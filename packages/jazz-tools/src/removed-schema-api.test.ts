@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as root from "./index.js";
-import { UPGRADE_FROM_ALPHA_64_URL } from "./removed-schema-api.js";
+import { UPGRADE_FROM_ALPHA_65_URL } from "./removed-schema-api.js";
 
 const TOP_LEVEL = [
   "defineApp",
@@ -91,7 +91,7 @@ describe("the schema DSL alpha.66 removed", () => {
         message.startsWith(`[JAZZ_API_REMOVED] ${name} was removed in jazz-tools alpha.66`),
       ).toBe(true);
       expect(message).toContain("`npx jazz-tools upgrade`");
-      expect(message).toContain(UPGRADE_FROM_ALPHA_64_URL);
+      expect(message).toContain(UPGRADE_FROM_ALPHA_65_URL);
     }
   });
 

@@ -10,8 +10,8 @@
 import { type RemovedApi } from "./removed-api.js";
 
 /** Where the alpha.65 → alpha.66 changes are written up. */
-export const UPGRADE_FROM_ALPHA_64_URL =
-  "https://jazz.tools/docs/operating/backups-and-upgrades#upgrading-from-alpha64";
+export const UPGRADE_FROM_ALPHA_65_URL =
+  "https://jazz.tools/docs/operating/backups-and-upgrades#upgrading-from-alpha65";
 
 const FILES_AS_SOURCE =
   "jazz.app.json and jazz.permissions.json are now the app's schema, migrations and permissions, " +
@@ -21,7 +21,7 @@ const FILES_AS_SOURCE =
 export function removedSchemaApiError(name: string): Error {
   return Object.assign(
     new Error(
-      `[JAZZ_API_REMOVED] ${name} was removed in jazz-tools alpha.66: ${FILES_AS_SOURCE}. See ${UPGRADE_FROM_ALPHA_64_URL}`,
+      `[JAZZ_API_REMOVED] ${name} was removed in jazz-tools alpha.66: ${FILES_AS_SOURCE}. See ${UPGRADE_FROM_ALPHA_65_URL}`,
     ),
     { code: "JAZZ_API_REMOVED" },
   );
