@@ -754,11 +754,13 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
   assert.match(aggregate, /if: always\(\)/);
   assert.match(
     aggregate,
-    /needs: \[test-rust-workspace, test-storage-compat, test-jazz-ffi-bindings\]/,
+    /needs:\s*\[\s*test-rust-workspace,\s*test-storage-compat,\s*test-jazz-ffi-bindings,\s*test-kotlin,\s*test-kotlin-android,?\s*\]/,
   );
   assert.match(aggregate, /test "\$\{WORKSPACE_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{STORAGE_COMPAT_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{JAZZ_FFI_BINDINGS_RESULT\}" = success/);
+  assert.match(aggregate, /test "\$\{KOTLIN_RESULT\}" = success/);
+  assert.match(aggregate, /test "\$\{KOTLIN_ANDROID_RESULT\}" = success/);
   assert.throws(
     () => assert.match(localCi.replace("--exact --ignored", "--ignored"), /--exact --ignored/),
     /exact/,
@@ -2063,6 +2065,8 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     "test-ts",
     "test-react-native",
     "test-jazz-ffi-bindings",
+    "test-kotlin",
+    "test-kotlin-android",
   ])
     assert.equal(
       suite.jobs[name].if,
@@ -2079,6 +2083,8 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     [
       "lint",
       "test-jazz-ffi-bindings",
+      "test-kotlin",
+      "test-kotlin-android",
       "test-next-trace",
       "test-react-native",
       "test-rust",
