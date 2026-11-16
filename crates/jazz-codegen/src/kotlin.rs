@@ -1058,17 +1058,17 @@ mod tests {
             "dependencies {\n    implementation(\"tools.jazz:jazz-kotlin\")\n}\n"
         ));
         assert!(is_app_build(
-            "implementation(\"tools.jazz:jazz-kotlin:2.0.0-alpha.65\")"
+            "implementation(\"tools.jazz:jazz-kotlin:2.0.0-alpha.66\")"
         ));
         assert!(!is_app_build(
             "// implementation(\"tools.jazz:jazz-kotlin\")\nplugins { kotlin(\"jvm\") }"
         ));
         assert!(!is_app_build("rootProject.name = \"jazz-kotlin\""));
         assert!(is_app_build(
-            "implementation(files(\"libs/jazz-kotlin-2.0.0-alpha.65.jar\"))"
+            "implementation(files(\"libs/jazz-kotlin-2.0.0-alpha.66.jar\"))"
         ));
         assert!(is_app_build(
-            "implementation(files(\"libs/jazz-kotlin-android-2.0.0-alpha.65.aar\"))"
+            "implementation(files(\"libs/jazz-kotlin-android-2.0.0-alpha.66.aar\"))"
         ));
     }
 

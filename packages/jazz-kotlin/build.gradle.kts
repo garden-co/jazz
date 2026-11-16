@@ -11,7 +11,7 @@ plugins {
 }
 
 group = "tools.jazz"
-version = "2.0.0-alpha.65"
+version = "2.0.0-alpha.66"
 
 repositories { mavenCentral() }
 

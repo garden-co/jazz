@@ -23,7 +23,7 @@ android="${3:-}"
 mkdir -p "$out"
 out="$(cd "$out" && pwd)"
 
-version=2.0.0-alpha.65
+version=2.0.0-alpha.66
 found=0
 for dir in "$natives"/*/; do
   ls "$dir" | grep -Eq '^(lib)?jazz_ffi\.(so|dylib|dll)$' || {

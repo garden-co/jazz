@@ -96,24 +96,20 @@ impl Lang {
             // The back end is here, but the runtime package isn't released
             // yet: `swift` is switched on with it (add it to `ALL` too).
             "swift" => Err(CodegenError::unsupported(
-                "generating Swift bindings is not available yet; supported: ts, rust",
-            )),
-            // Switched off until the Go runtime and docs ship with it.
-            "go" | "golang" => Err(CodegenError::unsupported(
-                "generating bindings in Go is not available yet; supported: ts, rust",
+                "generating Swift bindings is not available yet; supported: ts, rust, kotlin, go",
             )),
             "kotlin" | "kt" => Ok(Lang::Kotlin),
+            "go" | "golang" => Ok(Lang::Go),
             other => Err(CodegenError::unsupported(format!(
-                "generating bindings in `{other}` is not supported yet; supported: ts, rust, kotlin"
+                "generating bindings in `{other}` is not supported yet; supported: ts, rust, kotlin, go"
             ))),
         }
     }
 
-    /// Every language `jazz-tools generate` handles, in that order. (Swift and
-    /// Go are not available yet: [`Lang::Swift`] and [`Lang::Go`] are
-    /// generated only by direct calls, so no `Package.swift` or `go.mod`
-    /// selects them.)
-    pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust, Lang::Kotlin];
+    /// Every language `jazz-tools generate` handles, in that order. (Swift is
+    /// not available yet: [`Lang::Swift`] is generated only by direct calls,
+    /// so no `Package.swift` selects it.)
+    pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust, Lang::Kotlin, Lang::Go];
 
     /// The file whose presence beside `jazz.app.json` says the app is
     /// written in this language, so `validate` writes its bindings.

@@ -3,6 +3,8 @@ package tools.jazz
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
@@ -239,6 +241,23 @@ class JazzTest {
         assertFailsWith<JazzException.Refused> { jazz.deleteClientStorage() }
         jazz.insert(Items, ItemInsert(title = "still open", rank = 1.0, kind = ItemKind.C))
         assertEquals(listOf("still open"), jazz.all(Items.query()).map { it.title })
+    }
+
+    @Test
+    fun watch_keeps_results_with_the_same_id_apart_by_key(): Unit = runBlocking {
+        // As a history or union subscription delivers them: one row id, two results.
+        val native = object : Native by FakeNative() {
+            override fun subscribe(queryJson: String, onDelta: (String) -> Unit, onError: (String, String) -> Unit): () -> Unit {
+                val v = { k: String, t: String -> """{"id":"i","${'$'}key":"$k","title":"$t","rank":1,"kind":"c"}""" }
+                onDelta("""{"added":[${v("v1", "one")},${v("v2", "two")}],"updated":[],"removed":[],"reset":true}""")
+                onDelta("""{"added":[],"updated":[],"removed":["i"],"removedKeys":["v1"],"reset":false}""")
+                return {}
+            }
+        }
+        Jazz.opener = Native.Opener { native }
+        val jazz = Jazz.open("{}", JazzConfig())
+        val results = jazz.watch(Items.query()).take(2).toList()
+        assertEquals(listOf(listOf("one", "two"), listOf("two")), results.map { list -> list.map { it.title } })
     }
 }
 

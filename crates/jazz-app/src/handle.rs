@@ -780,12 +780,16 @@ async fn connect(
         });
     }
     let connector = Arc::new(jazz_native_transport::NativeWebSocketConnector);
+    // A main backend (TS `createJazz`) may not upgrade sockets where it is
+    // hosted: its clients fall back to its HTTP stream, as TS clients do.
+    let endpoint_connector = Arc::new(jazz_native_transport::HttpStreamFallbackConnector::new());
     let memory = context.storage == ClientStorage::Memory;
     let mut backend_client = None;
     let (client, user) = match (config.user, &config.server_url) {
         (Some(Auth::Credential(credential)), Some(endpoint)) => {
             let (client, user, credential, link) =
-                crate::backend_client::connect(context, connector, credential, endpoint).await?;
+                crate::backend_client::connect(context, endpoint_connector, credential, endpoint)
+                    .await?;
             if !user.account.is_system() {
                 admitted = Some(user.account);
             }
@@ -794,7 +798,7 @@ async fn connect(
         }
         (Some(auth), Some(endpoint)) => {
             let (client, user, credential) =
-                connect_user(context, connector, auth, endpoint).await?;
+                connect_user(context, endpoint_connector, auth, endpoint).await?;
             admitted = Some(user.account);
             (client, Some((user, credential)))
         }
@@ -841,7 +845,7 @@ async fn connect(
 /// the bearer on the upgrade, which the backend checks it against.
 async fn connect_user(
     mut context: AppContext,
-    connector: Arc<jazz_native_transport::NativeWebSocketConnector>,
+    connector: Arc<jazz_native_transport::HttpStreamFallbackConnector>,
     auth: Auth,
     endpoint: &str,
 ) -> Result<(JazzClient, User, Credential)> {

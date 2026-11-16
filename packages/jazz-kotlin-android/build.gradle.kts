@@ -19,7 +19,7 @@ plugins {
 }
 
 group = "tools.jazz"
-version = "2.0.0-alpha.65"
+version = "2.0.0-alpha.66"
 
 val ndkVersionPinned = "27.1.12297006"
 val minSdkVersion = 24
