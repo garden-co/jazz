@@ -255,7 +255,12 @@ fn vector_search_keeps_the_k_most_similar_rows() {
     // Cosine ignores length.
     assert_eq!(ids(&db, &nearest([0.0, 0.0, 7.0], 2)), [4, 5]);
     let error = try_ids(&db, &nearest([0.0, 0.0, 0.0], 2)).expect_err("zero vector");
-    assert!(error.message.contains("a cosine query vector cannot be zero"), "{error}");
+    assert!(
+        error
+            .message
+            .contains("a cosine query vector cannot be zero"),
+        "{error}"
+    );
     let error = try_ids(
         &db,
         &Query::from("places").search(
@@ -597,7 +602,12 @@ fn every_slot_of_an_all_search_needs_its_own_match() {
 fn a_reopened_store_recreates_missing_queue_triggers() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("places.sqlite");
-    let db = block_on(Db::open_at(config(schema_with(4)), &path, FileOptions::default())).unwrap();
+    let db = block_on(Db::open_at(
+        config(schema_with(4)),
+        &path,
+        FileOptions::default(),
+    ))
+    .unwrap();
     seed(&db);
     drop(db);
     let triggers = || -> i64 {
@@ -613,9 +623,16 @@ fn a_reopened_store_recreates_missing_queue_triggers() {
     assert_eq!(triggers(), 3);
     rusqlite::Connection::open(&path)
         .unwrap()
-        .execute_batch("DROP TRIGGER \"places__jazz_ix_ins\"; DROP TRIGGER \"places__jazz_ix_upd\";")
+        .execute_batch(
+            "DROP TRIGGER \"places__jazz_ix_ins\"; DROP TRIGGER \"places__jazz_ix_upd\";",
+        )
         .unwrap();
-    let db = block_on(Db::open_at(config(schema_with(4)), &path, FileOptions::default())).unwrap();
+    let db = block_on(Db::open_at(
+        config(schema_with(4)),
+        &path,
+        FileOptions::default(),
+    ))
+    .unwrap();
     assert_eq!(triggers(), 3, "recreated on open");
     place(&db, 7, "Leipzig", None, 51.34, 12.37, [1.0, 0.0, 0.0]);
     assert_eq!(ids(&db, &text("leipzig")), [7]);

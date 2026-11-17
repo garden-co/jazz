@@ -6621,6 +6621,88 @@ mod specialised_index_tests {
         );
     }
 
+    /// `SPEC/fixtures/ix/decl-v1.json` pins `jazz-ix-decl/1` (SPEC 20.1):
+    /// each case's declaration, its canonical bytes and their SHA-256 (the
+    /// hash a search names). `JAZZ_UPDATE_FIXTURES=1` rewrites it.
+    #[test]
+    fn declaration_fixture_is_what_the_encoder_writes() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../SPEC/fixtures/ix/decl-v1.json"
+        );
+        let index = |name: &str, kind: SpecialisedIndexKind, server_only: bool| SpecialisedIndex {
+            name: name.into(),
+            kind,
+            server_only,
+        };
+        let cases = [
+            (
+                "text, two fields, a declared length, prefix",
+                index(
+                    "search",
+                    SpecialisedIndexKind::Text {
+                        fields: std::collections::BTreeMap::from([
+                            (
+                                "body".to_owned(),
+                                TextField {
+                                    weight: 1,
+                                    length: 256,
+                                },
+                            ),
+                            ("title".to_owned(), TextField::weight(4)),
+                        ]),
+                        analyzer: "jazz-text/1:en".into(),
+                        prefix: true,
+                    },
+                    false,
+                ),
+            ),
+            (
+                "vector, l2",
+                index(
+                    "similar",
+                    SpecialisedIndexKind::Vector {
+                        column: "embedding".into(),
+                        metric: VectorMetric::L2,
+                        ann: crate::model::public_api::types::VectorAnn::Exact,
+                    },
+                    false,
+                ),
+            ),
+            (
+                "geo, server-only",
+                index(
+                    "place",
+                    SpecialisedIndexKind::Geo {
+                        column: "location".into(),
+                    },
+                    true,
+                ),
+            ),
+        ];
+        let written = serde_json::json!({
+            "encoding": "jazz-ix-decl/1",
+            "cases": cases.iter().map(|(about, index)| serde_json::json!({
+                "about": about,
+                "declaration": index,
+                "bytes_hex": ::hex::encode(index.canonical_bytes()),
+                "sha256_hex": ::hex::encode(index.declaration_hash()),
+            })).collect::<Vec<_>>(),
+        });
+        let text = serde_json::to_string_pretty(&written).unwrap() + "\n";
+        if std::env::var_os("JAZZ_UPDATE_FIXTURES").is_some() {
+            std::fs::write(path, &text).unwrap();
+        }
+        let committed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("fixture")).unwrap();
+        assert_eq!(committed, written);
+        for case in committed["cases"].as_array().unwrap() {
+            let index: SpecialisedIndex =
+                serde_json::from_value(case["declaration"].clone()).unwrap();
+            assert_eq!(::hex::encode(index.canonical_bytes()), case["bytes_hex"]);
+        }
+    }
+
     /// Every declaration error names the table, the index and the option.
     #[test]
     fn invalid_declarations_are_refused_with_their_path() {
