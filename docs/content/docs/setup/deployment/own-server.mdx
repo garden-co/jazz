@@ -57,6 +57,11 @@ sqlite({ path: "./data/jazz", blobs: "sqlite" }); // inside the SQLite database 
 
 `"sqlite"` works, but the database file grows with every large value.
 
+A large-value store thread that dies (only a bug can cause this; a failing store just retries)
+ends the whole process with exit code 70 after logging
+`large-value chunk lane died; the server exits`. That includes a backend embedded in your Node or
+Next.js app: your app's process exits with it, for its host to restart.
+
 `s3()` works with any S3-compatible service, such as AWS S3 or Cloudflare R2. All its options are optional:
 
 | Option     | Default            | What it does                                 |
