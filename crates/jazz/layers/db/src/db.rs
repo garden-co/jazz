@@ -648,7 +648,9 @@ pub struct RuntimeStats {
 }
 
 struct Inner {
-    conn: crate::storage::Storage,
+    /// Shared so a scope can run while the store is borrowed afresh
+    /// inside it ([`crate::storage::Storage::scope`]).
+    conn: Rc<crate::storage::Storage>,
     /// Query shapes (with their binding) `prepare` has already validated
     /// against this schema version: it validates each once. Cleared when
     /// it reaches [`VALIDATED_SHAPES_MAX`].
@@ -2191,7 +2193,7 @@ impl Db {
             view: None,
             defer_fetches: false,
             inner: Rc::new(Store::new(Inner {
-                conn,
+                conn: Rc::new(conn),
                 validated_shapes: HashSet::new(),
                 mutation_admission_closed: false,
                 kept_variants: BTreeMap::new(),
@@ -2301,9 +2303,10 @@ impl Db {
             // order.
             if newest {
                 let owner = inner.owner.clone();
-                crate::values::in_savepoint(&inner.conn, "jazz_align", || {
-                    inner.align_tags(&owner)
-                })?;
+                inner
+                    .conn
+                    .clone()
+                    .scope("jazz_align", |_| inner.align_tags(&owner))?;
             }
             inner.seq = seq;
             inner.load_client()?;
@@ -2869,7 +2872,7 @@ impl Db {
         {
             let inner = self.inner();
             if !io.puts.is_empty() {
-                in_savepoint(&inner.conn, "jazz_lv_offloaded", || {
+                inner.conn.clone().scope("jazz_lv_offloaded", |_| {
                     for ((key, _), put) in io.puts.iter().zip(put) {
                         match put {
                             Ok(()) => crate::large::offloaded(&inner.conn, key)?,
@@ -2882,7 +2885,7 @@ impl Db {
                 })?;
             }
             if !io.deletes.is_empty() {
-                in_savepoint(&inner.conn, "jazz_lv_deleted", || {
+                inner.conn.clone().scope("jazz_lv_deleted", |_| {
                     for (key, done) in io.deletes.iter().zip(deleted) {
                         match done {
                             Ok(()) => crate::large::deleted(&inner.conn, key)?,
@@ -3846,10 +3849,8 @@ impl Db {
         if !wrap {
             return f();
         }
-        begin_savepoint(&self.inner.borrow().conn, "upload_local")?;
-        let result = f();
-        end_savepoint(&self.inner.borrow().conn, "upload_local", result.is_ok())?;
-        result
+        let conn = self.inner.borrow().conn.clone();
+        conn.scope("upload_local", |_| f())
     }
 
     /// Run one write atomically. Inside a transaction it joins the
@@ -3867,7 +3868,7 @@ impl Db {
                 Some((seq, _)) => (*seq, false),
                 None => (inner.fresh_seq(), true),
             };
-            begin_savepoint(&inner.conn, "w")?;
+            let conn = inner.conn.clone();
             let mark = inner.changed.borrow().len();
             // A standalone commit takes the writer id a thin client's write
             // gave it (`Db::write_as_origin`), on every attempt of the write
@@ -3878,9 +3879,6 @@ impl Db {
             // drops whatever an exit after this one leaves).
             let origin = if standalone { inner.next_origin } else { None };
             let prior = standalone.then(|| inner.own_order.get(&seq).copied());
-            inner.commit_origin = origin;
-            let applied = apply(&mut inner, seq);
-            inner.commit_origin = None;
             let restore = |inner: &mut Inner| match prior {
                 Some(Some(order)) => {
                     inner.own_order.insert(seq, order);
@@ -3890,31 +3888,35 @@ impl Db {
                 }
                 None => {}
             };
-            // The authority records the fate of a commit made under a
-            // client's id in the commit itself.
-            let applied = applied.and_then(|handle| {
-                let wrote = handle.seq == inner.own_pos(seq);
-                if let (true, true, Some((node, tx))) =
-                    (standalone && wrote, inner.me == sync::ACCEPTED, origin)
-                {
-                    inner.record_fate(node, tx, &Ok(()))?;
-                    inner.record_settled(node, tx, Some(Pos::at(seq)))?;
-                    // Its entry ages out if all it wrote is latest-only,
-                    // as the commit's version declares (SPEC 8 §8.14).
-                    let prunable = {
-                        let changed = inner.changed.borrow();
-                        changed.len() > mark
-                            && changed[mark..]
-                                .iter()
-                                .all(|(stored, ..)| inner.prunes(stored))
-                    };
-                    inner.note_origin_entry(node, tx, prunable)?;
-                }
-                Ok((wrote, handle))
+            let applied = conn.scope("w", |_| {
+                inner.commit_origin = origin;
+                let applied = apply(&mut inner, seq);
+                inner.commit_origin = None;
+                // The authority records the fate of a commit made under a
+                // client's id in the commit itself.
+                applied.and_then(|handle| {
+                    let wrote = handle.seq == inner.own_pos(seq);
+                    if let (true, true, Some((node, tx))) =
+                        (standalone && wrote, inner.me == sync::ACCEPTED, origin)
+                    {
+                        inner.record_fate(node, tx, &Ok(()))?;
+                        inner.record_settled(node, tx, Some(Pos::at(seq)))?;
+                        // Its entry ages out if all it wrote is latest-only,
+                        // as the commit's version declares (SPEC 8 §8.14).
+                        let prunable = {
+                            let changed = inner.changed.borrow();
+                            changed.len() > mark
+                                && changed[mark..]
+                                    .iter()
+                                    .all(|(stored, ..)| inner.prunes(stored))
+                        };
+                        inner.note_origin_entry(node, tx, prunable)?;
+                    }
+                    Ok((wrote, handle))
+                })
             });
             match applied {
                 Ok((wrote, handle)) => {
-                    end_savepoint(&inner.conn, "w", true)?;
                     if !wrote {
                         restore(&mut inner);
                     } else if origin.is_some() {
@@ -3934,7 +3936,6 @@ impl Db {
                 Err(error) => {
                     inner.changed.borrow_mut().truncate(mark);
                     restore(&mut inner);
-                    end_savepoint(&inner.conn, "w", false)?;
                     return Err(error);
                 }
             }
@@ -4078,16 +4079,14 @@ impl Db {
                 inner.owner_version,
             )
         };
-        begin_savepoint(&self.inner().conn, "jazz_catalogue")?;
-        let applied = (|| {
-            crate::catalogue::put(&self.inner().conn, &change.put)?;
+        let conn = self.inner().conn.clone();
+        let result = conn.scope("jazz_catalogue", |conn| {
+            crate::catalogue::put(conn, &change.put)?;
             for (schema, lenses) in change.admit {
                 self.admit(schema, &lenses)?;
             }
             Ok(())
-        })();
-        let ended = end_savepoint(&self.inner().conn, "jazz_catalogue", applied.is_ok());
-        let result = applied.and(ended);
+        });
         if result.is_err() {
             let mut inner = self.inner();
             let (physical, names, admitted, owner, owner_version) = saved;
@@ -4342,10 +4341,11 @@ impl Inner {
             self.admitted.clone(),
         );
         let tags = self.names.tags().snapshot();
-        begin_savepoint(&self.conn, "jazz_mirror")?;
-        let mirrored = self.mirror_versions_steps(versions, cells, defaults);
-        let ended = end_savepoint(&self.conn, "jazz_mirror", mirrored.is_ok());
-        if let Err(error) = mirrored.and(ended) {
+        let conn = self.conn.clone();
+        let mirrored = conn.scope("jazz_mirror", |_| {
+            self.mirror_versions_steps(versions, cells, defaults)
+        });
+        if let Err(error) = mirrored {
             self.physical = physical;
             self.names = names;
             self.admitted = admitted;
@@ -4592,10 +4592,10 @@ impl Inner {
     ) -> Result<(), Error> {
         let (physical, names) = (self.physical.clone(), self.names.clone());
         let tags = self.names.tags().snapshot();
-        begin_savepoint(&self.conn, "jazz_admit")?;
-        let written = self.write_admission_steps(target, cells, current);
-        let ended = end_savepoint(&self.conn, "jazz_admit", written.is_ok());
-        let written = written.and(ended);
+        let conn = self.conn.clone();
+        let written = conn.scope("jazz_admit", |_| {
+            self.write_admission_steps(target, cells, current)
+        });
         if written.is_err() {
             self.physical = physical;
             self.names = names;
@@ -7504,7 +7504,7 @@ impl Inner {
         self.reclaim_passes += 1;
         self.reclaimed_at = None;
         self.release_dropped_uploads()?;
-        let deleted = in_savepoint(&self.conn, "reclaim", || {
+        let deleted = self.conn.clone().scope("reclaim", |_| {
             crate::large::reclaim(&self.conn, &self.chunks, budget)
         })?;
         // A pass inside an open transaction may yet roll back, and one
@@ -10939,7 +10939,7 @@ impl Db {
         let (seq, prior, mark) = {
             let mut inner = self.inner();
             let seq = inner.fresh_seq();
-            begin_savepoint(&inner.conn, "commit_batch")?;
+            let conn = inner.conn.clone();
             let mark = inner.changed.borrow().len();
             // Each write passed its check as it was staged, with the rows
             // staged before it as evidence. The commit grounds the unit's
@@ -10947,17 +10947,20 @@ impl Db {
             // commits here exactly when the authority accepts it: a row the
             // unit deleted is no evidence, and rows can't ground each other
             // in a cycle.
-            inner.defer_checks();
-            let applied = inner
-                .apply_with_edits(ops, &batch.edits, 0, seq)
-                .and_then(|()| inner.finish_checks(seq).map_err(refused_at_commit));
+            let applied = conn.scope("commit_batch", |_| {
+                inner.defer_checks();
+                let applied = inner
+                    .apply_with_edits(ops, &batch.edits, 0, seq)
+                    .and_then(|()| inner.finish_checks(seq).map_err(refused_at_commit));
+                if applied.is_err() {
+                    inner.abandon_checks();
+                }
+                applied
+            });
             if let Err(error) = applied {
-                inner.abandon_checks();
                 inner.changed.borrow_mut().truncate(mark);
-                end_savepoint(&inner.conn, "commit_batch", false)?;
                 return Err(error);
             }
-            end_savepoint(&inner.conn, "commit_batch", true)?;
             let prior = inner.seq;
             if !ops.is_empty() || kind.validates_reads() {
                 inner.seq = inner.seq.max(seq);
