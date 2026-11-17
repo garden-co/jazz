@@ -1162,11 +1162,12 @@ mod core_host {
                     );
                 }
             };
-            let upgrade = match (&credential, &access) {
-                (Some(credential), Some(access)) => Some(UpgradeCredential { credential, access }),
-                _ => None,
-            };
-            let admission = match admit_by_core_secret(&prelude, upgrade, &self.secret) {
+            let upgrade = credential.as_deref().map(|credential| UpgradeCredential {
+                credential,
+                access: access.as_deref(),
+            });
+            let now = js_sys::Date::now() as u64;
+            let admission = match admit_by_core_secret(&prelude, upgrade, &self.secret, now) {
                 Ok(admission) => admission,
                 Err(message) => return fail(jazz::wire::WireErrorCode::AuthFailed, message),
             };
