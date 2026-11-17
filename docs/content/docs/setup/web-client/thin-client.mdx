@@ -90,7 +90,7 @@ from `jazz-tools/client`, without a `client` loader.
   <Tab value="TypeScript">
     ```ts title="app.ts"
     import { createJazzClient } from "jazz-tools/client";
-    import { app } from "./schema";
+    import { app } from "./jazz.generated";
 
     const session = await createJazzClient({ serverUrl: "/jazz" });
     // After your own sign-in or sign-out, ask your backend again.
@@ -101,6 +101,28 @@ from `jazz-tools/client`, without a `client` loader.
       const todos = await session.db.all(app.todos);
     }
     ```
+
+    `await createJazzClient(…)` resolves once the session started, and rejects if it can't. To
+    show a loading screen and a failed-to-start screen while it starts, use `startJazzClient`: it
+    returns the session at once, in `"starting"`.
+
+    ```ts title="app.ts"
+    import { startJazzClient } from "jazz-tools/client";
+
+    const session = startJazzClient({ serverUrl: "/jazz" });
+    const render = () => {
+      const { status, error } = session.getSnapshot();
+      if (status === "starting" || status === "transitioning") showLoading();
+      else if (status === "error") showError(error, () => void session.retry());
+      else if (status === "signed-out") showSignIn();
+      else if (status === "ready") showApp(session.db);
+    };
+    session.subscribe(render);
+    render();
+    ```
+
+    A failed start leaves the session open, in `"error"`: `retry()` starts it again, and
+    `session.close()` is yours to call when the app is done with it.
 
   </Tab>
 </Tabs>

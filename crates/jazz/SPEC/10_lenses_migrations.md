@@ -794,8 +794,9 @@ An app is described by two readable JSON files beside its `schema.ts`:
 - `jazz.permissions.json`: the current version's permissions. Only backends
   read it, so no client bundle carries the app's policies.
 
-The files are meant to be read by people and agents, and later written by
-them (see **Bindings** below for alpha.65, where they are the source). In
+The files are meant to be read by people and agents. From alpha.66 they are
+never authored: TypeScript is the only source, and they are generated from
+it (see **Generated files** below; in alpha.65 they were the source). In
 stage 1 (alpha.63) they are an IR: `jazz-tools generate` and
 `jazz-tools migrations create` compile the TS DSL (`schema.ts`,
 `permissions.ts`, `migrations/*.ts`) to them through the Rust writer
@@ -808,10 +809,25 @@ Neither file carries a schema hash or bundle id: loaders compute them.
 **Conventions.**
 
 - Plain JSON. Unknown keys are refused at every level, except `$comment`
-  (a string, allowed in every object) and a top-level `$schema` (a JSON
-  Schema URL, ignored on load; the writer puts
+  (a string, allowed in every object) and a top-level `$generated` (see
+  **Generated files** below: ignored on load, but its shape is checked).
+  Repeated keys are refused.
+- **Versioning.** A required top-level `$schema` names the file's JSON Schema
+  and so its version: `https://jazz.tools/schemas/jazz.app.v1.json`, resp.
+  `https://jazz.tools/schemas/jazz.permissions.v1.json`. The writer puts it
+  first; the reader reads it first, so a file from a newer Jazz
+  (`….v2.json`) is refused as such ("written by a newer Jazz") rather than
+  for fields this version doesn't know. A file without `$schema` is refused
+  with a hint to run `jazz-tools generate`; any other URL is refused.
+  There is no `format` field.
+- **Legacy files.** Jazz before alpha.66 wrote `"format": 1` and the unversioned
   `https://jazz.tools/schemas/jazz.app.schema.json`, resp.
-  `jazz.permissions.schema.json`, first). Repeated keys are refused.
+  `jazz.permissions.schema.json`. A file carrying `"format": 1` and/or the
+  unversioned URL still loads, as version 1 (another `format` is refused like
+  an unknown version). Any `$schema` next to `"format": 1` is accepted: it
+  was only an editor hint then. `jazz-tools upgrade` writes the versioned
+  form; tools that write the files whole write it too. Both unversioned JSON
+  Schemas stay published for editors.
 - Column and table names are identifiers: `[A-Za-z_][A-Za-z0-9_]*`.
 - Object key order is significant only for `columns` (declared order, which
   the schema hash covers) and `history` (oldest first). The writer lists
@@ -821,11 +837,56 @@ Neither file carries a schema hash or bundle id: loaders compute them.
   characters and expanded otherwise, and a trailing newline. Writing the same
   app twice gives the same bytes.
 
+**Generated files.** When TypeScript is an app's source, `npx jazz-tools
+generate` writes both files from it, and marks each with a top-level
+`$generated`, first after `$schema`:
+
+```json
+"$generated": {
+  "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+  "sha256": "3fa1c2d9…"
+}
+```
+
+- `by` is a string for people reading the file: what wrote it.
+- `sha256` is 64 lowercase hex characters: the SHA-256 of the file's
+  canonical text (the conventions above, as the writer prints it: two-space
+  indent, one line when it fits in 100 characters, a trailing newline,
+  UTF-8, no BOM) of the file's parsed JSON with the `$generated` member
+  removed, the other members in the order the file has them. For a file the
+  writer wrote, that is exactly the text it produces without the marker
+  (`artifact::write`), so the digest covers the bytes that are tool-written.
+- No other key is allowed in it. Loaders ignore it, but refuse a malformed
+  one (not an object, a missing or non-string `by`, a `sha256` that isn't 64
+  lowercase hex characters, another key).
+- `artifact::verify_generated(text)` tells a file with no marker
+  (`Unmarked`), one whose digest matches (`Matches`, unchanged since it was
+  written, give or take formatting: indent, line ends, a BOM) and one whose
+  digest doesn't (`Mismatch`, edited by hand since), so tools can refuse to
+  overwrite a hand edit. `artifact::write_generated(input, by)` writes the
+  files with the marker, `artifact::mark_generated(text, by)` marks one
+  text, and `artifact::rewrite(app, permissions, by?)` checks two readable
+  files as `load` does and re-renders them through the writer (keeping
+  migration `name`s; dropping `$comment`s), with the marker when asked.
+- Only `npx jazz-tools generate` and `npx jazz-tools migrations create`
+  write an app's files, bindings and migrations, and only from `schema.ts`
+  (in the app's directory, `src/` or `src/lib/`). An app with
+  `jazz.app.json` but no `schema.ts` is refused by both, with a pointer to
+  `npx jazz-tools upgrade` (which writes `schema.ts` from the files,
+  keeping the schema hashes and bundle id): editing the JSON is not
+  a second authoring path. The standalone `jazz-tools` binary can't read
+  TypeScript, so it never writes: its `generate` and `migrations create`
+  refuse, pointing to `npx jazz-tools …` (or, without `schema.ts`, to
+  `upgrade` as above), while `generate --check` (for CI gates) checks the
+  committed files, their `$generated` digests (when present) and the
+  bindings, and, for an app with `schema.ts`, notes that freshness from the
+  TypeScript is `npx jazz-tools generate --check`'s to check.
+
 #### `jazz.app.json`
 
 | Field        | Type                  | Meaning                                                                |
 | ------------ | --------------------- | ---------------------------------------------------------------------- |
-| `format`     | integer               | `1`, read first; any other value is refused.                           |
+| `$schema`    | string                | `https://jazz.tools/schemas/jazz.app.v1.json`, read first.             |
 | `tables`     | map name → Table      | The current schema: the version the app's code is written against.     |
 | `history`    | map version → Version | Optional. Earlier versions the app still ships, by name, oldest first. |
 | `migrations` | array of Migration    | Optional. Lenses between versions.                                     |
@@ -861,8 +922,8 @@ Neither file carries a schema hash or bundle id: loaders compute them.
   `uuid`, `bytes`; a trailing `?` makes the column optional (`"string?"`).
 - Objects carry one type key and options:
   - `{"type": "<scalar>"}`;
-  - `{"enum": ["todo", "done"]}`, or with payloads
-    `{"enum": {"open": {}, "closed": {"at": "timestamp"}}}`;
+  - `{"enum": ["todo", "done"]}` (an object of cases with fields is
+    refused: Jazz has no such columns, see jazz#5758);
   - `{"json": <JSON Schema>}` or `{"json": true}` for any JSON;
   - `{"array": <Column type>}`.
   - Options: `"optional": true`, `"default": <Value>`,
@@ -877,8 +938,7 @@ Neither file carries a schema hash or bundle id: loaders compute them.
   `uuid`, numbers for `int`/`float`, a decimal string for `bigint`, the
   engine's integer for `timestamp`, milliseconds since the Unix epoch (an ISO
   8601 form is not supported yet),
-  base64 for `bytes`, any JSON for `json`, arrays for `array`, objects
-  `{"<case>": {...}}` for payload enums, and `null`.
+  base64 for `bytes`, any JSON for `json`, arrays for `array`, and `null`.
 
 **Transform** `{stored, view}`: two column types without `?` or options.
 The engine stores `stored`; code reads and writes `view`, converting with
@@ -944,17 +1004,16 @@ drop this one later). A reference to a table the same migration renames
 follows it.
 
 **Files from alpha.63.** A file's `slices` (schema slicing is gone in
-alpha.65) and a table's `tsOnly` load with a warning that they are ignored;
-`jazz-tools upgrade` turns `tsOnly` into `computed` and `transforms` and
-removes `slices`.
+alpha.65) and a table's `tsOnly` load with a warning that they are ignored.
+`jazz-tools upgrade` removes `slices`; the fields `tsOnly` held are declared
+in `schema.ts` with `s.computed(…)` or `.transform(…)`.
 
 #### `jazz.permissions.json`
 
-| Field    | Type                      | Meaning                                                  |
-| -------- | ------------------------- | -------------------------------------------------------- |
-| `format` | integer                   | `1`.                                                     |
-| `defs`   | map signature → Policy    | Optional. Named, parameterised expressions.              |
-| `tables` | map table → TablePolicies | Every key must be a table of `jazz.app.json`'s `tables`. |
+| Field     | Type                      | Meaning                                                       |
+| --------- | ------------------------- | ------------------------------------------------------------- |
+| `$schema` | string                    | `https://jazz.tools/schemas/jazz.permissions.v1.json`, first. |
+| `tables`  | map table → TablePolicies | Every key must be a table of `jazz.app.json`'s `tables`.      |
 
 **TablePolicies** `{read?, insert?, update?, delete?}`. An absent operation
 is denied, as today.
@@ -975,12 +1034,10 @@ There is no other form: every policy the engine holds has an expression
 string, so every policy a TS app can declare round-trips through this file
 as text.
 
-**`defs`.** A key is a signature `name($param, …)`. Its value is a Policy in
-which `$param` stands for a value. A call `name(arg, …)` passes values or
-column references, so `"isChatMember(this.id)"`. Definitions may call each
-other in any order, but never recursively (a cycle is refused), so every
-policy terminates. Files compiled from TS inline their helpers and have no
-`defs`.
+There are no named definitions: a policy says everything it checks. A
+`defs` key, which files written by hand for alpha.63–65 could hold, is
+refused with a hint to inline each definition or author the app in
+`schema.ts` (`jazz-tools upgrade` does both for an alpha.65 app).
 
 **Expressions.** SQL-like, with JSON's double quotes left to the file:
 string literals use single quotes, and a name that isn't a plain identifier
@@ -993,7 +1050,7 @@ conjunction = negation , { "and" , negation } ;
 negation    = "not" , negation | atom ;
 atom        = "(" , expr , ")" | "true" | "false"
             | ( "anyOf" | "allOf" ) , "(" , [ expr , { "," , expr } ] , ")"
-            | exists | allowed | call | comparison ;
+            | exists | allowed | comparison ;
 
 comparison  = operand , ( cmp_op , operand
                         | "in" , ( list | session )
@@ -1003,9 +1060,8 @@ operand     = column | value ;
 column      = [ ( "this" | "outer" | name ) , "." ] , ( name | magic ) ;
 magic       = ( "$createdBy" | "$updatedBy" | "$deletedBy" ) , [ "." , ( "account" | "identity" ) ]
             | "$createdAt" | "$updatedAt" | "$deletedAt" ;
-value       = literal | "null" | session | param ;
+value       = literal | "null" | session ;
 session     = "session" , "." , name , { "." , name } ;
-param       = "$" , ident ;
 list        = "[" , [ value , { "," , value } ] , "]" ;
 
 literal     = string | number | "true" | "false" | typed ;
@@ -1015,8 +1071,7 @@ typed       = "literal" , "(" , ( string | number | "true" | "false" | "null" ) 
             | ( "text" | "uuid" | "bytes" | "txid" ) , "(" , string , ")"
             | "bool" , "(" , ( "true" | "false" ) , ")"
             | "array" , "(" , [ typed_arg , { "," , typed_arg } ] , ")"
-            | "row" , "(" , ( "uuid" , "(" , string , ")" | "null" ) , { "," , typed_arg } , ")"
-            | "enumcase" , "(" , string , { "," , typed_arg } , ")" ;
+            | "row" , "(" , ( "uuid" , "(" , string , ")" | "null" ) , { "," , typed_arg } , ")" ;
 typed_arg   = typed | "null" ;
 
 exists      = "exists" , source , [ "as" , name ] , "(" , [ conditions ] , ")" ,
@@ -1027,7 +1082,6 @@ conditions  = expr , { "," , expr } ;
 allowed     = "allowedTo." , ( "read" | "insert" | "update" | "delete" ) , "(" ,
               ( name | "via" , [ name , "." ] , name ) ,
               [ "," , "maxDepth" , ":" , integer ] , ")" ;
-call        = ident , "(" , [ operand , { "," , operand } ] , ")" ;
 
 (* The relation IR, inside `exists ( … )`. *)
 query       = "from" , from_source , { clause } ;
@@ -1101,7 +1155,7 @@ session.identity` matches only rows it wrote), `session.claims.<path>`,
   refused. Compared with a session claim, `'…'` is text, `1` an int, `1.5` a
   float. A typed literal (`int(5)`, `text('5')`, `uuid('…')`,
   `timestamp(1700000000000)`, `bytes('0aff')`, `array(int(1), int(2))`,
-  `row(null, text('a'))`, `enumcase('closed', timestamp(5))`) is exactly that
+  `row(null, text('a'))`) is exactly that
   value, whatever it is compared with; the writer uses one only where a plain
   literal would read back as another value.
 - **`exists`.** `exists t(c₁, c₂, …)` holds when some row of `t` satisfies
@@ -1124,13 +1178,17 @@ session.identity` matches only rows it wrote), `session.claims.<path>`,
 n | fixpoint)` is `Gather`. In a predicate, a column is `scope.col` or
   `col`; `outer.col` and `frontier.col` are the outer and frontier rows'
   columns, `id(row)`, `id(outer)` and `id(frontier)` their row ids,
-  `param.name` a query parameter, `session.…` a session value, `col is
-case(p)` an enum case whose payload satisfies `p` (`EnumMatch`), and
+  `param.name` a query parameter, `session.…` a session value, and
   `json('…')` a literal JSON value the relation IR holds as is.
 - **Inheritance.** `allowedTo.op(rel)` holds when the row relation `rel`
   leads to allows `op`. `allowedTo.op(via col)` names the forward column
   itself and `allowedTo.op(via t.col)` the rows of `t` pointing here, for a
-  link no relation names. `maxDepth` bounds recursive chains.
+  link no relation names. `maxDepth` bounds recursive chains of forward
+  relations; a reverse relation (or `via t.col`) takes none, as the TS DSL
+  refused one: the engine checks every row pointing here and refuses
+  reverse inheritance cycles when it compiles the schema, so a bound would
+  be dropped rather than applied. A recursive relation's `maxDepth` is at
+  most 64.
 - `anyOf(…)` and `allOf(…)` inside an expression are `Or`/`And` of any
   number of items; the writer uses them only for fewer than two.
 - Nesting deeper than 64 levels is refused.
@@ -1162,7 +1220,7 @@ jazz.permissions.json: tables.chatMembers.read.anyOf[1]:
 ```
 
 Names are suggested by edit distance among the columns, tables, relations,
-operations, keys or defs in scope; syntax errors (`==`, `"…"` strings, a
+operations or keys in scope; syntax errors (`==`, `"…"` strings, a
 missing `and`) add a correct example (`e.g. …`).
 
 **Loading.** `artifact::load(app, permissions)` checks both files: every
@@ -1175,8 +1233,9 @@ don't reproduce the engine input exactly (schema hashes, lenses,
 permissions), it refuses with "not supported … yet" rather than write files
 that would publish something else.
 
-**Bindings.** From alpha.65 the files are the app's source in every
-language. `crates/jazz-codegen` generates typed bindings from
+**Bindings.** Every language opens the same files (alpha.65 made them the
+app's source in every language; from alpha.66 they are generated from
+`schema.ts`). `crates/jazz-codegen` generates typed bindings from
 `jazz.app.json` (`jazz.generated.ts` in TS), which apps commit. They embed
 the file's `source`, `sha256:` and the hex SHA-256 of its canonical text
 (the parsed file printed canonically, so reformatting the file leaves it
@@ -1190,9 +1249,9 @@ only the bindings loads its permissions against their compiled app
 (`artifact::load_backend`), with every check `load` runs.
 
 The bindings also record the version the app last generated against, which
-is how `jazz-tools generate` (and the `jazz-tools` binary's `validate`)
-tells edits apart: when the file's versions don't include the bindings'
-current schema, `tables` changed without a migration, and validate refuses
+is how `jazz-tools generate` tells edits apart: when the file's versions
+don't include the bindings' current schema, `tables` changed without a
+migration, and generate refuses
 ("the schema changed since the last version: run `jazz-tools migrations
 create --name <name>`") before it overwrites the only copy of that version.
 `migrations create` moves that version into `history` under its short hash

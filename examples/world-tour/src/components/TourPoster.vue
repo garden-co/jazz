@@ -24,7 +24,7 @@
 </template>
 
 <script setup lang="ts">
-import type { StopWithVenue } from "../../schema.js";
+import type { StopWithVenue } from "../../app-extras.js";
 import { formatShortDate } from "../lib/format.js";
 import Button from "./ui/Button.vue";
 import Dialog from "./ui/Dialog.vue";

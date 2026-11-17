@@ -1,6 +1,6 @@
 import type { Db } from "jazz-tools";
 import { retryOnConflict } from "./write-errors";
-import { app } from "../schema";
+import { app } from "../jazz.generated";
 
 /**
  * The deterministic "small" seed profile: two warehouses, three districts

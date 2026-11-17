@@ -1,390 +1,272 @@
 //! Documentation snippet sources compiled with the example crate.
+//!
+//! The docs include each `#region` by name. Each region is one function over
+//! the docs todo app (`todos` and `projects`, from the TypeScript example's
+//! `schema.ts`), doing what its TypeScript twin does. The files snippets
+//! still use the low-level `JazzClient`.
+//! Permissions are the app's `jazz.permissions.json`.
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::ops::ControlFlow;
 
-use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
-use jazz::db::{Db, SerializableTxOps, InsertOptions, MergeableTxOps, UpdateOptions};
-use jazz::records::Value as DbValue;
-use jazz::ids::RowUuid;
-use jazz::query::{
-    ArraySubquery, ArraySubqueryRequirement, Gather, OrderDirection, Query, col, contains, eq, gt,
-    gte, is_null, lit, lt, ne, not,
+use ::jazz_app_support::jazz;
+use futures_util::StreamExt;
+use jazz::query::{Query as UntypedQuery, col, eq, lit};
+use jazz::tools::{JazzClient, Value};
+use uuid::Uuid;
+
+use crate::jazz_app::{
+    self, Advice, DurabilityTier, Jazz, NewTodo, ObjectId, Order, Partial, Project, Query,
+    ReadTier, Rows, Subscription, Timestamp, Todo, TodoUpdate, projects, todos,
 };
-use jazz::tools::{
-    JazzClient, ObjectId, Operation, PolicyExpr, ReadTier, Session, TablePolicies, Value,
-};
+use crate::required_references;
 
-fn verify_jwt_and_extract_claims(_token: &str) -> (String, String, serde_json::Value) {
-    unimplemented!("replace with your auth provider's JWT verification logic")
-}
-
-fn todo_values(
-    title: impl Into<String>,
-    description: impl Into<String>,
-) -> std::collections::HashMap<String, Value> {
-    jazz::row_input!(
-        "title" => title.into(), "done" => false, "description" => description.into(),
-        "parent" => Value::Null, "project" => Value::Null,
-    )
-}
-
-fn transaction_todo_values(title: impl Into<String>) -> jazz::db::RowCells {
-    BTreeMap::from([
-        ("title".to_string(), DbValue::String(title.into())),
-        ("done".to_string(), DbValue::Bool(false)),
-        ("description".to_string(), DbValue::String(String::new())),
-    ])
-}
-
-// #region backend-request-session-rust
-pub fn requester_session_from_headers(headers: &HeaderMap) -> Result<Session, StatusCode> {
-    let auth = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-
-    let token = auth
-        .strip_prefix("Bearer ")
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-
-    let (issuer, user_id, claims) = verify_jwt_and_extract_claims(token);
-    Ok(Session::new(issuer, user_id).with_claims(claims))
-}
-// #endregion backend-request-session-rust
-
-// #region backend-request-scoped-client-rust
-pub fn scoped_client_for_session(client: &JazzClient, session: Session) -> JazzClient {
-    client.for_session(session)
-}
-// #endregion backend-request-scoped-client-rust
-
-// #region backend-request-handler-rust
-pub async fn list_todos_for_request(
-    headers: &HeaderMap,
-    client: &JazzClient,
-) -> Result<usize, StatusCode> {
-    let user_client = client.for_session(requester_session_from_headers(headers)?);
-    let query = Query::from("todos");
-    let rows = user_client
-        .query(query, ReadTier::LocalFirst)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(rows.len())
-}
-// #endregion backend-request-handler-rust
-
-// #region permissions-simple-rust
-pub fn simple_owner_policies() -> TablePolicies {
-    TablePolicies::new()
-        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
-        .with_insert(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
-        .with_update(
-            Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
-            PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-        )
-}
-// #endregion permissions-simple-rust
-
-// #region permissions-inherits-rust
-pub fn inherits_select_policy() -> TablePolicies {
-    TablePolicies::new().with_select(PolicyExpr::or(vec![
-        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-        PolicyExpr::inherits(Operation::Select, "folder_id"),
-    ]))
-}
-// #endregion permissions-inherits-rust
-
-// #region permissions-combinators-rust
-pub fn combinator_policy() -> TablePolicies {
-    TablePolicies::new().with_select(PolicyExpr::or(vec![
-        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-        PolicyExpr::and(vec![
-            PolicyExpr::True,
-            PolicyExpr::inherits(Operation::Select, "project"),
-        ]),
-    ]))
-}
-// #endregion permissions-combinators-rust
-
-// #region permissions-recursive-inherits-rust
-pub fn recursive_inherits_policy() -> TablePolicies {
-    TablePolicies::new().with_select(PolicyExpr::or(vec![
-        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-        PolicyExpr::inherits_with_depth(Operation::Select, "parent", 10),
-    ]))
-}
-// #endregion permissions-recursive-inherits-rust
+/// The example's owner and project ids, as the TypeScript snippets'
+/// `EXAMPLE_OWNER_ID` and `EXAMPLE_PROJECT_ID`.
+const EXAMPLE_OWNER_ID: Uuid = Uuid::from_u128(0x0000_0000_0000_0000_0000_0000_0000_00a1);
+const EXAMPLE_PROJECT_ID: Uuid = Uuid::nil();
 
 // #region reading-oneshot-rust
-pub async fn read_todos_oneshot(client: &JazzClient) -> jazz::tools::Result<usize> {
-    let query = Query::from("todos");
-    let rows = client.query(query, ReadTier::LocalFirst).await?;
-    Ok(rows.len())
+pub async fn read_todos_oneshot(jazz: &Jazz) -> jazz_app::Result<Vec<Todo>> {
+    jazz.all(todos::query().filter(todos::done().eq(false)))
+        .await
 }
 // #endregion reading-oneshot-rust
 
+// #region reading-one-rust
+pub async fn read_todo(jazz: &Jazz, id: ObjectId) -> jazz_app::Result<Option<Todo>> {
+    // The row, or `None` if there is none or you can't read it.
+    jazz.get::<Todo>(id).await
+}
+// #endregion reading-one-rust
+
 // #region reading-subscriptions-rust
 pub async fn subscribe_todos(
-    client: &JazzClient,
-) -> jazz::tools::Result<jazz::tools::SubscriptionStream> {
-    let query = Query::from("todos");
-    client.subscribe(query).await
+    jazz: &Jazz,
+    mut on_change: impl FnMut(&[Todo]) -> ControlFlow<()>,
+) -> jazz_app::Result<()> {
+    let mut changes = jazz
+        .subscribe(todos::query().filter(todos::done().eq(false)))
+        .await?;
+    // The subscription yields deltas; `Rows` folds each into the whole result.
+    let mut todos = Rows::default();
+    while let Some(delta) = changes.next().await {
+        todos.apply(delta?);
+        if on_change(todos.as_slice()).is_break() {
+            break;
+        }
+    }
+    // Dropping the subscription unsubscribes.
+    drop(changes);
+    Ok(())
 }
 // #endregion reading-subscriptions-rust
 
 // #region reading-durability-tier-rust
-pub async fn read_todos_at_remote_tier(client: &JazzClient) -> jazz::tools::Result<usize> {
-    let query = Query::from("todos");
-    let rows = client.query(query, ReadTier::Remote).await?;
-    Ok(rows.len())
+pub async fn read_todos_at_remote_tier(jazz: &Jazz) -> jazz_app::Result<Vec<Todo>> {
+    jazz.all_with(
+        todos::query().filter(todos::done().eq(false)),
+        ReadTier::Remote,
+    )
+    .await
 }
 // #endregion reading-durability-tier-rust
 
 // #region reading-filters-rust
-pub async fn read_todos_with_filters(client: &JazzClient) -> jazz::tools::Result<usize> {
-    let query = Query::from("todos").filter(eq(col("done"), lit(false)));
+pub async fn read_todos_with_filters(jazz: &Jazz) -> jazz_app::Result<Vec<Todo>> {
+    let query = todos::query()
+        .filter(todos::done().eq(false))
+        .filter(todos::title().contains("docs"));
 
-    let rows = client.query(query, ReadTier::LocalFirst).await?;
-    Ok(rows.len())
+    jazz.all(query).await
 }
 // #endregion reading-filters-rust
 
 // #region reading-sorting-rust
-pub async fn read_todos_sorted(client: &JazzClient) -> jazz::tools::Result<usize> {
-    let query = Query::from("todos")
-        .filter(eq(col("done"), lit(false)))
-        .order_by("title", OrderDirection::Asc);
+pub async fn read_todos_sorted_by_title(jazz: &Jazz) -> jazz_app::Result<Vec<Todo>> {
+    let query = todos::query()
+        .filter(todos::done().eq(false))
+        .order_by(todos::title(), Order::Asc);
 
-    let rows = client.query(query, ReadTier::LocalFirst).await?;
-    Ok(rows.len())
+    jazz.all(query).await
 }
 // #endregion reading-sorting-rust
 
 // #region reading-pagination-rust
 pub async fn read_todo_page(
-    client: &JazzClient,
-    page_size: usize,
+    jazz: &Jazz,
     page: usize,
-) -> jazz::tools::Result<usize> {
+    page_size: usize,
+) -> jazz_app::Result<Vec<Todo>> {
     let offset = page.saturating_sub(1) * page_size;
-    let query = Query::from("todos")
-        .filter(eq(col("done"), lit(false)))
-        .order_by("title", OrderDirection::Asc)
-        .order_by("id", OrderDirection::Asc)
+    let query = todos::query()
+        .filter(todos::done().eq(false))
+        .order_by(todos::title(), Order::Asc)
+        .order_by(todos::id(), Order::Asc)
         .limit(page_size)
         .offset(offset);
 
-    let rows = client.query(query, ReadTier::LocalFirst).await?;
-    Ok(rows.len())
+    jazz.all(query).await
 }
 // #endregion reading-pagination-rust
 
 // #region reading-includes-rust
-pub async fn read_todos_with_project(client: &JazzClient) -> jazz::tools::Result<usize> {
-    let query = Query::from("todos")
-        .filter(eq(col("done"), lit(false)))
-        .flat_join("projects", "todos.project_id", "projects.id");
+/// Each todo with its project, and its parent with the parent's project.
+pub type TodoWithProjects = (Todo, Option<Project>, Option<(Todo, Option<Project>)>);
 
-    let rows = client.query(query, ReadTier::LocalFirst).await?;
-    Ok(rows.len())
+pub async fn read_todos_with_includes(jazz: &Jazz) -> jazz_app::Result<Vec<TodoWithProjects>> {
+    let query = todos::query()
+        .filter(todos::done().eq(false))
+        .include(todos::project())
+        .include(todos::parent().with(todos::query().include(todos::project())));
+
+    jazz.all(query).await
 }
 // #endregion reading-includes-rust
 
 // #region reading-reverse-relation-rust
-pub fn build_projects_with_todos_query() -> Query {
-    Query::from("projects").array_subquery(
-        ArraySubquery::new("todos_via_project", "todos", "project_id", "id")
-            .filter(eq(col("done"), lit(false))),
-    )
+pub async fn read_projects_with_todos(jazz: &Jazz) -> jazz_app::Result<Vec<(Project, Vec<Todo>)>> {
+    let open_todos = todos::query().filter(todos::done().eq(false));
+    let query = projects::query().include(projects::todos().with(open_todos));
+
+    jazz.all(query).await
 }
 // #endregion reading-reverse-relation-rust
 
 // #region reading-require-includes-rust
-pub fn build_todos_with_required_project() -> Query {
-    Query::from("todos")
-        .filter(eq(col("done"), lit(false)))
-        .array_subquery(
-            ArraySubquery::new("project", "projects", "id", "project_id")
-                .requirement(ArraySubqueryRequirement::AtLeastOne),
-        )
+pub async fn read_orders_with_required_customer(
+    jazz: &Jazz,
+) -> jazz_app::Result<Vec<(required_references::Order, required_references::Customer)>> {
+    // `require` keeps only the orders whose customer is there, and includes
+    // a `Customer` rather than an `Option<Customer>`.
+    let query = required_references::orders::query()
+        .include(required_references::orders::customer().require());
+
+    jazz.all(query).await
 }
 // #endregion reading-require-includes-rust
 
 // #region reading-select-rust
-pub async fn read_todo_titles(client: &JazzClient) -> jazz::tools::Result<usize> {
-    let query = Query::from("todos").select(["title", "done"]);
+pub async fn read_todo_titles_with_selected_project(
+    jazz: &Jazz,
+) -> jazz_app::Result<Vec<(Partial<Todo, String>, Option<Partial<Project, String>>)>> {
+    // `select` reads only some columns: each row is a `Partial`, with its id.
+    let query = todos::query()
+        .select(todos::title())
+        .filter(todos::done().eq(false))
+        .include(todos::project().with(projects::query().select(projects::name())));
 
-    let rows = client.query(query, ReadTier::LocalFirst).await?;
-    Ok(rows.len())
+    jazz.all(query).await
 }
 // #endregion reading-select-rust
 
 // #region reading-recursive-rust
-pub fn build_todo_lineage_query() -> Query {
-    Query::from("todos")
-        .filter(eq(col("done"), lit(false)))
-        .gather(
-            Gather::from("todos")
-                .where_current("id")
-                .hop_to("parent_id")
-                .max_depth(10),
-        )
+pub fn build_todo_lineage_query() -> Query<Todo> {
+    todos::query()
+        .filter(todos::done().eq(false))
+        .gather(todos::parent(), 10)
 }
 // #endregion reading-recursive-rust
 
-// #region writing-crud-rust
-pub async fn write_todo_crud(
-    client: &JazzClient,
-    existing_id: ObjectId,
-) -> jazz::tools::Result<()> {
-    let values = todo_values("Write docs", "");
+// #region reading-composing-queries-rust
+pub fn compose_todo_queries() -> [Query<Todo>; 3] {
+    // Store a base query and reuse it for different views.
+    let open_todos = todos::query().filter(todos::done().eq(false));
 
-    let _new_row = client.insert("todos", values)?;
-    client.update(
-        "todos",
-        existing_id,
-        vec![("done".to_string(), Value::Boolean(true))],
-    )?;
-    client.delete("todos", existing_id)?;
-    Ok(())
+    let by_newest = open_todos.clone().order_by(todos::id(), Order::Desc);
+    let by_title = open_todos
+        .clone()
+        .order_by(todos::title(), Order::Asc)
+        .limit(20);
+    let urgent = open_todos.filter(todos::title().contains("urgent"));
+
+    [by_newest, by_title, urgent]
 }
-// #endregion writing-crud-rust
+// #endregion reading-composing-queries-rust
 
-// #region writing-durability-tier-rust
-pub async fn write_todo_with_default_durability(
-    client: &JazzClient,
-) -> jazz::tools::Result<ObjectId> {
-    let (id, _row_values, _transaction_id) = client.insert(
-        "todos",
-        todo_values("Write docs with default durability behavior", ""),
-    )?;
-
-    // Rust currently does not expose per-write durability tier arguments.
-    // Writes apply locally first, then sync asynchronously to higher tiers.
-    Ok(id)
-}
-// #endregion writing-durability-tier-rust
-
-// #region writing-transaction-rust
-pub async fn group_todo_writes(
-    db: &Db,
-    existing_todo_id: RowUuid,
-) -> Result<RowUuid, jazz::db::Error> {
-    let (created_id, _transaction_id) = db
-        .transaction(async |tx| {
-            let created_id = tx
-                .insert(
-                    "todos",
-                    transaction_todo_values("Write transaction docs"),
-                    InsertOptions::default(),
-                )
-                .await?;
-            tx.update(
-                "todos",
-                existing_todo_id,
-                BTreeMap::from([("done".to_string(), DbValue::Bool(true))]),
-                UpdateOptions::default(),
-            )
-            .await?;
-
-            let _staged = tx.read("todos", created_id).await?;
-
-            Ok(created_id)
-        })
-        .await?;
-
-    Ok(created_id)
-}
-// #endregion writing-transaction-rust
-
-// #region writing-serializable-transaction-rust
-pub async fn finish_todo_serializably(db: &Db, todo_id: RowUuid) -> Result<(), jazz::db::Error> {
-    let tx = db.serializable_tx().await?;
-    let _todo = tx.read("todos", todo_id).await?;
-
-    tx.update(
-        "todos",
-        todo_id,
-        BTreeMap::from([("done".to_string(), DbValue::Bool(true))]),
-        UpdateOptions::default(),
-    )
-    .await?;
-    let _transaction_id = tx.commit().await?;
-    Ok(())
-}
-// #endregion writing-serializable-transaction-rust
-
-pub async fn where_operator_examples(client: &JazzClient) -> jazz::tools::Result<()> {
-    let search_term = "milk";
-
+pub async fn where_operator_examples(
+    jazz: &Jazz,
+    search_term: &str,
+    todo_id_a: ObjectId,
+    todo_id_b: ObjectId,
+) -> jazz_app::Result<()> {
     // #region where-eq-ne-rust
     // Exact match
-    let query = Query::from("todos").filter(eq(col("done"), lit(false)));
-    let incomplete_todos = client.query(query, ReadTier::LocalFirst).await?;
+    let incomplete_todos = jazz
+        .all(todos::query().filter(todos::done().eq(false)))
+        .await?;
 
     // Not equal
-    let query = Query::from("todos").filter(ne(col("title"), lit("Draft")));
-    let non_draft_todos = client.query(query, ReadTier::LocalFirst).await?;
+    let non_draft_todos = jazz
+        .all(todos::query().filter(todos::title().ne("Draft")))
+        .await?;
+
+    // One of a set
+    let selected_todos = jazz
+        .all(todos::query().filter(todos::id().is_in([todo_id_a, todo_id_b])))
+        .await?;
     // #endregion where-eq-ne-rust
 
     // #region where-numeric-rust
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-    let one_week_ago = now_ms - 7 * 24 * 60 * 60 * 1000;
+    // Every table has `created_at()` and `updated_at()` columns.
+    let one_week_ago = Timestamp(Timestamp::now().0 - 7 * 24 * 60 * 60 * 1000);
 
-    let query = Query::from("todos").filter(gt(col("$createdAt"), lit(one_week_ago)));
-    let recent_todos = client.query(query, ReadTier::LocalFirst).await?;
-
-    let query = Query::from("todos").filter(gte(col("priority"), lit(3)));
-    let high_priority = client.query(query, ReadTier::LocalFirst).await?;
-
-    let query = Query::from("todos").filter(lt(col("priority"), lit(10)));
-    let low_priority = client.query(query, ReadTier::LocalFirst).await?;
+    let recent_todos = jazz
+        .all(todos::query().filter(jazz_app::created_at().gt(one_week_ago)))
+        .await?;
+    let high_priority = jazz
+        .all(todos::query().filter(todos::priority().gte(3)))
+        .await?;
+    let low_priority = jazz
+        .all(todos::query().filter(todos::priority().lt(10)))
+        .await?;
     // #endregion where-numeric-rust
 
     // #region where-contains-rust
     // Substring match (case-sensitive)
-    let query = Query::from("todos").filter(contains(col("title"), lit(search_term)));
-    let matches = client.query(query, ReadTier::LocalFirst).await?;
+    let matches = jazz
+        .all(todos::query().filter(todos::title().contains(search_term)))
+        .await?;
     // #endregion where-contains-rust
 
     // #region where-null-rust
     // Rows where the optional ref is not set
-    let query = Query::from("todos").filter(is_null(col("parent")));
-    let unlinked_todos = client.query(query, ReadTier::LocalFirst).await?;
+    let unlinked_todos = jazz
+        .all(todos::query().filter(todos::parent_id().is_null()))
+        .await?;
 
     // Rows where it is set
-    let query = Query::from("todos").filter(not(is_null(col("parent"))));
-    let linked_todos = client.query(query, ReadTier::LocalFirst).await?;
+    let linked_todos = jazz
+        .all(todos::query().filter(todos::parent_id().is_not_null()))
+        .await?;
     // #endregion where-null-rust
 
     // #region where-and-rust
-    // Multiple filter calls are AND-combined
-    let query = Query::from("todos")
-        .filter(eq(col("done"), lit(true)))
-        .filter(not(is_null(col("project"))));
-    let done_with_project = client.query(query, ReadTier::LocalFirst).await?;
+    // Multiple filter calls are AND-combined: done AND assigned to a project
+    let done_with_project = jazz
+        .all(
+            todos::query()
+                .filter(todos::done().eq(true))
+                .filter(todos::project_id().is_not_null()),
+        )
+        .await?;
     // #endregion where-and-rust
 
     // #region where-order-limit-rust
-    let query = Query::from("todos")
-        .filter(eq(col("done"), lit(false)))
-        .order_by("$createdAt", OrderDirection::Asc)
-        .limit(50);
-    let recent_incomplete = client.query(query, ReadTier::LocalFirst).await?;
+    let recent_incomplete = jazz
+        .all(
+            todos::query()
+                .filter(todos::done().eq(false))
+                .order_by(jazz_app::created_at(), Order::Asc)
+                .limit(50),
+        )
+        .await?;
     // #endregion where-order-limit-rust
-
-    // #region where-subscription-rust
-    let query = Query::from("todos").filter(eq(col("done"), lit(false)));
-    let pending = client.subscribe(query).await?;
-    // #endregion where-subscription-rust
 
     let _ = (
         incomplete_todos,
         non_draft_todos,
+        selected_todos,
         recent_todos,
         high_priority,
         low_priority,
@@ -393,42 +275,301 @@ pub async fn where_operator_examples(client: &JazzClient) -> jazz::tools::Result
         linked_todos,
         done_with_project,
         recent_incomplete,
-        pending,
     );
     Ok(())
 }
 
-// #region reading-composing-queries-rust
-pub fn composing_queries() {
-    // Build two views from the same base conditions.
-    let by_title = Query::from("todos")
-        .filter(eq(col("done"), lit(false)))
-        .order_by("title", OrderDirection::Asc)
-        .limit(20);
-    let by_newest = Query::from("todos")
-        .filter(eq(col("done"), lit(false)))
-        .order_by("id", OrderDirection::Desc);
-
-    let _ = (by_title, by_newest);
+// #region where-subscription-rust
+pub async fn subscribe_open_todos(jazz: &Jazz) -> jazz_app::Result<Subscription<Todo>> {
+    // Dropping the subscription unsubscribes.
+    jazz.subscribe(todos::query().filter(todos::done().eq(false)))
+        .await
 }
-// #endregion reading-composing-queries-rust
+// #endregion where-subscription-rust
+
+// #region writing-crud-rust
+pub async fn write_todo_crud(jazz: &Jazz, todo_id: ObjectId) -> jazz_app::Result<()> {
+    jazz.insert(NewTodo {
+        owner_id: Some(ObjectId::from_uuid(EXAMPLE_OWNER_ID)),
+        project_id: Some(ObjectId::from_uuid(EXAMPLE_PROJECT_ID)),
+        ..NewTodo::new("Write docs", false)
+    })
+    .await?;
+    jazz.update(
+        todo_id,
+        TodoUpdate {
+            done: Some(true),
+            ..Default::default()
+        },
+    )
+    .await?;
+    jazz.delete::<Todo>(todo_id).await
+}
+// #endregion writing-crud-rust
 
 // #region writing-nullable-update-rust
-pub async fn clear_nullable_fields(
-    client: &JazzClient,
-    todo_id: ObjectId,
-) -> jazz::tools::Result<()> {
-    // Set a nullable column to null
-    client.update(
-        "todos",
+pub async fn clear_nullable_todo_fields(jazz: &Jazz, todo_id: ObjectId) -> jazz_app::Result<()> {
+    jazz.update(
         todo_id,
-        vec![("owner_id".to_string(), Value::Null)],
-    )?;
-
-    // Only the specified columns are changed; omitted columns are left as-is.
-    Ok(())
+        TodoUpdate {
+            // `Some(None)` sets a nullable column to null.
+            owner_id: Some(None),
+            // `None` leaves a column unchanged.
+            description: None,
+            ..Default::default()
+        },
+    )
+    .await
 }
 // #endregion writing-nullable-update-rust
+
+// #region writing-upsert-rust
+pub async fn upsert_todo(jazz: &Jazz, imported_todo_id: ObjectId) -> jazz_app::Result<Todo> {
+    // A durable handle's writes return once that tier has them.
+    jazz.durable(DurabilityTier::GlobalServer)
+        .upsert(imported_todo_id, NewTodo::new("Imported task", false))
+        .await
+}
+// #endregion writing-upsert-rust
+
+// #region writing-durability-tier-rust
+pub async fn write_todo_with_durability_tiers(jazz: &Jazz) -> jazz_app::Result<()> {
+    // A durable handle's writes return once the server accepted them, and
+    // fail if it refused them.
+    let global = jazz.durable(DurabilityTier::GlobalServer);
+
+    let todo = global
+        .insert(NewTodo {
+            owner_id: Some(ObjectId::from_uuid(EXAMPLE_OWNER_ID)),
+            project_id: Some(ObjectId::from_uuid(EXAMPLE_PROJECT_ID)),
+            ..NewTodo::new("Write docs with durability tier", false)
+        })
+        .await?;
+    global
+        .update(
+            todo.id,
+            TodoUpdate {
+                done: Some(true),
+                ..Default::default()
+            },
+        )
+        .await?;
+    global.delete::<Todo>(todo.id).await
+}
+// #endregion writing-durability-tier-rust
+
+// #region writing-transaction-rust
+pub async fn group_todo_writes(
+    jazz: &Jazz,
+    existing_todo_id: ObjectId,
+) -> jazz_app::Result<ObjectId> {
+    // Committed together if the closure returns `Ok`, rolled back if it
+    // returns `Err`. On a durable handle it returns once the commit reached
+    // that tier.
+    jazz.durable(DurabilityTier::GlobalServer)
+        .transaction(move |tx| async move {
+            let created = tx.insert(NewTodo {
+                owner_id: Some(ObjectId::from_uuid(EXAMPLE_OWNER_ID)),
+                project_id: Some(ObjectId::from_uuid(EXAMPLE_PROJECT_ID)),
+                ..NewTodo::new("Write transaction docs", false)
+            })?;
+            tx.update(
+                existing_todo_id,
+                TodoUpdate {
+                    done: Some(true),
+                    ..Default::default()
+                },
+            )?;
+
+            // Reads inside the transaction see its staged writes.
+            let staged = tx
+                .get::<Todo>(created.id)
+                .await?
+                .ok_or(jazz_app::Error::NotFound {
+                    table: "todos",
+                    id: created.id.to_string(),
+                })?;
+            Ok(staged.id)
+        })
+        .await
+}
+// #endregion writing-transaction-rust
+
+// #region writing-mutation-errors-rust
+pub async fn insert_todo_and_wait(jazz: &Jazz) -> jazz_app::Result<Option<Todo>> {
+    // A durable write returns once the server accepted it, and fails with
+    // its verdict if it refused it.
+    let inserted = jazz
+        .durable(DurabilityTier::GlobalServer)
+        .insert(NewTodo {
+            owner_id: Some(ObjectId::from_uuid(EXAMPLE_OWNER_ID)),
+            project_id: Some(ObjectId::from_uuid(EXAMPLE_PROJECT_ID)),
+            ..NewTodo::new("Ship review fixes", false)
+        })
+        .await;
+
+    match inserted {
+        Ok(todo) => Ok(Some(todo)),
+        // `code` is TypeScript's: `permission_denied`, `write_rejected`, …
+        Err(jazz_app::Error::WriteRejected { code, reason, .. }) => {
+            eprintln!("{code}: {reason}");
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+// #endregion writing-mutation-errors-rust
+
+// #region writing-transaction-errors-rust
+/// Whether the server accepted the commit.
+pub async fn complete_todo_in_transaction(
+    jazz: &Jazz,
+    todo_id: ObjectId,
+) -> jazz_app::Result<bool> {
+    let committed = jazz
+        .durable(DurabilityTier::GlobalServer)
+        .transaction(move |tx| async move {
+            tx.update(
+                todo_id,
+                TodoUpdate {
+                    done: Some(true),
+                    ..Default::default()
+                },
+            )
+        })
+        .await;
+
+    match committed {
+        Ok(()) => Ok(true),
+        Err(jazz_app::Error::WriteRejected { code, reason, .. }) => {
+            eprintln!("{code}: {reason}");
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+// #endregion writing-transaction-errors-rust
+
+// #region writing-serializable-transaction-rust
+pub async fn finish_todo_serializably(
+    jazz: &Jazz,
+    todo_id: ObjectId,
+) -> jazz_app::Result<ObjectId> {
+    // Reads see the data as of the transaction's start; the server applies
+    // the commit only if nothing it read or wrote changed meanwhile, and
+    // refuses it otherwise.
+    jazz.serializable_transaction(move |tx| async move {
+        let todo = tx
+            .get::<Todo>(todo_id)
+            .await?
+            .ok_or(jazz_app::Error::NotFound {
+                table: "todos",
+                id: todo_id.to_string(),
+            })?;
+
+        tx.update(
+            todo.id,
+            TodoUpdate {
+                done: Some(true),
+                ..Default::default()
+            },
+        )?;
+        Ok(todo.id)
+    })
+    .await
+}
+// #endregion writing-serializable-transaction-rust
+
+// #region writing-restore-rust
+pub async fn restore_deleted_todo(jazz: &Jazz, todo_id: ObjectId) -> jazz_app::Result<Todo> {
+    jazz.delete::<Todo>(todo_id).await?;
+
+    // `include_deleted` reads deleted rows too.
+    let deleted = jazz
+        .one(todos::query().id(todo_id).include_deleted())
+        .await?;
+    if deleted.is_none() {
+        return Err(jazz_app::Error::NotFound {
+            table: "todos",
+            id: todo_id.to_string(),
+        });
+    }
+
+    // A restore replaces the whole row, so it takes a full `NewTodo`.
+    jazz.restore_with(
+        todo_id,
+        NewTodo {
+            owner_id: Some(ObjectId::from_uuid(EXAMPLE_OWNER_ID)),
+            project_id: Some(ObjectId::from_uuid(EXAMPLE_PROJECT_ID)),
+            ..NewTodo::new("Restored task", false)
+        },
+    )
+    .await
+}
+// #endregion writing-restore-rust
+
+// #region writing-manual-transaction-rust
+pub async fn stage_todo_across_steps(jazz: &Jazz, should_cancel: bool) -> jazz_app::Result<()> {
+    // On a durable handle, `commit` returns once the commit reached that tier.
+    let tx = jazz
+        .durable(DurabilityTier::GlobalServer)
+        .begin_transaction()
+        .await?;
+
+    tx.insert(NewTodo {
+        owner_id: Some(ObjectId::from_uuid(EXAMPLE_OWNER_ID)),
+        project_id: Some(ObjectId::from_uuid(EXAMPLE_PROJECT_ID)),
+        ..NewTodo::new("Review staged changes", false)
+    })
+    .await?;
+
+    if should_cancel {
+        return tx.rollback().await;
+    }
+
+    tx.commit().await
+}
+// #endregion writing-manual-transaction-rust
+
+// #region dry-run-permissions-rust
+pub async fn can_read_todo(jazz: &Jazz, todo_id: ObjectId) -> jazz_app::Result<Advice> {
+    jazz.can_read::<Todo>(todo_id).await
+}
+
+pub async fn read_todos_with_delete_permission(jazz: &Jazz) -> jazz_app::Result<Vec<Todo>> {
+    let todos = jazz
+        .all(todos::query().order_by(todos::title(), Order::Asc))
+        .await?;
+    let mut deletable = Vec::new();
+    for todo in todos {
+        if jazz.can_delete::<Todo>(todo.id).await? == Advice::Allowed {
+            deletable.push(todo);
+        }
+    }
+    Ok(deletable)
+}
+
+pub async fn read_editable_todos(jazz: &Jazz) -> jazz_app::Result<Vec<Todo>> {
+    let todos = jazz
+        .all(todos::query().order_by(todos::title(), Order::Asc))
+        .await?;
+    let mut editable = Vec::new();
+    for todo in todos {
+        let update = TodoUpdate {
+            title: Some(todo.title.clone()),
+            ..Default::default()
+        };
+        if jazz.can_update(todo.id, update).await? == Advice::Allowed {
+            editable.push(todo);
+        }
+    }
+    Ok(editable)
+}
+
+pub async fn can_create_todo(jazz: &Jazz, title: &str) -> jazz_app::Result<Advice> {
+    jazz.can_insert(NewTodo::new(title, false)).await
+}
+// #endregion dry-run-permissions-rust
 
 // #region files-create-from-bytes-rust
 pub async fn create_file_from_bytes(
@@ -478,7 +619,7 @@ pub async fn load_file_bytes(
 ) -> jazz::tools::Result<Option<Vec<u8>>> {
     let uploads = client
         .query(
-            Query::from("uploads")
+            UntypedQuery::from("uploads")
                 .select(["fileId"])
                 .filter(eq(col("id"), lit(*upload_id.uuid()))),
             ReadTier::Remote,
@@ -494,7 +635,7 @@ pub async fn load_file_bytes(
 
     let files = client
         .query(
-            Query::from("files")
+            UntypedQuery::from("files")
                 .select(["data"])
                 .filter(eq(col("id"), lit(*file_id.uuid()))),
             ReadTier::Remote,
@@ -519,7 +660,7 @@ pub async fn delete_upload_with_file(
 ) -> jazz::tools::Result<()> {
     let uploads = client
         .query(
-            Query::from("uploads")
+            UntypedQuery::from("uploads")
                 .select(["fileId"])
                 .filter(eq(col("id"), lit(*upload_id.uuid()))),
             ReadTier::Remote,

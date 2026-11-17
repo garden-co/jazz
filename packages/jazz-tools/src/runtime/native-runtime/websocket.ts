@@ -88,6 +88,71 @@ export function isSocketDropWireError(error: WireError): boolean {
   );
 }
 
+const KNOWN_WIRE_ERROR_CODES = new Set([
+  "unsupported_protocol_version",
+  "unsupported_feature",
+  "malformed_frame",
+  "auth_failed",
+  "backpressure",
+  "internal",
+  "not_ready",
+]);
+const KNOWN_WIRE_RETRIES = new Set(["never", "after_auth", "after_resume", "later"]);
+
+/** How an upstream link treats a connection's end (`LinkFailure` in Rust). */
+export type WireLinkFailureKind =
+  | "network"
+  | "refused"
+  | "serverNotReady"
+  | "authRejected"
+  | "fatal"
+  | "reauthenticate";
+
+/**
+ * How a link classifies the `error` a connection ended with, for hosts that
+ * cannot call the Rust link (the thin client). Rust decides this
+ * (`LinkFailure::from_wire_error`); this copy is held to the same table
+ * (`crates/jazz/layers/db/fixtures/link_wire_failure_v1.json`). Decided by
+ * `code`, never by `retry` alone: a malformed frame or a refused credential
+ * can carry `later`. A code or retry this client does not know came from a
+ * newer server: a refusal, retried, never a stop.
+ */
+export function classifyWireLinkFailure(error: WireError, admitted: boolean): WireLinkFailureKind {
+  if (isSocketDropWireError(error)) return "network";
+  if (isLocalProtocolWireError(error)) return "fatal";
+  // A code or retry from a newer server, even on `auth_failed`: native
+  // clients cannot decode it at all and retry it, so every host does.
+  if (!KNOWN_WIRE_ERROR_CODES.has(error.code) || !KNOWN_WIRE_RETRIES.has(error.retry)) {
+    return "refused";
+  }
+  if (error.code === "auth_failed") {
+    return isReauthenticateWireError(error) ? "reauthenticate" : "authRejected";
+  }
+  // `internal` with `later`: a runtime that cannot serve the session now.
+  if (isReconnectLaterWireError(error) || (error.code === "internal" && error.retry === "later")) {
+    if (admitted) return "network";
+    return error.code === "not_ready" ? "serverNotReady" : "refused";
+  }
+  return "fatal";
+}
+
+/**
+ * Whether the carrier itself ended the link for good: it could not handle
+ * what the server sent (`protocol_error`), or its socket ended in a way it
+ * does not retry (a `websocket_*` code without `later`). These are the
+ * carrier's codes, not a server's, so the link never sees them as unknown
+ * server codes: they stop the link.
+ */
+export function isLocalProtocolWireError(error: WireError): boolean {
+  if (error.code === "protocol_error") return true;
+  return (
+    (error.code === "websocket_closed" ||
+      error.code === "websocket_error" ||
+      error.code === "websocket_silent") &&
+    !isSocketDropWireError(error)
+  );
+}
+
 export function isRetryablePreHelloWireError(error: unknown): error is PreHelloWireError {
   return error instanceof PreHelloWireError && isReconnectLaterWireError(error.wireError);
 }
@@ -169,8 +234,18 @@ export const HANDSHAKE_TIMEOUT_MS = 10_000;
  * a frozen page or a long task held back are delivered before it counts. */
 const HEARTBEAT_CONFIRM_MS = 1_000;
 const WIRE_FRAME_HEARTBEAT = 7;
+/**
+ * `FEATURE_SERIALIZABLE_BRANCH_READS` in `crates/jazz/layers/protocol/src/wire.rs`:
+ * the server validates a serializable transaction's reads through a branch
+ * view at commit. Without it, the core refuses to commit such a transaction
+ * upstream rather than have it validated against the wrong rows (jazz#5806).
+ */
+export const FEATURE_SERIALIZABLE_BRANCH_READS = 1 << 12;
 export const CLIENT_WIRE_FEATURES =
-  FEATURE_PAYLOAD_ZSTD | FEATURE_AUTHORIZATION_SCOPE_VIEWS | FEATURE_AUXILIARY_CHUNKS;
+  FEATURE_PAYLOAD_ZSTD |
+  FEATURE_AUTHORIZATION_SCOPE_VIEWS |
+  FEATURE_AUXILIARY_CHUNKS |
+  FEATURE_SERIALIZABLE_BRANCH_READS;
 
 // The server route accepts WebSocket messages up to one MiB. Reserve enough
 // postcard framing bytes that a burst of otherwise-valid wire frames remains
@@ -1017,7 +1092,9 @@ function wireErrorCodeName(tag: number): string {
     case 6:
       return "not_ready";
     default:
-      throw new Error(`unknown WireErrorCode discriminant ${tag}`);
+      // A code from a newer server: still the server's refusal, which the
+      // link retries rather than a frame it failed to read.
+      return `unknown:${tag}`;
   }
 }
 
@@ -1032,7 +1109,7 @@ function wireRetryName(tag: number): string {
     case 3:
       return "later";
     default:
-      throw new Error(`unknown WireRetry discriminant ${tag}`);
+      return `unknown:${tag}`;
   }
 }
 

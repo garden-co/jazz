@@ -16,18 +16,17 @@ to:
 ```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
 
-const schema = {
-  notes: s.table(
-    {
-      title: s.string(), // one value: a concurrent edit replaces it whole
-      body: s.string().merge("markdown"),
-    },
-    {},
-  ),
-};
+export const schema = s.defineSchema({
+  notes: s.table({
+    title: s.string(),
+    body: s.string().merge("markdown"),
+  }),
+});
 ```
 
-`merge("text")` and `merge("html")` are the other two strategies. They differ in which pieces a
+`title` keeps one value: a concurrent edit replaces it whole. `body` merges.
+
+`.merge("text")` and `.merge("html")` are the other two strategies. They differ in which pieces a
 merge keeps whole: words and punctuation for all three, plus markup runs and link targets for
 Markdown, and whole tags and entities for HTML. See
 [Column types](/docs/schemas/column-types#mergeable-text-columns) for the full rules and for optional
@@ -95,7 +94,7 @@ const found = anchors.resolveRange(range, latestBody);
 // found.start, found.end, found.confidence, found.ambiguous
 ```
 
-- Anchors and ranges are plain JSON, so store them in a `s.json()` column next to the text, or send
+- Anchors and ranges are plain JSON, so store them in a `{ "json": true }` column next to the text, or send
   them as presence.
 - `confidence` falls as the text under them changes, and `ambiguous` says another place matched
   about as well. When confidence is very low, the text is gone: show the comment as orphaned rather
@@ -104,6 +103,10 @@ const found = anchors.resolveRange(range, latestBody);
   positions: a range with just the `matched` text, and `before` and `after` left empty, is found
   wherever that text is.
 
-Positions count UTF-16 code units, like JavaScript strings. In ProseMirror, `captureRange`,
+Positions count UTF-16 code units, like JavaScript strings. In Rust, use `Anchor::capture_utf8`,
+`Anchor::resolve_utf8`, `Range::capture_utf8` and `Range::resolve_utf8` from
+`jazz_app_support::text`: they take and return UTF-8 byte offsets (`str` indices) and refuse an
+offset inside a code point. The anchors themselves are the same, so a Rust server and a TypeScript
+client share them. In ProseMirror, `captureRange`,
 `resolveRange` and `overlays` from `jazz-tools/prosemirror` work in editor positions instead; see
 [comments that stay on their words](/docs/recipes/data-patterns/rich-text-editor#comments-that-stay-on-their-words).

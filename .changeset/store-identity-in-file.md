@@ -1,0 +1,6 @@
+---
+"jazz-tools": patch
+"jazz-napi": patch
+---
+
+A `sqlite({ path })` store and a self-hosted server's data dir now keep their identity inside `jazz.sqlite`: the app id, the store's own id, and where its large values live. `jazz.sqlite` alone is now the whole store, so a copy or restore of it is the same store, for the same app, with the same chunks. The `app-id`, `store-id` and `blob-store` files stay beside it as copies each start rewrites, so an earlier release opened on the directory keeps the same identity; a copy that disagrees with `jazz.sqlite` is refused, not chosen. The Inspector's `inspect-token-secret` stays a file of its own (readable by its owner only) and never enters `jazz.sqlite`. To open a copy next to the original (a staging copy of a backup), run `npx jazz-tools store detach <path>` on the stopped copy: it gets its own store id and agent-token secret instead of claiming the original's chunks. **New refusal:** a store keeps the app it was first opened for, so a self-hosted server started with a different `--app-id` on an existing data dir now refuses to start instead of serving that data as another app; `npx jazz-tools store set-app-id <path> <app id>` changes it, and the error says so.

@@ -1,13 +1,13 @@
 import { For, createMemo, createSignal, type JSX } from "solid-js";
-import { useAll, useSession } from "jazz-tools/solid";
+import { useAll, useJazzSession } from "jazz-tools/solid";
 import { toast } from "solid-sonner";
-import { app, type Todo } from "./lib/schema.js";
+import { app, type Todo } from "./lib/jazz.generated.js";
 
 export function TodoList() {
-  const session = useSession();
+  const { snapshot } = useJazzSession();
   const [title, setTitle] = createSignal("");
 
-  const sessionUserId = createMemo(() => session()?.user ?? null);
+  const sessionUserId = createMemo(() => snapshot().user?.accountId ?? null);
   const todos = useAll(() => ({ query: app.todos }));
 
   const handleSubmit: JSX.EventHandler<HTMLFormElement, SubmitEvent> = (e) => {

@@ -9,7 +9,7 @@
     "backend": "tsx server.ts",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "build": "jazz-tools validate && tsc --noEmit",
+    "build": "jazz-tools generate && tsc --noEmit",
     "prebuild": "expo prebuild --clean",
     "verify:expo": "pnpm verify:expo:android && pnpm verify:expo:ios",
     "verify:expo:android": "CI=1 expo prebuild --platform android --clean --no-install",

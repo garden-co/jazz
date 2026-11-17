@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { getSession, QuerySubscription } from "jazz-tools/svelte";
-  import { app } from "../../schema";
+  import { getJazzSession, QuerySubscription } from "jazz-tools/svelte";
+  import { app } from "../../jazz.generated";
   import Account from "$lib/components/Account.svelte";
   import Board from "$lib/components/Board.svelte";
   import { createShow, type Me } from "$lib/model/actions";
 
-  const session = getSession();
-  const account = $derived(session.current?.user ?? null);
+  const session = getJazzSession();
+  const account = $derived($session.user?.accountId ?? null);
   const profiles = new QuerySubscription(() =>
     account ? app.crew.where({ account }) : undefined,
   );

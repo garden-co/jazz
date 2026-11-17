@@ -1,0 +1,9 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "documents": {
+      "columns": { "title": "string", "payload": "bytes", "metadata": { "json": true }, "done": "boolean" }
+    }
+  }
+}

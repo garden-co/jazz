@@ -11,20 +11,20 @@ After [user-owned data](/docs/recipes/access-control/user-owned-data), the next 
 Add a `todoShares` table that records which user has access to which todo.
 
 <include cwd lang="ts" meta='title="schema.ts"'>
-  ../examples/docs/todo-client-localfirst-react/src/shared-access-snippets.tsx#shared-schema
+  ../examples/docs/todo-client-localfirst-react/src/recipes/shared-access/schema.ts#schema
 </include>
 
 ## Permissions
 
 The creator can do everything. Share recipients get read access, and optionally edit access via `can_edit`.
-A share row is readable by its recipient and by the todo's creator, who needs it to list and revoke
-access.
+Only the todo's creator can insert and delete share rows. A share row is readable by its recipient
+and by the todo's creator, who needs it to list and revoke access.
 
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-client-localfirst-react/src/shared-access-snippets.tsx#shared-permissions
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/recipes/shared-access/schema.ts#permissions
 </include>
 
-See [Declarative Permissions](/docs/schemas/policies) for more on `exists.where`, `anyOf`, and `allOf`.
+See [Declarative Permissions](/docs/schemas/policies) for more on `exists`, `anyOf`, and relation `.where`.
 
 ## Granting access
 

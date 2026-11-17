@@ -66,7 +66,8 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from "vue";
 import { useAll } from "jazz-tools/vue";
-import { app, type StopStatus, type StopWithVenue } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
+import { type StopStatus, type StopWithVenue } from "../../app-extras.js";
 import { formatLongDate, fromDateInput, statusLabels, toDateInput } from "../lib/format.js";
 import { renderMarkdown } from "../lib/markdown.js";
 import { saveStopEdit, type OpenedTexts } from "../lib/stop-edit.js";
