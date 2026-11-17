@@ -207,18 +207,6 @@ pub(crate) fn end_savepoint(
     }
 }
 
-/// Run `f` inside `SAVEPOINT name`: kept if it succeeds, undone if not.
-pub(crate) fn in_savepoint<T>(
-    conn: &rusqlite::Connection,
-    name: &str,
-    f: impl FnOnce() -> Result<T, Error>,
-) -> Result<T, Error> {
-    begin_savepoint(conn, name)?;
-    let result = f();
-    end_savepoint(conn, name, result.is_ok())?;
-    result
-}
-
 /// One SQLite value, as bound or read. Text holds raw bytes, which SQLite
 /// stores and compares without interpreting.
 #[derive(Clone, Debug, PartialEq)]
