@@ -519,8 +519,9 @@ pub struct SubscriptionStream {
     /// A withheld opening, released as one reset of the current rows.
     gate: Option<sync::Gate>,
     group: Weak<RefCell<fanout::Group>>,
-    /// Why the server refused the remote read, once it has; reported once.
-    refused: Option<Rc<RefCell<Option<Error>>>>,
+    /// The remote read it follows: why the server refused it, once it
+    /// has, is reported once and ends the stream.
+    refused: Option<Rc<sync::ReadSignal>>,
     /// The remote attachment to release on drop.
     remote: Option<(
         Rc<Store>,
@@ -548,10 +549,9 @@ impl Drop for SubscriptionStream {
 
 impl SubscriptionStream {
     pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
-        let refused = self.refused.as_ref().and_then(|refused| {
-            refused
-                .borrow()
-                .as_ref()
+        let refused = self.refused.as_ref().and_then(|signal| {
+            signal
+                .refusal()
                 .map(|error| (error.code, error.message.clone(), error.to_string()))
         });
         if let Some((code, message, reason)) = refused {
@@ -577,8 +577,11 @@ impl SubscriptionStream {
             {
                 return None;
             }
-            let settled = gate.answered.get();
-            let global = settled && gate.global.get();
+            // Opened on an answer, or past its wait: either way it reports
+            // what the read was last confirmed as (an outage leaves that
+            // standing).
+            let settled = gate.signal.confirmed();
+            let global = settled && gate.signal.confirmed_globally();
             self.gate = None;
             self.queue.borrow_mut().clear();
             let group = self.group.upgrade()?;
@@ -3512,22 +3515,19 @@ impl Db {
             },
             None => read,
         };
-        let remote = attached.map(|(_, flags)| flags);
+        let remote = attached.map(|(_, signal)| signal);
         let settled = match (&remote, client) {
-            (Some((answered, _, global)), _) => {
-                sync::SettledBy::Remote(answered.clone(), global.clone())
-            }
+            (Some(signal), _) => sync::SettledBy::Remote(signal.clone()),
             (None, true) => sync::SettledBy::Never,
             (None, false) => sync::SettledBy::Always(self.inner().authority),
         };
         let gate = match (&remote, self.link_hint()) {
-            (Some((answered, _, global)), Some(hint)) => {
+            (Some(signal), Some(hint)) => {
                 let deadline =
                     sync::remote_deadline(&opts, non_durable, sync::may_wait(hint.get()));
                 let live = hint.get().hint == RemoteLinkHint::Live;
                 deadline.map(|deadline| sync::Gate {
-                    answered: answered.clone(),
-                    global: global.clone(),
+                    signal: signal.clone(),
                     hint,
                     live,
                     deadline,
@@ -3559,7 +3559,7 @@ impl Db {
             dropped: inner.fan.dropped.clone(),
             gate,
             group,
-            refused: remote.as_ref().map(|(_, refused, _)| refused.clone()),
+            refused: remote.clone(),
             remote: remote.zip(reach).map(|(_, reach)| {
                 (
                     self.inner.clone(),

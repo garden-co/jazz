@@ -231,6 +231,8 @@ mod sync_frame_bounds;
 mod sync_gather;
 #[path = "../sync_join.rs"]
 mod sync_join;
+#[path = "../sync_read_state.rs"]
+mod sync_read_state;
 #[path = "../sync_resume.rs"]
 mod sync_resume;
 #[path = "../sync_sessions.rs"]
