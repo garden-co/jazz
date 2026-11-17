@@ -6,7 +6,10 @@
 //!
 //! Parsing accepts JSON text of these shapes only (no whitespace, no
 //! fractions or exponents, no negative numbers); a decoder then rebuilds the
-//! record and refuses input whose canonical encoding differs from it.
+//! record and refuses input whose canonical encoding differs from it. A
+//! document of records is parsed into its parts with
+//! [`parse_object_parts`] and [`parse_array_parts`], which also accept
+//! whitespace, so that each record is checked on its own.
 
 use super::super::error::{ProtocolError, ProtocolResult};
 use super::super::json;
@@ -149,7 +152,11 @@ pub(crate) fn framed(format: &str, value: Value) -> ProtocolResult<Vec<u8>> {
 
 /// Parses JSON text of the store's shapes.
 pub(crate) fn parse(bytes: &[u8]) -> ProtocolResult<Value> {
-    let mut parser = Parser { bytes, at: 0 };
+    let mut parser = Parser {
+        bytes,
+        at: 0,
+        lenient: false,
+    };
     let value = parser.value(0)?;
     if parser.at != bytes.len() {
         return invalid("trailing bytes after JSON");
@@ -157,18 +164,110 @@ pub(crate) fn parse(bytes: &[u8]) -> ProtocolResult<Value> {
     Ok(value)
 }
 
+/// One field of an object parsed by [`parse_object_parts`]: its name, its
+/// value and the exact bytes the value was parsed from.
+pub(crate) type ObjectPart<'a> = (String, Value, &'a [u8]);
+
+/// Parses a JSON object of the store's shapes, whitespace allowed, into its
+/// fields, each with the exact bytes its value was parsed from, so that a
+/// caller can check each part's canonical form on its own.
+pub(crate) fn parse_object_parts(bytes: &[u8]) -> ProtocolResult<Vec<ObjectPart<'_>>> {
+    let mut parser = Parser {
+        bytes,
+        at: 0,
+        lenient: true,
+    };
+    parser.skip_whitespace();
+    parser.expect(b'{')?;
+    let mut fields: Vec<ObjectPart<'_>> = Vec::new();
+    if parser.token() != Some(b'}') {
+        loop {
+            let name = parser.string()?;
+            parser.expect(b':')?;
+            let (value, raw) = parser.part(1)?;
+            if fields.iter().any(|(field, _, _)| *field == name) {
+                return invalid("repeated JSON field");
+            }
+            fields.push((name, value, raw));
+            match parser.token() {
+                Some(b',') => parser.at += 1,
+                Some(b'}') => break,
+                _ => return invalid("malformed JSON object"),
+            }
+        }
+    }
+    parser.expect(b'}')?;
+    if parser.at != bytes.len() {
+        return invalid("trailing bytes after JSON");
+    }
+    Ok(fields)
+}
+
+/// Parses a JSON array of the store's shapes, whitespace allowed, into its
+/// items, each with the exact bytes it was parsed from.
+pub(crate) fn parse_array_parts(bytes: &[u8]) -> ProtocolResult<Vec<(Value, &[u8])>> {
+    let mut parser = Parser {
+        bytes,
+        at: 0,
+        lenient: true,
+    };
+    parser.skip_whitespace();
+    parser.expect(b'[')?;
+    let mut items = Vec::new();
+    if parser.token() != Some(b']') {
+        loop {
+            items.push(parser.part(1)?);
+            match parser.token() {
+                Some(b',') => parser.at += 1,
+                Some(b']') => break,
+                _ => return invalid("malformed JSON array"),
+            }
+        }
+    }
+    parser.expect(b']')?;
+    if parser.at != bytes.len() {
+        return invalid("trailing bytes after JSON");
+    }
+    Ok(items)
+}
+
 struct Parser<'a> {
     bytes: &'a [u8],
     at: usize,
+    /// Whitespace between tokens is skipped rather than refused.
+    lenient: bool,
 }
 
-impl Parser<'_> {
+impl<'a> Parser<'a> {
     fn peek(&self) -> Option<u8> {
         self.bytes.get(self.at).copied()
     }
 
+    /// The first byte of the next token, after any whitespace a lenient
+    /// parser skips.
+    fn token(&mut self) -> Option<u8> {
+        self.skip_whitespace();
+        self.peek()
+    }
+
+    fn skip_whitespace(&mut self) {
+        if self.lenient {
+            while matches!(self.bytes.get(self.at), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+                self.at += 1;
+            }
+        }
+    }
+
+    /// A value and the exact bytes it was parsed from.
+    fn part(&mut self, depth: usize) -> ProtocolResult<(Value, &'a [u8])> {
+        self.skip_whitespace();
+        let start = self.at;
+        let value = self.value(depth)?;
+        Ok((value, &self.bytes[start..self.at]))
+    }
+
     fn expect(&mut self, byte: u8) -> ProtocolResult<()> {
-        if self.peek() == Some(byte) {
+        if self.token() == Some(byte) {
             self.at += 1;
             Ok(())
         } else {
@@ -189,18 +288,18 @@ impl Parser<'_> {
         if depth > MAX_DEPTH {
             return invalid("JSON nested too deeply");
         }
-        match self.peek() {
+        match self.token() {
             Some(b'"') => self.string().map(Value::String),
             Some(b'[') => {
                 self.at += 1;
                 let mut items = Vec::new();
-                if self.peek() == Some(b']') {
+                if self.token() == Some(b']') {
                     self.at += 1;
                     return Ok(Value::Array(items));
                 }
                 loop {
                     items.push(self.value(depth + 1)?);
-                    match self.peek() {
+                    match self.token() {
                         Some(b',') => self.at += 1,
                         Some(b']') => {
                             self.at += 1;
@@ -213,7 +312,7 @@ impl Parser<'_> {
             Some(b'{') => {
                 self.at += 1;
                 let mut fields: Vec<(String, Value)> = Vec::new();
-                if self.peek() == Some(b'}') {
+                if self.token() == Some(b'}') {
                     self.at += 1;
                     return Ok(Value::Object(fields));
                 }
@@ -225,7 +324,7 @@ impl Parser<'_> {
                         return invalid("repeated JSON field");
                     }
                     fields.push((name, value));
-                    match self.peek() {
+                    match self.token() {
                         Some(b',') => self.at += 1,
                         Some(b'}') => {
                             self.at += 1;

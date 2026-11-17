@@ -892,6 +892,9 @@ fn an_unrecognised_document_is_refused_whole() {
         text.replace(r#""format":"#, r#" "format":"#),
         text.replace(r#""revision":3"#, r#""revision":"3""#),
         text.replace(r#","revision":3"#, ""),
+        text.replace(r#""revision":3"#, r#""revision":03"#),
+        text.replace(r#""keys":["#, r#""keys": ["#),
+        text.replace(r#"},{"binding""#, r#"}, {"binding""#),
         format!("{text}\n"),
         "[]".into(),
         String::new(),
@@ -909,4 +912,51 @@ fn an_unrecognised_document_is_refused_whole() {
     assert!(document.lineage.is_some());
     assert_eq!(document.keys[0], None);
     assert!(document.keys[1].is_some());
+}
+
+#[test]
+fn one_non_canonical_record_is_skipped_and_the_others_load() {
+    let (world, space, _) = alice_holding(10);
+    let text = String::from_utf8(stored(&world, &space)).unwrap();
+    let owner = owner(&world, ALICE);
+    // The first key record's first envelope byte with a leading zero, then
+    // with whitespace inside the record: the same values, not canonical.
+    for damaged in [
+        text.replacen(r#""envelope":["#, r#""envelope":[0"#, 1),
+        text.replacen(r#""depth":"#, r#""depth": "#, 1),
+    ] {
+        assert_ne!(damaged, text);
+        let document = decode_document(damaged.as_bytes()).unwrap();
+        assert!(document.lineage.is_some());
+        assert_eq!(document.keys[0], None);
+        assert!(document.keys[1].is_some());
+        let loaded = owner.load(&document).unwrap();
+        assert_eq!(
+            loaded.rejected,
+            vec![Rejected {
+                record: RejectedRecord::Key {
+                    index: 0,
+                    epoch_id: None
+                },
+                reason: Rejection::Malformed
+            }]
+        );
+        assert_eq!(
+            loaded
+                .space
+                .unwrap()
+                .held()
+                .map(|(depth, _)| depth)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+    }
+    // A non-canonical lineage skips the document, as any failed lineage.
+    let damaged = text.replacen(r#""successors":["#, r#""successors": ["#, 1);
+    let document = decode_document(damaged.as_bytes()).unwrap();
+    assert_eq!(document.lineage, None);
+    assert_eq!(
+        owner.load(&document).unwrap().rejected[0].record,
+        RejectedRecord::Lineage
+    );
 }

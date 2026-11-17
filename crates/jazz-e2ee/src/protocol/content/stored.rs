@@ -15,7 +15,9 @@
 //! Every value is canonical JSON ([`super::canonical`]); `B(f, x) =
 //! UTF8(json(canonical([f, x])))`. Stored root and successor rows are
 //! objects of their §1.3 columns plus `id`, bytes as arrays. A decoder
-//! rebuilds each record and refuses input whose canonical encoding differs.
+//! rebuilds each record and refuses input whose canonical encoding differs;
+//! a document is decoded record by record, so such a record is skipped on
+//! its own.
 
 use crate::agility::{MechanismId, PublicKey};
 use crate::primitives::hash::sha256;
@@ -488,31 +490,65 @@ impl From<HeldDocument> for DecodedDocument {
 #[error("Unrecognised E2EE held-key document")]
 pub struct UnrecognisedDocument;
 
-/// Decodes a stored held-key document. Text that is not canonical JSON, or
-/// of another format, or without `revision`, `lineage` and `keys`, is
-/// [`UnrecognisedDocument`]; records inside it that do not decode are
-/// `None`.
+/// Decodes a stored held-key document. Each record is decoded on its
+/// own: a record that does not decode, or is not in canonical form, is
+/// `None`, to be skipped and reported (§6.2), and the others still load.
+/// The document itself must be canonical around its records: text that is
+/// not JSON of the store's shapes, an envelope in another form (whitespace,
+/// key order, number form), another format, or fields other than
+/// `format`, `revision`, `lineage` and `keys`, is [`UnrecognisedDocument`].
 pub fn decode_document(bytes: &[u8]) -> Result<DecodedDocument, UnrecognisedDocument> {
-    let value = parse_canonical(bytes).map_err(|_| UnrecognisedDocument)?;
-    let fields = Fields::new(&value).map_err(|_| UnrecognisedDocument)?;
-    let known = fields.format(DOCUMENT_FORMAT).is_ok()
-        && matches!(&value, Value::Object(fields) if fields.len() == 4);
-    let (Some(revision), Some(lineage), Some(keys)) = (
-        fields.get("revision").and_then(Value::as_number).ok(),
-        fields.get("lineage").ok(),
-        fields.get("keys").and_then(Value::as_array).ok(),
-    ) else {
+    let fields = canonical::parse_object_parts(bytes).map_err(|_| UnrecognisedDocument)?;
+    let [
+        (format_name, format, _),
+        (keys_name, _, keys),
+        (lineage_name, _, lineage),
+        (revision_name, revision, _),
+    ] = fields.as_slice()
+    else {
         return Err(UnrecognisedDocument);
     };
-    if !known {
+    let names = [format_name, keys_name, lineage_name, revision_name];
+    if names != ["format", "keys", "lineage", "revision"]
+        || format.as_str().ok() != Some(DOCUMENT_FORMAT)
+    {
+        return Err(UnrecognisedDocument);
+    }
+    let revision = revision.as_number().map_err(|_| UnrecognisedDocument)?;
+    let keys = canonical::parse_array_parts(keys).map_err(|_| UnrecognisedDocument)?;
+    // The envelope as the store writes it, around the records as stored.
+    let mut envelope = Vec::with_capacity(bytes.len());
+    envelope.extend_from_slice(b"{\"format\":");
+    envelope.extend(
+        Value::string(DOCUMENT_FORMAT)
+            .encode()
+            .map_err(|_| UnrecognisedDocument)?,
+    );
+    envelope.extend_from_slice(b",\"keys\":[");
+    for (index, (_, key)) in keys.iter().enumerate() {
+        if index > 0 {
+            envelope.push(b',');
+        }
+        envelope.extend_from_slice(key);
+    }
+    envelope.extend_from_slice(b"],\"lineage\":");
+    envelope.extend_from_slice(lineage);
+    envelope.extend_from_slice(b",\"revision\":");
+    envelope.extend(
+        Value::Number(revision)
+            .encode()
+            .map_err(|_| UnrecognisedDocument)?,
+    );
+    envelope.push(b'}');
+    if envelope != bytes {
         return Err(UnrecognisedDocument);
     }
     Ok(DecodedDocument {
         revision,
-        lineage: LineageRecord::from_value(lineage).ok(),
+        lineage: LineageRecord::decode(lineage).ok(),
         keys: keys
             .iter()
-            .map(|key| HeldKeyRecord::from_value(key).ok())
+            .map(|(_, key)| HeldKeyRecord::decode(key).ok())
             .collect(),
     })
 }
