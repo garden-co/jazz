@@ -261,6 +261,10 @@ export function remote(
 const DURABLE_OBJECT_SECRET_MIN_LENGTH = 32;
 /** The hosts a `durableObjects()` url may reach over plain http. */
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+/** How long the store waits for the core to name its app. */
+const DURABLE_OBJECT_APP_TIMEOUT_MS = 30_000;
+/** An app id the core may name: no path separators, dots or line breaks. */
+const DURABLE_OBJECT_APP_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 /**
  * A core running in a Cloudflare Durable Object: one SQLite-backed object per
@@ -335,21 +339,30 @@ async function durableObjectCore(
   store: Extract<JazzStore, { kind: "durableObjects" }>,
 ): Promise<Extract<JazzStore, { kind: "remote" }>> {
   let response: Response;
+  let body: { appId?: unknown } | undefined;
   try {
     response = await fetch(`${store.url}/app`, {
       headers: { [CREDENTIAL_HEADER]: store.secret },
       redirect: "manual",
+      signal: AbortSignal.timeout(DURABLE_OBJECT_APP_TIMEOUT_MS),
     });
+    body = (await response.json().catch(() => undefined)) as typeof body;
   } catch (error) {
+    if ((error as { name?: unknown } | null)?.name === "TimeoutError") {
+      throw new Error(
+        `createJazz: the Durable Object core at ${store.url} did not answer within ${DURABLE_OBJECT_APP_TIMEOUT_MS / 1000}s; this Jazz tries again on its next use`,
+        { cause: error },
+      );
+    }
     throw unreachableCore(store.url, error);
   }
-  const body = (await response.json().catch(() => undefined)) as { appId?: unknown } | undefined;
   if (response.status === 401 || response.status === 403) {
     throw new Error(
       `createJazz: the Durable Object core at ${store.url} refused the secret: durableObjects()'s secret must be the Worker's JAZZ_CORE_SECRET`,
     );
   }
-  if (!response.ok || typeof body?.appId !== "string" || !body.appId) {
+  // The id goes into request paths and log lines: only a plain one.
+  if (!response.ok || typeof body?.appId !== "string" || !DURABLE_OBJECT_APP_ID.test(body.appId)) {
     throw new Error(
       `createJazz: ${store.url} did not answer as a Jazz Durable Object core (GET /app: ${response.status}); is url the Worker that exports JazzCore, on this jazz-tools version?`,
     );
