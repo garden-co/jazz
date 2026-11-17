@@ -20,7 +20,8 @@ pub const MAX_RANGES: usize = 16;
 
 /// Most snapped blocks per rectangle side. Bounds the work of a cover to a
 /// few thousand quadtree nodes; past 64 the read amplification barely moves
-/// (measured in `tests::amplification`).
+/// (measured with `examples/geo_amplification.rs`, and against 16–256 when
+/// this was chosen).
 pub(crate) const SNAP_SIDE: u32 = 64;
 
 /// Bits per axis.

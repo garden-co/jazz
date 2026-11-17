@@ -5,7 +5,6 @@
 //! cross-target bits) is only observable here. End-to-end geo queries are
 //! tested in `jazz-db` through the public query API.
 
-use super::cover::{self, Curve, Morton, Rect};
 use super::*;
 
 /// A small deterministic PRNG (xorshift64*), so the tests need no
@@ -450,124 +449,6 @@ fn check_fixture(name: &str, actual: String) {
 #[test]
 fn covers_snapshot() {
     check_fixture("covers.txt", covers_fixture());
-}
-
-// ---------------------------------------------------------------------------
-// Read amplification: Z-order against Hilbert on the same grid, same
-// snapping, same 16-range limit. Run with
-// `cargo test -p jazz-index --release -- --ignored amplification --nocapture`.
-
-/// The Hilbert curve on the 31-bit grid (test-only, for comparison).
-struct Hilbert;
-
-impl Curve for Hilbert {
-    fn block_start(x: u32, y: u32, k: u32) -> i64 {
-        // The Hilbert index of the block among blocks of side 2^k, times 4^k.
-        // Wikipedia's `xy2d` on a grid of side 2^(31-k).
-        let side: u64 = 1 << (31 - k);
-        let (mut x, mut y) = ((x >> k) as u64, (y >> k) as u64);
-        let mut d: u64 = 0;
-        let mut s = side / 2;
-        while s > 0 {
-            let rx = u64::from(x & s > 0);
-            let ry = u64::from(y & s > 0);
-            d += s * s * ((3 * rx) ^ ry);
-            if ry == 0 {
-                if rx == 1 {
-                    x = side - 1 - x;
-                    y = side - 1 - y;
-                }
-                core::mem::swap(&mut x, &mut y);
-            }
-            s /= 2;
-        }
-        (d << (2 * k)) as i64
-    }
-}
-
-fn read_cells(ranges: &[(i64, i64)]) -> f64 {
-    ranges.iter().map(|&(a, b)| (b - a + 1) as f64).sum()
-}
-
-fn cover_with<C: Curve>(rects: &[Rect], max: usize) -> Vec<(i64, i64)> {
-    let mut r = cover::exact_ranges::<C>(rects, cover::snap_level(rects), &cover::keep_all);
-    r.sort_unstable();
-    cover::merge_touching(&mut r);
-    cover::limit(r, max)
-}
-
-/// The Hilbert comparison is only meaningful if its blocks tile the curve:
-/// the 16 × 16 blocks of side 2^27 start at distinct multiples of 4^27, and
-/// neighbours along the curve are neighbours on the grid.
-#[test]
-fn hilbert_blocks_tile() {
-    let mut starts: Vec<(i64, u32, u32)> = Vec::new();
-    for x in 0..16u32 {
-        for y in 0..16u32 {
-            starts.push((Hilbert::block_start(x << 27, y << 27, 27) >> 54, x, y));
-        }
-    }
-    starts.sort_unstable();
-    for (i, w) in starts.windows(2).enumerate() {
-        assert_eq!(w[0].0, i as i64);
-        assert_eq!(w[0].1.abs_diff(w[1].1) + w[0].2.abs_diff(w[1].2), 1);
-    }
-}
-
-/// A cover of `rects` on curve `C`, keeping only blocks that meet the cap.
-fn cap_cover<C: Curve>(rects: &[Rect], lat: f64, lng: f64, meters: f64) -> Vec<(i64, i64)> {
-    let cap = Cap::new(lat, lng, meters);
-    cover::cover::<C>(rects, &|x, y, k| cap.meets(x, y, k))
-}
-
-fn quantile(xs: &mut [f64], q: f64) -> f64 {
-    xs.sort_by(f64::total_cmp);
-    xs[((xs.len() - 1) as f64 * q) as usize]
-}
-
-#[test]
-#[ignore = "measurement; prints a table"]
-fn amplification() {
-    let cell_dlng = 2.0 * core::f64::consts::PI / (1u64 << 31) as f64;
-    let cell_dlat = core::f64::consts::PI / (1u64 << 31) as f64;
-    println!(
-        "{:>8} {:>5} | {:>8} {:>8} | {:>8} {:>8} | {:>8} {:>8}",
-        "radius", "lat", "Zcap", "Zcap p90", "Hcap", "Zbbox", "Hbbox", "Zbbox∞"
-    );
-    for &meters in &[100.0, 500.0, 1000.0, 2000.0, 5000.0, 10_000.0, 50_000.0] {
-        for &lat in &[0.0, 37.8, 51.5, 60.0, 70.0] {
-            let mut rng = Rng(7);
-            let mut cols: [Vec<f64>; 5] = Default::default();
-            for _ in 0..300 {
-                let clat = lat + rng.range(-0.5, 0.5);
-                let clng = rng.range(-170.0, 170.0);
-                let rects = radius_rects(clat, clng, meters);
-                let delta = meters / EARTH_RADIUS_M;
-                let disc = 2.0 * core::f64::consts::PI * (1.0 - delta.cos())
-                    / (cell_dlng * cell_dlat * clat.to_radians().cos());
-                let zcap = cover_radius(clat, clng, meters).unwrap();
-                assert_eq!(zcap, cap_cover::<Morton>(&rects, clat, clng, meters));
-                cols[0].push(read_cells(&zcap) / disc);
-                cols[1].push(read_cells(&cap_cover::<Hilbert>(&rects, clat, clng, meters)) / disc);
-                cols[2].push(read_cells(&cover_with::<Morton>(&rects, MAX_RANGES)) / disc);
-                cols[3].push(read_cells(&cover_with::<Hilbert>(&rects, MAX_RANGES)) / disc);
-                cols[4].push(read_cells(&cover_with::<Morton>(&rects, usize::MAX)) / disc);
-            }
-            let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
-            let means: Vec<f64> = cols.iter().map(|c| mean(c)).collect();
-            println!(
-                "{:>7}m {:>5} | {:>8.2} {:>8.2} | {:>8.2} {:>8.2} | {:>8.2} {:>8.2}",
-                meters,
-                lat,
-                means[0],
-                quantile(&mut cols[0], 0.9),
-                means[1],
-                means[2],
-                means[3],
-                means[4],
-            );
-        }
-    }
 }
 
 /// Points that pass the exact chord test only through rounding: each lies
