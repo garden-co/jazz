@@ -1471,8 +1471,8 @@ sender (§3.4). The remedy is to remove
 the device that signed it: the removal starts a new account epoch, whose
 co-published record is correct. A record whose signer has no signing key
 published before it is not valid. A record whose signer's signing mechanism
-this client does not support is skipped and reported as unsupported; it
-never fails the account's replay.
+this client does not support is skipped and reported
+(`unsupported-account-key`); it never fails the account's replay.
 
 Required behavioural tests, each a separate case: a record co-published by
 a bootstrap, by a reset and by a rotation is valid; a record co-published by
@@ -2486,7 +2486,8 @@ flattened into a bare `refused`. The data-error codes are exactly
 `key-unavailable`, `key-pending`, `space-pending`, `unsupported-format`,
 `invalid-ciphertext`, `empty-cell`, `superseded`, `stale-space` and
 `encryption-failed`. The encryption status events (not data errors) are
-`account-reset` (§2.11), `invalid-delivery` (§3.4), `broken-history` (§3.4) and `space-over-member-limit` (§3.8). Account roots that do not count are reported with
+`account-reset` (§2.11), `invalid-delivery` (§3.4), `broken-history` (§3.4),
+`conflicting-account-key` and `unsupported-account-key` (§2.12) and `space-over-member-limit` (§3.8). Account roots that do not count are reported with
 `root-malformed`, `root-foreign-account`, `root-key-mismatch`,
 `root-device-keys-missing`, `root-signature-invalid`, `root-kind-mismatch`
 or `root-unchained` (§2.4 step 1); they never fail replay.
@@ -2617,6 +2618,12 @@ Properties:
 
 Limits:
 
+- **A bad sealing key record works until its signer is removed.** Senders
+  cannot check derivation (§2.12), so while a non-derived record of an
+  account is the first valid one, they keep sealing to it, and a correct
+  later record does not replace it. In that window a delivery that was
+  deliberately broken is also attributed to the record, not to its sender.
+  Removing the signing device ends the window.
 - **Older clients may miss a removal.** A client that cannot read a
   member's account history (a newer format) does not rotate when that
   member's device is removed, and does not deliver to it (§3.4). Clients
