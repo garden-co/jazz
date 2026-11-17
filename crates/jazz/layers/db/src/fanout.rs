@@ -1583,7 +1583,11 @@ impl Inner {
             .filter(|(_, row)| ids.contains(&row.id))
             .map(|(i, row)| (row.id, (i, row.clone(), group.keys[i].clone())))
             .collect();
-        let limit = group.prepared.query.limit;
+        // A nearest search's window holds its `k` best at most.
+        let limit = match nearest_k(&group.prepared.query) {
+            Some(k) => Some(group.prepared.query.limit.map_or(k, |limit| limit.min(k))),
+            None => group.prepared.query.limit,
+        };
         let page_ids_before: Vec<RowUuid> = if limit.is_some() {
             group.rows.iter().map(|row| row.id).collect()
         } else {
@@ -1792,11 +1796,21 @@ impl Inner {
             // the row alone.
             Some(search) => {
                 let (_, claims) = self.read_sessions(&group.prepared, group.identity);
-                let planned =
-                    match self.plan_search(&group.prepared, None, &claims, &group.read, search) {
-                        Ok(planned) => planned,
-                        Err(error) => return Some(Err(error)),
-                    };
+                // Each row's score depends on the row alone: plan the search
+                // over just these rows, so a nearest search scores them and
+                // no other (SPEC 20.8).
+                let mut narrowed = group.prepared.clone();
+                narrowed.query.filters.push(crate::query::Predicate::In(
+                    crate::query::Operand::Column("id".to_owned()),
+                    rows.iter()
+                        .map(|row| crate::query::Operand::Literal(Value::Uuid(row.id.0)))
+                        .collect(),
+                ));
+                let planned = match self.plan_search(&narrowed, None, &claims, &group.read, search)
+                {
+                    Ok(planned) => planned,
+                    Err(error) => return Some(Err(error)),
+                };
                 match self
                     .read_ctx(&group.prepared, None, &claims, &group.read)
                     .with_search(Some(planned))
@@ -2225,13 +2239,19 @@ impl Group {
 /// reads its root table exactly once (a read policy that looks at other
 /// rows of the same table would let one row's change move another).
 fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) -> bool {
-    // A text or geo search is rechecked like any filter, its changed
-    // rows spliced in by (score, id) (SPEC 20.8). A nearest search keeps
-    // only its `k` best, so a changed row can push out a row it never
-    // read: it re-runs whole.
-    !crate::ix::search_of(query)
-        .is_some_and(|search| matches!(search.op, crate::query::IndexOp::Nearest { .. }))
-        && !is_history_table(&query.table)
+    // A search is rechecked like any filter, its changed rows scored alone
+    // and spliced in by (score, id) (SPEC 20.8). A nearest search's `k` is
+    // its window's limit: a row that beats the window's last enters and the
+    // k-th leaves; a member that gets worse or leaves a full window re-runs.
+    // Its window is in score order only, so another order re-runs.
+    !crate::ix::search_of(query).is_some_and(|search| {
+        matches!(search.op, crate::query::IndexOp::Nearest { .. })
+            && !query.order_by.is_empty()
+            && query
+                .order_by
+                .iter()
+                .any(|by| by.column != crate::query::SCORE_COLUMN)
+    }) && !is_history_table(&query.table)
         && query.relation.is_none()
         && query.offset == 0
         && query.aggregate.is_none()
@@ -2360,6 +2380,14 @@ pub(crate) fn view_masks<'t>(
         });
     }
     out
+}
+
+/// A nearest search's `k`.
+fn nearest_k(query: &Query) -> Option<usize> {
+    match &crate::ix::search_of(query)?.op {
+        crate::query::IndexOp::Nearest { k, .. } => Some(*k as usize),
+        _ => None,
+    }
 }
 
 /// A query's order as its SQL applies it: a search without an explicit

@@ -1031,3 +1031,55 @@ fn try_ids_with(db: &Db, query: &Query, opts: ReadOpts) -> Result<Vec<u8>, jazz:
         .map(|row| row.row_uuid().0.as_bytes()[0])
         .collect())
 }
+
+/// A live nearest search rechecks a changed row alone (SPEC 20.8): a row
+/// that now beats the window's last enters and the k-th leaves, without a
+/// re-run; a window member that gets worse re-runs the search, which finds
+/// the row that takes its place.
+#[test]
+fn a_live_nearest_search_splices_a_closer_row_and_reruns_when_one_drifts() {
+    // A store answering its own queries scores its rows unfiltered.
+    let db = open(3, schema());
+    insert(&db, 1, note("a", None, "home", &[0.0, 0.0]));
+    insert(&db, 2, note("b", None, "home", &[1.0, 0.0]));
+    insert(&db, 3, note("c", None, "home", &[5.0, 5.0]));
+    let query = Query::from("notes").search("similar", nearest(&[0.0, 0.0], 2));
+    let prepared = db.prepare_query(&query).unwrap();
+    let mut stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.tick()).unwrap();
+    let delta = |stream: &mut jazz::db::SubscriptionStream| {
+        let (mut added, mut removed) = (Vec::new(), Vec::new());
+        while let Some(event) = stream.try_next_event() {
+            if let SubscriptionEvent::Delta {
+                added: a,
+                removed: r,
+                ..
+            } = event
+            {
+                added.extend(a.iter().map(|row| row.row_uuid().0.as_bytes()[0]));
+                removed.extend(r.iter().map(|row| row.row_uuid.0.as_bytes()[0]));
+            }
+        }
+        (added, removed)
+    };
+    assert_eq!(delta(&mut stream).0, [1, 2]);
+
+    let before = db.fanout_stats();
+    update(&db, 3, "embedding", Value::Bytes(f32le(&[0.1, 0.0])));
+    block_on(db.tick()).unwrap();
+    let after = db.fanout_stats();
+    assert!(after.rechecked > before.rechecked, "{before:?} → {after:?}");
+    assert_eq!(after.reran, before.reran, "spliced, not re-run");
+    assert_eq!(delta(&mut stream), (vec![3], vec![2]));
+    assert_eq!(ids(&db, &query), [1, 3]);
+
+    let before = db.fanout_stats();
+    update(&db, 1, "embedding", Value::Bytes(f32le(&[9.0, 9.0])));
+    block_on(db.tick()).unwrap();
+    assert!(
+        db.fanout_stats().reran > before.reran,
+        "a member drifted: re-run"
+    );
+    assert_eq!(delta(&mut stream), (vec![2], vec![1]));
+    assert_eq!(ids(&db, &query), [3, 2]);
+}
