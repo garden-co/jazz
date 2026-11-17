@@ -6895,6 +6895,40 @@ impl Inner {
         ))
     }
 
+    /// A USING or read-for-write check of the row a write acts on
+    /// (SPEC 7, INV-RLS-9). While a unit is decided
+    /// ([`Inner::defer_checks`]: at the authority on upload, in a relay's
+    /// admission, and in a node's own commit) such a check reads committed
+    /// state, as the grounding's first round does: the row as it stood
+    /// before the unit and the policy's other rows likewise, never the
+    /// unit's own earlier writes. So the unit's decision does not depend on
+    /// the order of its writes, and no write vouches for another's USING.
+    /// A row the unit created or revived has no committed state to act
+    /// on: the end-state check of its first write
+    /// ([`Inner::write_check`]) decides it. For such a row, and outside a
+    /// unit, this returns `None`: the caller checks the current version.
+    fn holds_on_acted_row(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        seq: u64,
+        policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
+    ) -> Result<Option<bool>, Error> {
+        if self.deferred.borrow().is_none() || !self.was_live_before(table, row, key, seq)? {
+            return Ok(None);
+        }
+        let cut = Cut {
+            unsettled: false,
+            seq: self.own_pos(seq.saturating_sub(1)),
+            own: self.own_rank(seq),
+            extra: Vec::new(),
+            overlay: Some(CutOverlay::Grounded(Arc::default())),
+        };
+        self.holds_as_of(&self.schema, table, row, key, cut, policy)
+            .map(Some)
+    }
+
     /// Whether `row`'s current version on branch `key` is a tombstone.
     fn is_deleted_version(&self, table: &Table, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
         let sql = format!(
@@ -8367,21 +8401,25 @@ impl Inner {
         key: &[u8],
         who: &Who,
         verb: &str,
+        seq: u64,
     ) -> Result<(), Error> {
-        if let Some(author) = self.checked(*who)
-            && !self.check(table, row, key, author, Operation::Select)?
-        {
+        let Some(author) = self.checked(*who) else {
+            return Ok(());
+        };
+        let readable = self.holds_on_acted_row(table, row, key, seq, |ctx| {
+            ctx.operation_policy(table, Operation::Select, "a", &self.session(author))
+        })?;
+        if !readable.map_or_else(
+            || self.check(table, row, key, author, Operation::Select),
+            Ok,
+        )? {
             return Err(unreadable_target(verb, &table.name));
         }
-        if let Some(author) = self.checked(*who)
-            && !self.check_clause(
-                table,
-                row,
-                key,
-                author,
-                table.policies.update.using.as_ref(),
-            )?
-        {
+        let using = table.policies.update.using.as_ref();
+        let usable = self.holds_on_acted_row(table, row, key, seq, |ctx| {
+            ctx.policy_clause(using, table, "a", &self.session(author))
+        })?;
+        if !usable.map_or_else(|| self.check_clause(table, row, key, author, using), Ok)? {
             return Err(denied(format_args!(
                 "{verb} policy (USING) denied the target row"
             )));
@@ -8498,7 +8536,7 @@ impl Inner {
                         cells.insert(column.name.clone(), value);
                     }
                 } else {
-                    self.authorize_patch(table, row, &key, &who, verb)?;
+                    self.authorize_patch(table, row, &key, &who, verb, seq)?;
                 }
                 if cells.is_empty() && !staged_tombstone {
                     return Ok(WriteHandle {
@@ -8529,7 +8567,7 @@ impl Inner {
                 head_cells,
                 at,
             } => {
-                self.authorize_patch(table, row, &from, &who, verb)?;
+                self.authorize_patch(table, row, &from, &who, verb, seq)?;
                 let cells = self.merged_cells(table, row, Some(&from), Some((&to, seq)), cells)?;
                 self.copy_on_write(table, row, &from, &to, &head_cells, at.as_ref(), seq)?;
                 self.set_cells(table, row, &to, &cells, Cells::Authored, seq, None, true)?;
@@ -8605,10 +8643,16 @@ impl Inner {
         // A delete by row id reads no user data (SPEC 7): its DELETE policy
         // alone decides, so a write-only principal may delete.
         let check = |inner: &Self, key: &[u8]| -> Result<(), Error> {
-            if let Some(author) = inner.checked(who)
-                && !inner.check(table, row, key, author, Operation::Delete)?
-            {
-                return Err(delete_denied());
+            if let Some(author) = inner.checked(who) {
+                let allowed = inner.holds_on_acted_row(table, row, key, seq, |ctx| {
+                    ctx.operation_policy(table, Operation::Delete, "a", &inner.session(author))
+                })?;
+                if !allowed.map_or_else(
+                    || inner.check(table, row, key, author, Operation::Delete),
+                    Ok,
+                )? {
+                    return Err(delete_denied());
+                }
             }
             Ok(())
         };

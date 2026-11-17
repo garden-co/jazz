@@ -261,6 +261,8 @@ mod transaction_policy_exists;
 mod transaction_read_tiers;
 #[path = "../union_queries.rs"]
 mod union_queries;
+#[path = "../unit_using_evidence.rs"]
+mod unit_using_evidence;
 #[path = "../unsupported_json_schemas.rs"]
 mod unsupported_json_schemas;
 #[path = "../uuid_page_probe.rs"]
