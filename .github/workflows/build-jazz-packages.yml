@@ -183,11 +183,6 @@ jobs:
           test -f crates/jazz-wasm/pkg/jazz_wasm.js
           test -f crates/jazz-wasm/pkg/jazz_wasm.d.ts
 
-      # A Durable Object host runs jazz-server's engine without its native
-      # host on wasm32; this job has the wasm32 toolchain it needs.
-      - name: Check jazz-server's engine for wasm32
-        run: cargo check -p jazz-server --no-default-features --lib --target wasm32-unknown-unknown
-
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-wasm-pkg

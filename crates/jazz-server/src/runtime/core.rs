@@ -43,8 +43,9 @@ pub struct ServerCore {
     edges: HashMap<ServerSession, CoreEdge>,
     /// The server's budget for split thin requests being joined.
     thin_ingress: Arc<tokio::sync::Semaphore>,
-    /// Output taken brought a session back under its egress budget: what
-    /// it held back moves on at the next tick.
+    /// Input was accepted, or output taken brought a session back under
+    /// its egress budget: the next tick moves what that changed (other
+    /// sessions' live queries and subscriptions, held output).
     tick_wanted: bool,
 }
 
@@ -182,6 +183,7 @@ impl ServerCore {
         };
         self.owner
             .receive(session, frames, WireIngress { _room: room });
+        self.tick_wanted = true;
         Ok(true)
     }
 
@@ -223,6 +225,9 @@ impl ServerCore {
                 _server: server_room,
             },
         );
+        // Served already, but what it wrote reaches other sessions' live
+        // queries and subscriptions at the next tick.
+        self.tick_wanted = true;
         Ok(true)
     }
 
@@ -239,8 +244,9 @@ impl ServerCore {
         self.owner.inbound_pending()
     }
 
-    /// Whether the core wants a tick now: input waits, or output taken
-    /// since the last tick brought a session back under its egress budget.
+    /// Whether the core wants a tick now: input was accepted since the last
+    /// tick (a thin write's effects on other sessions move at a tick), or
+    /// output taken brought a session back under its egress budget.
     pub fn wants_tick(&self) -> bool {
         self.tick_wanted || self.inbound_pending()
     }
@@ -438,6 +444,7 @@ mod tests {
             rows[0].rows[0].cells.get("body"),
             Some(&Value::Bytes(b"hello".to_vec()))
         );
+        core.tick();
         assert!(!core.wants_tick());
         assert!(core.db().held_for_test().is_nothing());
         core.close_session(session);
@@ -475,6 +482,62 @@ mod tests {
         assert!(
             matches!(got[0], (1, jazz::thin::ThinBody::Written { .. })),
             "{got:?}"
+        );
+    }
+
+    /// A thin write reaches other sessions' live queries at the next tick,
+    /// so a thin request makes the core want one: a host ticking only when
+    /// the core wants it (and every `IDLE_TICK`) delivers the event at once.
+    ///
+    /// ```text
+    /// A ──subscribe notes──► initial results
+    /// B ──insert note──────► Written; wants_tick ──tick──► A's event
+    /// ```
+    #[test]
+    fn a_thin_write_wants_the_tick_that_reaches_other_sessions_live_queries() {
+        let mut core = core();
+        let watcher = thin_session(
+            &mut core,
+            AuthorSubject::SYSTEM,
+            CommitUnitTrust::TrustedBackend,
+        );
+        let writer = thin_session(
+            &mut core,
+            AuthorSubject::SYSTEM,
+            CommitUnitTrust::TrustedBackend,
+        );
+        send_thin(
+            &mut core,
+            watcher,
+            1,
+            jazz::thin::ThinOp::Subscribe {
+                query: postcard::to_allocvec(&jazz::query::Query::from("notes")).unwrap(),
+                options: Vec::new(),
+            },
+        );
+        while core.wants_tick() {
+            core.tick();
+        }
+        let opening = answers(&mut core, watcher);
+        assert!(opening.iter().all(|(id, _)| *id == 1), "{opening:?}");
+
+        send_thin(&mut core, writer, 2, insert_into("notes"));
+        let got = answers(&mut core, writer);
+        assert!(
+            matches!(got[..], [(2, jazz::thin::ThinBody::Written { .. })]),
+            "{got:?}"
+        );
+        assert!(
+            core.wants_tick(),
+            "the write's effects on others move at a tick"
+        );
+        core.tick();
+        let events = answers(&mut core, watcher);
+        assert!(
+            events
+                .iter()
+                .any(|(id, body)| *id == 1 && matches!(body, jazz::thin::ThinBody::Event { .. })),
+            "{events:?}"
         );
     }
 
