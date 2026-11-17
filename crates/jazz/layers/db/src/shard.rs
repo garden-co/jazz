@@ -298,6 +298,11 @@ impl Inner {
         if !self.shard.rows.is_empty() && self.shard.blocks(by, &HeldRow::of(ops)) {
             return Ok(true);
         }
+        // A held part lands only at the position fixed for its commit: until
+        // it is fixed (or released), it waits (INV-SHARD-27).
+        if self.shard.held(by).is_some() && self.shard.fixed(by).is_none() {
+            return Ok(true);
+        }
         if self.waits_out().is_none() || self.shard.fixed(by).is_some() {
             return Ok(false);
         }
@@ -786,7 +791,22 @@ impl ShardRole<'_> {
                 format!("position {position} is below the part's hold at {held}"),
             ));
         }
-        observe(&mut inner, position)?;
+        // A fixed position is the commit's decision, checked against the
+        // decider's clock, which is within the offset bound of this one: it
+        // may be up to twice the bound ahead here, and is taken whole
+        // (INV-SHARD-26). Further ahead, a peer broke the bound.
+        if position > inner.seq
+            && position > hlc((inner.shard.clock)().saturating_add(2 * HLC_MAX_OFFSET_MS))
+        {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                format!(
+                    "fixed position {position} is more than twice {HLC_MAX_OFFSET_MS} ms ahead \
+                     of this store's clock"
+                ),
+            ));
+        }
+        note_observed(&mut inner, position)?;
         inner
             .exec(
                 "UPDATE _jazz_shard_holds SET fixed = ?3 WHERE node = ?1 AND tx = ?2",
@@ -831,6 +851,12 @@ fn observe(inner: &mut Inner, position: u64) -> Result<(), Error> {
             ),
         ));
     }
+    note_observed(inner, position)
+}
+
+/// Raise the store's numbering to `position`, noting (durably, once) that
+/// it observed past what it numbered.
+fn note_observed(inner: &mut Inner, position: u64) -> Result<(), Error> {
     if position > inner.seq && !inner.shard.observed {
         inner.persist_meta(SHARD_OBSERVED, 1)?;
         inner.shard.observed = true;

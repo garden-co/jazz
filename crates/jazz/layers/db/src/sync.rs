@@ -15038,6 +15038,19 @@ impl Db {
                 tx: id.1,
             };
             let fixed = inner.shard.fixed(part);
+            // A held part lands only at the position its commit was fixed
+            // at: landing it anywhere else would split the commit across
+            // shards (INV-SHARD-27). A session's commit waits for its fix
+            // (`commit_waits`), so only a caller that skipped that gets here.
+            if fixed.is_none() && inner.shard.awaits(part) {
+                return Err((
+                    Error::new(
+                        ErrorCode::Protocol,
+                        "a held cross-shard part lands only once its position is fixed",
+                    ),
+                    Vec::new(),
+                ));
+            }
             let seq = fixed.unwrap_or_else(|| inner.next_seq());
             let prior = inner.seq;
             // A relay holds the session's commit at its clock as bounded
