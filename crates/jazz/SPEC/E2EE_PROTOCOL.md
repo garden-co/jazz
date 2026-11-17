@@ -1174,7 +1174,7 @@ space whose current version was sealed to an account epoch the removed
 device held as needing rotation (§3.5), and the next encrypted write by an
 updater rotates it, as after a member's removal. An application that
 wants it sooner calls `db.encryption.rotate(space)`. Developer documentation must
-say to revoke the sign-in first.say to revoke the sign-in first.
+say to revoke the sign-in first.
 
 **What removal achieves also depends on how the account signs in.** For an
 account authenticated by the application's own sign-in, a removed device can
