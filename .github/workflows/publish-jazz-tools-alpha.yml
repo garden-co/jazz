@@ -769,6 +769,35 @@ jobs:
             pnpm --filter create-jazz publish --tag latest --access public --no-git-checks
           fi
 
+  # The Rust crates follow npm: dispatch publish-jazz-crates-alpha.yml for
+  # this version. crates.io trusted publishing refuses workflow_run triggers,
+  # and GITHUB_TOKEN may dispatch workflows. That workflow publishes the
+  # v<version> commit, only when its crates match npm, behind the `publish`
+  # environment's approval.
+  dispatch-crates:
+    name: Dispatch the crates.io publish
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [publish-npm]
+    if: >-
+      always() &&
+      needs.publish-npm.result == 'success' &&
+      (inputs.mode || github.event.inputs.mode || 'publish') == 'publish'
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch publish-jazz-crates-alpha.yml
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
+        run: |
+          set -euo pipefail
+          VERSION=$(gh api "repos/${GH_REPO}/contents/packages/jazz-tools/package.json?ref=${SHA}" --jq .content | base64 -d | jq -r .version)
+          gh workflow run publish-jazz-crates-alpha.yml --ref "${DEFAULT_BRANCH}" -f mode=publish -f "tag=v${VERSION}"
+          echo "Dispatched the crates.io publish for v${VERSION}."
+
   # Jazz Cloud's images run the Linux server binary from the GitHub release:
   # npm's jazz-tools carries no native binary. Attach both builds with their
   # SHA256SUMS to the version's draft; "GitHub release" refuses to publish
