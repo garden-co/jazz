@@ -42,6 +42,7 @@ export {
   type BackendCredential,
   type JazzUser,
   type LocalFirstGuest,
+  type DeviceAccountsOption,
   acceptDeviceAccounts,
   perBranch,
   type VercelNamespace,
