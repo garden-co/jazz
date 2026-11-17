@@ -493,8 +493,9 @@ jobs:
         if: always()
         run: sccache --show-stats
 
-  # jazz-kotlin and the StagePlan Kotlin CLI (examples/stage-plan/apps/kotlin-cli)
-  # on the JVM, against jazz-ffi and an in-memory `jazz-tools server`.
+  # jazz-kotlin, the StagePlan Kotlin CLI (examples/stage-plan/apps/kotlin-cli)
+  # and the docs' Kotlin snippets (examples/docs/todo-client-kotlin) on the JVM,
+  # against jazz-ffi and an in-memory `jazz-tools server`.
   test-kotlin:
     if: inputs.scope == 'full'
     runs-on: blacksmith-4vcpu-ubuntu-2404

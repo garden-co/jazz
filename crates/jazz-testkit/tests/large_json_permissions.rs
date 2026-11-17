@@ -104,10 +104,7 @@ async fn run_matrix(private_reads: bool) {
                             .await
                             .unwrap()
                             .expect_err("another account cannot take over the row");
-                            assert!(
-                                error.to_string().ends_with("authorization_denied"),
-                                "{error}"
-                            );
+                            assert!(error.to_string().contains("(permission_denied)"), "{error}");
                         }
                         Ok(None) => panic!("standalone update must commit or reject"),
                     }
@@ -130,10 +127,7 @@ async fn run_matrix(private_reads: bool) {
                         .await
                         .unwrap()
                         .expect_err("new owner must still match the writer");
-                        assert!(
-                            error.to_string().ends_with("authorization_denied"),
-                            "{error}"
-                        );
+                        assert!(error.to_string().contains("(permission_denied)"), "{error}");
                     }
                 }
                 let (_, _, tx) = bob
@@ -149,10 +143,7 @@ async fn run_matrix(private_reads: bool) {
                 .await
                 .unwrap()
                 .expect_err("another account cannot insert an Alice-owned row");
-                assert!(
-                    error.to_string().ends_with("authorization_denied"),
-                    "{error}"
-                );
+                assert!(error.to_string().contains("(permission_denied)"), "{error}");
             }
             alice.shutdown().await.unwrap();
             bob.shutdown().await.unwrap();

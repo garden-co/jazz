@@ -165,10 +165,11 @@ was. Each says what to do, with `file:line` where there is one:
   `npx jazz-tools migrations create --name <name>` first, commit, then upgrade.
 - **The wrong `jazz-tools` installed:** `upgrade` needs the app's alpha.65 (or older) installed to
   check the files, and `typescript` to read `schema.ts`.
-- **Computed fields and transforms** in an app with `schema.ts`. `upgrade` doesn't convert them
-  yet: declare them in `schema.ts` by hand, with `s.computed(…)` and `.transform(…)` (see
-  [Column Types](/docs/schemas/column-types#computed-columns)); `jazz.computed.ts` stays as it is.
-  An app without `schema.ts` is converted with them.
+- **Computed fields and transforms** in an app with `schema.ts`, refused with
+  ``computed columns and transforms is not supported yet by `jazz-tools upgrade` ``. `upgrade`
+  doesn't convert them yet: take them out, upgrade, and add them back as in
+  [Computed fields and transforms](#computed-fields-and-transforms). An app without `schema.ts` is
+  converted with them.
 - **Permissions the new DSL can't express yet**, listed with the policy and the reason.
 - **Permissions that read the environment, when a policy in `jazz.permissions.json` is a bare
   `"true"`** (on its own or inside `anyOf`/`allOf`). alpha.65 compiled a condition on an unset
@@ -186,6 +187,63 @@ uses the value alpha.65's `validate` resolved, under a `// TODO` comment naming 
 report lists each read under "Left for you". Make the value explicit, or compute it in a helper. `defs` in an app with
 `schema.ts` aren't refused either: step 1 compares what alpha.65 writes with the expanded files by
 schema hashes and bundle id.
+
+### Computed fields and transforms
+
+`upgrade` refuses an app whose `schema.ts` has computed fields (`s.computed((row) => …)`) or column
+transforms (`.transform({ from, to })`). Convert them by hand around the upgrade. Neither is stored,
+so the schema hashes and the bundle id don't change, and `upgrade` still checks that they don't.
+
+1. **Before upgrading,** with alpha.65 still installed, take them out of `schema.ts`: delete each
+   computed field from the table's second argument, and each column's `.transform(…)`, keeping the
+   stored type (`dueAt: s.timestamp().transform(isoDate)` becomes `dueAt: s.timestamp()`). Keep the
+   callbacks aside for step 4. Run alpha.65's `npx jazz-tools validate` and commit.
+2. **Run `upgrade`** as above. Its typecheck reports the code that still uses the removed fields:
+   that's expected until steps 3 to 5 put them back.
+3. **In the new `schema.ts`,** declare them in the table's columns:
+   - a computed field as `s.computed(type, [columns it reads])`. It reads stored columns of its
+     table, or `"id"`. An optional result is an optional type, such as `s.int().optional()`;
+   - a transformed column as its stored type, then `.transform("name", viewType)`.
+
+   ```ts
+   tasks: s.table({
+     title: s.string(),
+     score: s.int(),
+     dueAt: s.timestamp().transform("isoDate", s.string()),
+     tags: s.string().transform("tags", s.array(s.string())),
+     priority: s.computed(s.enum("low", "medium", "high"), ["score"]),
+     label: s.computed(s.string(), ["title", "score"]),
+   }),
+   ```
+
+4. **Put the callbacks in `jazz.computed.ts`,** beside `schema.ts`. A computed field gets the row,
+   typed with the columns it declared it reads. A transform's `from` turns the stored value into
+   the one your app sees, and `to` turns it back. Jazz never calls them with `null`.
+
+   ```ts
+   import type { AppComputed, AppTransforms } from "./jazz.generated";
+
+   export const computed = {
+     tasks: {
+       priority: (row) => (row.score >= 8 ? "high" : row.score >= 4 ? "medium" : "low"),
+       label: ({ title, score }) => `${title} (${score})`,
+     },
+   } satisfies AppComputed;
+
+   export const transforms = {
+     isoDate: {
+       from: (stored: Date) => stored.toISOString(),
+       to: (view: string) => new Date(view),
+     },
+     tags: { from: (stored: string) => stored.split(","), to: (view: string[]) => view.join(",") },
+   } satisfies AppTransforms;
+   ```
+
+5. **Bump to alpha.66 and run `npx jazz-tools generate`.** `jazz.app.json` gains the `computed`
+   fields and `transforms`, and `jazz.generated.ts` binds `jazz.computed.ts`. A missing or extra
+   implementation is a type error naming the field.
+
+[Column Types](/docs/schemas/column-types#computed-columns) has the details.
 
 ### Other changes
 
@@ -396,7 +454,12 @@ a store: on Android that also deletes SecureStore, and with it a device account.
 
 ## Upgrading from alpha.59
 
-Alpha.60 changes how Jazz runs, so an alpha.59 app needs more than a version bump:
+Upgrade an alpha.59 app in two moves: first to **alpha.65**, as described below, then from alpha.65
+to the current release as in [Upgrading from alpha.65](#upgrading-from-alpha65). alpha.65 is the
+last release that ships the alpha.59 exporter and importer, so pin `jazz-tools@2.0.0-alpha.65` (and
+the other Jazz packages at the same version) for the first move.
+
+Alpha.60 changed how Jazz runs, so an alpha.59 app needs more than a version bump:
 
 - **Jazz runs inside your backend.** Clients no longer talk to a Jazz server with a JWT. Add a main
   backend with `createJazz` (see [Your Own Server](/docs/setup/deployment/own-server)), and, if your data is on Jazz
@@ -461,8 +524,11 @@ account.
 
 ### Self-hosted alpha.59 servers
 
-Move a self-hosted data directory with the same import tool Jazz Cloud uses. You need only the two
-downloads below, no Node or Rust toolchain, and nothing writes to your alpha.59 directory.
+Move a self-hosted data directory with the alpha.65 exporter and importer, attached to the
+[v2.0.0-alpha.65 release](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.65). Later
+releases don't ship them: the import gives you an alpha.65 data directory, and you upgrade from
+there. You need only the two downloads below, no Node or Rust toolchain, and nothing writes to your
+alpha.59 directory.
 
 Before you start:
 
@@ -487,7 +553,7 @@ Then:
 2. **Download the tools.** Get `jazz-alpha59-alpha60-export-<platform>` and
    `jazz-alpha59-alpha60-import-<platform>` (`linux-x64`, `linux-arm64` or `darwin-arm64`) and the
    two checksum files from the
-   [v2.0.0-alpha.60 release](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.60). Each
+   [v2.0.0-alpha.65 release](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.65). Each
    checksum file lists every platform, so check with `--ignore-missing`, then rename the tools to
    drop the platform suffix and make them executable:
 
@@ -515,7 +581,8 @@ Then:
    ./jazz-alpha59-alpha60-import verify --dump app.dump --data-dir ./data-new --app-id <appId>
    ```
 
-5. **Start your new backend** with `sqlite({ path: "./data-new" })`, then deploy the new client.
+5. **Start your new backend** on alpha.65 with `sqlite({ path: "./data-new" })`, then deploy the
+   new client, also on alpha.65.
    If your alpha.59 app had local-first guests, pass your old app ID as `scope` to the client, so
    each guest's device finds its account again:
 
@@ -529,6 +596,9 @@ Then:
    local-first guests over. If the alpha.59 app was reached through more than one Jazz server URL
    on that origin, guests aren't picked up automatically.
    Keep `./data` and the dump until you're happy with the result.
+
+6. **Upgrade from alpha.65** to the current release as in
+   [Upgrading from alpha.65](#upgrading-from-alpha65). The data directory needs nothing more.
 
 `--app-id` is your app's ID exactly as before, case included: the import uses it to link each
 returning user's old sign-in to their account, as `jazz:backend` with their old `sub` (as [`fromJWT()`](/docs/setup/auth/custom) returns it), and to keep

@@ -8502,21 +8502,35 @@ impl Db {
                 .map(|op| inner.stored_op(op, &schema))
                 .collect::<Result<Vec<_>, _>>()?;
             if inner.tx.is_some() {
+                // The claims a session write is staged with travel with it.
+                if inner.capture_claims.is_none()
+                    && let Some(author) = ops
+                        .iter()
+                        .find(|op| op.is_session())
+                        .and_then(StagedOp::author)
+                {
+                    inner.capture_claims =
+                        Some(inner.claims.get(&author).cloned().unwrap_or_default());
+                }
                 inner.capture.extend(ops);
                 return Ok(());
             }
             ops
         };
-        self.record_stored_upload(ops, seq, kind, relayed)
+        self.record_stored_upload(ops, seq, kind, relayed, None)
     }
 
     /// [`Db::record_upload`] of ops already named by stored names.
+    /// `claims`: the claims its session writes were staged with, when they
+    /// were staged before now (a transaction); otherwise its author's
+    /// registered claims are read now.
     pub(crate) fn record_stored_upload(
         &self,
         ops: Vec<StagedOp>,
         seq: u64,
         kind: Kind,
         relayed: Option<Relayed>,
+        claims: Option<BTreeMap<String, Value>>,
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.client.is_none() {
@@ -8526,7 +8540,7 @@ impl Db {
         let view = inner.stored_view();
         let active = std::mem::replace(&mut inner.schema, view);
         drop(inner);
-        let recorded = self.record_upload_under_stored_view(ops, seq, kind, relayed);
+        let recorded = self.record_upload_under_stored_view(ops, seq, kind, relayed, claims);
         self.inner.borrow_mut().schema = active;
         recorded
     }
@@ -8537,6 +8551,7 @@ impl Db {
         seq: u64,
         kind: Kind,
         relayed: Option<Relayed>,
+        claims: Option<BTreeMap<String, Value>>,
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.tx.is_some() {
@@ -8560,7 +8575,8 @@ impl Db {
             None => Acting::Own,
             Some(author) if session => Acting::Session {
                 author: author.canonical().to_owned(),
-                claims: inner.claims.get(&author).cloned().unwrap_or_default(),
+                claims: claims
+                    .unwrap_or_else(|| inner.claims.get(&author).cloned().unwrap_or_default()),
             },
             Some(author) => Acting::Attributed {
                 author: author.canonical().to_owned(),
@@ -15061,6 +15077,7 @@ impl Db {
                     clock,
                     bases,
                 }),
+                None,
             )
         } else {
             Ok(())
@@ -15420,7 +15437,7 @@ impl Db {
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         coverage: Option<&dyn Fn() -> bool>,
     ) -> Result<SerializedReadResult, Error> {
-        let query: Query = postcard::from_bytes(query)
+        let query: Query = jazz_model::query::decode_client_query_postcard(query)
             .map_err(|e| Error::new(ErrorCode::Query, format!("undecodable query: {e}")))?;
         let mut prepared = self.prepare_query(&query)?;
         // An explicit identity reads what its policies let it see.

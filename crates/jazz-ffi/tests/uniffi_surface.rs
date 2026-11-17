@@ -146,6 +146,23 @@ fn stage_plan_reads_and_writes_locally() {
     );
     assert_eq!(count(json!({ "column": "assigneeId", "op": "isNull" })), 2);
     assert_eq!(count(json!({ "column": "notes", "op": "isNotNull" })), 2);
+    // Conditions mean what they mean in TS (jazz#5929).
+    assert_eq!(
+        count(json!({ "column": "assigneeId", "op": "isNull", "value": false })),
+        0
+    );
+    assert_eq!(
+        count(json!({ "column": "assigneeId", "op": "eq", "value": null })),
+        2
+    );
+    assert_eq!(
+        count(json!({ "column": "assigneeId", "op": "ne", "value": null })),
+        0
+    );
+    assert_eq!(
+        count(json!({ "column": "status", "op": "notIn", "value": ["todo", "doing"] })),
+        1
+    );
     let page = parse(
         &jazz
             .all(json!({ "table": "tasks", "orderBy": [{ "column": "rank", "direction": "desc" }], "limit": 1, "offset": 1 }).to_string())

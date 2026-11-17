@@ -213,7 +213,7 @@ pub(crate) fn lower(schema: &Schema, relations: &Relations, json: &Json) -> Resu
         let mut lowered = Vec::with_capacity(arms.len());
         for (at, arm) in arms.iter().enumerate() {
             let arm = object(arm, &format!("union[{at}]"))?;
-            only(arm, &["table", "where"], &format!("union[{at}]"))?;
+            only(arm, &["table", "where", "label"], &format!("union[{at}]"))?;
             if arm.get("table").and_then(Json::as_str) != Some(first) {
                 return Err(refused(format!(
                     "union[{at}] must read table {first}, as every arm does"
@@ -226,9 +226,16 @@ pub(crate) fn lower(schema: &Schema, relations: &Relations, json: &Json) -> Resu
                 arm,
                 &format!("union[{at}]."),
             )?;
-            lowered.push((format!("arm{at}"), query));
+            // A named arm keeps its label; an unnamed one is labelled by what
+            // it reads, as every client labels it (`jazz.union-arm-label.v2`).
+            let label = match arm.get("label") {
+                None | Some(Json::Null) => None,
+                Some(Json::String(label)) => Some(label.clone()),
+                Some(_) => return Err(refused(format!("union[{at}].label must be a string"))),
+            };
+            lowered.push((label, query));
         }
-        let mut query = untyped::Query::union(untyped_table, lowered);
+        let mut query = untyped::Query::union_of(untyped_table, lowered);
         query = clauses(query, &table, first, top, "")?;
         if include_deleted {
             query = query.include_deleted();

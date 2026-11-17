@@ -2855,7 +2855,7 @@ async fn update_with_check_inherits_denies_when_parent_is_not_updateable_inner()
         .await
         .expect_err("authority should reject inherited WITH CHECK");
     assert!(
-        update_err.to_string().contains("authorization_denied"),
+        update_err.to_string().contains("(permission_denied)"),
         "expected policy rejection, got {update_err}"
     );
     let rows = wait_for_query(

@@ -402,6 +402,41 @@ fn a_loaded_app_feeds_clients_and_a_deployment() {
     );
 }
 
+/// A hop condition or relation filter with a plain literal (`name = 'x'`,
+/// as the DSL's `.hop("rel", {name: "x"})` writes it) compiles to a bare
+/// JSON literal. It validates and deploys alike: the compile reads it with
+/// the column's type, and the catalogue keeps it as JSON (#5931).
+#[test]
+fn relation_literals_written_as_text_validate_and_deploy() {
+    let written = write(shared_todos()).unwrap();
+    for read in [
+        "exists shares(todo = this.id).todoRow(name = 'x')",
+        "exists (from todos where todos.name = 'x')",
+    ] {
+        let file = serde_json::json!({
+            "format": 1,
+            "tables": { "todos": { "read": read }, "shares": { "read": "true" } },
+        });
+        let loaded = load(written.app.as_bytes(), file.to_string().as_bytes())
+            .unwrap_or_else(|error| panic!("{read}: {error}"));
+        let request = loaded.deployment_request(false);
+        let target = &request
+            .schemas
+            .iter()
+            .find(|(hash, _)| *hash == request.target_schema_hash)
+            .unwrap()
+            .1;
+        let mut with_policies = target.clone();
+        for (name, policies) in &request.permissions {
+            with_policies.get_mut(name).unwrap().policies = policies.clone();
+        }
+        crate::tools::public_schema_convert::check_deployable_policies(&with_policies)
+            .unwrap_or_else(|error| panic!("validate {read}: {error}"));
+        prepare_deployment(&DeploymentCatalogue::default(), request)
+            .unwrap_or_else(|error| panic!("deploy {read}: {error}"));
+    }
+}
+
 #[test]
 fn the_files_read_like_the_dsl() {
     let written = write(shared_todos()).unwrap();

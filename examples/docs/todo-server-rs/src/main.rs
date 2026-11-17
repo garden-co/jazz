@@ -31,8 +31,8 @@ use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use ::jazz_app_support::{AppFiles, AppId, CLOSE_TIMEOUT, Config, Jazz, Storage};
 use futures_util::FutureExt;
+use todo_server_docs::jazz_app::{AppFiles, AppId, CLOSE_TIMEOUT, Config, Jazz, Storage};
 use todo_server_docs::{credential::Credential, jazz_app, router_until};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;

@@ -216,7 +216,7 @@ Alpha.59 ran Jazz as its own process (`jazz-tools server`), and clients connecte
   [`fromJWT()`](/docs/setup/auth/custom#tokens-from-your-identity-provider).
 - **`jazz-tools deploy` is gone.** Your backend applies its schema, migrations and permissions
   each time it starts.
-- **Move the data directory with the import tool** (see
+- **Move the data directory with alpha.65's import tool** (see
   [Upgrading from alpha.59](/docs/operating/backups-and-upgrades#self-hosted-alpha59-servers)).
   The import keeps large values inside `jazz.sqlite`. On its first start your backend moves them
   to `blobs/`, or wherever `blobs` points, without logging anything. Run the import's `verify`

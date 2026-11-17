@@ -15,6 +15,9 @@ code that defines its format.
   (`jazz-query-v0` plus a retained relation's `jazz-relation-v1` tree) and the
   resulting shape ids. Receivers recompute shape ids on registration, so these
   bytes are a cross-release contract.
+- `union_arm_label_v2.json`: derived labels of unnamed union arms
+  (`jazz.union-arm-label.v2`, `jazz-model` `union_arm_label.rs`): preimages,
+  labels, and a nested union filled innermost first.
 - `result-key.json`: result-key sidecar addresses (`jazz-types` `object.rs`).
 - `snapshot_ref_v1.json`: snapshot reference codec.
 - `sqlite_sync_wire_v1.json`: the sync wire corpus (`sync_wire_corpus.rs`,

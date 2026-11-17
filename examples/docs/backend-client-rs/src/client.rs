@@ -15,12 +15,12 @@ pub mod my_sign_in {
 /// Opens the app as an end user, with a device account or the app's own
 /// sign-in, and waits until signed in.
 pub async fn open_client(
-    app_id: ::jazz_app_support::AppId,
+    app_id: jazz_app::AppId,
     signed_in_with_my_auth: bool,
-) -> ::jazz_app_support::Result<::jazz_app_support::Jazz> {
+) -> jazz_app::Result<jazz_app::Jazz> {
     // #region context-setup-rust-client
-    use ::jazz_app_support::{Auth, Config, DeviceKey, SessionState, Storage, TokenReason};
     use futures_util::StreamExt;
+    use jazz_app::{Auth, Config, DeviceKey, SessionState, Storage, TokenReason};
 
     // An end user's client syncs through your app's Jazz endpoint (its
     // backend's handler), never with the core directly.
@@ -58,13 +58,13 @@ pub async fn open_client(
 /// A session that follows who is signed in, as TypeScript's
 /// `createJazzClient` does.
 pub async fn open_session(
-    app_id: ::jazz_app_support::AppId,
-) -> ::jazz_app_support::Result<(::jazz_app_support::JazzSession, ::jazz_app_support::Jazz)> {
+    app_id: jazz_app::AppId,
+) -> jazz_app::Result<(jazz_app::JazzSession, jazz_app::Jazz)> {
     // #region context-setup-rust-session
-    use ::jazz_app_support::{
+    use futures_util::StreamExt;
+    use jazz_app::{
         AppFiles, Initial, JazzSession, SessionConfig, SessionStatus, Storage, TokenReason,
     };
-    use futures_util::StreamExt;
 
     // A session follows who is signed in: a device account (a guest) until
     // your sign-in names a user, who takes the guest's account over if they

@@ -205,6 +205,31 @@ fn splices_over_the_whole_value() {
         h_call("one", json!({ "query": { "table": "tasks" } }))["notes"].clone()
     };
     assert_eq!(read(&call), "héllo there");
+    // A UTF-8 splice inside é (bytes 1..3) is refused, not I/O to retry, and
+    // writes nothing (jazz#5979).
+    let error = {
+        let (method, args) = (
+            CString::new("edit").unwrap(),
+            CString::new(
+                json!({ "table": "tasks", "id": id, "edits": [{ "kind": "splice", "column": "notes",
+                    "units": "utf8", "splices": [{ "at": 2, "delete": 0, "insert": "x" }] }] })
+                .to_string(),
+            )
+            .unwrap(),
+        );
+        let mut err = std::ptr::null_mut();
+        let out = unsafe { jazz_call(h, method.as_ptr(), args.as_ptr(), &mut err) };
+        assert!(out.is_null(), "a mid-code-point splice is refused");
+        let text = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_owned();
+        unsafe { jazz_string_free(err) };
+        parse(&text)
+    };
+    assert_eq!(error["kind"], "refused", "{error}");
+    assert!(
+        error["message"].as_str().unwrap().contains("char boundary"),
+        "{error}"
+    );
+    assert_eq!(read(&call), "héllo there");
     call(
         "edit",
         json!({ "table": "tasks", "id": id, "edits": [{ "kind": "splice", "column": "notes", "units": "utf16",

@@ -1064,19 +1064,42 @@ fn a_large_answer_travels_in_parts_the_client_joins() {
 }
 
 #[test]
-fn the_router_keeps_the_schema_the_client_bound() {
+fn the_router_keeps_the_schema_the_client_bound_once_the_core_accepted_it() {
     let mut router = ThinRouter::default();
     assert!(router.schema().is_none());
-    router
-        .from_client(vec![frame(
-            1,
+    let bind = |id: u64, schema: &[u8]| {
+        frame(
+            id,
             ThinOp::Schema {
-                schema: b"{}".to_vec(),
+                schema: schema.to_vec(),
             },
-        )])
-        .unwrap();
-    assert_eq!(router.schema(), Some(&b"{}"[..]));
+        )
+    };
+    router.from_client(vec![bind(1, b"{}")]).unwrap();
     assert_eq!(released(router.ready()), ["core:1"]);
+    assert!(router.schema().is_none(), "not before the core accepted it");
+    router.from_core(&[core_answer(1)]);
+    assert_eq!(router.schema(), Some(&b"{}"[..]));
+
+    // A version the core refuses binds nothing: not the earlier one either.
+    router
+        .from_client(vec![bind(2, b"{\"forged\":1}")])
+        .unwrap();
+    assert_eq!(released(router.ready()), ["core:1"]);
+    assert!(router.schema().is_none());
+    router.from_core(&[
+        jazz::wire::encode_frame(&jazz::wire::WireFrame::ThinResponse(
+            jazz::thin::ThinResponse {
+                id: 2,
+                body: ThinBody::Error {
+                    code: "SchemaNotDeployed".to_owned(),
+                    message: "not admitted".to_owned(),
+                },
+            },
+        ))
+        .unwrap(),
+    ]);
+    assert!(router.schema().is_none());
 }
 
 #[test]
@@ -1173,4 +1196,33 @@ fn a_staged_write_refused_outright_fails_the_transaction() {
     let body = session.serve(4, commit(&tx));
     assert!(matches!(body, ThinBody::Error { .. }), "{body:?}");
     assert!(titles(&session.core).is_empty());
+}
+
+#[test]
+fn a_trusted_sessions_writes_are_the_backends_own() {
+    // A trusted backend client's session: its client is the backend's,
+    // linked as it, and its writes are the database's own.
+    let core = authority();
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0xb1; 16]),
+        author: AuthorSubject::SYSTEM,
+    };
+    let db = block_on(Db::open(DbConfig::new(schema(), identity))).unwrap();
+    let client = Binding::new(db, identity, true);
+    let upstream = client.connect_upstream();
+    let subscriber = core
+        .accept_subscriber(AuthorSubject::SYSTEM, Default::default())
+        .unwrap();
+    let mut session = Session {
+        core,
+        client,
+        upstream,
+        subscriber,
+        transactions: ThinTransactions::trusted(),
+    };
+    let tx = session.begin("mergeable");
+    session.serve(2, insert(&tx, "the backend's"));
+    let body = session.serve(3, commit(&tx));
+    assert!(matches!(body, ThinBody::Written { .. }), "{body:?}");
+    assert_eq!(titles(&session.core), ["the backend's"]);
 }
