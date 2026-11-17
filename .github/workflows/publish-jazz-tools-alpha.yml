@@ -795,6 +795,10 @@ jobs:
         run: |
           set -euo pipefail
           VERSION=$(gh api "repos/${GH_REPO}/contents/packages/jazz-tools/package.json?ref=${SHA}" --jq .content | base64 -d | jq -r .version)
+          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+$ ]]; then
+            echo "::error::jazz-tools at ${SHA} is '${VERSION}', not 2.0.0-alpha.N; not dispatching the crates publish."
+            exit 1
+          fi
           gh workflow run publish-jazz-crates-alpha.yml --ref "${DEFAULT_BRANCH}" -f mode=publish -f "tag=v${VERSION}"
           echo "Dispatched the crates.io publish for v${VERSION}."
 
