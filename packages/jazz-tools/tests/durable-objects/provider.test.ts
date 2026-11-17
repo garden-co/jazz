@@ -149,6 +149,25 @@ describe("createJazz with durableObjects()", () => {
     );
   });
 
+  it.each(["..", "a/b", "a\nb", ""])(
+    "refuses an app id the core names that isn't plain: %j",
+    async (appId) => {
+      const asked: string[] = [];
+      const url = await listening(
+        createServer((request, response) => {
+          asked.push(request.url!);
+          response.setHeader("content-type", "application/json");
+          response.end(JSON.stringify({ appId }));
+        }),
+      );
+      const error = await openFailure(durableObjects({ url, secret: "s".repeat(40) }));
+      expect(error.message).toMatch(
+        /did not answer as a Jazz Durable Object core \(GET \/app: 200\)/,
+      );
+      expect(asked).toEqual(["/app"]);
+    },
+  );
+
   it("follows no redirect, so the secret goes nowhere else", async () => {
     const reached: IncomingHttpHeaders[] = [];
     const elsewhere = await listening(
