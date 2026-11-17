@@ -257,6 +257,9 @@ crates are published with a short-lived token the first time:
 3. **Publish:** "Publish jazz-tools alpha" dispatches `publish-jazz-crates-alpha.yml`
    after the npm publish; to run it by hand, dispatch it with `mode: publish`, `tag: v<version>`. The summary at the
    end of its log shows which auth each crate used.
+   crates.io limits new crates to a burst of 5, then 1 every 10 minutes. On a
+   429 the script waits until the time crates.io names and retries, up to
+   `CRATES_IO_MAX_WAIT_MINUTES` (default 180), so one run publishes them all.
 4. **Afterwards, for every new crate:** add the same trusted publisher
    (`garden-co/jazz`, `publish-jazz-crates-alpha.yml`, environment `publish`). Then
    delete the `CRATES_IO_BOOTSTRAP_TOKEN` secret and revoke the token on
