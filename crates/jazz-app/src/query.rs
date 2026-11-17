@@ -9,7 +9,8 @@ use jazz::query::{self as q, OrderDirection, Predicate};
 /// [`ValuePart::text`] (`TextUtf8`) is the Rust way: UTF-8 byte offsets,
 /// `str` indices. `TextUtf16` counts UTF-16 code units instead, for interop
 /// with hosts that count those. A text range that splits a code point is
-/// refused.
+/// refused (a query error: "UTF-8 range splits a code point"); one past the
+/// end is clamped to the value.
 pub use jazz::query::Part as ValuePart;
 use jazz::records::Value as CoreValue;
 use jazz::tools::{ObjectId, Value};
