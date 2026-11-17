@@ -1,15 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { ReadTier } from "../../src/runtime/client.js";
-import { schema } from "../../src/index.js";
 import { withNativeRelayFixture } from "./fixture.js";
-import type { TestJazz } from "../../src/testing/index.js";
+import { testApp, testPermissions, type TestJazz } from "../../src/testing/index.js";
 
-const app = schema.defineApp(
-  {
-    todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
-  },
-  { migrations: "none" },
-);
+const app = testApp({
+  tables: { todos: { columns: { title: "string", done: "boolean" } } },
+});
 
 // Browser donor: db.transaction-reads.test.ts, snapshot anchoring, staged
 // insert/update/delete isolation, rollback, and mergeable read-own-writes.
@@ -107,19 +103,19 @@ it("waits for native upstream authority before accepting a serializable commit",
   });
   let backend: TestJazz | undefined;
   try {
-    const permissions = schema.definePermissions(app, ({ policy }) => [
-      policy.todos.allowRead.always(),
-      policy.todos.allowInsert.always(),
-      policy.todos.allowUpdate.always(),
-    ]);
+    const permissionsFile = {
+      format: 1,
+      tables: { todos: { read: "true", insert: "true", update: "true" } },
+    };
+    const permissions = testPermissions(app, permissionsFile);
     await deploy({
       appId: server.appId,
       serverUrl: server.url,
       adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
+      app,
+      permissions: permissionsFile,
     });
-    backend = await startTestJazz({ core: server, app, permissions });
+    backend = await startTestJazz({ core: server, app, permissions: permissionsFile });
     await withNativeRelayFixture(
       app,
       permissions,

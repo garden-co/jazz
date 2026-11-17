@@ -10,22 +10,15 @@
     "$schema": {
       "type": "string"
     },
+    "$generated": {
+      "$ref": "#/$defs/generated"
+    },
     "$comment": {
       "type": "string"
     },
     "format": {
       "const": 1,
       "description": "The format version: 1."
-    },
-    "defs": {
-      "type": "object",
-      "description": "Named, parameterised expressions, e.g. \"isChatMember($chat)\": \"exists chatMembers(chatId = $chat, userId = session.user)\", called as isChatMember(this.id). Definitions may call each other but never recursively.",
-      "propertyNames": {
-        "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\(\\s*(\\$[A-Za-z_][A-Za-z0-9_]*\\s*(,\\s*\\$[A-Za-z_][A-Za-z0-9_]*\\s*)*)?\\))?$"
-      },
-      "additionalProperties": {
-        "$ref": "#/$defs/policy"
-      }
     },
     "tables": {
       "type": "object",
@@ -77,12 +70,27 @@
     }
   },
   "$defs": {
+    "generated": {
+      "type": "object",
+      "description": "Written by the tool that generated this file (npx jazz-tools generate, from the app's TypeScript); loaders ignore it. by says what wrote the file; sha256 is the hex SHA-256 of the file's canonical text without this member, so a file whose digest no longer matches was edited by hand since.",
+      "additionalProperties": false,
+      "required": ["by", "sha256"],
+      "properties": {
+        "by": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
     "policy": {
       "description": "An expression string, { \"anyOf\": [...] }, { \"allOf\": [...] }, or { \"$comment\": \u2026, \"where\": \u2026 }.",
       "anyOf": [
         {
           "type": "string",
-          "description": "A policy expression, SQL-like, with single-quoted strings; every policy the engine holds has one. Comparisons: column = | != | < | <= | > | >= value; column in ['a', 'b']; column in session.claims.teams; column contains value; column = null / != null. Values: literals ('text', 42, 1.5, true, false), typed literals (int(5), text('5'), uuid('\u2026'), timestamp(\u2026), array(\u2026), literal(null), \u2026), session.user, session.claims.<path>, $param (inside defs), this.<column> (inside exists: the row being checked). Logic: and, or, not, parentheses, anyOf(\u2026), allOf(\u2026); true / false. Existence: exists <table> [as a](col = value, \u2026), e.g. exists chatMembers(chatId = this.id, userId = session.user); hops: exists files(id = this.fileId).folder(ownerId = session.user); any relation: exists (from t join u as x on t.uId = x.id where x.ownerId = session.user). Inheritance: allowedTo.read(<relation>) / insert / update / delete, or allowedTo.read(via <column>) / allowedTo.read(via <table>.<column>), optionally with maxDepth: 8. Magic columns: $createdBy, $createdBy.account, $updatedBy, $createdAt, $updatedAt, \u2026 Names that are keywords go in backticks: `order`. Definitions: name(arg, \u2026) calls a defs entry. Grammar: https://jazz.tools/docs/reference/app-files#expressions",
+          "description": "A policy expression, SQL-like, with single-quoted strings; every policy the engine holds has one. Comparisons: column = | != | < | <= | > | >= value; column in ['a', 'b']; column in session.claims.teams; column contains value; column = null / != null. Values: literals ('text', 42, 1.5, true, false), typed literals (int(5), text('5'), uuid('\u2026'), timestamp(\u2026), array(\u2026), literal(null), \u2026), session.user (the account), session.identity (the exact login), session.identity.subject, session.identity.issuer, session.authMode, session.claims.<path>, this.<column> (inside exists: the row being checked). Logic: and, or, not, parentheses, anyOf(\u2026), allOf(\u2026); true / false. Existence: exists <table> [as a](col = value, \u2026), e.g. exists chatMembers(chatId = this.id, userId = session.user); hops: exists files(id = this.fileId).folder(ownerId = session.user); any relation: exists (from t join u as x on t.uId = x.id where x.ownerId = session.user). Inheritance: allowedTo.read(<relation>) / allowedTo.insert / allowedTo.update / allowedTo.delete, or allowedTo.read(via <column>) / allowedTo.read(via <table>.<column>), optionally with maxDepth: 8. Magic columns: $createdBy, $createdBy.account, $createdBy.identity, $updatedBy, $deletedBy, $createdAt, $updatedAt, $deletedAt. Names that are keywords go in backticks: `order`. Relations inside exists ( \u2026 ), each clause wrapping what comes before: from t [as a], join u as b on a.x = b.y (or left join),  where <predicate>, select a.x as name, \u2026, distinct on (a.x), order by a.x asc | desc, limit n, offset n; sources union(label: query, \u2026) and recursive(seed: query, step: query, frontier: id(row), dedupe: (id(row)), maxDepth: n | fixpoint). In their predicates: outer.<column> and frontier.<column> (the outer and frontier rows), id(row) / id(outer) / id(frontier), param.<name>, json('\u2026') and row(\u2026). Grammar: https://jazz.tools/docs/reference/app-files#expressions",
           "examples": [
             "true",
             "userId = session.user",

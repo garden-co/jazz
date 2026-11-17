@@ -230,6 +230,122 @@ struct WebSocketAdmission {
     /// The published permissions bundle the backend pinned this session
     /// to (see [`jazz::catalogue`]).
     bundle: Option<jazz::catalogue::BundleId>,
+    /// A user session the app's backend stated: `jazz.revokeUser` can end
+    /// it from any backend instance (see [`SessionRevocation`]).
+    revocation: Option<SessionRevocation>,
+}
+
+/// What a backend-stated user session is checked against: the user's
+/// session revocation mark in the account registry. The session ends once
+/// the mark is past the time the backend's `authenticate` started for it
+/// (`authenticatedAt` in the stated session, on the backend's clock), so a
+/// revocation from one backend instance reaches sessions another holds, and
+/// refuses those it admits later on an answer from before the revocation.
+#[derive(Clone, Debug)]
+struct SessionRevocation {
+    principal: jazz::account_registry::Principal,
+    /// Unix milliseconds. A backend that doesn't state it (older than this
+    /// check) gets the time the core admitted the session.
+    authenticated_at_ms: u64,
+}
+
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+/// What a backend-stated user session listens to for `jazz.revokeUser`
+/// (compare [`AccountWatch`]).
+enum RevocationWatch {
+    /// Not a stated user session, or no registry: nothing to hear.
+    Unwatched,
+    /// Every recorded revocation, filtered to this session's user.
+    Registry {
+        revocation: SessionRevocation,
+        revocations: tokio::sync::broadcast::Receiver<crate::server::accounts::SessionsRevoked>,
+    },
+}
+
+/// Why [`RevocationWatch::wake`] returned.
+enum RevocationWake {
+    /// This session's user was revoked after it was authenticated.
+    Revoked,
+    /// Revocations were missed (the subscriber fell behind): look the user
+    /// up in the registry.
+    Recheck,
+    /// The registry owner is gone: fail closed.
+    RegistryGone,
+}
+
+impl RevocationWatch {
+    /// Subscribe *before* the admission's revocation check.
+    fn subscribe(
+        revocation: Option<SessionRevocation>,
+        accounts: Option<&crate::server::accounts::AccountRegistryOwner>,
+    ) -> Self {
+        match (revocation, accounts) {
+            (Some(revocation), Some(registry)) => Self::Registry {
+                revocation,
+                revocations: registry.subscribe_revocations(),
+            },
+            _ => Self::Unwatched,
+        }
+    }
+
+    /// Wait for a revocation that concerns this session. Other users'
+    /// revocations are skipped without a registry lookup, so a revocation
+    /// (or a transient registry failure while recording one) ends only the
+    /// revoked user's sessions.
+    async fn wake(&mut self) -> RevocationWake {
+        let Self::Registry {
+            revocation,
+            revocations,
+        } = self
+        else {
+            return std::future::pending().await;
+        };
+        loop {
+            match revocations.recv().await {
+                Ok(revoked) => {
+                    if revoked.principal == revocation.principal
+                        && revoked.before_ms > revocation.authenticated_at_ms
+                    {
+                        return RevocationWake::Revoked;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    return RevocationWake::Recheck;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    *self = Self::Unwatched;
+                    return RevocationWake::RegistryGone;
+                }
+            }
+        }
+    }
+}
+
+/// Whether `revocation`'s session is still admitted: no revocation mark for
+/// its user is past the time it was authenticated.
+async fn session_not_revoked(
+    state: &ServerState,
+    revocation: Option<&SessionRevocation>,
+) -> Result<(), super::accounts::AdmissionError> {
+    let (Some(revocation), Some(registry)) = (revocation, state.accounts.as_ref()) else {
+        return Ok(());
+    };
+    match registry
+        .sessions_revoked_before(revocation.principal.clone())
+        .await?
+    {
+        Some(before) if before > revocation.authenticated_at_ms => {
+            Err(super::accounts::AdmissionError::Revoked)
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Authentication class selected by the prelude, independently of the
@@ -553,9 +669,17 @@ async fn ws_admission(
             // Served with full access; sessions it acts for are governed by
             // the bundle.
             bundle,
+            revocation: None,
         });
     }
 
+    // When the backend's `authenticate` started for a session it states
+    // (Unix ms): what a revocation mark is compared with.
+    let stated_authenticated_at = auth
+        .backend_session
+        .as_ref()
+        .and_then(|session| session.get("authenticatedAt"))
+        .and_then(serde_json::Value::as_u64);
     let mut headers = request_headers.clone();
     if let Some(jwt) = auth.jwt_token.as_deref() {
         let value = axum::http::HeaderValue::from_str(&format!("Bearer {jwt}"))
@@ -623,6 +747,7 @@ async fn ws_admission(
             // The backend's own link: the sessions it acts for (its
             // `forReqUser` reads and writes) are governed by its bundle.
             bundle,
+            revocation: None,
         });
     }
 
@@ -659,6 +784,13 @@ async fn ws_admission(
         session.account_id = Some(account);
     }
     ws_validate_session_identity(&session, peer_identity)?;
+    let revocation = backend_stated.then(|| SessionRevocation {
+        principal: jazz::account_registry::Principal {
+            issuer: session.issuer.clone(),
+            subject: session.user_id.clone(),
+        },
+        authenticated_at_ms: stated_authenticated_at.unwrap_or_else(unix_now_ms),
+    });
     Ok(WebSocketAdmission {
         identity: peer_identity,
         claims: session_claims(session)?,
@@ -670,6 +802,7 @@ async fn ws_admission(
         },
         requested_link,
         bundle,
+        revocation,
     })
 }
 
@@ -696,6 +829,60 @@ async fn account_still_admitted(
     }
 }
 
+/// What wakes a live socket to re-check its account admission.
+enum AccountWatch {
+    /// The link carries no account identity (Backend, Admin): nothing can
+    /// revoke it, so it never wakes.
+    Unaccounted,
+    /// Woken by every registry change. The registry owner thread holds the
+    /// only sender, so a closed watch means the registry is gone.
+    Registry(tokio::sync::watch::Receiver<u64>),
+    /// An account identity on a server without a registry: re-checked every
+    /// second (each check fails closed).
+    Poll,
+}
+
+/// Why [`AccountWatch::wake`] returned.
+#[derive(Debug, PartialEq, Eq)]
+enum AccountWake {
+    /// Something may have changed: re-check.
+    Recheck,
+    /// The registry owner is gone: nothing can confirm the account any more.
+    RegistryGone,
+}
+
+impl AccountWatch {
+    /// Subscribe *before* the admission check (see
+    /// [`account_admission_current`]).
+    fn subscribe(
+        identity: Option<AuthorSubject>,
+        accounts: Option<&crate::server::accounts::AccountRegistryOwner>,
+    ) -> Self {
+        match (identity, accounts) {
+            (None, _) => Self::Unaccounted,
+            (Some(_), Some(registry)) => Self::Registry(registry.subscribe()),
+            (Some(_), None) => Self::Poll,
+        }
+    }
+
+    /// Wait until the account should be re-checked. Never resolves for an
+    /// unaccounted link, and resolves once (not in a loop) when the registry
+    /// is gone: the caller must stop on [`AccountWake::RegistryGone`].
+    async fn wake(&mut self) -> AccountWake {
+        match self {
+            Self::Unaccounted => std::future::pending().await,
+            Self::Registry(changes) => match changes.changed().await {
+                Ok(()) => AccountWake::Recheck,
+                Err(_) => AccountWake::RegistryGone,
+            },
+            Self::Poll => {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                AccountWake::Recheck
+            }
+        }
+    }
+}
+
 /// Per-message admission check for a live account socket.
 ///
 /// Every registry mutation runs on the registry owner thread and bumps
@@ -711,12 +898,12 @@ async fn account_still_admitted(
 async fn account_admission_current(
     state: &ServerState,
     identity: Option<AuthorSubject>,
-    changes: &mut Option<tokio::sync::watch::Receiver<u64>>,
+    watch: &mut AccountWatch,
 ) -> Result<(), super::accounts::AdmissionError> {
     if identity.is_none() {
         return Ok(());
     }
-    if let Some(changes) = changes {
+    if let AccountWatch::Registry(changes) = watch {
         match changes.has_changed() {
             Ok(false) => return Ok(()),
             Ok(true) => {
@@ -1109,11 +1296,20 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
 
     let account_identity =
         matches!(admission.credential, WebSocketCredential::Session).then_some(admission.identity);
-    let mut account_changes = state.accounts.as_ref().map(|registry| registry.subscribe());
+    let mut account_changes = AccountWatch::subscribe(account_identity, state.accounts.as_ref());
     let mut activity_rx = core_server_shell.subscribe_activity();
     // Subscribe before checking: a revocation concurrent with this check must
     // remain visible even if no application traffic arrives afterward.
-    if let Err(error) = account_still_admitted(&state, account_identity).await {
+    // A user session the backend stated watches session revocations alone,
+    // subscribed before its first check for the same reason.
+    let session_revocation = admission.revocation.clone();
+    let mut revocations =
+        RevocationWatch::subscribe(session_revocation.clone(), state.accounts.as_ref());
+    let admitted = match account_still_admitted(&state, account_identity).await {
+        Ok(()) => session_not_revoked(&state, session_revocation.as_ref()).await,
+        refused => refused,
+    };
+    if let Err(error) = admitted {
         send_ws_error(&mut socket, error.into_wire()).await;
         let _ = socket.close().await;
         core_server_shell.close(session);
@@ -1174,6 +1370,23 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         let stall_at = thin_reader.stall_deadline();
         tokio::select! {
             _ = &mut writer_terminal => break,
+            // `jazz.revokeUser`, from any backend instance: an idle session
+            // ends at once too, not on its next message.
+            wake = revocations.wake() => {
+                let refused = match wake {
+                    RevocationWake::Revoked => Err(super::accounts::AdmissionError::Revoked),
+                    RevocationWake::Recheck => {
+                        session_not_revoked(&state, session_revocation.as_ref()).await
+                    }
+                    RevocationWake::RegistryGone => {
+                        Err(super::accounts::AdmissionError::Unavailable)
+                    }
+                };
+                if let Err(error) = refused {
+                    queue_ws_error(&writer_tx, error.into_wire());
+                    break;
+                }
+            }
             _ = keepalive.tick() => {
                 // A connection waiting for room reads nothing, its peer's
                 // pongs included: that is not the peer going quiet.
@@ -1199,13 +1412,12 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                 // browser) asked for a heartbeat frame it can see instead.
                 let _ = writer_tx.try_send(keepalive_beat(heartbeat));
             }
-            _ = async {
-                if let Some(changes) = &mut account_changes { let _ = changes.changed().await; }
-                else if account_identity.is_some() {
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                } else { std::future::pending::<()>().await; }
-            } => {
-                if let Err(error) = account_still_admitted(&state, account_identity).await {
+            wake = account_changes.wake() => {
+                let admitted = match wake {
+                    AccountWake::Recheck => account_still_admitted(&state, account_identity).await,
+                    AccountWake::RegistryGone => Err(super::accounts::AdmissionError::Unavailable),
+                };
+                if let Err(error) = admitted {
                     queue_ws_error(&writer_tx, error.into_wire());
                     break;
                 }
@@ -1745,6 +1957,32 @@ mod tests {
         ColumnType, PolicyExpr, Schema, SchemaBuilder, TablePolicies,
         TableSchema as PublicTableSchema,
     };
+
+    /// A Backend or Admin link carries no account identity: a dead registry
+    /// must not wake it (each wake used to resolve at once, a hot loop).
+    /// An account link wakes exactly once with `RegistryGone` and fails closed.
+    #[tokio::test]
+    async fn account_watch_does_not_spin_once_the_registry_is_gone() {
+        let registry = crate::server::accounts::AccountRegistryOwner::in_memory_for_test();
+        let identity = AuthorSubject::reserved(jazz::tools::identity::LOCAL_FIRST_ISSUER, "alice")
+            .expect("author");
+        let mut unaccounted = AccountWatch::subscribe(None, Some(&registry));
+        let mut account = AccountWatch::subscribe(Some(identity), Some(&registry));
+        registry.close().expect("close registry");
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), unaccounted.wake())
+                .await
+                .is_err(),
+            "a link without an account identity never wakes"
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), account.wake())
+                .await
+                .expect("an account link wakes when the registry goes"),
+            AccountWake::RegistryGone
+        );
+    }
     use jazz::tools::{AppId, AuthMode};
 
     const WS_STORM_SIZE: usize = 24;
@@ -4136,6 +4374,184 @@ mod tests {
         (token, identity, subject)
     }
 
+    /// A user session the app's backend states, for `subject` (enrolled
+    /// first), authenticated at `authenticated_at_ms`: the socket, and the
+    /// frames it got after its prelude and Hello.
+    #[cfg(feature = "embedded-server")]
+    async fn stated_session(
+        core: &crate::server::testing::JazzServer,
+        subject: &str,
+        authenticated_at_ms: u64,
+    ) -> (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        Vec<WireFrame>,
+    ) {
+        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER};
+        let account = enroll(core, subject).await;
+        let identity = AuthorSubject::authenticated(TEST_JWT_ISSUER, subject)
+            .expect("external author")
+            .with_account(account);
+        let (mut ws, _) = connect_async(format!(
+            "ws://127.0.0.1:{}/apps/{}/ws",
+            core.port(),
+            core.app_id()
+        ))
+        .await
+        .expect("connect");
+        let prelude = serde_json::json!({
+            "peer_identity": identity.canonical(),
+            "auth": {
+                "backend_secret": JazzServer::BACKEND_SECRET,
+                "backend_session": {
+                    "account_id": account,
+                    "issuer": TEST_JWT_ISSUER,
+                    "user_id": subject,
+                    "claims": {},
+                    "authMode": "external",
+                    "authenticatedAt": authenticated_at_ms,
+                },
+            },
+            "bundle": core.latest_bundle(),
+        });
+        ws.send(WsMessage::Binary(prelude.to_string().into_bytes().into()))
+            .await
+            .expect("send prelude");
+        ws.send(WsMessage::Binary(
+            ws_client_hello_batch_with_features(current_wire_features()).into(),
+        ))
+        .await
+        .expect("send hello");
+        let mut frames = Vec::new();
+        // The Hello, and an admission error right behind it if there is one.
+        let until = tokio::time::Instant::now() + Duration::from_millis(500);
+        while let Ok(Some(Ok(message))) = tokio::time::timeout_at(until, ws.next()).await {
+            frames.extend(decode_ws_message(&message));
+            if frames
+                .iter()
+                .any(|frame| matches!(frame, WireFrame::Error(_)))
+            {
+                break;
+            }
+        }
+        (ws, frames)
+    }
+
+    #[cfg(feature = "embedded-server")]
+    async fn revoke_sessions(
+        core: &crate::server::testing::JazzServer,
+        subject: &str,
+        revoked_before: u64,
+    ) -> u64 {
+        let response = admin_accounts(
+            core,
+            "revoke-sessions",
+            serde_json::json!({
+                "identity": {
+                    "issuer": crate::server::testing::TEST_JWT_ISSUER,
+                    "subject": subject,
+                },
+                "revokedBefore": revoked_before,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body: serde_json::Value = response.json().await.expect("revocation response");
+        body["revokedBefore"].as_u64().expect("revokedBefore")
+    }
+
+    fn is_revoked(frame: &WireFrame) -> bool {
+        matches!(
+            frame,
+            WireFrame::Error(WireError {
+                code: WireErrorCode::AuthFailed,
+                retry: WireRetry::AfterAuth,
+                message,
+            }) if message == super::super::accounts::SESSION_REVOKED
+        )
+    }
+
+    /// `jazz.revokeUser` on one backend instance reaches the sessions any
+    /// other instance holds: a revocation mark in the registry closes the
+    /// user's live stated sessions at once (with no traffic on them), leaves
+    /// other users alone, refuses sessions stated later on an older
+    /// `authenticate`, and admits a fresh sign-in.
+    #[cfg(feature = "embedded-server")]
+    #[tokio::test]
+    async fn revoking_a_users_sessions_ends_stated_sessions_from_any_backend() {
+        use crate::server::testing::JazzServer;
+
+        let schema = SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .policies(public_table_policies()),
+            )
+            .build();
+        let core = JazzServer::start_with_schema(schema)
+            .await
+            .expect("start test server");
+        let now = unix_now_ms();
+
+        let (mut alice, frames) = stated_session(&core, "alice", now - 1_000).await;
+        assert!(
+            matches!(frames.as_slice(), [WireFrame::Hello(_)]),
+            "Alice is admitted: {frames:?}"
+        );
+        let (mut bob, frames) = stated_session(&core, "bob", now - 1_000).await;
+        assert!(
+            matches!(frames.as_slice(), [WireFrame::Hello(_)]),
+            "{frames:?}"
+        );
+
+        assert_eq!(revoke_sessions(&core, "alice", now).await, now);
+        let revoked = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(Ok(message)) = alice.next().await {
+                if decode_ws_message(&message).iter().any(is_revoked) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .expect("Alice's idle socket ends promptly");
+        assert!(revoked, "Alice's socket ends as revoked");
+
+        // Bob's session is untouched.
+        let quiet_until = tokio::time::Instant::now() + Duration::from_millis(300);
+        while let Ok(message) = tokio::time::timeout_at(quiet_until, bob.next()).await {
+            let message = message
+                .expect("Bob stays open")
+                .expect("Bob stays readable");
+            assert!(
+                !decode_ws_message(&message)
+                    .iter()
+                    .any(|frame| matches!(frame, WireFrame::Error(_))),
+                "another user's revocation leaves Bob alone"
+            );
+        }
+
+        // An earlier mark never moves the recorded one back.
+        assert_eq!(revoke_sessions(&core, "alice", now - 5_000).await, now);
+
+        // A session another instance admits on an `authenticate` answer from
+        // before the revocation (a slow sign-in, a cached answer) is refused.
+        let (_late, frames) = stated_session(&core, "alice", now - 1).await;
+        assert!(
+            frames.iter().any(is_revoked),
+            "stale admission refused: {frames:?}"
+        );
+
+        // Signing in again afterwards works.
+        let (_fresh, frames) = stated_session(&core, "alice", now + 1).await;
+        assert!(
+            matches!(frames.as_slice(), [WireFrame::Hello(_)]),
+            "a fresh sign-in is admitted: {frames:?}"
+        );
+        let _ = bob.close(None).await;
+    }
+
     /// Alice holds a live account websocket. An unrelated registry change
     /// (Bob enrolling) must not disconnect her, while revoking Alice's
     /// identity must still close her socket promptly with an auth failure.
@@ -4423,7 +4839,13 @@ mod tests {
         );
 
         let state = core.server_state();
-        let mut changes = state.accounts.as_ref().map(|registry| registry.subscribe());
+        let mut changes = AccountWatch::Registry(
+            state
+                .accounts
+                .as_ref()
+                .expect("account registry")
+                .subscribe(),
+        );
         let registry = state.accounts.as_ref().expect("account registry");
         registry.fail_next_write_for_test();
         let revoked = revoke(
@@ -4487,7 +4909,13 @@ mod tests {
                 .with_account(account),
         );
         let state = core.server_state();
-        let mut changes = state.accounts.as_ref().map(|registry| registry.subscribe());
+        let mut changes = AccountWatch::Registry(
+            state
+                .accounts
+                .as_ref()
+                .expect("account registry")
+                .subscribe(),
+        );
         account_admission_current(&state, identity, &mut changes)
             .await
             .expect("admitted");
@@ -4537,8 +4965,13 @@ mod tests {
                 for _ in 0..sockets {
                     let state = state.clone();
                     tasks.push(tokio::spawn(async move {
-                        let mut changes =
-                            state.accounts.as_ref().map(|registry| registry.subscribe());
+                        let mut changes = AccountWatch::Registry(
+                            state
+                                .accounts
+                                .as_ref()
+                                .expect("account registry")
+                                .subscribe(),
+                        );
                         for _ in 0..CHECKS_PER_SOCKET {
                             let result = if gated {
                                 account_admission_current(&state, identity, &mut changes).await

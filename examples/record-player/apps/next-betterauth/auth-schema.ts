@@ -3,7 +3,7 @@ import { schema as s } from "jazz-tools";
 // Better Auth persists ordinary application rows through the trusted backend
 // context. These timestamp names belong to Better Auth's wire format, not
 // application-defined Jazz provenance.
-export const betterAuthSchema = {
+export const tables = {
   better_auth_user: s.table(
     {
       name: s.string(),
@@ -64,27 +64,15 @@ export const betterAuthSchema = {
   ),
 };
 
-type BetterAuthSchema = s.Schema<typeof betterAuthSchema>;
-const betterAuthApp: s.App<BetterAuthSchema> = s.defineApp(betterAuthSchema, {
-  migrations: "none",
-});
-
 /**
  * Better Auth is backed by Jazz, but its implementation tables are a trusted
  * server concern. The browser authenticates through Better Auth's endpoints;
  * it must never subscribe to or mutate these rows through the application DB.
  */
-export const betterAuthPermissions = s.definePermissions(betterAuthApp, ({ policy }) => {
-  for (const table of [
-    policy.better_auth_user,
-    policy.better_auth_session,
-    policy.better_auth_account,
-    policy.better_auth_verification,
-    policy.better_auth_jwks,
-  ]) {
-    table.allowRead.never();
-    table.allowInsert.never();
-    table.allowUpdate.never();
-    table.allowDelete.never();
-  }
-});
+export const permissions = {
+  better_auth_user: { read: false, insert: false, update: false, delete: false },
+  better_auth_session: { read: false, insert: false, update: false, delete: false },
+  better_auth_account: { read: false, insert: false, update: false, delete: false },
+  better_auth_verification: { read: false, insert: false, update: false, delete: false },
+  better_auth_jwks: { read: false, insert: false, update: false, delete: false },
+};

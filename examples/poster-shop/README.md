@@ -29,7 +29,7 @@ animation frame. Both are ordinary local-first updates.
 
 ## Authorization
 
-`permissions.ts` gives every child table its own role predicate (#1926).
+`jazz.permissions.json` gives every child table its own role predicate (#1926).
 No client can create a canvas or promote itself: canvases and first admins
 come only from the server bootstrap, and other memberships from an admin or
 the server invite route.
@@ -105,6 +105,6 @@ takes: the data lives in a local SQLite directory, `.jazz/`. The browser signs
 in through that backend with its Better Auth session; it holds no token of its
 own. To deploy, copy `apps/nextjs-betterauth/.env.example` to `.env.local` and
 set your origin, app id and Better Auth secret. To keep the data on a sync
-server such as Jazz Cloud, also set `JAZZ_SERVER_URL`, `JAZZ_ADMIN_SECRET` and
+server such as Jazz Cloud (deprecated), also set `JAZZ_SERVER_URL`, `JAZZ_ADMIN_SECRET` and
 `BACKEND_SECRET`. Memberships and cursor identity use the canonical Jazz account
 id, so equal provider subjects from different issuers cannot share access.

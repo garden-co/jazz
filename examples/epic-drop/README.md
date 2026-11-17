@@ -35,12 +35,12 @@ invite links. It runs as a Vite and React single-page app on an anonymous device
 - **Sharing.** `folderMembers` rows grant access; `folderInvites` rows hold invite codes that only the
   folder owner can read. Joining inserts a membership that carries the code and role, and the
   permission for that insert checks for a matching invite at the sync server
-  (`permissions.ts`, `src/sharing.ts`). Because a membership row keeps the code it was created
+  (`jazz.permissions.json`, `src/sharing.ts`). Because a membership row keeps the code it was created
   with, only the member and the folder owner can read it. The code travels in the URL fragment, so
   it stays out of server logs.
 - **Inherited access.** A folder is readable by its owner, by its members and by anyone who can read
   its parent; editing its contents follows the same shape with editor members. Inheritance uses
-  `allowedTo.read("parent", { maxDepth: 8 })`, so a share reaches eight levels of subfolders, and
+  `allowedTo.read(parent, maxDepth: 8)`, so a share reaches eight levels of subfolders, and
   the app stops offering "New folder" at that depth. Files follow their folder. Uploads are stamped
   with the uploader, and neither renames nor moves can change an owner.
 - **Moving and deleting.** Every folder in a tree belongs to the owner of its top-level folder: a

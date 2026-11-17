@@ -1,4 +1,4 @@
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { errorResponse, userDb } from "@/src/server/access";
 
 export const runtime = "nodejs";

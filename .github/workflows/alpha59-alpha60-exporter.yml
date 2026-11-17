@@ -70,8 +70,8 @@ jobs:
           # A release candidate (2.0.0-alpha.N-rc.M, a prerelease the
           # "Release candidate" workflow makes) lets hosts try the upgrade
           # before 2.0.0-alpha.N ships.
-          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
-            echo "::error::version must look like 2.0.0-alpha.N or 2.0.0-alpha.N-rc.M, got '${VERSION}'"
+          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+((\.[0-9]+)?-rc\.[0-9]+)?$ ]]; then
+            echo "::error::version must look like 2.0.0-alpha.N, 2.0.0-alpha.N-rc.M or 2.0.0-alpha.N.K-rc.M, got '${VERSION}'"
             exit 1
           fi
 
@@ -108,7 +108,7 @@ jobs:
           .a59/target/release/jazz-alpha59-alpha60-export --help | grep -q "usage: jazz-alpha59-alpha60-export"
 
       - name: Build the importer
-        run: cargo build --release -p jazz-cli --bin jazz-alpha59-alpha60-import
+        run: cargo build --release -p jazz-tools --bin jazz-alpha59-alpha60-import
 
       - name: Smoke test the importer
         run: |

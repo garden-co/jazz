@@ -10,8 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defineShippedApp } from "../testing/client-migrations.js";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { fetchFor } from "../runtime/in-process-transport.js";
 import { createJazz, vercel, vercelBlob } from "./index.js";
@@ -28,13 +27,9 @@ import {
   type SandboxSdk,
 } from "./vercel-store.js";
 
-const app = await defineShippedApp({ notes: s.table({ text: s.string() }, {}) });
-const permissions = s.definePermissions(app, ({ policy }) => {
-  policy.notes.allowRead.always();
-  policy.notes.allowInsert.always();
-  policy.notes.allowUpdate.never();
-  policy.notes.allowDelete.never();
-});
+const app = testApp({ tables: { notes: { columns: { text: "string" } } } });
+// Updates and deletes are denied.
+const permissions = { format: 1, tables: { notes: { read: "true", insert: "true" } } };
 
 // The cores earlier versions created by default, production's and one per
 // preview branch (see vercel-namespace.test.ts).

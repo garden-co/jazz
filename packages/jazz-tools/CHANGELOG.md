@@ -1,5 +1,465 @@
 # jazz-tools
 
+## 2.0.0-alpha.66
+
+### Minor Changes
+
+- 7160afe: ### Upgrading from alpha.65: run `jazz-tools upgrade` and review the diff
+
+  Breaking: alpha.66 gives the schema a cleaner home and permissions a much leaner DSL. Each app defines its tables, permissions and migrations in one `schema.ts`, in every language, and one command, `npx jazz-tools generate`, turns it into readable `jazz.app.json` / `jazz.permissions.json` files and typed bindings for TypeScript, Rust, Go, Swift and Kotlin. The table, column and migration builders are the ones you know from alpha.65; how the schema is mounted (`defineApp`) and how permissions are written change. `jazz-tools upgrade` converts an alpha.65 app for you and checks that its schema hashes and bundle id stay the same.
+
+  **`schema.ts`** (beside the app's manifest: package.json, Cargo.toml, go.mod, Package.swift or build.gradle):
+
+  ```ts
+  import { schema as s } from "jazz-tools";
+
+  export const schema = s.defineSchema({
+    chats: s.table({ isPublic: s.boolean() }, { membersViaChat: s.reverse("chatMembers", "chat") }),
+    chatMembers: s.table(
+      { chatId: s.uuid(), userId: s.uuid() },
+      { chat: s.rel("chats", "chatId") },
+    ),
+  });
+
+  const { definePermissions, exists, session, anyOf } = schema;
+  const isMember = (chatId: s.Uuid) => exists.chatMembers({ chatId, userId: session.user });
+
+  export const permissions = definePermissions({
+    chats: { read: (chat) => anyOf({ isPublic: true }, isMember(chat.id)) },
+    chatMembers: {
+      read: (m) => isMember(m.chatId),
+      insert: { userId: session.user },
+    },
+  });
+  ```
+
+  - **Permissions** use a new, much shorter DSL on the schema: per table `read`, `insert`, `update` (or `updateIf` + `updateTo`, where `updateTo: (row, old) => …` can compare with the old row) and `delete`; conditions are objects (`{ col: v }`, arrays mean `in`), `exists.<table>({…})`, `row.<relation>.where({…})`, `allowedTo.<op>(row.<relation>)`, `anyOf`/`allOf`/`not`, comparison helpers and `session`. Helpers are plain functions. Every table must be listed (`{}` denies everything), an operation left out is denied, and types check tables, columns, values, relations and rule keys. It covers the whole expression grammar of `jazz.permissions.json`. A separate `permissions.ts` exporting `permissions` still works; both at once is refused.
+  - **`generate`** (renamed from `validate`, which now fails naming it) loads `schema.ts` and writes `jazz.app.json` and `jazz.permissions.json`, then the bindings: `jazz.generated.ts`, or Rust, Go, Swift or Kotlin bindings, detected from the manifest beside `schema.ts` (`--lang` overrides). Commit them all. `generate --check` (for CI) writes nothing and fails when anything is stale. Writing needs `npx`, so Node, in every language; the standalone Rust `jazz-tools` binary only runs `generate --check`.
+  - **The JSON files are generated.** They carry a versioned `$schema` (`https://jazz.tools/schemas/jazz.app.v1.json`, `…/jazz.permissions.v1.json`) and a `$generated` digest. `generate` refuses to overwrite a file edited by hand, or one it didn't write, unless given `--force`. Backends and other languages read them: `createJazz({ app, permissions })` with `app` from `./jazz.generated` and `import permissions from "./jazz.permissions.json" with { type: "json" }`.
+  - **Migrations** live in `migrations/*.ts` (`m.defineMigration`, as in alpha.64) with tool-written snapshots in `migrations/snapshots/`, and become `history` and `migrations` in `jazz.app.json`. After a schema change `generate` asks for `npx jazz-tools migrations create --name <name>`; resolve each `TODO` it writes. There is no `migrations/index.ts`.
+  - **Computed fields and transforms** are declared in `schema.ts` (`s.computed(type, ["from", …])` among the columns, `.transform(name, viewType)`) and implemented in `jazz.computed.ts`.
+  - **Runtime code** imports `app` and the row types from `./jazz.generated`; nothing imports `schema.ts` at runtime.
+  - **Better Auth:** the adapter's generator writes `schema-better-auth/schema.ts` exporting `tables` and `permissions`, which `schema.ts` spreads.
+  - **Tests:** `createPolicyTestApp`, `startTestJazz`, `deploy` and backend clients take the generated `app` and permissions file; `jazz-tools/testing` adds `testApp(appJson)` and `testPermissions(app, permissionsJson)` for apps a test defines inline.
+
+  **Upgrade:** run `npx jazz-tools@2.0.0-alpha.66 upgrade` in each app _before_ bumping `jazz-tools`, then review the diff. It first checks with your installed alpha.65 (or .64) that the committed JSON is fresh, then:
+  - rewrites `schema.ts` from `defineApp(schema, { migrations })` to `export const schema = s.defineSchema({ … })`, keeping your comments;
+  - prints the permissions from the committed `jazz.permissions.json` into `schema.ts` in the new DSL (or a separate `permissions.ts` when the old one was large), factoring repeated checks into named helpers and keeping the old file's named constants;
+  - converts Better Auth's module to export `tables` and `permissions`;
+  - rewrites imports of `./schema` to `./jazz.generated`, `app.slice(…)` to `app`, and `validate` to `generate` in package.json scripts;
+  - deletes `migrations/index.ts` (stubs and snapshots stay);
+  - runs `generate`, and checks that the schema hashes and bundle id are unchanged. Otherwise it puts every file back and refuses.
+
+  Upgrade refuses, before writing anything, an app with computed columns or transforms (move those into `schema.ts` by hand), a policy that reads `process.env` and compiled to a bare `true`, and what alpha.65's own `validate --check` refuses. Other environment reads are listed under "Left for you".
+
+  **Removed:** `defineApp` and `{ migrations }` mounting, schema slicing (`defineSliceableApp`, `app.slice(…)`), the callback permissions DSL (`definePermissions(app, ({ policy }) => …)`, root-level `anyOf`/`allOf`/`createSessionContext`), `migrations/index.ts`, `schemaToWasm`, `validate --strict-provenance` and `migrations create --fromHash/--toHash/--migrations-dir`. Removed names throw `JAZZ_API_REMOVED` errors naming their replacement and pointing at `jazz-tools upgrade`. See "Upgrading from alpha.65" in the docs.
+
+  jazz-napi exports Jazz's code generator and loaders (`generate`, `compileApp`, `schemaSourceHash`, `migrationsCreate`, `validateBindings`, `loadBackendApp`) and the generated-file writer `writeAppFiles` with `verifyGenerated`.
+
+- 0e1cfe9: Removed enum-with-payload columns, which no store could hold yet ([#5758](https://github.com/garden-co/jazz/issues/5758)). Enums are lists of case names (`{ "enum": ["a", "b"] }`); a `jazz.app.json` whose current tables declare cases with fields is refused, naming the column. A schema version from alpha.64 or earlier that declared one still reads in a store's history and in an app's `history` and migrations, so such stores open and such apps can migrate away from it.
+
+### Patch Changes
+
+- d2bb287: `$acceptedAt` in history reads is now always the time the server accepted a version, taken from the version's position on the server. Before, it copied `$updatedAt`, so a write that set `updatedAt` explicitly (a backfill or an import) was listed at that time, and history ordered by `$acceptedAt` didn't end with the current row. `$updatedAt` still keeps the time you set.
+
+  **Apps imported from alpha.59:** the importer replays each version with its original `updatedAt`. Those versions now show `$acceptedAt` as the time the import wrote them, and their original times remain in `$updatedAt`. Only pre-release development stores from before alpha.60 hold positions that aren't server clock times; their `$acceptedAt` is wrong, and they aren't supported.
+
+- 88911fd: **`jazz.app.json` and `jazz.permissions.json` are versioned by `$schema`; `format` is gone.** Each file now starts with a required `$schema` that names its JSON Schema and so its version: `https://jazz.tools/schemas/jazz.app.v1.json` and `https://jazz.tools/schemas/jazz.permissions.v1.json`. Jazz refuses a file written by a newer version and asks you to upgrade. A file without `$schema` is refused with a hint to run `jazz-tools generate`. Files written before alpha.66 carry `"format": 1` and an unversioned `$schema`; they still load as version 1. `jazz-tools upgrade` writes the new form, and `createJazz` takes both forms. The old JSON Schema URLs keep working in editors.
+- 0bc5388: Trusted backend clients check their permissions against the main backend's ([jazz#5808](https://github.com/garden-co/jazz/issues/5808)). `createJazz` now answers a trusted backend client's admission with the bundle it pins the client to (`X-Jazz-Bundle`). A `createJazzClient` opened with a `jazz.permissions.json` compares that with the bundle its own app and permissions make, and `client.forUser(...)` throws (`code: "bundle_mismatch"`, naming both bundle ids) on a mismatch. Before, a stale or laxer permissions file silently widened what a user's reads returned. The client's own system reads and writes are unaffected. Against an older main backend, or when the client is opened with compiled engine policies, nothing is checked, as before.
+- e4f2989: Better Auth adapter: `sortBy`, `limit` and `offset` now run in the query engine (byte order for text, declaration order for enums), instead of sorting every match in JavaScript. `where` shapes the engine cannot answer (OR connectors, case-insensitive matches, operators a column does not support) now throw `UnsupportedBetterAuthQueryError` instead of loading the whole table. `starts_with`/`ends_with` keep working.
+- 72d98e3: Generated bindings in every language (`jazz.generated.ts`, `src/jazz_app.rs`, `JazzApp.swift`, `JazzApp.kt`, `jazz_app.go`) now say "Edit schema.ts and run `npx jazz-tools generate`" instead of "Regenerate it after changing jazz.app.json". Bindings with the old header stay current for `generate --check`; the next `generate` rewrites them.
+- a64a646: An edit to `jazz.app.json` that only adds or changes single-column indexes no longer needs a migration: `jazz-tools generate` regenerates the bindings instead of refusing with "the schema changed since the last version", and `jazz-tools migrations create` writes nothing and says "only single-column indexes changed: no migration needed". A single-column index changes the schema's hash but not its version or its rows. A composite index is part of the version, so it still needs `migrations create`, which writes an empty step.
+- b05d375: `jazz-tools generate` now parenthesises an array whose element is a union. An array of an enum (`{ "array": { "enum": ["low", "high"] } }`) used to be typed `"low" | "high"[]` in `jazz.generated.ts`, which TypeScript reads as "low, or an array of highs". It is now `("low" | "high")[]`. `generate` leaves bindings whose `source` still matches `jazz.app.json` as they are, so an app with such a column picks the fix up by deleting `jazz.generated.ts` and running `jazz-tools generate`.
+- d150ea6: - Relation policies with a plain literal in a hop condition or relation filter (for example `exists shares(todo = this.id).todoRow(name = 'x')`, or the DSL's `.hop("todoRow", { name: "x" })`) now deploy. `jazz-tools validate` and the dev server already accepted them; publishing refused them.
+  - A plain literal in a relation policy now compares as the column's type: UUID-shaped text compared with a text column is text, and UUID text in any spelling (hyphenated, plain hex or braced) compared with a UUID column is a UUID. Before, policy evaluation in SQL decided by the text's shape, so on a mismatch `=` matched no row and `!=` matched every row.
+  - React Native: the native relay reports a refused credential with its classified reason (`expired`, `missing`, `invalid`, `disabled` or `revoked`) instead of the server's message, so the client no longer re-reads the server's wording to decide whether to renew.
+- 492dd55: Client-side checks now match the Rust core:
+  - Writing a `Date` before 1970 to a timestamp column throws ("dates before 1970 are not supported") instead of storing a far-future time.
+  - UUIDs must be hyphenated `8-4-4-4-12` or 32 plain hex digits; text with dashes elsewhere is refused.
+  - Table columns named like the store's own row columns (`rid`, `_branch`, `_clock`, `_writer`, `_state`, `_base`, `_touched`, `_partition`) or starting with `__jazz_aggregate_` are refused when the schema is defined, not first when it compiles.
+  - React Native: a native lifecycle or encode failure no longer turns the pending-upload count off for the session (it reported 0 from then on, so sign-out skipped the unconfirmed-writes warning). Native errors carry the relay status as `error.code`.
+
+- 27edc93: **Core: reads through a branch view inside a mergeable transaction** ([jazz#5806](https://github.com/garden-co/jazz/issues/5806)). A transaction read with a branch view (`branch`/`base`) used to ignore the view and read every branch-local row as stored. In a mergeable transaction it now composes the head over its live or frozen base, over the transaction's staged writes, as outside one. Serializable transactions read through branch views too, and their commits are validated through the view (see the serializable branch read notes). A snapshot read in any transaction is refused with "not supported yet".
+- 93e9738: **Core: serializable transactions read through branch views, in a store without a server** ([jazz#5806](https://github.com/garden-co/jazz/issues/5806)). A serializable read with a branch view records the rows of its view: the head's, or the base's rows it inherits. Its commit conflicts when any of them changed, including when a head row now hides a base row. Writes to other branches don't conflict, and neither do later writes to a frozen base. A server validates such a commit the same way, over a link that negotiated `FEATURE_SERIALIZABLE_BRANCH_READS`.
+- cb8e5b2: **Sync: serializable transactions that read through a branch view commit to a server** ([jazz#5806](https://github.com/garden-co/jazz/issues/5806)). Each read in such a commit carries its branch view, and the server validates the read through that view. A new optional wire feature, `FEATURE_SERIALIZABLE_BRANCH_READS` (`1 << 12`), negotiates this in the `Hello`, and the protocol version stays 6:
+  - A commit whose reads all went through the root view is encoded exactly as before.
+  - A commit with a branch read is made like any serializable commit, offline included. It is only sent over a link that negotiated the feature. On another link (an older server), it is refused with "not supported yet by this server" instead of being validated against the wrong rows.
+
+  Pending commits keep their reads' views across restarts, in a new `_jazz_pending_read_views` table. The table is created when a commit first needs it, so opening an existing store leaves its file unchanged. The Rust native transport, the native relay, and the napi and wasm `connectUpstreamWithSession` pass on the features they negotiated.
+
+- 00fef6b: FFI (Swift/Kotlin/Go) queries: `{"op": "isNull", "value": false}` now means "is not null", as in TS; it used to mean "is null". `notIn`, `eq: null` and `ne: null` work as in TS. `gt`/`gte`/`lt`/`lte`/`contains` with `null` and `isNotNull: false` are refused.
+- 7ad4953: Running a `jazz-tools` command in a directory with `jazz.app.json` but no `schema.ts` no longer points apps in other languages at the standalone `jazz-tools` binary. It now says that `npx jazz-tools upgrade` converts an alpha.65 app in any language, and that from alpha.66 every language edits `schema.ts` beside its manifest and runs `npx jazz-tools generate`.
+- 677158e: One session hook: `useJazzSession()` (Svelte `getJazzSession()`). Its `user` is the user your permissions see as `session`, so the permission-session hooks are deprecated. They still work in this release, and warn once in development:
+
+  | Deprecated                                 | Use instead                                                                       |
+  | ------------------------------------------ | --------------------------------------------------------------------------------- |
+  | React / React Native / Expo `useSession()` | `useJazzSession().user`                                                           |
+  | Vue `useSession()`                         | `useJazzSession().snapshot.value.user`                                            |
+  | Solid `useSession()`                       | `useJazzSession().snapshot().user`                                                |
+  | Svelte `getSession().current`              | `getJazzSession()`, then `$session.user`                                          |
+  | `session.user`                             | `user.accountId`                                                                  |
+  | `session.identity`, `session.claims`       | `user.identity`, `user.claims`                                                    |
+  | `session.authMode`                         | `user.kind` (`"backend"` or `"device"`); `user` is `null` for an anonymous reader |
+
+  `useJazzSession()` now also works under `<JazzClientProvider client>` (Svelte `<JazzSvelteClientProvider client>`), for a client you opened yourself. There it's `ready` with that client's user, and its session operations (`signOut()`, `refresh()`, …) reject, naming why: the client has no session to sign in or out. This holds when it's nested inside a `<JazzProvider>` too: its children read their own client, never the enclosing session (before, they read the enclosing session, and `signOut()` signed it out).
+
+- dbffe8c: **`forUser` handles for the same user keep their own claims on writes.** A transaction opened from a handle acting for a user (`forSession`/`forUser` in TypeScript, `for_session`/`for_user` in Rust) is now checked with the claims its writes were staged with. Before, it took the claims registered for that user when it committed, so another handle for the same user with different claims could change them in between. Single writes outside a transaction already carried their own claims.
+- ce04b09: `npx jazz-tools generate [--check]` and `migrations create` pick the app's languages and write its bindings with the same code as the `jazz-tools` binary (jazz-codegen's `project`, through the new jazz-napi `generateForDir` and `migrationsCreateForDir`). An app whose directory has a `Package.swift`, Gradle build or `go.mod` no longer gets a `jazz.generated.ts` from the npm CLI. Where nothing names a language, the npm CLI still assumes TypeScript. A TS app's `jazz.app.json` may sit in `src/` or `src/lib/` below its `package.json`. A `Cargo.toml` makes an app a Rust one for the npm CLI as for the binary only when it's a `[package]` that depends on `jazz-app-support` (also under another name, with `package = "jazz-app-support"`), so a workspace or unrelated `Cargo.toml` beside `jazz.app.json` no longer adds `src/jazz_app.rs`, and a bare `Cargo.toml` with no bindings committed now fails asking for `--lang`. Pass `--lang rust` (or `--lang ts`) to choose explicitly.
+- 59f3841: `jazz-tools generate` and `jazz-tools migrations create` write only from `schema.ts`. An app with `jazz.app.json` but no `schema.ts` is refused with "TS is the source in alpha.66: this app has jazz.app.json but no schema.ts. Run `npx jazz-tools upgrade` to write schema.ts from it (it keeps the schema hashes and bundle id), then edit schema.ts beside your app's manifest (package.json, Cargo.toml, go.mod, Package.swift, build.gradle, …) and run `npx jazz-tools generate`." The standalone `jazz-tools` binary (Rust) no longer writes at all: its `generate` and `migrations create` refuse and point to `npx jazz-tools …`, while its `generate --check` still checks committed files and bindings.
+
+  `jazz-tools upgrade` now converts a JSON-only app whose columns use `transforms`: the first snapshot it writes no longer fails with "no transform … in the top-level `transforms`" (snapshots hold stored types, so transforms are left out of them, as they are of the schema hash).
+
+- f7c6fd8: `jazz-tools generate` (without `--check`) now also rewrites bindings that this version of Jazz generates differently from the committed ones, so a generator fix reaches an app whose `jazz.app.json` didn't change; you no longer need to delete `jazz.generated.ts` first. `jazz.generated.ts` records a digest of the generator's output on its second line (`// Bindings format 1. Output <hex>. …`), so a module a formatter reformatted is still kept as it is. `generate --check` is unchanged: it checks the bindings' source and format, so upgrading Jazz doesn't fail CI by itself. Other languages' bindings are rewritten when their text differs.
+- 2fd13a5: The Go module (`jazz-go/v2`) connects as a backend client of your main backend's `/jazz`: `jazz.Credential` opens with a machine's OIDC token, `db.BackendClient` says whether it is trusted or scoped, a trusted client acts for a user with `db.ForUser`, and `db.Shutdown(ctx)` uploads queued writes before closing.
+- 98b3018: `jazz-tools generate` writes Go bindings (`jazzapp/jazz_app.go`) beside a `go.mod` that requires `github.com/garden-co/jazz/packages/jazz-go/v2`, or with `--lang go`. The Go module (`jazz-go/v2`, no cgo) opens an app locally or as an end user through the main backend's `/jazz`.
+- b4beeb6: Go: `ForUser` on a trusted backend client whose `Config.Permissions` isn't the bundle the main backend serves fails with `jazz.ErrBundleMismatch` (`Error.OwnBundle`, `Error.ServedBundle`), as TS's `bundle_mismatch`.
+- ea36afd: Go: `Relation.Select(cols…)` includes only some of the related rows' columns (as TS's `include({ project: app.projects.select("name") })`), and a `jazz.Select` struct may have a field for an included relation.
+- 1dbe694: The Go module (`jazz-go/v2`) has TS's client lifecycle: `jazz.Mergeable()` transactions (TS's default), `db.Disconnect` / `db.Reconnect`, `db.DeleteClientStorage`, and `db.OnMutationError` for refused writes nothing waited on.
+- 2ed2fab: The Go module (`jazz-go/v2`) has `jazz.OpenSession`, a session that follows who is signed in, as TS's `JazzSession`: `Session.DB` for the user signed in now, `Watch` for its changes, and sign-in flows (`SignOut`, `Refresh`, `CreateDeviceAccount`, `RestoreDeviceAccount`, `LinkDeviceAccount`, `ExportDeviceKey`). New errors `jazz.ErrReplaced` and `jazz.ErrNoUser`.
+- af9c62a: Go: `db.Tx(ctx, fn)` is now a mergeable transaction by default, as TypeScript's `db.transaction` (its writes merge with concurrent ones, and its commit never fails with `jazz.ErrConflict`). Pass `jazz.Serializable()` for a serializable transaction, as `db.serializableTransaction`; `jazz.Mergeable()` stays, as an explicit no-op.
+- e9d751a: `jazz.app.json` declares computed fields (`"computed": { "<field>": { "type", "from" } }` per table) and transforms (top-level `"transforms": { "<name>": { "stored", "view" } }`, named by a column's `"transform"`), replacing `tsOnly`. A file written before alpha.66 with `tsOnly` or `slices` loads with a warning that they are ignored.
+
+  Loaders now refuse, naming the JSON path:
+  - a `"TODO: …"` placeholder left in `migrations`, a computed field's type or a transform's types;
+  - a relation named like a column of its table, or `id` (as the TS DSL refused);
+
+  A history version no chain of migrations connects to the current tables gets the implied identity step when its rows pass unchanged (index, merge-strategy or column-order changes, which earlier versions wrote no migration for); any other loads with a warning, and generating bindings refuses it.
+
+  The expression grammar reads `session.identity` (the exact login: `$createdBy.identity = session.identity`), and a `select` or `order by` list inside `recursive(…)` no longer runs into the next field, so the writer reads back the Gather policies it prints.
+
+  New `jazz-codegen` crate: typed bindings generated from `jazz.app.json` (`jazz.generated.ts`, embedding the compiled schema so runtimes never parse the readable file), and `migrations create` in Rust: it moves the version the committed bindings were generated from into `history` and writes the migration, leaving `"TODO: …"` where only the author can decide. jazz-napi exposes `generate`, `compileApp`, `schemaSourceHash`, `migrationsCreate`, `validateBindings` and `loadBackendApp`; `loadAppArtifact` also returns the permissions, the deployment body and warnings. The `jazz-tools` binary gains `generate [--check]` and `migrations create --name`, so apps without Node need nothing else.
+
+- 9ed3ad2: jazz-ffi opens backend clients: a Go or Rust machine syncing through the app's main backend with its own token (`"auth": {"credential": true}`), trusted or scoped as that backend decides, with `for_user` on trusted clients (`jazz_for_user`) and closing that first drains queued writes (`shutdown_within`, `jazz_close_within`). New error kinds under contract 2: `noAccount` and `unsynced`.
+- 8243dc5: jazz-ffi reports a trusted backend client's `for_user` refused for a permissions bundle the main backend doesn't serve as its own error kind, `bundleMismatch` (contract 2, with `own` and `served`; `refused` before), as TS's `code: "bundle_mismatch"`.
+- f02649f: jazz-ffi gains TS's lifecycle calls. Mergeable transactions (`begin_mergeable`, C `txBegin {"serializable": false}`), `disconnect` / `reconnect`, `deleteClientStorage`, and a `mutationErrors` watch reporting the writes the server refused that nothing waited on (TS's `onMutationError`).
+- 6caf068: **Native bindings core (`jazz-ffi`): Swift, Kotlin (UniFFI) and Go (C ABI) over `jazz-app-support`.**
+  - A JSON-in/JSON-out layer over `jazz-app-support` for languages other than Rust and TS: open an app from its `jazz.app.json` (as a local client, or as a backend acting as a session user), read with queries, insert/update/delete, and subscribe to deltas. UniFFI (pinned `=0.32.2`) generates the Swift and Kotlin sources; Go links a hand-written C ABI (`crates/jazz-ffi/include/jazz_ffi.h`).
+  - Contract v2 (additive; v1 stays valid): `include` (nested related rows) and `select` in queries, transactions (`JazzHandle.begin()` / C `txBegin`, `txCommit`, `txRollback`) whose reads see their own writes, read and durability tiers, `waitForSync`, and with `"contract": 2` in the open config the error kinds `permission`, `notSupported` and `conflict`.
+  - **Breaking when you regenerate Swift or Kotlin bindings:** `JazzError` gains the variants `Permission`, `NotSupported` and `Conflict`, so an exhaustive Swift `switch` or Kotlin `when` over it needs those cases or a default. `catch` clauses are unaffected, and hosts without `"contract": 2` never receive them.
+  - **Breaking for Swift and Kotlin listeners:** `SubscriptionListener.on_error` takes `(kind, message)` (`kind` as the C ABI's error kinds: `closed`, `refused`, `io`, and with contract 2 `permission`, `notSupported`, `conflict`) instead of `(message)`; implementations must adopt the new signature.
+  - `select` may read part of a large value (`{"column", "from", "to", "units"}` or `{"column", "at"}`). Beside `"*"`, the other `select` entries are now checked too: an unknown column next to `"*"` is refused, and so is a column named both whole and in part.
+  - Not supported yet (refused by name): connecting as an end user with a JWT, device accounts and sessions, mergeable-text edits, streamed files.
+
+- 5a24538: jazz-ffi subscription deltas carry each result's key: `$key` on added and updated rows, and `removedKeys` beside `removed`. Live unions that match a row in several arms now apply each occurrence on its own, and history subscriptions, no longer refused, deliver each accepted version as its own result. Hosts keyed by `id` keep working.
+- 6021245: jazz-ffi sessions: a `Session` (C `jazz_session_*`) over jazz-app's `JazzSession` follows who is signed in (the app's bearer, a device account, or no one) and hands out a handle for that user, which fails `Replaced` once the user changes. Snapshots as TS's, a session watch, device accounts, sign-out and retry. New contract 2 error kinds: `replaced` and `noUser`.
+- 0073d31: BREAKING CHANGE: Deployments refuse JSON column schemas that use a JSON Schema feature the browser can't check yet. These are `$dynamicRef`/`$dynamicAnchor`, draft 6/7 `contentMediaType`, the `idn-email`, `idn-hostname`, `iri` and `iri-reference` formats in drafts 4–7, and a few regex constructs in `pattern`/`patternProperties`: possessive quantifiers, `(?i)` anywhere but at the start of a pattern, the `x` flag, and Unicode class names spelled differently from JS (such as `\p{greek}`). Browser clients already refused such schemas; now every runtime treats them the same. The error names the column, the feature and where it sits in the schema.
+
+  The check runs on every deploy's target schema, so an app whose deployed schema already uses one of these features can't redeploy at all (not even a permissions-only change) until it replaces the feature. This only affects apps without browser clients, since browsers could never open such a schema. Stores whose schema already uses one still open and sync.
+
+- e8211d8: `jazz-tools generate` (npm and the Rust CLI) writes Kotlin bindings (`src/main/kotlin/JazzApp.kt`) for an app whose `build.gradle.kts` beside `jazz.app.json` depends on `jazz-kotlin`, or with `--lang kotlin`.
+- a3a6b5e: `jazz-tools generate` finds a Kotlin app by a Groovy `build.gradle` as well as a `build.gradle.kts`, and by a dependency on `tools.jazz:jazz-kotlin-android` as well as `tools.jazz:jazz-kotlin` (single or double quotes).
+- 1a3cf6a: Kotlin: `jazz.transaction { }` is mergeable by default, like TypeScript's (`serializable = true` for a transaction whose conflicting commit throws). Also: `disconnect()` / `reconnect()`, `deleteClientStorage()`, and `mutationErrors`, a Flow of writes the server refused that nobody waited on.
+- 0ce7ae1: jazz-kotlin and jazz-kotlin-android can publish to Maven Central as `tools.jazz:jazz-kotlin` and `tools.jazz:jazz-kotlin-android`, signed, at jazz-tools' version ("Publish jazz-kotlin", dry run first). Their Gradle builds now read that version from jazz-tools' `package.json` instead of hard-coding it.
+- 4a8231d: jazz-kotlin: `signOut()` leaves `session` reading `SignedOut`, even when jazz-ffi ends the session watch before it delivers the final `signedOut` state.
+- 3cdfe06: jazz-kotlin: text positions are UTF-16 code units (Kotlin's `String` indices) by default. `Edits.splice(column, from, to, …)` splices a text column in UTF-16 without naming the units, as `Column.range` already reads; `SpliceUnits.Utf8` and `SpliceUnits.Bytes` stay available.
+- 12b1cb6: Native clients and the native relay classify a server's connection errors the same way as the web client.
+- ceb389a: - A `jazz.permissions.json` policy that reads a computed field is now refused with a message saying so (`` `priority` is a computed field, which isn't stored, so a permission can't read it``), as the TS DSL's message did. That includes a relation's `outer.` column.
+  - `jazz.app.json` now refuses a relation over a column whose `references` names another table: before, it loaded, and the first query including the relation failed.
+  - `insert` now returns an omitted `bigint` column's default as a `bigint`, as reads do. Before, it was the default's decimal string.
+- 42c0f9c: `migrations create` now decides whether a schema change needs a migration with the same rule a deployment uses (Rust's `schemasAreCompatible`, exported from jazz-napi). Adding enum variants or adding `branchBy` to a table now writes a migration with no steps instead of only a snapshot; before, deploying such a change over a store on the earlier version failed with "disconnected roots". A project that already recorded such a change as a snapshot only, before this release, still has no migration between those two snapshots: `migrations create` diffs against the latest snapshot only, so it won't write that one.
+- 0c965af: `migrations create` now takes a stub's steps from the Rust diff (`migrationDiff` in jazz-napi) that `jazz.app.json`'s `migrations create` uses: table renames, possible column renames, defaults and refusals are decided once. Moving a kept column's reference to another table is now refused with the alternative, instead of writing a stub that a deploy refuses. A table whose rows pass unchanged gets a comment naming what changed (`// Rows pass unchanged: only branchBy changed.`). Removing a column from `branchBy` or changing a branch column's default is now refused at `migrations create`, as a deployment refuses it, instead of writing a stub no deploy accepts.
+- 76bc5f1: Rust: `jazz::tools::deployment::published::client_migrations_module`, which read a `migrations/index.ts` from Rust, is removed with that module (alpha.66 keeps an app's history and migrations in `jazz.app.json`). Load the file with `jazz::tools::deployment::artifact::load_client`, or lower the compiled schema generated bindings embed with `published::lowered_client_migrations`. `artifact::client_migrations` is removed too; use `load_client`.
+
+  `jazz-napi` adds `schemaHash(engineSchemaJson)`, the engine's hash of a schema (not `schemaSourceHash`, which hashes the `jazz.app.json` file). The app-file loaders also refuse:
+  - a migration that moves a kept column's reference to another table (one that follows a table the same migration renames is fine);
+  - an index naming a column the table doesn't have, or a computed field.
+
+- 2c616d8: `jazz.permissions.json` refuses `maxDepth` on `allowedTo` along a reverse relation (`allowedTo.read(<reverse relation>, maxDepth: n)` or `allowedTo.read(via t.col, maxDepth: n)`), as the TS DSL did, instead of accepting a bound the engine then dropped. It also caps a recursive relation's `maxDepth` at 64, as the DSL's `gather` did.
+- 077b28f: React Native: `pendingUploads` (and the upload status) now count writes the relay store recovered after an app restart. Previously a new foreground answered from its own, initially empty, store only and reported 0 pending uploads while unconfirmed writes were still waiting to sync.
+- c13fe23: **Rust: the generated bindings re-export `jazz-app-support`.** `src/jazz_app.rs` now starts with `pub use ::jazz_app_support::*;`, so app code names everything through one module: `jazz_app::Jazz`, `jazz_app::Config`, `jazz_app::Result`, `use jazz_app::{Jazz, Todo, todos};`. The bindings' own items win where a name is the same (a table `errors` is still `jazz_app::Error`; the crate's stays `jazz_app_support::Error`). Existing bindings keep working; the next `npx jazz-tools generate` adds the line. `jazz_app_support::Result` now defaults its error (`Result<T, E = Error>`), so std's two-parameter `Result<(), String>` still works where the bindings or the crate are glob-imported. The bindings format is unchanged.
+- 0d1f22f: **Rust: reads made for a user evaluate with that handle's own claims.** Reads through a session-scoped client (`JazzClient::for_session`, and `jazz-app-support`'s `for_user` built on it) now carry their session's claims with each read, as the TypeScript runtime's do. Several handles acting for the same user with different claims each read by their own. Writes carry their claims as before.
+- 1cf4cc0: **Breaking (Rust): subscription deltas carry a `key`; history reads can be subscribed to in `jazz-app-support`.**
+
+  Subscribe to history reads, as in TypeScript. `jazz.subscribe(todos::history().id(id))` streams each accepted version as a row of its own, and new versions arrive as they are accepted. Subscription deltas now name the result they change with `key` (on `Added`, `Updated` and `Removed`), and `Rows::apply` applies them by key. A live union that holds a row once per matching arm now keeps each occurrence right.
+
+  Migration: `Added`, `Updated` and `Removed` gain a `pub key: ResultKey` (re-exported as `jazz_app_support::ResultKey`) and are now `#[non_exhaustive]`. Destructure them with `..` (`Added { row, .. }`); they are delivered by subscriptions and not built by callers.
+
+- f3a76d4: **Rust: `order_by`, `limit` and `offset` before a `hop_to` apply to the rows it reaches**, as in TypeScript, where a query has one order and window applied to the rows it ends on. `jazz-app-support` used to refuse them with `Error::Unsupported`.
+- 687e0d4: **Rust: hopTo, gather, union, includeDeleted and history in `jazz-app-support`.** A typed query now covers the rest of the TypeScript client's query forms.
+  - **Hops.** `todos::query().filter(...).hop_to(todos::project_relation())` yields a `Query<Project>`: the rows a forward relation references, or, for a reverse relation, the rows that reference them. Hops chain. Filters, order and window after a hop apply to the rows it reached.
+  - **Gather.** `todos::query().id(leaf).gather(todos::parent_relation(), 10)` reads the rows a forward relation reaches recursively, up to a depth, seeded by the query's filters. `Step::via(edge_from, edge_to)` steps through an edge table, and `Step::filter` narrows the rows a step goes through.
+  - **Union.** `Query::union([a, b])` (or `Query::union_named` with labels) reads several queries of the same table. Like TypeScript's `union`, it takes only `order_by`, `limit` and `offset`.
+  - **Deleted rows.** `.include_deleted()` reads deleted rows too. `jazz_app_support::deleted_at()` is the column that tells them apart.
+  - **History.** Each table module has `history()`, a `Query<Version<Row>>` over the row's accepted versions. Each `Version` holds the row, the `transaction_id` that wrote it and when the authority accepted it (`accepted_at`). `.accepted(range)` and `.order_by_accepted_at(...)` filter and order versions by acceptance time. Subscribing to history is not supported yet.
+  - **By name.** `jazz_app_support::untyped::Query` builds the same queries from table and column names (`Table`, `Hop`, `GatherStep`), for bindings in other languages. The typed `Query<T>` wraps it, and `untyped::transaction_id` and `untyped::accepted_at` decode history metadata.
+  - Combinations TypeScript refuses (modifiers on a union, `include` after `gather`) fail with `Error::Unsupported`. `Query::into_untyped` now returns a `Result`.
+
+  Rust bindings move to format 4, which adds `history()` and reserves it as a function name. Regenerate them with `jazz-tools generate`.
+
+- 5fc7019: **Rust (`jazz-app-support`): the HTTP stream fallback.** A Rust client of an app's main backend (a backend client, or a user signing in through its `/jazz`) now falls back from the WebSocket to the backend's HTTP stream, as TypeScript clients do, on hosts that can't upgrade sockets:
+  - **When it switches:** a socket that fails before opening asks the backend. A `createJazz` backend that can't upgrade sockets says so, and the client switches at once. If the backend says it upgrades sockets but 3 in a row fail anyway (2 that get no answer), something in between doesn't pass upgrades on, and the client switches then.
+  - **How long:** the switch lasts while the client runs. A stream refused before it opens switches back to sockets.
+  - **Idle sessions:** an idle stream session isn't given up after the socket's 45 s of silence, since a backend sends nothing on an idle stream.
+  - **Credentials:** each stream request carries the bearer the session connected with. When the client renews its bearer (at 80% of the token's life), it replaces the stream session with a new one carrying the fresh bearer, as it reconnects a socket. A new session at each renewal is expected, not a dropped link.
+  - **Other failures:** a socket that fails for any other reason fails as before.
+
+- 6812de2: **Rust: includes and select in `jazz-app-support`.** A typed query now includes related rows and reads partial rows, as `.include(...)`, `requireIncludes` and `.select(...)` do in TypeScript.
+  - **Includes.** `todos::query().include(todos::project_relation())` yields `(Todo, Option<Project>)` per row. A reverse relation includes a `Vec<U>`. Each further `include` adds a tuple element, up to eight. `.require()` works as TypeScript's `requireIncludes` does. On a forward relation whose column is not null, it includes the row itself (`(Todo, Project)`) and keeps only the rows whose referenced row is there. On a nullable one, the include stays an `Option` and every row is kept. Generated bindings mark nullable relations as `One<T, U, Nullable>`.
+  - **Array relations.** A relation over a `uuid[]` column is generated as `Refs<T, U>` and includes a `Vec<U>`. `.require()` on a not-null one keeps only the rows whose every referenced row is there, and `referencing(id)` filters by a referenced row.
+  - **Shaping an include.** `relation.with(query)` filters, orders, limits, offsets, selects or nests the included rows, for example `projects::todos_via_project().with(todos::query().filter(...).include(todos::parent_relation()))`.
+  - **Select.** `todos::query().select((todos::title(), todos::done()))` yields `jazz_app_support::Partial<Todo, (String, bool)>`, which holds the row's id and the selected values in order. A single column yields its value. A transformed column is selected as its stored value, as columns are typed everywhere in Rust, unlike TypeScript, which gives the view value.
+  - **Everywhere a query goes.** `all`, `one` and `subscribe` take these queries, and `Rows` keeps subscribed rows with includes in order.
+
+  Rust bindings move to format 3, which adds `Table::COLUMNS`. Regenerate them with `jazz-tools generate`.
+
+- 595164d: **Rust: permission advice.** `jazz.can_read::<X>(id)`, `can_insert(NewX::new(…))`, `can_update(id, XUpdate { … })` and `can_delete::<X>(id)` ask the server whether this user may do that, without doing it, like TS's `canRead`, `canInsert`, `canUpdate` and `canDelete`. They return `Advice::Allowed`, `Denied` or `Unknown` (`Unknown` when no server can say). The answers come from `JazzClient::permission_advice`.
+- 1153a7a: **Rust (`jazz-app-support`): a server serving another history is reported as `authority-changed`, as TypeScript reports it.** This happens when the server's store was recreated, or it's another app's server.
+  - **What the client does:** it stops syncing with that server. `jazz.sync_status()` reports `Offline { reason: AuthorityChanged, retrying: false }` and `last_error: AuthorityChanged`, serialized as `"authority-changed"`.
+  - **Local data:** local reads and writes keep working, and unsynced writes are kept. Nothing is reset automatically.
+  - **Resyncing with the new server:** delete the local store and open the client again.
+  - **Before:** the link stayed up while nothing synced over it.
+
+  In the `jazz` crate, `JazzClient::upstream_refusal()` says why the database stopped the link.
+
+- 444e021: **Rust (`jazz-app-support`): a trusted backend client acts for users only when its permissions match the ones its main backend serves.**
+  - **Why it matters:** the reads of users it acts for (`for_user`) are evaluated by the client, against the `jazz.permissions.json` it was opened with. A stale or laxer copy would widen what they return.
+  - **What changes:** when the main backend names the bundle it serves (`X-Jazz-Bundle` on `backend/admit`), a client opened with different permissions fails `for_user` with `Error::BundleMismatch { own, served }` (TypeScript's `bundle_mismatch`).
+  - **Unaffected:** its own system reads and writes.
+
+- 95de331: **Rust (`jazz-app-support`): backend clients.** A trusted machine can now sync with an app through its main backend's `/jazz`, as TypeScript's `createJazzClient({ serverUrl, credential })` does.
+  - **Opening:** `Config::new(app_id).server("https://my-app.com/jazz").credential(provider)` opens as a backend client. It needs the app's `jazz.permissions.json`, as `createJazzClient` takes `permissions`. `provider` gives a fresh machine credential, such as an OIDC workload token, for every connection and request.
+  - **Trusted or scoped:** the main backend's `backendClients` (`trustWorkload`) decides, and `jazz.backend_client()` reports which.
+    - A trusted client acts as the system.
+    - A scoped client acts as its one user.
+    - A credential trusted as neither fails with `Error::Refused`.
+  - **Acting for a user:** `jazz.for_user(user_id, claims)` on a trusted client returns a handle that reads and writes as that user, under their permissions. It never creates an account:
+    - a user with none fails with `Error::NoAccount`;
+    - an identity the main backend refuses fails with `Error::Refused`.
+  - **Closing:** `jazz.close(timeout)` waits for queued writes to reach the backend, then stops (`CLOSE_TIMEOUT` is 10 s). With an in-memory store, writes that never arrived are lost, and it fails with `Error::Unsynced { pending }`. `Duration::ZERO` closes at once and accepts that loss.
+
+- ce9b7f7: **Rust: a branch option on reads.** `ReadOptions::branch(view)` reads through a branch view, as TS's per-call `branch` and `base` query options: `jazz.all_with_options(query, ReadOptions::default().branch(Branch::from("draft").over("main")))`, and the same for `subscribe_with_options`. A frozen base (`over_snapshot`) and the other read options combine with it.
+
+  **Changed:** `OnBranch::all`, `one`, `get` and `subscribe` (from `Jazz::on_branch`) now read at the client's default tier, the same one `Jazz::all` and `Jazz::subscribe` use. On a backend or backend client that means the server's answer (`Remote`), where they used to read local data first. `all_with(query, tier)` and `subscribe_with(query, tier)` still read at the tier you give them.
+
+- 399e817: **Rust: branch reads in mergeable transactions.** With the core fix, `tx.on_branch(view)` in `Jazz::transaction` reads through the branch view too, staged writes included, so its `get`, `all`, `upsert` and `restore` work. In `serializable_transaction` a branch read is still refused (jazz#5806), and `upsert`/`restore` through a branch fail before staging.
+- 53f8fa8: **Rust: branches and drafts.** `jazz.on_branch(view)` gives a handle that reads and writes through a branch view, as TS's `branch` and `base` options: `jazz.on_branch(Branch::from("draft").over("main"))`. Its `all`, `one`, `get` and `subscribe` see the head's rows, falling back to the base's; its `update`, `upsert` and `delete` land in the head, copying an inherited row first; `insert` and `restore` land in the head too. A `Branch` is a scalar for a schema with one branch column (`Branch::from("draft")`), or qualified: `Branch::by(documents::workspace_id(), ws).and(documents::branch_id(), id)`.
+
+  `jazz.capture_snapshot()` returns a `Snapshot` for a frozen base (`Branch::over_snapshot(base, snapshot)`), stored as TS's `serializeSnapshotRef` string with `to_persisted` / `from_persisted`. `Transaction::on_branch(view)` writes into branches inside a transaction.
+
+  `JazzClient` gains `on_branch(head, base)`, `branch_selector`, `branch_columns` and `capture_snapshot`. Not supported yet through a branch: reads inside a transaction, streaming inserts and byte-range reads; they fail with an error.
+
+- 39d6f5a: **Rust (`jazz-app-support`): reads that name no tier now read as TypeScript's do.** This applies to `jazz.all`, `one`, `get` and `subscribe`.
+  - **A backend, or a backend client opened with `Config::credential`:** reads the server's answer (`ReadTier::Remote`), as TypeScript does in a server runtime. Before, a backend client never saw rows other clients had written unless it asked for `ReadTier::Remote` itself.
+  - **An end user's client (`Config::user`):** reads local data first, and its first load waits up to `DEFAULT_FIRST_LOAD_REMOTE_WAIT` (5 s) for the server, as TypeScript's browser and React Native clients do.
+  - **No server:** reads stay local.
+
+  `ReadOptions` that name no tier follow the same defaults. `all_with(query, tier)` and `subscribe_with(query, tier)` still read exactly at the tier they name. Reads inside a transaction stay local. To get the old behaviour, call `all_with(query, ReadTier::LocalFirst)`.
+
+- a8a3ab1: **Rust: `delete_client_storage()` leaves nothing behind on unix.** It used to leave an empty `jazz.lock` in the store directory; on Linux and macOS it now removes it last, while still holding it, as TS's `deleteClientStorage` leaves nothing. An app that opened the lock file just before then takes its lock again on the current file, so the guard against deleting a store another process has open still holds. On Windows the lock file stays, as before.
+- 9bbb871: **Rust (`jazz-app-support`): end-user clients, signed in with a device account or the app's bearer.**
+  - **Connecting:** an end user's client opens with `Config::new(app_id).server("https://app.example/jazz").user(auth)`. It syncs through the app backend's `createJazz` endpoint, as a browser does.
+  - **Device accounts:** `Auth::Device(DeviceKey::generate()?)`, or `DeviceKey::load_or_create(path)` on a host without a keychain.
+    - The key is the account. It reads and writes as `jazz-auth-v1:…`, the same form as TypeScript's `exportDeviceKey`.
+    - The client mints its self-signed tokens and renews them itself.
+  - **Bearer:** `Auth::bearer(|reason: TokenReason| async move { Ok(my_auth.token(reason.is_fresh()).await) })`.
+    - The backend's `authenticate` names the user from the token.
+    - The provider is asked again before a JWT expires (`Renew`), and for a new token when the backend refuses one (`Expired`) or on `refresh()` (`Refresh`).
+    - When it returns `None`, the user is signed out.
+  - **Session:** `jazz.session()` gives the state (`SignedIn`, `Expired` or `SignedOut`) and a stream of its changes, plus `refresh()`. `jazz.sign_out()` signs the user out.
+  - **Sync status:** `jazz.sync_status()` and `jazz.sync_changes()` report `LocalOnly`, `Connecting`, `Connected` or `Offline { reason, retrying }`.
+
+  A `Config::server` without `backend` or `user` is now a configuration error.
+
+- f6fb77d: **Rust (`jazz-app-support`): the native `/jazz` endpoint is unstable, behind the off-by-default `unstable-endpoint` feature. It is not part of alpha.66 and will ship in a later release.**
+
+  The endpoint includes `Endpoint`, `serve_socket`, the `axum` router, `for_user` and `backend-link`. Its code stays in the tree and is tested in CI with the feature on, but the default build doesn't export it. Run an app's main backend with TS `createJazz`; from Rust, connect as a client.
+
+- c2433d3: **Rust: a user's handle leaves the shared client's lifecycle alone.** On a handle from `Endpoint::for_user`, `disconnect()`, `reconnect()`, `mutation_errors()` and `delete_client_storage()` now fail with `Error::Unsupported`: the handle shares the backend's trusted client with every user, so they would move its link for all of them, show every user's refusals, or (for `delete_client_storage`) report success having done nothing. Call them on the backend's own handle.
+- 311fbc3: **Rust (`jazz-app-support`): `JazzSession`, a user-following session, as TypeScript's `JazzSession`.**
+  - **Opening:** `JazzSession::open(files, SessionConfig::new(app_id).server(url).storage(..).bearer(provider))`.
+  - **Following the app's backend:** the session follows the user the app's bearer names. Call `refresh()` when the app's own auth changes.
+    - The same user keeps the same `Jazz`.
+    - Another user gets their own, and the old one fails with `Error::Replaced`; its subscriptions end.
+    - No user signs out a backend user, but keeps a device guest.
+    - A user who has no account yet, while a guest is signed in, gets the guest linked to them, keeping its data (`link_guest`, on by default, as TypeScript's `linkGuest`). A link the backend refuses for good signs them in on their own account instead, once. With `link_guest(false)`, the guest stays for the app to link with `link_device_account`.
+  - **Device accounts:** `create_device_account`, `restore_device_account(key)`, `reopen_device_account`, `link_device_account` and `export_device_key`.
+  - **State and lifecycle** (status strings as TypeScript's: `signed-out`):
+    - `snapshot()` and `changes()` give the status (`starting | ready | signed-out | transitioning | error | closed`), the user, a `clientEpoch`, and a failed operation's `error` and `recovery`.
+    - `jazz()` gives the signed-in user's `Jazz`, or `Error::NoUser { status }`.
+    - Also `sign_out`, `retry` and `close`.
+  - **Storage:** with `Storage::Dir(dir)`, each account's store lives in `dir/<account id>/`, and the device key in `dir/device.key`.
+  - **Runtime:** every operation runs on the session's own runtime, so it can be called from any executor.
+
+- bf17da6: **Rust: large values.**
+  - **`jazz.insert_streaming(new, column, chunks)`**, **`update_streaming(id, update, column, chunks)`** and **`upsert_streaming(id, new, column, chunks)`** write a bytes or text column from an async `Stream` of chunks, like TS's `insertStreaming`. Each chunk is stored as it arrives, between the client's other calls, so the value is never held whole. A failing stream abandons the upload with `Error::Upload`.
+  - **`jazz.splice(id, column, Page, splices)`** and **`jazz.json_set(id, column, edits)`** (and `tx.splice` / `tx.json_set`) edit bytes, text and json cells in place, like TS's `update(…, { applyDiffs })`.
+  - **`JazzClient` streaming uploads:** `begin_streaming_upload`, `push_streaming_upload`, `finish_streaming_upload` and `abort_streaming_upload` drive the core's resumable uploads.
+  - **Not supported yet:** streaming inside a transaction, and edits combined with whole-column replacements in one update.
+
+- 91cd2a3: **Rust: mutation errors, disconnect/reconnect, deleting client storage, text anchors.**
+  - **`jazz.mutation_errors()`:** a `Stream` of the writes the server refused that no durable wait handled, like TS's `onMutationError`. Refusals that arrived before the first listener are delivered to it (the last 1024). Each stream holds up to 1024 unread refusals; drops are logged with `tracing::warn!`.
+  - **`jazz.disconnect()` / `jazz.reconnect()`:** leave the server and resume sync, as TS's `disconnect`/`reconnect` do. Local reads and writes go on while disconnected. Without a server both do nothing.
+  - **`jazz.delete_client_storage()`:** stops the client and deletes its local store, like TS's `deleteClientStorage`. While another open app has the same store directory (in this process, or another one through a `jazz.lock` file lock) it fails with `Error::StoreHeld`, as TS refuses with `StoreHeldByAnotherTabError`.
+  - **`jazz_app_support::text`:** re-exports `jazz-text`'s anchors and ranges, like TS's `db.textAnchors()`.
+  - **`JazzClient`:** gains `disconnect` and `reconnect`. `MutationError` serializes (camelCase, `transaction` as its string id).
+
+- c3d338e: **Rust (`jazz-app-support`): link a device account to the user's own sign-in.** `session.link(bearer)` carries a device account over to the user the app's backend names from `bearer`, so the account and its data move with them. It works as TypeScript's `linkDeviceAccount` does, through the `backend-link` challenge.
+- 5a4aa8e: **Rust (`jazz-app-support`): a link the app's backend refuses for good now fails with `Error::Refused`.** That covers a user who already has another account. It used to be `Error::Server`, which hosts retry as a network failure. A bearer that names no one is still `Error::SignedOut`.
+- 96ea2e7: **Breaking (Rust): `jazz.transaction(…)` is now mergeable, as TS's `transaction` is.** Where you relied on the commit being refused when something it read changed, switch to `jazz.serializable_transaction(…)`.
+  - **`jazz.transaction(…)` is now mergeable,** like TS's `transaction`. Its writes commit together, each merging with concurrent writes, and its reads see local data together with its own staged writes.
+  - **`jazz.serializable_transaction(…)`** is TS's `serializableTransaction`. The server refuses its commit when anything it read or wrote changed in the meantime.
+  - **`JazzClient::begin_mergeable_transaction`** sits beside `begin_transaction`, which stays serializable.
+
+- 89a7885: **Rust: transactions driven call by call.** `jazz.begin_transaction()` and `begin_serializable_transaction()` return an `OpenTransaction`, like TS's `beginTransaction` / `beginSerializableTransaction`. It's a `Send` handle with `insert`, `update`, `upsert`, `delete`, `restore`, `all`, `one`, `get`, `commit` and `rollback`, and dropping it uncommitted rolls it back.
+- 0ac5c8e: **Rust (`jazz-app-support`): more typed queries, and new rows take their required columns.**
+  - **Comparisons** take whatever converts into the column's type: `todos::title().eq("milk")`, and `todos::priority().gte(3)` on a nullable column.
+  - **New filters:** text and array columns have `contains`; nullable columns have `is_not_null`.
+  - **Built-in columns:** `jazz_app_support::id()`, `created_at()` and `updated_at()` (and each table module's `id()`) work in filters and `order_by`.
+  - **Panics:** a call that panics fails with `Error::Panicked`, and the client keeps running.
+
+  **Breaking for generated Rust bindings (format 2):**
+  - **`NewX`** derives `Default` only when every column may be left out, so a required column is never filled in silently. `NewX::new(…)` takes the required columns: `NewTodo { description, ..NewTodo::new(title, false) }`.
+  - **Module functions:** a column named `query` or `id` gets `query_column()` / `id_column()` in its table module.
+  - **`is_in`** takes anything whose items convert into the column's type. An empty literal (`is_in([])`, `is_in(Vec::new())`), or an `.eq(x.into())`, now needs a type annotation.
+  - **Regenerating:** run `npx jazz-tools generate` to update `src/jazz_app.rs`.
+
+  A `Cargo.toml` now marks a Rust app only when the crate depends on `jazz-app-support` in `[dependencies]` (or a target's dependencies). Workspace, dev- and build-dependencies don't count.
+
+  The docs gain a Rust Backend setup page, and Rust tabs on the reading and writing pages.
+
+- f554fce: **Rust: read options.** `jazz.all_with_options(query, ReadOptions)` and `subscribe_with_options(query, ReadOptions)` cover TS's query options:
+  - `ReadOptions::tier(…)`;
+  - `wait_for_remote(Duration)` (TS's `firstLoadRemoteWaitMs`);
+  - `splices(column)` (TS's `splices`), so a subscription's `Updated` carries a column's changes as `splices`.
+
+  `ReadOptions::wait_for_remote` is for local-first reads. Combined with `tier(Remote)` it is refused, and so is a `Remote` read on an app with no server, instead of hanging. **Breaking:** `Updated` gains a `splices` field and is now `#[non_exhaustive]`, so match it with `..`.
+
+- 43e8bf0: **Rust: partial reads of large values.** `query.part(column, ValuePart::…)` reads a column only in part, like TS's partial select. That covers a byte range of a bytes column, a UTF-8 or UTF-16 range of a text one, or the subtree at a JSON pointer of a json one. Only the chunks the part covers are read. A column a computed field is computed from is read whole, so the computed field stays right, as TS re-reads it in full. A part inside an include's query reads the included rows' column in part. Generated bindings also allow `unused_variables`, so a table with computed fields and no transforms compiles under `-D warnings`.
+- b4a760c: **Rust: serializable transactions read back their writes through a branch.** In `serializable_transaction`, `tx.on_branch(view)`'s `upsert`, `restore` and `restore_with` now return the row as it reads through the view, as they already do in a mergeable transaction. Before, they were refused before staging.
+- 0bc77ba: **Rust: streaming uploads inside a transaction.**
+  - **`tx.insert_streaming` / `update_streaming` / `upsert_streaming`** on `Transaction` and `OpenTransaction` stream a bytes or text column into a row staged in the transaction, as TS's `tx.insertStreaming` does. The row commits with the transaction and rolls back with it; an upload dropped mid-stream is aborted and leaves the transaction usable.
+  - **`JazzClient::begin_streaming_upload`** now works on a transaction's client: `finish_streaming_upload` stages the row in that transaction (returning no commit id) instead of refusing.
+
+- d6d60c5: **Rust (`jazz-app-support`): sync status matches TypeScript's `SyncStatus`.**
+  - **Fields:** `jazz.sync_status()` now reports `pending_uploads`, `oldest_pending_at`, `rejected`, `last_error` and `synced` alongside `link`, and serializes them the same way TypeScript does.
+  - **Link:** it reads as `Connecting` while a dropped link retries, until an outage is published, so a short blip never shows as offline. `link.state` is `local-only`, `connecting`, `connected` or `offline`, and `Offline.reason` is `network`, `auth`, `stopped` or `disconnected` (kebab-case, as in TypeScript).
+
+- 991244c: **Rust: mergeable text editing.**
+  - **`jazz.edit_text(id, tasks::notes(), edited_from, text)`** (and `tx.edit_text` in a transaction) sets a text column as an edit of the value its writer saw, as TS's `update(…, { editedFrom })` does. On a `"merge": "text"` column, the edit is merged over changes the writer hadn't seen.
+  - **`JazzClient::update_with_edits`** applies a row update together with large-value edits: text edits, splices and JSON sets.
+
+- e8c1bdf: **Rust: in-place edits together with other column changes.**
+  - **`jazz.update_edited(id, update, Edits::new().edited_from(tasks::notes(), shown))`** applies the update's text columns named with `edited_from` as edits of the values given, and its other columns as plain sets, in one row update, as TS's `update(table, id, data, { editedFrom })` does.
+  - **`Edits::splice`** and **`Edits::json_set`** add splices and json sets to the same update, as TS's `applyDiffs` does. A column can't be both set and diffed.
+  - Also on `Transaction` and `OpenTransaction`.
+
+- 89510f0: **Rust (`jazz-app-support`): durability, upsert, restore and transactions that read.**
+  - **`jazz.durable(DurabilityTier::GlobalServer)`** gives a handle whose writes (`insert`, `update`, `delete`, `upsert`, `restore`, `transaction`) return only once the server accepted them, and fail if it refused them. Without a server, they are refused before anything is written.
+  - **`jazz.wait_for_sync()`** waits until every write committed so far reached the server and fails if the server rejected one, like TS's `waitForSync` (`JazzClient::wait_for_sync`).
+  - **`jazz.upsert(id, NewX::new(…))`** writes a row with a chosen id, or replaces its columns.
+  - **`jazz.restore::<X>(id)`** brings a deleted row back, and **`restore_with(id, NewX::new(…))`** brings it back with new values (the full row, like TS's `restore(table, id, data)`). Each returns the row.
+  - **Breaking: `jazz.transaction` takes an async closure,** `|tx| async move { … }`, so the body can read with `tx.all`, `tx.one` and `tx.get` as the transaction sees the data. `Transaction` gains `upsert`, `restore` and `restore_with`, which return the row. A body that panics rolls back and fails with `Error::Panicked`.
+  - A write's future runs to its end on the client's thread: dropping it doesn't cancel the write.
+
+- eb8bc44: **Rust: a typed client for a Jazz app, opened from its files.** The new `jazz-app-support` crate opens an app from its `jazz.app.json`. `jazz-tools generate` now also writes Rust bindings, `src/jazz_app.rs`, when a `Cargo.toml` sits beside `jazz.app.json`. It writes them from `jazz_codegen::rust`, and `jazz_codegen::rust::build()` generates them from a `build.rs` instead.
+  - **The bindings.** Per table there is a row struct, a new-row struct and an update struct, and a module of typed columns, relations and queries. A `Computed` trait declares the app's computed fields and transforms. `open(config)` returns a `Send + Clone` `jazz_app_support::Jazz` that can sit in an Axum router's state.
+  - **The API.** Typed `all`, `one`, `get`, `insert`, `update` and `delete`, transactions, and `subscribe`, which returns a `futures::Stream` of typed deltas.
+  - **Backends.** Opened as the app's backend (`Config::backend`), it publishes the app's permissions bundle at startup with the admin secret, as `createJazz` does. It then admits the user it acts as with the backend secret, and pins that session to the bundle.
+  - **Not supported yet.** Connecting to a server as an end user (JWT), includes and reads inside transactions are refused with "not supported yet".
+
+  `examples/todo-server-rs` uses the new crate: it no longer needs `JAZZ_BUNDLE`, `schema.ts` or the `jazz-tools schema compile` shell-out, and it takes `JAZZ_ADMIN_SECRET`.
+
+- eb8bc44: **Breaking (Rust `jazz` crate):** rows delivered by `JazzClient` subscriptions (`jazz::tools::Row`) now always carry their decoded `fields`, not only with the `testing` feature. As a result, `Row` no longer implements `Eq` (it is still `PartialEq`), and code that builds a `Row` with a struct literal must set `fields` (or use `Row::new`).
+- f139f23: **Rust: `select` reads a transformed column as viewed.** In `jazz-app-support`, selecting a column with a transform now yields its view value through the app's transform, as a full row and TypeScript do. For example, `tasks::query().select(tasks::due_at())` yields the `String` the `isoDate` transform makes, where it used to yield the stored `Timestamp`. Conditions still compare the stored value. Generated bindings type such a column `Column<Task, Option<Timestamp>, DueAtView>`, where `DueAtView` is a generated `jazz_app_support::Pick`. Regenerate bindings that declare transforms with `jazz-tools generate`.
+- 2c7f46d: **Rust: reads made for a user also apply the user's read policy to related rows and to reads inside a transaction.** For a session-scoped client (`JazzClient::for_session`, and `jazz-app-support`'s `for_user`):
+  - a local one-shot read with array relations nests only the related rows that user may read, as their subscriptions do;
+  - a read inside a transaction opened from that client reads as that user, with that handle's claims.
+
+  This matches the TypeScript runtime.
+
+- 7685683: **Rust: text offsets are UTF-8 bytes (`str` indices) throughout `jazz-app-support`.**
+  - **Splices:** `Page::text(from..to)` and `Splice::text(at, delete, "…")` build UTF-8 pages and splices for `jazz.splice`, `tx.splice` and `Edits::splice`. A UTF-8 offset inside a code point is now refused with the new `Error::TextOffset` instead of a generic write error (the core refuses it for every host, reading only the bytes at the splice's ends). `Page::TextUtf16` stays for interop.
+  - **Partial reads:** `ValuePart::text(from..to)` (and `ValuePart::bytes`) build a UTF-8 (byte) range for `Query::part`; `ValuePart::TextUtf16` stays for interop.
+  - **Subscription splices:** `ValueSplice::at`/`delete` are UTF-8 bytes on text columns, documented as the Rust fields; `at_utf16`/`delete_utf16` are for UTF-16 hosts.
+  - **Text anchors:** `Anchor::capture_utf8`/`resolve_utf8` and `Range::capture_utf8`/`resolve_utf8` take and return UTF-8 byte offsets, refusing an offset inside a code point with `NotCharBoundary`. The anchors are the same as the UTF-16 ones, so they are shared with TypeScript clients.
+
+- f357519: **Rust: a rejected write carries TypeScript's `code` and `reason`.** In `jazz-app-support`, a durable write, a transaction, or `wait_for_sync` that the server rejects now fails with `Error::WriteRejected { code, reason, .. }` (like TS's `PersistedWriteRejectedError`). Each `MutationError` also has `code` and `reason` (like TS's `MutationErrorEvent`). The codes are TS's, so a program can match on them: `permission_denied`, `serialization_conflict`, `transaction_conflict`, `client_clock_too_far_ahead`, and `write_rejected` for any other rejection.
+
+  **Breaking:**
+  - `jazz::tools::JazzError` is now `#[non_exhaustive]` and has a new `WriteRejected { code, reason }` variant: a `match` on it needs a wildcard arm.
+  - A policy or conflict rejection from `JazzClient::wait_for_transaction` or `wait_for_sync` is now `JazzError::WriteRejected` (in `jazz-app-support`, `Error::WriteRejected`) instead of `JazzError::Sync(..)` / `JazzError::Write(..)`, and its message reads `Write rejected (permission_denied): …`. Code that matched the old variant or message, such as `Sync(message) if message.ends_with("authorization_denied")`, still compiles but no longer matches: match on `WriteRejected { code, .. }` instead.
+  - `jazz::tools::MutationError` has new public fields `code` and `reason` and is now `#[non_exhaustive]`: it can no longer be built with a struct literal or destructured without `..` outside `jazz`.
+
+- 6d62bb5: New `startJazzClient(config)`: opens a Jazz session and returns it at once, while it starts (`status: "starting"`), so an app without a framework provider can show a loading screen and a failed-to-start screen from the session's own state. A failed start leaves the session in `error` (the cause in `snapshot.error`) and `retry()` starts it again; unlike `createJazzClient`, it doesn't close the session, so call `close()` when you are done. Available in the browser, React Native and Expo entries, and works with `<JazzProvider session>`. `createJazzClient` is unchanged: it resolves once the session started and rejects on a failed start.
+
+  Fix: a `retry()` called from a session observer the moment a failed start shows (for example an app that retries on its own) now starts again; before, it got the failed attempt back.
+
+- e92344a: jazz-codegen gains a Swift back end (`JazzApp.swift`, not yet available from `jazz-tools generate`): a `Codable` row struct, insert and patch structs and a typed query builder per table. Computed fields and transforms are refused as not supported in Swift yet.
+- 876c3b0: `jazz-tools generate` writes Swift bindings (`JazzApp.swift`) for an app whose `Package.swift` beside `jazz.app.json` depends on Jazz (the `jazz-swift` package), or with `--lang swift`. See the Swift setup page for the Jazz Swift package and what's not supported yet.
+- 8e279be: Jazz for Swift follows TS's lifecycle: `transaction` is mergeable (its commit merges with concurrent writes and is never a conflict), with `serializableTransaction` for the serializable kind; `disconnect()` and `reconnect()`; `deleteClientStorage()`; and `mutationErrors`, a stream of the writes the server refused that nothing waited on (TS's `onMutationError`).
+
+  **Behaviour change:** `transaction` was serializable and is now mergeable, as everywhere: concurrent transactions on the same rows both commit instead of one throwing `JazzError.conflict`. Use `serializableTransaction` for the old semantics.
+
+- b3cd2ff: Jazz for Swift: every call is plain `throws` instead of `throws(JazzError)`, since Swift 6.1 (Xcode 16) crashes compiling callers of typed-throws async functions. What a call throws is still a `JazzError`, but callers that relied on the typed error now need `catch let error as JazzError`.
+- ec3ab79: Jazz for Swift: sessions as TS's React layer. `JazzApp.session(appId:serverUrl:bearer:…)` (generated) makes a session that opens in the background; `session.client()` waits while the session starts and returns the signed-in user's client (`.noUser` when no one is), and `session.clients` follows each user, with `nil` on sign-out (TS's `followDb`). In SwiftUI, `JazzRoot(session) { … } signedOut: { … }` (TS's `<JazzProvider>`) shows your views with the signed-in user's client, `@JazzAll(query)` is a live query (`useAll`), and `@Environment(\.jazz)` / `@Environment(\.jazzSession)` are `useDb` / `useJazzSession`.
+- e8e799d: Jazz for Swift has `JazzSession`, as TS's: it follows who is signed in (a device account, your sign-in's bearer token, or no one), hands out a `Client` per user (`client()`, the same until `clientEpoch` changes), and has `snapshots`, `refresh()`, the device-account calls, `signOut()`, `retry()` and `close()`. `JazzError` gains `.replaced` (a client kept past a change of user) and `.noUser` (no one signed in); code switching over every `JazzError` case needs the two new cases.
+- 04f29f3: **Breaking:** `JazzText`'s `Int` (UTF-16) overloads of `insert(_:at:)`, `delete(_:)` and `replace(_:with:)` are removed. Jazz for Swift: `JazzText` edits take Swift's own positions. `insert(_:at:)`, `delete(_:)` and `replace(_:with:)` take `String.Index` / `Range<String.Index>` of `current`; `replace(_:with:)` also takes an `NSRange` (UTF-16, as `UITextView` gives it), and `replace(utf16:with:)` raw UTF-16 offsets; UTF-16 positions may split a character (a backspace removing one combining mark) and are refused only inside a surrogate pair. Pass `current`'s indices, or an `NSRange`.
+- ef21bb9: Transactions read through branch views ([jazz#5806](https://github.com/garden-co/jazz/issues/5806)). Inside a mergeable or serializable transaction, `tx.all` / `tx.one` with `branch` / `base` read the draft over its base, live or frozen (`base: [branch, snapshot]`), including the transaction's own staged writes. Before, such a read silently ignored the branch and returned rows outside the requested view.
+
+  A serializable transaction's commit is validated through the views it read, so a change under them is a `serialization_conflict`. It commits locally, offline included. It is only sent over a link that negotiated `FEATURE_SERIALIZABLE_BRANCH_READS` with the server. Against an older server, the client refuses it (`write_rejected`) before sending, instead of having it validated against the wrong rows.
+
+- 4fbb2ed: Unnamed `union([...])` arms are labelled once, in Rust (`jazz.union-arm-label.v2`), so TypeScript, Rust and FFI clients give the same union the same shape id. TypeScript no longer hashes arms itself; Rust's `Query::union` and FFI unions no longer number arms and refuse two identical unnamed arms (name them with `union({...})`, `Query::union_named` or an FFI arm `"label"`). Shape ids of unnamed unions change once.
+
+  Upgrade thin servers before clients: a new client's unnamed union labels are refused by older servers.
+
+- d5c4896: `db.waitForSync()` now rejects when a write committed before the call was refused, even if the refusal arrived before the call and later writes were accepted. Before, it resolved in that case, because it only waited for the writes still pending when called (jazz#5728). Each refusal is reported once, and one that the write's own `wait({ tier: "global" })` already reported isn't reported again. A refusal goes only to its writer's wait: on a backend, a `forReqUser` or `forSession` Db's `waitForSync()` reports that user's refusals and the backend's own `db` reports its own (before, a backend Db's `waitForSync()` didn't wait at all). Graceful shutdown doesn't fail on a refusal that settled before it. The same fix applies to Rust's `jazz.wait_for_sync()`.
+- Updated dependencies [492dd55]
+  - jazz-rn@2.0.0-alpha.66
+  - jazz-wasm@2.0.0-alpha.66
+
+## 2.0.0-alpha.65
+
+### Patch Changes
+
+- dc52930: Jazz Cloud is deprecated for new apps: use your own backend (Vercel or self-hosted). Existing Jazz Cloud apps keep running.
+- 6c85d5c: `db.transaction(callback)` whose callback writes nothing, such as a cleanup that finds nothing to clean up, no longer throws "empty mergeable transaction has no committed unit". The transaction is rolled back, as there's nothing to commit, and the result resolves with the callback's value; its `wait()` resolves at once. Committing an empty mergeable transaction by hand (`beginTransaction()` … `commit()`) still refuses, as before.
+- dded95e: A component that returns to a cached query whose resubscription fails right away now gets its error callback once instead of twice.
+- 5811cee: Harden backend socket admission in `createJazz`.
+- d9bc3bf: A subscription that joins a shared live result while it waits for large-value chunks now waits with it and opens on the current rows, instead of opening on the rows from before the change.
+- c3ef03b: Server: a Backend or Admin websocket no longer busy-loops if the account registry stops, and an account websocket then closes with a retryable `NotReady` error.
+- 44cbed0: A framework subscription (`useAll` and friends) that was rejected now subscribes again when the sync link connects again, for example after `db.reconnect()`, instead of keeping the error for as long as the component stays mounted.
+- 6b1f304: A partial selection (`select({ body: { from, to } })`, and `{ fromUtf8, toUtf8 }` or a bytes range) now clamps its range to the value's current length instead of failing with "value range is out of bounds": a range that starts past the end reads as an empty string or empty bytes, one that runs past it reads what the value still covers. A subscription over a range therefore survives the value shrinking below it and follows the value as it grows again; one-shot reads of the same query clamp alike. Inverted ranges, ranges that split a code point or surrogate pair, the native `Db::read_value_range`, and `applyDiffs` pages still fail explicitly.
+- 212ee17: `vercel()`: a core that ran a release candidate now moves to the final release. Core versions compared release candidates wrongly: `2.0.0-alpha.64` didn't count as newer than `2.0.0-alpha.64-rc.1`, and `alpha.100-rc.1` didn't count as newer than `alpha.99-rc.1`. So a Drive that once ran an rc kept running it after the release was deployed. The backend and the core's start script now agree that a `-rc.N` sorts before the release it is a candidate for.
+  - jazz-wasm@2.0.0-alpha.65
+  - jazz-rn@2.0.0-alpha.65
+
+## 2.0.0-alpha.64
+
+### Patch Changes
+
+- 50402da: A local-first tab in Chrome's back/forward cache no longer holds the store. When the user navigates away and Chrome keeps the page, the tab lets go of its two Web Locks (its liveness lock and its store's) and detaches from the shared worker. When the user goes back, it takes them again and reconnects, keeping its in-memory state and any writes the worker hadn't seen. Before, Chrome cached the tab with its locks held, so the worker still counted it as open: a tab under another sign-in waited for it until it reported the store held, and the cached tab was dropped from the cache whenever another tab wrote. If the store was wiped, deleted, reset or cleared while the tab was cached (another tab signed out as the last tab out, called `deleteClientStorage()`, or the user cleared site data), the tab reloads when the user goes back. A tab with an operation or a write still waiting on the worker keeps its connection and its locks. Firefox still doesn't cache local-first tabs: it caches no page connected to a SharedWorker that holds a lock.
+- b8b8166: A local-first tab coming back from Chrome's back/forward cache to a store that was wiped or reset meanwhile never reconnects to it, even when it can't reload because it already reloaded for an invalidation moments before. Its reads and writes that need the worker fail with an error asking to reload the page, instead of writing into the new store.
+- a2b39a0: The browser WASM is smaller: its SQLite no longer includes FTS5, R-Tree, the session extension, or diagnostic virtual tables. Jazz uses none of them. Raw SQL in the browser that uses FTS5, `rtree`, `dbstat` or `sqlite_offset()` now fails with SQLite's "no such module" or "no such function" error.
+- eb9fedc: Session claims now compare as the type of what they meet, the same way in every policy form (a row's own column, `exists.where`, relation-style `exists(...)`, claim lists and `contains`) and in query filters:
+  - A string claim matches a uuid column (or `id`, or a uuid literal) by the uuid it spells, in any spelling the uuid parser accepts.
+  - A uuid-shaped claim matches a text column by its exact text.
+  - An Integer or BigInt column accepts a canonical decimal string (`"42"`, not `"042"`) as well as a number. Timestamps take numbers only.
+  - A claim the column can't hold matches nothing.
+
+  Before, some of these combinations silently granted nothing. Note what changes for negated or `!=` policies: a claim that used to compare as unequal and grant can now compare as equal (or as unmatched) and deny. For example, `not(...)` around a uuid-shaped claim compared with a text column, or a `"042"` claim compared with an int column.
+
+  Provider claims that are uuid-shaped strings now reach host code as strings rather than uuid values.
+
+- 29ad0ee: Ship the browser broker worker minified. Bundlers that serve `dist/worker/jazz-broker-worker.js` as it is, such as Next.js with Turbopack, now load about 114 KB gzip instead of 174 KB.
+- fa8f899: A page load no longer signs its local-first token two or three times in plain JS. The account manager mints a root's token at most once and reuses it for the restore, the account it founds and every connection. It keeps the token next to the root in the account selection store, so a reload within the first half of the token's hour signs nothing. Ed25519 signing in JS (the thin client, and the browser's account manager in local-first too) also uses a 4-bit base-point window instead of noble's 8-bit one, whose 4096-point table cost ~40 ms on the first signature of every load. The token is unchanged: the same claims, issuer, audience and 1 h lifetime.
+- 0c71c41: Vite builds (and webpack 5 builds, which emit the same asset) no longer contain an unused, unminified copy of the browser broker worker (174 KB gzip in `dist/`). With `runtimeSources.wasmUrl` and `wasmVersion` but no `brokerWorkerUrl`, the page now starts the worker its bundler built; the version still keeps each deployment's tabs in their own worker. Without a bundler, also set `brokerWorkerUrl` or `baseUrl` so the worker script URL is versioned too.
+- f90f29b: Paging with `offset` no longer re-downloads every row above the page. When a new subscription opens, the server leaves out rows the client already keeps current through another of its live subscriptions (such as the previous page, whose rows the next page's read covers), so each next page ships only its own rows.
+- 4339a52: A query no component uses any more (a page you navigated away from) no longer stays subscribed for 30 seconds. After one second unused, it stops being re-evaluated and refreshed on every write, but keeps its last result for the rest of the 30 seconds. Navigating back still shows those rows at once while the query resubscribes and catches up. A Suspense read that is still waiting for its first result stays subscribed until it gets one.
+- d23bb32: Let bundlers drop the parts of jazz-tools an app doesn't use. `schema` is now an ES namespace, so a client that never calls `schema.definePermissions` no longer ships the permissions DSL, and `package.json` declares `sideEffects`. `schema` has the same members as before. It is a module namespace object now, frozen and without a prototype: `vi.spyOn(schema, …)` / `jest.spyOn(schema, …)`, `schema.hasOwnProperty(…)` and assigning to its members throw. Spy on or wrap your own functions instead, and use `Object.hasOwn(schema, …)`.
+- 0943163: Fix serializable transactions that read an aggregate (`count`, `sum`, `avg`, `min`, `max`, grouped or not) committing even after the aggregate changed. A "book if under capacity" transaction could overbook under concurrent bookings. The read set now records each aggregate group with its values, so a changed value, or a group that appears or disappears, makes the commit conflict.
+
+  **Upgrade servers (and Jazz Cloud) before clients.** The server accepts only value-checked aggregate reads. Until a client upgrades, its serializable transactions that read an aggregate now conflict on every commit instead of committing unchecked. A client on this release talking to an older server sees the same: its aggregate reads conflict until the server upgrades.
+
+- bad7ef6: A serializable transaction no longer misses a conflict on a row its own staged write brought into a `limit`, `offset` or `one()` read. For example: mark job A done, take the next queued job with `one()`, get B, claim B. Before, the read was recorded as `[A]`, so a concurrent claim of B went undetected and B could be claimed twice. Now the read is recorded, and checked by the server, with its window widened by the number of rows the transaction wrote to that table (and started earlier when it has an offset), so it covers every row the staged writes could have moved into it. Relation windows widen the same way. A windowed read whose rows depend on other rows the transaction wrote (a join, a required include or relation, or a read policy that reads other rows) now fails with a "not supported in serializable transactions yet" error instead of committing unchecked.
+- b8e2a6d: Keep slow-query reports to a readable size. A report line now shows the first 40 steps of the query plan, with the count of the rest, and the first 2,000 characters of the SQL, with its length. A policy that expanded into thousands of `UNION ALL` branches used to make a single `console.warn` line tens of megabytes long. `createPolicyTestApp` and `startTestJazz` now take `slowQueryThresholdMs` for their test clients (`0` turns the slow-query log off).
+- fc9f530: `streamAuthReuseSeconds` now takes effect on a hot reload (a later `createJazz` for the same store), for open HTTP stream sessions too, as `sessionTtlSeconds` does.
+- cdc6529: HTTP stream sessions no longer run the app's `authenticate` on every send. A send whose headers match the last one `authenticate` admitted reuses that answer, for at most `streamAuthReuseSeconds` (a new `createJazz` option, default 60) and never past its `expiresAt`. Only headers that proxies, hosts and tracing set per request are left out of that match; `Cookie`, `Authorization` and identity-proxy headers always count. `revokeUser` still ends a session at once. A sign-out or ban that skips `revokeUser`, a revoked scoped backend credential, or a revocation that reaches a stream on another instance now cuts off the stream within that window, rather than on its next send. Pass `streamAuthReuseSeconds: 0` if your `authenticate` must run on every request. WebSocket sessions hold until `expiresAt`, as before. This cuts a thin BigLabel save, five sends in a row, from five `getSession` lookups to one.
+- 4890eea: A page's copy of the stream-endpoint memory now keeps IndexedDB's answer for each endpoint, "stream" or "no stream". An endpoint with nothing kept, for example because storage is full, is looked up in IndexedDB as before. A page with full Web Storage no longer fails a socket on every load on hosts that can't upgrade sockets. A page also no longer misses an endpoint that only IndexedDB knows, such as one learned before an upgrade or by a worker. Its "no stream" answer is re-checked every 10 minutes, and expired entries are removed.
+- 0d65d5c: A page now opens its socket without first looking its endpoint up in IndexedDB. The memory of backends that serve the HTTP stream instead of sockets now keeps a copy in the page's Web Storage, which the page reads at once. A thin client's socket opens 10–20 ms sooner on every load. Workers still use IndexedDB.
+- 071be8d: The standalone `jazz-server` (and any server built with its `ServerBuilder` and served from a listener) no longer closes a WebSocket as idle while a large message is still arriving. Its 60 s idle timeout now counts any bytes from the client, not only whole messages, so a multi-MB upload on a slow uplink completes instead of being closed and resent in a loop. A client that sends nothing, or stops partway through a message, is still closed. Sockets carried by an embedding `createJazz` host (Node `ws`, Vercel, the HTTP stream) are unchanged and still judge idleness per whole message. Reported and diagnosed by Xelson.
+  - jazz-wasm@2.0.0-alpha.64
+  - jazz-rn@2.0.0-alpha.64
+
 ## 2.0.0-alpha.63
 
 ### Patch Changes

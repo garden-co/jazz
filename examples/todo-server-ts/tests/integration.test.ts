@@ -7,7 +7,7 @@
 
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { startTestJwtIssuer, type TestJwtIssuerHandle } from "jazz-tools/testing";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";

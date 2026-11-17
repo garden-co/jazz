@@ -22,6 +22,7 @@ import { playwright } from "@vitest/browser-playwright";
 import { readCorrectnessArtifactSnapshot } from "../../dev/artifacts/test-artifact-store.mjs";
 import {
   jazzAppFront,
+  jazzTestDeployment,
   jazzAppUser,
   jazzAppSignOut,
   jazzAppVisitor,
@@ -39,6 +40,10 @@ import {
   sessionTabState,
   runInSessionTab,
   crashSessionTab,
+  leaveSessionTab,
+  returnToSessionTab,
+  pageCacheKeepsSharedWorkerPages,
+  sessionTabNavigationType,
 } from "./tests/browser/session-tab-node.js";
 import {
   closeRemoteBrowserDb,
@@ -165,14 +170,17 @@ export default defineConfig({
     include: ["react/jsx-dev-runtime", "react/jsx-runtime"],
   },
   resolve: {
-    alias: {
+    alias: [
       // Needed because jazz-tools browser tests import from source (../../src/),
       // bypassing node_modules resolution. Consumers don't need this.
       // Point Vite at the workspace package, rather than its generated
       // directory. The package manifest selects pkg/jazz_wasm.js; wasm-pack's
       // web target intentionally does not emit a second manifest in pkg/.
-      "jazz-wasm": jazzWasmTestEntry,
-    },
+      { find: "jazz-wasm", replacement: jazzWasmTestEntry },
+      // Committed test apps' jazz.generated.ts import "jazz-tools": the
+      // source, as the tests themselves use it.
+      { find: /^jazz-tools$/, replacement: resolve(__dirname, "src/index.ts") },
+    ],
   },
   worker: {
     plugins: () => [wasm(), topLevelAwait()],
@@ -187,7 +195,18 @@ export default defineConfig({
     maxWorkers: browserName === "webkit" ? 1 : 4,
     browser: {
       enabled: true,
-      provider: playwright(),
+      // Playwright turns Chromium's back/forward cache off; the cache tests
+      // (tests/browser/back-forward-cache.test.ts) need it on. Its Firefox
+      // and WebKit builds have it off for good.
+      provider: playwright(
+        browserName === "chromium"
+          ? {
+              launchOptions: {
+                ignoreDefaultArgs: ["--disable-back-forward-cache"],
+              },
+            }
+          : {},
+      ),
       instances: [
         {
           browser: browserName as "chromium" | "firefox" | "webkit",
@@ -238,6 +257,8 @@ export default defineConfig({
           console.info(`[jazz-browser-topology] ${status} ${label} (${elapsedMs}ms)`);
         },
         jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
+        jazzTestDeployment: async (_context, bound, permissions) =>
+          jazzTestDeployment(bound, permissions),
         jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
         jazzAppUser: async (_context, frontUrl, userId, claims) =>
           jazzAppUser(frontUrl, userId, claims),
@@ -251,6 +272,11 @@ export default defineConfig({
         sessionTabRun: async (_context, id, action, title) => runInSessionTab(id, action, title),
         sessionTabClose: async (_context, id) => closeSessionTab(id),
         sessionTabCrash: async (_context, id) => crashSessionTab(id),
+        sessionTabLeave: async (_context, id) => leaveSessionTab(id),
+        sessionTabReturn: async (_context, id) => returnToSessionTab(id),
+        sessionTabNavigationType: async (_context, id) => sessionTabNavigationType(id),
+        pageCacheKeepsSharedWorkerPages: async ({ context, page }) =>
+          pageCacheKeepsSharedWorkerPages(context, page),
         jazzAppSignUp: async (_context, frontUrl, originUrl, userId) =>
           jazzAppSignUp(frontUrl, originUrl, userId),
         jazzAppRequest: async (_context, url, init) => jazzAppRequest(url, init),

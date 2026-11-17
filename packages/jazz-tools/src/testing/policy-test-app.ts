@@ -7,7 +7,7 @@ import { localFirstSessionFromToken } from "../backend/request-auth.js";
 import { ANONYMOUS_JWT_ISSUER, LOCAL_FIRST_JWT_ISSUER } from "../runtime/client-session.js";
 import type { Session } from "../runtime/context.js";
 import type { WasmSchema } from "../drivers/types.js";
-import type { CompiledPermissions } from "../permissions/index.js";
+import { loadTestPermissions, type TestPermissionsFile } from "./test-app.js";
 import { deployApp } from "../dev/catalogue.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../dev/dev-server.js";
 
@@ -276,16 +276,18 @@ export class PolicyTestApp {
  * Create a new policy test app.
  * This will start a local Jazz server and push the schema catalogue to it.
  * @returns a {@link PolicyTestApp} instance that can be used to seed the database and validate policy checks.
- * @param app - The Jazz app created with `defineApp(...)`
- * @param permissions - The permissions created with `definePermissions(...)`
+ * @param app - The app, as `jazz.generated.ts` exports it (or `testApp(...)` makes it)
+ * @param permissions - The app's `jazz.permissions.json`, imported as JSON (or an inline object)
  * @param expectFn - The `expect` function to use for assertions (e.g. `expect` from `vitest`)
  */
 export async function createPolicyTestApp(
   app: PolicyTestAppSchema,
-  permissions: CompiledPermissions,
+  permissionsFile: TestPermissionsFile,
   expectFn: ExpectLike,
   options: PolicyTestAppOptions = {},
 ): Promise<PolicyTestApp> {
+  // Checked and compiled by Jazz's Rust loader, as a backend's createJazz does.
+  const { permissions } = loadTestPermissions(app as never, permissionsFile);
   const backendSecret = `backend-secret`;
   const adminSecret = `admin-secret`;
   const server = await startLocalJazzServer({
@@ -300,7 +302,7 @@ export async function createPolicyTestApp(
     serverUrl: server.url,
     adminSecret,
     app,
-    permissions,
+    permissions: { format: 1, ...permissionsFile } as never,
   });
 
   const jazzContext = createJazzContext({
