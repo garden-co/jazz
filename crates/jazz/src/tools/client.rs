@@ -2714,8 +2714,30 @@ impl Deref for JazzTransaction {
     }
 }
 
+/// A write's or transaction's synchronous failure. A rejection the core
+/// decides before the write leaves the client (input it refuses, a taken
+/// id, a local transaction conflict) carries TS's code, as TS's
+/// synchronous writes do, with the core's detail as its reason.
 fn write_error(error: CoreError) -> JazzError {
-    JazzError::Write(error.to_string())
+    let Some((code, _)) = super::rejection_code_and_reason(&error) else {
+        return JazzError::Write(error.to_string());
+    };
+    let detail = match error.reason {
+        Some(reason) => error
+            .message
+            .strip_prefix(reason.as_str())
+            .and_then(|rest| rest.strip_prefix(": "))
+            .unwrap_or(&error.message),
+        None => &error.message,
+    };
+    // The authority's wording ("…by server authorization") would be wrong
+    // here: without a detail, the core's own diagnostic is the reason.
+    let reason = if detail.is_empty() {
+        error.to_string()
+    } else {
+        detail.to_owned()
+    };
+    JazzError::WriteRejected { code, reason }
 }
 
 fn local_first_opts(first_load_remote_wait: Duration) -> ReadOpts {
@@ -3320,6 +3342,37 @@ fn provenance(row: &CurrentRow) -> crate::model::metadata::RowProvenance {
 
 #[cfg(test)]
 mod tests {
+    /// A write refused before it leaves the client carries TS's code, with
+    /// the core's detail as its reason; any other failure stays a `Write`.
+    #[test]
+    fn local_write_rejections_are_coded() {
+        use crate::db::{Error, ErrorCode, Reason};
+        let denied = Error::with_reason(
+            ErrorCode::WriteRejected,
+            Reason::AuthorizationDenied,
+            "authorization_denied: policy denied INSERT on table notes",
+        );
+        match super::write_error(denied) {
+            JazzError::WriteRejected { code, reason, .. } => {
+                assert_eq!(code, "permission_denied");
+                assert_eq!(reason, "policy denied INSERT on table notes");
+            }
+            other => panic!("expected a coded rejection, got {other:?}"),
+        }
+        let exists = Error::with_reason(
+            ErrorCode::WriteRejected,
+            Reason::RowAlreadyExists,
+            "row 1 already exists",
+        );
+        assert!(matches!(
+            super::write_error(exists),
+            JazzError::WriteRejected { code, reason, .. }
+                if code == "write_rejected" && reason == "row 1 already exists"
+        ));
+        let storage = Error::new(ErrorCode::Storage, "disk");
+        assert!(matches!(super::write_error(storage), JazzError::Write(_)));
+    }
+
     use super::*;
     use crate::tools::native_transport_connector::ConnectedNativeTransport;
     use crate::tools::public_schema::{ColumnType, SchemaBuilder, TableSchema};

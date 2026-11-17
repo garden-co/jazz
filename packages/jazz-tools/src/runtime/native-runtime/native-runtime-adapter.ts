@@ -912,6 +912,29 @@ export function slowQuerySummary(line: string): string {
   return plan === -1 ? line : line.slice(0, plan);
 }
 
+/**
+ * Where a {@link NativeRuntimeAdapter} is in its life. It only moves forward:
+ *
+ * - `open`: it admits work.
+ * - `quiesced`: a foreground lease handoff closed mutation admission to read
+ *   the final HLC high-water (`quiesceForegroundTxTimeHighWater`).
+ * - `storageCleared`: its native store was deleted (`clearClientStorage`).
+ * - `closing`: `close()` is tearing it down.
+ * - `closed`: torn down, by `close()` or `discard()`.
+ *
+ * `quiesced` and `storageCleared` admit nothing, but leave the teardown to
+ * `close()`: neither reaches `closed` on its own.
+ */
+export type NativeRuntimePhase = "open" | "quiesced" | "storageCleared" | "closing" | "closed";
+
+const NATIVE_RUNTIME_PHASE_ORDER: Record<NativeRuntimePhase, number> = {
+  open: 0,
+  quiesced: 1,
+  storageCleared: 1,
+  closing: 2,
+  closed: 3,
+};
+
 export class NativeRuntimeAdapter implements Runtime {
   private readonly auxiliaryReceiveDeadlines = new Map<Transport, AuxiliaryReceiveDeadline>();
   private readonly pendingNativeAdmissionCancels = new Set<() => void>();
@@ -1054,11 +1077,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverPumpRunning = false;
   private serverPumpAgain = false;
   private serverConnectionGeneration = 0;
-  private closed = false;
-  // A foreground lease handoff closes mutation admission before it snapshots
-  // the native HLC, but physical native disposal still happens through the
-  // ordinary client shutdown path.
-  private foregroundLeaseQuiesced = false;
+  /** See {@link NativeRuntimePhase}. Only {@link advancePhase} moves it. */
+  private phase: NativeRuntimePhase = "open";
   // A concurrent ordinary close must not dispose native state between a lease
   // handoff's mutation drain and its HLC readout.
   private foregroundLeaseCapture: Promise<bigint> | null = null;
@@ -1067,7 +1087,6 @@ export class NativeRuntimeAdapter implements Runtime {
   // admission deadlines). Mutation admission stays closed, but core progress
   // must continue, or the HLC readout waits behind them forever.
   private foregroundLeaseDraining = false;
-  private physicalCloseStarted = false;
   private nextSubscriptionId = 1;
 
   static fromDb(
@@ -1381,10 +1400,9 @@ export class NativeRuntimeAdapter implements Runtime {
       return this.ownerRuntime.quiesceForegroundTxTimeHighWater();
     }
     if (this.foregroundLeaseCapture) return this.foregroundLeaseCapture;
-    if (this.closed) throw new Error("Native runtime is already closed");
-    this.closed = true;
+    if (this.closed) throw new Error(`Native runtime is already ${this.phase}`);
+    this.advancePhase("quiesced");
     this.clearCoreDeadline();
-    this.foregroundLeaseQuiesced = true;
     this.foregroundLeaseDraining = true;
     const capture = this.captureForegroundTxTimeHighWater().finally(() => {
       this.foregroundLeaseDraining = false;
@@ -1646,8 +1664,13 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!this.db?.deleteNativeStore) {
       throw new Error("Runtime does not support client storage reset.");
     }
+    if (this.closed) {
+      throw new Error(`Cannot clear client storage: native runtime is ${this.phase}`);
+    }
     const deleted = this.db.deleteNativeStore();
-    this.closed = true;
+    // The store is gone and admits nothing more; `close()` still tears this
+    // runtime down (its subscriptions, link and native handle).
+    this.advancePhase("storageCleared");
     return deleted;
   }
 
@@ -1762,17 +1785,36 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.ownerRuntime.closed;
   }
 
+  /** Whether this runtime admits no more work: any phase past `open`. */
+  private get closed(): boolean {
+    return this.phase !== "open";
+  }
+
+  /** Move to `next`, which must lie ahead of the current phase. */
+  private advancePhase(next: NativeRuntimePhase): void {
+    if (NATIVE_RUNTIME_PHASE_ORDER[next] <= NATIVE_RUNTIME_PHASE_ORDER[this.phase]) {
+      throw new Error(`Native runtime cannot move from ${this.phase} back to ${next}`);
+    }
+    this.phase = next;
+  }
+
+  /**
+   * Tear this runtime down, from any phase before `closing`: `open`,
+   * `quiesced` (a lease handoff read its high-water) or `storageCleared` (its
+   * store was deleted). Each of those stopped admitting work but left the
+   * teardown to this call. Once `closing`, a repeated call returns at once.
+   */
   async close(): Promise<void> {
     if (this !== this.ownerRuntime) {
+      if (this.phase === "closed") return;
+      this.advancePhase("closed");
       this.closeRuntimeState();
       return;
     }
-    if (this.physicalCloseStarted) return;
-    if (this.closed && !this.foregroundLeaseQuiesced) return;
-    this.physicalCloseStarted = true;
+    if (this.phase === "closing" || this.phase === "closed") return;
     // Stop admitting/scheduling work first, but keep every WASM receiver alive
     // until the evaluator future that may currently borrow it has unwound.
-    this.closed = true;
+    this.advancePhase("closing");
     this.clearCoreDeadline();
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
     for (const cancel of this.pendingNativeReadCancels) cancel();
@@ -1784,15 +1826,25 @@ export class NativeRuntimeAdapter implements Runtime {
       await Promise.all(this.pendingLocalSettlements);
     }
     await this.coreOperation?.completion.catch(() => undefined);
-    this.closeRuntimeState(true);
-    await this.db.close?.();
+    try {
+      this.closeRuntimeState();
+      await this.db.close?.();
+    } finally {
+      this.advancePhase("closed");
+    }
     // wasm-bindgen futures may retain this receiver after logical closure.
     // Its registered finalizer owns physical release; explicit `free()` here
     // creates a second, unsynchronised lifetime and can corrupt the WASM heap.
   }
 
-  /** Discard a runtime whose persistence epoch is no longer usable. */
+  /**
+   * Discard a runtime whose persistence epoch is no longer usable: an `open`
+   * one stops at once and goes straight to `closed`, without native disposal.
+   * One past `open` already admits nothing, and `close()` finishes it.
+   */
   discard(): void {
+    if (this.phase !== "open") return;
+    this.advancePhase("closed");
     // Do not explicitly free the WASM wrapper here. A forced IndexedDB close
     // can reject a storage Promise while a WASM future is still unwinding;
     // freeing its receiver in that window is unsafe. Sever all runtime work
@@ -1800,9 +1852,8 @@ export class NativeRuntimeAdapter implements Runtime {
     this.closeRuntimeState();
   }
 
-  private closeRuntimeState(alreadyMarkedClosed = false): boolean {
-    if (this.closed && !alreadyMarkedClosed) return false;
-    this.closed = true;
+  /** Drop this runtime's work and links. The caller moved its phase past `open`. */
+  private closeRuntimeState(): void {
     this.clearCoreDeadline();
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
     for (const cancel of this.pendingNativeReadCancels) cancel();
@@ -1815,7 +1866,7 @@ export class NativeRuntimeAdapter implements Runtime {
       // schema-view wrapper. Eagerly freeing a wasm-bindgen receiver here is a
       // use-after-free; let GC release the Rc-backed view after those promises
       // drop their references.
-      return false;
+      return;
     }
     for (const write of this.writes.values()) {
       write.close?.();
@@ -1849,7 +1900,6 @@ export class NativeRuntimeAdapter implements Runtime {
     this.peerUpstreamAttached = false;
     this.serverCarrier?.close();
     this.serverCarrier = null;
-    return true;
   }
 
   /** Row identity/defaults only; physical validation and staging happen on insertion. */
