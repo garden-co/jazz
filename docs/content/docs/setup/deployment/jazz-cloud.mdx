@@ -1,7 +1,14 @@
 ---
-title: Jazz Cloud
+title: Jazz Cloud (deprecated)
 description: "Learn how to keep your app's data on Jazz Cloud, with your own backend in front for auth."
+languageTabs: main-backend
 ---
+
+<Callout type="warn" title="Deprecated">
+  Jazz Cloud is deprecated. For new apps, use your own backend:
+  [Vercel](/docs/setup/deployment/vercel) or [your own server](/docs/setup/deployment/own-server).
+  Existing Jazz Cloud apps keep running for now; we'll announce any change well ahead.
+</Callout>
 
 Jazz Cloud stores and syncs your app's data. Your own backend sits in front of it: browsers talk only to your backend, which signs users in with your auth and connects to Jazz Cloud. Jazz Cloud does no user auth of its own.
 
@@ -11,15 +18,16 @@ browsers and apps, and decides who each user is. Other trusted machines reach Ja
 
 <include>../../../partials/install-alpha.mdx</include>
 
-## Get an app ID
+## Find your app ID
 
-Your app ID namespaces your data for storage and sync. Click below to generate one on Jazz Cloud. You also get the secrets your backend needs. Generated apps are unclaimed until you claim them in the dashboard, and unclaimed apps are deleted after 14 days.
-
-<GenerateAppId />
+Jazz Cloud isn't for new apps. For an existing app, find its ID with `npx jazz-tools apps list`
+or `npx jazz-tools apps get <appId>`, or in the Jazz Cloud dashboard. Its admin secret is
+printed only when the app is created; `npx jazz-tools apps secrets rotate <appId>` prints new
+ones.
 
 ## Connect your backend
 
-Put the generated values in your backend's environment. All of them stay server-side; the browser never needs the app ID or the sync URL, and the admin secret is like a database password:
+Put your app's values in your backend's environment. All of them stay server-side; the browser never needs the app ID or the sync URL, and the admin secret is like a database password:
 
 ```bash title=".env"
 JAZZ_APP_ID="<your app ID>"

@@ -165,10 +165,21 @@ function readTsconfig(
  * src/lib), else the one directory under the project holding both schema.ts
  * and jazz.app.json (an Expo app's `jazz/`, say).
  */
+/**
+ * An app whose source is its JSON files (jazz.app.json, no schema.ts), as an
+ * alpha.65 Rust or Go backend's: `upgrade` writes its TS from them.
+ */
+export class JsonOnlyApp extends UpgradeRefusal {
+  constructor(readonly dir: string) {
+    super(`${dir} has jazz.app.json but no schema.ts`);
+  }
+}
+
 function findSchemaDir(root: string, option: string | undefined): string {
   if (option) {
     const dir = resolve(root, option);
     if (!existsSync(join(dir, "schema.ts"))) {
+      if (existsSync(join(dir, APP_FILE))) throw new JsonOnlyApp(dir);
       throw new UpgradeRefusal(`--schema-dir ${option}: no schema.ts in ${dir}`);
     }
     return dir;
@@ -201,11 +212,10 @@ function findSchemaDir(root: string, option: string | undefined): string {
       `${root} holds several apps (schema.ts beside jazz.app.json in ${found.map((d) => relative(root, d)).join(", ")}): pass --schema-dir for the one to upgrade`,
     );
   }
-  if (SCHEMA_ROOTS.some((r) => existsSync(join(root, r, APP_FILE)))) {
-    throw new UpgradeRefusal(
-      `${root} has jazz.app.json but no schema.ts: it is already on files as source, nothing to upgrade`,
-    );
-  }
+  const jsonOnly = SCHEMA_ROOTS.map((r) => join(root, r)).find((dir) =>
+    existsSync(join(dir, APP_FILE)),
+  );
+  if (jsonOnly) throw new JsonOnlyApp(jsonOnly);
   throw new UpgradeRefusal(
     `no schema.ts in ${root}, ${join(root, "src")} or ${join(root, "src", "lib")}: run upgrade in the app's directory (or pass --dir, and --schema-dir where schema.ts lives elsewhere)`,
   );

@@ -1,0 +1,125 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "7cd2d586fa754548a65181d0dc3d80572f4a3366f57588e7184ecda058a65ce0"
+  },
+  "tables": {
+    "albums": {
+      "columns": {
+        "title": "string",
+        "artist": "string",
+        "cover_locator": "string?",
+        "cover_image": "bytes?",
+        "cover_mime": "string?"
+      },
+      "relations": { "tracksViaAlbum": { "reverse": "tracks", "relation": "album" } },
+      "indexes": ["title"]
+    },
+    "better_auth_account": {
+      "columns": {
+        "accountId": "string",
+        "providerId": "string",
+        "userId": "uuid",
+        "password": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_jwks": {
+      "columns": {
+        "publicKey": "string",
+        "privateKey": "string",
+        "createdAt": "timestamp",
+        "expiresAt": "timestamp?",
+        "alg": "string?",
+        "crv": "string?"
+      }
+    },
+    "better_auth_session": {
+      "columns": {
+        "expiresAt": "timestamp",
+        "token": "string",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp",
+        "userId": "uuid",
+        "ipAddress": "string?",
+        "userAgent": "string?"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_user": {
+      "columns": {
+        "name": "string",
+        "email": "string",
+        "emailVerified": "boolean",
+        "image": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": {
+        "better_auth_accountViaUser": { "reverse": "better_auth_account", "relation": "user" },
+        "better_auth_sessionViaUser": { "reverse": "better_auth_session", "relation": "user" }
+      }
+    },
+    "better_auth_verification": {
+      "columns": {
+        "identifier": "string",
+        "value": "string",
+        "expiresAt": "timestamp",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      }
+    },
+    "invitations": {
+      "columns": {
+        "playlist_id": "uuid",
+        "subject": "uuid",
+        "role": { "enum": ["listener", "editor"] },
+        "status": { "enum": ["pending", "accepted", "revoked"] }
+      },
+      "relations": { "playlist": { "rel": "playlists", "column": "playlist_id" } }
+    },
+    "playback_positions": {
+      "columns": { "playlist_id": "uuid", "track_id": "uuid", "position_ms": "int" },
+      "relations": {
+        "playlist": { "rel": "playlists", "column": "playlist_id" },
+        "track": { "rel": "tracks", "column": "track_id" }
+      }
+    },
+    "playlist_entries": {
+      "columns": { "playlist_id": "uuid", "track_id": "uuid", "position": "float" },
+      "relations": {
+        "playlist": { "rel": "playlists", "column": "playlist_id" },
+        "track": { "rel": "tracks", "column": "track_id" }
+      },
+      "indexes": ["playlist_id", "position"]
+    },
+    "playlists": {
+      "columns": { "name": "string" },
+      "relations": {
+        "invitationsViaPlaylist": { "reverse": "invitations", "relation": "playlist" },
+        "playback_positionsViaPlaylist": { "reverse": "playback_positions", "relation": "playlist" },
+        "playlist_entriesViaPlaylist": { "reverse": "playlist_entries", "relation": "playlist" }
+      }
+    },
+    "tracks": {
+      "columns": {
+        "album_id": "uuid",
+        "title": "string",
+        "ordinal": "int",
+        "duration_ms": "int",
+        "audio_bytes": "bytes?",
+        "audio_mime": "string?",
+        "audio_byte_length": "int?"
+      },
+      "relations": {
+        "album": { "rel": "albums", "column": "album_id" },
+        "playback_positionsViaTrack": { "reverse": "playback_positions", "relation": "track" },
+        "playlist_entriesViaTrack": { "reverse": "playlist_entries", "relation": "track" }
+      },
+      "indexes": ["album_id", "ordinal"]
+    }
+  }
+}

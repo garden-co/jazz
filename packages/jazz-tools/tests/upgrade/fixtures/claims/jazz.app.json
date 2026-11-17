@@ -1,0 +1,14 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "messages": {
+      "columns": {
+        "author_name": "string",
+        "chat_id": "string",
+        "text": "string",
+        "sent_at": "timestamp"
+      }
+    }
+  }
+}

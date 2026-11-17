@@ -18,7 +18,7 @@ Jazz keeps every schema version usable and translates rows between them on read 
 
 ## Schemas and lenses
 
-Every unique version of your schema (the `tables` of `jazz.app.json`) has a hash which can be used to refer to it. When creating migrations, you describe the changes required to move between two schema versions. This is known as a 'lens'. Fetching all intermediate lenses allows clients with any published schema version to read data created with any other published schema version.
+Every unique version of your schema (the tables in `schema.ts`) has a hash which can be used to refer to it. When creating migrations, you describe the changes required to move between two schema versions. This is known as a 'lens'. Fetching all intermediate lenses allows clients with any published schema version to read data created with any other published schema version.
 
 <LensDiagram />
 
@@ -34,44 +34,55 @@ In practice, this lets you:
 
 ## Where migrations live
 
-Migrations live in `jazz.app.json`, next to the current `tables`:
+Migrations live in a `migrations/` directory next to `schema.ts`:
 
-- `history` holds the earlier versions your app still ships, oldest first, each named by its
-  short schema hash (the first 12 hex characters).
-- `migrations` holds the lenses between them. A migration goes `from` a version `to` another; with
-  no `to`, it goes to the current `tables`.
+- `migrations/*.ts` holds the lenses, one file per migration, each a `m.defineMigration(...)` that
+  goes from one version to another. `migrations create` writes them; you review and edit them.
+- `migrations/snapshots/*.json` holds a snapshot of each schema version, named by its short schema
+  hash (the first 12 hex characters). The tool writes them; don't edit them.
 
-`jazz.generated.ts` embeds every version and every lens, so clients can read and write data from
-any version, including before they first sync, and a client never has to rename or reshape stored
-data later.
+`npx jazz-tools generate` reads both and writes them into `jazz.app.json`, next to the current
+`tables`: `history` holds the earlier versions your app still ships, oldest first, and
+`migrations` the lenses between them. `jazz.generated.ts` embeds every version and every lens, so
+clients can read and write data from any version, including before they first sync, and a client
+never has to rename or reshape stored data later.
 
 ## Workflow
 
-1. **Edit `tables` in `jazz.app.json`**&hairsp;—&hairsp;change the data shape as needed.
-2. **Run `npx jazz-tools generate`**. If the change touches a schema the bindings were generated
+1. If this is the first migration you are creating, run:
+
+   ```bash
+   npx jazz-tools migrations create
+   ```
+
+   This creates an initial snapshot of your schema in `migrations/snapshots/`. No migration file is
+   created yet because there is no previous schema to diff against. Until then your app has no
+   earlier version, and no change needs a migration.
+
+2. **Edit `schema.ts`**&hairsp;—&hairsp;change the data shape as needed.
+3. **Run `npx jazz-tools generate`**. If the change touches a schema the bindings were generated
    from, it refuses before it writes anything:
 
    ```text
    the schema changed since the last version: run `jazz-tools migrations create --name <name>`
    ```
 
-   An app that has never generated its bindings has no earlier version, and needs no migration.
-
-3. **Create the migration**&hairsp;—&hairsp;run:
+4. **Create the migration**&hairsp;—&hairsp;run:
 
    ```bash
    npx jazz-tools migrations create --name <your-migration-name>
    ```
 
-   It moves the version the bindings were generated from into `history`, and writes a migration
-   from it to your edited `tables`, guessing what the diff allows. Where only you can decide, it
-   writes a `"TODO: …"` string instead and lists each one. When nothing is left to decide, it also
-   regenerates `jazz.generated.ts`.
+   Jazz diffs the latest snapshot in `migrations/snapshots/` against the current `schema.ts`,
+   writes a migration file into `migrations/`, guessing what the diff allows, and saves a snapshot
+   of the new schema. Where only you can decide, it writes a `"TODO: …"` string instead and lists
+   each one.
 
-4. **Review and resolve**&hairsp;—&hairsp;read the migration, and replace every `"TODO: …"` with
-   what it asks for (see below). Every loader refuses a file with a TODO left, so a half-written
-   migration can't be deployed. Then run `npx jazz-tools generate`.
-5. **Deploy your main backend**&hairsp;—&hairsp;restart it locally, or deploy it as usual. When it
+5. **Review and resolve**&hairsp;—&hairsp;read the migration, and replace every `"TODO: …"` with
+   what it asks for (see below). `generate` and every loader refuse a migration with a TODO left,
+   so a half-written migration can't be deployed. Then run `npx jazz-tools generate` (and your type
+   checker).
+6. **Deploy your main backend**&hairsp;—&hairsp;restart it locally, or deploy it as usual. When it
    starts, `createJazz` sends the schema, permissions and migrations your code imports to its store
    as one bundle. There is no separate deploy or push command. If the bundle has no migration path
    from the schema already in the store, the store refuses it with an error naming the missing
@@ -93,25 +104,40 @@ data later.
 The `jazz-tools` CLI only writes and checks migrations (`migrations create`, `generate`,
 `migrations graph`). It never publishes anything: only your main backend does.
 
-Commit `jazz.app.json` and `jazz.generated.ts` together. Two branches that each added a migration
-from the same version both change `history` and `migrations`: keep both versions' entries when you
-merge, then see [Handling concurrent migrations](#handling-concurrent-migrations).
+Commit `schema.ts`, the `migrations/` directory (snapshots included), and the files `generate`
+writes (`jazz.app.json`, `jazz.permissions.json` and `jazz.generated.ts`) together. Two branches
+that each added a migration from the same version add separate migration files, but both change
+the generated files: keep both branches' migration files and snapshots when you merge, take either
+side of the generated files, and run `npx jazz-tools generate` to write them again. Then see
+[Handling concurrent migrations](#handling-concurrent-migrations).
 
-Index changes, `"history": "latest"`, a column's `merge` and the column order are part of the
-schema version too, so `generate` asks for a migration. Run `migrations create` as usual: for an
-index change it writes an empty step, with nothing to decide:
+### Changes that keep every row
 
-```json
-"tasks": { "$comment": "Rows pass unchanged: only indexes changed." }
+Single-column indexes (`.indexOnly([...])`) aren't part of the schema version, so an edit that
+only adds, removes or changes them needs no migration: `generate` writes new bindings. If you run
+`migrations create` anyway, it writes nothing and says "only single-column indexes changed: no
+migration needed; run `jazz-tools generate`".
+
+Composite indexes (`.compositeIndex([...])`), `.history("latest")`, a column's `.merge(...)` and
+the column order are part of the schema version, so `generate` asks for a migration. Run
+`migrations create` as usual: it writes an empty step, with nothing to decide, for example for a
+composite index:
+
+```ts
+migrate: {
+  tasks: {
+    // Rows pass unchanged: only indexes changed.
+  },
+},
 ```
 
 [Computed fields](/docs/schemas/column-types#computed-columns) aren't stored, so adding or
 changing one needs no migration.
 
-Permission-only changes in `jazz.permissions.json` don't need a migration; they go live when your
-main backend restarts with them. See [Declarative Permissions](/docs/schemas/policies) for details.
+Permission-only changes in `definePermissions` don't need a migration; they go live when your main
+backend restarts with them. See [Declarative Permissions](/docs/schemas/policies) for details.
 
-## The migration entry
+## The migration file
 
 A migration describes the diff as declarative operations which carry enough information to run in
 either direction. That is how older clients can still read data written under a newer schema: the
@@ -122,32 +148,37 @@ same operations replay in reverse.
 Say the `todos` table gains an optional `description` column. `migrations create --name
 add-description` writes:
 
-```json title="jazz.app.json"
-{
-  "format": 1,
-  "tables": {
-    "todos": { "columns": { "title": "string", "done": "boolean", "description": "string?" } }
+```ts title="migrations/20260318T101500-add-description-e5628c8e53c8-311995e9a178.ts"
+import { schema as s, migration as m } from "jazz-tools";
+
+export default m.defineMigration({
+  migrate: {
+    todos: {
+      description: m.add.string({ default: null }),
+    },
   },
-  "history": {
-    "e5628c8e53c8": {
-      "tables": { "todos": { "columns": { "title": "string", "done": "boolean" } } }
-    }
+  fromHash: "e5628c8e53c8",
+  toHash: "311995e9a178",
+  from: {
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+    }),
   },
-  "migrations": [
-    {
-      "name": "add-description",
-      "from": "e5628c8e53c8",
-      "migrate": {
-        "todos": { "description": { "add": "string", "default": null } }
-      }
-    }
-  ]
-}
+  to: {
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+    }),
+  },
+});
 ```
 
-`default` is the value rows written under the older schema read for the new column. The added
-type carries no `?`: a lens carries no nullability, and the current `tables` say whether the column
-is optional.
+`from` and `to` hold the affected tables of both versions, as the tool wrote them; leave them as
+they are. `default` is the value rows written under the older schema read for the new column. The
+added type carries no `.optional()`: a lens carries no nullability, and `to` says whether the
+column is optional.
 
 ### What it can't decide
 
@@ -156,30 +187,29 @@ is optional.
 - **A possible rename.** An added column shaped like a removed one may be the same column renamed.
   Adding one and dropping the other would start every row empty, so it asks:
 
-  ```json
-  "rank": "TODO: added column `rank` may be a rename of `priority`. To keep its values, replace this with { \"renameFrom\": \"priority\" }; to start it empty, with { \"add\": \"int\", \"default\": null }."
+  ```ts
+  rank: "TODO: added column `rank` may be a rename of `priority`. To keep its values, replace this with m.renameFrom(\"priority\"); to start it empty, with m.add.int({ default: null }).",
   ```
 
   The removed column gets a matching TODO: delete it if the column was renamed, or replace it with
-  its `drop`.
+  its `m.drop`.
 
 - **A new required column.** Rows written under the older schema need a value for it:
 
-  ```json
-  "status": {
-    "add": { "enum": ["todo", "done"] },
-    "default": "TODO: added required column `status` needs the value existing rows get; replace this with it."
-  }
+  ```ts
+  status: m.add.enum(["todo", "done"], {
+    default: "TODO: added required column `status` needs the value existing rows get; replace this with it.",
+  }),
   ```
 
 - **A dropped required column.** Clients still on the older schema need a value to read back
   (`backwardsDefault`).
 
-When you run `generate` with a TODO left, it names each one with its JSON path:
+When you run `generate` with a TODO left, it names each one with its file and path:
 
 ```text
-jazz.app.json: 1 unresolved TODO left by `jazz-tools migrations create`; replace each with the value it asks for, …
-  migrations[0].migrate.todos.status.default: TODO: added required column `status` needs the value existing rows get; replace this with it.
+migrations/20260318T101500-add-status-311995e9a178-9b2f0c41d7aa.ts: 1 unresolved TODO left by `jazz-tools migrations create`; replace each with the value it asks for, …
+  migrate.todos.status.default: TODO: added required column `status` needs the value existing rows get; replace this with it.
 ```
 
 ### Customising defaults
@@ -187,8 +217,8 @@ jazz.app.json: 1 unresolved TODO left by `jazz-tools migrations create`; replace
 Review generated defaults before you publish. For example, you might replace a `null` default with
 a domain-specific value:
 
-```json
-"description": { "add": "string", "default": "No description yet" }
+```ts
+description: m.add.string({ default: "No description yet" }),
 ```
 
 ### Backwards defaults
@@ -196,8 +226,8 @@ a domain-specific value:
 When a newer schema drops a column that older clients still expect, give it a backwards default
 so the lens can supply a value for those clients:
 
-```json
-"priority": { "drop": "int", "backwardsDefault": 0 }
+```ts
+priority: m.drop.int({ backwardsDefault: 0 }),
 ```
 
 ### Operations
@@ -205,31 +235,31 @@ so the lens can supply a value for those clients:
 A migration's `migrate` maps each changed table to its column operations; tables themselves are
 added, dropped and renamed next to it:
 
-```json
-{
-  "name": "rename-and-split",
-  "from": "3fa1c2d9e0b4",
-  "renameTables": { "projects": "lists" },
-  "createTables": ["labels"],
-  "dropTables": ["archived_todos"],
-  "migrate": {
-    "todos": {
-      "notes": { "renameFrom": "description" },
-      "priority": { "add": "int", "default": 0 },
-      "legacy_flag": { "drop": "boolean", "backwardsDefault": false }
-    }
-  }
-}
+```ts title="migrations/20260401T090000-rename-and-split-3fa1c2d9e0b4-8c7d21a0f6e3.ts"
+import { migration as m } from "jazz-tools";
+
+export default m.defineMigration({
+  migrate: {
+    todos: {
+      notes: m.renameFrom("description"), // same type, new name
+      priority: m.add.int({ default: 0 }), // a new column and its value for old rows
+      legacy_flag: m.drop.boolean({ backwardsDefault: false }), // what older clients read
+    },
+  },
+  renameTables: { projects: m.renameTableFrom("lists") },
+  createTables: { labels: true },
+  dropTables: { archived_todos: true },
+  // fromHash, toHash, from and to as generated
+});
 ```
 
-- `{ "add": <type>, "default": <value> }` adds a column. The default fills it for rows written
-  under the older schema.
-- `{ "drop": <type>, "backwardsDefault": <value> }` drops a column; older clients read
-  `backwardsDefault`.
-- `{ "renameFrom": "<old name>" }` renames a column of the same type. Values carry over.
-- `renameTables` (new name → old name), `createTables` and `dropTables` cover tables that exist on
-  only one side.
-- `$comment` keys say why, anywhere in the entry.
+- `m.add.<type>({ default })` adds a column (`string`, `int`, `bigint`, `boolean`, `timestamp` and
+  the other column types). The default fills it for rows written under the older schema.
+- `m.drop.<type>({ backwardsDefault })` drops a column; older clients read `backwardsDefault`.
+- `m.renameFrom("oldName")` renames a column of the same type. Values carry over.
+- `renameTables` (`newName: m.renameTableFrom("oldName")`), `createTables` and `dropTables` cover
+  tables that exist on only one side.
+- `//` comments say why, anywhere in the file.
 
 `generate` rejects a migration that doesn't cover every change, or that fails the lens checks a
 deployment runs.
@@ -242,16 +272,17 @@ sort as before, and the migration needs no step. A variant's position in the lis
 order, so adding one elsewhere, or reordering the list, is refused. `jazz-tools migrations create`
 writes a migration with nothing to fill in, noting which column gains which variants:
 
-```json
-{
-  "name": "add-blocked-status",
-  "from": "d18686fe548a",
-  "migrate": {
-    "tasks": {
-      "$comment": "`status` gains enum variant \"blocked\": existing rows are unchanged, so it needs no step."
-    }
-  }
-}
+```ts title="migrations/20261113T120000-add-blocked-status-d18686fe548a-5e0b3c9a7f12.ts"
+import { migration as m } from "jazz-tools";
+
+export default m.defineMigration({
+  migrate: {
+    tasks: {
+      // Column "status" gains enum variant "blocked": existing rows are unchanged, so it needs no step.
+    },
+  },
+  // fromHash, toHash, from and to as generated
+});
 ```
 
 Clients still on the older schema read a row holding the new variant with its name as it is (here
@@ -279,7 +310,7 @@ once a release drops a column, code on that release can no longer read it.
 
 ## Adding relations to existing UUID columns
 
-To add a relation using an existing `ownerId` UUID column, declare `"owner": { "rel": "users", "column": "ownerId" }` in the table's `relations` and follow the migration workflow above. Existing UUID values stay unchanged; the migration is an identity step for the table, which preserves row values while making the relation available under the new schema.
+To add a relation using an existing `ownerId` UUID column, declare `owner: s.rel("users", "ownerId")` in the table's relations (the second argument to `s.table`) and follow the migration workflow above. Existing UUID values stay unchanged; the migration is an identity step for the table, which preserves row values while making the relation available under the new schema.
 
 ## Handling concurrent migrations
 
@@ -322,9 +353,9 @@ backend rejects on start.
 
 ### Converging into a merged schema
 
-To preserve both changes, merge both branches' `history` entries and edit `tables` so `tasks`
-contains both `dueDate` and `priority`. Then write a migration into this merged schema from each
-branch's version, in `migrations`:
+To preserve both changes, merge both branches' migration files and snapshots, and edit `schema.ts`
+so `tasks` contains both `dueDate` and `priority`. Then write a migration into this merged schema
+from each branch's version:
 
 ```text
                ┌──→ Due dates ──add priority──┐
@@ -332,9 +363,10 @@ Original tasks ┤                             ├──→ Due dates + prioriti
                └──→ Priorities ──add dueDate──┘
 ```
 
-`migrations create` only writes a migration from the version your bindings were generated from,
-so write the second one by hand, next to it, with that branch's version as `from`. The versions'
-names are in `history`, and `migrations graph` shows them too. Review both migrations:
+`migrations create` only writes a migration from the latest snapshot, so write the second one by
+hand, next to it in `migrations/`, with that branch's version as `fromHash` and its tables as
+`from`. The versions' hashes name the files in `migrations/snapshots/`, and `migrations graph`
+shows them too. Review both migrations:
 
 - The migration from Alice's schema should preserve `dueDate` and introduce `priority`.
 - The migration from Bob's schema should preserve `priority` and introduce `dueDate`.
@@ -352,16 +384,16 @@ preserve or introduce.
 ## Visualizing the migration graph
 
 Run `jazz-tools migrations graph` to see the schemas and migrations. It reads the server's history,
-so it needs a Jazz Cloud app or a [`remote()`](/docs/setup/deployment/own-server#data-on-another-machine)
+so it needs a Jazz Cloud app (deprecated) or a [`remote()`](/docs/setup/deployment/own-server#data-on-another-machine)
 store; against a backend's own `sqlite()` store it fails with a 404.
 
 ```sh
 npx jazz-tools migrations graph <appId> --server-url <url> --admin-secret <secret>
 ```
 
-The graph includes all schemas and migrations present in the server and in your `jazz.app.json`.
+The graph includes all schemas and migrations present in the server and locally, in `migrations/`.
 Schemas and migrations that exist only on the server or only locally are labelled accordingly. The
-graph also marks the current `tables` and, with "(latest bundle)", the schema of the bundle your
+graph also marks the local `schema.ts` and, with "(latest bundle)", the schema of the bundle your
 backends published most recently.
 
 ## Compiling the schema
@@ -380,13 +412,13 @@ npx jazz-tools schema compile --schema-dir ./packages/app
 | Flag                  | Default                           | Description                                 |
 | --------------------- | --------------------------------- | ------------------------------------------- |
 | `--name <name>`       | required                          | `migrations create`: the migration's `name` |
-| `--schema-dir <path>` | `.`, then `./src` and `./src/lib` | Directory holding `jazz.app.json`           |
+| `--schema-dir <path>` | `.`, then `./src` and `./src/lib` | Directory holding `schema.ts`               |
 
-alpha.64's `--fromHash`, `--toHash` and `--migrations-dir` are gone: a migration goes from the
-version in `jazz.generated.ts` to the current `tables`, and lives in `jazz.app.json`.
+There is no `--fromHash`, `--toHash` or `--migrations-dir`: a migration goes from the latest
+snapshot to the current `schema.ts`, and lives in `migrations/` next to `schema.ts`.
 
 ## Next steps
 
 - [Defining Tables](/docs/schemas/defining-tables)&hairsp;—&hairsp;table and column definitions
 - [Column Types](/docs/schemas/column-types)&hairsp;—&hairsp;full list of available column types
-- [App files](/docs/reference/app-files)&hairsp;—&hairsp;the format of `jazz.app.json`, including `history` and `migrations`
+- [App files](/docs/reference/app-files)&hairsp;—&hairsp;the format of the generated `jazz.app.json`, including `history` and `migrations`

@@ -1,6 +1,7 @@
 ---
 title: How Auth Works in Jazz
 description: "Learn how your backend decides who a user is, how the browser follows your auth, and what a session is."
+languageTabs: main-backend
 ---
 
 To authenticate users with Jazz, sign in your users with your auth library as usual. Provide an
@@ -91,12 +92,15 @@ expiry, with a fresh token. On that reconnect:
 So a sign-out on another device, a ban or a changed role reaches an open connection within
 `sessionTtlSeconds` at the latest. To end a user's open connections at once, call
 `jazz.revokeUser(userId)` from your sign-out handler or your auth provider's session-revoked
-webhook. It ends their connections on this backend instance, including one still signing in as
-them when you call it (say a tab reconnecting); connections on other instances end
-within `sessionTtlSeconds`. On Vercel and other serverless hosts, the request that signs a user out
-usually runs on a different instance than their sync connections, so `revokeUser` there rarely
-reaches them. To sign out the browser the user is in, every tab of it, call `refresh()` on the
-client after your sign-out (see [Signing out in every tab](#signing-out-in-every-tab)). A connection
+webhook. It ends their connections on every backend instance, including one still signing in as
+them when you call it (say a tab reconnecting). On Vercel and other serverless hosts, the request
+that signs a user out usually runs on a different instance than their sync connections, so
+`revokeUser` records the revocation at the core. The core ends the user's connections wherever
+they are served, and refuses any that an instance admits afterwards on an `authenticate` answer
+from before the call. A sign-in after the call works as usual. This needs a core at least as new as
+your backend; in front of an older core, `revokeUser` ends this instance's connections only, and
+warns. To sign out the browser the user is in, every tab of it, call `refresh()` on the client
+after your sign-out (see [Signing out in every tab](#signing-out-in-every-tab)). A connection
 `revokeUser` does end asks your backend who is signed in; in a background tab, a "no one" answer
 then waits until the tab is in front again, since its cookies may be stale.
 
@@ -291,10 +295,10 @@ On the client, the Jazz session names the same user: `getSnapshot().user` (or `u
 user your backend signed in; `identity.subject` is your own user ID.
 
 - **Ownership** compares `session.user`. Linked identities share one account, so this is
-  what "rows this user owns" should use: `$createdBy.account = session.user` or
-  `owner_id = session.user`, also inside `exists` rules.
+  what "rows this user owns" should use: `{ $createdBy: session.user }` or
+  `{ owner_id: session.user }`, also inside `exists` rules.
 - **Exact authorship** compares `session.identity`, issuer and subject included:
-  `$createdBy.identity = session.identity`.
+  `{ "$createdBy.identity": session.identity }`.
   Jazz stamps `$createdBy` and `$updatedBy` with the
   full author record, `{ account, identity }`, along with edit timestamps. This tells apart writes
   by the same account made through your auth (`jazz:backend`), through a device account's key
@@ -310,17 +314,20 @@ author into a string.
 
 ### Observe the current session
 
-| Binding              | Read the current session                                            |
-| -------------------- | ------------------------------------------------------------------- |
-| React / React Native | `const session = useSession()`                                      |
-| Vue                  | `const session = useSession()`; read `session.value`                |
-| Solid                | `const session = useSession()`; read `session()`                    |
-| Svelte               | `const session = getSession()`; read `session.current`              |
-| TypeScript           | `db.getAuthState().session`; subscribe with `db.onAuthChanged(...)` |
+The Jazz session's `user` is who is signed in, and it is what your policies see:
+`user.accountId` is `session.user`, and `user.identity` and `user.claims` are `session.identity` and
+`session.claims`. It is `null` while no one is signed in.
 
-Who is signed in on the device (rather than what a policy sees) comes from the Jazz session:
-`useJazzSession().user` in React, `getJazzSession()` in Svelte, `session.getSnapshot().user`
-without a framework.
+| Binding              | Read the signed-in user                                               |
+| -------------------- | --------------------------------------------------------------------- |
+| React / React Native | `const { user } = useJazzSession()`                                   |
+| Vue                  | `const { snapshot } = useJazzSession()`; read `snapshot.value.user`   |
+| Solid                | `const { snapshot } = useJazzSession()`; read `snapshot().user`       |
+| Svelte               | `const session = getJazzSession()`; read `$session.user`              |
+| TypeScript           | `session.getSnapshot().user`; subscribe with `session.subscribe(...)` |
+
+`user.kind` tells a device account (`"device"`, a guest) from a user your backend signed in
+(`"backend"`).
 
 Framework hooks must run inside the Jazz provider. Signed-out readers have no session account, so
 ownership checks against them fail closed; write an explicit anonymous-access policy when you want
@@ -329,31 +336,28 @@ that access.
 ### Rows the user owns
 
 If a row always belongs to whoever created it, you don't need a column: compare `$createdBy` with
-`session.user` in your policy (`$createdBy.account = session.user`). When ownership can move to someone
+`session.user` in your policy (`{ $createdBy: session.user }`). When ownership can move to someone
 else, such as a reassigned task or a transferred document, store the current owner in its own UUID
 column and base your policies on it:
 
-```json title="jazz.app.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
-  "tables": {
-    "todos": { "columns": { "title": "string", "owner_id": "uuid" } }
-  }
-}
-```
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
 
-```json title="jazz.permissions.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
-  "tables": {
-    "todos": {
-      "read": "owner_id = session.user",
-      "insert": "owner_id = session.user"
-    }
-  }
-}
+export const schema = s.defineSchema({
+  todos: s.table({
+    title: s.string(),
+    owner_id: s.uuid(),
+  }),
+});
+
+const { definePermissions, session } = schema;
+
+export const permissions = definePermissions({
+  todos: {
+    read: { owner_id: session.user },
+    insert: { owner_id: session.user },
+  },
+});
 ```
 
 Then read and insert with the session's account:

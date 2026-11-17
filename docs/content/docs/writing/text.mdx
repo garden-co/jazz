@@ -13,24 +13,20 @@ keeps both changes.
 Opt a string column into a text merge strategy. Use Markdown for prose unless you have a reason not
 to:
 
-```json title="jazz.app.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
-  "tables": {
-    "notes": {
-      "columns": {
-        "title": "string",
-        "body": { "type": "string", "merge": "markdown" }
-      }
-    }
-  }
-}
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  notes: s.table({
+    title: s.string(),
+    body: s.string().merge("markdown"),
+  }),
+});
 ```
 
 `title` keeps one value: a concurrent edit replaces it whole. `body` merges.
 
-`"merge": "text"` and `"merge": "html"` are the other two strategies. They differ in which pieces a
+`.merge("text")` and `.merge("html")` are the other two strategies. They differ in which pieces a
 merge keeps whole: words and punctuation for all three, plus markup runs and link targets for
 Markdown, and whole tags and entities for HTML. See
 [Column types](/docs/schemas/column-types#mergeable-text-columns) for the full rules and for optional
@@ -107,6 +103,10 @@ const found = anchors.resolveRange(range, latestBody);
   positions: a range with just the `matched` text, and `before` and `after` left empty, is found
   wherever that text is.
 
-Positions count UTF-16 code units, like JavaScript strings. In ProseMirror, `captureRange`,
+Positions count UTF-16 code units, like JavaScript strings. In Rust, use `Anchor::capture_utf8`,
+`Anchor::resolve_utf8`, `Range::capture_utf8` and `Range::resolve_utf8` from
+`jazz_app_support::text`: they take and return UTF-8 byte offsets (`str` indices) and refuse an
+offset inside a code point. The anchors themselves are the same, so a Rust server and a TypeScript
+client share them. In ProseMirror, `captureRange`,
 `resolveRange` and `overlays` from `jazz-tools/prosemirror` work in editor positions instead; see
 [comments that stay on their words](/docs/recipes/data-patterns/rich-text-editor#comments-that-stay-on-their-words).

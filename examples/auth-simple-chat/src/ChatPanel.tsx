@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useAll, useSession } from "jazz-tools/react";
+import { useAll, useJazzSession } from "jazz-tools/react";
 import { app } from "../jazz.generated";
 
 export type ChatPanelProps = {
@@ -26,8 +26,8 @@ export function ChatPanel({
   placeholder,
   readOnlyNotice,
 }: ChatPanelProps) {
-  const session = useSession();
-  const sessionUserId = session?.user ?? null;
+  const session = useJazzSession();
+  const sessionUserId = session.user?.accountId ?? null;
 
   const { data: rows = [], db } = useAll(
     app.messages

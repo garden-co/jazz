@@ -146,13 +146,22 @@ impl JazzServer {
             trusted_workload,
         } = builder;
 
-        let app_id = app_id.unwrap_or_else(AppId::random);
         let data_dir = if persistent_storage {
             ServerDataDir::persistent(data_dir)
         } else {
             ServerDataDir::in_memory()
         };
         let storage_data_dir = data_dir.path().to_path_buf();
+        // A store keeps the app it was first opened for: a server reopened on
+        // a data dir without naming an app serves that one, as `sqlite()`
+        // does, instead of a new random app it would refuse.
+        let app_id = match app_id {
+            Some(app_id) => app_id,
+            None if persistent_storage => {
+                recorded_app_id(&storage_data_dir).unwrap_or_else(AppId::random)
+            }
+            None => AppId::random(),
+        };
         let admin_secret = admin_secret.unwrap_or_else(|| Self::ADMIN_SECRET.to_string());
         let backend_secret = backend_secret.unwrap_or_else(|| Self::BACKEND_SECRET.to_string());
         let auth_clock = auth_clock.unwrap_or_default();
@@ -656,4 +665,12 @@ mod tests {
         assert_eq!(server.shutdown().await, ShutdownPhase::Failed);
         drop(active_request);
     }
+}
+
+/// The app a persistent store in `data_dir` records, if it holds one.
+fn recorded_app_id(data_dir: &std::path::Path) -> Option<AppId> {
+    let recorded = super::identity::read_store_identity(data_dir)
+        .ok()?
+        .app_id?;
+    Some(AppId::from_string(&recorded).unwrap_or_else(|_| AppId::from_name(&recorded)))
 }

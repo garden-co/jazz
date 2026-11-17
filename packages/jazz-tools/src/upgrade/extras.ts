@@ -379,7 +379,7 @@ export function convertExtras(input: ExtrasInput): ExtrasResult {
   const ext = input.jsExtensions ? ".js" : "";
   const lines: string[] = [
     "// What schema.ts exported besides the schema, moved here by `jazz-tools upgrade`.",
-    "// The schema itself is jazz.app.json; its types are in jazz.generated.ts.",
+    "// The schema is schema.ts (for `generate` only); its types are in jazz.generated.ts.",
   ];
   if (jazzToolsTypes.size > 0)
     lines.push(`import type { ${[...jazzToolsTypes].sort().join(", ")} } from "jazz-tools";`);
@@ -413,7 +413,7 @@ export function convertExtras(input: ExtrasInput): ExtrasResult {
 
 /**
  * An app ships its history through the migrations module schema.ts passes
- * to s.defineApp: alpha.64's validate writes it only then, and otherwise
+ * to s.defineApp: alpha.65's validate writes it only then, and otherwise
  * just warns. Without it, stores may hold versions jazz.app.json doesn't
  * carry, so upgrade refuses rather than start the history empty. An explicit
  * `migrations: "none"` is the app saying it keeps no history.
@@ -467,9 +467,9 @@ function refuseMissingMigrations(
   }
   if (imported) return;
   throw new UpgradeRefusal(
-    "schema.ts doesn't pass its migrations module to s.defineApp, so alpha.64 shipped no schema history and a store may " +
+    "schema.ts doesn't pass its migrations module to s.defineApp, so alpha.65 shipped no schema history and a store may " +
       'hold versions jazz.app.json doesn\'t record. Add `import { migrations } from "./migrations";` and ' +
-      "`s.defineApp(schema, { migrations })`, run `npx jazz-tools validate` with the app's alpha.64 (it writes the history " +
+      "`s.defineApp(schema, { migrations })`, run `npx jazz-tools validate` with the app's alpha.65 (it writes the history " +
       'into jazz.app.json), commit, then upgrade again. If the app really keeps no history, say `{ migrations: "none" }`.',
     where(call),
   );

@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Db } from 'jazz-tools';
-  import { getDb, getJazzSession, getSession } from 'jazz-tools/svelte';
+  import { getDb, getJazzSession } from 'jazz-tools/svelte';
   import { app } from '../jazz.generated.js';
 
   // #region db-access-svelte
@@ -21,14 +21,13 @@
   // #endregion db-access-svelte
 
   // #region session-svelte
-  // Who is signed in: { accountId, kind: "device" | "backend", identity, claims } | null
+  // Who is signed in: { accountId, kind: "device" | "backend", identity, claims } | null.
+  // Your permissions see the same user as `session.user` (the accountId),
+  // `session.identity` and `session.claims`.
   const jazzSession = getJazzSession(); // $jazzSession.user
-  // What your permissions see as `session` (its `user` is the account id).
-  const session = getSession(); // { current: Session | null }
   // #endregion session-svelte
 
   void addTodo;
   void todoActions;
   void jazzSession;
-  void session;
 </script>
