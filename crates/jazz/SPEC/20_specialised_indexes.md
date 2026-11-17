@@ -479,10 +479,12 @@ version:
    scripts are searched by character. Separators end words and are dropped,
    in every script (`नमस्ते।दुनिया`, `مرحبا،عالم` and `x։y` are two words
    each), and ignored characters do not split a word and are left out of
-   its term (`co\u{AD}operate` is `cooperate`). Two runs of word characters
-   with a single `'` or `’` between them are one word (`don't`, `O’Neill`);
-   other separators split, so `e-mail`, `3.14` and `snake_case` are two
-   words each. A field is analyzed up to its first 65 536 terms (after step
+   its term (`co\u{AD}operate` is `cooperate`). As in UAX #29 (WB6, WB7,
+   WB7b, WB7c), a few separators stay inside a word between letters: `'`,
+   `’` or `·` (U+00B7) between two word characters (`don't`, `O’Neill`,
+   Catalan `col·lecció`), and `׳` (U+05F3), `״` (U+05F4), `'` or `"` between
+   two Hebrew letters (`צה״ל`, `צה"ל`). Other separators split, so `e-mail`,
+   `3.14` and `snake_case` are two words each. A field is analyzed up to its first 65 536 terms (after step
    5); the rest of it is not indexed and does not count toward its length
    `L`. This bounds the postings one write creates; a value is never
    refused or left unindexed for its length (`INV-IX-7`).
@@ -499,7 +501,9 @@ version:
    the fullwidth Latin letters and digits fold to ASCII. Combining marks
    (U+0300–U+036F, U+1AB0–U+1AFF, U+1DC0–U+1DFF, U+20D0–U+20FF,
    U+FE20–U+FE2F) and variation selectors are dropped, so precomposed and
-   decomposed spellings meet, as are ignored characters. `’` becomes `'`.
+   decomposed spellings meet, as are ignored characters and the
+   word-internal `·`, `״` and `"`. `’` and `׳` become `'`. So
+   `col·lecció` meets `colleccio`, and `צה״ל` and `צה"ל` meet `צהל`.
    Other characters are unchanged.
 4. For `en`, stem with the Snowball English (Porter 2) algorithm of Snowball
    v3.2.0 (`algorithms/english.sbl`), which also strips possessives (`'s`,
@@ -518,7 +522,9 @@ indexed term equal to the word analyzed as a whole word (so a fully typed
 `running` meets the stem `run`), or any indexed term starting with the word
 folded but unstemmed (steps 1–3), compared as UTF-8 bytes. A partly typed
 word whose stem is shorter than what has been typed (`runn`) matches only
-once completed. A last word of one character is an exact term, not a prefix
+once completed. A term equal to the prefix's whole-word term is not a
+separate slot (`run run` binds the prefix alone). A last word of one
+character is an exact term, not a prefix
 (a prefix has at least 2 characters), so `jazz b` does not expand to every
 term starting with `b`. A query with no terms and no prefix after analysis
 is refused (20.4), as is query text over 1 KiB (refused before analysis)
