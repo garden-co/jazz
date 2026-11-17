@@ -199,6 +199,8 @@ mod slow_queries;
 mod snapshots;
 #[path = "../specialised_index_kinds.rs"]
 mod specialised_index_kinds;
+#[path = "../specialised_index_policies.rs"]
+mod specialised_index_policies;
 #[path = "../specialised_indexes.rs"]
 mod specialised_indexes;
 #[path = "../storage_corpus.rs"]
