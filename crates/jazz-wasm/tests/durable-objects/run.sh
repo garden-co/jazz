@@ -7,4 +7,4 @@ here=$(cd "$(dirname "$0")" && pwd)
 wasm-pack build "$here/../.." --target web --dev --out-dir "$here/pkg" \
   --out-name jazz_wasm --no-pack -- --features durable-object-tests
 cd "$here/../.."
-node --test "$here/smoke.test.mjs"
+node --test "$here/smoke.test.mjs" "$here/host.test.mjs"

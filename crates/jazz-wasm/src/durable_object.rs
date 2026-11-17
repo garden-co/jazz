@@ -677,6 +677,150 @@ mod smoke {
         serde_json::to_string(&same).map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))
     }
 
+    /// A thin client's wire, for the host test (`host.test.mjs`): one
+    /// WebSocket message carrying `frames`.
+    fn batch(frames: &[jazz::wire::WireFrame]) -> Vec<u8> {
+        let encoded: Vec<Vec<u8>> = frames
+            .iter()
+            .map(|frame| jazz::wire::encode_frame(frame).expect("encode frame"))
+            .collect();
+        jazz_server::portable::websocket_codec::encode_ws_frame_batches(&encoded)
+            .expect("batch")
+            .pop()
+            .expect("one batch")
+    }
+
+    /// The fixture's schema (a `notes` table with a `title`), as the
+    /// public schema JSON a core is opened with and a thin client declares.
+    #[wasm_bindgen(js_name = testNotesSchema)]
+    pub fn test_notes_schema() -> String {
+        let policies = TablePolicies::new()
+            .with_select(PolicyExpr::True)
+            .with_insert(PolicyExpr::True)
+            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+            .with_delete(PolicyExpr::True);
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("title", ColumnType::Text)
+                    .policies(policies),
+            )
+            .build();
+        serde_json::to_string(&schema).expect("schema JSON")
+    }
+
+    /// The system identity, as a prelude names its peer.
+    #[wasm_bindgen(js_name = testSystemIdentity)]
+    pub fn test_system_identity() -> String {
+        AuthorSubject::SYSTEM.canonical().to_owned()
+    }
+
+    /// A thin client's opening `Hello`.
+    #[wasm_bindgen(js_name = testThinHello)]
+    pub fn test_thin_hello() -> Vec<u8> {
+        batch(&[jazz::wire::WireFrame::Hello(
+            jazz::wire::WireHello::current(
+                jazz::wire::WirePeerRole::Client,
+                jazz::wire::current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS,
+            ),
+        )])
+    }
+
+    fn thin(id: u64, op: jazz::thin::ThinOp) -> Vec<u8> {
+        batch(&[jazz::wire::WireFrame::ThinRequest(
+            jazz::thin::ThinRequest { id, op },
+        )])
+    }
+
+    /// A thin request declaring `schema` (public schema JSON).
+    #[wasm_bindgen(js_name = testThinSchema)]
+    pub fn test_thin_schema(id: u64, schema: &str) -> Vec<u8> {
+        thin(
+            id,
+            jazz::thin::ThinOp::Schema {
+                schema: schema.as_bytes().to_vec(),
+            },
+        )
+    }
+
+    /// A thin request inserting a note titled `title`.
+    #[wasm_bindgen(js_name = testThinInsertNote)]
+    pub fn test_thin_insert_note(id: u64, title: &str) -> Vec<u8> {
+        let descriptor =
+            jazz::records::RecordDescriptor::new([("title", jazz::records::ValueType::String)]);
+        let record = jazz::records::OwnedRecord::new(
+            descriptor
+                .create(&[Value::String(title.to_owned())])
+                .expect("note record"),
+            descriptor,
+        );
+        thin(
+            id,
+            jazz::thin::ThinOp::Insert {
+                table: "notes".to_owned(),
+                cells: jazz::binding_codec::encode_named_cells(&record).expect("cells"),
+                options: Vec::new(),
+                transaction: None,
+            },
+        )
+    }
+
+    /// A thin request reading every note.
+    #[wasm_bindgen(js_name = testThinQueryNotes)]
+    pub fn test_thin_query_notes(id: u64) -> Vec<u8> {
+        thin(
+            id,
+            jazz::thin::ThinOp::Query {
+                query: postcard::to_allocvec(&Query::from("notes")).expect("query"),
+                options: Vec::new(),
+                transaction: None,
+            },
+        )
+    }
+
+    /// The answers in a message the core sent, as JSON: `{"hello":true}`,
+    /// `{"id":n,"ok":true}`, `{"id":n,"written":true}`,
+    /// `{"id":n,"titles":[…]}` or `{"error":"…"}`.
+    #[wasm_bindgen(js_name = testDecodeAnswers)]
+    pub fn test_decode_answers(message: &[u8]) -> Result<String, JsValue> {
+        let frames = jazz_server::portable::websocket_codec::decode_ws_encoded_frame_batch(message)
+            .map_err(js)?;
+        let mut out = Vec::new();
+        for frame in frames {
+            out.push(match jazz::wire::decode_frame(&frame).map_err(js)? {
+                jazz::wire::WireFrame::Hello(_) => serde_json::json!({ "hello": true }),
+                jazz::wire::WireFrame::Error(error) => {
+                    serde_json::json!({ "error": error.message })
+                }
+                jazz::wire::WireFrame::ThinResponse(response) => match response.body {
+                    jazz::thin::ThinBody::Ok => serde_json::json!({ "id": response.id, "ok": true }),
+                    jazz::thin::ThinBody::Written { .. } => {
+                        serde_json::json!({ "id": response.id, "written": true })
+                    }
+                    jazz::thin::ThinBody::Rows { rows, .. } => {
+                        let rows = jazz::binding_codec::decode_rows(&rows).map_err(js)?;
+                        let mut titles: Vec<String> = rows
+                            .iter()
+                            .flat_map(|group| group.rows.iter())
+                            .filter_map(|row| match row.cells.get("title") {
+                                Some(Value::String(title)) => Some(title.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        titles.sort();
+                        serde_json::json!({ "id": response.id, "titles": titles })
+                    }
+                    jazz::thin::ThinBody::Error { code, message } => {
+                        serde_json::json!({ "id": response.id, "error": format!("{code}: {message}") })
+                    }
+                    other => serde_json::json!({ "id": response.id, "other": format!("{other:?}") }),
+                },
+                other => serde_json::json!({ "other": format!("{other:?}") }),
+            });
+        }
+        serde_json::to_string(&out).map_err(js)
+    }
+
     /// Run `step` on this object's storage; a JSON summary of what it saw.
     /// - `write`: insert a short note and a 300 KiB one.
     /// - `read`: every note's title and body length (after a restart too).
@@ -746,5 +890,351 @@ mod smoke {
             }
             other => Err(js(format!("unknown smoke step {other}"))),
         }
+    }
+}
+
+/// The Jazz core a Durable Object hosts: jazz-server's engine
+/// ([`jazz_server::runtime::ServerCore`]) on the object's own SQL, with the
+/// native server's WebSocket handshake and admission by the app's core
+/// secret. The object's JavaScript (`durable-object-host.js`) owns the
+/// sockets and calls in as they deliver: `accept` a new connection's
+/// prelude and first frames, `receive` its later messages, `tick`, and
+/// send what `output` returns.
+mod core_host {
+    use super::{durable_object_storage, ObjectStorage};
+    use jazz_server::portable::admission::{
+        admit_by_core_secret, UpgradeCredential, WebSocketPrelude,
+    };
+    use jazz_server::portable::handshake::{link, negotiate_hello};
+    use jazz_server::portable::websocket_codec::{
+        decode_ws_encoded_frame_batch, encode_ws_frame_batches, ws_foreign_version_refusal,
+    };
+    use jazz_server::runtime::{ServerCore, ServerSession};
+    use std::collections::{HashMap, VecDeque};
+    use wasm_bindgen::prelude::*;
+
+    fn js(error: impl std::fmt::Display) -> JsValue {
+        JsValue::from_str(&error.to_string())
+    }
+
+    /// What a connection's socket is.
+    struct Socket {
+        session: ServerSession,
+        thin: bool,
+        /// Split thin requests being joined.
+        assembler: jazz::thin::ThinAssembler,
+        /// Input its session's budget had no room for yet, oldest first.
+        held: VecDeque<Held>,
+    }
+
+    enum Held {
+        Frames(Vec<Vec<u8>>, usize),
+        Thin(jazz::thin::ThinRequest, usize, bool),
+    }
+
+    /// The core (see the module docs). Sockets are numbered by `accept`.
+    #[wasm_bindgen]
+    pub struct DurableObjectCore {
+        core: ServerCore,
+        secret: String,
+        sockets: HashMap<u32, Socket>,
+        next_socket: u32,
+    }
+
+    /// What `accept` answers: the frames to send, and the socket's number
+    /// (absent when the connection was refused and is to be closed after
+    /// sending them).
+    #[wasm_bindgen(getter_with_clone)]
+    pub struct Accepted {
+        pub socket: Option<u32>,
+        pub frames: Vec<js_sys::Uint8Array>,
+    }
+
+    fn error_frame(error: &jazz::wire::WireError) -> Vec<u8> {
+        jazz::wire::encode_frame(&jazz::wire::WireFrame::Error(error.clone()))
+            .and_then(|frame| encode_ws_frame_batches(&[frame]))
+            .ok()
+            .and_then(|mut batches| batches.pop())
+            .unwrap_or_default()
+    }
+
+    fn refused(frame: Vec<u8>) -> Accepted {
+        Accepted {
+            socket: None,
+            frames: vec![js_sys::Uint8Array::from(frame.as_slice())],
+        }
+    }
+
+    #[wasm_bindgen]
+    impl DurableObjectCore {
+        /// Open the core on the object's SQL (`ctx.storage`). `secret`
+        /// admits the app's backend; `schema` (the app's public schema as
+        /// JSON) is served until a published catalogue replaces it.
+        pub fn open(
+            storage: ObjectStorage,
+            app_id: String,
+            secret: String,
+            schema: String,
+        ) -> Result<DurableObjectCore, JsValue> {
+            if secret.len() < 32 {
+                return Err(js("the core secret must be at least 32 characters"));
+            }
+            let source: jazz::tools::public_schema::Schema =
+                serde_json::from_str(&schema).map_err(js)?;
+            let schema = jazz::schema::JazzSchema::new(&source).map_err(js)?;
+            let file =
+                jazz::host::StoreFile::from_storage(durable_object_storage(storage)).map_err(js)?;
+            let any_stored = jazz::host::HostTables::catalogue(&file)
+                .map(|rows| !rows.schemas.is_empty())
+                .map_err(js)?;
+            let core = ServerCore::open(schema, file, any_stored, Some(app_id)).map_err(js)?;
+            Ok(Self {
+                core,
+                secret,
+                sockets: HashMap::new(),
+                next_socket: 1,
+            })
+        }
+
+        /// Admit a new connection: its prelude (JSON) and first frame batch
+        /// (its `Hello`), and the credential its upgrade carried, if any.
+        pub fn accept(
+            &mut self,
+            prelude: &str,
+            first: &[u8],
+            credential: Option<String>,
+            access: Option<String>,
+        ) -> Accepted {
+            // A client on another wire version is refused in its own layout.
+            if let Some(refusal) = ws_foreign_version_refusal(first) {
+                return refused(
+                    encode_ws_frame_batches(&[refusal])
+                        .ok()
+                        .and_then(|mut b| b.pop())
+                        .unwrap_or_default(),
+                );
+            }
+            let fail = |code, message: String| {
+                refused(error_frame(&jazz::wire::WireError::new(
+                    code,
+                    jazz::wire::WireRetry::Never,
+                    message,
+                )))
+            };
+            let prelude: WebSocketPrelude = match serde_json::from_str(prelude) {
+                Ok(prelude) => prelude,
+                Err(error) => {
+                    return fail(
+                        jazz::wire::WireErrorCode::AuthFailed,
+                        format!("invalid websocket prelude: {error}"),
+                    );
+                }
+            };
+            let upgrade = match (&credential, &access) {
+                (Some(credential), Some(access)) => Some(UpgradeCredential { credential, access }),
+                _ => None,
+            };
+            let admission = match admit_by_core_secret(&prelude, upgrade, &self.secret) {
+                Ok(admission) => admission,
+                Err(message) => return fail(jazz::wire::WireErrorCode::AuthFailed, message),
+            };
+            let hello = match negotiate_hello(first, prelude.bootstrap_catalogue) {
+                Ok(hello) => hello,
+                Err(error) => return refused(error_frame(&error)),
+            };
+            let link = match link(&admission, &hello) {
+                Ok(link) => link,
+                Err(error) => return refused(error_frame(&error)),
+            };
+            let opened = if link.thin {
+                self.core.open_thin_session(
+                    admission.identity,
+                    admission.claims,
+                    admission.bundle,
+                    admission.trust,
+                )
+            } else {
+                self.core.open_session(
+                    admission.identity,
+                    admission.claims,
+                    admission.bundle,
+                    admission.trust,
+                )
+            };
+            let session = match opened {
+                Ok(session) => session,
+                Err(error) => {
+                    return fail(jazz::wire::WireErrorCode::NotReady, error.to_string());
+                }
+            };
+            let socket = self.next_socket;
+            self.next_socket += 1;
+            self.sockets.insert(
+                socket,
+                Socket {
+                    session,
+                    thin: link.thin,
+                    assembler: jazz::thin::ThinAssembler::default(),
+                    held: VecDeque::new(),
+                },
+            );
+            let hello = encode_ws_frame_batches(&[link.server_hello])
+                .ok()
+                .and_then(|mut b| b.pop())
+                .unwrap_or_default();
+            Accepted {
+                socket: Some(socket),
+                frames: vec![js_sys::Uint8Array::from(hello.as_slice())],
+            }
+        }
+
+        /// Take a message `socket` delivered (a batch of encoded frames).
+        /// An error ends the connection (send `output` first).
+        pub fn receive(&mut self, socket: u32, message: &[u8]) -> Result<(), JsValue> {
+            let Some(state) = self.sockets.get_mut(&socket) else {
+                return Err(js("unknown socket"));
+            };
+            let frames = decode_ws_encoded_frame_batch(message).map_err(js)?;
+            if !state.thin {
+                state.held.push_back(Held::Frames(frames, message.len()));
+            } else {
+                for frame in frames {
+                    let len = frame.len();
+                    let request = match jazz::wire::decode_frame(&frame).map_err(js)? {
+                        jazz::wire::WireFrame::ThinRequest(request) => Some((request, len, false)),
+                        jazz::wire::WireFrame::ThinPart(part) => {
+                            let total = part.total().map_err(js)?;
+                            match state.assembler.push(part).map_err(js)? {
+                                Some(joined) => {
+                                    match jazz::wire::decode_postcard_frame(&joined).map_err(js)? {
+                                        jazz::wire::WireFrame::ThinRequest(request) => {
+                                            Some((request, total, true))
+                                        }
+                                        _ => return Err(js("a split thin frame is not a request")),
+                                    }
+                                }
+                                None => None,
+                            }
+                        }
+                        _ => return Err(js("a thin connection sends only thin requests")),
+                    };
+                    if let Some((request, bytes, split)) = request {
+                        state.held.push_back(Held::Thin(request, bytes, split));
+                    }
+                }
+            }
+            self.admit_held(socket)
+        }
+
+        fn admit_held(&mut self, socket: u32) -> Result<(), JsValue> {
+            let Some(state) = self.sockets.get_mut(&socket) else {
+                return Ok(());
+            };
+            while let Some(next) = state.held.pop_front() {
+                let admitted = match next {
+                    Held::Frames(frames, bytes) => {
+                        let retry = Held::Frames(frames.clone(), bytes);
+                        (
+                            self.core
+                                .receive_frames(state.session, frames, bytes)
+                                .map_err(js)?,
+                            retry,
+                        )
+                    }
+                    Held::Thin(request, bytes, split) => {
+                        let retry = Held::Thin(request.clone(), bytes, split);
+                        (
+                            self.core
+                                .receive_thin_request(state.session, request, bytes, split)
+                                .map_err(js)?,
+                            retry,
+                        )
+                    }
+                };
+                if !admitted.0 {
+                    state.held.push_front(admitted.1);
+                    break;
+                }
+            }
+            Ok(())
+        }
+
+        /// Run the engine, admitting input held for room as room frees,
+        /// until it wants no further tick. Take every socket's `output`
+        /// after it (output taken can make the core want another tick:
+        /// call `tick` again while `wantsTick`).
+        pub fn tick(&mut self) -> Result<(), JsValue> {
+            loop {
+                self.core.tick();
+                let sockets: Vec<u32> = self.sockets.keys().copied().collect();
+                for socket in sockets {
+                    self.admit_held(socket)?;
+                }
+                if !self.core.inbound_pending() {
+                    return Ok(());
+                }
+            }
+        }
+
+        /// Whether the core wants a tick now (see `ServerCore::wants_tick`).
+        #[wasm_bindgen(js_name = wantsTick)]
+        pub fn wants_tick(&self) -> bool {
+            self.core.wants_tick()
+        }
+
+        /// How often to tick while sockets are open, in milliseconds.
+        #[wasm_bindgen(js_name = idleTickMs)]
+        pub fn idle_tick_ms() -> u32 {
+            ServerCore::IDLE_TICK.as_millis() as u32
+        }
+
+        /// What to send on `socket` now: frame batches, in order. `ended`
+        /// says whether the session ended (close the socket after sending).
+        pub fn output(&mut self, socket: u32) -> Output {
+            let Some(state) = self.sockets.get(&socket) else {
+                return Output {
+                    batches: Vec::new(),
+                    ended: true,
+                };
+            };
+            let mut batches = Vec::new();
+            let mut ended = false;
+            for out in self.core.take_output(state.session) {
+                match out {
+                    Ok(frames) => {
+                        for batch in encode_ws_frame_batches(&frames).unwrap_or_default() {
+                            batches.push(js_sys::Uint8Array::from(batch.as_slice()));
+                        }
+                    }
+                    Err(error) => {
+                        batches.push(js_sys::Uint8Array::from(error_frame(&error).as_slice()));
+                        ended = true;
+                    }
+                }
+            }
+            if ended {
+                self.close(socket);
+            }
+            Output { batches, ended }
+        }
+
+        /// Every open socket's number.
+        pub fn sockets(&self) -> Vec<u32> {
+            self.sockets.keys().copied().collect()
+        }
+
+        /// `socket` closed.
+        pub fn close(&mut self, socket: u32) {
+            if let Some(state) = self.sockets.remove(&socket) {
+                self.core.close_session(state.session);
+            }
+        }
+    }
+
+    /// What `output` answers.
+    #[wasm_bindgen(getter_with_clone)]
+    pub struct Output {
+        pub batches: Vec<js_sys::Uint8Array>,
+        pub ended: bool,
     }
 }

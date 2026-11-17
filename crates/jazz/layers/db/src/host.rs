@@ -185,6 +185,17 @@ impl StoreFile {
         })
     }
 
+    /// A store on `storage` a host opened (a Durable Object's SQL:
+    /// [`Storage::from_backend`]), admitted as a file is, with no path:
+    /// its chunks live in the store itself.
+    pub fn from_storage(storage: Storage) -> Result<Self, Error> {
+        crate::format::admit(&storage)?;
+        Ok(Self {
+            conn: storage,
+            path: None,
+        })
+    }
+
     /// A store that lives only as long as what is opened on it.
     pub fn memory() -> Result<Self, Error> {
         let conn = Storage::open_in_memory().map_err(storage)?;

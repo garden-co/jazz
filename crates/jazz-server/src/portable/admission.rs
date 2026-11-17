@@ -166,3 +166,112 @@ pub fn ws_link_admission(
         )),
     }
 }
+
+/// Compare two secrets in time independent of where they differ.
+fn same_secret(expected: &str, given: &str) -> bool {
+    let (a, b) = (expected.as_bytes(), given.as_bytes());
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
+}
+
+/// How a socket's upgrade request vouched for it: the core secret it
+/// carried (`X-Jazz-Backend-Credential`) and the access it asked for
+/// (`X-Jazz-Backend-Access`: `admin` or `backend`).
+pub struct UpgradeCredential<'a> {
+    pub credential: &'a str,
+    pub access: &'a str,
+}
+
+/// Admit a socket to a core that admits only its app's backend, by the
+/// core's one `secret` (a Durable Object core): as a native core does with
+/// a backend credential and no trusted workload.
+///
+/// - The upgrade's credential, or the prelude's `admin_secret` /
+///   `backend_secret`, must be `secret`; an admin one is an authority link.
+/// - A backend's own link is served as the backend; a user session the
+///   backend states (`backend_session`) is served under that user's
+///   policies, and must be the peer its prelude named.
+/// - A local-first guest's own proof (`jwt_token`) is not verified here
+///   yet: the backend relays a guest as a stated session.
+/// - Such a core keeps no account registry yet, so `jazz.revokeUser` does
+///   not end the sessions it serves (a native core watches revocations).
+pub fn admit_by_core_secret(
+    prelude: &WebSocketPrelude,
+    upgrade: Option<UpgradeCredential<'_>>,
+    secret: &str,
+) -> Result<WebSocketAdmission, String> {
+    let peer_identity = crate::portable::session::ws_peer_identity(&prelude.peer_identity)?;
+    let bundle = prelude
+        .bundle
+        .as_deref()
+        .map(|text| {
+            jazz::catalogue::BundleId::from_hex(text)
+                .ok_or_else(|| format!("invalid permissions bundle id: {text}"))
+        })
+        .transpose()?;
+    let auth = &prelude.auth;
+    let (admin, backend) = match &upgrade {
+        Some(upgrade) if same_secret(secret, upgrade.credential) => match upgrade.access {
+            "admin" => (true, true),
+            "backend" => (false, true),
+            other => return Err(format!("unknown backend access `{other}`")),
+        },
+        Some(_) => return Err("Invalid backend secret".to_owned()),
+        None => (
+            auth.admin_secret
+                .as_deref()
+                .is_some_and(|given| same_secret(secret, given)),
+            auth.backend_secret
+                .as_deref()
+                .is_some_and(|given| same_secret(secret, given)),
+        ),
+    };
+    if admin {
+        return Ok(WebSocketAdmission {
+            identity: peer_identity,
+            claims: BTreeMap::new(),
+            trust: CommitUnitTrust::TrustedAuthority,
+            credential: WebSocketCredential::Admin,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
+            bundle,
+            revocation: None,
+        });
+    }
+    if !backend {
+        return Err(match (&auth.backend_secret, &auth.admin_secret) {
+            (Some(_), _) | (_, Some(_)) => "Invalid backend secret",
+            _ => {
+                "this core admits only its app's backend: connect through the app's createJazz handler"
+            }
+        }
+        .to_owned());
+    }
+    if auth.jwt_token.is_some() {
+        return Err(
+            "a local-first proof is not verified by a Durable Object core yet: relay the guest as a backend-stated session"
+                .to_owned(),
+        );
+    }
+    let Some(stated) = &auth.backend_session else {
+        return Ok(WebSocketAdmission {
+            identity: peer_identity,
+            claims: BTreeMap::new(),
+            trust: CommitUnitTrust::TrustedBackend,
+            credential: WebSocketCredential::Backend,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
+            bundle,
+            revocation: None,
+        });
+    };
+    let session: jazz::tools::Session = serde_json::from_value(stated.clone())
+        .map_err(|error| format!("Invalid session format: {error}"))?;
+    crate::portable::session::ws_validate_session_identity(&session, peer_identity)?;
+    Ok(WebSocketAdmission {
+        identity: peer_identity,
+        claims: crate::portable::session::session_claims(session)?,
+        trust: CommitUnitTrust::Session,
+        credential: WebSocketCredential::Backend,
+        requested_link: prelude.requested_link,
+        bundle,
+        revocation: None,
+    })
+}
