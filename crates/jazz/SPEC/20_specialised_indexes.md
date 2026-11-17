@@ -485,7 +485,7 @@ version:
    the Catalan ela geminada (`col·lecció`; `3·4` and `Home·About` split);
    and `׳` (U+05F3), `״` (U+05F4), `'` or `"` between two Hebrew letters
    (`צה״ל`, `צה"ל`). The letter before one of these is found past any marks
-   and ignored characters (WB4), so `צהָ״ל` is one word. Other separators split, so `e-mail`,
+   and ignored characters (WB4), so `צהָ״ל` is one word, `צהל`. Other separators split, so `e-mail`,
    `3.14` and `snake_case` are two words each. A field is analyzed up to its first 65 536 terms (after step
    5); the rest of it is not indexed and does not count toward its length
    `L`. This bounds the postings one write creates; a value is never
@@ -502,8 +502,11 @@ version:
    `ı` → `i`, `ŧ` → `t`, `ƀ` → `b`. The Latin ligatures (U+FB00–U+FB06) and
    the fullwidth Latin letters and digits fold to ASCII. Combining marks
    (U+0300–U+036F, U+1AB0–U+1AFF, U+1DC0–U+1DFF, U+20D0–U+20FF,
-   U+FE20–U+FE2F) and variation selectors are dropped, so precomposed and
-   decomposed spellings meet, as are ignored characters and the
+   U+FE20–U+FE2F), Hebrew points and cantillation (U+0591–U+05BD, U+05BF,
+   U+05C1–U+05C2, U+05C4–U+05C5, U+05C7), Arabic harakat (U+064B–U+065F,
+   U+0670) and variation selectors are dropped, so precomposed and
+   decomposed, and pointed and unpointed, spellings meet (`צהָל` is `צהל`,
+   `مَرْحَبًا` is `مرحبا`), as are ignored characters and the
    word-internal `·`, `״` and `"`. `’` and `׳` become `'`. So
    `col·lecció` meets `colleccio`, and `צה״ל` and `צה"ל` meet `צהל`.
    Other characters are unchanged.
