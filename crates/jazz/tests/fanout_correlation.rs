@@ -75,7 +75,7 @@ pub(crate) struct Live {
     pub(crate) name: String,
     query: PreparedQuery,
     identity: Option<AuthorSubject>,
-    stream: SubscriptionStream,
+    pub(crate) stream: SubscriptionStream,
     pub(crate) rows: Snapshot,
 }
 
@@ -126,6 +126,11 @@ pub(crate) fn apply(live: &mut Live) -> BTreeSet<RowUuid> {
     let events: Vec<SubscriptionEvent> =
         std::iter::from_fn(|| live.stream.try_next_event()).collect();
     apply_events(live, events)
+}
+
+/// Applies one delta to the maintained result.
+pub(crate) fn apply_event(live: &mut Live, event: SubscriptionEvent) {
+    apply_events(live, vec![event]);
 }
 
 /// [`apply`] for events already taken from the stream.
@@ -1551,6 +1556,7 @@ fn refreshed(
         unevidenced: after.unevidenced - before.unevidenced,
         kept_plans: after.kept_plans - before.kept_plans,
         kept_root_plans: after.kept_root_plans - before.kept_root_plans,
+        coalesced: after.coalesced - before.coalesced,
     };
     (delta, reported)
 }
