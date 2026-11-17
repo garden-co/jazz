@@ -1317,12 +1317,10 @@ describe("createJazz", () => {
 
   it("never takes row data for the core's revocation", async () => {
     // Everyone reads every todo, so Bob's text reaches Alice's session.
-    const shared = s.definePermissions(app, ({ policy, session }) => {
-      policy.todos.allowRead.always();
-      policy.todos.allowInsert.where({ owner: session.user });
-      policy.todos.allowUpdate.never();
-      policy.todos.allowDelete.never();
-    });
+    const shared = {
+      format: 1,
+      tables: { todos: { read: "true", insert: "owner = session.user" } },
+    };
     const jazz = await createJazz({
       app,
       permissions: shared,
