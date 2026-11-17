@@ -1,0 +1,46 @@
+# XcodeGen spec for the StagePlan SwiftUI example: `xcodegen generate` writes
+# StagePlanUI.xcodeproj (not committed). The app uses StagePlan's Swift
+# bindings, ../swift-cli/JazzApp.swift.
+name: StagePlanUI
+options:
+  bundleIdPrefix: tools.jazz.examples
+  deploymentTarget:
+    iOS: "17.0"
+    macOS: "14.0"
+packages:
+  Jazz:
+    url: https://github.com/garden-co/jazz-swift
+    exactVersion: 2.0.0-alpha.66
+targets:
+  StagePlanUI:
+    type: application
+    platform: auto
+    supportedDestinations: [iOS, macOS]
+    sources:
+      - StagePlanUI
+      - path: ../swift-cli/JazzApp.swift
+    dependencies:
+      - package: Jazz
+        product: Jazz
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        CODE_SIGNING_ALLOWED: NO
+  StagePlanUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [StagePlanUITests]
+    dependencies:
+      - target: StagePlanUI
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGNING_ALLOWED: NO
+schemes:
+  StagePlanUI:
+    build:
+      targets:
+        StagePlanUI: all
+    test:
+      targets: [StagePlanUITests]

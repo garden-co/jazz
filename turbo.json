@@ -185,7 +185,6 @@
         "$TURBO_ROOT$/crates/jazz/**",
         "$TURBO_ROOT$/crates/jazz-codegen/**",
         "$TURBO_ROOT$/crates/jazz-text/**",
-        "$TURBO_ROOT$/crates/jazz-alpha59-alpha60-dump/**",
         "$TURBO_ROOT$/crates/jazz-cli/**",
         "$TURBO_ROOT$/crates/jazz-compression/**",
         "$TURBO_ROOT$/vendor/ruzstd/**",

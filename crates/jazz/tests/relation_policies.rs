@@ -507,6 +507,21 @@ fn a_row_id_key_inside_a_gather_seed_is_refused() {
     assert!(refused.contains("Gather seed"), "{refused}");
 }
 
+/// The policy language has no prefix/suffix test. One built through the
+/// Rust API (an `ExistsRel` whose filter uses `StartsWith`) is refused when
+/// the schema compiles, not deployed.
+#[test]
+fn a_prefix_test_in_a_relation_policy_is_refused() {
+    let refused = refusal(edges_where(RelationPredicate::StartsWith {
+        left: access("team"),
+        right: RelationValueRef::literal(Value::Text("ops".into())),
+    }));
+    assert!(
+        refused.contains("starts/ends with is not supported in permission policies"),
+        "{refused}"
+    );
+}
+
 /// A deny policy, a negated relation, is not a form the schema takes yet:
 /// it is refused when the schema compiles, not compiled either way.
 #[test]

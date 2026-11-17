@@ -35,6 +35,8 @@ mod claims_change;
 mod claims_registry_refresh;
 #[path = "../column_defaults.rs"]
 mod column_defaults;
+#[path = "../column_operators.rs"]
+mod column_operators;
 #[path = "../commit_atomicity_frames.rs"]
 mod commit_atomicity_frames;
 #[path = "../composite_indexes.rs"]
@@ -75,6 +77,8 @@ mod history_reads;
 mod host_tables;
 #[path = "../include_live.rs"]
 mod include_live;
+#[path = "../kept_plans.rs"]
+mod kept_plans;
 #[path = "../large_value_append.rs"]
 mod large_value_append;
 #[path = "../large_value_chunk_store.rs"]
@@ -125,6 +129,8 @@ mod pending_rebase_scope;
 mod permission_advice;
 #[path = "../policy_activation.rs"]
 mod policy_activation;
+#[path = "../policy_check_plans.rs"]
+mod policy_check_plans;
 #[path = "../policy_claim_coercion.rs"]
 mod policy_claim_coercion;
 #[path = "../policy_support_rows.rs"]
@@ -145,8 +151,12 @@ mod recheck_sync;
 mod reconnect_fanout;
 #[path = "../rejected_retry_store.rs"]
 mod rejected_retry_store;
+#[path = "../relation_literal_types.rs"]
+mod relation_literal_types;
 #[path = "../relation_policies.rs"]
 mod relation_policies;
+#[path = "../relation_policy_validation.rs"]
+mod relation_policy_validation;
 #[path = "../relation_queries.rs"]
 mod relation_queries;
 #[path = "../relation_results.rs"]
@@ -225,6 +235,8 @@ mod sync_frame_bounds;
 mod sync_gather;
 #[path = "../sync_join.rs"]
 mod sync_join;
+#[path = "../sync_read_state.rs"]
+mod sync_read_state;
 #[path = "../sync_resume.rs"]
 mod sync_resume;
 #[path = "../sync_sessions.rs"]
@@ -239,6 +251,8 @@ mod sync_untrusted_clients;
 mod sync_wire_corpus;
 #[path = "../sync_write_only.rs"]
 mod sync_write_only;
+#[path = "../text_affix_predicates.rs"]
+mod text_affix_predicates;
 #[path = "../text_merge.rs"]
 mod text_merge;
 #[path = "../text_splices.rs"]

@@ -285,7 +285,16 @@ async fn serve(stream: TcpStream, endpoint: Endpoint, admitted: Arc<Mutex<Vec<Ad
                 }
             }
         };
-        let (_closed, ()) = futures::future::join(relay, forward).await;
+        let (closed, ()) = futures::future::join(relay, forward).await;
+        // Close as the endpoint says, as a host's server does.
+        let _ = sink
+            .send(Message::Close(Some(
+                tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                    code: closed.code.into(),
+                    reason: closed.reason.into(),
+                },
+            )))
+            .await;
         let _ = sink.close().await;
         return;
     }
@@ -1431,6 +1440,28 @@ impl ThinSocket {
         thin
     }
 
+    /// Send requests in one message, without waiting for their answers.
+    async fn send_all(&mut self, ops: Vec<jazz_app_support::jazz::thin::ThinOp>) {
+        use jazz_app_support::jazz::wire::{WireFrame, encode_frame, encode_websocket_frame_batch};
+        let mut frames = Vec::new();
+        for op in ops {
+            let id = self.next;
+            self.next += 1;
+            frames.push(
+                encode_frame(&WireFrame::ThinRequest(
+                    jazz_app_support::jazz::thin::ThinRequest { id, op },
+                ))
+                .unwrap(),
+            );
+        }
+        self.socket
+            .send(Message::Binary(
+                encode_websocket_frame_batch(&frames).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+    }
+
     /// Send a request without waiting for its answer; its id.
     async fn send(&mut self, op: jazz_app_support::jazz::thin::ThinOp) -> u64 {
         use jazz_app_support::jazz::wire::{WireFrame, encode_frame, encode_websocket_frame_batch};
@@ -1823,5 +1854,45 @@ async fn a_thin_sessions_transaction_client_ends_with_its_socket_and_is_capped()
         matches!(committed, ThinBody::Written { .. }),
         "{committed:?}"
     );
+    app.stop().await;
+}
+
+/// A thin socket whose requests wait on an answer past the deadline is
+/// closed with 1011: here a plain read waits on a transaction's first
+/// request, which the session's client takes longer to answer than the
+/// (shortened) deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_thin_socket_whose_answer_never_comes_is_closed() {
+    use jazz_app_support::jazz::thin::ThinOp;
+    let app = App::start_with(|endpoint| endpoint.answer_deadline(Duration::from_millis(1))).await;
+    let mut hana = ThinSocket::open(&app, "token-hana", "hana").await;
+    let tx = jazz_app_support::jazz::tools::OpenTransactionId::new().to_string();
+    // In one message, so the read is routed behind the transaction's first
+    // request before that is answered.
+    hana.send_all(vec![
+        ThinOp::Begin {
+            transaction: tx,
+            kind: "mergeable".into(),
+        },
+        ThinOp::Query {
+            query: postcard::to_allocvec(&todos::query().into_untyped().unwrap()).unwrap(),
+            options: Vec::new(),
+            transaction: None,
+        },
+    ])
+    .await;
+    let closed = tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(Ok(message)) = hana.socket.next().await {
+            if let Message::Close(frame) = message {
+                return frame;
+            }
+        }
+        None
+    })
+    .await
+    .expect("the socket ends");
+    let frame = closed.expect("a close frame");
+    assert_eq!(u16::from(frame.code), 1011, "{frame:?}");
+    assert_eq!(frame.reason.as_str(), "an answer never came");
     app.stop().await;
 }

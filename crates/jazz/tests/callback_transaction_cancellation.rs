@@ -78,6 +78,26 @@ fn drive<T>(alice: &Db, bob: &Db, future: impl Future<Output = T>) -> T {
     panic!("sync operation did not finish within 100 turns");
 }
 
+/// A suspended callback transaction holds its savepoint across the
+/// callback's await, as `Db::held_for_test` reports; dropping it releases
+/// everything.
+#[test]
+fn held_for_test_sees_a_suspended_callback_transaction() {
+    let alice = open(1, AuthorSubject::SYSTEM);
+    assert!(alice.held_for_test().is_nothing());
+    let mut transaction = Box::pin(alice.transaction(async |tx| {
+        tx.insert("notes", body("uncommitted"), Default::default())
+            .await?;
+        pending::<Result<(), Error>>().await
+    }));
+    poll_pending(transaction.as_mut());
+    let held = alice.held_for_test();
+    assert!(held.callback_transaction);
+    assert!(held.sqlite_transaction);
+    drop(transaction);
+    assert!(alice.held_for_test().is_nothing());
+}
+
 /// Alice cancels a suspended callback after an update and a large insert. Her
 /// retained view sees the original row, subscribers hear no rolled-back change,
 /// SQLite releases its writer lock, and a subsequent transaction can commit.
@@ -307,4 +327,138 @@ fn rolling_back_a_callback_keeps_seq_floors_raised_while_it_ran() {
         .unwrap();
         assert!(receipt.0 > floor, "cancel: {cancel}");
     }
+}
+
+/// While Alice's callback transaction is suspended, a standalone write
+/// under another identity (a session) on the same store would join that
+/// transaction's commit and upload under its author. It is refused, and
+/// the transaction commits only its own write.
+#[test]
+fn a_write_as_another_identity_is_refused_while_a_transaction_is_open() {
+    use jazz::db::{InsertOptions, WriteIdentity};
+    let alice = open(1, AuthorSubject::SYSTEM);
+    let carol = AuthorSubject::for_test_bytes([7; 16]);
+    let (resume, resumed) = futures_channel::oneshot::channel::<()>();
+    let mut transaction = Box::pin(alice.transaction(async |tx| {
+        tx.insert("notes", body("own"), Default::default()).await?;
+        resumed.await.unwrap();
+        Ok(())
+    }));
+    poll_pending(transaction.as_mut());
+    let joined = block_on(alice.insert(
+        "notes",
+        body("carol's"),
+        InsertOptions {
+            identity: WriteIdentity::Session(carol),
+            ..Default::default()
+        },
+    ));
+    let refused = joined.expect_err("a joining write is refused");
+    assert!(
+        refused
+            .to_string()
+            .contains("a write as another identity while a transaction is open"),
+        "{refused}"
+    );
+    resume.send(()).unwrap();
+    block_on(transaction).unwrap();
+    assert_eq!(bodies(&alice), [Value::String("own".to_owned())]);
+}
+
+/// A transaction handle (`begin_mergeable`) committed while Alice's callback
+/// transaction is suspended would join that callback's commit. It is refused
+/// and stays open. Whether the callback then finishes (`resume`) or is
+/// cancelled, the handle commits afterwards and keeps its row. With
+/// `synced`, Alice is a client of Bob's authority, and both commits reach
+/// Bob without wedging sync.
+fn handle_commit_waits_for_a_suspended_callback(resume: bool, synced: bool) {
+    use jazz::model::transaction::OpenTransactionId;
+    let author = AuthorSubject::for_test_bytes([1; 16]);
+    let alice = open(
+        1,
+        if synced {
+            author
+        } else {
+            AuthorSubject::SYSTEM
+        },
+    );
+    let bob = open(2, AuthorSubject::SYSTEM);
+    let _upstream = synced.then(|| {
+        let (client, server) = duplex();
+        let upstream = block_on(alice.connect_upstream(client));
+        bob.accept_subscriber(server, author).unwrap();
+        upstream
+    });
+    let handle = OpenTransactionId::new();
+    block_on(alice.begin_mergeable(handle)).unwrap();
+    block_on(
+        alice
+            .tx_ref(handle)
+            .insert("notes", body("handle's"), Default::default()),
+    )
+    .unwrap();
+    let (finish, finished) = futures_channel::oneshot::channel::<()>();
+    let mut transaction = Box::pin(alice.transaction(async |tx| {
+        tx.insert("notes", body("callback's"), Default::default())
+            .await?;
+        finished.await.unwrap();
+        Ok(())
+    }));
+    poll_pending(transaction.as_mut());
+
+    let refused = block_on(alice.commit_mergeable_handle(handle))
+        .expect_err("a handle's commit waits for the callback transaction");
+    assert!(
+        refused
+            .to_string()
+            .contains("committing a transaction while a callback transaction is open"),
+        "{refused}"
+    );
+
+    let mut expected = vec![Value::String("handle's".to_owned())];
+    if resume {
+        finish.send(()).unwrap();
+        block_on(transaction).unwrap();
+        expected.push(Value::String("callback's".to_owned()));
+    } else {
+        drop(transaction);
+    }
+    let committed = block_on(alice.commit_mergeable_handle(handle)).unwrap();
+    expected.sort_by_key(|value| format!("{value:?}"));
+    let sorted = |db: &Db| {
+        let mut bodies = bodies(db);
+        bodies.sort_by_key(|value| format!("{value:?}"));
+        bodies
+    };
+    assert_eq!(sorted(&alice), expected);
+    if synced {
+        drive(
+            &alice,
+            &bob,
+            alice.wait_for_transaction(committed.0, DurabilityTier::Global),
+        )
+        .unwrap();
+        assert_eq!(sorted(&bob), expected);
+        assert_eq!(sorted(&alice), expected);
+    }
+}
+
+#[test]
+fn a_handle_commit_waits_for_a_suspended_callback_that_resumes() {
+    handle_commit_waits_for_a_suspended_callback(true, false);
+}
+
+#[test]
+fn a_handle_commit_waits_for_a_suspended_callback_that_is_cancelled() {
+    handle_commit_waits_for_a_suspended_callback(false, false);
+}
+
+#[test]
+fn a_client_handle_commit_waits_for_a_suspended_callback_that_resumes() {
+    handle_commit_waits_for_a_suspended_callback(true, true);
+}
+
+#[test]
+fn a_client_handle_commit_waits_for_a_suspended_callback_that_is_cancelled() {
+    handle_commit_waits_for_a_suspended_callback(false, true);
 }

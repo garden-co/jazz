@@ -112,7 +112,7 @@ import {
   WebSocketCarrier,
   WIRE_PROTOCOL_VERSION,
   isReconnectLaterWireError,
-  isReauthenticateWireError,
+  isLocalProtocolWireError,
   isSocketDropWireError,
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
@@ -121,7 +121,6 @@ import {
   type WebSocketConstructor,
   type WebSocketNegotiation,
   type WireError,
-  wireAuthFailureReason,
 } from "./websocket.js";
 import { isRenewableAuthFailure, mapAuthReason } from "../auth-state.js";
 import {
@@ -252,6 +251,10 @@ type NativeRestoreOptions = NativeWriteOptions & {
 
 type NativeDb = {
   captureSnapshot?(): NativeReadResult | Promise<NativeReadResult>;
+  /** NAPI: a thin session's transaction request, as its backend's client serves it. */
+  serveThinTransaction?(request: Uint8Array): NativeReadResult;
+  /** NAPI: end the thin session's open transactions. */
+  releaseThinTransactions?(): NativeReadResult;
   /** WASM settles its promise-shaped wait early once `cancelled` settles. */
   waitForPendingWrites?(
     tier: string,
@@ -617,10 +620,13 @@ type ServerConnectionAttempt = {
  * and the timer and steps the machine with one JSON document per input.
  */
 type NativeUpstreamLink = { handle(nowMs: number, input: string): string };
-type UpstreamLinkFailure = {
-  kind: "network" | "refused" | "serverNotReady" | "authRejected" | "fatal" | "reauthenticate";
-  message: string;
-};
+type UpstreamLinkFailure =
+  | {
+      kind: "network" | "refused" | "serverNotReady" | "authRejected" | "fatal" | "reauthenticate";
+      message: string;
+    }
+  /** A server's `WireError`, classified by the link. */
+  | { kind: "wire"; code: string; retry: string; message: string; admitted: boolean };
 type UpstreamLinkInput =
   | { type: "serverConfigured"; configured: boolean }
   | { type: "setOffline"; offline: boolean }
@@ -659,31 +665,20 @@ type UpstreamLinkStep = {
   status: UpstreamLinkStatus;
 };
 
-/** How the link machine should treat a server connection that ended with `error`. */
-function upstreamLinkFailure(error: WireError, negotiated: boolean): UpstreamLinkFailure {
-  const message = error.message;
-  // The server's session reached the expiry the app's auth gave it: a
-  // planned reconnect, so the app's auth decides again with this client's
-  // current credential (see `isReauthenticateWireError`).
-  if (isReauthenticateWireError(error)) return { kind: "reauthenticate", message };
-  if (wireAuthFailureReason(error)) return { kind: "authRejected", message };
-  // The server's bootstrap and overload signals. Before its hello, `not_ready`
-  // means the server is still starting; `backpressure` means it answered and
-  // refused this connection for now (such as the connection cap per user),
-  // which is retried like an outage but published at once with the server's
-  // reason. After its hello both end a link like an outage.
-  if (isReconnectLaterWireError(error)) {
-    if (negotiated) return { kind: "network", message };
-    return { kind: error.code === "backpressure" ? "refused" : "serverNotReady", message };
-  }
+/**
+ * How a server connection that ended with `error` is reported to the link.
+ * The carrier's own socket drops are a network outage; anything the server
+ * said goes to the link as it arrived, which classifies it in Rust
+ * (`LinkFailure::from_wire_error`) as it does for every host.
+ */
+function upstreamLinkFailure(error: WireError, admitted: boolean): UpstreamLinkFailure {
   // The network or the server dropped the socket. A local-first client must
   // survive an outage of any length, including one it was opened in.
-  if (isSocketDropWireError(error)) {
-    return { kind: "network", message };
-  }
-  // Anything else (a protocol error, an incompatible server) cannot succeed
-  // by retrying.
-  return { kind: "fatal", message };
+  if (isSocketDropWireError(error)) return { kind: "network", message: error.message };
+  // This client could not read what the server sent: a local protocol
+  // failure, not something the server said, so it stops as it always did.
+  if (isLocalProtocolWireError(error)) return { kind: "fatal", message: error.message };
+  return { kind: "wire", ...error, admitted };
 }
 
 function joinServerTransportRetirements(
@@ -914,6 +909,29 @@ export function slowQuerySummary(line: string): string {
   return plan === -1 ? line : line.slice(0, plan);
 }
 
+/**
+ * Where a {@link NativeRuntimeAdapter} is in its life. It only moves forward:
+ *
+ * - `open`: it admits work.
+ * - `quiesced`: a foreground lease handoff closed mutation admission to read
+ *   the final HLC high-water (`quiesceForegroundTxTimeHighWater`).
+ * - `storageCleared`: its native store was deleted (`clearClientStorage`).
+ * - `closing`: `close()` is tearing it down.
+ * - `closed`: torn down, by `close()` or `discard()`.
+ *
+ * `quiesced` and `storageCleared` admit nothing, but leave the teardown to
+ * `close()`: neither reaches `closed` on its own.
+ */
+export type NativeRuntimePhase = "open" | "quiesced" | "storageCleared" | "closing" | "closed";
+
+const NATIVE_RUNTIME_PHASE_ORDER: Record<NativeRuntimePhase, number> = {
+  open: 0,
+  quiesced: 1,
+  storageCleared: 1,
+  closing: 2,
+  closed: 3,
+};
+
 export class NativeRuntimeAdapter implements Runtime {
   private readonly auxiliaryReceiveDeadlines = new Map<Transport, AuxiliaryReceiveDeadline>();
   private readonly pendingNativeAdmissionCancels = new Set<() => void>();
@@ -1056,11 +1074,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverPumpRunning = false;
   private serverPumpAgain = false;
   private serverConnectionGeneration = 0;
-  private closed = false;
-  // A foreground lease handoff closes mutation admission before it snapshots
-  // the native HLC, but physical native disposal still happens through the
-  // ordinary client shutdown path.
-  private foregroundLeaseQuiesced = false;
+  /** See {@link NativeRuntimePhase}. Only {@link advancePhase} moves it. */
+  private phase: NativeRuntimePhase = "open";
   // A concurrent ordinary close must not dispose native state between a lease
   // handoff's mutation drain and its HLC readout.
   private foregroundLeaseCapture: Promise<bigint> | null = null;
@@ -1069,7 +1084,6 @@ export class NativeRuntimeAdapter implements Runtime {
   // admission deadlines). Mutation admission stays closed, but core progress
   // must continue, or the HLC readout waits behind them forever.
   private foregroundLeaseDraining = false;
-  private physicalCloseStarted = false;
   private nextSubscriptionId = 1;
 
   static fromDb(
@@ -1375,10 +1389,9 @@ export class NativeRuntimeAdapter implements Runtime {
       return this.ownerRuntime.quiesceForegroundTxTimeHighWater();
     }
     if (this.foregroundLeaseCapture) return this.foregroundLeaseCapture;
-    if (this.closed) throw new Error("Native runtime is already closed");
-    this.closed = true;
+    if (this.closed) throw new Error(`Native runtime is already ${this.phase}`);
+    this.advancePhase("quiesced");
     this.clearCoreDeadline();
-    this.foregroundLeaseQuiesced = true;
     this.foregroundLeaseDraining = true;
     const capture = this.captureForegroundTxTimeHighWater().finally(() => {
       this.foregroundLeaseDraining = false;
@@ -1640,8 +1653,13 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!this.db?.deleteNativeStore) {
       throw new Error("Runtime does not support client storage reset.");
     }
+    if (this.closed) {
+      throw new Error(`Cannot clear client storage: native runtime is ${this.phase}`);
+    }
     const deleted = this.db.deleteNativeStore();
-    this.closed = true;
+    // The store is gone and admits nothing more; `close()` still tears this
+    // runtime down (its subscriptions, link and native handle).
+    this.advancePhase("storageCleared");
     return deleted;
   }
 
@@ -1756,17 +1774,36 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.ownerRuntime.closed;
   }
 
+  /** Whether this runtime admits no more work: any phase past `open`. */
+  private get closed(): boolean {
+    return this.phase !== "open";
+  }
+
+  /** Move to `next`, which must lie ahead of the current phase. */
+  private advancePhase(next: NativeRuntimePhase): void {
+    if (NATIVE_RUNTIME_PHASE_ORDER[next] <= NATIVE_RUNTIME_PHASE_ORDER[this.phase]) {
+      throw new Error(`Native runtime cannot move from ${this.phase} back to ${next}`);
+    }
+    this.phase = next;
+  }
+
+  /**
+   * Tear this runtime down, from any phase before `closing`: `open`,
+   * `quiesced` (a lease handoff read its high-water) or `storageCleared` (its
+   * store was deleted). Each of those stopped admitting work but left the
+   * teardown to this call. Once `closing`, a repeated call returns at once.
+   */
   async close(): Promise<void> {
     if (this !== this.ownerRuntime) {
+      if (this.phase === "closed") return;
+      this.advancePhase("closed");
       this.closeRuntimeState();
       return;
     }
-    if (this.physicalCloseStarted) return;
-    if (this.closed && !this.foregroundLeaseQuiesced) return;
-    this.physicalCloseStarted = true;
+    if (this.phase === "closing" || this.phase === "closed") return;
     // Stop admitting/scheduling work first, but keep every WASM receiver alive
     // until the evaluator future that may currently borrow it has unwound.
-    this.closed = true;
+    this.advancePhase("closing");
     this.clearCoreDeadline();
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
     for (const cancel of this.pendingNativeReadCancels) cancel();
@@ -1778,15 +1815,25 @@ export class NativeRuntimeAdapter implements Runtime {
       await Promise.all(this.pendingLocalSettlements);
     }
     await this.coreOperation?.completion.catch(() => undefined);
-    this.closeRuntimeState(true);
-    await this.db.close?.();
+    try {
+      this.closeRuntimeState();
+      await this.db.close?.();
+    } finally {
+      this.advancePhase("closed");
+    }
     // wasm-bindgen futures may retain this receiver after logical closure.
     // Its registered finalizer owns physical release; explicit `free()` here
     // creates a second, unsynchronised lifetime and can corrupt the WASM heap.
   }
 
-  /** Discard a runtime whose persistence epoch is no longer usable. */
+  /**
+   * Discard a runtime whose persistence epoch is no longer usable: an `open`
+   * one stops at once and goes straight to `closed`, without native disposal.
+   * One past `open` already admits nothing, and `close()` finishes it.
+   */
   discard(): void {
+    if (this.phase !== "open") return;
+    this.advancePhase("closed");
     // Do not explicitly free the WASM wrapper here. A forced IndexedDB close
     // can reject a storage Promise while a WASM future is still unwinding;
     // freeing its receiver in that window is unsafe. Sever all runtime work
@@ -1794,9 +1841,8 @@ export class NativeRuntimeAdapter implements Runtime {
     this.closeRuntimeState();
   }
 
-  private closeRuntimeState(alreadyMarkedClosed = false): boolean {
-    if (this.closed && !alreadyMarkedClosed) return false;
-    this.closed = true;
+  /** Drop this runtime's work and links. The caller moved its phase past `open`. */
+  private closeRuntimeState(): void {
     this.clearCoreDeadline();
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
     for (const cancel of this.pendingNativeReadCancels) cancel();
@@ -1809,7 +1855,7 @@ export class NativeRuntimeAdapter implements Runtime {
       // schema-view wrapper. Eagerly freeing a wasm-bindgen receiver here is a
       // use-after-free; let GC release the Rc-backed view after those promises
       // drop their references.
-      return false;
+      return;
     }
     for (const write of this.writes.values()) {
       write.close?.();
@@ -1843,7 +1889,6 @@ export class NativeRuntimeAdapter implements Runtime {
     this.peerUpstreamAttached = false;
     this.serverCarrier?.close();
     this.serverCarrier = null;
-    return true;
   }
 
   /** Row identity/defaults only; physical validation and staging happen on insertion. */
@@ -2432,6 +2477,31 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.withPermissionAdviceTimeout(() =>
       request.call(this.db, table, parseUuid(objectId), delegated?.identity, delegated?.claims),
     );
+  }
+
+  /**
+   * @internal Serve one of a thin session's transaction requests (its wire
+   * frame) as the backend's client linked to the core as that session
+   * (SPEC 8.14); the answer is the response frame. A commit answers once the
+   * core accepted it. One request at a time.
+   */
+  serveThinTransaction(request: Uint8Array): Promise<Uint8Array> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.serveThinTransaction(request);
+    if (this.closed) return Promise.reject(new Error("the native runtime is closed"));
+    if (!this.db.serveThinTransaction)
+      return Promise.reject(new Error("this native binding serves no thin transactions"));
+    const served = this.db.serveThinTransaction(request);
+    this.scheduleCoreTick();
+    return this.awaitNativeRead(served);
+  }
+
+  /** @internal End the thin session's open transactions: nothing of them reached the core. */
+  async releaseThinTransactions(): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.releaseThinTransactions();
+    if (this.closed || !this.db.releaseThinTransactions) return;
+    const released = this.db.releaseThinTransactions();
+    this.scheduleCoreTick();
+    await this.awaitNativeRead(released);
   }
 
   captureSnapshot(): Promise<SnapshotRef> {
@@ -3294,6 +3364,17 @@ export class NativeRuntimeAdapter implements Runtime {
   onServerTransportError(callback: (error: Error, state: { retrying: boolean }) => void): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.onServerTransportError(callback);
     this.serverTransportErrorCallback = callback;
+  }
+
+  /**
+   * The upstream failure remote waits fail on now, and whether the client
+   * keeps reconnecting through it; null while there is none. A durable
+   * worker relays this as state to the tabs attached to it.
+   */
+  upstreamFailure(): { error: Error; retrying: boolean } | null {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.upstreamFailure();
+    const error = this.serverTransportError;
+    return error ? { error, retrying: this.serverTransportErrorRetrying } : null;
   }
 
   /**

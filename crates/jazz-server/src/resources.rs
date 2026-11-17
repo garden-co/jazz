@@ -31,6 +31,24 @@ pub struct ServerResourceLimits {
     /// The storage cache budget while memory is plentiful, instead of a
     /// share of the memory limit.
     pub query_cache_budget_bytes: Option<u64>,
+    /// Undrained output one client session may hold beyond twice its
+    /// biggest tick before it is closed (`None`: 64 MiB).
+    pub session_backlog_bytes: Option<u64>,
+    /// Undrained output one session may hold at most (`None`: 256 MiB).
+    pub session_backlog_max_bytes: Option<u64>,
+    /// Undrained output all sessions together may hold; past it the
+    /// sessions holding the most are closed first (`None`: a quarter of
+    /// the memory limit, else 2 GiB).
+    pub egress_budget_bytes: Option<u64>,
+    /// Seconds a session may fall behind the minimum read rate, while its
+    /// output waits, before it is closed (`None`: 120).
+    pub slow_reader_timeout_secs: Option<u64>,
+    /// Seconds a session must be behind the minimum read rate before the
+    /// egress budget may close it (`None`: 10).
+    pub egress_stall_grace_secs: Option<u64>,
+    /// Bytes a second a client must read, on average, while its output
+    /// waits (`None`: 1024).
+    pub slow_reader_min_bytes_per_sec: Option<u64>,
 }
 
 impl Default for ServerResourceLimits {
@@ -42,6 +60,12 @@ impl Default for ServerResourceLimits {
             memory_limit_bytes: None,
             stored_arrangements: true,
             query_cache_budget_bytes: None,
+            session_backlog_bytes: None,
+            session_backlog_max_bytes: None,
+            egress_budget_bytes: None,
+            slow_reader_timeout_secs: None,
+            egress_stall_grace_secs: None,
+            slow_reader_min_bytes_per_sec: None,
         }
     }
 }
@@ -87,7 +111,43 @@ const CACHE_STEP_DOWN_DIVISOR: usize = 8;
 const CACHE_STEP_UP_DIVISOR: usize = 10;
 const CACHE_PROBE_UP_DIVISOR: usize = 50;
 
+/// All sessions' undrained output may hold this fraction of the process
+/// memory limit together (a quarter), when nothing sets the egress budget.
+const EGRESS_BUDGET_LIMIT_DIVISOR: u64 = 4;
+
 impl ServerResourceLimits {
+    /// The bounds on output held for clients, with defaults filled in.
+    pub fn egress_limits(&self) -> crate::runtime::EgressLimits {
+        let to_usize = |bytes: u64| usize::try_from(bytes).unwrap_or(usize::MAX);
+        let defaults = crate::runtime::EgressLimits::default();
+        let floor = self
+            .session_backlog_bytes
+            .map_or(defaults.session_backlog_bytes, to_usize);
+        crate::runtime::EgressLimits {
+            session_backlog_bytes: floor,
+            session_backlog_max_bytes: self
+                .session_backlog_max_bytes
+                .map_or(defaults.session_backlog_max_bytes, to_usize)
+                .max(floor),
+            egress_budget_bytes: self
+                .egress_budget_bytes
+                .or_else(|| {
+                    self.memory_limit_bytes
+                        .map(|limit| limit / EGRESS_BUDGET_LIMIT_DIVISOR)
+                })
+                .map_or(defaults.egress_budget_bytes, to_usize),
+            slow_reader_timeout: self
+                .slow_reader_timeout_secs
+                .map_or(defaults.slow_reader_timeout, std::time::Duration::from_secs),
+            stall_grace: self
+                .egress_stall_grace_secs
+                .map_or(defaults.stall_grace, std::time::Duration::from_secs),
+            min_read_rate: self
+                .slow_reader_min_bytes_per_sec
+                .unwrap_or(defaults.min_read_rate),
+        }
+    }
+
     /// The governor for this process's limit, or `None` when nothing limits
     /// memory and the budget stays where it was configured.
     pub fn cache_budget_governor(&self) -> Option<CacheBudgetGovernor> {
@@ -283,6 +343,35 @@ mod tests {
         }
         .cache_budget_governor()
         .unwrap()
+    }
+
+    #[test]
+    fn egress_limits_come_from_configuration_or_the_memory_limit() {
+        let defaults = ServerResourceLimits::default().egress_limits();
+        assert_eq!(defaults, crate::runtime::EgressLimits::default());
+        let limited = ServerResourceLimits {
+            memory_limit_bytes: Some(4096 * MIB),
+            ..ServerResourceLimits::default()
+        }
+        .egress_limits();
+        assert_eq!(limited.egress_budget_bytes, (1024 * MIB) as usize);
+        let set = ServerResourceLimits {
+            memory_limit_bytes: Some(4096 * MIB),
+            session_backlog_bytes: Some(512 * MIB),
+            session_backlog_max_bytes: Some(128 * MIB),
+            egress_budget_bytes: Some(100 * MIB),
+            slow_reader_timeout_secs: Some(30),
+            ..ServerResourceLimits::default()
+        }
+        .egress_limits();
+        assert_eq!(set.session_backlog_bytes, (512 * MIB) as usize);
+        assert_eq!(
+            set.session_backlog_max_bytes,
+            (512 * MIB) as usize,
+            "the ceiling is never under the floor"
+        );
+        assert_eq!(set.egress_budget_bytes, (100 * MIB) as usize);
+        assert_eq!(set.slow_reader_timeout, std::time::Duration::from_secs(30));
     }
 
     #[test]
