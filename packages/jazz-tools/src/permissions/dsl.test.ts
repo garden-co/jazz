@@ -78,7 +78,7 @@ describe("acceptance: the reference renderings", () => {
       if (
         items?.length === 2 &&
         typeof items[0] === "string" &&
-        items[0].endsWith('role = \'admin\')') &&
+        /role = 'admin'\)$/.test(items[0]) &&
         items[1] === items[0].replace("role = 'admin'", "role = 'editor'")
       )
         return editorOf(/organizationId = ([^,]+),/.exec(items[0])![1]!);
