@@ -637,3 +637,64 @@ fn a_reopened_store_recreates_missing_queue_triggers() {
     place(&db, 7, "Leipzig", None, 51.34, 12.37, [1.0, 0.0, 0.0]);
     assert_eq!(ids(&db, &text("leipzig")), [7]);
 }
+
+/// Vector and point columns compare whole (SPEC 20.1): the engine accepts
+/// `eq`, `ne`, `in`, `notIn` and `isNull` on them, and refuses a range,
+/// `contains` and `orderBy`, whose bytes mean nothing for either. These
+/// cases join `column_operators.rs` once jazz#5966 moves the operator
+/// table into the engine.
+#[test]
+fn vector_and_point_columns_compare_only_whole() {
+    use jazz::query::{Operand, OrderDirection, Predicate};
+    let db = open();
+    let point = Value::Bytes(
+        jazz::records::encode_point_f64le(13.4, 52.5)
+            .unwrap()
+            .to_vec(),
+    );
+    let vector = Value::Bytes(
+        [1.0f32, 0.0, 0.0]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect(),
+    );
+    let run = |query: Query| {
+        db.prepare_query(&query)
+            .and_then(|prepared| block_on(db.all(&prepared, ReadOpts::default())))
+            .map(|rows| rows.len())
+    };
+    for (column, value) in [("location", point), ("embedding", vector)] {
+        let c = || Operand::Column(column.into());
+        let v = || Operand::Literal(value.clone());
+        let filtered = |predicate: Predicate| Query::from("places").filter(predicate);
+        for (op, query) in [
+            ("eq", filtered(Predicate::Eq(c(), v()))),
+            ("ne", filtered(Predicate::Ne(c(), v()))),
+            ("in", filtered(Predicate::In(c(), vec![v()]))),
+            (
+                "notIn",
+                filtered(Predicate::Not(Box::new(Predicate::In(c(), vec![v()])))),
+            ),
+            ("isNull", filtered(Predicate::IsNull(c()))),
+        ] {
+            assert!(run(query).is_ok(), "{column} {op}");
+        }
+        for (op, query) in [
+            ("gt", filtered(Predicate::Gt(c(), v()))),
+            ("gte", filtered(Predicate::Gte(c(), v()))),
+            ("lt", filtered(Predicate::Lt(c(), v()))),
+            ("lte", filtered(Predicate::Lte(v(), c()))),
+            ("contains", filtered(Predicate::Contains(c(), v()))),
+            (
+                "orderBy",
+                Query::from("places").order_by(column, OrderDirection::Asc),
+            ),
+        ] {
+            let error = run(query).expect_err(&format!("{column} {op}"));
+            assert!(
+                error.message.contains("compare whole"),
+                "{column} {op}: {error}"
+            );
+        }
+    }
+}

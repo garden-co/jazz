@@ -2329,6 +2329,18 @@ impl<'a> Ctx<'a> {
         table: &Table,
         alias: &str,
     ) -> Result<String, Error> {
+        if is_range(&op) {
+            for operand in [left, right] {
+                if let Operand::Column(column) = operand
+                    && is_whole_only(table, column)
+                {
+                    return Err(query_error(format!(
+                        "operand type mismatch: a range on {column}: vector and point \
+                         columns compare whole (eq, ne, in, notIn, isNull)"
+                    )));
+                }
+            }
+        }
         let (left, right) = match (left, right) {
             (Operand::Column(column), other) => (
                 self.operand(left, table, alias)?,
@@ -3496,11 +3508,34 @@ fn check_candidate(table: &Table, column: &str, option: &Operand) -> Result<(), 
     )))
 }
 
+/// Whether `column` is a vector or point column (nullable or not): one
+/// that compares only whole, by `eq`, `ne`, `in`, `notIn` and `isNull`
+/// (SPEC 20.1). Its bytes have no order a range or `orderBy` could mean,
+/// and no part `contains` could find.
+fn is_whole_only(table: &Table, column: &str) -> bool {
+    fn whole(ty: &ValueType) -> bool {
+        match ty {
+            ValueType::Nullable(inner) => whole(inner),
+            ValueType::Vector(_) | ValueType::Point => true,
+            _ => false,
+        }
+    }
+    table
+        .column(column)
+        .is_some_and(|declared| whole(&declared.ty))
+}
+
 /// `contains` searches text, bytes or an array.
 fn check_haystack(table: &Table, column: &str) -> Result<(), Error> {
     let Some(declared) = table.column(column) else {
         return Ok(());
     };
+    if is_whole_only(table, column) {
+        return Err(query_error(format!(
+            "operand type mismatch: contains on {column}: vector and point columns compare \
+             whole (eq, ne, in, notIn, isNull)"
+        )));
+    }
     match type_kind(&declared.ty) {
         Kind::Text | Kind::Bytes | Kind::Array | Kind::Other => Ok(()),
         _ => Err(query_error(format!(
@@ -4357,6 +4392,13 @@ impl Ctx<'_> {
             if crate::values::author_record(&key.column).is_some() {
                 return Err(unsupported(format!(
                     "ordering by the author record `{}` (order by its parts)",
+                    key.column
+                )));
+            }
+            if is_whole_only(table, &key.column) {
+                return Err(query_error(format!(
+                    "column {} cannot be ordered by: vector and point columns compare whole \
+                     (eq, ne, in, notIn, isNull)",
                     key.column
                 )));
             }
