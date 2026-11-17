@@ -111,6 +111,12 @@ pub(crate) fn decrypted_equality_value(
         {
             return Err(error);
         }
+        // A value this reader cannot decode for want of a capability is
+        // unsupported, never invalid.
+        Err(ContentError::Data(DataError::UnsupportedFormat))
+        | Err(ContentError::Protocol(ProtocolError::Unsupported(_))) => {
+            return Ok(Err(DataError::UnsupportedFormat));
+        }
         Err(_) => return Ok(Err(DataError::InvalidCiphertext)),
     };
     if index.encode(&value.as_value()).is_err() {

@@ -226,8 +226,11 @@ impl StoreOwner<'_> {
     /// rewrites only its root's document (§6.1). `carried` are the records
     /// the last load of this document skipped as unsupported
     /// ([`Loaded::unsupported`]), so that a key this device cannot open is
-    /// not lost; it is empty for a new document. A carried record of
-    /// another root is an invalid input.
+    /// not lost; it is empty only for a new document: passing `&[]` when
+    /// rewriting an existing document drops them. A carried record of
+    /// another root, or one deeper than `space`'s lineage reaches, is an
+    /// invalid input: extend the lineage first, or the next load would
+    /// drop the record.
     pub fn seal_document(
         &self,
         space: &HeldSpace,
@@ -238,6 +241,14 @@ impl StoreOwner<'_> {
         if carried.iter().any(|record| record.root_id != space.root.id) {
             return Err(ProtocolError::InvalidRecord(
                 "a carried record of another root",
+            ));
+        }
+        // A carried record must stay loadable: the lineage written now has
+        // to reach its depth, or the next load would drop it (§6.2).
+        let reach = space.successors.len() as u64;
+        if carried.iter().any(|record| record.depth > reach) {
+            return Err(ProtocolError::InvalidRecord(
+                "a carried record deeper than the lineage",
             ));
         }
         let lineage = self.seal_lineage(space)?;

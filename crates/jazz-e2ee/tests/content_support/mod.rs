@@ -99,12 +99,21 @@ pub fn acquire_held(world: &World, account: &str, identifier: &str) -> HeldSpace
 /// otherwise; a stand-in for Jazz's native encoding.
 pub struct Values;
 
+/// A plaintext [`Values`] reports as needing a decoder it lacks.
+pub const UNSUPPORTED_PLAINTEXT: &[u8] = b"\x00needs-a-newer-decoder";
+
 impl PlaintextValues for Values {
     fn equality_value(
         &self,
         column: &EncryptedColumn<'_>,
         plaintext: &[u8],
     ) -> ContentResult<EqualityValueBuf> {
+        // A plaintext this stand-in pretends to need a newer decoder for.
+        if plaintext == UNSUPPORTED_PLAINTEXT {
+            return Err(jazz_e2ee::protocol::content::ContentError::Data(
+                jazz_e2ee::protocol::content::DataError::UnsupportedFormat,
+            ));
+        }
         Ok(if column.is_bytes {
             EqualityValueBuf::Bytes(plaintext.to_vec())
         } else {

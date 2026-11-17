@@ -1073,3 +1073,40 @@ fn a_move_reencrypts_every_encrypted_column() {
     let stale = open_cell(registry, &held, &to, &title(), &cells[0].stored, false).unwrap();
     assert_eq!(stale.report(), Some(DataError::StaleSpace));
 }
+
+/// A plaintext the reader cannot turn into a value for want of a decoder is
+/// skipped as unsupported, never as invalid ciphertext, and the rest of the
+/// batch is repaired.
+#[test]
+fn a_plaintext_needing_a_newer_decoder_is_skipped_as_unsupported() {
+    let mut repairing = Repairing::new(14);
+    let unsupported = alice_writes_raw(
+        &repairing,
+        ROW_2,
+        title(),
+        content_support::UNSUPPORTED_PLAINTEXT,
+        "x",
+    );
+    let other = repairing.alice_writes(ROW_2, &[(notes(), "m")]);
+    repairing.settle();
+    let cells = [
+        (title().column_id, &unsupported[..]),
+        (notes().column_id, stored_of(&other, &notes())),
+    ];
+    let plan = repairing
+        .plan(
+            &repairing.alice,
+            &[RepairRow {
+                row_id: ROW_2,
+                space_identifier: ROW,
+                cells: &cells,
+            }],
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(rewritten(&plan, ROW_2).len(), 1);
+    assert_eq!(
+        plan.rows[0].skipped,
+        vec![(title().column_id.to_owned(), DataError::UnsupportedFormat)]
+    );
+}

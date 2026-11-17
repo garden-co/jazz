@@ -1029,6 +1029,21 @@ fn a_record_this_device_cannot_read_survives_a_rewrite() {
         marks(loaded.space.as_ref().unwrap())
     );
 
+    // A carried record deeper than the lineage written now is refused:
+    // the next load would drop it.
+    let mut too_deep = loaded.unsupported[0].clone();
+    too_deep.depth = 99;
+    assert!(
+        owner
+            .seal_document(
+                loaded.space.as_ref().unwrap(),
+                &[too_deep],
+                2,
+                &mut TestRandom(6),
+            )
+            .is_err()
+    );
+
     // A record of another root is not carried.
     let (_, _, lost) = alice_holding(11);
     assert!(
