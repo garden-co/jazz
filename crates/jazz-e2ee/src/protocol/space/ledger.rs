@@ -15,7 +15,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::envelope::Mechanism;
 use crate::registry::Registry;
 
-use super::super::account::{AccountReplay, AccountState, PublicAccountLedger, SealingKeys};
+use super::super::account::{
+    AccountEpochKeys, AccountReplay, AccountState, PublicAccountLedger, SealingKeys,
+};
 use super::super::domain::AppDomain;
 use super::super::error::{IntrinsicContradiction, ProtocolError, ProtocolResult};
 use super::super::ids::{self, IdForm};
@@ -285,7 +287,7 @@ impl<'a> AccountDirectory<'a> {
     /// current epoch and the first valid sealing key record of that epoch
     /// and `mechanism`. `None` when the account has no counting root or no
     /// such record: sealing to it would be "recipient unsupported", and the
-    /// sender waits.
+    /// sender waits. The recipient is stamped with this directory's cut.
     pub fn recipient(
         &self,
         account_id: &str,
@@ -294,12 +296,46 @@ impl<'a> AccountDirectory<'a> {
         let Some(keys) = self.sealing_keys(account_id)? else {
             return Ok(None);
         };
-        Ok(keys.current(mechanism).map(|record| Recipient {
+        Ok(keys
+            .current(mechanism)
+            .map(|record| self.stamp(account_id, &keys, record)))
+    }
+
+    /// Where a device of `own`'s account seals a delivery to its own
+    /// account: as [`recipient`](Self::recipient), but never to a sealing
+    /// key record the device's derivation check reported as not derived
+    /// ([`SealingKeys::current_for_own`]). `None` when no other valid
+    /// record of the current epoch and `mechanism` exists: the device
+    /// waits. `own` must be the account's keys of its current generation at
+    /// this read's state; anything else is
+    /// [`ProtocolError::InconsistentEvidence`].
+    pub fn own_recipient(
+        &self,
+        own: &AccountEpochKeys,
+        mechanism: Mechanism<'_>,
+    ) -> ProtocolResult<Option<Recipient>> {
+        let account_id = own.account_id();
+        let Some(keys) = self.sealing_keys(account_id)? else {
+            return Err(ProtocolError::InconsistentEvidence);
+        };
+        Ok(keys
+            .current_for_own(own, mechanism)?
+            .map(|record| self.stamp(account_id, &keys, record)))
+    }
+
+    fn stamp(
+        &self,
+        account_id: &str,
+        keys: &SealingKeys,
+        record: &Accepted<AccountSealingKey>,
+    ) -> Recipient {
+        Recipient {
             account_id: account_id.to_owned(),
             account_epoch_id: keys.current_epoch_id().to_owned(),
             generation: keys.generation(),
             sealing_key: record.clone(),
-        }))
+            through: self.through,
+        }
     }
 }
 
@@ -317,15 +353,18 @@ pub enum AuthorCheck {
 }
 
 /// A member account's current epoch and the sealing key record a delivery
-/// to it is sealed to (§2.12, §3.4). Built only by
-/// [`AccountDirectory::recipient`], from the account's replayed public
-/// history, so a delivery is never sealed to a record the caller assembled.
+/// to it is sealed to (§2.12, §3.4), at the cut of the read it came from.
+/// Built only by [`AccountDirectory::recipient`] or
+/// [`AccountDirectory::own_recipient`], from the account's replayed public
+/// history, so a delivery is never sealed to a record the caller assembled,
+/// and the builders refuse it with a chain of another read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recipient {
     account_id: String,
     account_epoch_id: String,
     generation: u64,
     sealing_key: Accepted<AccountSealingKey>,
+    through: Position,
 }
 
 impl Recipient {
@@ -347,5 +386,10 @@ impl Recipient {
     /// selected mechanism (§2.12).
     pub fn sealing_key(&self) -> &Accepted<AccountSealingKey> {
         &self.sealing_key
+    }
+
+    /// The cut of the read the recipient was built from.
+    pub fn through(&self) -> Position {
+        self.through
     }
 }

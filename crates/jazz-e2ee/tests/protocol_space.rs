@@ -22,7 +22,7 @@ use jazz_e2ee::context::{CryptoContext, frame_record};
 use jazz_e2ee::envelope::{self, Mechanism};
 use jazz_e2ee::mechanisms::{key_envelope, key_seal};
 use jazz_e2ee::protocol::account::PublicAccountLedger;
-use jazz_e2ee::protocol::account::build::RotationTarget;
+use jazz_e2ee::protocol::account::build::{self as account_build, LocalDevice, RotationTarget};
 use jazz_e2ee::protocol::derive::{RecoveryKeys, RecoverySecret};
 use jazz_e2ee::protocol::error::{ProtocolError, RefusalCode, UnsupportedCapability};
 use jazz_e2ee::protocol::records::space::{SpaceAddress, SpaceDelivery};
@@ -301,11 +301,7 @@ fn the_chain_rule_skips_invalid_successors() {
         &world.writer(ALICE),
         &chain,
         &keys,
-        &Author {
-            state: &own.state,
-            account_key: &own.key,
-            device: &phone,
-        },
+        &Author::new(&read.directory(&world), ALICE, &own.key, &phone).unwrap(),
         &[],
         &mut rng,
     )
@@ -721,6 +717,7 @@ fn deliveries_are_bound_to_their_space() {
     let mut rng = TestRandom(3);
     let to_bob = build::deliver(
         &world.writer(ALICE),
+        &other_chain,
         &other_keys.version(&other_v0).unwrap(),
         &recipient,
         &mut rng,
@@ -890,13 +887,14 @@ fn rotation_preconditions_refuse() {
         Some(refused(RefusalCode::RotationNeedsKey))
     );
     let phone = world.approve_device(ALICE);
-    let read = world.read();
-    let chain = read.chain(&world).unwrap();
     let keys = world.acquire(ALICE).keys;
     let own = world.own_with(ALICE, &phone).unwrap();
     world.remove_device(ALICE, &phone.id);
-    let after = world.own(ALICE);
     let stranger = world.accounts[ALICE].env.device(&mut world.rng);
+    let read = world.read();
+    let chain = read.chain(&world).unwrap();
+    let directory = read.directory(&world);
+    let after = world.own(ALICE);
     let mut rng = TestRandom(5);
     for (device, code) in [
         (&phone, RefusalCode::DeviceRemoved),
@@ -907,11 +905,7 @@ fn rotation_preconditions_refuse() {
                 &world.writer(ALICE),
                 &chain,
                 &keys,
-                &Author {
-                    state: &after.state,
-                    account_key: &after.key,
-                    device,
-                },
+                &Author::new(&directory, ALICE, &after.key, device).unwrap(),
                 &[],
                 &mut rng,
             )
@@ -925,11 +919,7 @@ fn rotation_preconditions_refuse() {
             &world.writer(ALICE),
             &chain,
             &keys,
-            &Author {
-                state: &after.state,
-                account_key: &own.key,
-                device: &world.accounts[ALICE].device,
-            },
+            &Author::new(&directory, ALICE, &own.key, &world.accounts[ALICE].device).unwrap(),
             &[],
             &mut rng,
         )
@@ -943,11 +933,7 @@ fn rotation_preconditions_refuse() {
             &world.writer(ALICE),
             &chain,
             &empty,
-            &Author {
-                state: &after.state,
-                account_key: &after.key,
-                device: &world.accounts[ALICE].device,
-            },
+            &Author::new(&directory, ALICE, &after.key, &world.accounts[ALICE].device).unwrap(),
             &[],
             &mut rng,
         )
@@ -1047,9 +1033,9 @@ fn rotation_recipients_prefer_previous_holders_and_cap_the_first_batch() {
         recipients
             .first
             .iter()
-            .chain(&recipients.rest)
             .all(|recipient| recipient.account_id() != ALICE)
     );
+    assert!(recipients.rest.iter().all(|account| account != ALICE));
 }
 
 /// `X(column, recipient, epoch)` of §3.1, rebuilt here from the formula
@@ -1440,11 +1426,13 @@ fn a_chain_ledger_and_directory_of_different_reads_are_inconsistent_evidence() {
         &world.writer(ALICE),
         &new_chain,
         &old_keys,
-        &Author {
-            state: &alice.state,
-            account_key: &alice.key,
-            device: &world.accounts[ALICE].device,
-        },
+        &Author::new(
+            &new_directory,
+            ALICE,
+            &alice.key,
+            &world.accounts[ALICE].device,
+        )
+        .unwrap(),
         &recipients.first,
         &mut rng,
     )
@@ -1569,11 +1557,13 @@ fn a_rotation_delivers_to_the_first_batch_then_to_the_rest() {
             let keys = world.acquire(rotator).keys;
             let own = world.own(rotator);
             let writer = world.writer(rotator);
-            let author = Author {
-                state: &own.state,
-                account_key: &own.key,
-                device: &world.accounts[rotator].device,
-            };
+            let author = Author::new(
+                &directory,
+                rotator,
+                &own.key,
+                &world.accounts[rotator].device,
+            )
+            .unwrap();
             let recipients =
                 rotation_recipients(&chain, &read.space, &directory, rotator, BUILTIN, &mut rng)
                     .unwrap();
@@ -1589,8 +1579,13 @@ fn a_rotation_delivers_to_the_first_batch_then_to_the_rest() {
             let everyone: Vec<Recipient> = recipients
                 .first
                 .iter()
-                .chain(&recipients.rest)
                 .cloned()
+                .chain(
+                    recipients
+                        .rest
+                        .iter()
+                        .map(|account| directory.recipient(account, BUILTIN).unwrap().unwrap()),
+                )
                 .collect();
             let before = rng.0;
             assert!(matches!(
@@ -1623,16 +1618,13 @@ fn a_rotation_delivers_to_the_first_batch_then_to_the_rest() {
             accounts.sort();
             accounts
         };
-        let mut rest_accounts: Vec<String> = rest
-            .iter()
-            .map(|recipient| recipient.account_id().to_owned())
-            .collect();
+        let mut rest_accounts = rest.clone();
         rest_accounts.sort();
         assert_eq!(lacking_new(&world), rest_accounts);
 
         // A member of the first batch delivers the new version to one of
         // the rest, and that delivery does not open: holders cannot see it.
-        let garbled = rest[0].account_id().to_owned();
+        let garbled = rest[0].clone();
         let holder = others
             .iter()
             .find(|account| !rest_accounts.contains(account))
@@ -1782,7 +1774,8 @@ enum Damage {
 /// a delivery, not as a held key (§3.3). A wrong marker makes the delivery
 /// invalid; a wrong history link is the successor's fault, reported as a
 /// broken history naming it and its author, never as an invalid delivery
-/// (§3.4).
+/// (§3.4). A held key re-checked against the chain gives the same broken
+/// history, not a plain invalid key.
 #[test]
 fn a_signed_successor_with_a_wrong_history_or_marker_gives_no_key() {
     for (seed, damage) in [
@@ -1831,11 +1824,12 @@ fn a_signed_successor_with_a_wrong_history_or_marker_gives_no_key() {
         assert!(!bob.keys.holds(&v1), "{damage:?}");
         let alice = world.acquire(ALICE);
         assert!(!alice.keys.holds(&v1), "{damage:?}");
-        if matches!(damage, Damage::MarkerNotZero) {
+        let held_check = if matches!(damage, Damage::MarkerNotZero) {
             assert_eq!(bob.invalid_deliveries.len(), 1, "{damage:?}");
             assert_eq!(bob.invalid_deliveries[0].key_epoch_id, v1);
             assert!(bob.broken_history.is_empty(), "{damage:?}");
             assert!(alice.broken_history.is_empty(), "{damage:?}");
+            KeyCheck::Invalid
         } else {
             assert!(bob.invalid_deliveries.is_empty(), "{damage:?}");
             let broken = BrokenHistory {
@@ -1849,13 +1843,18 @@ fn a_signed_successor_with_a_wrong_history_or_marker_gives_no_key() {
                 std::slice::from_ref(&broken),
                 "{damage:?}"
             );
-            assert_eq!(alice.broken_history, [broken], "{damage:?}");
-        }
+            assert_eq!(
+                alice.broken_history,
+                std::slice::from_ref(&broken),
+                "{damage:?}"
+            );
+            KeyCheck::BrokenHistory(broken)
+        };
         let mut keys = SpaceKeys::new(&chain);
         assert_eq!(
             keys.authenticate(&chain, &world.shared.registry, &v1, &k1)
                 .unwrap(),
-            KeyCheck::Invalid,
+            held_check,
             "{damage:?}"
         );
         assert!(keys.depths().next().is_none(), "{damage:?}");
@@ -2520,4 +2519,191 @@ fn a_delivery_at_the_roots_position_counts_for_holders_but_not_for_acquiring() {
     let mark = mark_of(&world);
     assert!(mark.needs_rotation());
     assert_eq!(mark.former_members, [BOB]);
+}
+
+/// `account`'s devices `phone` and `tablet`, approved; `phone` then removes
+/// `tablet` and co-publishes the new account epoch's sealing key record
+/// with a key that does not derive from the new epoch key. Returns the
+/// record and `phone`.
+fn non_derived_account_epoch(
+    world: &mut World,
+    account: &str,
+) -> (
+    jazz_e2ee::protocol::records::account::AccountSealingKey,
+    LocalDevice,
+) {
+    world.with_account(account, |entry, rng| {
+        let phone = entry.env.device(rng);
+        let tablet = entry.env.device(rng);
+        let approver = entry.device.clone();
+        for device in [&phone, &tablet] {
+            entry.ledger.request(device, rng);
+            entry.ledger.approve(&entry.env, &approver, device, rng);
+        }
+        let key = entry.ledger.acquire(&entry.env, &phone).unwrap();
+        let state = entry.ledger.state(&entry.env);
+        let mut rotation = account_build::rotate(
+            &entry.env.writer(),
+            &state,
+            &phone,
+            &key,
+            &RotationTarget::RemoveDevice(tablet.id.clone()),
+            rng,
+        )
+        .unwrap();
+        let wrong = derive::account_sealing_key_pair(&key_seal::Builtin, &[9; 32])
+            .unwrap()
+            .public
+            .bytes;
+        let record = &mut rotation.account_key;
+        record.public_key = wrong;
+        let bytes = record.signed_bytes(&entry.env.application()).unwrap();
+        let signer = entry
+            .env
+            .registry
+            .signer(phone.signing.public.mechanism.as_mechanism())
+            .unwrap();
+        record.signature = signing::sign(signer, &phone.signing, &bytes).unwrap();
+        let at = entry.ledger.next();
+        entry.ledger.accept_rotation(at, &rotation);
+        (rotation.account_key.clone(), phone)
+    })
+}
+
+/// A sender delivers to a member whose current sealing key record does not
+/// derive from its account key. The sender cannot know and seals to it;
+/// the member's devices know, so the delivery that does not open is
+/// reported against that record and the device that signed it, and no
+/// invalid delivery names the sender (§2.12, §3.4). Once the member removes
+/// that device, a delivery sealed to the new epoch's record opens.
+#[test]
+fn a_delivery_sealed_to_a_non_derived_record_is_reported_against_the_record() {
+    let mut world = space(50, &[ALICE, BOB]);
+    let v0 = world.current();
+    let (record, phone) = non_derived_account_epoch(&mut world, BOB);
+    let read = world.read();
+    let recipient = read
+        .directory(&world)
+        .recipient(BOB, BUILTIN)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recipient.sealing_key().row.id, record.id);
+
+    let delivery = world.deliver(ALICE, BOB, &v0);
+    let bob = world.acquire(BOB);
+    assert!(!bob.keys.holds(&v0));
+    assert!(bob.invalid_deliveries.is_empty());
+    assert_eq!(bob.non_derived_deliveries.len(), 1);
+    let reported = &bob.non_derived_deliveries[0];
+    assert_eq!(reported.delivery_id, delivery.id);
+    assert_eq!(reported.key_epoch_id, v0);
+    assert_eq!(reported.sealing_key.record_id, record.id);
+    assert_eq!(reported.sealing_key.epoch_id, record.epoch_id);
+    assert_eq!(reported.sealing_key.signer_id, phone.id);
+    assert!(reported.sealing_key.selected);
+    let own = world.own(BOB);
+    assert_eq!(
+        own.epoch_keys.non_derived_sealing_keys(),
+        std::slice::from_ref(&reported.sealing_key)
+    );
+    // A self-delivery never seals to the record.
+    assert_eq!(
+        read.directory(&world)
+            .own_recipient(&own.epoch_keys, BUILTIN)
+            .unwrap(),
+        None
+    );
+
+    // A delivery damaged in transit to the same record is not the
+    // sender's either; to a record that derives, it would be.
+    let mut damaged = world.build_delivery(ALICE, BOB, &v0).unwrap();
+    let last = damaged.envelope.len() - 1;
+    damaged.envelope[last] ^= 1;
+    let at = world.next();
+    world.space.deliveries.push(Accepted::new(at, damaged));
+
+    world.remove_device(BOB, &phone.id);
+    let new_epoch = world.account_epoch(BOB);
+    assert_ne!(new_epoch, record.epoch_id);
+    world.deliver(ALICE, BOB, &v0);
+    let bob = world.acquire(BOB);
+    assert!(bob.keys.holds(&v0));
+    assert!(bob.invalid_deliveries.is_empty());
+    assert_eq!(bob.non_derived_deliveries.len(), 2);
+    assert!(
+        bob.non_derived_deliveries
+            .iter()
+            .all(|reported| reported.sealing_key.record_id == record.id)
+    );
+}
+
+/// A recipient or an author state from another read than the chain's is
+/// inconsistent evidence for a delivery and for both kinds of rotation;
+/// from the chain's own read they are accepted. Membership is not checked
+/// by the builder: the server's policy enforces it.
+#[test]
+fn a_recipient_or_author_from_another_read_is_inconsistent_evidence() {
+    let mut world = space(51, &[ALICE, BOB]);
+    let v0 = world.current();
+    let old = world.read();
+    let old_recipient = old
+        .directory(&world)
+        .recipient(BOB, BUILTIN)
+        .unwrap()
+        .unwrap();
+    assert_eq!(old_recipient.through(), old.space.through);
+    let alice = world.own(ALICE);
+    let device = world.accounts[ALICE].device.clone();
+    let old_directory = old.directory(&world);
+    let old_author = Author::new(&old_directory, ALICE, &alice.key, &device).unwrap();
+    assert_eq!(old_author.through(), old.space.through);
+
+    // Any later row moves the cut: Carol's account, with no member row.
+    world.account(CAROL);
+    let new = world.read();
+    let chain = new.chain(&world).unwrap();
+    let directory = new.directory(&world);
+    let keys = world.acquire(ALICE).keys;
+    let version = keys.version(&v0).unwrap();
+    let recipient = directory.recipient(BOB, BUILTIN).unwrap().unwrap();
+    let author = Author::new(&directory, ALICE, &alice.key, &device).unwrap();
+    let writer = world.writer(ALICE);
+    let mut rng = TestRandom(51);
+    let inconsistent = Some(ProtocolError::InconsistentEvidence);
+
+    assert_eq!(
+        build::deliver(&writer, &chain, &version, &old_recipient, &mut rng).err(),
+        inconsistent
+    );
+    for recovery in [false, true] {
+        let rotate = |author: &Author<'_>, recipients: &[Recipient], rng: &mut TestRandom| {
+            if recovery {
+                build::recover_rotation(&writer, &chain, &keys, author, recipients, rng)
+            } else {
+                build::rotate(&writer, &chain, &keys, author, recipients, rng)
+            }
+        };
+        let before = rng.0;
+        assert_eq!(
+            rotate(&old_author, std::slice::from_ref(&recipient), &mut rng).err(),
+            inconsistent,
+            "recovery: {recovery}"
+        );
+        assert_eq!(
+            rotate(&author, std::slice::from_ref(&old_recipient), &mut rng).err(),
+            inconsistent,
+            "recovery: {recovery}"
+        );
+        assert_eq!(rng.0, before, "nothing was generated");
+        // The same read: accepted.
+        let records = rotate(&author, std::slice::from_ref(&recipient), &mut rng).unwrap();
+        assert_eq!(records.deliveries.len(), 1);
+    }
+    let delivery = build::deliver(&writer, &chain, &version, &recipient, &mut rng).unwrap();
+    assert_eq!(delivery.recipient_account_id, BOB);
+    // Carol is no member: the server's policy refuses that delivery, not
+    // the builder.
+    assert!(!new.space.is_member(CAROL));
+    let to_carol = directory.recipient(CAROL, BUILTIN).unwrap().unwrap();
+    assert!(build::deliver(&writer, &chain, &version, &to_carol, &mut rng).is_ok());
 }

@@ -7,7 +7,7 @@
 //! - [`key`]: acquiring and authenticating the account epoch key (§2.6,
 //!   §2.7), and the earlier epoch keys of its generation it reaches.
 //! - [`sealing`]: which account sealing key records are valid, the record
-//!   a sender seals to, and the derivation check (§2.12).
+//!   a sender seals to, and the derivation check and its report (§2.12).
 //! - [`build`]: the records each account publication writes, and the
 //!   preconditions that refuse it.
 
@@ -24,4 +24,4 @@ pub use private::{PrivateEvidence, VerifiedApproval, verify_private};
 pub use replay::{
     AccountEpoch, AccountFloor, AccountReplay, AccountState, RejectedRoot, RootSelection,
 };
-pub use sealing::SealingKeys;
+pub use sealing::{NonDerivedSealingKey, SealingKeys, UnsupportedSealingKey};

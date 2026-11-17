@@ -13,7 +13,10 @@
 //! failed authentication, or a marker other than `Z32`) is skipped. A
 //! delivery is reported as an invalid delivery only for its own fault: its
 //! envelope does not open, or the key it opens fails its own version's
-//! marker (§3.4). A key that opens and passes its own marker but whose
+//! marker (§3.4). An envelope that does not open because senders seal to a
+//! sealing key record of this account that does not derive (§2.12) is not
+//! the sender's fault: it is reported against that record and its signing
+//! device instead. A key that opens and passes its own marker but whose
 //! history fails further back is not accepted either, and is reported as a
 //! broken history naming the successor whose link fails, never against the
 //! delivery's sender: the fault is in the chain. A candidate naming an
@@ -28,14 +31,15 @@ use std::collections::BTreeMap;
 
 use zeroize::Zeroizing;
 
+use crate::envelope::{self, Mechanism};
 use crate::error::Error;
 use crate::registry::Registry;
 
-use super::super::account::AccountEpochKeys;
+use super::super::account::{AccountEpochKeys, NonDerivedSealingKey};
 use super::super::derive;
 use super::super::domain::AccountDomain;
 use super::super::error::{ProtocolError, ProtocolResult};
-use super::super::records::space::{SpaceAddress, SpaceScope};
+use super::super::records::space::{SpaceAddress, SpaceDelivery, SpaceScope};
 use super::chain::SpaceChain;
 use super::ledger::SpaceLedger;
 
@@ -146,6 +150,8 @@ fn version_marker(
 enum PathCheck {
     /// Every key the path reaches, by depth.
     Ok(PathKeys),
+    /// The envelope does not open.
+    Unopened,
     /// The key fails its own version's marker.
     Invalid,
     /// The key passes its own version's marker, but the `history` link of
@@ -209,6 +215,20 @@ pub struct InvalidDelivery {
     pub sender_account_id: String,
     pub recipient_account_id: String,
     pub key_epoch_id: String,
+}
+
+/// A delivery to this account whose envelope does not open because it was
+/// sealed to the sealing key record senders select for the recipient epoch
+/// and the envelope's mechanism, and that record does not derive from the
+/// account's epoch key (§2.12, §3.4). It is reported against the record and
+/// the device that signed it (`conflicting-account-key`), never as an
+/// invalid delivery against the sender, who cannot check derivation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonDerivedDelivery {
+    pub delivery_id: String,
+    pub key_epoch_id: String,
+    /// The record the delivery was sealed to, with its signing device.
+    pub sealing_key: NonDerivedSealingKey,
 }
 
 /// A key of the space that opened and passed its own version's marker, but
@@ -283,14 +303,19 @@ impl core::fmt::Debug for HeldVersion<'_> {
 }
 
 /// The outcome of checking a key held from elsewhere against the chain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyCheck {
     /// The key authenticated; it and every key its history links reach are
     /// now held.
     Accepted,
     /// The epoch is not a version of this chain, or the key provably fails
-    /// its marker or a history link.
+    /// its own version's marker.
     Invalid,
+    /// The key passes its own version's marker, but a `history` link
+    /// further back fails (§3.3, §3.4): as in
+    /// [`Acquisition::broken_history`], the fault is the named successor's,
+    /// and the key is not accepted.
+    BrokenHistory(BrokenHistory),
     /// A marker or history link is of a mechanism this reader does not
     /// route.
     Unsupported,
@@ -377,7 +402,9 @@ impl SpaceKeys {
     /// Authenticates a key of `epoch_id` held from elsewhere (a held-key
     /// record, §6.2, or a creation's own key) against `chain`, exactly as an
     /// acquired key: its version's marker and each `history` link back to
-    /// the root. On success it and every key the links reach are held.
+    /// the root. On success it and every key the links reach are held. A
+    /// key that passes its own marker but whose history fails further back
+    /// is [`KeyCheck::BrokenHistory`], naming the failing successor.
     pub fn authenticate(
         &mut self,
         chain: &SpaceChain,
@@ -396,7 +423,8 @@ impl SpaceKeys {
                     self.insert(keys);
                     KeyCheck::Accepted
                 }
-                PathCheck::Invalid | PathCheck::BrokenHistory(_) => KeyCheck::Invalid,
+                PathCheck::Unopened | PathCheck::Invalid => KeyCheck::Invalid,
+                PathCheck::BrokenHistory(at) => KeyCheck::BrokenHistory(broken_history(chain, at)),
                 PathCheck::Unsupported => KeyCheck::Unsupported,
             },
         )
@@ -425,6 +453,11 @@ pub struct Acquisition {
     /// Deliveries to this account that provably failed for their own
     /// fault (§3.4), by version (current first), then position and ID.
     pub invalid_deliveries: Vec<InvalidDelivery>,
+    /// Deliveries to this account that did not open because they were
+    /// sealed to a sealing key record of this account that does not derive
+    /// (§2.12), in the same order: reported against the record, not the
+    /// sender.
+    pub non_derived_deliveries: Vec<NonDerivedDelivery>,
     /// Successors whose `history` link failed under a key that opened and
     /// passed its own marker, once each, in the order found.
     pub broken_history: Vec<BrokenHistory>,
@@ -448,7 +481,8 @@ impl Acquisition {
 /// Acquires every key of `chain` this device can obtain (§3.3): the current
 /// version first, then earlier ones, for versions the history links of a
 /// newer key do not reach. `own` are the account epoch keys of the device's
-/// own account, current generation (§2.12); `ledger` holds the deliveries
+/// own account, current generation (§2.12), with the derivation check's
+/// report on the account's sealing key records; `ledger` holds the deliveries
 /// addressed to that account and must be the read `chain` was replayed
 /// from, either of the whole space or filtered for this account (a read
 /// filtered for another account is
@@ -476,20 +510,11 @@ pub fn acquire(
     let root_position = chain.root.position;
     let mut keys = SpaceKeys::new(chain);
     let mut invalid_deliveries = Vec::new();
+    let mut non_derived_deliveries = Vec::new();
     let mut broken_history = Vec::new();
     let mut unsupported = Vec::new();
     let mut broken = |depth: usize| {
-        let successor = &chain.versions[depth]
-            .successor
-            .as_ref()
-            .expect("a version with a history link has a successor")
-            .row;
-        let report = BrokenHistory {
-            space: chain.address().clone(),
-            key_epoch_id: successor.epoch_id.clone(),
-            successor_id: successor.id.clone(),
-            author_account_id: successor.author_account_id.clone(),
-        };
+        let report = self::broken_history(chain, depth);
         if !broken_history.contains(&report) {
             broken_history.push(report);
         }
@@ -527,7 +552,7 @@ pub fn acquire(
                     keys.insert(found);
                     continue;
                 }
-                PathCheck::Invalid => {}
+                PathCheck::Unopened | PathCheck::Invalid => {}
                 PathCheck::BrokenHistory(at) => broken(at),
                 PathCheck::Unsupported => unsupported.push(record_id.clone()),
             }
@@ -554,12 +579,24 @@ pub fn acquire(
                 // The delivery is not at fault: its key passed its own
                 // version's marker.
                 PathCheck::BrokenHistory(at) => broken(at),
-                PathCheck::Invalid => invalid_deliveries.push(InvalidDelivery {
-                    delivery_id: row.id.clone(),
-                    sender_account_id: row.sender_account_id.clone(),
-                    recipient_account_id: row.recipient_account_id.clone(),
-                    key_epoch_id: row.key_epoch_id.clone(),
-                }),
+                PathCheck::Unopened | PathCheck::Invalid => {
+                    let non_derived = matches!(outcome, PathCheck::Unopened)
+                        .then(|| sealed_to_non_derived(own, row))
+                        .flatten();
+                    match non_derived {
+                        Some(record) => non_derived_deliveries.push(NonDerivedDelivery {
+                            delivery_id: row.id.clone(),
+                            key_epoch_id: row.key_epoch_id.clone(),
+                            sealing_key: record.clone(),
+                        }),
+                        None => invalid_deliveries.push(InvalidDelivery {
+                            delivery_id: row.id.clone(),
+                            sender_account_id: row.sender_account_id.clone(),
+                            recipient_account_id: row.recipient_account_id.clone(),
+                            key_epoch_id: row.key_epoch_id.clone(),
+                        }),
+                    }
+                }
                 PathCheck::Unsupported => unsupported.push(row.id.clone()),
             }
         }
@@ -567,9 +604,42 @@ pub fn acquire(
     Ok(Acquisition {
         keys,
         invalid_deliveries,
+        non_derived_deliveries,
         broken_history,
         unsupported,
     })
+}
+
+/// The report of a broken `history` link of the successor of the version
+/// at `depth`.
+fn broken_history(chain: &SpaceChain, depth: usize) -> BrokenHistory {
+    let successor = &chain.versions[depth]
+        .successor
+        .as_ref()
+        .expect("a version with a history link has a successor")
+        .row;
+    BrokenHistory {
+        space: chain.address().clone(),
+        key_epoch_id: successor.epoch_id.clone(),
+        successor_id: successor.id.clone(),
+        author_account_id: successor.author_account_id.clone(),
+    }
+}
+
+/// The non-derived sealing key record of this account that senders select
+/// for the delivery's recipient epoch and its envelope's mechanism, if any
+/// (§2.12): a delivery sealed to it cannot open, through no fault of its
+/// sender.
+fn sealed_to_non_derived<'k>(
+    own: &'k AccountEpochKeys,
+    row: &SpaceDelivery,
+) -> Option<&'k NonDerivedSealingKey> {
+    let (id, version, _) = envelope::parse(&row.envelope).ok()?;
+    let id = core::str::from_utf8(id).ok()?;
+    let mechanism = Mechanism::new(id, version);
+    own.non_derived_sealing_keys()
+        .iter()
+        .find(|record| record.is_selected_for(&row.recipient_account_epoch_id, mechanism))
 }
 
 /// Opens one candidate for the version at `depth` and authenticates it.
@@ -583,7 +653,7 @@ fn try_candidate(
 ) -> ProtocolResult<PathCheck> {
     match open_account_envelope(registry, epoch_key, context, envelope)? {
         Outcome::Ok(key) => authenticate(chain, registry, depth, key),
-        Outcome::Invalid => Ok(PathCheck::Invalid),
+        Outcome::Invalid => Ok(PathCheck::Unopened),
         Outcome::Unsupported => Ok(PathCheck::Unsupported),
     }
 }

@@ -410,8 +410,11 @@ pub struct RotationRecipients {
     pub first: Vec<Recipient>,
     /// The remaining members with a valid sealing key, in the same order,
     /// delivered to right after the rotation is accepted, in batches of up
-    /// to [`DELIVERY_BATCH`].
-    pub rest: Vec<Recipient>,
+    /// to [`DELIVERY_BATCH`]. Each batch is built from the read it is
+    /// delivered in, so only the accounts are kept here: the caller takes
+    /// each recipient from that read
+    /// ([`AccountDirectory::recipient`](super::ledger::AccountDirectory::recipient)).
+    pub rest: Vec<String>,
     /// Members without a valid sealing key of the selected mechanism (or
     /// without a counting root): they receive the version later from any
     /// holder.
@@ -460,7 +463,11 @@ pub fn rotation_recipients(
     shuffle(&mut holding, rng)?;
     shuffle(&mut others, rng)?;
     holding.extend(others);
-    let rest = holding.split_off(holding.len().min(DELIVERY_BATCH));
+    let rest = holding
+        .split_off(holding.len().min(DELIVERY_BATCH))
+        .into_iter()
+        .map(|recipient| recipient.account_id().to_owned())
+        .collect();
     Ok(RotationRecipients {
         first: holding,
         rest,

@@ -32,11 +32,12 @@ use super::super::derive;
 use super::super::domain::AppDomain;
 use super::super::error::{ProtocolError, ProtocolResult, RefusalCode};
 use super::super::ids;
+use super::super::position::Position;
 use super::super::records::space::{SpaceAddress, SpaceDelivery, SpaceRoot, SpaceSuccessor};
 use super::super::signing;
 use super::chain::SpaceChain;
 use super::keys::{HeldVersion, Outcome, SpaceKeys, open_account_envelope, unwrap};
-use super::ledger::Recipient;
+use super::ledger::{AccountDirectory, Recipient};
 use super::members::DELIVERY_BATCH;
 
 const Z32: [u8; 32] = [0; 32];
@@ -69,13 +70,56 @@ pub struct SpaceWriter<'a> {
     pub account_id: &'a str,
 }
 
-/// The writing device's own account at the cut: its current state, the
-/// authenticated current account key, and the device, which must be active.
-#[derive(Clone, Copy)]
+/// The writing device's own account at one read: its current state at the
+/// read's cut, the authenticated current account key, and the device,
+/// which must be active. Built only by [`Author::new`], which takes the
+/// state from the read's [`AccountDirectory`] and stamps it with that cut,
+/// so a rotation refuses an author state of another read than its chain.
 pub struct Author<'a> {
-    pub state: &'a AccountState,
-    pub account_key: &'a AccountKey,
-    pub device: &'a LocalDevice,
+    state: AccountState,
+    through: Position,
+    account_key: &'a AccountKey,
+    device: &'a LocalDevice,
+}
+
+impl<'a> Author<'a> {
+    /// `account_id`'s current state in `accounts`, with its account key and
+    /// device. An account with no counting root at that read is
+    /// [`ProtocolError::InconsistentEvidence`]: the key came from a read in
+    /// which it had one.
+    pub fn new(
+        accounts: &AccountDirectory<'_>,
+        account_id: &str,
+        account_key: &'a AccountKey,
+        device: &'a LocalDevice,
+    ) -> ProtocolResult<Self> {
+        let state = accounts
+            .current(account_id)?
+            .ok_or(ProtocolError::InconsistentEvidence)?;
+        Ok(Self {
+            state,
+            through: accounts.through(),
+            account_key,
+            device,
+        })
+    }
+
+    pub fn state(&self) -> &AccountState {
+        &self.state
+    }
+
+    /// The cut of the read the state comes from.
+    pub fn through(&self) -> Position {
+        self.through
+    }
+
+    pub fn account_key(&self) -> &AccountKey {
+        self.account_key
+    }
+
+    pub fn device(&self) -> &LocalDevice {
+        self.device
+    }
 }
 
 impl SpaceWriter<'_> {
@@ -256,9 +300,12 @@ impl core::fmt::Debug for RotationRecords {
 /// batch ([`first`](super::members::RotationRecipients::first)). The
 /// remaining members ([`rest`](super::members::RotationRecipients::rest))
 /// are delivered to with [`deliver`] in later transactions of up to
-/// [`DELIVERY_BATCH`], once the rotation is accepted. Without the current
-/// version's key it is `rotation-needs-key`; more than [`DELIVERY_BATCH`]
-/// recipients is an invalid input, refused before anything is generated.
+/// [`DELIVERY_BATCH`], once the rotation is accepted, each from the read
+/// it is built at. Without the current version's key it is
+/// `rotation-needs-key`; more than [`DELIVERY_BATCH`] recipients is an
+/// invalid input, refused before anything is generated. An author state
+/// or a recipient of another read than `chain`'s is
+/// [`ProtocolError::InconsistentEvidence`].
 ///
 /// Returns the records only. The caller inserts the successor and its
 /// deliveries in one serializable ledger transaction whose read set
@@ -291,7 +338,8 @@ pub fn rotate(
 /// wraps the newest version the rotator holds, so the versions after that
 /// one, up to and including the predecessor, are skipped. `recipients` is
 /// the rotation's own batch, as for [`rotate`]. With no held version of the
-/// space it is `rotation-needs-key`.
+/// space it is `rotation-needs-key`. An author state or a recipient of
+/// another read than `chain`'s is [`ProtocolError::InconsistentEvidence`].
 ///
 /// Returns the records only. The caller inserts them as for [`rotate`]: in
 /// one serializable ledger transaction whose read set includes the space's
@@ -325,6 +373,13 @@ fn successor(
         return Err(ProtocolError::InvalidRecord(
             "more deliveries than a rotation's own transaction holds",
         ));
+    }
+    if author.through != chain.through()
+        || recipients
+            .iter()
+            .any(|recipient| recipient.through() != chain.through())
+    {
+        return Err(ProtocolError::InconsistentEvidence);
     }
     writer.check_author(author)?;
     let current = chain.current()?;
@@ -378,7 +433,7 @@ fn successor(
         if recipient.account_id() == writer.account_id {
             continue;
         }
-        deliveries.push(deliver(writer, &new_version, recipient, rng)?);
+        deliveries.push(seal_delivery(writer, &new_version, recipient, rng)?);
     }
     Ok(RotationRecords {
         successor,
@@ -387,23 +442,48 @@ fn successor(
     })
 }
 
-/// A delivery of a held `version` to `recipient` (§3.1, §3.4): a fresh ID,
-/// and `envelope = seal(A(recipient, recipientAccountEpochId),
+/// A delivery of a held `version` of `chain` to `recipient` (§3.1, §3.4):
+/// a fresh ID, and `envelope = seal(A(recipient, recipientAccountEpochId),
 /// X(json(["delivery", id, senderAccountId]), json([recipient,
 /// recipientAccountEpochId]), keyEpochId), K)`, sealed to the recipient's
 /// first valid sealing key record of its current epoch (§2.12). A record of
 /// another mechanism than the selected one is "recipient unsupported".
 /// `recipient` comes only from
-/// [`AccountDirectory::recipient`](super::ledger::AccountDirectory::recipient),
-/// and its record must name the recipient's account and epoch.
+/// [`AccountDirectory::recipient`](super::ledger::AccountDirectory::recipient)
+/// (or, for the writer's own account,
+/// [`AccountDirectory::own_recipient`](super::ledger::AccountDirectory::own_recipient)),
+/// and its record must name the recipient's account and epoch. A recipient
+/// of another read than `chain`'s, or a version that is not `chain`'s, is
+/// [`ProtocolError::InconsistentEvidence`]. Whether the recipient is a
+/// member is the server's policy to enforce, not checked here.
 ///
 /// Returns the record only. The caller inserts it in a ledger transaction
 /// whose read set includes the recipient's public account rows and the
-/// space's member rows at the cut `recipient` was read at (§3.4), so the
-/// delivery is refused if the recipient's account rotated or the space's
-/// members changed after that cut, and the caller re-reads. Within a
-/// rotation (§3.5), the same applies to each later delivery transaction.
+/// space's member rows at the cut `chain` and `recipient` were read at
+/// (§3.4), so the delivery is refused if the recipient's account rotated or
+/// the space's members changed after that cut, and the caller re-reads.
+/// Within a rotation (§3.5), the same applies to each later delivery
+/// transaction, each built from its own read.
 pub fn deliver(
+    writer: &SpaceWriter<'_>,
+    chain: &SpaceChain,
+    version: &HeldVersion<'_>,
+    recipient: &Recipient,
+    rng: &mut dyn RandomSource,
+) -> ProtocolResult<SpaceDelivery> {
+    let of_chain = *version.scope == chain.scope
+        && *version.application == chain.application
+        && chain
+            .version(version.depth)
+            .is_some_and(|held| held.epoch_id == version.epoch_id);
+    if !of_chain || recipient.through() != chain.through() {
+        return Err(ProtocolError::InconsistentEvidence);
+    }
+    seal_delivery(writer, version, recipient, rng)
+}
+
+/// [`deliver`], once its evidence is checked.
+fn seal_delivery(
     writer: &SpaceWriter<'_>,
     version: &HeldVersion<'_>,
     recipient: &Recipient,

@@ -14,7 +14,7 @@ use jazz_e2ee::protocol::records::space::{SpaceAddress, SpaceDelivery, SpaceMemb
 use jazz_e2ee::protocol::space::build::{self, Author, SpaceWriter};
 use jazz_e2ee::protocol::space::members::DELIVERY_BATCH;
 use jazz_e2ee::protocol::space::{
-    AccountDirectory, Acquisition, Recipient, SpaceChain, SpaceKeys, SpaceLedger, acquire,
+    AccountDirectory, Acquisition, SpaceChain, SpaceKeys, SpaceLedger, acquire,
 };
 use jazz_e2ee::protocol::{Accepted, Position, ProtocolResult, ids};
 use jazz_e2ee::registry::Registry;
@@ -59,7 +59,8 @@ pub struct Own {
 pub struct Rotation {
     pub rotator: String,
     pub records: build::RotationRecords,
-    pub rest: Vec<Recipient>,
+    /// The members delivered to after the successor is accepted.
+    pub rest: Vec<String>,
 }
 
 /// A ledger read at one cut: every account's public rows and the space's.
@@ -258,11 +259,8 @@ impl World {
         device: &LocalDevice,
     ) -> ProtocolResult<build::RootRecords> {
         let own = self.own_with(account, device)?;
-        let author = Author {
-            state: &own.state,
-            account_key: &own.key,
-            device,
-        };
+        let read = self.read();
+        let author = Author::new(&read.directory(self), account, &own.key, device)?;
         let mut rng = TestRandom(self.rng.next_u64());
         build::space_root(
             &self.writer(account),
@@ -356,6 +354,7 @@ impl World {
         let mut rng = TestRandom(self.rng.next_u64());
         let acquisition = self.acquire(from);
         let read = self.read();
+        let chain = read.chain(self).expect("a space root");
         let directory = read.directory(self);
         let writer = self.writer(from);
         let recipient = directory
@@ -367,7 +366,7 @@ impl World {
             .keys
             .version(epoch_id)
             .expect("the sender holds the version");
-        build::deliver(&writer, &version, &recipient, &mut rng)
+        build::deliver(&writer, &chain, &version, &recipient, &mut rng)
     }
 
     /// `account` rotates the space with its default device (§3.5): the
@@ -414,11 +413,7 @@ impl World {
             writer.suite.key_seal.mechanism(),
             rng,
         )?;
-        let author = Author {
-            state: &own.state,
-            account_key: &own.key,
-            device: &self.accounts[account].device,
-        };
+        let author = Author::new(directory, account, &own.key, &self.accounts[account].device)?;
         let records = if recovery {
             build::recover_rotation(&writer, chain, keys, &author, &recipients.first, rng)
         } else {
@@ -461,25 +456,34 @@ impl World {
         epoch
     }
 
-    /// `from`'s deliveries of version `epoch_id` to each of `recipients`,
-    /// whether or not a delivery to it already exists, built from what
-    /// `from` acquires at the current cut. `None` when `from` does not hold
-    /// the version (a successor that did not become the next version).
+    /// `from`'s deliveries of version `epoch_id` to each of `accounts`,
+    /// whether or not a delivery to it already exists, built from a read
+    /// at the current cut and what `from` acquires there. `None` when
+    /// `from` does not hold the version (a successor that did not become
+    /// the next version).
     pub fn build_deliveries(
         &mut self,
         from: &str,
         epoch_id: &str,
-        recipients: &[Recipient],
+        accounts: &[String],
     ) -> ProtocolResult<Option<Vec<SpaceDelivery>>> {
         let mut rng = TestRandom(self.rng.next_u64());
         let acquisition = self.try_acquire(from)?;
         let Some(version) = acquisition.keys.version(epoch_id) else {
             return Ok(None);
         };
+        let read = self.read();
+        let chain = read.chain(self).expect("a space root");
+        let directory = read.directory(self);
         let writer = self.writer(from);
-        recipients
+        accounts
             .iter()
-            .map(|recipient| build::deliver(&writer, &version, recipient, &mut rng))
+            .map(|account| {
+                let recipient = directory
+                    .recipient(account, writer.suite.key_seal.mechanism())?
+                    .expect("a recipient with a sealing key");
+                build::deliver(&writer, &chain, &version, &recipient, &mut rng)
+            })
             .collect::<ProtocolResult<_>>()
             .map(Some)
     }

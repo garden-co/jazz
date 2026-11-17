@@ -9,7 +9,8 @@
 //!
 //! An authenticated key is also checked against the account's own sealing
 //! key records (§2.12): a valid record that does not derive from the epoch
-//! key it names is `conflicting-account-key`, and acquisition fails closed.
+//! key it names is reported (`conflicting-account-key`) and ignored, and
+//! acquisition succeeds.
 
 use std::collections::BTreeSet;
 
@@ -30,6 +31,7 @@ use super::super::records::account::{
 };
 use super::private::{PrivateEvidence, VerifiedApproval};
 use super::replay::{AccountReplay, AccountState};
+use super::sealing::NonDerivedSealingKey;
 
 const Z32: [u8; 32] = [0; 32];
 
@@ -40,6 +42,10 @@ pub struct AuthenticatedAccountKey {
     /// Private approvals of the current epoch whose markers authenticate
     /// under the key and whose signers have authenticated lineage.
     pub approval_ids: BTreeSet<String>,
+    /// Valid sealing key records of the account's current generation that
+    /// do not derive from the epoch key they name (§2.12), by position then
+    /// ID: reported and ignored by this device.
+    pub non_derived_sealing_keys: Vec<NonDerivedSealingKey>,
 }
 
 /// An account key with what authenticated it, obtainable only by
@@ -77,12 +83,15 @@ impl core::fmt::Debug for AccountKey {
 /// `history` (§2.7, §2.12), root epoch first. An envelope sealed to the
 /// account names the epoch whose sealing key it used; every device holding
 /// a later epoch key of the same generation opens it with these. Keys are
-/// cleared on drop and never printed.
+/// cleared on drop and never printed. They carry the derivation check's
+/// report on the account's sealing key records at the read they were
+/// reached from (§2.12).
 pub struct AccountEpochKeys {
     account_id: String,
     generation: u64,
     root_id: String,
     keys: Vec<(String, Zeroizing<[u8; 32]>)>,
+    non_derived: Vec<NonDerivedSealingKey>,
 }
 
 impl AccountEpochKeys {
@@ -113,6 +122,14 @@ impl AccountEpochKeys {
     pub fn epoch_ids(&self) -> impl Iterator<Item = &str> {
         self.keys.iter().map(|(epoch, _)| epoch.as_str())
     }
+
+    /// Valid sealing key records of this generation that do not derive
+    /// from the epoch key they name (§2.12), by position then ID. The
+    /// device ignores them; space key acquisition reports a delivery sealed
+    /// to one against the record, not against its sender (§3.4).
+    pub fn non_derived_sealing_keys(&self) -> &[NonDerivedSealingKey] {
+        &self.non_derived
+    }
 }
 
 impl core::fmt::Debug for AccountEpochKeys {
@@ -122,6 +139,7 @@ impl core::fmt::Debug for AccountEpochKeys {
             .field("generation", &self.generation)
             .field("root_id", &self.root_id)
             .field("epochs", &self.epoch_ids().collect::<Vec<_>>())
+            .field("non_derived", &self.non_derived)
             .finish()
     }
 }
@@ -370,11 +388,12 @@ impl AccountKeyEvidence<'_> {
     ///
     /// Once the key authenticates, the device checks that every valid
     /// sealing key record of an epoch of its generation derives from that
-    /// epoch's key, for each mechanism its registry has (§2.12): a record
-    /// that does not is the intrinsic contradiction
-    /// `conflicting-account-key`, since only the account's own devices can
-    /// write a valid one. Acquisition fails with it rather than trying
-    /// another candidate: the key is the account's, and the record is wrong.
+    /// epoch's key, for each mechanism its registry has (§2.12). A record
+    /// that does not is reported in
+    /// [`AuthenticatedAccountKey::non_derived_sealing_keys`] and ignored:
+    /// it never stops the device acquiring its account key. Only an active
+    /// device of the account can sign a valid record; the remedy is to
+    /// remove that device.
     pub fn authenticate(
         &self,
         key: &[u8; 32],
@@ -421,10 +440,11 @@ impl AccountKeyEvidence<'_> {
             return Err(ProtocolError::AccountKeyUnavailable);
         }
         reached.reverse();
-        self.check_sealing_keys(&self.epoch_keys_of(reached))?;
+        let keys = self.epoch_keys_of(reached)?;
         Ok(AuthenticatedAccountKey {
             epoch_id: current.epoch_id.to_owned(),
             approval_ids,
+            non_derived_sealing_keys: keys.non_derived,
         })
     }
 
@@ -434,7 +454,8 @@ impl AccountKeyEvidence<'_> {
     /// another epoch than the current one is
     /// [`ProtocolError::AccountKeyUnavailable`]. The sealing key records
     /// are checked against the keys reached, as in
-    /// [`authenticate`](Self::authenticate).
+    /// [`authenticate`](Self::authenticate), and the report travels with
+    /// the keys ([`AccountEpochKeys::non_derived_sealing_keys`]).
     pub fn epoch_keys(&self, key: &AccountKey) -> ProtocolResult<AccountEpochKeys> {
         let chain = self.chain()?;
         let current = chain.last().expect("a state has its root epoch");
@@ -463,29 +484,27 @@ impl AccountKeyEvidence<'_> {
             keys.push((previous.epoch_id.to_owned(), previous_key));
         }
         keys.reverse();
-        let keys = self.epoch_keys_of(keys);
-        self.check_sealing_keys(&keys)?;
-        Ok(keys)
+        self.epoch_keys_of(keys)
     }
 
     /// The epoch keys of this account's current generation, root epoch
-    /// first.
-    fn epoch_keys_of(&self, keys: Vec<(String, Zeroizing<[u8; 32]>)>) -> AccountEpochKeys {
-        AccountEpochKeys {
+    /// first, with the derivation check of a device of the account (§2.12)
+    /// over the valid sealing key records of its current chain.
+    fn epoch_keys_of(
+        &self,
+        keys: Vec<(String, Zeroizing<[u8; 32]>)>,
+    ) -> ProtocolResult<AccountEpochKeys> {
+        let mut keys = AccountEpochKeys {
             account_id: self.account_id().to_owned(),
             generation: self.state.generation,
             root_id: self.state.root.row.id.clone(),
             keys,
+            non_derived: Vec::new(),
+        };
+        if let Some(sealing) = self.replay.sealing_keys()? {
+            keys.non_derived = sealing.check_derived(self.registry(), &keys)?;
         }
-    }
-
-    /// The derivation check of a device of the account (§2.12) over the
-    /// valid sealing key records of its current chain.
-    fn check_sealing_keys(&self, keys: &AccountEpochKeys) -> ProtocolResult<()> {
-        match self.replay.sealing_keys()? {
-            Some(sealing) => sealing.check_derived(self.registry(), keys),
-            None => Ok(()),
-        }
+        Ok(keys)
     }
 
     /// Opens one candidate and authenticates it. `Ok(None)` when the

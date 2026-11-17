@@ -24,7 +24,8 @@ pub mod members;
 
 pub use chain::{InvalidSpaceRoot, LostRoot, SpaceChain, SpaceRoots, SpaceVersion, Unresolved};
 pub use keys::{
-    Acquisition, BrokenHistory, HeldVersion, InvalidDelivery, KeyCheck, SpaceKeys, acquire,
+    Acquisition, BrokenHistory, HeldVersion, InvalidDelivery, KeyCheck, NonDerivedDelivery,
+    SpaceKeys, acquire,
 };
 pub use ledger::{AccountDirectory, AuthorCheck, Recipient, SpaceLedger};
 pub use members::{
