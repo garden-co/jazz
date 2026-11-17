@@ -1352,6 +1352,7 @@ impl Inner {
     /// The active schema changed: every subscription re-runs and restates
     /// its rows (a reset), since their shape may have changed.
     pub(super) fn reset_everything(&mut self) {
+        self.clear_check_plans();
         self.refresh_where(|_| true, true);
     }
 
