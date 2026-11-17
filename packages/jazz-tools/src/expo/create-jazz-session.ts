@@ -82,6 +82,7 @@ const NATIVE_SESSION_OPTIONS = {
   telemetryCollectorUrl: true,
   devMode: true,
   slowQueryThresholdMs: true,
+  subscriptionBacklogRows: true,
   bearer: true,
   nativeRelay: true,
   profile: true,

@@ -217,6 +217,8 @@ mod streaming_transaction;
 mod streaming_upload_ownership;
 #[path = "../structured_result_tree.rs"]
 mod structured_result_tree;
+#[path = "../subscription_backlog.rs"]
+mod subscription_backlog;
 #[path = "../sync_access_loss.rs"]
 mod sync_access_loss;
 #[path = "../sync_aggregates.rs"]
@@ -273,6 +275,8 @@ mod transaction_policy_exists;
 mod transaction_read_tiers;
 #[path = "../union_queries.rs"]
 mod union_queries;
+#[path = "../unit_using_evidence.rs"]
+mod unit_using_evidence;
 #[path = "../unsupported_json_schemas.rs"]
 mod unsupported_json_schemas;
 #[path = "../uuid_page_probe.rs"]
