@@ -76,10 +76,7 @@ variant`) and refuses it, so a downgrade fails closed rather than dropping
   (used only in tests) binds an identity only once its catalogue mirror has
   confirmed the schema version's names; until then the identity is no value
   and the policy grants nothing through it. Policies are compiled per check
-  and per read, so each one compiled after confirmation binds it. Support
-  chosen for a subscription taken before confirmation leaves the unknown
-  identity out of its key: it is wider, the session's policies still filter
-  it, and nothing the read rests on is missing.
+  and per read, so each one compiled after confirmation binds it.
 - **Clients.** A client never evaluates write policies. `table_id('T')` is
   read by the permissions reader of this version and later; an older reader
   does not accept it, so a permissions file using it needs this version's
