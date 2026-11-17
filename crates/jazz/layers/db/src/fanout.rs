@@ -1175,6 +1175,7 @@ impl Inner {
                 kept: &self.kept_variants,
                 out: Evidence::new(),
                 through: Vec::new(),
+                reader: reader.clone(),
             };
             let understood = policy_pins_enabled()
                 && read.view.is_none()
@@ -3904,6 +3905,21 @@ struct Occurrence {
     pin: Option<(String, String)>,
     /// The stored application columns of the table's rows it reads.
     columns: BTreeSet<String>,
+    /// Set for the source of an `INHERITS_REFERENCING` in the reader's own
+    /// policy: a row of this table can only change whether the reader rows
+    /// its `via` names are visible.
+    link: Option<Link>,
+}
+
+/// The reader an [`Occurrence`]'s rows grant through `INHERITS_REFERENCING`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct Link {
+    /// The reader's stored table.
+    reader: String,
+    /// The source's stored `via` column.
+    via: String,
+    /// `via` is a list of references (one per element).
+    list: bool,
 }
 
 /// The stored tables read policies read as evidence, each with every
@@ -3943,6 +3959,8 @@ struct EvidenceWalk<'a> {
     /// The tables (and operations) whose policies an `INHERITS` is being
     /// read through: a chain back to one is watched whole.
     through: Vec<(String, Operation)>,
+    /// The stored table whose policy is walked.
+    reader: String,
 }
 
 impl EvidenceWalk<'_> {
@@ -4044,7 +4062,7 @@ impl EvidenceWalk<'_> {
                 else {
                     return false;
                 };
-                self.inherit(target, *operation, BTreeSet::new())
+                self.inherit(target, *operation, BTreeSet::new(), None)
             }
             PolicyExpr::InheritsReferencing {
                 operation,
@@ -4056,7 +4074,18 @@ impl EvidenceWalk<'_> {
                     return false;
                 };
                 let mut columns = BTreeSet::new();
-                column(via_column, &mut columns) && self.inherit(source, *operation, columns)
+                // Only the reader's own policy: one reached through another
+                // table's INHERITS decides other rows. A `via` that holds no
+                // row references cannot be matched to held parents.
+                let link = (self.through.is_empty() && table.stored == self.reader)
+                    .then(|| link_kind(source, via_column))
+                    .flatten()
+                    .map(|list| Link {
+                        reader: table.stored.clone(),
+                        via: source.stored_name(via_column).to_owned(),
+                        list,
+                    });
+                column(via_column, &mut columns) && self.inherit(source, *operation, columns, link)
             }
             PolicyExpr::ExistsRel { .. } => false,
         }
@@ -4071,6 +4100,7 @@ impl EvidenceWalk<'_> {
         table: &Table,
         operation: Operation,
         mut columns: BTreeSet<String>,
+        link: Option<Link>,
     ) -> bool {
         let key = (table.stored.clone(), operation);
         if self.through.contains(&key) {
@@ -4090,11 +4120,21 @@ impl EvidenceWalk<'_> {
         let pin = conjuncts(policy)
             .into_iter()
             .find_map(|c| value_pin(table, c, self.session, self.kept));
-        self.occurrence(table, pin, columns);
+        self.linked_occurrence(table, pin, columns, link);
         true
     }
 
     fn occurrence(&mut self, table: &Table, pin: Option<Pin>, columns: BTreeSet<String>) {
+        self.linked_occurrence(table, pin, columns, None)
+    }
+
+    fn linked_occurrence(
+        &mut self,
+        table: &Table,
+        pin: Option<Pin>,
+        columns: BTreeSet<String>,
+        link: Option<Link>,
+    ) {
         let columns = columns
             .iter()
             .map(|c| table.stored_name(c).to_owned())
@@ -4102,7 +4142,7 @@ impl EvidenceWalk<'_> {
         add_evidence(
             &mut self.out,
             &table.stored,
-            Some(Occurrence { pin, columns }),
+            Some(Occurrence { pin, columns, link }),
         );
     }
 }
@@ -4595,8 +4635,53 @@ fn evidenced(
                 }
                 _ => true,
             };
-        pinned && changed
+        pinned && changed && linked(group, occurrence, images)
     })
+}
+
+/// Whether a change matching a linked [`Occurrence`] can reach the
+/// result. The reader rows its `via` names (in its old or new image) are
+/// the only ones it can show or hide; when the result reads the reader
+/// only at relation levels keyed by `id` (every one complete), those rows
+/// matter only if a held parent names them. Anything else: yes.
+fn linked(group: &Group, occurrence: &Occurrence, images: &[Vec<(String, Sql)>]) -> bool {
+    let Some(Link { reader, via, list }) = occurrence.link.as_ref() else {
+        return true;
+    };
+    if group.awaiting || group.root == *reader {
+        return true;
+    }
+    let levels: Vec<&Held> = group
+        .correlations
+        .iter()
+        .zip(&group.held)
+        .filter(|(level, _)| level.table == *reader)
+        .map(|(level, held)| (level.inner == "id" && held.complete()).then_some(held))
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default();
+    if levels.is_empty()
+        || levels.len()
+            != group
+                .correlations
+                .iter()
+                .filter(|l| l.table == *reader)
+                .count()
+    {
+        return true;
+    }
+    images.iter().any(|image| {
+        image
+            .iter()
+            .filter(|(column, _)| column == via)
+            .any(|(_, cell)| match stored_atoms(cell, *list) {
+                Some(atoms) => atoms
+                    .iter()
+                    .any(|atom| levels.iter().any(|held| held.parents.contains_key(atom))),
+                None => true,
+            })
+    }) || !images
+        .iter()
+        .any(|image| image.iter().any(|(column, _)| column == via))
 }
 
 fn correlated(
