@@ -291,11 +291,27 @@ impl ServerCore {
     /// pinned to another bundle ends, told to reconnect later (sessions
     /// that ended stay ended even when a later step failed). The
     /// catalogue is read again after.
+    ///
+    /// `expected` is the index the change was staged against
+    /// ([`crate::portable::catalogue::StagedDeployment::expected`]): if the
+    /// store's catalogue no longer reads the same, the change is refused,
+    /// as native refuses a deployment whose catalogue moved under it.
     pub fn apply_catalogue(
         &mut self,
+        expected: &crate::portable::catalogue::CatalogueIndex,
         change: CatalogueChange,
         supersedes: Option<jazz::catalogue::BundleId>,
     ) -> Result<(), CatalogueApplyError> {
+        let rows = self
+            .db()
+            .catalogue()
+            .map_err(|error| CatalogueApplyError::Failed(error.to_string()))?;
+        if crate::portable::catalogue::CatalogueIndex::from_rows(&rows, None) != *expected {
+            return Err(CatalogueApplyError::Rejected(
+                "catalogue changed while preparing deployment; fetch the graph and retry"
+                    .to_owned(),
+            ));
+        }
         let (ended, result) = self.owner.apply_catalogue(change, supersedes);
         // Sessions that ended are gone even when a later step failed: the
         // host takes their error frames and closes their sockets, and a
@@ -735,8 +751,12 @@ mod tests {
             let change = deployment.catalogue_change(&rows).unwrap_or_else(|error| {
                 panic!("no catalogue change: {}", error.body);
             });
-            core.apply_catalogue(change, deployment.staged.new_bundle())
-                .unwrap();
+            core.apply_catalogue(
+                deployment.staged.expected(),
+                change,
+                deployment.staged.new_bundle(),
+            )
+            .unwrap();
         }
         deployment.staged.response
     }
@@ -883,5 +903,59 @@ mod tests {
             core.take_output(session).iter().all(Result::is_ok),
             "the pinned session stays"
         );
+    }
+
+    /// A deployment staged against a catalogue that moved before it was
+    /// applied is refused, and leaves the catalogue as it was.
+    ///
+    /// ```text
+    /// stage A on C ── deploy B (C → C') ── apply A on C' ──► Rejected
+    /// ```
+    #[test]
+    fn a_deployment_staged_on_a_catalogue_that_moved_is_refused() {
+        let mut core = core();
+        let rows = core.db().catalogue().unwrap();
+        let index = crate::portable::catalogue::CatalogueIndex::from_rows(&rows, None);
+        let stale =
+            crate::portable::deployment::prepare(&index, deploy_request(&source()), 1).unwrap();
+        let change = stale.catalogue_change(&rows).unwrap();
+
+        let mut other = source();
+        for table in other.values_mut() {
+            table.policies = TablePolicies::new().with_select(PolicyExpr::True);
+        }
+        assert!(deploy(&mut core, deploy_request(&other)).changed);
+        let moved = core.db().catalogue().unwrap();
+
+        let refused = core
+            .apply_catalogue(stale.staged.expected(), change, stale.staged.new_bundle())
+            .unwrap_err();
+        assert!(
+            matches!(&refused, CatalogueApplyError::Rejected(message) if message.contains("catalogue changed")),
+            "{refused:?}"
+        );
+        assert_eq!(core.db().catalogue().unwrap(), moved, "nothing was applied");
+    }
+
+    /// A change that would make a schema current is refused: a server's
+    /// sessions pin bundles, it never activates one.
+    #[test]
+    fn a_change_that_activates_a_schema_is_refused() {
+        let mut core = core();
+        let rows = core.db().catalogue().unwrap();
+        let index = crate::portable::catalogue::CatalogueIndex::from_rows(&rows, None);
+        let deployment =
+            crate::portable::deployment::prepare(&index, deploy_request(&source()), 1).unwrap();
+        let mut change = deployment.catalogue_change(&rows).unwrap();
+        let schema = deployment.genesis().unwrap();
+        change.activate = Some((1, schema, Vec::new()));
+        let refused = core
+            .apply_catalogue(deployment.staged.expected(), change, None)
+            .unwrap_err();
+        assert!(
+            matches!(refused, CatalogueApplyError::Rejected(_)),
+            "{refused:?}"
+        );
+        assert_eq!(core.db().catalogue().unwrap(), rows, "nothing was applied");
     }
 }
