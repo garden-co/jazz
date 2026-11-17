@@ -146,7 +146,20 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/art" "${RUNNER_TEMP}/pack"
           cp target/release/libjazz_ffi.so "${RUNNER_TEMP}/pack/"
           strip "${RUNNER_TEMP}/pack/libjazz_ffi.so"
-          tar -czf "${RUNNER_TEMP}/art/libjazz_ffi-linux-x86_64.tar.gz" -C "${RUNNER_TEMP}/pack" libjazz_ffi.so
+          # As attach-language-artifacts.yml packs it: ./-prefixed names.
+          tar -czf "${RUNNER_TEMP}/art/libjazz_ffi-linux-x86_64.tar.gz" -C "${RUNNER_TEMP}/pack" .
+
+      # The tag's commit can predate a fix to the embed script, so take it
+      # from the commit this workflow runs from (as release-candidate-npm.yml
+      # does with rc-tarballs.mjs). It only lays out files; the push job
+      # still refuses a commit that touches more than lib/ and embed_*.go.
+      - name: Take the embed script from the workflow's commit
+        if: github.event_name != 'pull_request'
+        run: |
+          git fetch -q --depth=1 origin "${GITHUB_SHA}"
+          # Overwritten in the working tree only: the commit below adds
+          # just packages/jazz-go/lib and embed_*.go.
+          git show "${GITHUB_SHA}:dev/scripts/go-embed-ffi-libraries.sh" > dev/scripts/go-embed-ffi-libraries.sh
 
       - name: Embed and commit
         id: commit
