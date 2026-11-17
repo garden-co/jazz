@@ -426,6 +426,14 @@ not hold them either way).
 `Read { id, query, binding, include_deleted, tier, wait, view, span }` asks
 for one query's result:
 
+- `query` may hold text prefix/suffix predicates (`StartsWith`/`EndsWith`,
+  in `Predicate` tags 13/14 and `RelationPredicate` tags 11/12; bytewise on
+  UTF-8, NULL never matches). An older server cannot decode them and drops
+  the link, so a client sends such a read, or a serializable commit whose
+  reads hold one, only over a link that negotiated
+  `FEATURE_TEXT_AFFIX_PREDICATES` (`1 << 13`). On any other link it refuses
+  the read (`Refused`, "not supported yet by this server") or the commit (a
+  rejected fate) itself, without sending it.
 - `view` is the read view the result is of: the current state, a branch view
   (head over an optional live or frozen base), or a snapshot. It is part of
   the read's identity (`INV-BVIEW-12`): the server keeps a live read in its

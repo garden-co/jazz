@@ -540,7 +540,9 @@ fn coerce_predicate_typed_literals(
                 !coerce_operand_pair_typed_literal(table, left, value, column_types)
             });
         }
-        Predicate::Contains(left, right) => {
+        Predicate::Contains(left, right)
+        | Predicate::StartsWith(left, right)
+        | Predicate::EndsWith(left, right) => {
             if coerce_operand_pair_typed_literal(table, left, right, column_types)
                 || coerce_operand_pair_typed_literal(table, right, left, column_types)
             {
@@ -1729,6 +1731,12 @@ fn validate_exists_rel_join_conditions(
 ) -> Result<(), SchemaConversionError> {
     match rel {
         RelationExpr::TableScan { .. } => Ok(()),
+        // The policy language has no prefix/suffix test; one built through
+        // the Rust API is refused here, not deployed.
+        RelationExpr::Filter { predicate, .. } if predicate.uses_text_affix() => Err(err(
+            policy_path(table, path),
+            "starts/ends with is not supported in permission policies yet",
+        )),
         RelationExpr::Filter { input, .. } | RelationExpr::Project { input, .. } => {
             validate_exists_rel_join_conditions(table, path, input)
         }
@@ -1820,15 +1828,20 @@ fn rel_has_outer_references(rel: &RelationExpr) -> bool {
     }
     fn predicate_has_outer(predicate: &RelationPredicate) -> bool {
         match predicate {
-            RelationPredicate::Cmp { right, .. } | RelationPredicate::Contains { right, .. } => {
-                value_is_outer(right)
-            }
+            RelationPredicate::Cmp { right, .. }
+            | RelationPredicate::Contains { right, .. }
+            | RelationPredicate::StartsWith { right, .. }
+            | RelationPredicate::EndsWith { right, .. } => value_is_outer(right),
             RelationPredicate::In { values, .. } => values.iter().any(value_is_outer),
             RelationPredicate::And(children) | RelationPredicate::Or(children) => {
                 children.iter().any(predicate_has_outer)
             }
             RelationPredicate::Not(child) => predicate_has_outer(child),
-            _ => false,
+            RelationPredicate::IsNull { .. }
+            | RelationPredicate::IsNotNull { .. }
+            | RelationPredicate::True
+            | RelationPredicate::False => false,
+            RelationPredicate::Removed(removed) => match *removed {},
         }
     }
     match rel {
@@ -2368,6 +2381,8 @@ fn collect_rel_predicate_columns<'a>(
         RelationPredicate::Not(child) => collect_rel_predicate_columns(child, columns),
         RelationPredicate::Cmp { left, .. }
         | RelationPredicate::Contains { left, .. }
+        | RelationPredicate::StartsWith { left, .. }
+        | RelationPredicate::EndsWith { left, .. }
         | RelationPredicate::In { left, .. } => columns.push(left),
         RelationPredicate::IsNull { column } | RelationPredicate::IsNotNull { column } => {
             columns.push(column)
