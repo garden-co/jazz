@@ -1538,3 +1538,83 @@ fn a_stream_is_stale_only_once_a_record_authenticates() {
 
 /// A third space, for values sealed under neither side of a move.
 const THIRD_ROW: &str = "038f2e3d-4c5b-7a69-8877-665544332233";
+
+/// Re-homing a row from one space to another never carries a value sealed
+/// under a third space: a cell is unconvertible (`stale-space`), and a
+/// stream is refused the same way, whether or not it has plaintext.
+#[test]
+fn a_value_of_a_third_space_is_never_rehomed() {
+    use jazz_e2ee::protocol::content::convert::{Rehome, RehomeCell, rehome_row};
+
+    let mut world = world(29);
+    for identifier in [OTHER_ROW, THIRD_ROW] {
+        world.add_member_of(identifier, ALICE);
+        world.create_of(identifier, ALICE);
+    }
+    let mut held = held_of(&world, ALICE, ROW);
+    held.hold(acquire_held(&world, ALICE, OTHER_ROW)).unwrap();
+    held.hold(acquire_held(&world, ALICE, THIRD_ROW)).unwrap();
+    let domain = shared(&world);
+    let (from, other, to) = (space(ROW), space(OTHER_ROW), space(THIRD_ROW));
+    let source = row(&domain, &from, ROW_1);
+    let sealed_in = row(&domain, &other, ROW_1);
+    let target = row(&domain, &to, ROW_1);
+    let registry = &world.shared.registry;
+    let suite = registry.select(&Default::default()).unwrap();
+    let to_key = write_key(&held, &to);
+
+    let (cell, _) = seal_title(&world, &write_key(&held, &other), &sealed_in, "elsewhere");
+    let rehomed = rehome_row(
+        registry,
+        &suite,
+        &held,
+        &source,
+        &to_key,
+        &target,
+        &[RehomeCell {
+            source: title(),
+            target: title(),
+            stored: &cell,
+        }],
+        &Values,
+        &mut TestRandom(29),
+    )
+    .unwrap();
+    assert!(matches!(
+        rehomed,
+        Rehome::Unconvertible {
+            opened: Opened::StaleSpace { .. },
+            ..
+        }
+    ));
+
+    let reseal = |stored: &[u8]| -> Result<Vec<u8>, ContentError> {
+        let StreamOpen::Reader { reader, .. } =
+            StreamValueReader::open(registry, &held, &source, &blob(), &stored[..69])?
+        else {
+            panic!("a reader");
+        };
+        let (writer, mut out) =
+            begin_stream(&suite, &to_key, &target, &blob(), &mut TestRandom(30))?;
+        let mut resealer = StreamResealer::new(reader, writer);
+        for part in stored[69..].chunks(4096) {
+            resealer.update(part, &mut out)?;
+        }
+        resealer.finish(&mut out)?;
+        Ok(out)
+    };
+    let stale = Err(ContentError::Data(DataError::StaleSpace));
+    let other_key = write_key(&held, &other);
+    let plaintext = TestRandom(29).bytes(20_000);
+    let stream = seal_stream(&world, &other_key, &sealed_in, &plaintext, 4096);
+    assert_eq!(reseal(&stream), stale);
+    let empty = seal_stream(&world, &other_key, &sealed_in, b"", 1);
+    assert_eq!(reseal(&empty), stale);
+    // A stream of the source space itself reseals.
+    let own = seal_stream(&world, &write_key(&held, &from), &source, &plaintext, 4096);
+    let resealed = reseal(&own).unwrap();
+    assert_eq!(
+        read_stream(registry, &held, &target, &resealed, 4096).unwrap(),
+        plaintext
+    );
+}

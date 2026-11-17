@@ -136,8 +136,9 @@ pub enum Converted {
     /// re-encrypting it in bounded memory with a
     /// [`StreamResealer`](super::cells::StreamResealer) into the target
     /// column under the target space. If it fails to open or verify then,
-    /// the runtime writes nothing of the row, so the row still converts
-    /// whole or not at all.
+    /// or if it opens only under a key of a space other than the old one
+    /// (`stale-space`, as for a cell), the runtime writes nothing of the row, so the row still
+    /// converts whole or not at all.
     Stream {
         source_column: String,
         target_column: String,

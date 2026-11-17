@@ -874,7 +874,9 @@ fn header_incomplete(bytes: &[u8]) -> bool {
 /// Re-encrypts one stored stream under another key or context in bounded
 /// memory (repair, §3.2; re-homes, migrations §4.4): authenticated
 /// plaintext from the reader goes straight into the writer, and the writer
-/// finishes only after the reader's last record authenticated.
+/// finishes only after the reader's last record authenticated. A value
+/// that opens only under a key of another space than the reader's row is
+/// refused with `stale-space`, as a cell is: it is never carried.
 pub struct StreamResealer<'r> {
     reader: StreamValueReader<'r>,
     writer: Box<dyn StreamWriter>,
@@ -899,14 +901,19 @@ impl<'r> StreamResealer<'r> {
     pub fn update(&mut self, input: &[u8], out: &mut Vec<u8>) -> ContentResult<()> {
         let mut plain = Zeroizing::new(Vec::new());
         self.reader.update(input, &mut plain)?;
+        if self.reader.stale_space().is_some() {
+            return Err(ContentError::Data(DataError::StaleSpace));
+        }
         self.writer.update(&plain, out)?;
         Ok(())
     }
 
     /// Ends the source; appends the rest of the new encoding only if the
-    /// whole source authenticated.
+    /// whole source authenticated under a key of the reader's row's space.
     pub fn finish(self, out: &mut Vec<u8>) -> ContentResult<()> {
-        self.reader.finish()?;
+        if self.reader.finish()?.is_some() {
+            return Err(ContentError::Data(DataError::StaleSpace));
+        }
         self.writer.finish(out)?;
         Ok(())
     }
