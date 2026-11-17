@@ -822,11 +822,12 @@ impl From<rusqlite::Connection> for Storage {
 /// What a Durable Object's SQL bridge refuses, checked the same way by
 /// the bridge (jazz-wasm) and its emulation: transaction control in SQL
 /// text (`BEGIN`, `SAVEPOINT`, …: scopes are `transactionSync`), named
-/// parameters (`:name`, `@name`, `$name`), integers beyond ±(2^53−1)
-/// (JavaScript numbers), and reading the rows of a data-modifying
-/// statement (`… RETURNING`). `reading`: the statement's rows are read.
-pub fn durable_object_refusal(sql: &str, parameters: &[Value], reading: bool) -> SqlResult<()> {
-    const MAX_SAFE: i64 = (1 << 53) - 1;
+/// parameters (`:name`, `@name`, `$name`), and reading the rows of a
+/// data-modifying statement (`… RETURNING`). `reading`: the statement's
+/// rows are read. Integers cross the bridge exactly over their whole
+/// 64-bit range (as decimal text where a JavaScript number cannot hold
+/// them), so they are not refused.
+pub fn durable_object_refusal(sql: &str, reading: bool) -> SqlResult<()> {
     let first = sql
         .split(|c: char| c.is_whitespace() || c == ';')
         .find(|word| !word.is_empty())
@@ -846,12 +847,6 @@ pub fn durable_object_refusal(sql: &str, parameters: &[Value], reading: bool) ->
     }
     if reading && matches!(first.as_str(), "INSERT" | "UPDATE" | "DELETE" | "REPLACE") {
         return refuse("reading a data-modifying statement's rows".to_owned());
-    }
-    if parameters
-        .iter()
-        .any(|value| matches!(value, Value::Integer(n) if !(-MAX_SAFE..=MAX_SAFE).contains(n)))
-    {
-        return refuse("an integer beyond ±(2^53−1)".to_owned());
     }
     // Parameter tokens outside strings, quoted identifiers and comments.
     let bytes = sql.as_bytes();
@@ -906,7 +901,7 @@ pub fn durable_object_refusal(sql: &str, parameters: &[Value], reading: bool) ->
 /// the same owner a Durable Object host gives it, so it takes the managed
 /// paths (callback scopes only, nothing open between calls) while SQLite
 /// itself stays native. It refuses what the Durable Object bridge refuses
-/// ([`durable_object_refusal`], and integers beyond ±(2^53−1) in results).
+/// ([`durable_object_refusal`]).
 /// Unlike the bridge, whose cursor is lazy, it reads each result out before
 /// returning it; the engine may run more SQL while it walks rows either way.
 #[cfg(any(test, feature = "testing"))]
@@ -960,7 +955,7 @@ pub mod managed_emulation {
 
     impl Backend for EmulatedObjectSql {
         fn query(&self, sql: &str, parameters: &[Value]) -> SqlResult<Box<dyn Cursor + '_>> {
-            super::durable_object_refusal(sql, parameters, true)?;
+            super::durable_object_refusal(sql, true)?;
             let conn = self.conn.lock().expect("connection");
             let mut statement = conn.prepare_cached(sql)?;
             let columns: Vec<String> = statement
@@ -975,17 +970,6 @@ pub mod managed_emulation {
                 let mut cells = Vec::with_capacity(n);
                 for i in 0..n {
                     let cell = Value::from(row.get_ref(i)?);
-                    // As the bridge: a JavaScript number holds no more.
-                    if let Value::Integer(n) = cell
-                        && !(-((1 << 53) - 1)..=(1 << 53) - 1).contains(&n)
-                    {
-                        return Err(super::backend_error(
-                            1,
-                            "an integer beyond ±(2^53−1) in a result is not supported by \
-                             Durable Object storage"
-                                .to_owned(),
-                        ));
-                    }
                     cells.push(cell);
                 }
                 out.push(cells);
@@ -998,7 +982,7 @@ pub mod managed_emulation {
         }
 
         fn execute(&self, sql: &str, parameters: &[Value]) -> SqlResult<usize> {
-            super::durable_object_refusal(sql, parameters, false)?;
+            super::durable_object_refusal(sql, false)?;
             let conn = self.conn.lock().expect("connection");
             let mut statement = conn.prepare_cached(sql)?;
             statement.execute(rusqlite::params_from_iter(parameters.iter()))
@@ -1012,13 +996,13 @@ pub mod managed_emulation {
                     std::ffi::CString::new(part).map_err(|_| rusqlite::Error::InvalidQuery)?;
                 // SAFETY: SQLite only reads this NUL-terminated SQL string.
                 if unsafe { rusqlite::ffi::sqlite3_complete(complete.as_ptr()) } != 0 {
-                    super::durable_object_refusal(part, &[], false)?;
+                    super::durable_object_refusal(part, false)?;
                     self.conn.lock().expect("connection").execute_batch(part)?;
                     start = end + 1;
                 }
             }
             if !script[start..].trim().is_empty() {
-                super::durable_object_refusal(&script[start..], &[], false)?;
+                super::durable_object_refusal(&script[start..], false)?;
                 self.conn
                     .lock()
                     .expect("connection")
@@ -1309,8 +1293,8 @@ mod tests {
 
     /// Managed storage refuses what a Durable Object's SQL bridge refuses
     /// ([`durable_object_refusal`]): transaction control in SQL text (its
-    /// only transactions are scopes), named parameters, integers beyond a
-    /// JavaScript number's exact range, and reading a write's rows.
+    /// only transactions are scopes), named parameters, and reading a
+    /// write's rows. Integers keep their whole 64-bit range.
     #[test]
     fn managed_storage_refuses_what_a_durable_object_refuses() {
         let storage = Storage::managed_emulation_in_memory().unwrap();
@@ -1325,11 +1309,6 @@ mod tests {
         );
         assert!(
             storage
-                .execute("INSERT INTO t VALUES (?1)", [1i64 << 53])
-                .is_err()
-        );
-        assert!(
-            storage
                 .query_row("INSERT INTO t VALUES (1) RETURNING v", [], |r| r
                     .get::<_, i64>(0))
                 .is_err()
@@ -1338,15 +1317,13 @@ mod tests {
         storage
             .execute("INSERT INTO t VALUES (length(':v @w $x')) -- :y", [])
             .unwrap();
-        storage
-            .execute_batch("UPDATE t SET v = 9007199254740993")
-            .unwrap();
-        assert!(
-            storage
-                .query_row("SELECT v FROM t", [], |r| r.get::<_, i64>(0))
-                .is_err(),
-            "a result beyond ±(2^53−1)"
-        );
+        for n in [i64::MIN, -(1 << 53) - 1, (1 << 53) + 1, i64::MAX] {
+            storage.execute("INSERT INTO t VALUES (?1)", [n]).unwrap();
+            let read: i64 = storage
+                .query_row("SELECT v FROM t WHERE v = ?1", [n], |r| r.get(0))
+                .unwrap();
+            assert_eq!(read, n);
+        }
         assert!(storage.is_managed());
         assert!(!Storage::open_in_memory().unwrap().is_managed());
     }
