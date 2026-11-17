@@ -955,11 +955,14 @@ fn read_stream(
     stored: &[u8],
     chunk: usize,
 ) -> Result<Vec<u8>, ContentError> {
-    let StreamOpen::Reader(mut reader) =
-        StreamValueReader::open(registry, held, target, &blob(), &stored[..69])?
+    let StreamOpen::Reader {
+        mut reader,
+        initial,
+    } = StreamValueReader::open(registry, held, target, &blob(), &stored[..69])?
     else {
         panic!("a reader");
     };
+    assert!(initial.is_empty(), "the routing alone holds no record");
     let mut out = Vec::new();
     for part in stored[69..].chunks(chunk) {
         reader.update(part, &mut out)?;
@@ -1101,12 +1104,13 @@ fn a_stream_reseals_under_another_version_in_bounded_memory() {
     let registry = &world.shared.registry;
     let suite = registry.select(&Default::default()).unwrap();
     let reseal = |source: &[u8]| -> Result<Vec<u8>, ContentError> {
-        let StreamOpen::Reader(reader) =
+        let StreamOpen::Reader { reader, initial } =
             StreamValueReader::open(registry, &after, &target, &blob(), &source[..69])?
         else {
             panic!("a reader");
         };
         let (writer, mut out) = begin_stream(&suite, &key, &target, &blob(), &mut TestRandom(5))?;
+        assert!(initial.is_empty(), "the routing alone holds no record");
         let mut resealer = StreamResealer::new(reader, writer);
         for part in source[69..].chunks(10_000) {
             resealer.update(part, &mut out)?;
@@ -1124,5 +1128,83 @@ fn a_stream_reseals_under_another_version_in_bounded_memory() {
     assert_eq!(
         reseal(&stored[..stored.len() - 20]),
         Err(ContentError::Data(DataError::InvalidCiphertext))
+    );
+}
+
+/// A first chunk may carry ciphertext beyond the routing: the records that
+/// complete inside it come back with the reader, never lost, whether the
+/// chunk is the whole value or ends inside a later record.
+#[test]
+fn plaintext_inside_the_first_chunk_is_returned() {
+    let world = world(21);
+    let held = held_of(&world, ALICE, ROW);
+    let domain = shared(&world);
+    let address = space(ROW);
+    let target = row(&domain, &address, ROW_1);
+    let key = write_key(&held, &address);
+    let registry = &world.shared.registry;
+    let plaintext = TestRandom(21).bytes(200_000);
+    let stored = seal_stream(&world, &key, &target, &plaintext, 10_000);
+    for split in [stored.len(), 69 + 70_000, 69 + 1] {
+        let StreamOpen::Reader {
+            mut reader,
+            initial,
+        } = StreamValueReader::open(registry, &held, &target, &blob(), &stored[..split]).unwrap()
+        else {
+            panic!("a reader");
+        };
+        let mut out = initial.to_vec();
+        reader.update(&stored[split..], &mut out).unwrap();
+        reader.finish().unwrap();
+        assert_eq!(out, plaintext, "first chunk of {split} bytes");
+    }
+    // A small value given whole: all of it comes back from `open`.
+    let small = TestRandom(22).bytes(300);
+    let stored = seal_stream(&world, &key, &target, &small, 300);
+    let StreamOpen::Reader { reader, initial } =
+        StreamValueReader::open(registry, &held, &target, &blob(), &stored).unwrap()
+    else {
+        panic!("a reader");
+    };
+    reader.finish().unwrap();
+    assert_eq!(&initial[..], &small[..]);
+}
+
+/// The stream counterpart of
+/// `another_spaces_key_of_the_same_epoch_never_decides_a_cell`: keys of
+/// another space with the value's epoch that do not open it leave the row's
+/// own key missing, never the value invalid.
+#[test]
+fn another_spaces_key_of_the_same_epoch_never_decides_a_stream() {
+    let world = world(23);
+    let ours = root_from(&world, ROW, root_random(1, 2, 9));
+    let theirs = root_from(&world, OTHER_ROW, root_random(3, 4, 9));
+    assert_eq!(ours.root.epoch_id, theirs.root.epoch_id);
+    let domain = shared(&world);
+    let address = space(OTHER_ROW);
+    let target = row(&domain, &address, ROW_1);
+    let mut writer = HeldKeys::new();
+    writer.hold(creation(&world, &theirs, "tx-theirs")).unwrap();
+    let plaintext = TestRandom(23).bytes(50_000);
+    let stored = seal_stream(
+        &world,
+        &write_key(&writer, &address),
+        &target,
+        &plaintext,
+        10_000,
+    );
+    let mut reader = HeldKeys::new();
+    reader.hold(creation(&world, &ours, "tx-ours")).unwrap();
+    let registry = &world.shared.registry;
+    let missing = theirs.root.epoch_id.clone();
+    // Given whole, the first record already fails under the other key.
+    assert!(matches!(
+        StreamValueReader::open(registry, &reader, &target, &blob(), &stored).unwrap(),
+        StreamOpen::Unreadable(Opened::Missing { epoch_id }) if epoch_id == missing
+    ));
+    // Given in chunks, the failure surfaces as missing from `update`.
+    assert_eq!(
+        read_stream(registry, &reader, &target, &stored, 10_000).err(),
+        Some(ContentError::Missing { epoch_id: missing })
     );
 }

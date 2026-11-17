@@ -501,6 +501,11 @@ pub struct StreamValueReader<'r> {
     /// The stream mechanism's encoding, until its header can be routed.
     pending: Vec<u8>,
     routed: bool,
+    /// The epoch the value names, and whether every candidate key is of
+    /// another space: if none of those opens it, the row's own key is
+    /// missing, not the value invalid (§4.2, as for a cell).
+    epoch_id: String,
+    foreign: bool,
 }
 
 impl core::fmt::Debug for StreamValueReader<'_> {
@@ -515,7 +520,13 @@ impl core::fmt::Debug for StreamValueReader<'_> {
 /// What starting to read a stored stream gives.
 #[derive(Debug)]
 pub enum StreamOpen<'r> {
-    Reader(StreamValueReader<'r>),
+    /// The reader, and the plaintext of any records that completed inside
+    /// `prefix` after its routing (empty when `prefix` was only the
+    /// routing). The caller continues with the bytes after `prefix`.
+    Reader {
+        reader: StreamValueReader<'r>,
+        initial: Zeroizing<Vec<u8>>,
+    },
     /// Not readable with the keys held: [`Opened::Missing`] or
     /// [`Opened::Unreadable`].
     Unreadable(Opened),
@@ -584,11 +595,18 @@ impl<'r> StreamValueReader<'r> {
             candidates,
             pending: Vec::new(),
             routed: false,
+            epoch_id: routing.epoch_id.clone(),
+            foreign: stale,
         };
-        let mut out = Zeroizing::new(Vec::new());
-        reader.update(&prefix[routing.consumed..], &mut out)?;
-        debug_assert!(out.is_empty(), "no record completes inside the routing");
-        Ok(StreamOpen::Reader(reader))
+        let mut initial = Zeroizing::new(Vec::new());
+        match reader.update(&prefix[routing.consumed..], &mut initial) {
+            Ok(()) => Ok(StreamOpen::Reader { reader, initial }),
+            Err(ContentError::Missing { epoch_id }) => {
+                Ok(StreamOpen::Unreadable(Opened::Missing { epoch_id }))
+            }
+            Err(ContentError::Data(code)) => Ok(StreamOpen::Unreadable(Opened::Unreadable(code))),
+            Err(error) => Err(error),
+        }
     }
 
     /// The other space the value was sealed under, once the candidates
@@ -658,9 +676,21 @@ impl<'r> StreamValueReader<'r> {
         }
         self.candidates = live;
         if self.candidates.is_empty() {
-            return Err(ContentError::Data(DataError::InvalidCiphertext));
+            return Err(self.none_opens());
         }
         Ok(())
+    }
+
+    /// Every candidate failed: another space's keys deciding nothing, the
+    /// row's own key is missing; otherwise the value is invalid.
+    fn none_opens(&self) -> ContentError {
+        if self.foreign {
+            ContentError::Missing {
+                epoch_id: self.epoch_id.clone(),
+            }
+        } else {
+            ContentError::Data(DataError::InvalidCiphertext)
+        }
     }
 
     /// Succeeds only if the whole value, including its last record,
@@ -669,6 +699,7 @@ impl<'r> StreamValueReader<'r> {
         if !self.routed {
             return Err(ContentError::Data(DataError::InvalidCiphertext));
         }
+        let missing = self.none_opens();
         for candidate in self.candidates {
             match candidate.reader.expect("routed").finish() {
                 Ok(()) => return Ok(()),
@@ -676,7 +707,7 @@ impl<'r> StreamValueReader<'r> {
                 Err(error) => return Err(error.into()),
             }
         }
-        Err(ContentError::Data(DataError::InvalidCiphertext))
+        Err(missing)
     }
 }
 

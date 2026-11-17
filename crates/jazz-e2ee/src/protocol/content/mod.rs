@@ -111,6 +111,11 @@ pub enum ContentError {
     /// space it cannot write (`space-pending`, §3.2).
     #[error("E2EE data error: {}", .0.code())]
     Data(DataError),
+    /// A streamed value of another space's epoch that none of the keys
+    /// held for that epoch elsewhere opens: the row's own key of
+    /// `epoch_id` is missing, and is acquired as for a missing cell (§4.2).
+    #[error("E2EE key of epoch {epoch_id} is missing")]
+    Missing { epoch_id: String },
     /// A query shape encrypted columns do not support; never a scan (§4.5).
     #[error("Unsupported encrypted query: {}", .0.name())]
     UnsupportedQuery(UnsupportedQuery),
