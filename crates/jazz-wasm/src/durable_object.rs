@@ -738,6 +738,39 @@ mod smoke {
         serde_json::to_string(&request).expect("deploy request JSON")
     }
 
+    /// A local-first guest (keys from `seed`, a byte repeated) proving
+    /// itself for `audience` at `now_seconds`: `{ proof, peer, subject }`,
+    /// its self-signed proof, the peer identity its client names (with the
+    /// account founded in `audience`'s namespace) and its subject.
+    #[wasm_bindgen(js_name = testGuest)]
+    pub fn test_guest(seed: u8, audience: &str, now_seconds: u64) -> String {
+        use jazz::tools::identity;
+        let seed = [seed; 32];
+        let proof = identity::mint_jazz_self_signed_token_at(
+            &seed,
+            identity::LOCAL_FIRST_ISSUER,
+            audience,
+            3600,
+            now_seconds,
+        )
+        .expect("a proof");
+        let subject = identity::derive_user_id(&seed).to_string();
+        let founding = jazz_server::portable::accounts::local_first_founding_app(audience);
+        let peer = AuthorSubject::reserved(identity::LOCAL_FIRST_ISSUER, &subject)
+            .expect("a local-first author")
+            .with_account(jazz::account_registry::local_first_account_id(
+                *founding.uuid(),
+                &subject,
+            ));
+        serde_json::json!({
+            "proof": proof,
+            "peer": peer.canonical(),
+            "subject": subject,
+            "issuer": identity::LOCAL_FIRST_ISSUER,
+        })
+        .to_string()
+    }
+
     /// A user's identity (`issuer`, `subject`), as a prelude names its peer.
     #[wasm_bindgen(js_name = testUserIdentity)]
     pub fn test_user_identity(issuer: &str, subject: &str) -> String {
@@ -944,7 +977,8 @@ mod core_host {
         self, AccountRoute, RouteAuthority, RouteBody, RouteContext,
     };
     use jazz_server::portable::admission::{
-        admit_by_core_secret, same_secret, SessionRevocation, UpgradeCredential, WebSocketPrelude,
+        admit_by_core_secret, same_secret, SessionRevocation, UpgradeCredential,
+        WebSocketCredential, WebSocketPrelude,
     };
     use jazz_server::portable::catalogue::{CatalogueIndex, DeploymentResponse};
     use jazz_server::portable::deployment::{self, DeployError, DeployRequest};
@@ -976,6 +1010,10 @@ mod core_host {
         /// For a user session the backend stated: what a revocation of its
         /// user's sessions is checked against.
         revocation: Option<SessionRevocation>,
+        /// For a guest admitted by its own proof: its identity, whose
+        /// account assignment is checked again whenever assignments change
+        /// (as native's sockets watch the registry).
+        guest: Option<jazz::ids::AuthorSubject>,
     }
 
     /// The most input a socket may have held for room (one session's
@@ -1219,6 +1257,8 @@ mod core_host {
             // A stated session of a user whose sessions were revoked after
             // the backend authenticated it is refused, as native refuses it.
             let revocation = admission.revocation.clone();
+            let guest = (admission.credential == WebSocketCredential::Session)
+                .then_some(admission.identity);
             if let Some(revocation) = &revocation {
                 match self.revocation_mark(&revocation.principal) {
                     Ok(mark) if accounts::session_revoked(mark, revocation.authenticated_at_ms) => {
@@ -1274,6 +1314,7 @@ mod core_host {
                     held_bytes: 0,
                     failed: None,
                     revocation,
+                    guest,
                 },
             );
             let hello = encode_ws_frame_batches(&[link.server_hello])
@@ -1874,13 +1915,10 @@ mod core_host {
                     Err(error) => refusal(500, ErrorResponse::internal(error)),
                 },
                 _ => {
-                    let request = match serde_json::from_slice::<DeployRequest>(body) {
-                        Ok(request) => request,
-                        Err(error) => {
-                            return refusal(400, ErrorResponse::bad_request(error.to_string()));
-                        }
-                    };
-                    match self.deploy(request) {
+                    if let Err(error) = serde_json::from_slice::<DeployRequest>(body) {
+                        return refusal(400, ErrorResponse::bad_request(error.to_string()));
+                    }
+                    match self.deploy(body) {
                         Ok(response) => answer(200, response),
                         Err(error) => answer(error.status.as_u16(), error.body),
                     }
@@ -1949,6 +1987,36 @@ mod core_host {
                 .map_err(|error| error.to_string())
         }
 
+        /// After an assignment may have changed: end every guest socket
+        /// whose identity no longer holds its account, as native ends it.
+        fn recheck_guests(&mut self, storage: &jazz::storage::Storage) {
+            for state in self.sockets.values_mut() {
+                let Some(identity) = state.guest else {
+                    continue;
+                };
+                let (issuer, subject) = identity.principal_parts();
+                let principal = jazz::account_registry::Principal { issuer, subject };
+                let holds = match (identity.account_id(), accounts::login(storage, &principal)) {
+                    (Some(account), Ok(assignment)) => assignment.account == account,
+                    // The registry could not be read: the next change
+                    // checks again.
+                    (Some(_), Err(accounts::RegistryError::Unavailable(_))) => true,
+                    _ => false,
+                };
+                if !holds {
+                    state.held.clear();
+                    state.held_bytes = 0;
+                    state.failed.get_or_insert_with(|| {
+                        jazz::wire::WireError::new(
+                            jazz::wire::WireErrorCode::AuthFailed,
+                            jazz::wire::WireRetry::Never,
+                            "account identity revoked",
+                        )
+                    });
+                }
+            }
+        }
+
         /// Serve an account route (`admin/accounts/...`) on the store's
         /// account registry, as native does. A revocation of a user's
         /// sessions ends the stated sessions of that user authenticated
@@ -1973,6 +2041,9 @@ mod core_host {
                     fresh_id: &mut uuid::Uuid::new_v4,
                 },
             );
+            if effects.assignments_changed {
+                self.recheck_guests(&storage);
+            }
             if let Some((principal, mark)) = effects.sessions_revoked {
                 for state in self.sockets.values_mut() {
                     let ends = state.revocation.as_ref().is_some_and(|revocation| {
@@ -2002,44 +2073,31 @@ mod core_host {
             Ok(CatalogueIndex::from_rows(&self.catalogue_rows()?, None))
         }
 
-        /// Publish `request`, as native's `POST admin/bundles`: validate it
-        /// against the store's catalogue, open the core on its first schema
-        /// if none runs yet, and apply its rows and admissions in one
-        /// transaction. A bundle new to the store ends the sessions pinned
-        /// to others (they reconnect and pin again). The object serves one
-        /// request at a time, so the catalogue cannot move between
-        /// validating and applying.
-        fn deploy(&mut self, request: DeployRequest) -> Result<DeploymentResponse, DeployError> {
-            let index = self.catalogue_index().map_err(DeployError::internal)?;
+        /// Publish the deploy request in `body` (valid JSON, checked by the
+        /// caller), as native's `POST admin/bundles`: validate it against
+        /// the core's catalogue and apply its rows and admissions in one
+        /// transaction, refused if the catalogue moved since it was staged
+        /// (`apply_catalogue`). Without a core yet, the deployment is
+        /// probed on a scratch store first, so one the catalogue refuses
+        /// never opens the app's store on its schema, and the core is
+        /// opened on its first schema; it is then staged again on that
+        /// core's catalogue (which admitted the schema it opened on). A
+        /// bundle new to the store ends the sessions pinned to others.
+        fn deploy(&mut self, body: &[u8]) -> Result<DeploymentResponse, DeployError> {
+            let request =
+                || serde_json::from_slice::<DeployRequest>(body).map_err(DeployError::invalid);
             let now = js_sys::Date::now() as u64;
-            let deployment = deployment::prepare(&index, request, now)?;
-            if !deployment.staged.response.changed {
-                // Nothing to commit; the core's view of the catalogue may
-                // be behind the store's, as on native: reload it.
-                if let Some(core) = &mut self.core {
-                    core.reload_catalogue().map_err(DeployError::internal)?;
-                }
-                return Ok(deployment.staged.response);
-            }
-            let new_bundle = deployment.staged.new_bundle();
             if self.core.is_none() {
+                let index = self.catalogue_index().map_err(DeployError::internal)?;
+                let deployment = deployment::prepare(&index, request()?, now)?;
+                if !deployment.staged.response.changed {
+                    return Ok(deployment.staged.response);
+                }
                 let genesis = deployment.genesis()?;
-                // Apply on a scratch store first, as native does, so a
-                // deployment the catalogue refuses never opens the app's
-                // store on its schema.
                 let scratch = jazz::host::StoreFile::memory().map_err(DeployError::internal)?;
                 let mut probe = ServerCore::open(genesis.clone(), scratch, false, None)
                     .map_err(DeployError::internal)?;
-                let probed = probe
-                    .db()
-                    .catalogue()
-                    .map_err(DeployError::internal)
-                    .and_then(|rows| deployment.catalogue_change(&rows))
-                    .and_then(|change| {
-                        probe
-                            .apply_catalogue(change, None)
-                            .map_err(DeployError::from)
-                    });
+                let probed = apply(&mut probe, request()?, now, false).map(drop);
                 probe.close();
                 probed?;
                 let file = jazz::host::StoreFile::from_storage(durable_object_storage(
@@ -2052,11 +2110,30 @@ mod core_host {
                 );
             }
             let core = self.core.as_mut().expect("opened above");
-            let rows = core.db().catalogue().map_err(DeployError::internal)?;
-            let change = deployment.catalogue_change(&rows)?;
-            core.apply_catalogue(change, new_bundle)?;
-            Ok(deployment.staged.response)
+            apply(core, request()?, now, true)
         }
+    }
+
+    /// Stage `request` on `core`'s catalogue and apply it; with
+    /// `supersede`, a bundle new to the store ends the sessions pinned to
+    /// others. Nothing to commit reloads the core's catalogue, as native.
+    fn apply(
+        core: &mut ServerCore,
+        request: DeployRequest,
+        now: u64,
+        supersede: bool,
+    ) -> Result<DeploymentResponse, DeployError> {
+        let rows = core.db().catalogue().map_err(DeployError::internal)?;
+        let index = CatalogueIndex::from_rows(&rows, None);
+        let deployment = deployment::prepare(&index, request, now)?;
+        if !deployment.staged.response.changed {
+            core.reload_catalogue().map_err(DeployError::internal)?;
+            return Ok(deployment.staged.response);
+        }
+        let change = deployment.catalogue_change(&rows)?;
+        let new_bundle = deployment.staged.new_bundle().filter(|_| supersede);
+        core.apply_catalogue(deployment.staged.expected(), change, new_bundle)?;
+        Ok(deployment.staged.response)
     }
 
     /// What `output` answers.

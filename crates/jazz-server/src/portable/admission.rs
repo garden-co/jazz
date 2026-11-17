@@ -196,8 +196,8 @@ pub type GuestVerifier<'a> =
 /// - A backend's own link is served as the backend; a user session the
 ///   backend states (`backend_session`) is served under that user's
 ///   policies, and must be the peer its prelude named.
-/// - A local-first guest's own proof (`jwt_token`) is not verified here
-///   yet: the backend relays a guest as a stated session.
+/// - A local-first guest's own proof (`jwt_token`) comes on session access
+///   and is admitted by `guest` (below); on backend access it is refused.
 /// - A credential that holds decides the access, and the prelude's secret
 ///   slots are ignored (as native's workload gate): without a stated
 ///   access it vouches only that it relays a client, which must prove who
