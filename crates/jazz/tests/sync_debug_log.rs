@@ -96,14 +96,16 @@ fn logged_subscription(level: Level) -> Vec<BTreeMap<String, String>> {
             AuthorSubject::SYSTEM,
         )))
         .unwrap();
-        server
-            .seed_settled_mergeable_for_bootstrap(
-                "items",
-                RowUuid::from_bytes([0x62; 16]),
-                AuthorSubject::SYSTEM,
-                BTreeMap::from([("label".to_owned(), Value::String(SEEDED.to_owned()))]),
-            )
-            .unwrap();
+        jazz::db::block_on(server.insert(
+            "items",
+            BTreeMap::from([("label".to_owned(), Value::String(SEEDED.to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(RowUuid::from_bytes([0x62; 16])),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
         let client = block_on(Db::open(config(
             0x63,
             AuthorSubject::for_test_bytes([0x63; 16]),
@@ -111,9 +113,7 @@ fn logged_subscription(level: Level) -> Vec<BTreeMap<String, String>> {
         .unwrap();
         let (client_side, server_side) = duplex();
         let _upstream = block_on(client.connect_upstream(client_side));
-        server
-            .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-            .unwrap();
+        block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
         let prepared = client.prepare_query(&Query::from("items")).unwrap();
         let mut stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
         for _ in 0..5 {

@@ -139,7 +139,7 @@ fn an_unrelated_concurrent_write_commits() {
     let all = db
         .prepare_query(&db.table("seats").filter(eq(col("taken"), lit(true))))
         .unwrap();
-    assert_eq!(db.read(&all).unwrap().len(), 2);
+    assert_eq!(jazz::db::block_on(db.read(&all)).unwrap().len(), 2);
 }
 
 /// Snapshot reads keep the pre-snapshot image of a row updated (and a row
@@ -213,5 +213,5 @@ fn snapshot_reads_see_history_images_and_own_writes() {
     );
     db.abandon_transaction_handle(tx).unwrap();
     // Seats 1, 4 and 5; seat 2 is deleted and seat 6 was abandoned.
-    assert_eq!(db.read(&ordered).unwrap().len(), 3);
+    assert_eq!(jazz::db::block_on(db.read(&ordered)).unwrap().len(), 3);
 }

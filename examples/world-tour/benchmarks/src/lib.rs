@@ -161,12 +161,13 @@ impl Fixture {
     }
 
     fn read_count(&self, query: &PreparedQuery) -> usize {
-        self.db.read(query).expect("read calendar window").len()
+        jazz::db::block_on(self.db.read(query))
+            .expect("read calendar window")
+            .len()
     }
 
     fn calendar_window_start_times(&self, query: &PreparedQuery) -> Vec<u64> {
-        self.db
-            .read(query)
+        jazz::db::block_on(self.db.read(query))
             .expect("read calendar window")
             .into_iter()
             .map(|row| match row.cell("date") {
@@ -187,8 +188,7 @@ impl Fixture {
             ["venueId"],
             "calendar workload must retain the app's venue include",
         );
-        self.db
-            .read(query)
+        jazz::db::block_on(self.db.read(query))
             .expect("read calendar window with included venues")
             .into_iter()
             .map(|stop| {
@@ -199,9 +199,7 @@ impl Fixture {
                     .db
                     .prepare_query(&Query::from("venues").filter(eq(col("id"), lit(venue_id))))
                     .expect("prepare included venue lookup");
-                let venue = self
-                    .db
-                    .read(&venue_query)
+                let venue = jazz::db::block_on(self.db.read(&venue_query))
                     .expect("read included venue")
                     .into_iter()
                     .next()

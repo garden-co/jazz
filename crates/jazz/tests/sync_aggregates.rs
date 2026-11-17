@@ -65,16 +65,19 @@ fn id(n: u8) -> RowUuid {
 }
 
 fn metric(db: &Db, n: u8, who: u8, kind: &str, value: f64) {
-    db.seed_settled_mergeable_for_bootstrap(
+    jazz::db::block_on(db.insert(
         "metrics",
-        id(n),
-        AuthorSubject::SYSTEM,
         BTreeMap::from([
             ("owner".to_owned(), owner(who)),
             ("kind".to_owned(), Value::String(kind.to_owned())),
             ("value".to_owned(), Value::F64(value)),
         ]),
-    )
+        jazz::db::InsertOptions {
+            row_id: Some(id(n)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
     .unwrap();
 }
 
@@ -122,7 +125,7 @@ fn a_synced_aggregate_reads_only_the_rows_its_reader_may_read() {
     let client = open(1, user(1));
     let (client_side, server_side) = duplex();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, user(1)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, user(1))).unwrap();
 
     let query = Query::from("metrics")
         .filter(eq(col("kind"), lit("cpu")))

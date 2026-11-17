@@ -279,9 +279,7 @@ impl Fixture {
     /// Reads the parent-scoped browser query shapes. The values make their
     /// index, ordering, and cardinality contracts observable in the fixture.
     pub fn session_browser_shape(&self) -> (Vec<String>, Vec<u64>, usize, usize) {
-        let session_titles = self
-            .db
-            .read(&self.session_list)
+        let session_titles = jazz::db::block_on(self.db.read(&self.session_list))
             .expect("read Wequencer session-browser query")
             .into_iter()
             .map(|row| match row.cell("title") {
@@ -289,9 +287,7 @@ impl Fixture {
                 value => panic!("unexpected session title: {value:?}"),
             })
             .collect();
-        let track_positions = self
-            .db
-            .read(&self.session_tracks)
+        let track_positions = jazz::db::block_on(self.db.read(&self.session_tracks))
             .expect("read Wequencer session-track query")
             .into_iter()
             .map(|row| match row.cell("position") {
@@ -299,16 +295,12 @@ impl Fixture {
                 value => panic!("unexpected track position: {value:?}"),
             })
             .collect();
-        let membership_count = self
-            .db
-            .read(&self.own_membership)
+        let membership_count = jazz::db::block_on(self.db.read(&self.own_membership))
             .expect("read Wequencer membership query")
             .into_iter()
             .filter(|row| matches!(row.cell("role"), Some(Value::String(_))))
             .count();
-        let presence_count = self
-            .db
-            .read(&self.session_presence)
+        let presence_count = jazz::db::block_on(self.db.read(&self.session_presence))
             .expect("read Wequencer presence query")
             .len();
         (
@@ -320,8 +312,7 @@ impl Fixture {
     }
 
     pub fn track_steps(&self) -> Vec<(u64, bool)> {
-        self.db
-            .read(&self.track_window)
+        jazz::db::block_on(self.db.read(&self.track_window))
             .expect("read Wequencer track")
             .into_iter()
             .map(|row| {
@@ -349,8 +340,7 @@ impl Fixture {
                     .limit(length),
             )
             .expect("prepare bounded Wequencer playhead query");
-        self.db
-            .read(&query)
+        jazz::db::block_on(self.db.read(&query))
             .expect("read bounded Wequencer playhead query")
             .into_iter()
             .map(|row| {
@@ -370,9 +360,7 @@ impl Fixture {
     /// Reads the same latest-receipt query used by the second browser client.
     /// The timestamp orders UI observations only; it is never an audio clock.
     pub fn playback_receipt(&self) -> (bool, u64) {
-        let row = self
-            .db
-            .read(&self.transport_receipts)
+        let row = jazz::db::block_on(self.db.read(&self.transport_receipts))
             .expect("read Wequencer transport receipt")
             .into_iter()
             .next()

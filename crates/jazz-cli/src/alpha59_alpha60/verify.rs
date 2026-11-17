@@ -542,9 +542,10 @@ async fn verify_rows(
                 }
                 for id in job_ids {
                     if let Some(actual) = found.get_mut(&id) {
-                        actual.provenance = view
-                            .row_provenance(&job_table, RowUuid::from_bytes(id))
-                            .map_err(err)?;
+                        actual.provenance = jazz::db::block_on(
+                            view.row_provenance(&job_table, RowUuid::from_bytes(id)),
+                        )
+                        .map_err(err)?;
                     }
                 }
                 Ok(found)

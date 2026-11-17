@@ -143,8 +143,14 @@ fn foreign_terminal_calls_release_only_the_original_owners_upload() {
             assert!(bodies(&other, "files").is_empty());
             // Staged chunks are deliberately invisible to row queries, so use
             // the existing inventory diagnostic to detect a leaked lease.
-            assert_eq!(alice.large_value_nodes_for_test().unwrap(), (0, 0));
-            assert_eq!(other.large_value_nodes_for_test().unwrap(), (0, 0));
+            assert_eq!(
+                jazz::db::block_on(alice.large_value_nodes_for_test()).unwrap(),
+                (0, 0)
+            );
+            assert_eq!(
+                jazz::db::block_on(other.large_value_nodes_for_test()).unwrap(),
+                (0, 0)
+            );
         }
     }
 }
@@ -177,7 +183,10 @@ fn finishing_cannot_change_the_original_table_or_column() {
         assert!(bodies(&alice, "files").is_empty());
         assert!(bodies(&alice, "copies").is_empty());
         // Queries cannot expose abandoned upload bytes: inspect their inventory.
-        assert_eq!(alice.large_value_nodes_for_test().unwrap(), (0, 0));
+        assert_eq!(
+            jazz::db::block_on(alice.large_value_nodes_for_test()).unwrap(),
+            (0, 0)
+        );
     }
 }
 
@@ -199,7 +208,10 @@ fn finishing_rejects_a_duplicate_streamed_column_in_the_other_cells() {
     block_on(alice.tick()).unwrap();
     assert!(bodies(&alice, "files").is_empty());
     // An unpublished upload has no row whose absence could prove reclamation.
-    assert_eq!(alice.large_value_nodes_for_test().unwrap(), (0, 0));
+    assert_eq!(
+        jazz::db::block_on(alice.large_value_nodes_for_test()).unwrap(),
+        (0, 0)
+    );
 }
 
 /// Alice abandons one stream while another remains live and a third is already
@@ -217,10 +229,17 @@ fn dropping_an_upload_reclaims_it_without_expiring_live_or_committed_values() {
     let abandoned = stage(&alice, b'a');
     // Row reads cannot reveal leaked staging nodes; the existing diagnostic
     // measures reclamation, while logical reads verify the retained values.
-    let before = alice.large_value_nodes_for_test().unwrap().0;
+    let before = jazz::db::block_on(alice.large_value_nodes_for_test())
+        .unwrap()
+        .0;
     drop(abandoned);
     block_on(alice.tick()).unwrap();
-    assert!(alice.large_value_nodes_for_test().unwrap().0 < before);
+    assert!(
+        jazz::db::block_on(alice.large_value_nodes_for_test())
+            .unwrap()
+            .0
+            < before
+    );
     assert_eq!(bodies(&alice, "files"), ["c".repeat(LEAF_MAX_BYTES + 1)]);
     publish(&alice, live, 2, "files", "body", BTreeMap::new()).unwrap();
     block_on(alice.tick()).unwrap();
@@ -233,9 +252,12 @@ fn dropping_an_upload_reclaims_it_without_expiring_live_or_committed_values() {
             "l".repeat(LEAF_MAX_BYTES + 1)
         ]
     );
-    let settled = alice.large_value_nodes_for_test().unwrap();
+    let settled = jazz::db::block_on(alice.large_value_nodes_for_test()).unwrap();
     block_on(alice.tick()).unwrap();
-    assert_eq!(alice.large_value_nodes_for_test().unwrap(), settled);
+    assert_eq!(
+        jazz::db::block_on(alice.large_value_nodes_for_test()).unwrap(),
+        settled
+    );
 }
 
 /// Bob holds a real SQLite writer lock while Alice's dropped upload awaits
@@ -263,7 +285,7 @@ fn failed_cleanup_is_retried_after_the_storage_lock_is_released() {
     let committed = stage(&alice, b'c');
     publish(&alice, committed, 1, "files", "body", BTreeMap::new()).unwrap();
     block_on(alice.tick()).unwrap();
-    let durable = alice.large_value_nodes_for_test().unwrap();
+    let durable = jazz::db::block_on(alice.large_value_nodes_for_test()).unwrap();
     let abandoned = stage(&alice, b'a');
     drop(abandoned);
     // A second SQLite connection is only fault injection: the public database
@@ -276,7 +298,10 @@ fn failed_cleanup_is_retried_after_the_storage_lock_is_released() {
     assert_eq!(bodies(&alice, "files"), ["c".repeat(LEAF_MAX_BYTES + 1)]);
     bob.execute_batch("ROLLBACK").unwrap();
     block_on(alice.tick()).unwrap();
-    assert_eq!(alice.large_value_nodes_for_test().unwrap(), durable);
+    assert_eq!(
+        jazz::db::block_on(alice.large_value_nodes_for_test()).unwrap(),
+        durable
+    );
     assert_eq!(bodies(&alice, "files"), ["c".repeat(LEAF_MAX_BYTES + 1)]);
 }
 
@@ -295,5 +320,93 @@ fn rolled_back_maintenance_does_not_forget_dropped_uploads() {
     assert!(result.is_err());
     block_on(alice.tick()).unwrap();
     // Staged bytes have no row representation; inspect the existing inventory.
-    assert_eq!(alice.large_value_nodes_for_test().unwrap(), (0, 0));
+    assert_eq!(
+        jazz::db::block_on(alice.large_value_nodes_for_test()).unwrap(),
+        (0, 0)
+    );
+}
+
+/// Alice finalizes a streamed row while Bob holds a suspended host write.
+/// Both standalone and staged finalization wait; cancelling a waiting finish
+/// leaves no row and does not prevent a later upload from completing.
+///
+/// bob: host write ──pending──drop
+/// alice: finish   ──wait─────finish or cancel
+#[test]
+fn streaming_finalization_waits_for_storage() {
+    use jazz::host::HostTable;
+    use jazz::tools::OpenTransactionId;
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    for transactional in [false, true] {
+        for cancel in [false, true] {
+            let db = open(1);
+            let upload = stage(&db, b'a');
+            let id = OpenTransactionId::new();
+            if transactional {
+                block_on(db.begin_mergeable(id)).unwrap();
+            }
+            let tx = db.tx_ref(id);
+            let mut bob = Box::pin(db.host_put_then_wait_for_test(
+                HostTable::new("streaming_wait"),
+                b"bob",
+                b"pending",
+                std::future::pending(),
+            ));
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(bob.as_mut().poll(&mut cx).is_pending());
+            let mut alice = Box::pin(async {
+                if transactional {
+                    tx.finish_streaming_value_upload(
+                        upload,
+                        StreamingMutationKind::Insert,
+                        "files",
+                        RowUuid::from_bytes([2; 16]),
+                        BTreeMap::new(),
+                        "body",
+                        WriteIdentity::Database,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                } else {
+                    db.finish_streaming_value_upload(
+                        upload,
+                        StreamingMutationKind::Insert,
+                        "files",
+                        RowUuid::from_bytes([2; 16]),
+                        BTreeMap::new(),
+                        "body",
+                        WriteIdentity::Database,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                }
+            });
+            assert!(alice.as_mut().poll(&mut cx).is_pending());
+            if cancel {
+                drop(alice);
+                drop(bob);
+                if transactional {
+                    db.abandon_transaction_handle(id).unwrap();
+                }
+                block_on(db.tick()).unwrap();
+                assert!(bodies(&db, "files").is_empty());
+                publish(&db, stage(&db, b'b'), 3, "files", "body", BTreeMap::new()).unwrap();
+                assert_eq!(bodies(&db, "files"), vec!["b".repeat(LEAF_MAX_BYTES + 1)]);
+            } else {
+                drop(bob);
+                block_on(alice).unwrap();
+                if transactional {
+                    assert!(bodies(&db, "files").is_empty());
+                    block_on(db.commit_mergeable_handle(id)).unwrap();
+                }
+                assert_eq!(bodies(&db, "files"), vec!["a".repeat(LEAF_MAX_BYTES + 1)]);
+            }
+        }
+    }
 }

@@ -420,14 +420,14 @@ fn a_table_rename_holds_across_reopen_and_for_a_fresh_receiver() {
     }
 
     let server = open_at(after.clone(), &path);
-    server.set_authority();
+    jazz::db::block_on(server.set_authority());
     let fresh = block_on(Db::open(
         bare_config(after, 2, user(2)).with_migrations(vec![before], vec![rename]),
     ))
     .unwrap();
     let (client_side, server_side) = pipe();
     let _link = block_on(fresh.connect_upstream(client_side));
-    server.accept_subscriber(server_side, user(2)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, user(2))).unwrap();
     let query = fresh.prepare_query(&Query::from("documents")).unwrap();
     let mut stream = block_on(fresh.subscribe(&query, ReadOpts::default())).unwrap();
     pump(&server, &[&fresh]);
@@ -591,17 +591,21 @@ fn server(first: JazzSchema, steps: Vec<(JazzSchema, MigrationLens)>) -> Db {
 }
 
 fn seed(server: &Db, table: &str, n: u8, cells: &[(&str, Value)]) {
-    server
-        .seed_settled_mergeable_for_bootstrap(
+    jazz::db::block_on(
+        server.insert(
             table,
-            row(n),
-            AuthorSubject::SYSTEM,
             cells
                 .iter()
                 .map(|(column, value)| ((*column).to_owned(), value.clone()))
                 .collect(),
-        )
-        .unwrap();
+            jazz::db::InsertOptions {
+                row_id: Some(row(n)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -615,8 +619,8 @@ fn a_client_on_the_old_schema_syncs_with_a_server_on_the_new_one() {
     let (new_client, new_server) = pipe();
     let _old_link = block_on(old.connect_upstream(old_client));
     let _new_link = block_on(new.connect_upstream(new_client));
-    server.accept_subscriber(old_server, user(1)).unwrap();
-    server.accept_subscriber(new_server, user(2)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(old_server, user(1))).unwrap();
+    jazz::db::block_on(server.accept_subscriber(new_server, user(2))).unwrap();
     let old_query = old.prepare_query(&Query::from("todos")).unwrap();
     let new_query = new.prepare_query(&Query::from("tasks")).unwrap();
     let _old_stream = block_on(old.subscribe(&old_query, ReadOpts::default())).unwrap();
@@ -694,7 +698,7 @@ fn an_old_client_is_served_under_the_current_policies_by_the_stored_column() {
     let client = block_on(Db::open(config(old_schema, 1, user(1)))).unwrap();
     let (client_side, server_side) = pipe();
     let _link = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, user(1)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, user(1))).unwrap();
     let query = client.prepare_query(&Query::from("notes")).unwrap();
     let _stream = block_on(client.subscribe(&query, ReadOpts::default())).unwrap();
     pump(&server, &[&client]);
@@ -876,8 +880,8 @@ fn a_row_a_client_on_the_old_schema_inserts_gets_the_copy() {
     let (new_client, new_server) = pipe();
     let _old_link = block_on(old.connect_upstream(old_client));
     let _new_link = block_on(new.connect_upstream(new_client));
-    server.accept_subscriber(old_server, user(1)).unwrap();
-    server.accept_subscriber(new_server, user(2)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(old_server, user(1))).unwrap();
+    jazz::db::block_on(server.accept_subscriber(new_server, user(2))).unwrap();
     let new_query = new.prepare_query(&Query::from("todos")).unwrap();
     let _new_stream = block_on(new.subscribe(&new_query, ReadOpts::default())).unwrap();
 
@@ -1033,7 +1037,7 @@ fn a_client_store_upgraded_across_a_rename_reads_its_cached_rows_by_the_new_name
         .unwrap();
         let (c, s) = pipe();
         let _link = block_on(client.connect_upstream(c));
-        server.accept_subscriber(s, user(1)).unwrap();
+        jazz::db::block_on(server.accept_subscriber(s, user(1))).unwrap();
         let q = client.prepare_query(&Query::from("todos")).unwrap();
         let _stream = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
         pump(&server, &[&client]);
@@ -1053,7 +1057,7 @@ fn a_client_store_upgraded_across_a_rename_reads_its_cached_rows_by_the_new_name
     );
     let (c, s) = pipe();
     let _link = block_on(client.connect_upstream(c));
-    server.accept_subscriber(s, user(1)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(s, user(1))).unwrap();
     let q = client.prepare_query(&Query::from("todos")).unwrap();
     let _stream = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
     pump(&server, &[&client]);
@@ -1088,7 +1092,7 @@ fn a_pending_write_staged_before_a_client_upgrade_uploads_and_reads_by_the_new_n
     .unwrap();
     let (c, s) = pipe();
     let _link = block_on(client.connect_upstream(c));
-    server.accept_subscriber(s, user(1)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(s, user(1))).unwrap();
     pump(&server, &[&client]);
     let rejections = client.take_upstream_rejections();
     assert!(rejections.is_empty(), "{rejections:?}");
@@ -1120,17 +1124,17 @@ fn a_tab_behind_a_worker_reads_a_renamed_column_after_the_worker_mirrors() {
     seed(&server, "todos", 1, &[("name", text("from server"))]);
     let worker = block_on(Db::open(config(v2(), 0xa0, user(0xa0)))).unwrap();
     let tab = block_on(Db::open(config(v2(), 0xa1, user(0xa0)))).unwrap();
-    tab.set_non_durable_client();
-    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(tab.set_non_durable_client());
+    jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
     let (tc, ts) = pipe();
     let _tab_link = block_on(tab.connect_upstream(tc));
-    worker.accept_subscriber(ts, user(0xa0)).unwrap();
+    jazz::db::block_on(worker.accept_subscriber(ts, user(0xa0))).unwrap();
     pump(&worker, &[&tab]);
 
     let (wc, ws) = pipe();
     let _worker_link = block_on(worker.connect_upstream(wc));
-    server.accept_subscriber(ws, user(0xa0)).unwrap();
-    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(server.accept_subscriber(ws, user(0xa0))).unwrap();
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Live));
     let q = tab.prepare_query(&Query::from("todos")).unwrap();
     let _stream = block_on(tab.subscribe(&q, ReadOpts::default())).unwrap();
     for _ in 0..6 {
@@ -1161,7 +1165,7 @@ fn a_catalogue_the_store_cannot_mirror_refuses_remote_reads_and_keeps_local_ones
         // Offline under v1, then v3 without the lenses between: `tasks` is
         // stored here as a new table, beside v1's `todos`.
         let client = open_at(v1(), &path);
-        client.become_replica();
+        jazz::db::block_on(client.become_replica());
         insert(&client, "todos", 2, "title", "v1 row");
     }
     let client = block_on(Db::open_at(
@@ -1173,7 +1177,7 @@ fn a_catalogue_the_store_cannot_mirror_refuses_remote_reads_and_keeps_local_ones
     insert(&client, "tasks", 3, "name", "local task");
     let (c, s) = pipe();
     let _link = block_on(client.connect_upstream(c));
-    server.accept_subscriber(s, AuthorSubject::SYSTEM).unwrap();
+    jazz::db::block_on(server.accept_subscriber(s, AuthorSubject::SYSTEM)).unwrap();
     let q = client.prepare_query(&Query::from("tasks")).unwrap();
     let mut stream = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
     pump(&server, &[&client]);
@@ -1274,15 +1278,14 @@ fn a_replicated_insert_names_every_column_of_its_version_by_stored_name() {
         "by stored names, the default included"
     );
 
-    server
-        .accept_subscriber(
-            Box::new(Pipe {
-                out: down,
-                inbound: up,
-            }),
-            user(1),
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(Pipe {
+            out: down,
+            inbound: up,
+        }),
+        user(1),
+    ))
+    .unwrap();
     pump(&server, &[&old]);
     assert_eq!(read(&server, "todos", "name"), texts(&["x"]));
 }
@@ -1296,7 +1299,7 @@ fn an_old_clients_insert_fills_a_copy_at_the_server() {
     let old = block_on(Db::open(config(v1(), 1, user(1)))).unwrap();
     let (c, s) = pipe();
     let _link = block_on(old.connect_upstream(c));
-    server.accept_subscriber(s, user(1)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(s, user(1))).unwrap();
     insert(&old, "todos", 1, "title", "from old");
     pump(&server, &[&old]);
     assert_eq!(read(&server, "todos", "search_title"), texts(&["from old"]));
@@ -1319,8 +1322,8 @@ fn a_dropped_column_takes_its_backwards_default_only_where_an_insert_leaves_it_o
     let (new_client, new_server) = pipe();
     let _old_link = block_on(old.connect_upstream(old_client));
     let _new_link = block_on(new.connect_upstream(new_client));
-    server.accept_subscriber(old_server, user(1)).unwrap();
-    server.accept_subscriber(new_server, user(2)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(old_server, user(1))).unwrap();
+    jazz::db::block_on(server.accept_subscriber(new_server, user(2))).unwrap();
     insert(&new, "todos", 1, "title", "new");
     block_on(old.insert(
         "todos",
@@ -1364,15 +1367,14 @@ fn a_write_naming_columns_the_server_does_not_store_is_refused() {
     let q = lensless.prepare_query(&Query::from("todos")).unwrap();
     let mut stream = block_on(lensless.subscribe(&q, ReadOpts::default())).unwrap();
     block_on(lensless.tick()).unwrap();
-    server
-        .accept_subscriber(
-            Box::new(Pipe {
-                out: down.clone(),
-                inbound: up,
-            }),
-            user(2),
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(Pipe {
+            out: down.clone(),
+            inbound: up,
+        }),
+        user(2),
+    ))
+    .unwrap();
     block_on(server.tick()).unwrap();
     let reason = down.borrow().iter().find_map(|message| match message {
         SyncMessage::Fate {
@@ -1423,7 +1425,7 @@ fn an_old_clients_insert_takes_a_lens_added_columns_default() {
     let old = block_on(Db::open(config(v1(), 1, user(1)))).unwrap();
     let (c, s) = pipe();
     let _link = block_on(old.connect_upstream(c));
-    server.accept_subscriber(s, user(1)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(s, user(1))).unwrap();
     insert(&old, "todos", 1, "title", "from old");
     pump(&server, &[&old]);
     assert_eq!(read(&server, "todos", "owner"), texts(&["nobody"]));
@@ -1477,7 +1479,7 @@ fn an_old_clients_insert_fills_a_copy_a_later_version_dropped() {
     let old = block_on(Db::open(config(v1(), 1, user(1)))).unwrap();
     let (c, s) = pipe();
     let _link = block_on(old.connect_upstream(c));
-    server.accept_subscriber(s, user(1)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(s, user(1))).unwrap();
     insert(&old, "todos", 1, "title", "from old");
     pump(&server, &[&old]);
     let v2 = block_on(server.register_schema_view(with_copy())).unwrap();
@@ -1512,7 +1514,7 @@ fn an_old_clients_insert_takes_an_added_columns_default_a_later_version_dropped(
     let old = block_on(Db::open(config(v1(), 1, user(1)))).unwrap();
     let (c, s) = pipe();
     let _link = block_on(old.connect_upstream(c));
-    server.accept_subscriber(s, user(1)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(s, user(1))).unwrap();
     insert(&old, "todos", 1, "title", "from old");
     pump(&server, &[&old]);
     let v2 = block_on(server.register_schema_view(with_note())).unwrap();
@@ -1546,8 +1548,8 @@ fn an_upsert_creating_its_row_takes_its_writers_defaults() {
     let (new_client, new_server) = pipe();
     let _old_link = block_on(old.connect_upstream(old_client));
     let _new_link = block_on(new.connect_upstream(new_client));
-    server.accept_subscriber(old_server, user(1)).unwrap();
-    server.accept_subscriber(new_server, user(2)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(old_server, user(1))).unwrap();
+    jazz::db::block_on(server.accept_subscriber(new_server, user(2))).unwrap();
     upsert(&old, 1, "old");
     upsert(&new, 2, "new");
     assert_eq!(read(&old, "todos", "rank"), vec![Value::I64(0)]);
@@ -1561,4 +1563,192 @@ fn an_upsert_creating_its_row_takes_its_writers_defaults() {
         vec![Value::I64(0)],
         "the echo keeps the client's value"
     );
+}
+
+/// Alice's backend executes every mutation through renamed schema views:
+/// updates preserve omitted cells, while restore and creating upserts use
+/// that view's defaults. Bob's older view observes the same stored rows.
+#[test]
+fn renamed_write_views_preserve_defaults_and_restore_semantics() {
+    let db = block_on(Db::open(config(v1(), 1, AuthorSubject::SYSTEM))).unwrap();
+    block_on(db.activate_schema_with_lenses(v2(), &[rename_title()])).unwrap();
+    block_on(db.activate_schema_with_lenses(v3(), &[rename_todos()])).unwrap();
+    let old = block_on(db.register_schema_view(v1())).unwrap();
+
+    block_on(db.upsert(
+        "tasks",
+        row(1),
+        BTreeMap::from([
+            ("name".into(), text("first")),
+            ("rank".into(), Value::I64(7)),
+        ]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(old.upsert(
+        "todos",
+        row(1),
+        BTreeMap::from([("rank".into(), Value::I64(8))]),
+        Default::default(),
+    ))
+    .unwrap();
+    assert_eq!(read(&db, "tasks", "name"), texts(&["first"]));
+    assert_eq!(read(&old, "todos", "rank"), vec![Value::I64(8)]);
+
+    block_on(old.delete("todos", row(1), Default::default())).unwrap();
+    block_on(db.restore(
+        "tasks",
+        row(1),
+        Some(BTreeMap::from([("name".into(), text("restored"))])),
+        Default::default(),
+    ))
+    .unwrap();
+    assert_eq!(read(&old, "todos", "title"), texts(&["restored"]));
+    assert_eq!(read(&db, "tasks", "rank"), vec![Value::I64(0)]);
+
+    block_on(old.upsert(
+        "todos",
+        row(2),
+        BTreeMap::from([("title".into(), text("second"))]),
+        Default::default(),
+    ))
+    .unwrap();
+    assert_eq!(read(&db, "tasks", "name"), texts(&["restored", "second"]));
+    assert_eq!(
+        read(&db, "tasks", "rank"),
+        vec![Value::I64(0), Value::I64(0)]
+    );
+}
+
+/// Alice may name only her schema's columns. Knowing a physical column's
+/// identity does not let her submit it as an undeclared alias. The test hook
+/// supplies the exact internal name; the assertion uses the public write API.
+#[test]
+fn storage_column_names_are_not_public_write_aliases() {
+    let db = block_on(Db::open(config(v1(), 1, AuthorSubject::SYSTEM))).unwrap();
+    block_on(db.activate_schema_with_lenses(v2(), &[rename_title()])).unwrap();
+    let (_, stored) = db.stored_column_for_test("todos", "name");
+    assert_ne!(stored, "name");
+    let error = block_on(db.insert(
+        "todos",
+        BTreeMap::from([(stored, text("undeclared"))]),
+        Default::default(),
+    ))
+    .unwrap_err();
+    assert_eq!(error.code, jazz::db::ErrorCode::WriteRejected);
+    assert!(error.message.contains("unknown column"), "{error}");
+    assert!(read(&db, "todos", "name").is_empty());
+}
+
+/// Alice queues writes before a rename and commits afterwards. The queued
+/// operations retain their original column identities and defaults; Bob's
+/// current view sees the same rows through the renamed table and column.
+#[test]
+fn queued_writes_keep_their_prepared_names_across_schema_renames() {
+    let db = block_on(Db::open(config(v1(), 1, AuthorSubject::SYSTEM))).unwrap();
+    let tx = block_on(db.mergeable_tx()).unwrap();
+    block_on(tx.upsert(
+        "todos",
+        row(1),
+        BTreeMap::from([("title".into(), text("queued"))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(tx.update(
+        "todos",
+        row(1),
+        BTreeMap::from([("rank".into(), Value::I64(9))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(db.activate_schema_with_lenses(v2(), &[rename_title()])).unwrap();
+    block_on(db.activate_schema_with_lenses(v3(), &[rename_todos()])).unwrap();
+    block_on(tx.commit()).unwrap();
+    assert_eq!(read(&db, "tasks", "name"), texts(&["queued"]));
+    assert_eq!(read(&db, "tasks", "rank"), vec![Value::I64(9)]);
+}
+
+/// Alice subscribes through an older prepared query while Bob writes through
+/// renamed tables and columns. Splice validation and delivery use Alice's
+/// query vocabulary even when the current Db opens or refreshes her stream.
+#[test]
+fn subscription_splices_use_the_prepared_querys_schema() {
+    let db = block_on(Db::open(config(v1(), 1, AuthorSubject::SYSTEM))).unwrap();
+    insert(&db, "todos", 1, "title", "before");
+    block_on(db.activate_schema_with_lenses(v2(), &[rename_title()])).unwrap();
+    block_on(db.activate_schema_with_lenses(v3(), &[rename_todos()])).unwrap();
+    let old = block_on(db.register_schema_view(v1())).unwrap();
+    let prepared = old
+        .prepare_query(&Query::from("todos").select(["title"]))
+        .unwrap();
+    let mut stream =
+        block_on(db.subscribe(&prepared, ReadOpts::default().with_splices(["title"]))).unwrap();
+    while stream.try_next_event().is_some() {}
+    update(&db, "tasks", 1, "name", "after");
+    let mut observed = false;
+    while let Some(event) = stream.try_next_event() {
+        match event {
+            SubscriptionEvent::Delta { updated, .. } => {
+                for row in updated {
+                    assert_eq!(row.cell("title"), Some(text("after")));
+                    let (_, splices) = row
+                        .splices
+                        .iter()
+                        .find(|(column, _)| column == "title")
+                        .expect("the old view receives splices under its column name");
+                    let mut value = b"before".to_vec();
+                    for splice in splices.iter().rev() {
+                        value.splice(
+                            splice.at as usize..(splice.at + splice.delete) as usize,
+                            splice.insert.clone(),
+                        );
+                    }
+                    assert_eq!(value, b"after");
+                    observed = true;
+                }
+            }
+            SubscriptionEvent::Rejected { message, .. } => panic!("{message}"),
+            _ => {}
+        }
+    }
+    assert!(observed, "the old subscription receives Bob's update");
+}
+
+/// Alice's old view and Bob's renamed view read and edit the same chunked
+/// text. Prepared cell reads keep the view's column metadata and SQL names.
+#[test]
+fn large_value_reads_and_edits_keep_the_source_views_names() {
+    let db = block_on(Db::open(config(v1(), 1, AuthorSubject::SYSTEM))).unwrap();
+    let original = "aé🦀".repeat(2000);
+    insert(&db, "todos", 1, "title", &original);
+    block_on(db.activate_schema_with_lenses(v2(), &[rename_title()])).unwrap();
+    block_on(db.activate_schema_with_lenses(v3(), &[rename_todos()])).unwrap();
+    let old = block_on(db.register_schema_view(v1())).unwrap();
+    assert_eq!(
+        block_on(old.read_text_utf16_range("todos", row(1), "title", 1..4)).unwrap(),
+        "é🦀"
+    );
+    block_on(old.append_value("todos", row(1), "title", b"!".to_vec())).unwrap();
+    block_on(db.update_with_large_value_mutations(
+        "tasks",
+        row(1),
+        BTreeMap::new(),
+        vec![jazz::db::LargeValueUpdate::Splice {
+            column: "name".into(),
+            within: jazz::db::LargeValueUpdatePage::TextUtf8 { from: 0, to: 1 },
+            splices: vec![jazz::db::LargeValueUpdateSplice {
+                at: 0,
+                delete: 1,
+                insert: b"b".to_vec(),
+            }],
+        }],
+        Default::default(),
+    ))
+    .unwrap();
+    let expected = format!("b{}!", &original[1..]);
+    assert_eq!(
+        block_on(old.read_value_range("todos", row(1), "title", 0..expected.len() as u64)).unwrap(),
+        expected.as_bytes()
+    );
+    assert_eq!(read(&db, "tasks", "name"), texts(&[&expected]));
 }

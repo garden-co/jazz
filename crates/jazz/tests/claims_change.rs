@@ -56,18 +56,21 @@ fn setup(users: u32) -> (Db, Vec<jazz::db::SubscriptionStream>) {
         let mut bytes = [0u8; 16];
         bytes[12..].copy_from_slice(&n.to_be_bytes());
         let region = format!("r{}", n % 10);
-        db.seed_settled_mergeable_for_bootstrap(
+        jazz::db::block_on(db.insert(
             "documents",
-            RowUuid::from_bytes(bytes),
-            AuthorSubject::SYSTEM,
             [("region".to_owned(), Value::String(region))].into(),
-        )
+            jazz::db::InsertOptions {
+                row_id: Some(RowUuid::from_bytes(bytes)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
         .unwrap();
     }
     let prepared = db.prepare_query(&Query::from("documents")).unwrap();
     let mut streams = Vec::new();
     for n in 0..users {
-        db.set_identity_claims(user(n), claims(&format!("r{}", n % 10)));
+        jazz::db::block_on(db.set_identity_claims(user(n), claims(&format!("r{}", n % 10))));
         streams.push(
             block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), user(n))).unwrap(),
         );
@@ -97,7 +100,7 @@ fn deltas(stream: &mut jazz::db::SubscriptionStream) -> (usize, usize) {
 #[test]
 fn only_the_changed_sessions_results_move() {
     let (db, mut streams) = setup(20);
-    db.set_identity_claims(user(3), claims("r7"));
+    jazz::db::block_on(db.set_identity_claims(user(3), claims("r7")));
     assert_eq!(
         deltas(&mut streams[3]),
         (50, 50),
@@ -118,7 +121,9 @@ fn claims_change_cost_with_many_sessions() {
     let mut times = Vec::new();
     for round in 0..20u32 {
         let started = std::time::Instant::now();
-        db.set_identity_claims(user(round), claims(&format!("r{}", (round + 1) % 10)));
+        jazz::db::block_on(
+            db.set_identity_claims(user(round), claims(&format!("r{}", (round + 1) % 10))),
+        );
         times.push(started.elapsed());
         assert_eq!(deltas(&mut streams[round as usize]), (50, 50));
     }

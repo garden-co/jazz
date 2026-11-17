@@ -12,6 +12,7 @@
 //! which must again read exactly what the per-parent path does, with about
 //! as little work. Every comparison runs the three paths in [`MODES`].
 
+use jazz_types::legacy_test_future::ResultFutureExt as _;
 use std::collections::BTreeMap;
 
 use crate::common::{
@@ -423,6 +424,7 @@ mod randomized {
     use jazz::tools::{
         ColumnType, OpenTransactionId, PolicyExpr, SchemaBuilder, TableSchemaBuilder,
     };
+    use jazz_types::legacy_test_future::ResultFutureExt as _;
 
     const SEEDS: u64 = 12;
     const READERS: usize = 3;

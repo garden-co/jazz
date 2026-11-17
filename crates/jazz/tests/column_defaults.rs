@@ -99,7 +99,7 @@ fn stored_row_in(db: &Db, table_name: &str, row_id: RowUuid) -> BTreeMap<String,
     let prepared = db
         .prepare_query(&db.table(table_name))
         .expect("prepare query");
-    let rows = db.read(&prepared).expect("read rows");
+    let rows = jazz::db::block_on(db.read(&prepared)).expect("read rows");
     let row = rows
         .iter()
         .find(|row| row.row_uuid() == row_id)

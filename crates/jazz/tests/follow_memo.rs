@@ -7,6 +7,7 @@
 //! after a write or a rollback.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt as _;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -124,32 +125,41 @@ fn setup_reading(replicas: u8, query: Query) -> (Db, Vec<Db>, Vec<Box<dyn std::a
     let server = open(0);
     for (n, name) in [(1, "ada"), (2, "bob"), (3, "cy")] {
         server
-            .seed_settled_mergeable_for_bootstrap(
+            .insert(
                 "users",
-                id(1, n),
-                AuthorSubject::SYSTEM,
                 cells(&[("name", text(name))]),
+                jazz::db::InsertOptions {
+                    row_id: Some(id(1, n)),
+                    identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                    ..Default::default()
+                },
             )
             .unwrap();
     }
     server
-        .seed_settled_mergeable_for_bootstrap(
+        .insert(
             "users",
-            id(1, 4),
-            AuthorSubject::SYSTEM,
             cells(&[("name", text("dee")), ("referrer", Value::Uuid(id(1, 3).0))]),
+            jazz::db::InsertOptions {
+                row_id: Some(id(1, 4)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
         )
         .unwrap();
     for (n, sender) in [(1, 1), (2, 2)] {
         server
-            .seed_settled_mergeable_for_bootstrap(
+            .insert(
                 "messages",
-                id(2, n),
-                AuthorSubject::SYSTEM,
                 cells(&[
                     ("senderId", Value::Uuid(id(1, sender).0)),
                     ("body", text(&format!("m{n}"))),
                 ]),
+                jazz::db::InsertOptions {
+                    row_id: Some(id(2, n)),
+                    identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                    ..Default::default()
+                },
             )
             .unwrap();
     }

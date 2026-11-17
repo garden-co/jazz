@@ -573,8 +573,8 @@ fn assert_call_order(
     let team_a = row(0x11);
     let team_b = row(0x12);
     seed(&db, team_a, team_b, region_a, region_b);
-    db.set_identity_claims(user_a(), test_user_claims(region_a));
-    db.set_identity_claims(user_b(), test_user_claims(region_b));
+    jazz::db::block_on(db.set_identity_claims(user_a(), test_user_claims(region_a)));
+    jazz::db::block_on(db.set_identity_claims(user_b(), test_user_claims(region_b)));
     let query = Query::from(DOCUMENTS)
         .filter(eq(col("team"), param("team")))
         .order_by("updated_at", OrderDirection::Desc)
@@ -652,8 +652,8 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
     let public = row(0x51);
     let private = row(0x52);
     let regional = row(0x53);
-    db.set_identity_claims(user_a(), test_user_claims("region-a"));
-    db.set_identity_claims(user_b(), test_user_claims("region-b"));
+    jazz::db::block_on(db.set_identity_claims(user_a(), test_user_claims("region-a")));
+    jazz::db::block_on(db.set_identity_claims(user_b(), test_user_claims("region-b")));
     block_on(db.insert(
         DOCUMENTS,
         BTreeMap::from([
@@ -745,8 +745,8 @@ fn assert_retained_subscription_regions(region_a: &str, region_b: &str) {
     let team_a = row(0x11);
     let team_b = row(0x12);
     seed(&db, team_a, team_b, region_a, region_b);
-    db.set_identity_claims(user_a(), test_user_claims(region_a));
-    db.set_identity_claims(user_b(), test_user_claims(region_b));
+    jazz::db::block_on(db.set_identity_claims(user_a(), test_user_claims(region_a)));
+    jazz::db::block_on(db.set_identity_claims(user_b(), test_user_claims(region_b)));
     let query = Query::from(DOCUMENTS)
         .filter(eq(col("team"), param("team")))
         .order_by("updated_at", OrderDirection::Desc)
@@ -858,13 +858,13 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
         .expect("seed invite chat");
     }
     for (identity, join_code) in [(user_a(), join_code_a), (user_b(), join_code_b)] {
-        db.set_identity_claims(
+        jazz::db::block_on(db.set_identity_claims(
             identity,
             BTreeMap::from([(
                 provider_claim("join_code"),
                 Value::Nullable(Some(Box::new(Value::String(join_code.to_owned())))),
             )]),
-        );
+        ));
     }
     let query = Query::from(CHATS).filter(eq(col("id"), param("id")));
     let prepared = |chat: RowUuid| {
@@ -973,7 +973,7 @@ fn policy_dependency_reads_do_not_expose_dependency_rows() {
     let team_a = row(0x11);
     let team_b = row(0x12);
     seed(&db, team_a, team_b, "region-a", "region-b");
-    db.set_identity_claims(
+    jazz::db::block_on(db.set_identity_claims(
         user_a(),
         BTreeMap::from([
             (
@@ -985,8 +985,8 @@ fn policy_dependency_reads_do_not_expose_dependency_rows() {
                 Value::String("not-region-a".to_owned()),
             ),
         ]),
-    );
-    db.set_identity_claims(
+    ));
+    jazz::db::block_on(db.set_identity_claims(
         user_b(),
         BTreeMap::from([
             (
@@ -998,7 +998,7 @@ fn policy_dependency_reads_do_not_expose_dependency_rows() {
                 Value::String("region-b".to_owned()),
             ),
         ]),
-    );
+    ));
     let query = Query::from(DOCUMENTS).filter(eq(col("team"), param("team")));
 
     for (identity, team, expected) in [(user_a(), team_a, row(0x41)), (user_b(), team_b, row(0x42))]
@@ -1147,8 +1147,8 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
     let document_a = row(0x41);
     let document_b = row(0x42);
     seed(&db, team_a, team_b, "region-a", "region-b");
-    db.set_identity_claims(user_a(), test_user_claims("region-a"));
-    db.set_identity_claims(user_b(), test_user_claims("region-b"));
+    jazz::db::block_on(db.set_identity_claims(user_a(), test_user_claims("region-a")));
+    jazz::db::block_on(db.set_identity_claims(user_b(), test_user_claims("region-b")));
     let query = Query::from(DOCUMENTS).filter(eq(col("team"), param("team")));
     let prepared_v1 = db
         .prepare_query_bound(
@@ -1168,7 +1168,7 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
         )
         .expect("prepare v1 team binding");
     assert_eq!(
-        db.read(&prepared_team_v1)
+        jazz::db::block_on(db.read(&prepared_team_v1))
             .expect("read prepared v1 team before schema change")
             .into_iter()
             .map(|row| row.row_uuid())
@@ -1242,7 +1242,7 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
     assert_eq!(projected.len(), 1);
     assert_eq!(projected[0].cell_at(2), Some(Value::U64(0)));
     assert_eq!(
-        db.read(&prepared_team_v1)
+        jazz::db::block_on(db.read(&prepared_team_v1))
             .expect("invalidate stale v1 handle after catalogue rebuild")
             .into_iter()
             .map(|row| row.row_uuid())
@@ -1280,8 +1280,8 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
     let team_a = row(0x11);
     let team_b = row(0x12);
     seed(&db, team_a, team_b, "region-a", "region-b");
-    db.set_identity_claims(user_a(), test_user_claims("region-a"));
-    db.set_identity_claims(user_b(), test_user_claims("region-b"));
+    jazz::db::block_on(db.set_identity_claims(user_a(), test_user_claims("region-a")));
+    jazz::db::block_on(db.set_identity_claims(user_b(), test_user_claims("region-b")));
     let query = Query::from(DOCUMENTS).filter(eq(col("team"), param("team")));
     let prepared = |team: RowUuid| {
         db.prepare_query_bound(
@@ -1437,7 +1437,7 @@ fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
         )
         .expect("prepare v1 join");
     assert_eq!(
-        db.read(&prepared_v1)
+        jazz::db::block_on(db.read(&prepared_v1))
             .expect("read v1 prepared join")
             .into_iter()
             .map(|row| row.row_uuid())
@@ -1491,12 +1491,12 @@ fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
         )
         .expect("prepare conflicting v2 join shape");
     assert!(
-        db.read(&conflicting_v2)
+        jazz::db::block_on(db.read(&conflicting_v2))
             .expect("execute conflicting v2 prepared shape")
             .is_empty()
     );
     assert_eq!(
-        db.read(&prepared_v1)
+        jazz::db::block_on(db.read(&prepared_v1))
             .expect("stale v1 handle recompiles through the active schema")
             .into_iter()
             .map(|row| row.row_uuid())
@@ -1537,10 +1537,10 @@ fn prepared_binding_rejects_conflicting_claim_types_across_policies() {
             .build(),
     );
     let db = open_db_with_schema(schema);
-    db.set_identity_claims(
+    jazz::db::block_on(db.set_identity_claims(
         user_a(),
         BTreeMap::from([(provider_claim("shared_scope"), Value::Uuid(row(0x11).0))]),
-    );
+    ));
     let error = db
         .prepare_query(&Query::from(DOCUMENTS))
         .expect_err("conflicting policy claim types must fail during preparation");

@@ -189,7 +189,7 @@ fn registered_schema_views_share_one_open_batch() {
         owner.commit_mergeable_handle(batch).await.unwrap();
 
         let query = owner.prepare_query(&owner.table("items")).unwrap();
-        let rows = owner.read(&query).unwrap();
+        let rows = owner.read(&query).await.unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(
             rows[0].cell("label"),
@@ -500,7 +500,7 @@ fn ordinary_view_write_does_not_enter_open_owner_snapshot() {
                 .is_empty()
         );
         owner.abandon_transaction_handle(batch).unwrap();
-        assert_eq!(view.read(&prepared).unwrap().len(), 1);
+        assert_eq!(jazz::db::block_on(view.read(&prepared)).unwrap().len(), 1);
     });
 }
 
@@ -559,6 +559,7 @@ mod executing_policy_context {
     use jazz::query::Query;
     use jazz::records::Value;
     use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TableSchemaBuilder};
+    use jazz_types::legacy_test_future::ResultFutureExt as _;
 
     fn schema(read: bool) -> jazz::tools::public_schema::Schema {
         SchemaBuilder::new()
@@ -721,7 +722,7 @@ mod executing_policy_context {
         use std::future::Future;
         use std::task::{Context, Poll, Waker};
         let server = owner();
-        server.set_authority();
+        jazz::db::block_on(server.set_authority());
         let alice = AuthorSubject::for_test_bytes([1; 16]);
         let client = block_on(Db::open(DbConfig::new(
             compile_schema(&schema(true)),
@@ -734,7 +735,7 @@ mod executing_policy_context {
         let (up, down) = jazz::db::duplex();
         block_on(client.connect_upstream(up));
         server.accept_subscriber(down, alice).unwrap();
-        client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+        jazz::db::block_on(client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
         for _ in 0..4 {
             block_on(client.tick()).unwrap();
             block_on(server.tick()).unwrap();

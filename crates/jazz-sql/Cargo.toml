@@ -1,0 +1,19 @@
+[package]
+name = "jazz-sql"
+version.workspace = true
+edition = "2024"
+description = "Jazz SQL execution boundary and optional SQLite adapter."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+include = ["src/**"]
+
+[features]
+default = []
+testing = []
+# Include Jazz's built-in SQLite backend; disable for host-provided storage.
+sqlite = ["dep:rusqlite"]
+
+[dependencies]
+rusqlite = { version = "0.40", optional = true, features = ["limits"] }

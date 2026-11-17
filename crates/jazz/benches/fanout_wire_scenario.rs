@@ -145,9 +145,16 @@ pub fn run(cfg: &Config) -> WireReport {
     )))
     .unwrap();
     let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
-        server
-            .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
-            .unwrap();
+        jazz::db::block_on(server.insert(
+            table,
+            values,
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     };
     for r in 0..cfg.rooms {
         seed(
@@ -209,7 +216,8 @@ pub fn run(cfg: &Config) -> WireReport {
         let client = open(node, user(u));
         let (client_side, server_side, down) = duplex();
         let _upstream = db::block_on(client.connect_upstream(client_side));
-        let _subscriber = server.accept_subscriber(server_side, user(u)).unwrap();
+        let _subscriber =
+            jazz::db::block_on(server.accept_subscriber(server_side, user(u))).unwrap();
         downs.push(down);
         clients.push(client);
     }

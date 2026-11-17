@@ -100,12 +100,11 @@ fn a_commit_split_across_frames_is_applied_whole() {
         released: server_released,
     };
     block_on(reader.connect_upstream(Box::new(WireTransportAdapter::current(reader_side))));
-    server
-        .accept_subscriber(
-            Box::new(WireTransportAdapter::current(server_side)),
-            reader_author,
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(WireTransportAdapter::current(server_side)),
+        reader_author,
+    ))
+    .unwrap();
 
     // Keep the reader subscribed to every note, and let the handshake and
     // the empty first result through.
@@ -199,12 +198,11 @@ fn a_split_commit_a_full_queue_interrupts_arrives_whole() {
         released: Rc::new(RefCell::new(usize::MAX)),
     };
     block_on(writer.connect_upstream(Box::new(WireTransportAdapter::current(writer_side))));
-    server
-        .accept_subscriber(
-            Box::new(WireTransportAdapter::current(server_side)),
-            writer_author,
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(WireTransportAdapter::current(server_side)),
+        writer_author,
+    ))
+    .unwrap();
     for _ in 0..20 {
         block_on(writer.tick()).unwrap();
         block_on(server.tick()).unwrap();
@@ -282,16 +280,15 @@ fn link(
             room: Rc::clone(room),
         }))),
     );
-    server
-        .accept_subscriber(
-            Box::new(WireTransportAdapter::current(GatedWire {
-                outbound: to_writer,
-                inbound: to_server,
-                released: Rc::new(RefCell::new(usize::MAX)),
-            })),
-            writer_author,
-        )
-        .unwrap()
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(WireTransportAdapter::current(GatedWire {
+            outbound: to_writer,
+            inbound: to_server,
+            released: Rc::new(RefCell::new(usize::MAX)),
+        })),
+        writer_author,
+    ))
+    .unwrap()
 }
 
 fn commit_notes(writer: &Db, rows: usize) {
@@ -501,15 +498,13 @@ fn a_refused_commit_over_one_stored_value_is_listed_whole_and_discarded() {
             .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
             .unwrap()
     };
-    let rejected = writer.rejected_transactions().unwrap();
+    let rejected = block_on(writer.rejected_transactions()).unwrap();
     assert_eq!(rejected.len(), 1);
     assert_eq!(rejected[0].ops.len(), 300, "listed whole");
     assert_eq!(count("_jazz_rejected_ops"), 300, "kept a row per op");
     assert_eq!(count("_jazz_pending_ops"), 0, "and no longer pending");
-    writer
-        .discard_rejected_transaction(rejected[0].seq)
-        .unwrap();
-    assert!(writer.rejected_transactions().unwrap().is_empty());
+    block_on(writer.discard_rejected_transaction(rejected[0].seq)).unwrap();
+    assert!(block_on(writer.rejected_transactions()).unwrap().is_empty());
     assert_eq!(count("_jazz_rejected_ops"), 0, "its ops go with it");
     assert_eq!(count("_jazz_rejected_cells"), 0, "and their cells");
 }
@@ -570,7 +565,7 @@ fn a_serializable_commit_refused_before_sending_is_reported_serializable() {
     let reported = writer.take_upstream_rejections();
     assert_eq!(reported.len(), 1, "{reported:?}");
     assert!(reported[0].serializable, "reported as serializable");
-    let rejected = writer.rejected_transactions().unwrap();
+    let rejected = block_on(writer.rejected_transactions()).unwrap();
     assert_eq!(rejected.len(), 1);
     assert!(rejected[0].serializable, "kept as serializable");
     assert_eq!(visible(&writer), 0, "rolled back");
@@ -607,14 +602,14 @@ fn a_commit_refused_twice_is_reported_and_kept_once() {
         let reported = settle(&writer);
         assert_eq!(reported.len(), 1, "reported once: {reported:?}");
         assert_eq!(
-            writer.rejected_transactions().unwrap().len(),
+            block_on(writer.rejected_transactions()).unwrap().len(),
             1,
             "kept once"
         );
         // A second one, and the store closes before its refusal applies.
         commit_notes(&writer, 300);
         block_on(writer.tick()).unwrap();
-        assert_eq!(writer.rejected_transactions().unwrap().len(), 1);
+        assert_eq!(block_on(writer.rejected_transactions()).unwrap().len(), 1);
         reported[0].seq
     };
     let writer = open_file(&path, 0x59);
@@ -626,7 +621,7 @@ fn a_commit_refused_twice_is_reported_and_kept_once() {
         "refused again, reported once: {reported:?}"
     );
     assert_ne!(reported[0].seq, first_seq);
-    let rejected = writer.rejected_transactions().unwrap();
+    let rejected = block_on(writer.rejected_transactions()).unwrap();
     assert_eq!(
         rejected.iter().map(|r| r.seq).collect::<Vec<_>>(),
         vec![first_seq, reported[0].seq],

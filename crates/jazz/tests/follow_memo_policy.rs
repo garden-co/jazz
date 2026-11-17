@@ -7,6 +7,7 @@
 //! its own.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt as _;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -119,24 +120,30 @@ fn two_identities_follow_one_key(alice_first: bool) {
     let (alice_subject, bob_subject) = (alice.principal_parts().1, bob.principal_parts().1);
     for (n, owner) in [(1, &alice_subject), (2, &bob_subject), (3, &alice_subject)] {
         server
-            .seed_settled_mergeable_for_bootstrap(
+            .insert(
                 "users",
-                id(1, n),
-                AuthorSubject::SYSTEM,
                 cells(&[("name", text(&format!("u{n}"))), ("owner", text(owner))]),
+                jazz::db::InsertOptions {
+                    row_id: Some(id(1, n)),
+                    identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                    ..Default::default()
+                },
             )
             .unwrap();
     }
     for (n, sender) in [(1, 1), (2, 2)] {
         server
-            .seed_settled_mergeable_for_bootstrap(
+            .insert(
                 "messages",
-                id(2, n),
-                AuthorSubject::SYSTEM,
                 cells(&[
                     ("senderId", Value::Uuid(id(1, sender).0)),
                     ("body", text(&format!("m{n}"))),
                 ]),
+                jazz::db::InsertOptions {
+                    row_id: Some(id(2, n)),
+                    identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                    ..Default::default()
+                },
             )
             .unwrap();
     }

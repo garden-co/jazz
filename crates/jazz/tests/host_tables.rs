@@ -19,6 +19,170 @@ use crate::common::{allow_all_policies, compile_schema};
 const CATALOGUE: HostTable = HostTable::new("catalogue");
 const JOURNAL: HostTable = HostTable::new("journal");
 
+/// Alice and Bob share one deterministic ID sequence across schema handles.
+/// IDs drawn during a suspended host write stay consumed even if it is cancelled;
+/// the next insert continues that same sequence.
+/// alice -> suspend storage -> alice/bob allocate -> cancel -> bob inserts
+#[test]
+fn row_ids_share_one_sequence_during_suspended_storage() {
+    use jazz::db::{RowIdSource, SeededRowIdSource};
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let mut expected = SeededRowIdSource::new(42);
+    let db = block_on(Db::open(config().with_id_source(expected.clone()))).unwrap();
+    let other = block_on(db.register_schema_view(schema())).unwrap();
+    assert_eq!(db.next_row_id(), expected.next_row_id());
+    let mut write = Box::pin(db.host_put_then_wait_for_test(
+        JOURNAL,
+        b"pending",
+        b"alice",
+        std::future::pending(),
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(write.as_mut().poll(&mut cx).is_pending());
+    assert_eq!(other.next_row_id(), expected.next_row_id());
+    assert_eq!(db.next_row_id(), expected.next_row_id());
+    drop(write);
+
+    let cells = || BTreeMap::from([("title".to_owned(), Value::String("bob".to_owned()))]);
+    let inserted = block_on(other.insert("notes", cells(), InsertOptions::default())).unwrap();
+    assert_eq!(inserted.row_uuid(), expected.next_row_id());
+    let transaction = block_on(db.mergeable_tx()).unwrap();
+    let staged = block_on(transaction.insert("notes", cells(), InsertOptions::default())).unwrap();
+    assert_eq!(staged.row_uuid(), expected.next_row_id());
+    block_on(transaction.commit()).unwrap();
+    assert_eq!(other.next_row_id(), expected.next_row_id());
+    let query = other.prepare_query(&Query::from("notes")).unwrap();
+    let rows = block_on(other.read(&query)).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().any(|row| row.row_uuid() == inserted.row_uuid()));
+    assert!(rows.iter().any(|row| row.row_uuid() == staged.row_uuid()));
+}
+
+/// Alice's completed read is reported once while Bob's host write is paused.
+/// Changing the diagnostic threshold during that pause applies to later reads.
+/// alice -> query -> bob suspends -> host drains diagnostics -> bob resumes
+#[test]
+fn diagnostics_remain_available_during_suspended_storage() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+    use std::time::Duration;
+
+    let db = block_on(Db::open(config())).unwrap();
+    let query = db.prepare_query(&Query::from("notes")).unwrap();
+    db.set_slow_query_threshold(Some(Duration::ZERO));
+    block_on(db.read(&query)).unwrap();
+    let (resume, wait) = futures::channel::oneshot::channel();
+    let mut write = Box::pin(
+        db.host_put_then_wait_for_test(JOURNAL, b"pending", b"bob", async { wait.await.unwrap() }),
+    );
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(write.as_mut().poll(&mut cx).is_pending());
+
+    let (queries, dropped) = db.take_due_slow_queries().expect("completed slow read");
+    assert_eq!(dropped, 0);
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].runs, 1);
+    assert_eq!(db.take_slow_queries(), (Vec::new(), 0));
+    assert!(db.take_slow_query_report(None).is_empty());
+    assert_eq!(db.take_merge_fallbacks(), (Vec::new(), 0));
+    db.set_slow_query_threshold(None);
+
+    resume.send(()).unwrap();
+    block_on(write).unwrap();
+    block_on(db.read(&query)).unwrap();
+    assert!(db.take_slow_queries().0.is_empty());
+    db.set_slow_query_threshold(Some(Duration::ZERO));
+    block_on(db.read(&query)).unwrap();
+    assert_eq!(db.take_slow_queries().0.len(), 1);
+}
+
+/// Alice's host write suspends while owning the store borrow. Another handle
+/// can still check Alice/Bob admission and chunk progress without waiting.
+/// The suspension hook models a pending SQL operation on the normal host path.
+/// alice -> host write -> suspend -> sync checks -> resume -> committed read
+#[test]
+fn identity_and_chunk_progress_remain_available_during_suspended_storage() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let alice = AuthorSubject::for_test_bytes([1; 16]);
+    let bob = AuthorSubject::for_test_bytes([2; 16]);
+    for author in [alice, AuthorSubject::SYSTEM] {
+        let mut config = config();
+        config.identity.author = author;
+        let db = block_on(Db::open(config)).unwrap();
+        let other = block_on(db.register_schema_view(schema())).unwrap();
+        let answered = other.chunk_fetches_answered();
+        let (resume, wait) = futures::channel::oneshot::channel();
+        let mut write = Box::pin(db.host_put_then_wait_for_test(
+            JOURNAL,
+            b"pending",
+            b"alice",
+            async { wait.await.unwrap() },
+        ));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(write.as_mut().poll(&mut cx).is_pending());
+
+        assert_eq!(other.chunk_fetches_answered(), answered);
+        other.check_serves(alice).unwrap();
+        if author == AuthorSubject::SYSTEM {
+            other.check_serves(bob).unwrap();
+        } else {
+            assert_eq!(
+                other.check_serves(bob).unwrap_err().reason,
+                Some(jazz::db::Reason::IdentityMismatch),
+            );
+        }
+
+        resume.send(()).unwrap();
+        block_on(write).unwrap();
+        assert_eq!(
+            block_on(other.host_get(JOURNAL, b"pending")).unwrap(),
+            Some(b"alice".to_vec()),
+        );
+    }
+}
+
+/// Alice stores a large host value through the shared async algorithm; Bob
+/// sees her existing value. The native future completes inline, and an outer rollback also undoes the shared operation's insert.
+/// alice -> inline conditional insert -> outer rollback -> bob reads no claim
+#[test]
+fn shared_async_host_operation_stays_inline_and_obeys_outer_rollback() {
+    let file = StoreFile::memory().unwrap();
+    assert_eq!(
+        block_on(file.host_put_if_absent(JOURNAL, b"", b"")).unwrap(),
+        None
+    );
+    assert_eq!(
+        block_on(file.host_get(JOURNAL, b"")).unwrap(),
+        Some(Vec::new())
+    );
+    let value = vec![0xa5; 128 * 1024];
+    assert_eq!(
+        block_on(file.host_put_if_absent(JOURNAL, b"large", &value)).unwrap(),
+        None
+    );
+    assert_eq!(
+        block_on(file.host_put_if_absent(JOURNAL, b"large", b"bob")).unwrap(),
+        Some(value.clone())
+    );
+    assert_eq!(
+        block_on(file.host_get(JOURNAL, b"large")).unwrap(),
+        Some(value)
+    );
+    let refused = block_on(file.host_sql(&mut |_| {
+        assert_eq!(
+            block_on(file.host_put_if_absent(JOURNAL, b"claim", b"alice"))?,
+            None
+        );
+        Err(jazz::db::Error::new(ErrorCode::Storage, "host refused"))
+    }));
+    assert!(refused.is_err());
+    assert_eq!(block_on(file.host_get(JOURNAL, b"claim")).unwrap(), None);
+}
+
 fn schema() -> JazzSchema {
     compile_schema(
         &SchemaBuilder::new()
@@ -59,17 +223,20 @@ fn host_tables_share_the_store_file_and_survive_reopening() {
     {
         // A new file: host tables written before any Db opens on it.
         let file = StoreFile::open(&path, options()).unwrap();
-        assert_eq!(file.host_get(CATALOGUE, b"k").unwrap(), None);
-        assert!(file.host_prefix(CATALOGUE, b"").unwrap().is_empty());
-        file.host_put_many(CATALOGUE, &[pair(b"cat:2", b"two"), pair(b"cat:1", b"one")])
+        assert_eq!(block_on(file.host_get(CATALOGUE, b"k")).unwrap(), None);
+        assert!(
+            block_on(file.host_prefix(CATALOGUE, b""))
+                .unwrap()
+                .is_empty()
+        );
+        block_on(file.host_put_many(CATALOGUE, &[pair(b"cat:2", b"two"), pair(b"cat:1", b"one")]))
             .unwrap();
         assert_eq!(
-            file.host_put_if_absent(CATALOGUE, b"cat:1", b"other")
-                .unwrap(),
+            block_on(file.host_put_if_absent(CATALOGUE, b"cat:1", b"other")).unwrap(),
             Some(b"one".to_vec())
         );
         assert_eq!(
-            file.host_put_if_absent(JOURNAL, b"0", b"first").unwrap(),
+            block_on(file.host_put_if_absent(JOURNAL, b"0", b"first")).unwrap(),
             None
         );
         // The Db opens on the same connection, and the host tables stay
@@ -81,17 +248,17 @@ fn host_tables_share_the_store_file_and_survive_reopening() {
             InsertOptions::default(),
         ))
         .unwrap();
-        db.host_put_many(JOURNAL, &[pair(b"1", b"second")]).unwrap();
-        db.host_delete(CATALOGUE, b"cat:2").unwrap();
+        block_on(db.host_put_many(JOURNAL, &[pair(b"1", b"second")])).unwrap();
+        block_on(db.host_delete(CATALOGUE, b"cat:2")).unwrap();
         block_on(db.close()).unwrap();
     }
     let db = block_on(Db::open_at(config(), &path, options())).unwrap();
     assert_eq!(
-        db.host_prefix(CATALOGUE, b"cat:").unwrap(),
+        block_on(db.host_prefix(CATALOGUE, b"cat:")).unwrap(),
         vec![pair(b"cat:1", b"one")]
     );
     assert_eq!(
-        db.host_prefix(JOURNAL, b"").unwrap(),
+        block_on(db.host_prefix(JOURNAL, b"")).unwrap(),
         vec![pair(b"0", b"first"), pair(b"1", b"second")]
     );
     // Host tables are not application tables; the rows are all there.
@@ -107,18 +274,350 @@ fn host_tables_share_the_store_file_and_survive_reopening() {
     assert_eq!(rows.len(), 1);
 }
 
+/// Alice opens Jazz beside Bob's existing SQLite data and writes host metadata.
+/// Bob's table definition and contents survive initialization and reopening.
 #[test]
-fn a_file_jazz_did_not_write_is_refused_before_any_host_table_is_touched() {
+fn a_shared_file_preserves_foreign_tables_beside_host_metadata() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("jazz.sqlite");
-    rusqlite::Connection::open(&path)
-        .unwrap()
-        .execute_batch("CREATE TABLE theirs (x INTEGER)")
+    let other = rusqlite::Connection::open(&path).unwrap();
+    other
+        .execute_batch("CREATE TABLE theirs (x INTEGER); INSERT INTO theirs VALUES (42)")
         .unwrap();
-    let before = std::fs::read(&path).unwrap();
-    let Err(error) = StoreFile::open(&path, options()) else {
-        panic!("a foreign file must be refused");
-    };
-    assert_eq!(error.code, ErrorCode::UnsupportedStorageCodecs);
-    assert_eq!(std::fs::read(&path).unwrap(), before);
+    {
+        let file = StoreFile::open(&path, options()).unwrap();
+        block_on(file.host_put_many(CATALOGUE, &[pair(b"alice", b"metadata")])).unwrap();
+        let db = block_on(Db::open_file(config(), file)).unwrap();
+        block_on(db.close()).unwrap();
+    }
+    let db = block_on(Db::open_at(config(), &path, options())).unwrap();
+    assert_eq!(
+        block_on(db.host_get(CATALOGUE, b"alice")).unwrap(),
+        Some(b"metadata".to_vec())
+    );
+    assert_eq!(
+        other
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'theirs'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "CREATE TABLE theirs (x INTEGER)"
+    );
+    let values: Vec<i64> = other
+        .prepare("SELECT x FROM theirs")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(values, [42]);
+}
+
+/// Alice suspends while owning a host savepoint. Bob's host read, application
+/// read, and insert wait for the same store; cancelling Alice rolls her write
+/// back before Bob resumes. The test-only suspension models asynchronous SQL
+/// without replacing the normal query, write, permission, or rollback paths.
+/// alice -> write -> suspend -> bob queues -> cancel alice -> rollback -> bob
+#[test]
+fn suspended_storage_operation_serializes_reads_and_writes() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let db = block_on(Db::open(config())).unwrap();
+    let prepared = db.prepare_query(&Query::from("notes")).unwrap();
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut alice = Box::pin(db.host_put_then_wait_for_test(
+        JOURNAL,
+        b"pending",
+        b"alice",
+        std::future::pending(),
+    ));
+    assert!(alice.as_mut().poll(&mut cx).is_pending());
+
+    let mut host_read = Box::pin(db.host_get(JOURNAL, b"pending"));
+    let mut read = Box::pin(db.all(
+        &prepared,
+        ReadOpts {
+            tier: ReadTier::LocalOnly,
+            ..ReadOpts::default()
+        },
+    ));
+    let mut insert = Box::pin(db.insert(
+        "notes",
+        BTreeMap::from([("title".to_owned(), Value::String("bob".to_owned()))]),
+        InsertOptions::default(),
+    ));
+    assert!(host_read.as_mut().poll(&mut cx).is_pending());
+    assert!(read.as_mut().poll(&mut cx).is_pending());
+    assert!(insert.as_mut().poll(&mut cx).is_pending());
+
+    // Cancelling a queued operation must also remove its waiter safely.
+    let mut cancelled = Box::pin(db.catalogue());
+    assert!(cancelled.as_mut().poll(&mut cx).is_pending());
+    drop(cancelled);
+    drop(alice);
+
+    assert_eq!(block_on(host_read).unwrap(), None);
+    assert!(block_on(read).unwrap().is_empty());
+    block_on(insert).unwrap();
+    let rows = block_on(db.all(
+        &prepared,
+        ReadOpts {
+            tier: ReadTier::LocalOnly,
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    block_on(db.catalogue()).unwrap();
+    block_on(db.close()).unwrap();
+}
+
+/// Alice abandons a staged batch and drops another transaction while Bob's
+/// host SQL is suspended. Neither cleanup borrows execution state, and reusing
+/// the first ID must not revive its cached writes.
+#[test]
+fn transaction_cleanup_remains_available_during_suspended_storage() {
+    use jazz::tools::OpenTransactionId;
+    use std::future::Future;
+    use std::task::{Context, Waker};
+    let db = block_on(Db::open(config())).unwrap();
+    let id = OpenTransactionId::new();
+    block_on(db.begin_mergeable(id)).unwrap();
+    block_on(db.tx_ref(id).insert(
+        "notes",
+        BTreeMap::from([("title".to_owned(), Value::String("abandoned".to_owned()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let tx = block_on(db.serializable_tx()).unwrap();
+    let mut write = Box::pin(db.host_put_then_wait_for_test(
+        JOURNAL,
+        b"pending",
+        b"bob",
+        std::future::pending(),
+    ));
+    assert!(
+        write
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    db.abandon_transaction_handle(id).unwrap();
+    assert!(db.abandon_transaction_handle(id).is_err());
+    drop(tx);
+    drop(write);
+    block_on(db.begin_mergeable(id)).unwrap();
+    block_on(db.tx_ref(id).insert(
+        "notes",
+        BTreeMap::from([("title".to_owned(), Value::String("replacement".to_owned()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(db.commit_mergeable_handle(id)).unwrap();
+    let query = db.prepare_query(&Query::from("notes")).unwrap();
+    let rows = block_on(db.read(&query)).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell("title"),
+        Some(Value::String("replacement".to_owned()))
+    );
+}
+
+/// Alice abandons a batch with a cached SQL overlay, then reuses its ID for a
+/// batch of the same length. Bob must see only the replacement's staged row.
+#[test]
+fn reused_transaction_id_does_not_reuse_an_abandoned_overlay() {
+    use jazz::tools::OpenTransactionId;
+    let db = block_on(Db::open(config())).unwrap();
+    let id = OpenTransactionId::new();
+    for title in ["abandoned", "replacement"] {
+        block_on(db.begin_mergeable(id)).unwrap();
+        block_on(db.tx_ref(id).insert(
+            "notes",
+            BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+            Default::default(),
+        ))
+        .unwrap();
+        if title == "abandoned" {
+            db.abandon_transaction_handle(id).unwrap();
+        }
+    }
+    block_on(db.commit_mergeable_handle(id)).unwrap();
+    let query = db.prepare_query(&Query::from("notes")).unwrap();
+    let rows = block_on(db.read(&query)).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell("title"),
+        Some(Value::String("replacement".to_owned()))
+    );
+}
+
+/// Alice's suspended host write owns SQL until it finishes. Bob's reads,
+/// maintenance, schema lookup and session admission must wait, then work on
+/// the rolled-back store when Alice cancels; none may enter her savepoint.
+#[test]
+fn database_entry_points_wait_for_the_current_sql_operation() {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Waker};
+
+    let db = block_on(Db::open(config())).unwrap();
+    let query = db.prepare_query(&Query::from("notes")).unwrap();
+    let mut write = Box::pin(db.host_put_then_wait_for_test(
+        JOURNAL,
+        b"pending",
+        b"alice",
+        std::future::pending(),
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(write.as_mut().poll(&mut cx).is_pending());
+    let mut operations: Vec<Pin<Box<dyn Future<Output = ()> + '_>>> = vec![
+        Box::pin(async {
+            db.tick().await.unwrap();
+        }),
+        Box::pin(async {
+            db.close().await.unwrap();
+        }),
+        Box::pin(async {
+            assert!(db.read(&query).await.unwrap().is_empty());
+        }),
+        Box::pin(async {
+            db.set_authority().await;
+        }),
+        Box::pin(async {
+            db.table_identity("notes").await.unwrap();
+        }),
+        Box::pin(async {
+            db.capture_snapshot().await.unwrap();
+        }),
+        Box::pin(async {
+            db.check_session_pin(AuthorSubject::SYSTEM, None)
+                .await
+                .unwrap();
+        }),
+        Box::pin(async {
+            db.begin_serializable(jazz::tools::OpenTransactionId::new())
+                .await
+                .unwrap();
+        }),
+    ];
+    for operation in &mut operations {
+        assert!(operation.as_mut().poll(&mut cx).is_pending());
+    }
+    drop(write);
+    for operation in operations {
+        block_on(operation);
+    }
+    assert_eq!(block_on(db.host_get(JOURNAL, b"pending")).unwrap(), None);
+    block_on(db.insert(
+        "notes",
+        BTreeMap::from([("title".to_owned(), Value::String("bob".to_owned()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    assert_eq!(block_on(db.read(&query)).unwrap().len(), 1);
+}
+
+/// Alice's staged reads, writes and partial edits wait for Bob's suspended SQL.
+/// Reusing Alice's transaction ID while she waits must reject the old operation.
+/// bob:   host SQL ──pending────drop
+/// alice: staged op ──wait──────resume (or reject replaced batch)
+#[test]
+fn staged_operations_wait_for_storage_and_reject_replaced_batches() {
+    use jazz::db::{LargeValueUpdate, LargeValueUpdatePage, LargeValueUpdateSplice};
+    use jazz::tools::OpenTransactionId;
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    for operation in ["read", "write", "edit"] {
+        for replace in [false, true] {
+            let db = block_on(Db::open(config())).unwrap();
+            let original = "a".repeat(jazz::large_values::LEAF_MAX_BYTES + 1);
+            let row = block_on(db.insert(
+                "notes",
+                BTreeMap::from([("title".to_owned(), Value::String(original.clone()))]),
+                Default::default(),
+            ))
+            .unwrap()
+            .row_uuid();
+            let id = OpenTransactionId::new();
+            block_on(db.begin_serializable(id)).unwrap();
+            let tx = db.tx_ref(id);
+            let query = db.prepare_query(&Query::from("notes")).unwrap();
+            let mut bob = Box::pin(db.host_put_then_wait_for_test(
+                JOURNAL,
+                b"bob",
+                b"pending",
+                std::future::pending(),
+            ));
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(bob.as_mut().poll(&mut cx).is_pending());
+            let mut alice = Box::pin(async {
+                match operation {
+                    "read" => {
+                        let rows = tx.all_prepared(&query).await?;
+                        assert_eq!(rows[0].cell("title"), Some(Value::String(original.clone())));
+                        Ok(())
+                    }
+                    "write" => tx
+                        .update(
+                            "notes",
+                            row,
+                            BTreeMap::from([(
+                                "title".to_owned(),
+                                Value::String("replacement".into()),
+                            )]),
+                            Default::default(),
+                        )
+                        .await
+                        .map(|_| ()),
+                    _ => tx
+                        .update_with_large_value_mutations(
+                            "notes",
+                            row,
+                            BTreeMap::new(),
+                            vec![LargeValueUpdate::Splice {
+                                column: "title".into(),
+                                within: LargeValueUpdatePage::TextUtf8 { from: 0, to: 1 },
+                                splices: vec![LargeValueUpdateSplice {
+                                    at: 0,
+                                    delete: 1,
+                                    insert: b"b".to_vec(),
+                                }],
+                            }],
+                            Default::default(),
+                        )
+                        .await
+                        .map(|_| ()),
+                }
+            });
+            assert!(alice.as_mut().poll(&mut cx).is_pending());
+            if replace {
+                db.abandon_transaction_handle(id).unwrap();
+                block_on(db.begin_mergeable(id)).unwrap();
+            }
+            drop(bob);
+            let result = block_on(alice);
+            if replace {
+                assert!(result.is_err());
+                block_on(db.commit_mergeable_handle(id)).unwrap();
+            } else {
+                result.unwrap();
+                block_on(db.commit_serializable_handle(id)).unwrap();
+            }
+            let expected = if replace || operation == "read" {
+                original
+            } else if operation == "write" {
+                "replacement".into()
+            } else {
+                format!("b{}", &original[1..])
+            };
+            let rows = block_on(db.read(&query)).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].cell("title"), Some(Value::String(expected)));
+        }
+    }
 }

@@ -92,7 +92,7 @@ impl Band {
         for i in 0..2 {
             let node = 0x50 + i as u8;
             let db = open(node, device_author(node));
-            db.set_remote_link_hint(RemoteLinkHint::Live);
+            block_on(db.set_remote_link_hint(RemoteLinkHint::Live));
             band.devices.push(Device {
                 node,
                 db,
@@ -115,23 +115,27 @@ impl Band {
         let (device_side, core_side) = duplex();
         let device = &mut self.devices[i];
         device.upstream = Some(block_on(device.db.connect_upstream(device_side)));
-        self.core
-            .accept_subscriber(core_side, device_author(device.node))
-            .expect("the authority accepts the device");
+        block_on(
+            self.core
+                .accept_subscriber(core_side, device_author(device.node)),
+        )
+        .expect("the authority accepts the device");
     }
 
     pub fn offline(&mut self, i: usize) {
         let device = &mut self.devices[i];
         let upstream = device.upstream.take().expect("the device is online");
         assert!(device.db.detach_connection(&upstream));
-        device.db.set_remote_link_hint(RemoteLinkHint::Failed);
+        block_on(device.db.set_remote_link_hint(RemoteLinkHint::Failed));
     }
 
     pub fn online(&mut self, i: usize) {
         self.connect(i);
-        self.devices[i]
-            .db
-            .set_remote_link_hint(RemoteLinkHint::Live);
+        block_on(
+            self.devices[i]
+                .db
+                .set_remote_link_hint(RemoteLinkHint::Live),
+        );
         self.pump();
     }
 

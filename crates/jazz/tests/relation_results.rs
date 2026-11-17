@@ -72,8 +72,16 @@ fn seed(db: &Db, table: &str, row: RowUuid, pairs: &[(&str, Value)]) {
         .iter()
         .map(|(k, v)| ((*k).to_owned(), v.clone()))
         .collect::<BTreeMap<_, _>>();
-    db.seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, cells)
-        .unwrap();
+    jazz::db::block_on(db.insert(
+        table,
+        cells,
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
 }
 
 fn text(s: &str) -> Value {
@@ -171,7 +179,7 @@ fn siblings_with_empty_and_full_nested_relations_share_one_type() {
     menu(&db);
     let prepared = db.prepare_query(&categories_with_images()).unwrap();
     let roots = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
-    let rows = db.nest_relations(&prepared, roots).unwrap();
+    let rows = jazz::db::block_on(db.nest_relations(&prepared, roots)).unwrap();
     let Value::Array(categories) = cell(&rows[0], "categories") else {
         panic!("categories are an array");
     };
@@ -197,9 +205,7 @@ fn a_synced_forward_array_relation_ships_the_rows_it_lists() {
     let client = open(1);
     let (client_side, server_side) = duplex();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server
-        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
     let query = Query::from("menus").array_subquery(ArraySubquery::new(
         "featured_rows",
         "categories",
@@ -218,7 +224,7 @@ fn a_synced_forward_array_relation_ships_the_rows_it_lists() {
         ..ReadOpts::default()
     };
     let roots = block_on(client.all(&prepared, opts)).unwrap();
-    let rows = client.nest_relations(&prepared, roots).unwrap();
+    let rows = jazz::db::block_on(client.nest_relations(&prepared, roots)).unwrap();
     let Value::Array(featured) = cell(&rows[0], "featured_rows") else {
         panic!("featured rows are an array");
     };
@@ -317,7 +323,7 @@ fn a_nested_required_relation_drops_children_without_rows() {
     );
     let prepared = db.prepare_query(&query).unwrap();
     let roots = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
-    let rows = db.nest_relations(&prepared, roots).unwrap();
+    let rows = jazz::db::block_on(db.nest_relations(&prepared, roots)).unwrap();
     let Value::Array(categories) = cell(&rows[0], "categories") else {
         panic!("categories are an array");
     };

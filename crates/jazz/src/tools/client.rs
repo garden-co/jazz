@@ -27,9 +27,11 @@ use serde::Deserialize;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use uuid::Uuid;
 
+#[cfg(feature = "sqlite")]
+use crate::db::FileOptions;
 use crate::db::{
     CurrentRow, Db, DbConfig, DbIdentity, DeleteOptions, Error as CoreError, ExactWriteTarget,
-    FileOptions, FirstLoad, InsertOptions, ReadOpts, RemoteLinkHint, RemovedRow, RestoreOptions,
+    FirstLoad, InsertOptions, ReadOpts, RemoteLinkHint, RemovedRow, RestoreOptions,
     SubscriptionEvent, SubscriptionOutputRow, SubscriptionStream as CoreSubscriptionStream,
     UpdateOptions, UpsertOptions, Upstream, WireTransportAdapter, WriteIdentity, WriteTarget,
 };
@@ -79,6 +81,7 @@ const TICK_RETRY_MAX_DELAY: Duration = Duration::from_secs(2);
 /// transaction-conflict failures.
 const TICK_RECOVERY_ATTEMPTS: u32 = 8;
 /// The local store under `AppContext::data_dir`.
+#[cfg(feature = "sqlite")]
 const STORE_FILE: &str = "jazz.sqlite";
 /// The node id a persistent store's writes are uploaded under. It must
 /// survive restarts: the server dedupes resent commits by node.
@@ -753,7 +756,7 @@ impl LinkKeeper {
 
     /// Hand the machine's view to the read gate and the status accessor.
     fn publish(&mut self, shared: &Shared) {
-        shared.db.set_remote_link_hint(self.link.remote_link_hint());
+        crate::db::block_on(shared.db.set_remote_link_hint(self.link.remote_link_hint()));
         let mut changed = false;
         for event in self.link.drain_events() {
             match event {
@@ -907,25 +910,10 @@ impl JazzClient {
         let identity = core_identity(&context, client_id(&context)?, default_session.as_ref())?;
         let mut config = DbConfig::new(core_schema, identity);
         config.migrations = context.migrations.clone();
-        let db = match context.storage {
-            ClientStorage::Memory => Db::open(config).await,
-            ClientStorage::Persistent => {
-                Db::open_at(
-                    config,
-                    &context.data_dir.join(STORE_FILE),
-                    FileOptions::default(),
-                )
-                .await
-            }
-        }
-        .map_err(|error| match error.code {
-            crate::db::ErrorCode::UnsupportedStorageCodecs => {
-                JazzError::UnsupportedStorage(error.message)
-            }
-            _ => JazzError::Storage(error.to_string()),
-        })?;
+        let db = open_client_db(config, &context).await?;
         if let Some(session) = default_session.as_ref() {
-            db.set_identity_claims(identity.author, session_claims_to_core_claims(session)?);
+            db.set_identity_claims(identity.author, session_claims_to_core_claims(session)?)
+                .await;
         }
         let work = Arc::new(Notify::new());
         let (progress, _) = watch::channel(0);
@@ -964,7 +952,10 @@ impl JazzClient {
         if connector.is_none() {
             // Still a replica: its writes queue for upload, so a store opened
             // without a server keeps them for the first one it connects to.
-            shared.db.set_remote_link_hint(RemoteLinkHint::NoServer);
+            shared
+                .db
+                .set_remote_link_hint(RemoteLinkHint::NoServer)
+                .await;
         }
         if let Some(connector) = connector {
             let wake = work.clone();
@@ -1073,9 +1064,11 @@ impl JazzClient {
             return Ok(None);
         };
         let author = session.author_subject()?;
-        self.shared
-            .db
-            .set_identity_claims(author, session_claims_to_core_claims(session)?);
+        crate::db::block_on(
+            self.shared
+                .db
+                .set_identity_claims(author, session_claims_to_core_claims(session)?),
+        );
         Ok(Some(author))
     }
 
@@ -1346,7 +1339,17 @@ impl JazzClient {
     /// A [`ReadTier::Remote`] read, and a local-first read that waits for
     /// the server, return the first answer of a subscription held for the
     /// read: the server's settled result once it arrives.
-    pub async fn query_with_opts(&self, query: Query, opts: ReadOpts) -> Result<Vec<QueryResult>> {
+    pub fn query_with_opts(
+        &self,
+        query: Query,
+        opts: ReadOpts,
+    ) -> impl std::future::Future<Output = Result<Vec<QueryResult>>> + '_ {
+        // SQL-backed reads have large futures. Allocate at this boundary so
+        // concurrent queries do not embed those futures in their caller's stack.
+        Box::pin(self.read_query(query, opts))
+    }
+
+    async fn read_query(&self, query: Query, opts: ReadOpts) -> Result<Vec<QueryResult>> {
         let read = with_history_identity(&query);
         let opts = self.branch_opts(opts);
         let rows = if let Some(transaction_id) = self.open_transaction()? {
@@ -1376,7 +1379,9 @@ impl JazzClient {
                     added.sort_by_key(|row| row.index);
                     added.into_iter().map(|row| row.row).collect()
                 }
-                SubscriptionEvent::Rejected { reason, .. } => return Err(JazzError::Query(reason)),
+                SubscriptionEvent::Rejected { reason, .. } => {
+                    return Err(JazzError::Query(reason));
+                }
                 SubscriptionEvent::Closed => {
                     return Err(JazzError::Query("the read closed before answering".into()));
                 }
@@ -2415,7 +2420,7 @@ impl JazzClient {
         }
         self.shared.upstream_paused.send_replace(true);
         let detached = detach(&self.shared);
-        self.shared.db.set_remote_link_hint(RemoteLinkHint::Failed);
+        crate::db::block_on(self.shared.db.set_remote_link_hint(RemoteLinkHint::Failed));
         detached
     }
 
@@ -2496,7 +2501,7 @@ impl JazzClient {
             if rejection.writer != *node.as_bytes() {
                 continue;
             }
-            let _ = self.shared.db.discard_rejected_transaction(rejection.seq);
+            let _ = crate::db::block_on(self.shared.db.discard_rejected_transaction(rejection.seq));
             let (code, reason) =
                 super::rejection_code_and_reason(&rejection.error).unwrap_or_else(|| {
                     // Any other refusal is a plain `write_rejected`, as TS
@@ -3203,8 +3208,7 @@ impl<'a> Decoder<'a> {
             return Ok(projected);
         };
         Ok(
-            match db
-                .row_provenance(row.table(), row.row_uuid())
+            match crate::db::block_on(db.row_provenance(row.table(), row.row_uuid()))
                 .map_err(|error| JazzError::Query(error.to_string()))?
             {
                 Some((created_at, created_by, updated_at, updated_by)) => {
@@ -3282,6 +3286,36 @@ fn provenance(row: &CurrentRow) -> crate::model::metadata::RowProvenance {
         updated_by: author("$updatedBy").unwrap_or_else(|| created_by.clone()),
         created_by,
         created_at,
+    }
+}
+
+async fn open_client_db(config: DbConfig, context: &AppContext) -> Result<Db> {
+    #[cfg(feature = "sqlite")]
+    {
+        match context.storage {
+            ClientStorage::Memory => Db::open(config).await,
+            ClientStorage::Persistent => {
+                Db::open_at(
+                    config,
+                    &context.data_dir.join(STORE_FILE),
+                    FileOptions::default(),
+                )
+                .await
+            }
+        }
+        .map_err(|error| match error.code {
+            crate::db::ErrorCode::UnsupportedStorageCodecs => {
+                JazzError::UnsupportedStorage(error.message)
+            }
+            _ => JazzError::Storage(error.to_string()),
+        })
+    }
+    #[cfg(not(feature = "sqlite"))]
+    {
+        let _ = (config, context);
+        Err(JazzError::Storage(
+            "Native client storage is not enabled in this server build".into(),
+        ))
     }
 }
 

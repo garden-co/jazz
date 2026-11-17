@@ -109,7 +109,7 @@ fn commit(db: &Db, inserts: &[(u16, &str)], updates: &[(u16, &str)]) {
 /// Every row's title, as `db` shows it now.
 fn titles(db: &Db) -> BTreeMap<RowUuid, String> {
     let prepared = db.prepare_query(&Query::from("docs")).unwrap();
-    db.read(&prepared)
+    jazz::db::block_on(db.read(&prepared))
         .unwrap()
         .iter()
         .map(|r| match r.cell("title") {
@@ -200,17 +200,16 @@ fn connect(server: &Db, client: &Db, identity: AuthorSubject) -> Link {
         to_server: up.clone(),
         from_server: down.clone(),
     })));
-    server
-        .accept_subscriber(
-            Box::new(Down {
-                to_client: down.clone(),
-                from_client: up,
-                holding: holding.clone(),
-                held: held.clone(),
-            }),
-            identity,
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(Down {
+            to_client: down.clone(),
+            from_client: up,
+            holding: holding.clone(),
+            held: held.clone(),
+        }),
+        identity,
+    ))
+    .unwrap();
     Link {
         _upstream: upstream,
         to_client: down,

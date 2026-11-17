@@ -111,10 +111,8 @@ fn drive<T>(dbs: &[&Db], future: impl Future<Output = T>) -> T {
 fn connect(client: &Db, server: &Db) {
     let (client_side, server_side) = duplex();
     block_on(client.connect_upstream(client_side));
-    client.set_remote_link_hint(RemoteLinkHint::Live);
-    server
-        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-        .unwrap();
+    jazz::db::block_on(client.set_remote_link_hint(RemoteLinkHint::Live));
+    jazz::db::block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
 }
 
 fn titles(db: &Db) -> BTreeMap<u8, String> {

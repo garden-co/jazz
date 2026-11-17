@@ -181,8 +181,8 @@ fn a_failed_write_leaves_its_key_to_no_other_commit() {
     let replica = open(1);
     let (up, down) = duplex();
     let _link = block_on(replica.connect_upstream(up));
-    core.accept_subscriber(down, AuthorSubject::SYSTEM).unwrap();
-    replica.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(core.accept_subscriber(down, AuthorSubject::SYSTEM)).unwrap();
+    jazz::db::block_on(replica.set_remote_link_hint(RemoteLinkHint::Live));
     let settle = || {
         for _ in 0..8 {
             for db in [&replica, &core] {
@@ -229,8 +229,8 @@ fn a_resend_through_another_server_gets_the_first_fate_from_the_authority() {
     for server in [&first, &second] {
         let (up, down) = duplex();
         links.push(block_on(server.connect_upstream(up)));
-        core.accept_subscriber(down, AuthorSubject::SYSTEM).unwrap();
-        server.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(core.accept_subscriber(down, AuthorSubject::SYSTEM)).unwrap();
+        jazz::db::block_on(server.set_remote_link_hint(RemoteLinkHint::Live));
     }
     let settle = || {
         for _ in 0..8 {
@@ -291,8 +291,8 @@ fn two_users_writing_under_one_key_through_two_servers_both_land() {
     for server in [&first, &second] {
         let (up, down) = duplex();
         links.push(block_on(server.connect_upstream(up)));
-        core.accept_subscriber(down, AuthorSubject::SYSTEM).unwrap();
-        server.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(core.accept_subscriber(down, AuthorSubject::SYSTEM)).unwrap();
+        jazz::db::block_on(server.set_remote_link_hint(RemoteLinkHint::Live));
     }
     let settle = || {
         for _ in 0..8 {
@@ -354,8 +354,8 @@ fn only_a_thin_clients_writer_node_is_refused_to_sessions() {
             .unwrap();
             let (up, down) = duplex();
             links.push(block_on(client.connect_upstream(up)));
-            core.accept_subscriber(down, user(1)).unwrap();
-            client.set_remote_link_hint(RemoteLinkHint::Live);
+            jazz::db::block_on(core.accept_subscriber(down, user(1))).unwrap();
+            jazz::db::block_on(client.set_remote_link_hint(RemoteLinkHint::Live));
             client
         })
         .collect();

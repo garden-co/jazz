@@ -8,18 +8,17 @@
 //! (`_jazz_names`), so a reopened store and its old-version views find the
 //! same columns again.
 
+use jazz_sql::Sql as _;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use rusqlite::Connection;
+use crate::host::DbConnection;
 
 use crate::ids::SchemaVersionId;
 use crate::options::{Error, ErrorCode};
 use crate::protocol::{LensOp, MigrationLens};
 use crate::records::{Value, ValueType};
 use crate::schema::JazzSchema;
-use crate::values::{
-    Column, Schema, Sql, StoredNames, TagRegistry, in_savepoint, storage, to_sql, unsupported,
-};
+use crate::values::{Column, Schema, Sql, StoredNames, TagRegistry, storage, to_sql, unsupported};
 
 /// The stored-name catalogue, created with the store.
 ///
@@ -287,26 +286,37 @@ fn schema_error(message: impl Into<String>) -> Error {
 }
 
 impl Names {
-    pub(crate) fn load(conn: &Connection) -> Result<Self, Error> {
-        conn.execute_batch(DDL).map_err(storage)?;
-        conn.execute_batch(crate::catalogue::DDL).map_err(storage)?;
+    pub(crate) async fn load<S: jazz_sql::Sql>(conn: &mut S) -> Result<Self, Error>
+    where
+        S::Error: std::fmt::Display,
+    {
+        use jazz_sql::Row as _;
+        conn.execute_script(DDL)
+            .await
+            .map_err(crate::values::provider_error)?;
+        conn.execute_script(crate::catalogue::DDL)
+            .await
+            .map_err(crate::values::provider_error)?;
         let mut names = Self::default();
         let bad = |what: &str| Error::new(ErrorCode::Storage, format!("bad {what}"));
         let mut by_n = HashMap::new();
-        let mut statement = conn
-            .prepare("SELECT n, version, confirmed FROM _jazz_versions")
-            .map_err(storage)?;
-        let rows = statement
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, Vec<u8>>(1)?,
-                    r.get::<_, Option<Vec<u8>>>(2)?,
-                ))
-            })
-            .map_err(storage)?;
+
+        let rows = conn
+            .query_rows(
+                "SELECT n, version, confirmed FROM _jazz_versions",
+                &[],
+                |r| {
+                    Ok((
+                        r.get::<i64>(0)?,
+                        r.get::<Vec<u8>>(1)?,
+                        r.get::<Option<Vec<u8>>>(2)?,
+                    ))
+                },
+            )
+            .await
+            .map_err(crate::values::provider_error)?;
         for row in rows {
-            let (n, version, confirmed) = row.map_err(storage)?;
+            let (n, version, confirmed) = row;
             let version = SchemaVersionId::from_bytes(
                 version
                     .try_into()
@@ -321,23 +331,25 @@ impl Names {
             by_n.insert(n, version);
             names.versions.insert(version, (n, StoredNames::default()));
         }
-        drop(statement);
-        let mut statement = conn
-            .prepare("SELECT n, tbl, col, stored_tbl, stored_col FROM _jazz_names")
-            .map_err(storage)?;
-        let rows = statement
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                ))
-            })
-            .map_err(storage)?;
+
+        let rows = conn
+            .query_rows(
+                "SELECT n, tbl, col, stored_tbl, stored_col FROM _jazz_names",
+                &[],
+                |r| {
+                    Ok((
+                        r.get::<i64>(0)?,
+                        r.get::<String>(1)?,
+                        r.get::<String>(2)?,
+                        r.get::<String>(3)?,
+                        r.get::<String>(4)?,
+                    ))
+                },
+            )
+            .await
+            .map_err(crate::values::provider_error)?;
         for row in rows {
-            let (n, table, column, stored_table, stored_column) = row.map_err(storage)?;
+            let (n, table, column, stored_table, stored_column) = row;
             let version = by_n
                 .get(&n)
                 .ok_or_else(|| bad("version number in _jazz_names"))?;
@@ -352,24 +364,26 @@ impl Names {
                 columns.insert(column, stored_column);
             }
         }
-        drop(statement);
-        let mut statement = conn
-            .prepare("SELECT tbl, col, ty, branch, has_dflt, dflt FROM _jazz_stored_columns")
-            .map_err(storage)?;
-        let rows = statement
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, bool>(3)?,
-                    r.get::<_, bool>(4)?,
-                    r.get::<_, Sql>(5)?,
-                ))
-            })
-            .map_err(storage)?;
+
+        let rows = conn
+            .query_rows(
+                "SELECT tbl, col, ty, branch, has_dflt, dflt FROM _jazz_stored_columns",
+                &[],
+                |r| {
+                    Ok((
+                        r.get::<String>(0)?,
+                        r.get::<String>(1)?,
+                        r.get::<Option<String>>(2)?,
+                        r.get::<bool>(3)?,
+                        r.get::<bool>(4)?,
+                        r.get::<Sql>(5)?,
+                    ))
+                },
+            )
+            .await
+            .map_err(crate::values::provider_error)?;
         for row in rows {
-            let (table, column, ty, branch, has_default, default) = row.map_err(storage)?;
+            let (table, column, ty, branch, has_default, default) = row;
             let columns = names.branches.entry(table.clone()).or_default();
             if column.is_empty() {
                 continue;
@@ -382,23 +396,24 @@ impl Names {
                 serde_json::from_str(&ty).map_err(|_| bad("value type in _jazz_stored_columns"))?;
             names.types.entry(table).or_default().insert(column, ty);
         }
-        drop(statement);
-        if table_exists(conn, "_jazz_enum_tags")? {
-            let mut statement = conn
-                .prepare("SELECT tbl, col, tag, name FROM _jazz_enum_tags")
-                .map_err(storage)?;
-            let rows = statement
-                .query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, i64>(2)?,
-                        r.get::<_, String>(3)?,
-                    ))
-                })
-                .map_err(storage)?;
+        if table_exists(conn, "_jazz_enum_tags").await? {
+            let rows = conn
+                .query_rows(
+                    "SELECT tbl, col, tag, name FROM _jazz_enum_tags",
+                    &[],
+                    |r| {
+                        Ok((
+                            r.get::<String>(0)?,
+                            r.get::<String>(1)?,
+                            r.get::<i64>(2)?,
+                            r.get::<String>(3)?,
+                        ))
+                    },
+                )
+                .await
+                .map_err(crate::values::provider_error)?;
             for row in rows {
-                let (table, column, tag, name) = row.map_err(storage)?;
+                let (table, column, tag, name) = row;
                 names
                     .tags
                     .column(&table, &column)
@@ -406,40 +421,41 @@ impl Names {
                     .insert(name, tag);
             }
         }
-        if table_exists(conn, "_jazz_enum_defaults")? {
-            let mut statement = conn
-                .prepare("SELECT tbl, col, name FROM _jazz_enum_defaults")
-                .map_err(storage)?;
-            let rows = statement
-                .query_map([], |r| {
+        if table_exists(conn, "_jazz_enum_defaults").await? {
+            let rows = conn
+                .query_rows("SELECT tbl, col, name FROM _jazz_enum_defaults", &[], |r| {
                     Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
+                        r.get::<String>(0)?,
+                        r.get::<String>(1)?,
+                        r.get::<String>(2)?,
                     ))
                 })
-                .map_err(storage)?;
+                .await
+                .map_err(crate::values::provider_error)?;
             for row in rows {
-                let (table, column, name) = row.map_err(storage)?;
+                let (table, column, name) = row;
                 names.enum_defaults.get_mut().insert((table, column), name);
             }
         }
-        let mut statement = conn
-            .prepare("SELECT tbl, col, since, src, dflt FROM _jazz_lens_cells")
-            .map_err(storage)?;
-        let rows = statement
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Vec<u8>>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                    r.get::<_, Sql>(4)?,
-                ))
-            })
-            .map_err(storage)?;
+
+        let rows = conn
+            .query_rows(
+                "SELECT tbl, col, since, src, dflt FROM _jazz_lens_cells",
+                &[],
+                |r| {
+                    Ok((
+                        r.get::<String>(0)?,
+                        r.get::<String>(1)?,
+                        r.get::<Vec<u8>>(2)?,
+                        r.get::<Option<String>>(3)?,
+                        r.get::<Sql>(4)?,
+                    ))
+                },
+            )
+            .await
+            .map_err(crate::values::provider_error)?;
         for row in rows {
-            let (table, column, since, src, default) = row.map_err(storage)?;
+            let (table, column, since, src, default) = row;
             let since = SchemaVersionId::from_bytes(
                 since
                     .try_into()
@@ -456,43 +472,42 @@ impl Names {
                 rule,
             });
         }
-        drop(statement);
         Ok(names)
     }
 
     /// Record lens cells (once each), in memory and in the file.
-    pub(crate) fn record_lens_cells(
-        &mut self,
-        conn: &Connection,
+    pub(crate) async fn record_lens_cells(
+        names: &std::cell::RefCell<Self>,
+        conn: &DbConnection,
         cells: Vec<LensCell>,
     ) -> Result<(), Error> {
         if cells.is_empty() {
             return Ok(());
         }
-        let mut insert = conn
-            .prepare_cached(
-                "INSERT OR IGNORE INTO _jazz_lens_cells (tbl, col, since, src, dflt) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-            )
-            .map_err(storage)?;
+        let insert = "INSERT OR IGNORE INTO _jazz_lens_cells (tbl, col, since, src, dflt) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)";
         for cell in cells {
-            if self.lens_cells.contains(&cell) {
+            if names.borrow().lens_cells.contains(&cell) {
                 continue;
             }
             let (source, default) = match &cell.rule {
                 LensCellRule::Copy(source) => (Some(source.as_str()), Sql::Null),
                 LensCellRule::Dropped(default) => (None, default.clone()),
             };
-            insert
-                .execute(rusqlite::params![
-                    cell.table,
-                    cell.column,
-                    cell.since.as_bytes().to_vec(),
-                    source,
-                    default
-                ])
+            conn.sql()
+                .execute(
+                    insert,
+                    jazz_sql::params![
+                        cell.table,
+                        cell.column,
+                        cell.since.as_bytes().to_vec(),
+                        source,
+                        default
+                    ],
+                )
+                .await
                 .map_err(storage)?;
-            self.lens_cells.push(cell);
+            names.borrow_mut().lens_cells.push(cell);
         }
         Ok(())
     }
@@ -564,6 +579,55 @@ impl Names {
         (copies, dropped)
     }
 
+    /// Every physical application table owned by any admitted schema, including
+    /// zero-column tables and tables absent from the currently opening version.
+    pub(crate) fn stored_tables(&self) -> BTreeSet<String> {
+        self.versions
+            .values()
+            .flat_map(|(_, names)| names.tables.values().map(|(table, _)| table.clone()))
+            .chain(self.branches.keys().cloned())
+            .collect()
+    }
+
+    /// Do not adopt an unrelated SQLite object just because its name matches a
+    /// newly admitted Jazz table. Check before minting metadata or issuing DDL.
+    async fn check_new_tables(
+        names: &std::cell::RefCell<Self>,
+        conn: &DbConnection,
+        schema: &Schema,
+    ) -> Result<(), Error> {
+        use jazz_sql::Row as _;
+        let owned: std::collections::BTreeSet<String> = names.borrow().stored_tables();
+        for table in schema
+            .tables
+            .values()
+            .filter(|table| !owned.contains(&table.stored))
+        {
+            for name in [
+                &table.stored,
+                &format!("{}__h", table.stored),
+                &format!("{}__by_clock", table.stored),
+            ] {
+                let existing: Option<String> = conn
+                    .sql()
+                    .query_optional(
+                        "SELECT name FROM sqlite_master WHERE name = ?1 COLLATE NOCASE",
+                        jazz_sql::params![name.as_str()],
+                        |row| row.get(0),
+                    )
+                    .await
+                    .map_err(storage)?;
+                if let Some(existing) = existing {
+                    return Err(schema_error(format!(
+                        "Cannot create Jazz table {}: SQLite object {existing} already exists outside Jazz's schema catalogue",
+                        table.stored
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The most recently admitted version's names.
     pub(crate) fn latest(&self) -> Option<&StoredNames> {
         self.versions
@@ -614,34 +678,47 @@ impl Names {
     /// stored columns. Another hash of a version admitted already (one that
     /// differs only in defaults or indexes) adds no names; its definition
     /// is kept, so a bundle selecting it resolves.
-    pub(crate) fn admit(&mut self, conn: &Connection, schema: &Schema) -> Result<(), Error> {
+    pub(crate) async fn admit(
+        names: &std::cell::RefCell<Self>,
+        conn: &DbConnection,
+        schema: &Schema,
+    ) -> Result<(), Error> {
         let version = schema.jazz.version_id();
-        if self.versions.contains_key(&version) {
-            return crate::catalogue::record_equivalent(conn, &schema.jazz);
+        if names.borrow().versions.contains_key(&version) {
+            return crate::catalogue::record_equivalent(&mut conn.sql(), &schema.jazz).await;
         }
-        let n = self.versions.values().map(|(n, _)| *n).max().unwrap_or(0) + 1;
-        let names = schema.names();
-        let columns = self.new_stored_columns(schema)?;
-        in_savepoint(conn, "jazz_names", || {
-            conn.execute(
-                "INSERT INTO _jazz_versions (n, version) VALUES (?1, ?2)",
-                rusqlite::params![n, version.as_bytes().to_vec()],
-            )
-            .map_err(storage)?;
-            write_names(conn, n, &names)?;
-            write_stored_columns(conn, &columns)?;
-            crate::catalogue::record_admitted(conn, n, &schema.jazz)
-        })?;
-        self.versions.insert(version, (n, names));
+        let (n, stored_names, columns) = {
+            let state = names.borrow();
+            let n = state.versions.values().map(|(n, _)| *n).max().unwrap_or(0) + 1;
+            let stored_names = schema.names();
+            let columns = state.new_stored_columns(schema)?;
+            (n, stored_names, columns)
+        };
+        crate::values::in_savepoint_async(conn, "jazz_names", async || {
+            conn.sql()
+                .execute(
+                    "INSERT INTO _jazz_versions (n, version) VALUES (?1, ?2)",
+                    jazz_sql::params![n, version.as_bytes().to_vec()],
+                )
+                .await
+                .map_err(storage)?;
+            write_names(conn, n, &stored_names).await?;
+            write_stored_columns(conn, &columns).await?;
+            crate::catalogue::record_admitted(&mut conn.sql(), n, &schema.jazz).await
+        })
+        .await?;
+        let mut state = names.borrow_mut();
+        state.versions.insert(version, (n, stored_names));
         for column in columns {
-            let branches = self.branches.entry(column.table.clone()).or_default();
+            let branches = state.branches.entry(column.table.clone()).or_default();
             let Some(ty) = column.ty else {
                 continue;
             };
             if let Some(default) = column.branch {
                 branches.insert(column.column.clone(), default);
             }
-            self.types
+            state
+                .types
                 .entry(column.table)
                 .or_default()
                 .insert(column.column, ty);
@@ -716,12 +793,17 @@ impl Names {
     /// tag for yet: each column's next tags, in declaration order. Every
     /// store does this as it admits a version; [`Self::align`] then puts
     /// the current schema's in its order.
-    pub(crate) fn mint(&self, conn: &Connection, schema: &Schema) -> Result<(), Error> {
+    pub(crate) async fn mint(
+        names: &std::cell::RefCell<Self>,
+        conn: &DbConnection,
+        schema: &Schema,
+    ) -> Result<(), Error> {
+        Self::check_new_tables(names, conn, schema).await?;
         for table in schema.tables.values() {
             for column in &table.columns {
                 if let Some(variants) = &column.variants {
                     let variants: Vec<&str> = variants.iter().map(String::as_str).collect();
-                    self.intern(conn, &table.stored, &column.stored, &variants)?;
+                    Self::intern(names, conn, &table.stored, &column.stored, &variants).await?;
                 }
             }
         }
@@ -732,19 +814,19 @@ impl Names {
     /// `table` has no tag for the column's next tag, in the file and in
     /// memory. A name no admitted version declares (a removed variant a row
     /// still holds, say) gets one too: every enum cell is a tag.
-    pub(crate) fn intern(
-        &self,
-        conn: &Connection,
+    pub(crate) async fn intern(
+        names: &std::cell::RefCell<Self>,
+        conn: &DbConnection,
         table: &str,
         column: &str,
-        names: &[&str],
+        variants: &[&str],
     ) -> Result<(), Error> {
-        let tags = self.tags.column(table, column);
+        let tags = names.borrow().tags.column(table, column);
         let new: Vec<(i64, &str)> = {
             let tags = tags.borrow();
             let mut next = tags.next();
             let mut new: Vec<(i64, &str)> = Vec::new();
-            for name in names {
+            for name in variants {
                 if tags.tag(name).is_none() && !new.iter().any(|(_, n)| n == name) {
                     new.push((next, name));
                     next += 1;
@@ -755,20 +837,19 @@ impl Names {
         if new.is_empty() {
             return Ok(());
         }
-        in_savepoint(conn, "jazz_tags", || {
-            conn.execute_batch(ENUM_DDL).map_err(storage)?;
-            let mut insert = conn
-                .prepare_cached(
-                    "INSERT INTO _jazz_enum_tags (tbl, col, tag, name) VALUES (?1, ?2, ?3, ?4)",
-                )
-                .map_err(storage)?;
+        crate::values::in_savepoint_async(conn, "jazz_tags", async || {
+            conn.sql().execute_script(ENUM_DDL).await.map_err(storage)?;
+            let insert =
+                "INSERT INTO _jazz_enum_tags (tbl, col, tag, name) VALUES (?1, ?2, ?3, ?4)";
             for (tag, name) in &new {
-                insert
-                    .execute(rusqlite::params![table, column, tag, name])
+                conn.sql()
+                    .execute(insert, jazz_sql::params![table, column, tag, name])
+                    .await
                     .map_err(storage)?;
             }
             Ok(())
-        })?;
+        })
+        .await?;
         crate::values::tags_changing(conn, &tags);
         let mut tags = tags.borrow_mut();
         for (tag, name) in new {
@@ -783,14 +864,14 @@ impl Names {
     /// takes its rank in `declared`'s order, in the file and in memory.
     /// Returns each (old, new) tag that changed; the caller rewrites the
     /// cells.
-    pub(crate) fn align(
-        &self,
-        conn: &Connection,
+    pub(crate) async fn align(
+        names: &std::cell::RefCell<Self>,
+        conn: &DbConnection,
         table: &str,
         column: &str,
         declared: &[String],
     ) -> Result<Vec<(i64, i64)>, Error> {
-        let tags = self.tags.column(table, column);
+        let tags = names.borrow().tags.column(table, column);
         let (renumbered, changed) = {
             let tags = tags.borrow();
             if tags.in_order(declared) {
@@ -812,43 +893,48 @@ impl Names {
         // it now names another variant, inserts that leave the column out
         // take the default by name instead (`_jazz_enum_defaults`).
         let key = (table.to_owned(), column.to_owned());
-        let stale_default = match self.enum_defaults.borrow().contains_key(&key) {
+        let has_default = names.borrow().enum_defaults.borrow().contains_key(&key);
+        let stale_default = match has_default {
             true => None,
-            false => ddl_default(conn, table, column)?
+            false => ddl_default(conn, table, column)
+                .await?
                 .filter(|tag| changed.iter().any(|(old, _)| old == tag))
                 .and_then(|tag| tags.borrow().name(tag).map(str::to_owned)),
         };
-        in_savepoint(conn, "jazz_tags", || {
-            conn.execute_batch(ENUM_DDL).map_err(storage)?;
+        crate::values::in_savepoint_async(conn, "jazz_tags", async || {
+            conn.sql().execute_script(ENUM_DDL).await.map_err(storage)?;
             if let Some(name) = &stale_default {
-                conn.execute(
-                    "INSERT INTO _jazz_enum_defaults (tbl, col, name) VALUES (?1, ?2, ?3)",
-                    rusqlite::params![table, column, name],
-                )
-                .map_err(storage)?;
+                conn.sql()
+                    .execute(
+                        "INSERT INTO _jazz_enum_defaults (tbl, col, name) VALUES (?1, ?2, ?3)",
+                        jazz_sql::params![table, column, name],
+                    )
+                    .await
+                    .map_err(storage)?;
             }
-            conn.execute(
-                "DELETE FROM _jazz_enum_tags WHERE tbl = ?1 AND col = ?2",
-                rusqlite::params![table, column],
-            )
-            .map_err(storage)?;
-            let mut insert = conn
-                .prepare_cached(
-                    "INSERT INTO _jazz_enum_tags (tbl, col, tag, name) VALUES (?1, ?2, ?3, ?4)",
+            conn.sql()
+                .execute(
+                    "DELETE FROM _jazz_enum_tags WHERE tbl = ?1 AND col = ?2",
+                    jazz_sql::params![table, column],
                 )
+                .await
                 .map_err(storage)?;
+            let insert =
+                "INSERT INTO _jazz_enum_tags (tbl, col, tag, name) VALUES (?1, ?2, ?3, ?4)";
             for (tag, name) in renumbered.iter() {
-                insert
-                    .execute(rusqlite::params![table, column, tag, name])
+                conn.sql()
+                    .execute(insert, jazz_sql::params![table, column, tag, name])
+                    .await
                     .map_err(storage)?;
             }
             Ok(())
-        })?;
+        })
+        .await?;
         crate::values::tags_changing(conn, &tags);
         *tags.borrow_mut() = renumbered;
         crate::values::tags_changed();
         if let Some(name) = stale_default {
-            self.enum_defaults.borrow_mut().insert(key, name);
+            names.borrow().enum_defaults.borrow_mut().insert(key, name);
         }
         Ok(changed)
     }
@@ -867,22 +953,23 @@ impl Names {
     /// A new copy `copy` of stored column `source` of stored table `table`
     /// starts with its source's tags, removed variants' too, so its cells
     /// are its source's and it sorts like its source.
-    pub(crate) fn copy_tags(
-        &self,
-        conn: &Connection,
+    pub(crate) async fn copy_tags(
+        names: &std::cell::RefCell<Self>,
+        conn: &DbConnection,
         table: &str,
         source: &str,
         copy: &str,
     ) -> Result<(), Error> {
-        let names: Vec<String> = self
+        let variants: Vec<String> = names
+            .borrow()
             .tags
             .column(table, source)
             .borrow()
             .iter()
             .map(|(_, name)| name.to_owned())
             .collect();
-        let names: Vec<&str> = names.iter().map(String::as_str).collect();
-        self.intern(conn, table, copy, &names)
+        let variants: Vec<&str> = variants.iter().map(String::as_str).collect();
+        Self::intern(names, conn, table, copy, &variants).await
     }
 
     /// Whether `version`'s names are the ones this replica's authority
@@ -905,9 +992,9 @@ impl Names {
 
     /// Record that the authority confirmed these (version, digest) pairs;
     /// whether any is new here.
-    pub(crate) fn confirm(
-        &mut self,
-        conn: &Connection,
+    pub(crate) async fn confirm(
+        names: &std::cell::RefCell<Self>,
+        conn: &DbConnection,
         confirmed: &[([u8; 16], [u8; 16])],
     ) -> Result<bool, Error> {
         // Only a version this store admitted is kept confirmed: the
@@ -916,27 +1003,28 @@ impl Names {
             .iter()
             .map(|(version, digest)| (SchemaVersionId::from_bytes(*version), *digest))
             .filter(|(version, digest)| {
-                self.versions.contains_key(version) && self.confirmed.get(version) != Some(digest)
+                names.borrow().versions.contains_key(version)
+                    && names.borrow().confirmed.get(version) != Some(digest)
             })
             .collect();
         if new.is_empty() {
             return Ok(false);
         }
-        in_savepoint(conn, "jazz_names", || {
-            let mut update = conn
-                .prepare_cached("UPDATE _jazz_versions SET confirmed = ?2 WHERE version = ?1")
-                .map_err(storage)?;
+        crate::values::in_savepoint_async(conn, "jazz_names", async || {
+            let update = "UPDATE _jazz_versions SET confirmed = ?2 WHERE version = ?1";
             for (version, digest) in &new {
-                update
-                    .execute(rusqlite::params![
-                        version.as_bytes().to_vec(),
-                        digest.to_vec()
-                    ])
+                conn.sql()
+                    .execute(
+                        update,
+                        jazz_sql::params![version.as_bytes().to_vec(), digest.to_vec()],
+                    )
+                    .await
                     .map_err(storage)?;
             }
             Ok(())
-        })?;
-        self.confirmed.extend(new);
+        })
+        .await?;
+        names.borrow_mut().confirmed.extend(new);
         Ok(true)
     }
 
@@ -1295,50 +1383,52 @@ impl Names {
 
 /// The tag stored column `column` of stored table `table` was added with
 /// (`ADD COLUMN ... DEFAULT`), if any.
-fn table_exists(conn: &Connection, name: &str) -> Result<bool, Error> {
-    conn.query_row(
+async fn table_exists<S: jazz_sql::Sql>(conn: &mut S, name: &str) -> Result<bool, Error>
+where
+    S::Error: std::fmt::Display,
+{
+    use jazz_sql::Row as _;
+    conn.query_one(
         "SELECT count(*) > 0 FROM sqlite_master WHERE name = ?1",
-        [name],
+        jazz_sql::params![name],
         |r| r.get(0),
     )
-    .map_err(storage)
+    .await
+    .map_err(crate::values::provider_error)
 }
 
-fn ddl_default(conn: &Connection, table: &str, column: &str) -> Result<Option<i64>, Error> {
-    let mut statement = conn
-        .prepare(&format!(
-            "PRAGMA table_info({})",
-            crate::values::quote(table)
-        ))
-        .map_err(storage)?;
-    let rows = statement
-        .query_map([], |r| {
-            Ok((r.get::<_, String>(1)?, r.get::<_, Option<String>>(4)?))
-        })
-        .map_err(storage)?;
-    for row in rows {
-        let (name, default) = row.map_err(storage)?;
-        if name == column {
-            return Ok(default.and_then(|default| default.trim().parse().ok()));
-        }
-    }
-    Ok(None)
-}
-
-fn write_names(conn: &Connection, n: i64, names: &StoredNames) -> Result<(), Error> {
-    let mut insert = conn
-        .prepare_cached(
-            "INSERT INTO _jazz_names (n, tbl, col, stored_tbl, stored_col) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+async fn ddl_default(conn: &DbConnection, table: &str, column: &str) -> Result<Option<i64>, Error> {
+    use jazz_sql::{Row as _, Sql as _};
+    let rows: Vec<(String, Option<String>)> = conn
+        .sql()
+        .query_rows(
+            &format!("PRAGMA table_info({})", crate::values::quote(table)),
+            jazz_sql::params![],
+            |r| Ok((r.get(1)?, r.get(4)?)),
         )
+        .await
         .map_err(storage)?;
+    Ok(rows
+        .into_iter()
+        .find(|(name, _)| name == column)
+        .and_then(|(_, default)| default.and_then(|default| default.trim().parse().ok())))
+}
+
+async fn write_names(conn: &DbConnection, n: i64, names: &StoredNames) -> Result<(), Error> {
+    let insert = "INSERT INTO _jazz_names (n, tbl, col, stored_tbl, stored_col) \
+             VALUES (?1, ?2, ?3, ?4, ?5)";
     for (table, (stored, columns)) in &names.tables {
-        insert
-            .execute(rusqlite::params![n, table, "", stored, ""])
+        conn.sql()
+            .execute(insert, jazz_sql::params![n, table, "", stored, ""])
+            .await
             .map_err(storage)?;
         for (column, stored_column) in columns {
-            insert
-                .execute(rusqlite::params![n, table, column, stored, stored_column])
+            conn.sql()
+                .execute(
+                    insert,
+                    jazz_sql::params![n, table, column, stored, stored_column],
+                )
+                .await
                 .map_err(storage)?;
         }
     }
@@ -1354,13 +1444,12 @@ struct NewStoredColumn {
     branch: Option<Option<Sql>>,
 }
 
-fn write_stored_columns(conn: &Connection, columns: &[NewStoredColumn]) -> Result<(), Error> {
-    let mut insert = conn
-        .prepare_cached(
-            "INSERT OR IGNORE INTO _jazz_stored_columns (tbl, col, ty, branch, has_dflt, dflt) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )
-        .map_err(storage)?;
+async fn write_stored_columns(
+    conn: &DbConnection,
+    columns: &[NewStoredColumn],
+) -> Result<(), Error> {
+    let insert = "INSERT OR IGNORE INTO _jazz_stored_columns (tbl, col, ty, branch, has_dflt, dflt) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
     for column in columns {
         let ty = column
             .ty
@@ -1375,15 +1464,19 @@ fn write_stored_columns(conn: &Connection, columns: &[NewStoredColumn]) -> Resul
             })
             .transpose()?;
         let default = column.branch.clone().flatten();
-        insert
-            .execute(rusqlite::params![
-                column.table,
-                column.column,
-                ty,
-                column.branch.is_some(),
-                default.is_some(),
-                default.unwrap_or(Sql::Null)
-            ])
+        conn.sql()
+            .execute(
+                insert,
+                jazz_sql::params![
+                    column.table,
+                    column.column,
+                    ty,
+                    column.branch.is_some(),
+                    default.is_some(),
+                    default.unwrap_or(Sql::Null)
+                ],
+            )
+            .await
             .map_err(storage)?;
     }
     Ok(())
@@ -1408,7 +1501,7 @@ fn branch_default(column: &Column) -> Result<Option<Sql>, Error> {
         .transpose()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
     use crate::protocol::TableLens;
@@ -1480,11 +1573,16 @@ mod tests {
     /// inside a kept savepoint stays in both.
     #[test]
     fn a_rolled_back_savepoint_takes_its_interned_tags_with_it() {
-        use crate::values::{begin_savepoint, end_savepoint};
-        let conn = Connection::open_in_memory().unwrap();
-        let names = Names::load(&conn).unwrap();
+        use crate::values::{
+            begin_savepoint_inline as begin_savepoint, end_savepoint_inline as end_savepoint,
+        };
+        let conn = DbConnection::new(rusqlite::Connection::open_in_memory().unwrap().into());
+        let names = std::cell::RefCell::new(
+            crate::options::block_on(Names::load(&mut conn.sql())).unwrap(),
+        );
         let file = || -> Vec<(i64, String)> {
-            if !table_exists(&conn, "_jazz_enum_tags").unwrap() {
+            if !crate::options::block_on(table_exists(&mut conn.sql(), "_jazz_enum_tags")).unwrap()
+            {
                 return Vec::new();
             }
             let mut statement = conn
@@ -1496,10 +1594,10 @@ mod tests {
                 .collect::<Result<_, _>>()
                 .unwrap()
         };
-        let tag = |name: &str| names.tags().column("t", "c").borrow().tag(name);
+        let tag = |name: &str| names.borrow().tags().column("t", "c").borrow().tag(name);
         begin_savepoint(&conn, "outer").unwrap();
         begin_savepoint(&conn, "inner").unwrap();
-        names.intern(&conn, "t", "c", &["lost"]).unwrap();
+        futures::executor::block_on(Names::intern(&names, &conn, "t", "c", &["lost"])).unwrap();
         end_savepoint(&conn, "inner", true).unwrap();
         assert_eq!(tag("lost"), Some(0));
         end_savepoint(&conn, "outer", false).unwrap();
@@ -1507,10 +1605,79 @@ mod tests {
         assert_eq!(file(), []);
 
         begin_savepoint(&conn, "outer").unwrap();
-        names.intern(&conn, "t", "c", &["kept"]).unwrap();
+        futures::executor::block_on(Names::intern(&names, &conn, "t", "c", &["kept"])).unwrap();
         end_savepoint(&conn, "outer", true).unwrap();
         assert_eq!(tag("kept"), Some(0));
         assert_eq!(file(), [(0, "kept".to_owned())]);
+    }
+    /// Alice cancels after interning a name while Bob commits independently.
+    /// Alice's owned journal restores both her SQL and tags; Bob keeps his tag.
+    /// This lower-level test forces suspension between metadata mutation and
+    /// transaction completion, which a native public write cannot expose.
+    #[test]
+    fn cancelled_metadata_is_undone_only_for_its_owner() {
+        use crate::values::{in_savepoint_async, rollbacks};
+        use std::future::Future;
+        let alice = DbConnection::new(rusqlite::Connection::open_in_memory().unwrap().into());
+        let bob = DbConnection::new(rusqlite::Connection::open_in_memory().unwrap().into());
+        let alice_names = std::cell::RefCell::new(
+            crate::options::block_on(Names::load(&mut alice.sql())).unwrap(),
+        );
+        let bob_names =
+            std::cell::RefCell::new(crate::options::block_on(Names::load(&mut bob.sql())).unwrap());
+        let mut write = Box::pin(in_savepoint_async(&alice, "alice_write", async || {
+            Names::intern(&alice_names, &alice, "t", "c", &["cancelled"]).await?;
+            std::future::pending::<()>().await;
+            Ok(())
+        }));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(write.as_mut().poll(&mut cx).is_pending());
+        futures::executor::block_on(Names::intern(&bob_names, &bob, "t", "c", &["kept"])).unwrap();
+        assert_eq!(
+            alice_names
+                .borrow()
+                .tags()
+                .column("t", "c")
+                .borrow()
+                .tag("cancelled"),
+            Some(0)
+        );
+        drop(write);
+        assert_eq!(
+            alice_names
+                .borrow()
+                .tags()
+                .column("t", "c")
+                .borrow()
+                .tag("cancelled"),
+            None
+        );
+        assert_eq!(
+            bob_names
+                .borrow()
+                .tags()
+                .column("t", "c")
+                .borrow()
+                .tag("kept"),
+            Some(0)
+        );
+        assert_eq!(rollbacks(&alice), 1);
+        assert_eq!(rollbacks(&bob), 0);
+        futures::executor::block_on(Names::intern(&alice_names, &alice, "t", "c", &["retry"]))
+            .unwrap();
+        assert_eq!(
+            alice_names
+                .borrow()
+                .tags()
+                .column("t", "c")
+                .borrow()
+                .tag("retry"),
+            Some(0)
+        );
+        let name: String = alice
+            .query_row("SELECT name FROM _jazz_enum_tags", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, "retry");
     }
 
     /// Every way a store's enum tags change moves the tag epoch: a name
@@ -1519,8 +1686,10 @@ mod tests {
     #[test]
     fn every_change_of_enum_tags_moves_the_tag_epoch() {
         use crate::values::{begin_savepoint, end_savepoint, tag_epoch};
-        let conn = Connection::open_in_memory().unwrap();
-        let names = Names::load(&conn).unwrap();
+        let conn = DbConnection::new(rusqlite::Connection::open_in_memory().unwrap().into());
+        let names = std::cell::RefCell::new(
+            crate::options::block_on(Names::load(&mut conn.sql())).unwrap(),
+        );
         let moved = |what: &str, change: &dyn Fn()| {
             let before = tag_epoch();
             change();
@@ -1530,23 +1699,29 @@ mod tests {
             );
         };
         moved("interning", &|| {
-            names.intern(&conn, "t", "c", &["b", "a"]).unwrap();
+            crate::options::block_on(Names::intern(&names, &conn, "t", "c", &["b", "a"])).unwrap();
         });
         moved("renumbering", &|| {
-            let changed = names
-                .align(&conn, "t", "c", &["a".to_owned(), "b".to_owned()])
-                .unwrap();
+            let changed = crate::options::block_on(Names::align(
+                &names,
+                &conn,
+                "t",
+                "c",
+                &["a".to_owned(), "b".to_owned()],
+            ))
+            .unwrap();
             assert!(!changed.is_empty());
         });
-        begin_savepoint(&conn, "outer").unwrap();
-        names.intern(&conn, "t", "c", &["lost"]).unwrap();
+        crate::options::block_on(begin_savepoint(&conn, "outer")).unwrap();
+        crate::options::block_on(Names::intern(&names, &conn, "t", "c", &["lost"])).unwrap();
         moved("a rollback", &|| {
-            end_savepoint(&conn, "outer", false).unwrap();
+            crate::options::block_on(end_savepoint(&conn, "outer", false)).unwrap();
         });
-        let snapshot = std::cell::Cell::new(Some(names.tags().snapshot()));
-        names.intern(&conn, "t", "c", &["later"]).unwrap();
+        let snapshot = std::cell::Cell::new(Some(names.borrow().tags().snapshot()));
+        crate::options::block_on(Names::intern(&names, &conn, "t", "c", &["later"])).unwrap();
         moved("a restore", &|| {
             names
+                .borrow()
                 .tags()
                 .restore(snapshot.take().expect("restored once"));
         });
@@ -1559,10 +1734,12 @@ mod tests {
         use crate::values::tag_epoch;
         let before = tag_epoch();
         std::thread::spawn(|| {
-            let conn = Connection::open_in_memory().unwrap();
-            let names = Names::load(&conn).unwrap();
+            let conn = DbConnection::new(rusqlite::Connection::open_in_memory().unwrap().into());
+            let names = std::cell::RefCell::new(
+                crate::options::block_on(Names::load(&mut conn.sql())).unwrap(),
+            );
             let start = tag_epoch();
-            names.intern(&conn, "t", "c", &["a"]).unwrap();
+            crate::options::block_on(Names::intern(&names, &conn, "t", "c", &["a"])).unwrap();
             assert!(
                 tag_epoch() > start,
                 "interning moved its own thread's epoch"

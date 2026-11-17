@@ -65,17 +65,19 @@ fn row(generation: u8, index: u8) -> RowUuid {
 /// Seed rows `range` of `generation` into `server`'s `items`.
 fn seed(server: &Db, generation: u8, range: std::ops::Range<u8>) {
     for index in range {
-        server
-            .seed_settled_mergeable_for_bootstrap(
-                "items",
-                row(generation, index),
-                AuthorSubject::SYSTEM,
-                BTreeMap::from([(
-                    "label".to_owned(),
-                    Value::String(format!("g{generation}-{index}")),
-                )]),
-            )
-            .expect("seed");
+        jazz::db::block_on(server.insert(
+            "items",
+            BTreeMap::from([(
+                "label".to_owned(),
+                Value::String(format!("g{generation}-{index}")),
+            )]),
+            jazz::db::InsertOptions {
+                row_id: Some(row(generation, index)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .expect("seed");
     }
 }
 
@@ -89,9 +91,7 @@ fn server_with(generation: u8, count: u8) -> Db {
 fn connect(client: &Db, server: &Db) -> Upstream {
     let (client_side, server_side) = duplex();
     let upstream = block_on(client.connect_upstream(client_side));
-    server
-        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-        .unwrap();
+    block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
     upstream
 }
 
@@ -113,7 +113,7 @@ impl Device {
 
     fn over(relay: Db, schema: JazzSchema, table: &'static str) -> Self {
         let tab = block_on(Db::open(config(schema, 0x62))).expect("open tab");
-        tab.set_non_durable_client();
+        block_on(tab.set_non_durable_client());
         connect(&tab, &relay);
         Self { relay, tab, table }
     }
@@ -451,7 +451,7 @@ fn a_relay_that_cannot_mirror_its_servers_catalogue_refuses_the_tabs_remote_read
         config(head.clone(), 0x51).with_migrations(schemas, lenses),
     ))
     .unwrap();
-    server.set_authority();
+    block_on(server.set_authority());
     let device = Device::new(head, "todos");
     let upstream = connect(&device.relay, &server);
     let refusal = tab_reads_through_a_refused_relay(&device, &server, &upstream, Some(0));

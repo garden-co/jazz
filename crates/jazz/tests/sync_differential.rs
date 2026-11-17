@@ -198,9 +198,7 @@ impl Net {
         let (client_side, server_side) = duplex();
         let client = &mut self.clients[index];
         client.upstream = Some(block_on(client.db.connect_upstream(client_side)));
-        self.server
-            .accept_subscriber(server_side, user(client.who))
-            .unwrap();
+        jazz::db::block_on(self.server.accept_subscriber(server_side, user(client.who))).unwrap();
     }
 
     fn pump(&self) {
@@ -358,14 +356,16 @@ fn run(seed: u64, steps: usize) -> usize {
         let Value::Uuid(id) = room(r) else {
             unreachable!()
         };
-        server
-            .seed_settled_mergeable_for_bootstrap(
-                "rooms",
-                RowUuid(id),
-                AuthorSubject::SYSTEM,
-                cells(&[("name", Value::String(format!("r{r}")))]),
-            )
-            .unwrap();
+        jazz::db::block_on(server.insert(
+            "rooms",
+            cells(&[("name", Value::String(format!("r{r}")))]),
+            jazz::db::InsertOptions {
+                row_id: Some(RowUuid(id)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     }
     let mut net = Net {
         server,

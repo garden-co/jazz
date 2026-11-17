@@ -116,7 +116,7 @@ fn authority(schema: JazzSchema, node: u8) -> Db {
         AuthorSubject::SYSTEM,
     )))
     .unwrap();
-    db.set_authority();
+    jazz::db::block_on(db.set_authority());
     db
 }
 
@@ -169,7 +169,7 @@ fn pipe() -> (Box<dyn Transport>, Box<dyn Transport>) {
 fn link(client: &Db, server: &Db) -> jazz::db::Upstream {
     let (c, s) = pipe();
     let link = block_on(client.connect_upstream(c));
-    server.accept_subscriber(s, AuthorSubject::SYSTEM).unwrap();
+    jazz::db::block_on(server.accept_subscriber(s, AuthorSubject::SYSTEM)).unwrap();
     link
 }
 
@@ -226,20 +226,33 @@ fn ranks(db: &Db) -> Vec<Option<Value>> {
 fn identities_are_the_authoritys_and_differ_between_apps() {
     let alice = authority(notes("notes", "text"), 1);
     let bob = authority(notes("notes", "text"), 2);
-    let table = alice.table_identity("notes").unwrap().expect("notes");
-    assert_ne!(Some(table), bob.table_identity("notes").unwrap());
-    let column = alice
-        .column_identity("notes", "text")
+    let table = jazz::db::block_on(alice.table_identity("notes"))
+        .unwrap()
+        .expect("notes");
+    assert_ne!(
+        Some(table),
+        jazz::db::block_on(bob.table_identity("notes")).unwrap()
+    );
+    let column = jazz::db::block_on(alice.column_identity("notes", "text"))
         .unwrap()
         .expect("text");
     assert_ne!(table.0, column.0);
     assert_ne!(
         Some(column),
-        alice.column_identity("notes", "rank").unwrap()
+        jazz::db::block_on(alice.column_identity("notes", "rank")).unwrap()
     );
-    assert_eq!(alice.table_identity("unknown").unwrap(), None);
-    assert_eq!(alice.column_identity("notes", "unknown").unwrap(), None);
-    assert_eq!(alice.table_identity("notes").unwrap(), Some(table));
+    assert_eq!(
+        jazz::db::block_on(alice.table_identity("unknown")).unwrap(),
+        None
+    );
+    assert_eq!(
+        jazz::db::block_on(alice.column_identity("notes", "unknown")).unwrap(),
+        None
+    );
+    assert_eq!(
+        jazz::db::block_on(alice.table_identity("notes")).unwrap(),
+        Some(table)
+    );
 
     let local = block_on(Db::open(config(
         notes("notes", "text"),
@@ -247,8 +260,8 @@ fn identities_are_the_authoritys_and_differ_between_apps() {
         AuthorSubject::SYSTEM,
     )))
     .unwrap();
-    not_observed(local.table_identity("notes"));
-    not_observed(local.column_identity("notes", "text"));
+    not_observed(jazz::db::block_on(local.table_identity("notes")));
+    not_observed(jazz::db::block_on(local.column_identity("notes", "text")));
 }
 
 /// An authority's identities survive its restart: the namespace is minted
@@ -258,14 +271,20 @@ fn a_reopened_authority_keeps_its_identities() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("authority.sqlite");
     let db = open_at(notes("notes", "text"), 1, &path);
-    db.set_authority();
-    let table = db.table_identity("notes").unwrap();
-    let column = db.column_identity("notes", "text").unwrap();
+    jazz::db::block_on(db.set_authority());
+    let table = jazz::db::block_on(db.table_identity("notes")).unwrap();
+    let column = jazz::db::block_on(db.column_identity("notes", "text")).unwrap();
     drop(db);
     let db = open_at(notes("notes", "text"), 1, &path);
-    db.set_authority();
-    assert_eq!(db.table_identity("notes").unwrap(), table);
-    assert_eq!(db.column_identity("notes", "text").unwrap(), column);
+    jazz::db::block_on(db.set_authority());
+    assert_eq!(
+        jazz::db::block_on(db.table_identity("notes")).unwrap(),
+        table
+    );
+    assert_eq!(
+        jazz::db::block_on(db.column_identity("notes", "text")).unwrap(),
+        column
+    );
 }
 
 /// A rename keeps the stored table and column, so it keeps their
@@ -276,8 +295,8 @@ fn a_rename_keeps_the_identities() {
     let v1 = notes("notes", "text");
     let v2 = notes("tasks", "body");
     let db = authority(v1.clone(), 1);
-    let table = db.table_identity("notes").unwrap();
-    let column = db.column_identity("notes", "text").unwrap();
+    let table = jazz::db::block_on(db.table_identity("notes")).unwrap();
+    let column = jazz::db::block_on(db.column_identity("notes", "text")).unwrap();
     let lens = rename(
         &v1,
         &v2,
@@ -287,13 +306,31 @@ fn a_rename_keeps_the_identities() {
         }],
     );
     block_on(db.activate_schema_with_lenses(v2, &[lens])).unwrap();
-    assert_eq!(db.table_identity("tasks").unwrap(), table);
-    assert_eq!(db.column_identity("tasks", "body").unwrap(), column);
-    assert_eq!(db.table_identity("notes").unwrap(), None);
+    assert_eq!(
+        jazz::db::block_on(db.table_identity("tasks")).unwrap(),
+        table
+    );
+    assert_eq!(
+        jazz::db::block_on(db.column_identity("tasks", "body")).unwrap(),
+        column
+    );
+    assert_eq!(
+        jazz::db::block_on(db.table_identity("notes")).unwrap(),
+        None
+    );
     let old = block_on(db.register_schema_view(v1)).unwrap();
-    assert_eq!(old.table_identity("notes").unwrap(), table);
-    assert_eq!(old.column_identity("notes", "text").unwrap(), column);
-    assert_eq!(old.table_identity("tasks").unwrap(), None);
+    assert_eq!(
+        jazz::db::block_on(old.table_identity("notes")).unwrap(),
+        table
+    );
+    assert_eq!(
+        jazz::db::block_on(old.column_identity("notes", "text")).unwrap(),
+        column
+    );
+    assert_eq!(
+        jazz::db::block_on(old.table_identity("tasks")).unwrap(),
+        None
+    );
 }
 
 /// A replica has no identities until it mirrors the authority's catalogue,
@@ -305,22 +342,22 @@ fn a_replica_answers_with_the_authoritys_identities_once_it_mirrors_them() {
     let path = dir.path().join("client.sqlite");
     {
         let client = open_at(notes("notes", "text"), 1, &path);
-        not_observed(client.table_identity("notes"));
+        not_observed(jazz::db::block_on(client.table_identity("notes")));
         let _link = link(&client, &server);
         pump(&server, &[&client]);
         assert_eq!(
-            client.table_identity("notes").unwrap(),
-            server.table_identity("notes").unwrap()
+            jazz::db::block_on(client.table_identity("notes")).unwrap(),
+            jazz::db::block_on(server.table_identity("notes")).unwrap()
         );
         assert_eq!(
-            client.column_identity("notes", "rank").unwrap(),
-            server.column_identity("notes", "rank").unwrap()
+            jazz::db::block_on(client.column_identity("notes", "rank")).unwrap(),
+            jazz::db::block_on(server.column_identity("notes", "rank")).unwrap()
         );
     }
     let offline = open_at(notes("notes", "text"), 1, &path);
     assert_eq!(
-        offline.table_identity("notes").unwrap(),
-        server.table_identity("notes").unwrap()
+        jazz::db::block_on(offline.table_identity("notes")).unwrap(),
+        jazz::db::block_on(server.table_identity("notes")).unwrap()
     );
 }
 
@@ -342,16 +379,22 @@ fn a_version_only_the_replica_admitted_has_no_identity_until_the_authority_admit
     let client = block_on(Db::open(config(v1.clone(), 1, AuthorSubject::SYSTEM))).unwrap();
     let _link = link(&client, &server);
     pump(&server, &[&client]);
-    let table = server.table_identity("notes").unwrap();
-    assert_eq!(client.table_identity("notes").unwrap(), table);
+    let table = jazz::db::block_on(server.table_identity("notes")).unwrap();
+    assert_eq!(
+        jazz::db::block_on(client.table_identity("notes")).unwrap(),
+        table
+    );
 
     block_on(client.admit_schema_with_lenses(v2.clone(), &[lens.clone()])).unwrap();
     let ahead = block_on(client.register_schema_view(v2.clone())).unwrap();
-    not_observed(ahead.table_identity("tasks"));
+    not_observed(jazz::db::block_on(ahead.table_identity("tasks")));
 
     block_on(server.activate_schema_with_lenses(v2, &[lens])).unwrap();
     pump(&server, &[&client]);
-    assert_eq!(ahead.table_identity("tasks").unwrap(), table);
+    assert_eq!(
+        jazz::db::block_on(ahead.table_identity("tasks")).unwrap(),
+        table
+    );
 }
 
 /// A store marked authority while it has an upstream is that upstream's
@@ -366,8 +409,8 @@ fn an_attached_store_marked_authority_mints_nothing() {
     .unwrap();
     let (c, _s) = pipe();
     let _link = block_on(client.connect_upstream(c));
-    client.set_authority();
-    not_observed(client.table_identity("notes"));
+    jazz::db::block_on(client.set_authority());
+    not_observed(jazz::db::block_on(client.table_identity("notes")));
 }
 
 /// A replica of one app connected to another app's authority refuses it:
@@ -397,8 +440,8 @@ fn an_upstream_of_another_app_is_refused() {
     let reason = rejected.expect("the remote read says why");
     assert!(reason.contains("another app"), "{reason}");
     assert_eq!(
-        client.table_identity("notes").unwrap(),
-        alice.table_identity("notes").unwrap()
+        jazz::db::block_on(client.table_identity("notes")).unwrap(),
+        jazz::db::block_on(alice.table_identity("notes")).unwrap()
     );
 }
 
@@ -418,14 +461,14 @@ fn a_tab_behind_a_worker_answers_with_the_authoritys_identities() {
         AuthorSubject::SYSTEM,
     )))
     .unwrap();
-    tab.set_non_durable_client();
-    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(tab.set_non_durable_client());
+    jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
     let _tab_link = link(&tab, &worker);
     pump(&worker, &[&tab]);
-    not_observed(tab.table_identity("notes"));
+    not_observed(jazz::db::block_on(tab.table_identity("notes")));
 
     let _worker_link = link(&worker, &server);
-    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Live));
     for _ in 0..6 {
         block_on(tab.tick()).unwrap();
         block_on(worker.tick()).unwrap();
@@ -434,8 +477,8 @@ fn a_tab_behind_a_worker_answers_with_the_authoritys_identities() {
         block_on(tab.tick()).unwrap();
     }
     assert_eq!(
-        tab.table_identity("notes").unwrap(),
-        server.table_identity("notes").unwrap()
+        jazz::db::block_on(tab.table_identity("notes")).unwrap(),
+        jazz::db::block_on(server.table_identity("notes")).unwrap()
     );
 }
 
@@ -449,10 +492,13 @@ fn a_column_added_again_with_its_type_keeps_its_identity_and_values() {
         1,
         &[("text", Value::String("a".into())), ("rank", Value::I64(7))],
     );
-    let rank = db.column_identity("notes", "rank").unwrap();
+    let rank = jazz::db::block_on(db.column_identity("notes", "rank")).unwrap();
     block_on(db.activate_schema(without_rank())).unwrap();
     block_on(db.activate_schema(bigint_rank())).unwrap();
-    assert_eq!(db.column_identity("notes", "rank").unwrap(), rank);
+    assert_eq!(
+        jazz::db::block_on(db.column_identity("notes", "rank")).unwrap(),
+        rank
+    );
     assert_eq!(ranks(&db), [Some(Value::I64(7))]);
 }
 
@@ -463,25 +509,28 @@ fn a_column_added_again_with_another_type_is_a_new_column() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     let db = open_at(notes("notes", "text"), 1, &path);
-    db.set_authority();
+    jazz::db::block_on(db.set_authority());
     insert(
         &db,
         1,
         &[("text", Value::String("a".into())), ("rank", Value::I64(7))],
     );
-    let rank = db.column_identity("notes", "rank").unwrap();
+    let rank = jazz::db::block_on(db.column_identity("notes", "rank")).unwrap();
     block_on(db.activate_schema(without_rank())).unwrap();
     drop(db);
     // Reopened, so only the file knows `rank` held integers.
     let db = open_at(without_rank(), 1, &path);
-    db.set_authority();
+    jazz::db::block_on(db.set_authority());
     block_on(db.activate_schema(text_rank())).unwrap();
-    let text = db.column_identity("notes", "rank").unwrap();
+    let text = jazz::db::block_on(db.column_identity("notes", "rank")).unwrap();
     assert!(text.is_some());
     assert_ne!(text, rank);
     assert_eq!(ranks(&db), [Some(Value::Nullable(None))]);
     let old = block_on(db.register_schema_view(notes("notes", "text"))).unwrap();
-    assert_eq!(old.column_identity("notes", "rank").unwrap(), rank);
+    assert_eq!(
+        jazz::db::block_on(old.column_identity("notes", "rank")).unwrap(),
+        rank
+    );
     assert_eq!(ranks(&old), [Some(Value::I64(7))]);
 }
 
@@ -494,22 +543,25 @@ fn a_type_changed_in_place_is_a_new_column() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     let db = open_at(notes("notes", "text"), 1, &path);
-    db.set_authority();
+    jazz::db::block_on(db.set_authority());
     insert(
         &db,
         1,
         &[("text", Value::String("a".into())), ("rank", Value::I64(7))],
     );
-    let rank = db.column_identity("notes", "rank").unwrap();
+    let rank = jazz::db::block_on(db.column_identity("notes", "rank")).unwrap();
     drop(db);
     let db = open_at(text_rank(), 1, &path);
-    db.set_authority();
-    let text = db.column_identity("notes", "rank").unwrap();
+    jazz::db::block_on(db.set_authority());
+    let text = jazz::db::block_on(db.column_identity("notes", "rank")).unwrap();
     assert!(text.is_some());
     assert_ne!(text, rank);
     assert_eq!(ranks(&db), [Some(Value::Nullable(None))]);
     let old = block_on(db.register_schema_view(notes("notes", "text"))).unwrap();
-    assert_eq!(old.column_identity("notes", "rank").unwrap(), rank);
+    assert_eq!(
+        jazz::db::block_on(old.column_identity("notes", "rank")).unwrap(),
+        rank
+    );
     assert_eq!(ranks(&old), [Some(Value::I64(7))]);
 }
 
@@ -610,7 +662,7 @@ fn a_column_a_lens_adds_again_is_a_new_column() {
         1,
         &[("text", Value::String("a".into())), ("rank", Value::I64(7))],
     );
-    let rank = db.column_identity("notes", "rank").unwrap();
+    let rank = jazz::db::block_on(db.column_identity("notes", "rank")).unwrap();
     block_on(db.activate_schema(without_rank())).unwrap();
     let lens = rename(
         &without_rank(),
@@ -621,7 +673,7 @@ fn a_column_a_lens_adds_again_is_a_new_column() {
         }],
     );
     block_on(db.activate_schema_with_lenses(bigint_rank(), &[lens])).unwrap();
-    let added = db.column_identity("notes", "rank").unwrap();
+    let added = jazz::db::block_on(db.column_identity("notes", "rank")).unwrap();
     assert!(added.is_some());
     assert_ne!(added, rank);
     assert_eq!(ranks(&db), [Some(Value::I64(5))]);
@@ -637,7 +689,7 @@ fn a_column_added_again_after_its_table_is_renamed_keeps_its_identity_and_values
         1,
         &[("text", Value::String("a".into())), ("rank", Value::I64(7))],
     );
-    let rank = db.column_identity("notes", "rank").unwrap();
+    let rank = jazz::db::block_on(db.column_identity("notes", "rank")).unwrap();
     block_on(db.activate_schema(without_rank())).unwrap();
     let tasks = ranked("tasks", None);
     block_on(
@@ -649,7 +701,10 @@ fn a_column_added_again_after_its_table_is_renamed_keeps_its_identity_and_values
         Some((ColumnType::BigInt, jazz::tools::Value::BigInt(5))),
     )))
     .unwrap();
-    assert_eq!(db.column_identity("tasks", "rank").unwrap(), rank);
+    assert_eq!(
+        jazz::db::block_on(db.column_identity("tasks", "rank")).unwrap(),
+        rank
+    );
     let prepared = db.prepare_query(&Query::from("tasks")).unwrap();
     let rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
     let ranks: Vec<_> = rows
@@ -683,12 +738,15 @@ fn a_replica_mirrors_a_column_added_again() {
     let all = client.prepare_query(&Query::from("notes")).unwrap();
     let _held = block_on(client.subscribe(&all, ReadOpts::default())).unwrap();
     pump(&server, &[&client]);
-    let rank = server.column_identity("notes", "rank").unwrap();
+    let rank = jazz::db::block_on(server.column_identity("notes", "rank")).unwrap();
     block_on(server.activate_schema(without_rank())).unwrap();
     block_on(server.activate_schema(bigint_rank())).unwrap();
     pump(&server, &[&client]);
     let view = block_on(client.register_schema_view(bigint_rank())).unwrap();
-    assert_eq!(view.column_identity("notes", "rank").unwrap(), rank);
+    assert_eq!(
+        jazz::db::block_on(view.column_identity("notes", "rank")).unwrap(),
+        rank
+    );
     assert_eq!(ranks(&view), [Some(Value::I64(7))]);
 }
 
@@ -872,7 +930,7 @@ fn a_pending_write_under_a_retyped_column_lands_where_the_authority_stores_it() 
             .with_migrations(vec![tasks(ColumnType::Boolean)], vec![retype]),
     ))
     .unwrap();
-    client.become_replica();
+    jazz::db::block_on(client.become_replica());
     let doing = Value::Nullable(Some(Box::new(text("doing"))));
     block_on(client.insert(
         "tasks",
@@ -895,8 +953,8 @@ fn a_pending_write_under_a_retyped_column_lands_where_the_authority_stores_it() 
     assert_eq!(task_rows(&server), expected);
     assert_eq!(task_rows(&client), expected);
     assert_eq!(
-        client.column_identity("tasks", "status").unwrap(),
-        server.column_identity("tasks", "status").unwrap()
+        jazz::db::block_on(client.column_identity("tasks", "status")).unwrap(),
+        jazz::db::block_on(server.column_identity("tasks", "status")).unwrap()
     );
 }
 

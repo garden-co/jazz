@@ -129,8 +129,16 @@ fn seed(db: &Db, table: &str, row: RowUuid, pairs: &[(&str, Value)]) {
         .iter()
         .map(|(k, v)| ((*k).to_owned(), v.clone()))
         .collect::<BTreeMap<_, _>>();
-    db.seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, cells)
-        .unwrap();
+    jazz::db::block_on(db.insert(
+        table,
+        cells,
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
 }
 
 fn text(s: &str) -> Value {
@@ -140,10 +148,10 @@ fn text(s: &str) -> Value {
 /// A user whose `claims.sub` is `sub`, as `db` knows them.
 fn user(db: &Db, n: u8, sub: &str) -> AuthorSubject {
     let author = AuthorSubject::for_test_bytes([0x60 + n; 16]);
-    db.set_identity_claims(
+    jazz::db::block_on(db.set_identity_claims(
         author,
         BTreeMap::from([(jazz::query::provider_claim_key("sub"), text(sub))]),
-    );
+    ));
     author
 }
 
@@ -407,9 +415,7 @@ fn a_trusted_links_session_write_is_checked_as_that_session_at_the_authority() {
     let backend = open(1);
     let (client_side, server_side) = duplex();
     let _upstream = block_on(backend.connect_upstream(client_side));
-    server
-        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
     let pump = || {
         for _ in 0..4 {
             block_on(backend.tick()).unwrap();
@@ -460,9 +466,7 @@ fn a_replica_leaves_a_relational_read_for_write_to_the_authority() {
     let backend = open(1);
     let (client_side, server_side) = duplex();
     let _upstream = block_on(backend.connect_upstream(client_side));
-    server
-        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
     let pump = || {
         for _ in 0..4 {
             block_on(backend.tick()).unwrap();
@@ -546,9 +550,7 @@ fn a_replica_leaves_a_row_local_read_for_write_to_the_authority() {
     let backend = open(1);
     let (client_side, server_side) = duplex();
     let _upstream = block_on(backend.connect_upstream(client_side));
-    server
-        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
     let pump = || {
         for _ in 0..4 {
             block_on(backend.tick()).unwrap();
@@ -611,16 +613,15 @@ fn a_session_links_session_write_is_checked_as_the_link() {
         let client = open(n);
         let (client_side, server_side) = duplex();
         let upstream = block_on(client.connect_upstream(client_side));
-        server
-            .accept_subscriber_with_claims(
-                server_side,
-                author,
-                Some(BTreeMap::from([(
-                    jazz::query::provider_claim_key("sub"),
-                    text(sub),
-                )])),
-            )
-            .unwrap();
+        jazz::db::block_on(server.accept_subscriber_with_claims(
+            server_side,
+            author,
+            Some(BTreeMap::from([(
+                jazz::query::provider_claim_key("sub"),
+                text(sub),
+            )])),
+        ))
+        .unwrap();
         let prepared = client.prepare_query(&Query::from("protected")).unwrap();
         let stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
         (client, (upstream, stream))

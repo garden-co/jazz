@@ -291,28 +291,24 @@ impl Fixture {
         }
     }
     pub fn warehouse_district_count(&self) -> usize {
-        self.db
-            .read(&self.warehouse_districts)
+        jazz::db::block_on(self.db.read(&self.warehouse_districts))
             .expect("warehouse districts")
             .len()
     }
     pub fn district_customer_count(&self) -> usize {
-        self.db
-            .read(&self.district_customers)
+        jazz::db::block_on(self.db.read(&self.district_customers))
             .expect("district customers")
             .len()
     }
     pub fn pending_order_count(&self) -> usize {
-        self.db
-            .read(&self.pending_orders)
+        jazz::db::block_on(self.db.read(&self.pending_orders))
             .expect("pending orders")
             .len()
     }
 
     /// Fixture receipt for the console's bounded, ordered pending-order page.
     pub fn pending_order_numbers_for_receipt(&self) -> Vec<i32> {
-        self.db
-            .read(&self.pending_orders)
+        jazz::db::block_on(self.db.read(&self.pending_orders))
             .expect("pending orders")
             .into_iter()
             .map(|order| match order.cell_at(3) {
@@ -322,8 +318,8 @@ impl Fixture {
             .collect()
     }
     pub fn low_stock_count(&self) -> usize {
-        self.db
-            .read(&self.low_stock_candidates)
+        jazz::db::block_on(self.db
+            .read(&self.low_stock_candidates))
             .expect("low-stock candidates")
             .into_iter()
             .filter(|stock| {
@@ -508,9 +504,7 @@ impl Fixture {
         })
     }
     pub fn stock_on_hand(&self) -> i32 {
-        let stock = self
-            .db
-            .read(&self.stock_on_hand)
+        let stock = jazz::db::block_on(self.db.read(&self.stock_on_hand))
             .expect("read stock")
             .pop()
             .expect("stock exists");
@@ -520,30 +514,26 @@ impl Fixture {
         }
     }
     pub fn complete_order_count_for_receipt(&self) -> usize {
-        self.db
-            .read(&self.complete_orders_for_receipt)
+        jazz::db::block_on(self.db.read(&self.complete_orders_for_receipt))
             .expect("complete orders")
             .len()
     }
     pub fn order_line_count(&self) -> usize {
-        self.db
-            .read(&self.all_order_lines)
+        jazz::db::block_on(self.db.read(&self.all_order_lines))
             .expect("order lines")
             .len()
     }
     pub fn payment_count(&self) -> usize {
-        self.db.read(&self.all_payments).expect("payments").len()
+        jazz::db::block_on(self.db.read(&self.all_payments))
+            .expect("payments")
+            .len()
     }
     pub fn purchase_artifacts(&self) -> PurchaseArtifacts {
-        let line = self
-            .db
-            .read(&self.all_order_lines)
+        let line = jazz::db::block_on(self.db.read(&self.all_order_lines))
             .expect("order lines")
             .pop()
             .expect("order line exists");
-        let payment = self
-            .db
-            .read(&self.all_payments)
+        let payment = jazz::db::block_on(self.db.read(&self.all_payments))
             .expect("payments")
             .pop()
             .expect("payment exists");
@@ -594,9 +584,7 @@ impl Fixture {
         });
     }
     pub fn district_next_order_number(&self) -> i32 {
-        let district = self
-            .db
-            .read(&self.district_next_order_number)
+        let district = jazz::db::block_on(self.db.read(&self.district_next_order_number))
             .expect("read district")
             .pop()
             .expect("district exists");

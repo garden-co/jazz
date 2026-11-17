@@ -6,6 +6,7 @@ use jazz::query::Query;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
+use jazz_types::legacy_test_future::ResultFutureExt as _;
 use std::collections::BTreeMap;
 fn alice() -> AuthorSubject {
     AuthorSubject::for_test_bytes([17; 16])
@@ -38,15 +39,18 @@ fn open(s: JazzSchema) -> Db {
         },
     )))
     .unwrap();
-    db.set_authority();
+    jazz::db::block_on(db.set_authority());
     db
 }
 fn seed(db: &Db, t: &str, n: u8, cells: BTreeMap<String, Value>) {
-    db.seed_settled_mergeable_for_bootstrap(
+    db.insert(
         t,
-        RowUuid::from_bytes([n; 16]),
-        AuthorSubject::SYSTEM,
         cells,
+        jazz::db::InsertOptions {
+            row_id: Some(RowUuid::from_bytes([n; 16])),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
     )
     .unwrap();
 }
@@ -87,14 +91,14 @@ fn cross_subject_request_claims_follow_effective_registry() {
         1,
         BTreeMap::from([("body".into(), Value::String("secret".into()))]),
     );
-    db.set_identity_claims(alice(), claims("secret"));
+    jazz::db::block_on(db.set_identity_claims(alice(), claims("secret")));
     let q = db
         .prepare_query(&Query::from("notes"))
         .unwrap()
         .with_identity_claims(bob(), claims("unused"));
     let mut sub = block_on(db.subscribe_for_identity(&q, ReadOpts::default(), alice())).unwrap();
     assert_eq!(count(&mut sub, 0), 1);
-    db.set_identity_claims(alice(), claims("revoked"));
+    jazz::db::block_on(db.set_identity_claims(alice(), claims("revoked")));
     assert_eq!(
         block_on(db.all_for_identity(&q, ReadOpts::default(), alice()))
             .unwrap()
@@ -127,14 +131,14 @@ fn isolated_scope(default_author: bool, scope: ClaimScope) {
         },
     )))
     .unwrap();
-    db.set_authority();
+    jazz::db::block_on(db.set_authority());
     seed(
         &db,
         "notes",
         1,
         BTreeMap::from([("body".into(), Value::String("secret".into()))]),
     );
-    db.set_identity_claims(alice(), claims("secret"));
+    jazz::db::block_on(db.set_identity_claims(alice(), claims("secret")));
     let prepared = db
         .prepare_query(
             &Query::from("notes").filter(eq(col("body"), claim(provider_claim_key("body")))),
@@ -154,13 +158,13 @@ fn isolated_scope(default_author: bool, scope: ClaimScope) {
     .unwrap();
     let before = usize::from(!matches!(scope, ClaimScope::Empty));
     assert_eq!(count(&mut stream, 0), before);
-    db.set_identity_claims(bob(), claims("unrelated"));
+    jazz::db::block_on(db.set_identity_claims(bob(), claims("unrelated")));
     assert_eq!(
         count(&mut stream, before),
         before,
         "unrelated registry change: default={default_author}, scope={scope:?}"
     );
-    db.set_identity_claims(alice(), claims("revoked"));
+    jazz::db::block_on(db.set_identity_claims(alice(), claims("revoked")));
     let expected = usize::from(matches!(scope, ClaimScope::Fixed));
     let fresh = if default_author {
         block_on(db.all(&query, ReadOpts::default()))

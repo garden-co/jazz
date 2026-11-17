@@ -126,9 +126,8 @@ fn byte_duplex() -> ByteLink {
 fn connect(client: &Db, server: &Db) -> ((Upstream, SubscriberId), Rc<RefCell<usize>>) {
     let (client_side, server_side, sent) = byte_duplex();
     let upstream = block_on(client.connect_upstream(client_side));
-    let subscriber = server
-        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-        .unwrap();
+    let subscriber =
+        jazz::db::block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
     ((upstream, subscriber), sent)
 }
 
@@ -610,8 +609,7 @@ impl Fixture {
     }
 
     fn read_count(&self, query: &PreparedQuery) -> usize {
-        self.db
-            .read(query)
+        jazz::db::block_on(self.db.read(query))
             .expect("W1 benchmark read succeeds")
             .len()
     }

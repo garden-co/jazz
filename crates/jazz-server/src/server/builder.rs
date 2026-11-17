@@ -62,8 +62,12 @@ enum ServerSchemaMode {
 /// registry in one SQLite file, `jazz.sqlite`, in the data directory.
 #[derive(Debug, Clone)]
 pub enum StorageBackend {
+    /// An exclusively owned asynchronous SQLite worker.
+    Worker(crate::runtime::WorkerStore),
     InMemory,
-    Persistent { path: PathBuf },
+    Persistent {
+        path: PathBuf,
+    },
 }
 
 /// Where a persistent store keeps the bytes of large values once they
@@ -230,7 +234,7 @@ impl ServerBuilder {
                     },
                 )?)
             }
-            StorageBackend::InMemory => None,
+            StorageBackend::InMemory | StorageBackend::Worker(_) => None,
         };
         log_auth_config(&auth_config);
 
@@ -367,6 +371,11 @@ impl ServerBuilder {
         identity: Option<&super::identity::StoreIdentity>,
     ) -> Result<ShellStorage, String> {
         match &self.storage_backend {
+            StorageBackend::Worker(store) => Ok(ShellStorage {
+                config: StorageConfig::Worker(store.clone()),
+                record: None,
+                s3: None,
+            }),
             StorageBackend::InMemory => Ok(ShellStorage {
                 config: StorageConfig::InMemory,
                 record: None,

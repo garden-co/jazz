@@ -14,6 +14,7 @@ use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
+use jazz_types::legacy_test_future::ResultFutureExt as _;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::pin;

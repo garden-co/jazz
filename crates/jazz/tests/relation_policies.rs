@@ -162,8 +162,16 @@ fn seed(db: &Db, table: &str, row: RowUuid, pairs: &[(&str, CoreValue)]) {
         .iter()
         .map(|(k, v)| ((*k).to_owned(), v.clone()))
         .collect::<BTreeMap<_, _>>();
-    db.seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, cells)
-        .unwrap();
+    jazz::db::block_on(db.insert(
+        table,
+        cells,
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
 }
 
 fn read_as(db: &Db, sub: &str) -> usize {
@@ -243,10 +251,10 @@ fn granted_policy() -> PolicyExpr {
 /// reads it) and SQLite's plan for it.
 fn read_plan(db: &Db, sub: &str) -> (String, String) {
     let prepared = db.prepare_query(&Query::from("resources")).unwrap();
-    db.explain_query_plan(
+    jazz::db::block_on(db.explain_query_plan(
         &prepared,
         Some(AuthorSubject::for_test_bytes([sub.len() as u8; 16])),
-    )
+    ))
     .unwrap()
 }
 
@@ -329,9 +337,10 @@ fn a_relation_keyed_by_the_row_id_grants_only_the_rows_it_names() {
         vec![Operand::Literal(CoreValue::Uuid(id(3, 1).0))],
     ));
     let prepared = db.prepare_query(&picked).unwrap();
-    let (sql, plan) = db
-        .explain_query_plan(&prepared, Some(AuthorSubject::for_test_bytes([6; 16])))
-        .unwrap();
+    let (sql, plan) = jazz::db::block_on(
+        db.explain_query_plan(&prepared, Some(AuthorSubject::for_test_bytes([6; 16]))),
+    )
+    .unwrap();
     assert!(
         sql.contains("EXISTS (") && !sql.contains("t.id IN (SELECT"),
         "{sql}"
@@ -532,9 +541,8 @@ fn an_insert_check_keyed_by_the_row_id_admits_the_rows_it_names() {
     ));
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     seed_edge(&db, 1, Some(id(3, 1)), "viewer");
-    let plan = db
-        .explain_write_check_plan("resources", id(3, 1), alice, &[])
-        .unwrap();
+    let plan =
+        jazz::db::block_on(db.explain_write_check_plan("resources", id(3, 1), alice, &[])).unwrap();
     assert!(
         common::unhashed(&plan).contains("resource_access_edges__ix(resource)")
             && !plan.contains("LIST SUBQUERY"),

@@ -164,9 +164,16 @@ fn cells(pairs: &[(&str, Value)]) -> BTreeMap<String, Value> {
 }
 
 fn seed(server: &Db, table: &str, row: RowUuid, values: BTreeMap<String, Value>) {
-    server
-        .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
-        .unwrap();
+    jazz::db::block_on(server.insert(
+        table,
+        values,
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
 }
 
 fn insert(server: &Db, table: &str, row: RowUuid, values: BTreeMap<String, Value>) {
@@ -249,9 +256,7 @@ fn connect(server: &Db, client: &Db, who: AuthorSubject) -> (Upstream, Rc<RefCel
         log: Some(log.clone()),
     };
     let upstream = block_on(client.connect_upstream(Box::new(client_side)));
-    server
-        .accept_subscriber(Box::new(server_side), who)
-        .unwrap();
+    block_on(server.accept_subscriber(Box::new(server_side), who)).unwrap();
     (upstream, log)
 }
 

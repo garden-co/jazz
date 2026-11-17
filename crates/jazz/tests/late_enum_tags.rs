@@ -14,6 +14,7 @@
 //! Every result is compared with a fresh one-shot read after every write
 //! (`fanout_correlation::check`), on SQLite file storage.
 
+use jazz_types::legacy_test_future::ResultFutureExt as _;
 use std::collections::{BTreeMap, BTreeSet};
 
 use jazz::db::{Db, ReadOpts, ReadTier, block_on, duplex};
@@ -130,10 +131,10 @@ fn seated() -> JazzSchema {
 }
 
 fn archived_role(db: &Db) {
-    db.set_identity_claims(
+    jazz::db::block_on(db.set_identity_claims(
         user(0),
         BTreeMap::from([("\0claims:role".to_owned(), Value::String("archived".into()))]),
-    );
+    ));
 }
 
 fn flag(db: &Db, n: usize, kind: &str) {
@@ -170,11 +171,11 @@ fn a_filter_on_a_variant_tagged_after_it_subscribed_wakes_for_its_rows() {
 #[test]
 fn a_policy_pinned_to_a_variant_tagged_after_it_subscribed_wakes_for_its_rows() {
     let db = open(schema(Some(session_eq("status", &["claims", "role"]))), 1);
-    db.set_authority();
-    db.set_identity_claims(
+    jazz::db::block_on(db.set_authority());
+    jazz::db::block_on(db.set_identity_claims(
         user(0),
         BTreeMap::from([("\0claims:role".to_owned(), Value::String("archived".into()))]),
-    );
+    ));
     keep_variant(&db, "archived");
     doc(&db, 0, "todo");
     let mut lives = vec![subscribe(&db, "role", Query::from("docs"), Some(user(0)))];
@@ -193,11 +194,11 @@ fn results_keyed_by_a_variant_keep_waking_after_its_tag_is_renumbered() {
     let policy = || Some(session_eq("status", &["claims", "role"]));
     let v1 = schema_of(&["todo", "done"], policy());
     let db = open(v1.clone(), 1);
-    db.set_authority();
-    db.set_identity_claims(
+    jazz::db::block_on(db.set_authority());
+    jazz::db::block_on(db.set_identity_claims(
         user(0),
         BTreeMap::from([("\0claims:role".to_owned(), Value::String("done".into()))]),
-    );
+    ));
     doc(&db, 0, "todo");
     doc(&db, 1, "done");
     let filtered = |status: &str| Query::from("docs").filter(eq(col("status"), lit(text(status))));
@@ -238,7 +239,7 @@ fn results_keyed_by_a_variant_keep_waking_after_its_tag_is_renumbered() {
 #[test]
 fn an_exists_pinned_to_a_variant_tagged_after_it_subscribed_wakes_for_its_rows() {
     let db = open(flagged(), 1);
-    db.set_authority();
+    jazz::db::block_on(db.set_authority());
     archived_role(&db);
     keep(&db, "flags", "kind", "archived");
     doc(&db, 0, "todo");
@@ -407,11 +408,11 @@ fn a_filter_on_a_name_that_is_no_variant_is_not_woken_by_other_rows() {
 #[test]
 fn a_policy_pinned_to_a_claim_outside_the_enum_is_not_woken_by_other_rows() {
     let db = open(schema(Some(session_eq("status", &["claims", "role"]))), 1);
-    db.set_authority();
-    db.set_identity_claims(
+    jazz::db::block_on(db.set_authority());
+    jazz::db::block_on(db.set_identity_claims(
         user(0),
         BTreeMap::from([("\0claims:role".to_owned(), Value::String("admin".into()))]),
-    );
+    ));
     let mut lives = vec![subscribe(&db, "role", Query::from("docs"), Some(user(0)))];
     check(&db, &mut lives, "subscribe");
     let woken = wakes(&db, || {
@@ -428,11 +429,11 @@ fn a_policy_pinned_to_a_claim_outside_the_enum_is_not_woken_by_other_rows() {
 #[test]
 fn an_exists_pinned_to_a_claim_outside_the_enum_is_not_woken_by_other_flags() {
     let db = open(flagged(), 1);
-    db.set_authority();
-    db.set_identity_claims(
+    jazz::db::block_on(db.set_authority());
+    jazz::db::block_on(db.set_identity_claims(
         user(0),
         BTreeMap::from([("\0claims:role".to_owned(), Value::String("admin".into()))]),
-    );
+    ));
     doc(&db, 0, "todo");
     let mut lives = vec![subscribe(&db, "role", Query::from("docs"), Some(user(0)))];
     check(&db, &mut lives, "subscribe");

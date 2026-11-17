@@ -3,6 +3,7 @@
 //! sync frames the host carries between two bindings.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt as _;
 
 use std::cell::Cell;
 use std::future::Future;
@@ -49,7 +50,7 @@ fn identity(node: u8) -> DbIdentity {
 fn open(node: u8) -> Binding {
     let identity = identity(node);
     let db = block_on(Db::open(DbConfig::new(schema(), identity))).unwrap();
-    Binding::new(db, identity, false)
+    jazz::db::block_on(Binding::new(db, identity, false))
 }
 
 fn authority() -> Binding {
@@ -58,7 +59,7 @@ fn authority() -> Binding {
         author: AuthorSubject::SYSTEM,
     };
     let db = block_on(Db::open_history_complete(DbConfig::new(schema(), identity))).unwrap();
-    Binding::new(db, identity, true)
+    jazz::db::block_on(Binding::new(db, identity, true))
 }
 
 fn title(value: &str) -> Vec<u8> {
@@ -253,7 +254,7 @@ fn staging_many_inserts_replays_no_earlier_write() {
         .unwrap();
     const N: usize = 200;
     for n in 0..N {
-        db.set_identity_claims(alice_bytes.as_bytes(), json!({ "role": "member" }))
+        block_on(db.set_identity_claims(alice_bytes.as_bytes(), json!({ "role": "member" })))
             .unwrap();
         db.insert_in_transaction(tx, "notes", &title(&format!("note {n}")), &none())
             .unwrap();
@@ -437,9 +438,8 @@ fn two_bindings_sync_over_frames_the_host_carries() {
     let server = authority();
     let client = open(0xa1);
     let upstream = client.connect_upstream();
-    let subscriber = server
-        .accept_subscriber(client.author(), Default::default())
-        .unwrap();
+    let subscriber =
+        jazz::db::block_on(server.accept_subscriber(client.author(), Default::default())).unwrap();
     let links = [(&upstream, &subscriber)];
 
     let write = client.insert("notes", &title("hello"), &none()).unwrap();
@@ -513,9 +513,8 @@ fn a_write_made_before_the_upstream_connects_uploads_once_it_does() {
     let client = open(0xa1);
     let write = client.insert("notes", &title("offline"), &none()).unwrap();
     let upstream = client.connect_upstream();
-    let subscriber = server
-        .accept_subscriber(client.author(), Default::default())
-        .unwrap();
+    let subscriber =
+        jazz::db::block_on(server.accept_subscriber(client.author(), Default::default())).unwrap();
     let links = [(&upstream, &subscriber)];
     drive(&links, client.wait_for(write.seq, "global").unwrap()).unwrap();
     assert_eq!(titles(&server), ["offline"]);
@@ -740,12 +739,11 @@ fn a_message_larger_than_one_wire_frame_travels_in_parts() {
 /// A browser tab over its worker: the worker is a replica whose own
 /// identity the tab connects as.
 fn tab_over(worker: &Binding, tab: Binding) -> (Binding, Link, Link) {
-    tab.set_non_durable_client();
-    tab.set_remote_link_hint("live").unwrap();
+    jazz::db::block_on(tab.set_non_durable_client());
+    jazz::db::block_on(tab.set_remote_link_hint("live")).unwrap();
     let up = tab.connect_upstream();
-    let down = worker
-        .accept_subscriber(worker.author(), Default::default())
-        .unwrap();
+    let down =
+        jazz::db::block_on(worker.accept_subscriber(worker.author(), Default::default())).unwrap();
     (tab, up, down)
 }
 
@@ -755,7 +753,7 @@ fn a_worker_refuses_a_tab_of_another_identity() {
     // another user's tab would attribute that user's writes to it.
     let worker = open(0xb1);
     let other = open(0xb2);
-    match worker.accept_subscriber(other.author(), Default::default()) {
+    match block_on(worker.accept_subscriber(other.author(), Default::default())) {
         Err(HostError::Engine(error)) => {
             assert_eq!(error.code, ErrorCode::Protocol);
             assert_eq!(error.reason, Some(jazz::db::Reason::IdentityMismatch));
@@ -767,11 +765,7 @@ fn a_worker_refuses_a_tab_of_another_identity() {
     // Its own identity's tabs are served, and the authority serves anyone.
     let (_tab, _up, _down) = tab_over(&worker, open(0xb3));
     assert_eq!(worker.db.open_subscribers(), 1);
-    assert!(
-        authority()
-            .accept_subscriber(other.author(), Default::default())
-            .is_ok()
-    );
+    assert!(block_on(authority().accept_subscriber(other.author(), Default::default())).is_ok());
 }
 
 #[test]
@@ -874,7 +868,7 @@ fn a_worker_serves_its_own_tabs_as_it_reads_itself() {
     let open = |node: u8| {
         let identity = identity(node);
         let db = block_on(Db::open(DbConfig::new(bare.clone(), identity))).unwrap();
-        Binding::new(db, identity, false)
+        jazz::db::block_on(Binding::new(db, identity, false))
     };
     let worker = open(0xb0);
     let (tab, up, down) = tab_over(&worker, open(0xb1));
@@ -888,11 +882,10 @@ fn a_worker_serves_its_own_tabs_as_it_reads_itself() {
 fn a_tab_reads_and_writes_through_its_worker_to_the_server() {
     let server = authority();
     let worker = open(0xc0);
-    worker.set_remote_link_hint("live").unwrap();
+    jazz::db::block_on(worker.set_remote_link_hint("live")).unwrap();
     let up = worker.connect_upstream();
-    let down = server
-        .accept_subscriber(worker.author(), Default::default())
-        .unwrap();
+    let down =
+        jazz::db::block_on(server.accept_subscriber(worker.author(), Default::default())).unwrap();
     let (tab, tab_up, tab_down) = tab_over(&worker, open(0xc1));
     let links = [(&up, &down), (&tab_up, &tab_down)];
 
@@ -983,11 +976,10 @@ fn a_tab_reads_a_large_value_its_worker_relays_from_the_server() {
     let large = "r".repeat(300 * 1024);
     server.insert("notes", &title(&large), &none()).unwrap();
     let worker = open(0xd2);
-    worker.set_remote_link_hint("live").unwrap();
+    jazz::db::block_on(worker.set_remote_link_hint("live")).unwrap();
     let up = worker.connect_upstream();
-    let down = server
-        .accept_subscriber(worker.author(), Default::default())
-        .unwrap();
+    let down =
+        jazz::db::block_on(server.accept_subscriber(worker.author(), Default::default())).unwrap();
     let (tab, tab_up, tab_down) = tab_over(&worker, open(0xd3));
     let links = [(&up, &down), (&tab_up, &tab_down)];
     let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
@@ -1007,11 +999,10 @@ fn a_tab_subscription_opens_with_a_large_value_its_worker_relays_from_the_server
     let large = "s".repeat(300 * 1024);
     server.insert("notes", &title(&large), &none()).unwrap();
     let worker = open(0xd4);
-    worker.set_remote_link_hint("live").unwrap();
+    jazz::db::block_on(worker.set_remote_link_hint("live")).unwrap();
     let up = worker.connect_upstream();
-    let down = server
-        .accept_subscriber(worker.author(), Default::default())
-        .unwrap();
+    let down =
+        jazz::db::block_on(server.accept_subscriber(worker.author(), Default::default())).unwrap();
     let (tab, tab_up, tab_down) = tab_over(&worker, open(0xd5));
     let links = [(&up, &down), (&tab_up, &tab_down)];
     let query = postcard::to_allocvec(&Query::from("notes").select(["title"])).unwrap();
@@ -1040,11 +1031,11 @@ fn a_tab_sees_another_workers_tab_write_live() {
     let server = authority();
     let connect = |node: u8| {
         let worker = open(node);
-        worker.set_remote_link_hint("live").unwrap();
+        jazz::db::block_on(worker.set_remote_link_hint("live")).unwrap();
         let up = worker.connect_upstream();
-        let down = server
-            .accept_subscriber(worker.author(), Default::default())
-            .unwrap();
+        let down =
+            jazz::db::block_on(server.accept_subscriber(worker.author(), Default::default()))
+                .unwrap();
         let (tab, tab_up, tab_down) = tab_over(&worker, open(node + 1));
         (worker, tab, up, down, tab_up, tab_down)
     };
@@ -1079,11 +1070,10 @@ fn a_tab_sees_another_workers_tab_write_live() {
 fn a_tabs_large_value_reaches_the_server_through_its_worker() {
     let server = authority();
     let worker = open(0xe0);
-    worker.set_remote_link_hint("live").unwrap();
+    jazz::db::block_on(worker.set_remote_link_hint("live")).unwrap();
     let up = worker.connect_upstream();
-    let down = server
-        .accept_subscriber(worker.author(), Default::default())
-        .unwrap();
+    let down =
+        jazz::db::block_on(server.accept_subscriber(worker.author(), Default::default())).unwrap();
     let (tab, tab_up, tab_down) = tab_over(&worker, open(0xe1));
     let links = [(&up, &down), (&tab_up, &tab_down)];
 
@@ -1114,7 +1104,7 @@ fn a_tab_whose_write_the_server_refuses_reverts_to_the_servers_row() {
     let open = |node: u8| {
         let identity = identity(node);
         let db = block_on(Db::open(DbConfig::new(schema.clone(), identity))).unwrap();
-        Binding::new(db, identity, false)
+        jazz::db::block_on(Binding::new(db, identity, false))
     };
     let server = {
         let identity = DbIdentity {
@@ -1126,14 +1116,13 @@ fn a_tab_whose_write_the_server_refuses_reverts_to_the_servers_row() {
             identity,
         )))
         .unwrap();
-        Binding::new(db, identity, true)
+        jazz::db::block_on(Binding::new(db, identity, true))
     };
     let worker = open(0xf0);
-    worker.set_remote_link_hint("live").unwrap();
+    jazz::db::block_on(worker.set_remote_link_hint("live")).unwrap();
     let up = worker.connect_upstream();
-    let down = server
-        .accept_subscriber(worker.author(), Default::default())
-        .unwrap();
+    let down =
+        jazz::db::block_on(server.accept_subscriber(worker.author(), Default::default())).unwrap();
     let (tab, tab_up, tab_down) = tab_over(&worker, open(0xf1));
     let links = [(&up, &down), (&tab_up, &tab_down)];
 
@@ -1175,7 +1164,7 @@ fn a_refusal_for_a_closed_tabs_write_names_the_tabs_transaction() {
     let open = |node: u8| {
         let identity = identity(node);
         let db = block_on(Db::open(DbConfig::new(schema.clone(), identity))).unwrap();
-        Binding::new(db, identity, false)
+        jazz::db::block_on(Binding::new(db, identity, false))
     };
     let server = {
         let identity = DbIdentity {
@@ -1187,7 +1176,7 @@ fn a_refusal_for_a_closed_tabs_write_names_the_tabs_transaction() {
             identity,
         )))
         .unwrap();
-        Binding::new(db, identity, true)
+        jazz::db::block_on(Binding::new(db, identity, true))
     };
     let worker = open(0xe0);
     let refused = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -1196,11 +1185,10 @@ fn a_refusal_for_a_closed_tabs_write_names_the_tabs_transaction() {
         seen.borrow_mut().push(tx_id.clone());
         true
     }));
-    worker.set_remote_link_hint("live").unwrap();
+    jazz::db::block_on(worker.set_remote_link_hint("live")).unwrap();
     let mut up = worker.connect_upstream();
-    let down = server
-        .accept_subscriber(worker.author(), Default::default())
-        .unwrap();
+    let down =
+        jazz::db::block_on(server.accept_subscriber(worker.author(), Default::default())).unwrap();
     let (tab, tab_up, mut tab_down) = tab_over(&worker, open(0xe1));
     let links = [(&up, &down), (&tab_up, &tab_down)];
     let write = tab.insert("notes", &title("kept"), &none()).unwrap();
@@ -1218,16 +1206,23 @@ fn a_refusal_for_a_closed_tabs_write_names_the_tabs_transaction() {
 
     // The worker uploads it once it is back, and the server refuses it.
     let up = worker.connect_upstream();
-    let down = server
-        .accept_subscriber(worker.author(), Default::default())
-        .unwrap();
+    let down =
+        jazz::db::block_on(server.accept_subscriber(worker.author(), Default::default())).unwrap();
     pump(&[(&up, &down)]);
     assert_eq!(titles(&worker), ["kept"]);
     assert_eq!(*refused.borrow(), [update.tx_id]);
     // Neither the relay nor the authority keeps the tab's refused payload
     // (INV-TX-9): only the store that made a write retries it.
-    assert!(worker.db.rejected_transactions().unwrap().is_empty());
-    assert!(server.db.rejected_transactions().unwrap().is_empty());
+    assert!(
+        block_on(worker.db.rejected_transactions())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        block_on(server.db.rejected_transactions())
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// A refusal no listener took stays in the retry store (INV-TX-9): the
@@ -1259,14 +1254,14 @@ fn a_refusal_nobody_heard_is_kept_until_a_listener_takes_it() {
             identity,
         )))
         .unwrap();
-        Binding::new(db, identity, true)
+        jazz::db::block_on(Binding::new(db, identity, true))
     };
     let identity = identity(0xe2);
-    let client = Binding::new(
+    let client = jazz::db::block_on(Binding::new(
         block_on(Db::open(DbConfig::new(schema, identity))).unwrap(),
         identity,
         false,
-    );
+    ));
     let listening = std::rc::Rc::new(std::cell::Cell::new(false));
     let heard = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let (on, seen) = (std::rc::Rc::clone(&listening), std::rc::Rc::clone(&heard));
@@ -1276,11 +1271,10 @@ fn a_refusal_nobody_heard_is_kept_until_a_listener_takes_it() {
         }
         on.get()
     }));
-    client.set_remote_link_hint("live").unwrap();
+    jazz::db::block_on(client.set_remote_link_hint("live")).unwrap();
     let up = client.connect_upstream();
-    let down = server
-        .accept_subscriber(client.author(), Default::default())
-        .unwrap();
+    let down =
+        jazz::db::block_on(server.accept_subscriber(client.author(), Default::default())).unwrap();
     let links = [(&up, &down)];
     let write = client.insert("notes", &title("kept"), &none()).unwrap();
     drive(&links, client.wait_for(write.seq, "global").unwrap()).unwrap();
@@ -1292,9 +1286,7 @@ fn a_refusal_nobody_heard_is_kept_until_a_listener_takes_it() {
     pump(&links);
     assert!(heard.borrow().is_empty());
     assert_eq!(
-        client
-            .db
-            .rejected_transactions()
+        block_on(client.db.rejected_transactions())
             .unwrap()
             .iter()
             .map(|r| r.seq)
@@ -1307,7 +1299,11 @@ fn a_refusal_nobody_heard_is_kept_until_a_listener_takes_it() {
     client.redeliver_rejections();
     pump(&links);
     assert_eq!(*heard.borrow(), [update.tx_id]);
-    assert!(client.db.rejected_transactions().unwrap().is_empty());
+    assert!(
+        block_on(client.db.rejected_transactions())
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1316,10 +1312,9 @@ fn a_tab_subscribed_while_its_worker_is_offline_hears_the_server_once_it_is_back
     server.insert("notes", &title("server's"), &none()).unwrap();
     let worker = open(0xac);
     let up = worker.connect_upstream();
-    worker.set_remote_link_hint("failed").unwrap();
-    let down = server
-        .accept_subscriber(worker.author(), Default::default())
-        .unwrap();
+    jazz::db::block_on(worker.set_remote_link_hint("failed")).unwrap();
+    let down =
+        jazz::db::block_on(server.accept_subscriber(worker.author(), Default::default())).unwrap();
     let (tab, tab_up, tab_down) = tab_over(&worker, open(0xad));
     let tab_links = [(&tab_up, &tab_down)];
 
@@ -1335,7 +1330,7 @@ fn a_tab_subscribed_while_its_worker_is_offline_hears_the_server_once_it_is_back
     assert_eq!(added.iter().map(|batch| batch.rows.len()).sum::<usize>(), 0);
 
     // The link comes back: the server's row reaches the tab.
-    worker.set_remote_link_hint("live").unwrap();
+    jazz::db::block_on(worker.set_remote_link_hint("live")).unwrap();
     let links = [(&up, &down), (&tab_up, &tab_down)];
     let change = binding_host::event_chunk(drive(&links, tab.next_event(&mut stream))).unwrap();
     let EventChunk::Delta { delta, .. } = change else {
@@ -1352,11 +1347,11 @@ fn tabs_changing_one_row_at_once_converge_on_the_later_write_without_a_server() 
     // commits' clocks (the writer's node breaking a tie), so the worker
     // and both tabs show the same write until a server orders them.
     let worker = open(0xc0);
-    worker.set_remote_link_hint("none").unwrap();
+    jazz::db::block_on(worker.set_remote_link_hint("none")).unwrap();
     let (a, a_up, a_down) = tab_over(&worker, open(0xc1));
     let (b, b_up, b_down) = tab_over(&worker, open(0xc2));
-    a.set_remote_link_hint("none").unwrap();
-    b.set_remote_link_hint("none").unwrap();
+    jazz::db::block_on(a.set_remote_link_hint("none")).unwrap();
+    jazz::db::block_on(b.set_remote_link_hint("none")).unwrap();
     let links = [(&a_up, &a_down), (&b_up, &b_down)];
     let write = a.insert("notes", &title("before"), &none()).unwrap();
     pump(&links);
@@ -1380,11 +1375,10 @@ fn tabs_changing_one_row_at_once_converge_on_the_later_write_without_a_server() 
 fn a_tabs_local_reads_are_its_workers_store() {
     let server = authority();
     let worker = open(0xa8);
-    worker.set_remote_link_hint("live").unwrap();
+    jazz::db::block_on(worker.set_remote_link_hint("live")).unwrap();
     let up = worker.connect_upstream();
-    let down = server
-        .accept_subscriber(worker.author(), Default::default())
-        .unwrap();
+    let down =
+        jazz::db::block_on(server.accept_subscriber(worker.author(), Default::default())).unwrap();
     let (tab, tab_up, tab_down) = tab_over(&worker, open(0xa9));
     let links = [(&up, &down), (&tab_up, &tab_down)];
     let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
@@ -1415,7 +1409,7 @@ fn a_tab_reads_its_workers_store_when_the_worker_has_no_server() {
     let tab_binding = open(0xab);
     let (tab, up, down) = tab_over(&worker, tab_binding);
     // The tab hears the worker's own path to the server: there is none.
-    tab.set_remote_link_hint("none").unwrap();
+    jazz::db::block_on(tab.set_remote_link_hint("none")).unwrap();
     let links = [(&up, &down)];
     worker.insert("notes", &title("worker's"), &none()).unwrap();
 
@@ -1481,9 +1475,9 @@ fn delta_rows(chunk: EventChunk) -> usize {
 #[test]
 fn a_tabs_remote_reads_and_global_waits_stay_pending_when_its_worker_has_no_server() {
     let worker = open(0xb0);
-    worker.set_remote_link_hint("none").unwrap();
+    jazz::db::block_on(worker.set_remote_link_hint("none")).unwrap();
     let (tab, up, down) = tab_over(&worker, open(0xb1));
-    tab.set_remote_link_hint("none").unwrap();
+    jazz::db::block_on(tab.set_remote_link_hint("none")).unwrap();
     let links = [(&up, &down)];
     worker.insert("notes", &title("worker's"), &none()).unwrap();
     let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
@@ -1516,10 +1510,9 @@ fn a_remote_read_waits_for_the_server_while_offline() {
     // A tab, its worker's link down.
     let worker = open(0xb2);
     let up = worker.connect_upstream();
-    let down = server
-        .accept_subscriber(worker.author(), Default::default())
-        .unwrap();
-    worker.set_remote_link_hint("failed").unwrap();
+    let down =
+        jazz::db::block_on(server.accept_subscriber(worker.author(), Default::default())).unwrap();
+    jazz::db::block_on(worker.set_remote_link_hint("failed")).unwrap();
     let (tab, tab_up, tab_down) = tab_over(&worker, open(0xb3));
     let tab_links = [(&tab_up, &tab_down)];
     let mut read = tab.all(query.clone(), &remote, None, None, None).unwrap();
@@ -1529,7 +1522,7 @@ fn a_remote_read_waits_for_the_server_while_offline() {
         let opening = tab.next_event(&mut stream);
         still_pending(&tab_links, pin!(opening));
     }
-    worker.set_remote_link_hint("live").unwrap();
+    jazz::db::block_on(worker.set_remote_link_hint("live")).unwrap();
     let links = [(&up, &down), (&tab_up, &tab_down)];
     assert_eq!(rows_in(&drive(&links, read).unwrap()), 1);
     let opening = binding_host::event_chunk(drive(&links, tab.next_event(&mut stream))).unwrap();
@@ -1538,13 +1531,12 @@ fn a_remote_read_waits_for_the_server_while_offline() {
     // A client of its own, its link down.
     let client = open(0xb4);
     let up = client.connect_upstream();
-    let down = server
-        .accept_subscriber(client.author(), Default::default())
-        .unwrap();
-    client.set_remote_link_hint("failed").unwrap();
+    let down =
+        jazz::db::block_on(server.accept_subscriber(client.author(), Default::default())).unwrap();
+    jazz::db::block_on(client.set_remote_link_hint("failed")).unwrap();
     let mut read = client.all(query, &remote, None, None, None).unwrap();
     still_pending(&[], read.as_mut());
-    client.set_remote_link_hint("live").unwrap();
+    jazz::db::block_on(client.set_remote_link_hint("live")).unwrap();
     assert_eq!(rows_in(&drive(&[(&up, &down)], read).unwrap()), 1);
 }
 
@@ -1555,12 +1547,11 @@ fn a_remote_read_waits_for_the_server_while_offline() {
 fn a_tabs_first_load_wait_reaches_its_worker() {
     let server = authority();
     let worker = open(0xb5);
-    worker.set_remote_link_hint("live").unwrap();
+    jazz::db::block_on(worker.set_remote_link_hint("live")).unwrap();
     // Connected, but the server never answers: its frames are never carried.
     let _up = worker.connect_upstream();
-    let _down = server
-        .accept_subscriber(worker.author(), Default::default())
-        .unwrap();
+    let _down =
+        jazz::db::block_on(server.accept_subscriber(worker.author(), Default::default())).unwrap();
     worker.insert("notes", &title("worker's"), &none()).unwrap();
     let (tab, tab_up, tab_down) = tab_over(&worker, open(0xb6));
     let links = [(&tab_up, &tab_down)];
@@ -1616,9 +1607,8 @@ fn a_remote_subscription_never_lists_pending_local_versions() {
         .as_bytes();
     let client = open(0xb7);
     let up = client.connect_upstream();
-    let down = server
-        .accept_subscriber(client.author(), Default::default())
-        .unwrap();
+    let down =
+        jazz::db::block_on(server.accept_subscriber(client.author(), Default::default())).unwrap();
     let links = [(&up, &down)];
     let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
     let mut remote = client
@@ -1682,7 +1672,7 @@ fn device_chain_subscribes_to_a_large_value(file: Option<&std::path::Path>) {
                 jazz::db::FileOptions::default(),
             ))
             .unwrap();
-            Binding::new(db, identity(node), false)
+            block_on(Binding::new(db, identity(node), false))
         }
         None => open(node),
     };
@@ -1696,16 +1686,12 @@ fn device_chain_subscribes_to_a_large_value(file: Option<&std::path::Path>) {
             (binding, asked)
         })
         .collect();
-    relay.set_remote_link_hint("live").unwrap();
+    block_on(relay.set_remote_link_hint("live")).unwrap();
     let up = relay.connect_upstream();
-    let down = server
-        .accept_subscriber(relay.author(), Default::default())
-        .unwrap();
-    tab.set_non_durable_client();
+    let down = block_on(server.accept_subscriber(relay.author(), Default::default())).unwrap();
+    block_on(tab.set_non_durable_client());
     let tab_up = tab.connect_upstream();
-    let tab_down = relay
-        .accept_subscriber(relay.author(), Default::default())
-        .unwrap();
+    let tab_down = block_on(relay.accept_subscriber(relay.author(), Default::default())).unwrap();
     let links = [(&up, &down), (&tab_up, &tab_down)];
     let query = postcard::to_allocvec(&Query::from("notes").select(["title"])).unwrap();
     let mut stream = tab
@@ -1779,7 +1765,7 @@ fn a_tabs_local_wait_the_worker_refuses_claims_the_refusal() {
     let open = |node: u8| {
         let identity = identity(node);
         let db = block_on(Db::open(DbConfig::new(schema.clone(), identity))).unwrap();
-        Binding::new(db, identity, false)
+        jazz::db::block_on(Binding::new(db, identity, false))
     };
     let server = {
         let identity = DbIdentity {
@@ -1791,14 +1777,13 @@ fn a_tabs_local_wait_the_worker_refuses_claims_the_refusal() {
             identity,
         )))
         .unwrap();
-        Binding::new(db, identity, true)
+        jazz::db::block_on(Binding::new(db, identity, true))
     };
     let worker = open(0xe0);
-    worker.set_remote_link_hint("live").unwrap();
+    jazz::db::block_on(worker.set_remote_link_hint("live")).unwrap();
     let up = worker.connect_upstream();
-    let down = server
-        .accept_subscriber(worker.author(), Default::default())
-        .unwrap();
+    let down =
+        jazz::db::block_on(server.accept_subscriber(worker.author(), Default::default())).unwrap();
     let (tab, tab_up, tab_down) = tab_over(&worker, open(0xe1));
     let told = Rc::new(RefCell::new(Vec::new()));
     let heard = Rc::clone(&told);
@@ -1950,7 +1935,7 @@ fn branched(node: u8, authority: bool) -> Binding {
         block_on(Db::open(config))
     }
     .unwrap();
-    Binding::new(db, identity, authority)
+    block_on(Binding::new(db, identity, authority))
 }
 
 fn branch(byte: u8) -> jazz::protocol::BranchSelector {

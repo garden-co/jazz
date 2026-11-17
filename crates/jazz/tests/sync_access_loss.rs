@@ -99,15 +99,22 @@ fn cells(pairs: &[(&str, Value)]) -> BTreeMap<String, Value> {
 }
 
 fn seed(server: &Db, table: &str, row: RowUuid, values: BTreeMap<String, Value>) {
-    server
-        .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
-        .unwrap();
+    jazz::db::block_on(server.insert(
+        table,
+        values,
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
 }
 
 fn connect(server: &Db, client: &Db, who: AuthorSubject) -> Upstream {
     let (client_side, server_side) = duplex();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, who).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, who)).unwrap();
     upstream
 }
 

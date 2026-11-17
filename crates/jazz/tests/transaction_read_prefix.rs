@@ -38,7 +38,7 @@ fn open(node: u8) -> Db {
 fn connect(client: &Db, server: &Db) {
     let (a, b) = duplex();
     block_on(client.connect_upstream(a));
-    server.accept_subscriber(b, AuthorSubject::SYSTEM).unwrap();
+    jazz::db::block_on(server.accept_subscriber(b, AuthorSubject::SYSTEM)).unwrap();
 }
 fn drive<T>(dbs: &[&Db], future: impl Future<Output = T>) -> T {
     let mut future = pin!(future);
@@ -76,9 +76,9 @@ fn exchange(alice: &Db, bob: &Db) {
 fn fixture() -> (Db, Db) {
     let alice = open(1);
     let bob = open(2);
-    bob.set_authority();
+    jazz::db::block_on(bob.set_authority());
     connect(&alice, &bob);
-    alice.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Live));
     exchange(&alice, &bob);
     (alice, bob)
 }

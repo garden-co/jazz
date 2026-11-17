@@ -103,7 +103,9 @@ impl Fixture {
     }
 
     pub fn list_folder(&self) -> usize {
-        self.db.read(&self.list).expect("list fixture folder").len()
+        jazz::db::block_on(self.db.read(&self.list))
+            .expect("list fixture folder")
+            .len()
     }
 
     pub fn download_middle_range(&self) -> Vec<u8> {

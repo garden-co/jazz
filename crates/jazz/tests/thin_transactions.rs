@@ -3,6 +3,7 @@
 //! serves them: the core only accepts finished uploads.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt as _;
 
 use std::future::Future;
 use std::pin::pin;
@@ -74,7 +75,7 @@ fn authority() -> Binding {
         author: AuthorSubject::SYSTEM,
     };
     let db = block_on(Db::open_history_complete(DbConfig::new(schema(), identity))).unwrap();
-    Binding::new(db, identity, true)
+    block_on(Binding::new(db, identity, true))
 }
 
 /// The session's client in its backend: in memory, linked to the core as
@@ -105,7 +106,7 @@ impl Session {
             author: own,
         };
         let db = block_on(Db::open(DbConfig::new(schema(), identity))).unwrap();
-        let client = Binding::new(db, identity, false);
+        let client = block_on(Binding::new(db, identity, false));
         let upstream = client.connect_upstream();
         let subscriber = core
             .accept_subscriber(session_user(), Default::default())
@@ -1208,7 +1209,7 @@ fn a_trusted_sessions_writes_are_the_backends_own() {
         author: AuthorSubject::SYSTEM,
     };
     let db = block_on(Db::open(DbConfig::new(schema(), identity))).unwrap();
-    let client = Binding::new(db, identity, true);
+    let client = block_on(Binding::new(db, identity, true));
     let upstream = client.connect_upstream();
     let subscriber = core
         .accept_subscriber(AuthorSubject::SYSTEM, Default::default())

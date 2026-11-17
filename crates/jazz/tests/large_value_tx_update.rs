@@ -90,7 +90,7 @@ fn seed(db: &Db) -> RowUuid {
 /// Committed row cells as a public query reader sees them.
 fn committed(db: &Db, row: RowUuid) -> BTreeMap<&'static str, Value> {
     let query = db.prepare_query(&db.table("docs")).expect("prepare");
-    let rows = db.read(&query).expect("read");
+    let rows = jazz::db::block_on(db.read(&query)).expect("read");
     let row = rows
         .into_iter()
         .find(|candidate| candidate.row_uuid() == row)
@@ -316,7 +316,9 @@ fn transaction_restore_brings_back_large_values() {
     .expect("stage restore");
     let query = db.prepare_query(&db.table("docs")).expect("prepare");
     assert!(
-        db.read(&query).expect("read").is_empty(),
+        jazz::db::block_on(db.read(&query))
+            .expect("read")
+            .is_empty(),
         "nothing lands before the commit"
     );
     block_on(db.commit_mergeable_handle(batch)).expect("commit");

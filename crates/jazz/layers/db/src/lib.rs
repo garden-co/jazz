@@ -14,6 +14,7 @@
 // Sync and fan-out bookkeeping keys maps by (table, row, branch) tuples;
 // naming each nesting would not make them clearer.
 #![allow(clippy::type_complexity)]
+#![deny(clippy::await_holding_refcell_ref)]
 
 // The layers below, under the paths this crate's code uses.
 use jazz_model::{query, schema, tx};
@@ -30,6 +31,7 @@ mod tools {
     pub use jazz_model::model::transaction::OpenTransactionId;
 }
 
+pub mod backend;
 pub mod binding_args;
 pub mod binding_codec;
 pub mod binding_host;
@@ -90,3 +92,8 @@ pub mod result_tree {
         Hole,
     }
 }
+
+// Available to lower-layer tests built with the testing feature.
+#[cfg(all(feature = "sqlite", any(test, feature = "testing")))]
+#[cfg_attr(not(test), allow(dead_code))]
+mod sql_test;

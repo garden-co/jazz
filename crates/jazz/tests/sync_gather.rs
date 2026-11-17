@@ -64,28 +64,34 @@ fn id(kind: u8, n: u8) -> RowUuid {
 
 fn team(db: &Db, n: u8, name: &str, parent: Option<u8>) {
     let parent = parent.map_or(Value::Nullable(None), |p| Value::Uuid(id(1, p).0));
-    db.seed_settled_mergeable_for_bootstrap(
+    jazz::db::block_on(db.insert(
         "teams",
-        id(1, n),
-        AuthorSubject::SYSTEM,
         BTreeMap::from([
             ("name".to_owned(), Value::String(name.to_owned())),
             ("parent_id".to_owned(), parent),
         ]),
-    )
+        jazz::db::InsertOptions {
+            row_id: Some(id(1, n)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
     .unwrap();
 }
 
 fn edge(db: &Db, n: u8, child: u8, parent: u8) {
-    db.seed_settled_mergeable_for_bootstrap(
+    jazz::db::block_on(db.insert(
         "team_edges",
-        id(2, n),
-        AuthorSubject::SYSTEM,
         BTreeMap::from([
             ("child_team".to_owned(), Value::Uuid(id(1, child).0)),
             ("parent_team".to_owned(), Value::Uuid(id(1, parent).0)),
         ]),
-    )
+        jazz::db::InsertOptions {
+            row_id: Some(id(2, n)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
     .unwrap();
 }
 
@@ -132,9 +138,7 @@ fn connect(server: &Db) -> Db {
     let client = open(1);
     let (client_side, server_side) = duplex();
     let _ = block_on(client.connect_upstream(client_side));
-    server
-        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
     client
 }
 
@@ -289,14 +293,19 @@ fn hop_schema() -> JazzSchema {
 }
 
 fn seed(db: &Db, table: &str, row: RowUuid, cells: Vec<(&str, Value)>) {
-    db.seed_settled_mergeable_for_bootstrap(
-        table,
-        row,
-        AuthorSubject::SYSTEM,
-        cells
-            .into_iter()
-            .map(|(name, value)| (name.to_owned(), value))
-            .collect(),
+    jazz::db::block_on(
+        db.insert(
+            table,
+            cells
+                .into_iter()
+                .map(|(name, value)| (name.to_owned(), value))
+                .collect(),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ),
     )
     .unwrap();
 }
@@ -396,9 +405,7 @@ fn a_synced_gather_seeded_through_a_hop_ships_its_seed_rows() {
     .unwrap();
     let (client_side, server_side) = duplex();
     let _ = block_on(client.connect_upstream(client_side));
-    server
-        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
 
     let query = targets_reached_from(source, 1);
     let filtered = targets_reached_from(source, 1).filter(eq(col("rank"), lit(8i32)));

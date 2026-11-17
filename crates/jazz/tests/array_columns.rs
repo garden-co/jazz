@@ -78,8 +78,7 @@ fn insert_into(db: &Db, table: &str, byte: u8, cells: Vec<(&str, Value)>) {
 
 fn ids(db: &Db, query: Query) -> Vec<u8> {
     let prepared = db.prepare_query(&query).unwrap();
-    let mut ids: Vec<u8> = db
-        .read(&prepared)
+    let mut ids: Vec<u8> = jazz::db::block_on(db.read(&prepared))
         .unwrap()
         .iter()
         .map(|row| row.row_uuid().as_bytes()[0])
@@ -117,7 +116,7 @@ fn array_cells_round_trip_by_their_declared_element_types() {
         ],
     );
     let prepared = db.prepare_query(&Query::from("posts")).unwrap();
-    let rows = db.read(&prepared).unwrap();
+    let rows = jazz::db::block_on(db.read(&prepared)).unwrap();
     let cell = |name: &str| {
         rows[0]
             .cells()

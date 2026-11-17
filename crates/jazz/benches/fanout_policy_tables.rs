@@ -160,7 +160,7 @@ fn run(cfg: &Config, mode: Mode) -> Vec<(&'static str, Measured)> {
                 ("handle", text(format!("h{u}"))),
             ],
         );
-        db.set_identity_claims(user(u), claims(id(PERSON, u)));
+        jazz::db::block_on(db.set_identity_claims(user(u), claims(id(PERSON, u))));
     }
     for r in 0..rooms {
         insert(

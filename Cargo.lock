@@ -2176,6 +2176,7 @@ dependencies = [
  "futures",
  "jazz-model",
  "jazz-protocol",
+ "jazz-sql",
  "jazz-text",
  "jazz-types",
  "postcard",
@@ -2499,6 +2500,7 @@ dependencies = [
  "hyper-util",
  "jazz-core",
  "jazz-otel",
+ "jazz-sql",
  "jsonwebtoken",
  "opentelemetry",
  "postcard",
@@ -2532,6 +2534,13 @@ dependencies = [
  "serde_json",
  "tempfile",
  "uuid",
+]
+
+[[package]]
+name = "jazz-sql"
+version = "2.0.0-alpha.66"
+dependencies = [
+ "rusqlite",
 ]
 
 [[package]]

@@ -137,7 +137,7 @@ impl Net {
 
     fn add_worker(&mut self) {
         let worker = open(WORKER, author(WORKER));
-        worker.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Live));
         self.worker = Some(Client {
             node: WORKER,
             db: worker,
@@ -152,9 +152,9 @@ impl Net {
         let identity = if via.is_some() { WORKER } else { node };
         let db = open(node, author(identity));
         if via.is_some() {
-            db.set_non_durable_client();
+            jazz::db::block_on(db.set_non_durable_client());
         }
-        db.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(db.set_remote_link_hint(RemoteLinkHint::Live));
         self.clients.push(Client {
             node,
             db,
@@ -178,17 +178,19 @@ impl Net {
         let client = &mut self.clients[i];
         client.up = Some(block_on(client.db.connect_upstream(client_side)));
         match client.via {
-            None => self
-                .core
-                .accept_subscriber(server_side, author(client.node))
-                .unwrap(),
-            Some(_) => self
-                .worker
-                .as_ref()
-                .expect("worker")
-                .db
-                .accept_subscriber(server_side, author(WORKER))
-                .unwrap(),
+            None => jazz::db::block_on(
+                self.core
+                    .accept_subscriber(server_side, author(client.node)),
+            )
+            .unwrap(),
+            Some(_) => jazz::db::block_on(
+                self.worker
+                    .as_ref()
+                    .expect("worker")
+                    .db
+                    .accept_subscriber(server_side, author(WORKER)),
+            )
+            .unwrap(),
         };
     }
 
@@ -196,22 +198,20 @@ impl Net {
         let (client_side, server_side) = duplex();
         let worker = self.worker.as_mut().expect("worker");
         worker.up = Some(block_on(worker.db.connect_upstream(client_side)));
-        self.core
-            .accept_subscriber(server_side, author(WORKER))
-            .unwrap();
+        jazz::db::block_on(self.core.accept_subscriber(server_side, author(WORKER))).unwrap();
     }
 
     fn worker_offline(&mut self) {
         let worker = self.worker.as_mut().expect("worker");
         let up = worker.up.take().expect("online");
         assert!(worker.db.detach_connection(&up));
-        worker.db.set_remote_link_hint(RemoteLinkHint::Failed);
+        jazz::db::block_on(worker.db.set_remote_link_hint(RemoteLinkHint::Failed));
     }
 
     fn worker_online(&mut self) {
         self.connect_worker();
         let worker = self.worker.as_ref().expect("worker");
-        worker.db.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(worker.db.set_remote_link_hint(RemoteLinkHint::Live));
         self.pump();
     }
 
@@ -219,14 +219,16 @@ impl Net {
         let client = &mut self.clients[i];
         let up = client.up.take().expect("online");
         assert!(client.db.detach_connection(&up));
-        client.db.set_remote_link_hint(RemoteLinkHint::Failed);
+        jazz::db::block_on(client.db.set_remote_link_hint(RemoteLinkHint::Failed));
     }
 
     fn online(&mut self, i: usize) {
         self.connect(i);
-        self.clients[i]
-            .db
-            .set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(
+            self.clients[i]
+                .db
+                .set_remote_link_hint(RemoteLinkHint::Live),
+        );
         self.pump();
     }
 
@@ -305,7 +307,7 @@ impl Net {
     }
 
     fn conflicts(&self, row: RowUuid) -> Vec<WriteConflict> {
-        self.core.write_conflicts("todos", row, None).unwrap()
+        jazz::db::block_on(self.core.write_conflicts("todos", row, None)).unwrap()
     }
 
     fn conflict(&self, row: RowUuid, writer: Writer) -> WriteConflict {
@@ -723,8 +725,7 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
     // renamed to the worker's own commits.
     let core = open(CORE, AuthorSubject::SYSTEM);
     let (mut relay, server_side) = duplex();
-    core.accept_subscriber(server_side, AuthorSubject::SYSTEM)
-        .unwrap();
+    jazz::db::block_on(core.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
     let relay_node = [0x77; 16];
     let row = block_on(core.insert(
         "todos",
@@ -733,7 +734,7 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
     ))
     .unwrap()
     .row_uuid();
-    let seed = core.write_conflicts("todos", row, None).unwrap()[0].seq;
+    let seed = jazz::db::block_on(core.write_conflicts("todos", row, None)).unwrap()[0].seq;
     // Accepted before the relay's first upload, which never saw it.
     block_on(core.update(
         "todos",
@@ -839,7 +840,7 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
         "{fate}"
     );
 
-    let conflicts = core.write_conflicts("todos", row, None).unwrap();
+    let conflicts = jazz::db::block_on(core.write_conflicts("todos", row, None)).unwrap();
     assert_eq!(conflicts.len(), 4, "seed, core, first, second");
     let core_write = conflicts[1].writer;
     assert_eq!(core_write.0, [CORE; 16]);
@@ -954,10 +955,8 @@ fn a_branched_rows_writes_are_derived_on_its_branch() {
     net.online(0);
     net.settle(0, edit.mergeable_tx_id());
 
-    let conflicts = net
-        .core
-        .write_conflicts("drafts", row, Some(&branch))
-        .unwrap();
+    let conflicts =
+        jazz::db::block_on(net.core.write_conflicts("drafts", row, Some(&branch))).unwrap();
     let client = conflicts
         .iter()
         .find(|conflict| conflict.writer == net.writer(0, edit.mergeable_tx_id()))
@@ -966,8 +965,7 @@ fn a_branched_rows_writes_are_derived_on_its_branch() {
     assert_eq!(client.overlapping.len(), 1);
     assert_eq!(client.overlapping[0].1.0, [CORE; 16]);
     assert!(
-        net.core
-            .write_conflicts("drafts", row, None)
+        jazz::db::block_on(net.core.write_conflicts("drafts", row, None))
             .unwrap()
             .is_empty(),
         "the row has no unbranched versions"
@@ -1005,7 +1003,7 @@ fn a_reopened_authority_still_derives_what_it_recorded() {
     drop(net);
 
     let core = open_core();
-    let after = core.write_conflicts("todos", row, None).unwrap();
+    let after = jazz::db::block_on(core.write_conflicts("todos", row, None)).unwrap();
     assert_eq!(after, before);
     let bob_conflict = after.iter().find(|c| c.writer == bob).unwrap();
     assert!(bob_conflict.maybe_conflicting);
@@ -1046,7 +1044,7 @@ fn a_merge_base_is_the_version_the_write_was_built_on_when_it_missed_the_column(
     let row = net.seed(0);
     let base = |net: &Net, writer: Writer, column: &str| {
         let seq = net.conflict(row, writer).seq;
-        net.core.merge_base("todos", row, seq, column).unwrap()
+        jazz::db::block_on(net.core.merge_base("todos", row, seq, column)).unwrap()
     };
     let text = |value: &str| Some(Value::String(value.to_owned()));
 

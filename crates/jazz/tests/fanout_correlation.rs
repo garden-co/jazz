@@ -11,6 +11,7 @@
 //! randomized differentials at the end cover the rest.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt as _;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -749,7 +750,7 @@ fn two_versions_of_one_row_in_one_relay_tick() {
     server
         .accept_subscriber(server_side, AuthorSubject::SYSTEM)
         .unwrap();
-    relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    jazz::db::block_on(relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
     let mut links = Vec::new();
     for leaf in [&alice, &bob] {
         let (leaf_side, relay_down) = duplex();
@@ -1287,7 +1288,7 @@ fn a_claims_change_reruns_and_rebuilds_the_correlations() {
     let db = open(schema, 1);
     let claims = |region: &str| BTreeMap::from([("\0claims:region".to_owned(), text(region))]);
     let alice = user(1);
-    db.set_identity_claims(alice, claims("a"));
+    jazz::db::block_on(db.set_identity_claims(alice, claims("a")));
     chat(&db, 1, "one");
     chat(&db, 2, "two");
     let note = |n: usize, chat: usize, region: &str| {
@@ -1309,7 +1310,7 @@ fn a_claims_change_reruns_and_rebuilds_the_correlations() {
         Some(alice),
     )];
     let opened = check(&db, &mut lives, "subscribe");
-    db.set_identity_claims(alice, claims("b"));
+    jazz::db::block_on(db.set_identity_claims(alice, claims("b")));
     let now = check(&db, &mut lives, "alice moves to region b");
     assert_ne!(opened, now, "region b shows other messages");
     note(3, 1, "b");
@@ -2649,7 +2650,7 @@ fn replica_run(topology: Topology, seed: u64) {
             server
                 .accept_subscriber(server_side, AuthorSubject::SYSTEM)
                 .unwrap();
-            relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+            jazz::db::block_on(relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
             let (client_side, relay_down) = duplex();
             links.push(block_on(client.connect_upstream(client_side)));
             relay.accept_subscriber(relay_down, served_as).unwrap();

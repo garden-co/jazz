@@ -40,7 +40,7 @@ fn row(n: u8) -> RowUuid {
 
 fn bodies(db: &Db) -> Vec<String> {
     let prepared = db.prepare_query(&Query::from("notes")).unwrap();
-    db.read(&prepared)
+    jazz::db::block_on(db.read(&prepared))
         .unwrap()
         .into_iter()
         .map(|row| match row.cell("body") {
