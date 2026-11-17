@@ -12,7 +12,8 @@ use super::super::json;
 use super::super::position::{Accepted, Position};
 use super::super::records::account::{
     AccountIdentity, AccountSuccessor, DeviceApproval, DeviceChallenge, DeviceDelivery,
-    DeviceProof, DeviceRequest, approval_signed_bytes, challenge_signed_bytes, proof_signed_bytes,
+    DeviceProof, DeviceRequest, approval_signed_bytes, challenge_signed_bytes, nonce_commitment,
+    proof_signed_bytes,
 };
 use super::super::signing;
 use super::ledger::{PrivateAccountLedger, PublicAccountLedger};
@@ -199,13 +200,20 @@ pub fn verify_private(
         // shown (§2.5); they must be the requester's. It is verified under
         // the approval signer's key, and the signer's ID is in the signed
         // column, so a challenge another device signed does not verify.
+        // The proof's nonce opens the requester's commitment (§2.5).
+        if !nonce_commitment(&recipient.id, &proof.row.nonce)
+            .is_ok_and(|commitment| commitment[..] == recipient.nonce_commitment[..])
+        {
+            continue;
+        }
         let Ok(challenge_bytes) = challenge_signed_bytes(
             application,
             account_id,
             coordinates,
             &challenge.row.signer_id,
-            &recipient.keys,
+            recipient,
             &challenge.row.envelope,
+            &challenge.row.nonce,
         ) else {
             continue;
         };
@@ -218,7 +226,13 @@ pub fn verify_private(
             continue;
         }
         let (Ok(proof_bytes), Ok(approval_bytes)) = (
-            proof_signed_bytes(application, account_id, coordinates, &proof.row.proof),
+            proof_signed_bytes(
+                application,
+                account_id,
+                coordinates,
+                &proof.row.proof,
+                &proof.row.nonce,
+            ),
             approval_signed_bytes(
                 application,
                 account_id,

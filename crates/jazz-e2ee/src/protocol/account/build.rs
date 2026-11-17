@@ -29,8 +29,8 @@ use super::super::records::account::{
     ChallengeCoordinates, DeviceApproval, DeviceChallenge, DeviceDelivery, DeviceKeysRow,
     DeviceProof, DeviceRemovalRequest, DeviceRequest, LEDGER_VERSION, PublicAccountSuccessor,
     PublicDeviceApproval, RecoveryDelivery, RecoveryRoot, approval_context, approval_signed_bytes,
-    challenge_signed_bytes, delivery_marker_context, identity_context, proof_signed_bytes,
-    recovery_delivery_context, successor_context,
+    challenge_signed_bytes, delivery_marker_context, identity_context, nonce_commitment,
+    proof_signed_bytes, recovery_delivery_context, successor_context,
 };
 use super::super::signing;
 use super::key::AccountKey;
@@ -65,12 +65,27 @@ fn random_key(rng: &mut dyn RandomSource) -> ProtocolResult<Zeroizing<[u8; 32]>>
     Ok(key)
 }
 
-/// This install's encryption identity in one account domain (§2.1).
+/// A device's approval nonce `n_R` (§2.5): committed in its request,
+/// revealed in its one approval proof. Cleared on drop and never printed.
+#[derive(Clone)]
+pub struct ApprovalNonce(pub Zeroizing<[u8; 32]>);
+
+impl core::fmt::Debug for ApprovalNonce {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("ApprovalNonce(..)")
+    }
+}
+
+/// This install's encryption identity in one account domain (§2.1). Its
+/// approval nonce is good for one approval attempt: a device whose attempt
+/// failed or was cancelled after it revealed the nonce starts again as a new
+/// device, with a new ID and request (§2.5).
 #[derive(Debug, Clone)]
 pub struct LocalDevice {
     pub id: String,
     pub sealing: KeyPair,
     pub signing: KeyPair,
+    pub approval_nonce: ApprovalNonce,
 }
 
 impl LocalDevice {
@@ -86,6 +101,7 @@ impl LocalDevice {
             id: ids::random_v4(rng)?,
             sealing: suite.key_seal.generate_key_pair(rng)?,
             signing: suite.signature.generate_key_pair(rng)?,
+            approval_nonce: ApprovalNonce(random_key(rng)?),
         };
         device.check(suite, registry, scope, rng)?;
         Ok(device)
@@ -126,11 +142,15 @@ impl LocalDevice {
         KeyColumns::new(&self.sealing.public, &self.signing.public)
     }
 
-    /// The request row (§2.2): row ID = device ID.
+    /// The request row (§2.2): row ID = device ID, with the commitment to
+    /// the device's approval nonce.
     pub fn request(&self) -> DeviceRequest {
         DeviceRequest {
             id: self.id.clone(),
             keys: self.keys(),
+            nonce_commitment: nonce_commitment(&self.id, &self.approval_nonce.0[..])
+                .expect("a framed device ID and nonce")
+                .to_vec(),
         }
     }
 
@@ -143,9 +163,10 @@ impl LocalDevice {
         })
     }
 
-    /// Whether `request` is this device's request with its keys.
+    /// Whether `request` is this device's request with its keys and nonce
+    /// commitment.
     pub fn matches(&self, request: &DeviceRequest) -> bool {
-        request.id == self.id && request.keys == self.keys()
+        *request == self.request()
     }
 }
 
@@ -538,6 +559,7 @@ pub fn challenge(
     };
     let context = approval_context(&application, writer.account_id, coordinates, "challenge")?;
     let envelope = writer.seal(&requester.keys.sealing_key(), &context, &secret, rng)?;
+    let nonce = random_key(rng)?;
     let challenge = signed_challenge(
         writer,
         &application,
@@ -546,12 +568,14 @@ pub fn challenge(
         requester,
         state.epoch_id(),
         envelope,
+        &nonce[..],
     )?;
     Ok(Challenge { challenge, secret })
 }
 
-/// A challenge row signed by `approver` over the requester keys it was
-/// shown (§2.5).
+/// A challenge row signed by `approver` over the requester keys and nonce
+/// commitment it was shown, with its nonce `n_A` (§2.5).
+#[allow(clippy::too_many_arguments)]
 fn signed_challenge(
     writer: &AccountWriter<'_>,
     application: &super::super::domain::AccountDomain,
@@ -560,6 +584,7 @@ fn signed_challenge(
     requester: &DeviceRequest,
     epoch_id: &str,
     envelope: Vec<u8>,
+    nonce: &[u8],
 ) -> ProtocolResult<DeviceChallenge> {
     let coordinates = ChallengeCoordinates {
         id,
@@ -571,8 +596,9 @@ fn signed_challenge(
         writer.account_id,
         coordinates,
         &approver.id,
-        &requester.keys,
+        requester,
         &envelope,
+        nonce,
     )?;
     Ok(DeviceChallenge {
         id: id.to_owned(),
@@ -581,6 +607,7 @@ fn signed_challenge(
         signer_id: approver.id.clone(),
         signature: writer.sign(&approver.signing, &bytes)?,
         envelope,
+        nonce: nonce.to_vec(),
     })
 }
 
@@ -612,8 +639,9 @@ pub fn respond(
         writer.account_id,
         challenge.coordinates(),
         &challenge.signer_id,
-        &device.keys(),
+        &device.request(),
         &challenge.envelope,
+        &challenge.nonce,
     )?;
     if !signing::verify(
         writer.registry,
@@ -645,17 +673,20 @@ fn prove(
     )?;
     let proof_context = approval_context(&application, writer.account_id, coordinates, "proof")?;
     let proof = writer.wrap(&secret, &proof_context, &Z32, rng)?;
-    let bytes = proof_signed_bytes(&application, writer.account_id, coordinates, &proof)?;
+    let nonce = device.approval_nonce.0.to_vec();
+    let bytes = proof_signed_bytes(&application, writer.account_id, coordinates, &proof, &nonce)?;
     Ok(DeviceProof {
         id: challenge.id.clone(),
         challenge_id: challenge.id.clone(),
         signature: writer.sign(&device.signing, &bytes)?,
         proof,
+        nonce,
     })
 }
 
-/// The possession check (§2.5 step 3): the proof unwraps to `Z32` under the
-/// secret and its signature verifies under the request's signing key.
+/// The possession check (§2.5 step 3): the proof's nonce opens the
+/// request's nonce commitment, the proof unwraps to `Z32` under the secret
+/// and its signature verifies under the request's signing key.
 /// Anything provably wrong is `invalid-possession-proof`; a provider failure
 /// stays one.
 pub fn verify_possession(
@@ -668,6 +699,7 @@ pub fn verify_possession(
     if proof.id != challenge.id
         || proof.challenge_id != challenge.id
         || challenge.device_id != requester.id
+        || nonce_commitment(&requester.id, &proof.nonce)?[..] != requester.nonce_commitment[..]
     {
         return refuse(RefusalCode::InvalidPossessionProof);
     }
@@ -687,7 +719,13 @@ pub fn verify_possession(
         }
         Err(error) => return Err(error.into()),
     }
-    let bytes = proof_signed_bytes(&application, writer.account_id, coordinates, &proof.proof)?;
+    let bytes = proof_signed_bytes(
+        &application,
+        writer.account_id,
+        coordinates,
+        &proof.proof,
+        &proof.nonce,
+    )?;
     if !signing::verify(
         writer.registry,
         &requester.keys.signing_key(),
@@ -871,6 +909,7 @@ pub fn recovery_approve(
     let envelope = writer.seal(&device.sealing.public, &context, &secret, rng)?;
     // A recovery is approved by the recovery root, not an active device: the
     // device signs its own challenge, which it never receives from anyone.
+    let nonce = random_key(rng)?;
     let challenge = signed_challenge(
         writer,
         &application,
@@ -879,6 +918,7 @@ pub fn recovery_approve(
         &request,
         state.epoch_id(),
         envelope,
+        &nonce[..],
     )?;
     let proof = prove(writer, device, &challenge, rng)?;
     verify_possession(writer, &challenge, &proof, &request, &secret)?;

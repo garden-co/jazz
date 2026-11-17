@@ -36,6 +36,10 @@ const SCOPE: &str = "account";
 pub struct DeviceRequest {
     pub id: String,
     pub keys: KeyColumns,
+    /// `SHA-256(UTF8("jazz.e2ee.approval-nonce.v1\0") ‖ frame[deviceId,
+    /// n_R])` of the device's approval nonce `n_R` (§2.5): committed before
+    /// any challenge exists, revealed in the proof.
+    pub nonce_commitment: Vec<u8>,
 }
 
 /// `__e2ee_device_keys`: the public projection of a request's keys.
@@ -89,8 +93,10 @@ pub struct DeviceChallenge {
     pub device_id: String,
     pub epoch_id: String,
     pub envelope: Vec<u8>,
+    /// The approver's random 32-byte nonce `n_A` (§2.5).
+    pub nonce: Vec<u8>,
     /// The approving device, which signs the challenge over the requester
-    /// keys it was shown (§2.5).
+    /// keys and nonce commitment it was shown (§2.5).
     pub signer_id: String,
     pub signature: Vec<u8>,
 }
@@ -101,6 +107,8 @@ pub struct DeviceProof {
     pub id: String,
     pub challenge_id: String,
     pub proof: Vec<u8>,
+    /// The requester's approval nonce `n_R`, revealed (§2.5).
+    pub nonce: Vec<u8>,
     pub signature: Vec<u8>,
 }
 
@@ -254,8 +262,20 @@ row_id!(
 impl DeviceRequest {
     pub fn validate(&self) -> ProtocolResult<()> {
         ensure_id(&self.id, IdForm::Random, "invalid device ID")?;
+        ensure(
+            self.nonce_commitment.len() == 32,
+            "invalid nonce commitment",
+        )?;
         self.keys.validate()
     }
+}
+
+/// The commitment to a device's approval nonce (§2.5):
+/// `SHA-256(UTF8("jazz.e2ee.approval-nonce.v1\0") ‖ frame[deviceId, n_R])`.
+pub fn nonce_commitment(device_id: &str, nonce: &[u8]) -> ProtocolResult<[u8; 32]> {
+    let mut bytes = b"jazz.e2ee.approval-nonce.v1\0".to_vec();
+    bytes.extend_from_slice(&frame(&[device_id.as_bytes(), nonce])?);
+    Ok(crate::primitives::hash::sha256(&bytes))
 }
 
 impl DeviceKeysRow {
@@ -380,6 +400,7 @@ impl DeviceChallenge {
         ensure_id(&self.device_id, IdForm::Random, "invalid device ID")?;
         ensure_id(&self.epoch_id, IdForm::Random, "invalid epoch ID")?;
         ensure_id(&self.signer_id, IdForm::Random, "invalid signer ID")?;
+        ensure(self.nonce.len() == 32, "invalid challenge nonce")?;
         ensure_bytes(&self.envelope, "empty challenge envelope")?;
         ensure_bytes(&self.signature, "empty challenge signature")
     }
@@ -401,6 +422,7 @@ impl DeviceProof {
             "proof ID is not its challenge ID",
         )?;
         ensure_bytes(&self.proof, "empty proof")?;
+        ensure(self.nonce.len() == 32, "invalid proof nonce")?;
         ensure_bytes(&self.signature, "empty proof signature")
     }
 }
@@ -940,8 +962,9 @@ pub fn approval_context(
 
 /// The challenge signature's bytes (§2.5): `P("challenge-signature:" ‖
 /// signerId) ‖ frame[env(signingMechanism, signingPublicKey),
-/// env(mechanism, publicKey), envelope]`, with the requester's key columns
-/// as the approver was shown them. The requester checks it against its own
+/// env(mechanism, publicKey), nonceCommitment, envelope, nonce]`, with the
+/// requester's key columns and nonce commitment as the approver was shown
+/// them, and the approver's nonce `n_A`. The requester checks it against its own
 /// keys, so a server that showed the approver other keys cannot present the
 /// requester a challenge for its real ones.
 pub fn challenge_signed_bytes(
@@ -949,17 +972,20 @@ pub fn challenge_signed_bytes(
     account_id: &str,
     challenge: ChallengeCoordinates<'_>,
     signer_id: &str,
-    requester_keys: &KeyColumns,
+    requester: &DeviceRequest,
     envelope: &[u8],
+    nonce: &[u8],
 ) -> ProtocolResult<Vec<u8>> {
-    requester_keys.validate()?;
+    requester.validate()?;
     let column = format!("challenge-signature:{signer_id}");
     append_framed(
         approval_context(application, account_id, challenge, &column)?,
         &[
-            &requester_keys.signing_envelope()?,
-            &requester_keys.sealing_envelope()?,
+            &requester.keys.signing_envelope()?,
+            &requester.keys.sealing_envelope()?,
+            &requester.nonce_commitment,
             envelope,
+            nonce,
         ],
     )
 }
@@ -967,14 +993,20 @@ pub fn challenge_signed_bytes(
 /// The approval comparison code (§2.5): six decimal digits, zero-padded,
 /// from the first four bytes (big-endian) of `SHA-256(P("approval-code") ‖
 /// frame[env(signingMechanism, signingPublicKey), env(mechanism,
-/// publicKey)])` modulo 10⁶, with the requester's key columns. The approver
-/// computes it from the keys it was shown, the requester from its own; the
-/// user confirms they match before approving.
+/// publicKey), n_A, n_R])` modulo 10⁶, with the requester's key columns and
+/// both nonces. Each side commits to its nonce before it learns the other's
+/// (the requester in its request, the approver in its signed challenge), so
+/// nobody between them can search for a match. The approver computes it
+/// from the keys it was shown once the proof reveals `n_R`, the requester
+/// from its own keys once it accepted the challenge; the user confirms they
+/// match before approving.
 pub fn approval_code(
     application: &AccountDomain,
     account_id: &str,
     challenge: ChallengeCoordinates<'_>,
     requester_keys: &KeyColumns,
+    approver_nonce: &[u8],
+    requester_nonce: &[u8],
 ) -> ProtocolResult<String> {
     requester_keys.validate()?;
     let bytes = append_framed(
@@ -982,6 +1014,8 @@ pub fn approval_code(
         &[
             &requester_keys.signing_envelope()?,
             &requester_keys.sealing_envelope()?,
+            approver_nonce,
+            requester_nonce,
         ],
     )?;
     let digest = crate::primitives::hash::sha256(&bytes);
@@ -989,16 +1023,18 @@ pub fn approval_code(
     Ok(format!("{value:06}"))
 }
 
-/// The proof signature's bytes: `P("proof-signature") ‖ frame[proof]`.
+/// The proof signature's bytes: `P("proof-signature") ‖ frame[proof,
+/// nonce]`, with the requester's revealed nonce `n_R`.
 pub fn proof_signed_bytes(
     application: &AccountDomain,
     account_id: &str,
     challenge: ChallengeCoordinates<'_>,
     proof: &[u8],
+    nonce: &[u8],
 ) -> ProtocolResult<Vec<u8>> {
     append_framed(
         approval_context(application, account_id, challenge, "proof-signature")?,
-        &[proof],
+        &[proof, nonce],
     )
 }
 
