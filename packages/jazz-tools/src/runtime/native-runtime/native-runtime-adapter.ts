@@ -112,7 +112,7 @@ import {
   WebSocketCarrier,
   WIRE_PROTOCOL_VERSION,
   isReconnectLaterWireError,
-  isReauthenticateWireError,
+  isLocalProtocolWireError,
   isSocketDropWireError,
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
@@ -121,7 +121,6 @@ import {
   type WebSocketConstructor,
   type WebSocketNegotiation,
   type WireError,
-  wireAuthFailureReason,
 } from "./websocket.js";
 import { isRenewableAuthFailure, mapAuthReason } from "../auth-state.js";
 import {
@@ -621,10 +620,13 @@ type ServerConnectionAttempt = {
  * and the timer and steps the machine with one JSON document per input.
  */
 type NativeUpstreamLink = { handle(nowMs: number, input: string): string };
-type UpstreamLinkFailure = {
-  kind: "network" | "refused" | "serverNotReady" | "authRejected" | "fatal" | "reauthenticate";
-  message: string;
-};
+type UpstreamLinkFailure =
+  | {
+      kind: "network" | "refused" | "serverNotReady" | "authRejected" | "fatal" | "reauthenticate";
+      message: string;
+    }
+  /** A server's `WireError`, classified by the link. */
+  | { kind: "wire"; code: string; retry: string; message: string; admitted: boolean };
 type UpstreamLinkInput =
   | { type: "serverConfigured"; configured: boolean }
   | { type: "setOffline"; offline: boolean }
@@ -663,34 +665,20 @@ type UpstreamLinkStep = {
   status: UpstreamLinkStatus;
 };
 
-/** How the link machine should treat a server connection that ended with `error`. */
-function upstreamLinkFailure(error: WireError, negotiated: boolean): UpstreamLinkFailure {
-  const message = error.message;
-  // The server's session reached the expiry the app's auth gave it: a
-  // planned reconnect, so the app's auth decides again with this client's
-  // current credential (see `isReauthenticateWireError`).
-  if (isReauthenticateWireError(error)) return { kind: "reauthenticate", message };
-  if (wireAuthFailureReason(error)) return { kind: "authRejected", message };
-  // The server's bootstrap and overload signals. Before its hello, `not_ready`
-  // means the server is still starting; `backpressure` means it answered and
-  // refused this connection for now (such as the connection cap per user),
-  // which is retried like an outage but published at once with the server's
-  // reason. After its hello both end a link like an outage.
-  // `internal` with `later` is a server that cannot serve this session right
-  // now (its runtime shutting down in a rolling deploy): retried like
-  // overload, as `LinkFailure::from_wire_error` does.
-  if (isReconnectLaterWireError(error) || (error.code === "internal" && error.retry === "later")) {
-    if (negotiated) return { kind: "network", message };
-    return { kind: error.code === "not_ready" ? "serverNotReady" : "refused", message };
-  }
+/**
+ * How a server connection that ended with `error` is reported to the link.
+ * The carrier's own socket drops are a network outage; anything the server
+ * said goes to the link as it arrived, which classifies it in Rust
+ * (`LinkFailure::from_wire_error`) as it does for every host.
+ */
+function upstreamLinkFailure(error: WireError, admitted: boolean): UpstreamLinkFailure {
   // The network or the server dropped the socket. A local-first client must
   // survive an outage of any length, including one it was opened in.
-  if (isSocketDropWireError(error)) {
-    return { kind: "network", message };
-  }
-  // Anything else (a protocol error, an incompatible server) cannot succeed
-  // by retrying.
-  return { kind: "fatal", message };
+  if (isSocketDropWireError(error)) return { kind: "network", message: error.message };
+  // This client could not read what the server sent: a local protocol
+  // failure, not something the server said, so it stops as it always did.
+  if (isLocalProtocolWireError(error)) return { kind: "fatal", message: error.message };
+  return { kind: "wire", ...error, admitted };
 }
 
 function joinServerTransportRetirements(
