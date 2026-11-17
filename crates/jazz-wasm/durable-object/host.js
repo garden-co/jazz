@@ -7,6 +7,8 @@
 //   GET  /apps/{appId}/ws                  WebSocket: prelude, Hello, then wire frames
 //   POST /apps/{appId}/backend/admit       204 for the app's backend
 //   GET  /apps/{appId}/admin/migrations/graph, GET|POST /apps/{appId}/admin/bundles
+//   POST /apps/{appId}/admin/accounts/{resolve,login-or-register,link,
+//        found-local-first,revoke,revoke-sessions}
 //
 // Bindings: JAZZ (this class's namespace), JAZZ_APP_ID, JAZZ_CORE_SECRET,
 // and optionally JAZZ_SCHEMA (a public schema's JSON, served until one is
@@ -123,11 +125,11 @@ export function jazzCoreClass(wasm) {
         );
         // A deployment may end sessions pinned to older bundles: tell them.
         this.flush();
-        return answer.status === 204
-          ? new Response(null, { status: 204 })
+        return answer.contentType === ""
+          ? new Response(null, { status: answer.status })
           : new Response(answer.body, {
               status: answer.status,
-              headers: { "content-type": "application/json" },
+              headers: { "content-type": answer.contentType },
             });
       }
       if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
