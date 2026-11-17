@@ -163,7 +163,7 @@ impl ColumnValue for Json {
 /// ```
 /// #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// pub enum Priority { Low, High }
-/// jazz_app::text_enum!(Priority { Low => "low", High => "high" });
+/// jazz_app_support::text_enum!(Priority { Low => "low", High => "high" });
 /// ```
 #[macro_export]
 macro_rules! text_enum {

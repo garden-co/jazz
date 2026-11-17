@@ -232,34 +232,11 @@ pub(crate) fn lower_relation_conjuncts<'a>(
                 None,
             )])
         }
-        RelationPredicate::EnumMatch {
-            column,
-            case,
-            payload,
-        } => {
-            // Payload fields name the matched case's own fields, not relation
-            // sources, so they stay unscoped and are not reported as columns.
-            let (payload, payload_columns) = lower_uncorrelated(payload, lower_value, "EnumMatch")?;
-            if payload_columns.iter().any(|column| column.scope.is_some()) {
-                return Err("Scoped enum payload fields are not supported yet".to_owned());
-            }
-            if relation_predicate_has_enum_match(&payload) {
-                return Err("Nested enum payload matches are not supported yet".to_owned());
-            }
-            Ok(vec![leaf(
-                Predicate::EnumMatch {
-                    column: column.column.clone(),
-                    case: case.clone(),
-                    payload: Box::new(payload),
-                },
-                column,
-                None,
-            )])
-        }
+        RelationPredicate::Removed(removed) => match *removed {},
     }
 }
 
-/// Lower a predicate under `Or`, `Not` or an enum payload, where a row-id
+/// Lower a predicate under `Or` or `Not`, where a row-id
 /// correlation cannot become a join: treating it as `true` would widen the
 /// predicate, so it is rejected.
 fn lower_uncorrelated<'a>(
@@ -294,13 +271,3 @@ fn is_always_false(predicate: &Predicate) -> bool {
     matches!(predicate, Predicate::Any(predicates) if predicates.is_empty())
 }
 
-fn relation_predicate_has_enum_match(predicate: &Predicate) -> bool {
-    match predicate {
-        Predicate::EnumMatch { .. } => true,
-        Predicate::All(children) | Predicate::Any(children) => {
-            children.iter().any(relation_predicate_has_enum_match)
-        }
-        Predicate::Not(child) => relation_predicate_has_enum_match(child),
-        _ => false,
-    }
-}

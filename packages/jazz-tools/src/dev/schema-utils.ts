@@ -16,37 +16,6 @@ export function shortSchemaHash(hash: string): string {
   return normalizeSchemaHashInput(hash, "schema hash").slice(0, SHORT_SCHEMA_HASH_LENGTH);
 }
 
-/**
- * Rust's canonical composite-index order: lexicographic over column names
- * compared as UTF-8 bytes, i.e. by Unicode code point. JavaScript's `<` on
- * strings compares UTF-16 code units, which orders U+E000..U+FFFF after
- * astral characters and would diverge from Rust's schema hash.
- */
-export function canonicalCompositeIndexOrder(indexes: readonly (readonly string[])[]): string[][] {
-  return indexes
-    .map((columns) => [...columns])
-    .sort((left, right) => {
-      for (let index = 0; index < Math.min(left.length, right.length); index++) {
-        const order = compareCodePoints(left[index]!, right[index]!);
-        if (order !== 0) {
-          return order;
-        }
-      }
-      return left.length - right.length;
-    });
-}
-
-function compareCodePoints(left: string, right: string): number {
-  const leftPoints = Array.from(left, (char) => char.codePointAt(0)!);
-  const rightPoints = Array.from(right, (char) => char.codePointAt(0)!);
-  for (let index = 0; index < Math.min(leftPoints.length, rightPoints.length); index++) {
-    if (leftPoints[index] !== rightPoints[index]) {
-      return leftPoints[index]! - rightPoints[index]!;
-    }
-  }
-  return leftPoints.length - rightPoints.length;
-}
-
 export { columnTypeSignature };
 
 function columnsEqual(left: ColumnDescriptor, right: ColumnDescriptor): boolean {

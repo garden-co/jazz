@@ -10,38 +10,19 @@ This recipe covers building an app where users own their own data and no-one els
 
 There's no need to add an explicit owner column&hairsp;—&hairsp;Jazz tracks who created each row automatically via `$createdBy`.
 
-```json title="jazz.app.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
-  "tables": {
-    "todos": {
-      "columns": { "title": "string", "done": "boolean" }
-    }
-  }
-}
-```
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/recipes/user-owned/schema.ts#schema
+</include>
 
 See [Defining tables](/docs/schemas/defining-tables) for everything a table can declare.
 
 ## Permissions
 
-Match `$createdBy` to `session.user` to validate whether the current user is the one who created the data. Because `$createdBy` is set automatically, we can allow every insert with `"true"`.
+Match `$createdBy` to `session.user` to validate whether the current user is the one who created the data. Because `$createdBy` is set automatically, we can allow every insert with `true`.
 
-```json title="jazz.permissions.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
-  "tables": {
-    "todos": {
-      "read": "$createdBy.account = session.user",
-      "insert": "true",
-      "update": "$createdBy.account = session.user",
-      "delete": "$createdBy.account = session.user"
-    }
-  }
-}
-```
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/recipes/user-owned/schema.ts#permissions
+</include>
 
 These rules are enforced on the server. See [Declarative Permissions](/docs/schemas/policies) for combinators, `allowedTo`, and more complex options.
 
@@ -73,36 +54,35 @@ Use `db.insert(...).wait({ tier: "..." })` if you need confirmation that the wri
 
 If ownership can be transferred after creation, use an explicit `owner_id` column instead of `$createdBy`.
 
-```json title="jazz.app.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
-  "tables": {
-    "todos": {
-      "columns": { "title": "string", "done": "boolean", "owner_id": "uuid" }
-    }
-  }
-}
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    owner_id: s.uuid(),
+  }),
+});
+
+const { definePermissions, session } = schema;
+
+const ownedByMe = { owner_id: session.user };
+
+export const permissions = definePermissions({
+  todos: {
+    read: ownedByMe,
+    insert: true,
+    updateIf: ownedByMe,
+    updateTo: true,
+    delete: ownedByMe,
+  },
+});
 ```
 
-```json title="jazz.permissions.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
-  "tables": {
-    "todos": {
-      "read": "owner_id = session.user",
-      "insert": "true",
-      "update": { "old": "owner_id = session.user" },
-      "delete": "owner_id = session.user"
-    }
-  }
-}
-```
+`updateIf` checks the row before the update and `updateTo: true` accepts any new row, so the current owner can rewrite `owner_id` to transfer the row. A plain `update` would also enforce the condition on the post-update row and block transfers. See [Declarative Permissions](/docs/schemas/policies) for `updateIf`/`updateTo` semantics.
 
-An update policy with only `old` checks the row before the update, so the current owner can rewrite `owner_id` to transfer the row. A plain string would also enforce the condition on the post-update row and block transfers. See [Declarative Permissions](/docs/schemas/policies) for `old`/`new` semantics.
-
-`"insert": "true"` lets any user insert a row with any `owner_id`, including someone else's. That's the right default if you want users to be able to assign rows to others on creation; otherwise, narrow it to `"owner_id = session.user"` so clients can only create rows they own.
+`insert: true` lets any user insert a row with any `owner_id`, including someone else's. That's the right default if you want users to be able to assign rows to others on creation; otherwise, narrow it to `insert: ownedByMe` so clients can only create rows they own.
 
 </Accordion>
 </Accordions>

@@ -495,10 +495,7 @@ fn supplied_transaction_id(predicate: &Predicate) -> bool {
         Predicate::All(predicates) | Predicate::Any(predicates) => {
             predicates.iter().any(supplied_transaction_id)
         }
-        Predicate::Not(predicate)
-        | Predicate::EnumMatch {
-            payload: predicate, ..
-        } => supplied_transaction_id(predicate),
+        Predicate::Not(predicate) => supplied_transaction_id(predicate),
         predicate => {
             predicate.any_operand(&mut |operand| {
                 matches!(operand,
@@ -1702,10 +1699,7 @@ fn rewrite_flat_join_predicate_columns(
             rewrite_operand(value)?;
             options.iter_mut().try_for_each(rewrite_operand)
         }
-        Predicate::EnumMatch { column, .. } => {
-            *column = rewrite(column)?;
-            Ok(())
-        }
+        Predicate::Removed(removed) => match *removed {},
         Predicate::IsNull(operand) => rewrite_operand(operand),
         Predicate::Search(_) => Err(QueryError::SearchMisplaced("in a flat join".into())),
     }
@@ -2583,33 +2577,7 @@ fn validate_predicate(
                 "nested in a condition, a join, a policy or a subquery".into(),
             ));
         }
-        Predicate::EnumMatch {
-            column,
-            case,
-            payload,
-        } => {
-            let column_type = planner_column_type(table, column)?;
-            let ColumnType::Enum(schema) = non_null_column_type(column_type) else {
-                return Err(QueryError::OperandTypeMismatch);
-            };
-            let enum_case = schema
-                .case(
-                    schema
-                        .tag(case)
-                        .map_err(|_| QueryError::OperandTypeMismatch)?,
-                )
-                .map_err(|_| QueryError::OperandTypeMismatch)?;
-            let payload_table = TableSchema::new(
-                "__enum_payload",
-                enum_case.payload.fields().iter().map(|field| {
-                    crate::schema::ColumnSchema::new(
-                        field.name.clone().unwrap_or_default(),
-                        field.value_type.clone(),
-                    )
-                }),
-            );
-            return validate_predicate(&payload_table, payload, params);
-        }
+        Predicate::Removed(removed) => match *removed {},
         _ => {}
     }
     if let ParameterPhase::Prepare(domain) = params {
@@ -2645,13 +2613,10 @@ fn validate_predicate(
         unreachable!()
     };
     match predicate {
-        Predicate::All(_)
-        | Predicate::Any(_)
-        | Predicate::Not(_)
-        | Predicate::EnumMatch { .. }
-        | Predicate::Search(_) => {
+        Predicate::All(_) | Predicate::Any(_) | Predicate::Not(_) | Predicate::Search(_) => {
             unreachable!("recursive predicates and searches handled by the shared traversal")
         }
+        Predicate::Removed(removed) => match *removed {},
         Predicate::Eq(left, right) | Predicate::Ne(left, right) => {
             validate_comparable_operands(table, left, right, params).map(|_| ())
         }

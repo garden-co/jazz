@@ -7,7 +7,7 @@
 mod bindings;
 
 use bindings::{NewPlace, Place, PlaceUpdate};
-use jazz_app::{AppId, Config, Point};
+use jazz_app_support::{AppId, Config, Point};
 
 /// alice writes a location and reads back the same `f64` bits; the omitted
 /// `home` takes its declared default; a latitude out of range (here,

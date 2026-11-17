@@ -611,16 +611,9 @@ pub enum Predicate {
     Lte(Operand, Operand),
     /// String substring or array membership.
     Contains(Operand, Operand),
-    /// Match one discriminated enum case, then evaluate the predicate against
-    /// that case's payload record fields.
-    EnumMatch {
-        /// Name of the enum column in the containing table.
-        column: String,
-        /// Name of the enum case that must be selected.
-        case: String,
-        /// Predicate evaluated against the selected case's payload record.
-        payload: Box<Predicate>,
-    },
+    /// The slot of a removed variant (see [`RemovedVariant`]).
+    #[doc(hidden)]
+    Removed(RemovedVariant),
     /// Nullable value is null.
     IsNull(Operand),
     /// A specialised index search (SPEC 20.4). Appended last, so every
@@ -719,7 +712,7 @@ pub const SCORE_COLUMN: &str = "$score";
 
 impl Predicate {
     /// Calls `f` on every operand of this predicate, descending through
-    /// `All`, `Any`, `Not` and `EnumMatch` payloads.
+    /// `All`, `Any` and `Not`.
     pub fn for_each_operand_mut(&mut self, f: &mut impl FnMut(&mut Operand)) {
         match self {
             Self::All(predicates) | Self::Any(predicates) => {
@@ -727,9 +720,8 @@ impl Predicate {
                     predicate.for_each_operand_mut(f);
                 }
             }
-            Self::Not(predicate) | Self::EnumMatch { payload: predicate, .. } => {
-                predicate.for_each_operand_mut(f);
-            }
+            Self::Not(predicate) => predicate.for_each_operand_mut(f),
+            Self::Removed(removed) => match *removed {},
             Self::Eq(left, right)
             | Self::Ne(left, right)
             | Self::Gt(left, right)
@@ -756,9 +748,8 @@ impl Predicate {
             Self::All(predicates) | Self::Any(predicates) => {
                 predicates.iter().any(|predicate| predicate.any_operand(f))
             }
-            Self::Not(predicate) | Self::EnumMatch { payload: predicate, .. } => {
-                predicate.any_operand(f)
-            }
+            Self::Not(predicate) => predicate.any_operand(f),
+            Self::Removed(removed) => match *removed {},
             Self::Eq(left, right)
             | Self::Ne(left, right)
             | Self::Gt(left, right)

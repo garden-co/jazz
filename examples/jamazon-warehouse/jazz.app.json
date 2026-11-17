@@ -1,6 +1,9 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "d336086d8ec5201d63651b7caca74c09bc62fa329c15aa4f07ed404c1f7ed283"
+  },
   "tables": {
     "better_auth_account": {
       "columns": {

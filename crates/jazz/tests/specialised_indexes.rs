@@ -587,8 +587,13 @@ impl Transport for Gated {
         self.inner.try_recv()
     }
 
-    fn supports(&self, feature: jazz::wire::WireFeatures) -> bool {
-        feature != jazz::wire::FEATURE_INDEX_SEARCH || self.search
+    fn features(&self) -> jazz::wire::WireFeatures {
+        let all = jazz::wire::current_wire_features();
+        if self.search {
+            all
+        } else {
+            all & !jazz::wire::FEATURE_INDEX_SEARCH
+        }
     }
 }
 

@@ -50,14 +50,17 @@ pub mod options;
 pub mod slow;
 #[cfg(feature = "sql-trace")]
 mod sql_trace;
+pub mod thin_transactions;
 pub mod values;
 
+#[cfg(feature = "testing")]
+pub use db::sync::{decode_session_read_cells_for_test, pruned_txs_lookups_for_test};
 /// Implement text and vector indexes with tiny test kinds on this thread
 /// (see `ix::test_kind`).
 #[cfg(any(test, feature = "testing"))]
 pub use ix::test_kind::use_test_kinds;
 #[cfg(feature = "testing")]
-pub use large::full_materializations_for_test;
+pub use large::{cell_ranges_for_test, full_materializations_for_test};
 
 /// Structured read results.
 pub mod result_tree {

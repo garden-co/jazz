@@ -464,7 +464,7 @@ test("continuous soak precompiles outside seed watchdogs and preserves failure a
     assert.match(run, /timeout --kill-after=30s "\$\{PRECOMPILE_TIMEOUT_SECONDS\}s"/);
     assert.match(
       run,
-      /cargo test -p jazz --no-default-features \\\n\s+--features testing,transport-compression-zstd --no-run \\\n\s+--test integration --test maintained_differential \\\n/,
+      /cargo test -p jazz-core --no-default-features \\\n\s+--features testing,transport-compression-zstd --no-run \\\n\s+--test integration --test maintained_differential \\\n/,
     );
     assert.doesNotMatch(run, /--no-exec/);
   };
@@ -740,7 +740,7 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
   );
   assert.match(
     localCi,
-    /cargo test -p jazz --test maintained_differential --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json/,
+    /cargo test -p jazz-core --test maintained_differential --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json/,
   );
   assert.match(localCi, /message\.target\.name === "maintained_differential"/);
   assert.match(
@@ -752,9 +752,16 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
     /#\[ignore = "#\d+: manual randomized differential soak; bounded seed 11 runs in CI"\]\n(?:pub )?fn maintained_one_shot_differential_oracle\(/,
   );
   assert.match(aggregate, /if: always\(\)/);
-  assert.match(aggregate, /needs: \[test-rust-workspace, test-storage-compat\]/);
+  assert.match(
+    aggregate,
+    /needs:\s*\[\s*test-rust-workspace,\s*test-storage-compat,\s*test-jazz-ffi-bindings,\s*test-crates-package,\s*test-kotlin,\s*test-kotlin-android,?\s*\]/,
+  );
   assert.match(aggregate, /test "\$\{WORKSPACE_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{STORAGE_COMPAT_RESULT\}" = success/);
+  assert.match(aggregate, /test "\$\{JAZZ_FFI_BINDINGS_RESULT\}" = success/);
+  assert.match(aggregate, /test "\$\{CRATES_PACKAGE_RESULT\}" = success/);
+  assert.match(aggregate, /test "\$\{KOTLIN_RESULT\}" = success/);
+  assert.match(aggregate, /test "\$\{KOTLIN_ANDROID_RESULT\}" = success/);
   assert.throws(
     () => assert.match(localCi.replace("--exact --ignored", "--ignored"), /--exact --ignored/),
     /exact/,
@@ -1374,7 +1381,7 @@ test("benchmark correctness stays on ordinary CI while API compilation runs nigh
   );
   assert.match(
     compileMode,
-    /run_phase jazz-benchmark-api cargo check -p jazz --benches --features testing/,
+    /run_phase jazz-benchmark-api cargo check -p jazz-core --benches --features testing/,
   );
   assert.match(compileMode, /run_phase jazz-sim-benchmark-api cargo check -p jazz-sim --benches/);
   assert.doesNotMatch(scenarioMode, /cargo check -p (?:jazz|jazz-sim) --benches/);
@@ -2053,17 +2060,37 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     default: "full",
   });
   assert.equal(suite.jobs.lint.if, "inputs.scope != 'none'");
-  for (const name of ["test-rust-workspace", "test-storage-compat", "test-ts", "test-react-native"])
+  for (const name of [
+    "test-rust-workspace",
+    "test-storage-compat",
+    "test-ts",
+    "test-react-native",
+    "test-jazz-ffi-bindings",
+    "test-crates-package",
+    "test-go",
+    "test-kotlin",
+    "test-kotlin-android",
+  ])
     assert.equal(
       suite.jobs[name].if,
       "inputs.scope == 'full'",
       `${name} must run only in the full scope`,
     );
   assert.equal(suite.jobs["test-rust"].if, "always() && inputs.scope == 'full'");
+  // The Next.js trace test (B65-1) on ready PRs; its setup and trace steps
+  // run only when the next-trace-decide partition finds the PR touches the
+  // paths dev/gates/next-trace.mjs guards.
+  assert.equal(suite.jobs["test-next-trace"].if, "inputs.scope == 'fast'");
   assert.deepEqual(
     Object.keys(suite.jobs).sort(),
     [
       "lint",
+      "test-crates-package",
+      "test-go",
+      "test-jazz-ffi-bindings",
+      "test-kotlin",
+      "test-kotlin-android",
+      "test-next-trace",
       "test-react-native",
       "test-rust",
       "test-rust-workspace",

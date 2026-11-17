@@ -1,0 +1,26 @@
+{
+  "format": 1,
+  "tables": {
+    "strings": {
+      "columns": { "source": "string", "app": "string", "open": "boolean", "string": "string" }
+    },
+    "errors": {
+      "columns": {
+        "error": "string?",
+        "json": { "json": true, "optional": true },
+        "context": "int",
+        "level": { "enum": ["1", "2", "in-progress"] }
+      }
+    },
+    "contexts": {
+      "columns": {
+        "at": "timestamp",
+        "big": "bigint",
+        "x": "float",
+        "tags": { "array": "string" },
+        "blob": "bytes?"
+      }
+    },
+    "activity": { "columns": { "kind": "string" } }
+  }
+}

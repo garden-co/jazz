@@ -3,10 +3,10 @@
 pub use crate::model::public_api::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
 pub use crate::model::public_api::session::{AuthMode, Session, WriteContext};
 pub use crate::model::public_api::types::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, EnumCaseDescriptor,
-    HistoryRetention, OperationPolicy, OrderedRowDelta, QueryResult, QueryResultField, Row,
-    RowDelta, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies,
-    TableSchema, TableSchemaBuilder, Value, permissions, policy_expr,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, HistoryRetention,
+    LegacyEnumCase, OperationPolicy, OrderedRowDelta, QueryResult, QueryResultField, Row, RowDelta,
+    RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema,
+    TableSchemaBuilder, Value, permissions, policy_expr,
 };
 pub use crate::model::public_api::types::{
     SPECIALISED_INDEX_DECL_ENCODING, SPECIALISED_INDEX_NAME_MAX, SpecialisedIndex,
@@ -23,6 +23,7 @@ pub use crate::query::{
 };
 
 use crate::model::json_schema::{self, JsonSchemaError};
+use crate::model::json_schema_support;
 
 /// Validate JSON-bearing public values without changing their source text.
 ///
@@ -50,25 +51,6 @@ pub fn validate_json_value(
                 validate_json_value(value, element, &format!("{path}[{index}]"))
             })
         }
-        (
-            Value::Enum { case, values },
-            ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. },
-        ) => {
-            let Some(selected) = cases.iter().find(|entry| entry.name == *case) else {
-                return Ok(());
-            };
-            selected
-                .fields
-                .iter()
-                .zip(values)
-                .try_for_each(|(field, value)| {
-                    validate_json_value(
-                        value,
-                        &field.column_type,
-                        &format!("{path}.{case}.{}", field.name_str()),
-                    )
-                })
-        }
         _ => Ok(()),
     }
 }
@@ -86,6 +68,28 @@ pub fn json_schema_failure(error: JsonSchemaError, path: &str) -> String {
         JsonSchemaError::Unavailable(error) => {
             format!("JSON schema validation unavailable for column `{path}`: {error}")
         }
+    }
+}
+
+/// Refuse declared JSON Schemas using a feature not every Jazz runtime
+/// evaluates (see [`json_schema_support`]). Deployments run it; admitting a
+/// schema does not, so a store whose schema already uses one still opens.
+pub fn check_supported_json_schemas(column_type: &ColumnType, path: &str) -> Result<(), String> {
+    match column_type {
+        ColumnType::Json {
+            schema: Some(schema),
+        } => json_schema_support::check_supported(schema)
+            .map_err(|error| format!("unsupported JSON schema for column `{path}`: {error}")),
+        ColumnType::Array { element } => {
+            check_supported_json_schemas(element, &format!("{path}[]"))
+        }
+        ColumnType::Row { columns } => columns.columns.iter().try_for_each(|field| {
+            check_supported_json_schemas(
+                &field.column_type,
+                &format!("{path}.{}", field.name_str()),
+            )
+        }),
+        _ => Ok(()),
     }
 }
 
@@ -109,16 +113,6 @@ pub fn validate_json_schemas(column_type: &ColumnType, path: &str) -> Result<(),
         ColumnType::Row { columns } => columns.columns.iter().try_for_each(|field| {
             validate_json_schemas(&field.column_type, &format!("{path}.{}", field.name_str()))
         }),
-        ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. } => {
-            cases.iter().try_for_each(|case| {
-                case.fields.iter().try_for_each(|field| {
-                    validate_json_schemas(
-                        &field.column_type,
-                        &format!("{path}.{}.{}", case.name, field.name_str()),
-                    )
-                })
-            })
-        }
         _ => Ok(()),
     }
 }

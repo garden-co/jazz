@@ -354,16 +354,7 @@ fn canonical_predicate_key(predicate: &Predicate) -> Vec<u8> {
             bytes.push(b'0');
             put_bytes(&mut bytes, &canonical_operand_key(operand));
         }
-        Predicate::EnumMatch {
-            column,
-            case,
-            payload,
-        } => {
-            bytes.push(b'm');
-            put_str(&mut bytes, column);
-            put_str(&mut bytes, case);
-            put_bytes(&mut bytes, &canonical_predicate_key(payload));
-        }
+        Predicate::Removed(removed) => match *removed {},
         Predicate::Search(search) => {
             bytes.push(b's');
             put_str(&mut bytes, &search.index);

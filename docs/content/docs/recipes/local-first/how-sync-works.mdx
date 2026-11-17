@@ -138,7 +138,7 @@ merge the edits inside the string.
 
 </Accordion>
 <Accordion id="text-merges" title="How are concurrent edits to a text column merged?">
-A string column declared with `"merge": "text"`, `"markdown"` or `"html"` in `jazz.app.json` still
+A string column declared with `.merge("text")`, `"markdown"` or `"html"` in `schema.ts` still
 stores a plain string. Your app writes the whole value, as an edit of the value its editor last
 showed (`editedFrom`): if a newer merged value reached the device first, the device merges the edit
 over it before sending, so the keystroke does not undo it. Concurrent writes are merged only by

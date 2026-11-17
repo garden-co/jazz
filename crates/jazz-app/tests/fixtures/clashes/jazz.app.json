@@ -1,0 +1,12 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "errors": { "columns": { "message": "string" } },
+    "queries": { "columns": { "text": "string" } },
+    "configs": { "columns": { "key": "string", "value": "string?" } },
+    "results": { "columns": { "score": "int" } },
+    "jazz": { "columns": { "style": "string" } },
+    "text": { "columns": { "body": "string" } }
+  }
+}

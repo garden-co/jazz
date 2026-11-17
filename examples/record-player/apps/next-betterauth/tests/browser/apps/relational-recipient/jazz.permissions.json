@@ -1,0 +1,97 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "73bc36b77a477ddc5542c2221b26fd0d119a6840ffce2ee191f3ba65c89e14ee"
+  },
+  "tables": {
+    "albums": { "read": "true", "insert": "$createdBy.account = session.user" },
+    "better_auth_account": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_jwks": { "read": "false", "insert": "false", "update": "false", "delete": "false" },
+    "better_auth_session": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_user": { "read": "false", "insert": "false", "update": "false", "delete": "false" },
+    "better_auth_verification": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "invitations": {
+      "read": {
+        "anyOf": [
+          "subject = session.user",
+          "exists playlists(id = this.playlist_id, $createdBy.account = session.user)"
+        ]
+      },
+      "insert": "exists playlists(id = this.playlist_id, $createdBy.account = session.user)",
+      "update": {
+        "old": {
+          "anyOf": [
+            "exists playlists(id = this.playlist_id, $createdBy.account = session.user)",
+            { "allOf": ["subject = session.user", "status = 'pending'"] }
+          ]
+        },
+        "new": {
+          "anyOf": [
+            "exists playlists(id = this.playlist_id, $createdBy.account = session.user)",
+            {
+              "allOf": [
+                "exists invitations(id = this.id, playlist_id = this.playlist_id, subject = this.subject, role = this.role, status = 'pending')",
+                { "allOf": ["subject = session.user", "status = 'accepted'"] }
+              ]
+            }
+          ]
+        }
+      },
+      "delete": "exists playlists(id = this.playlist_id, $createdBy.account = session.user)"
+    },
+    "playback_positions": {
+      "read": "$createdBy.account = session.user",
+      "insert": "true",
+      "update": "$createdBy.account = session.user",
+      "delete": "$createdBy.account = session.user"
+    },
+    "playlist_entries": {
+      "read": "allowedTo.read(playlist)",
+      "insert": {
+        "anyOf": [
+          "allowedTo.update(playlist)",
+          "exists invitations(playlist_id = this.playlist_id, subject = session.user, role = 'editor', status = 'accepted')"
+        ]
+      },
+      "update": {
+        "anyOf": [
+          "$createdBy.account = session.user",
+          "exists invitations(playlist_id = this.playlist_id, subject = session.user, role = 'editor', status = 'accepted')"
+        ]
+      },
+      "delete": {
+        "anyOf": [
+          "$createdBy.account = session.user",
+          "exists invitations(playlist_id = this.playlist_id, subject = session.user, role = 'editor', status = 'accepted')"
+        ]
+      }
+    },
+    "playlists": {
+      "read": {
+        "anyOf": [
+          "$createdBy.account = session.user",
+          "exists invitations(playlist_id = this.id, subject = session.user, status = 'accepted')"
+        ]
+      },
+      "insert": "true",
+      "update": "$createdBy.account = session.user"
+    },
+    "tracks": { "read": "true", "insert": "$createdBy.account = session.user" }
+  }
+}

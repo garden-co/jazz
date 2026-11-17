@@ -6,7 +6,7 @@ import { Utf8Decoder } from "../utf8.js";
 import { parseSnapshotRef, UnsupportedSnapshotError, type SnapshotRef } from "../snapshot-ref.js";
 import { isAuthorityChangedError, upstreamRefusalError } from "../authority-changed-error.js";
 import { CoreTickFailedError, isCoreTickFailedError } from "../core-tick-failed-error.js";
-import { formatUuid, formatUuidAt } from "../hex.js";
+import { formatUuid, formatUuidAt, parseUuidBytes } from "../hex.js";
 
 export { formatUuid };
 import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
@@ -112,7 +112,7 @@ import {
   WebSocketCarrier,
   WIRE_PROTOCOL_VERSION,
   isReconnectLaterWireError,
-  isReauthenticateWireError,
+  isLocalProtocolWireError,
   isSocketDropWireError,
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
@@ -121,7 +121,6 @@ import {
   type WebSocketConstructor,
   type WebSocketNegotiation,
   type WireError,
-  wireAuthFailureReason,
 } from "./websocket.js";
 import { isRenewableAuthFailure, mapAuthReason } from "../auth-state.js";
 import {
@@ -254,10 +253,25 @@ type NativeRestoreOptions = NativeWriteOptions & {
 
 type NativeDb = {
   captureSnapshot?(): NativeReadResult | Promise<NativeReadResult>;
+  /** NAPI: a thin session's transaction request, as its backend's client serves it. */
+  serveThinTransaction?(request: Uint8Array): NativeReadResult;
+  /** NAPI: end the thin session's open transactions. */
+  releaseThinTransactions?(): NativeReadResult;
   /** WASM settles its promise-shaped wait early once `cancelled` settles. */
   waitForPendingWrites?(
     tier: string,
     cancelled?: Promise<void>,
+    /** WASM: wait as `waitForSync` (see `waitForSync` below). */
+    forSync?: boolean,
+  ): NativeReadResult | Promise<NativeReadResult | void>;
+  /**
+   * NAPI: `waitForSync` for `writer`'s writes (a trusted session's author,
+   * or none for the database's own), failing also with a rejection of
+   * theirs that settled before and no wait reported.
+   */
+  waitForSync?(
+    tier: string,
+    writer?: Uint8Array | null,
   ): NativeReadResult | Promise<NativeReadResult | void>;
   // Native runtime adapters may close synchronously or asynchronously and may
   // report whether they transitioned state. The adapter awaits either form and
@@ -608,10 +622,13 @@ type ServerConnectionAttempt = {
  * and the timer and steps the machine with one JSON document per input.
  */
 type NativeUpstreamLink = { handle(nowMs: number, input: string): string };
-type UpstreamLinkFailure = {
-  kind: "network" | "refused" | "serverNotReady" | "authRejected" | "fatal" | "reauthenticate";
-  message: string;
-};
+type UpstreamLinkFailure =
+  | {
+      kind: "network" | "refused" | "serverNotReady" | "authRejected" | "fatal" | "reauthenticate";
+      message: string;
+    }
+  /** A server's `WireError`, classified by the link. */
+  | { kind: "wire"; code: string; retry: string; message: string; admitted: boolean };
 type UpstreamLinkInput =
   | { type: "serverConfigured"; configured: boolean }
   | { type: "setOffline"; offline: boolean }
@@ -650,31 +667,20 @@ type UpstreamLinkStep = {
   status: UpstreamLinkStatus;
 };
 
-/** How the link machine should treat a server connection that ended with `error`. */
-function upstreamLinkFailure(error: WireError, negotiated: boolean): UpstreamLinkFailure {
-  const message = error.message;
-  // The server's session reached the expiry the app's auth gave it: a
-  // planned reconnect, so the app's auth decides again with this client's
-  // current credential (see `isReauthenticateWireError`).
-  if (isReauthenticateWireError(error)) return { kind: "reauthenticate", message };
-  if (wireAuthFailureReason(error)) return { kind: "authRejected", message };
-  // The server's bootstrap and overload signals. Before its hello, `not_ready`
-  // means the server is still starting; `backpressure` means it answered and
-  // refused this connection for now (such as the connection cap per user),
-  // which is retried like an outage but published at once with the server's
-  // reason. After its hello both end a link like an outage.
-  if (isReconnectLaterWireError(error)) {
-    if (negotiated) return { kind: "network", message };
-    return { kind: error.code === "backpressure" ? "refused" : "serverNotReady", message };
-  }
+/**
+ * How a server connection that ended with `error` is reported to the link.
+ * The carrier's own socket drops are a network outage; anything the server
+ * said goes to the link as it arrived, which classifies it in Rust
+ * (`LinkFailure::from_wire_error`) as it does for every host.
+ */
+function upstreamLinkFailure(error: WireError, admitted: boolean): UpstreamLinkFailure {
   // The network or the server dropped the socket. A local-first client must
   // survive an outage of any length, including one it was opened in.
-  if (isSocketDropWireError(error)) {
-    return { kind: "network", message };
-  }
-  // Anything else (a protocol error, an incompatible server) cannot succeed
-  // by retrying.
-  return { kind: "fatal", message };
+  if (isSocketDropWireError(error)) return { kind: "network", message: error.message };
+  // This client could not read what the server sent: a local protocol
+  // failure, not something the server said, so it stops as it always did.
+  if (isLocalProtocolWireError(error)) return { kind: "fatal", message: error.message };
+  return { kind: "wire", ...error, admitted };
 }
 
 function joinServerTransportRetirements(
@@ -2425,6 +2431,31 @@ export class NativeRuntimeAdapter implements Runtime {
     );
   }
 
+  /**
+   * @internal Serve one of a thin session's transaction requests (its wire
+   * frame) as the backend's client linked to the core as that session
+   * (SPEC 8.14); the answer is the response frame. A commit answers once the
+   * core accepted it. One request at a time.
+   */
+  serveThinTransaction(request: Uint8Array): Promise<Uint8Array> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.serveThinTransaction(request);
+    if (this.closed) return Promise.reject(new Error("the native runtime is closed"));
+    if (!this.db.serveThinTransaction)
+      return Promise.reject(new Error("this native binding serves no thin transactions"));
+    const served = this.db.serveThinTransaction(request);
+    this.scheduleCoreTick();
+    return this.awaitNativeRead(served);
+  }
+
+  /** @internal End the thin session's open transactions: nothing of them reached the core. */
+  async releaseThinTransactions(): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.releaseThinTransactions();
+    if (this.closed || !this.db.releaseThinTransactions) return;
+    const released = this.db.releaseThinTransactions();
+    this.scheduleCoreTick();
+    await this.awaitNativeRead(released);
+  }
+
   captureSnapshot(): Promise<SnapshotRef> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.captureSnapshot();
     if (this.closed)
@@ -3363,10 +3394,19 @@ export class NativeRuntimeAdapter implements Runtime {
    * reported outage fails the wait; `throughOutage` keeps it pending until a
    * terminal failure, as a write's own Global wait does (#3923). `signal`
    * ends the wait with its reason; the writes are unaffected.
+   *
+   * `sync` makes it `waitForSync`: it waits for the writes of the session
+   * `sync.writeContext` names (none: this runtime's own) and also fails with a rejection of theirs
+   * that settled before the call and nothing reported yet. Without it, as
+   * graceful shutdown waits, such earlier rejections are not this wait's.
    */
   async waitForPendingWrites(
     tier = "global",
-    options: { throughOutage?: boolean; signal?: AbortSignal } = {},
+    options: {
+      throughOutage?: boolean;
+      signal?: AbortSignal;
+      sync?: { writeContext?: string | null };
+    } = {},
   ): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.waitForPendingWrites(tier, options);
     if (!this.db.waitForPendingWrites)
@@ -3390,10 +3430,17 @@ export class NativeRuntimeAdapter implements Runtime {
     const forwardAbort = () => stop.abort(signal?.reason);
     signal?.addEventListener("abort", forwardAbort, { once: true });
     try {
+      const { sync } = options;
+      const native = !sync
+        ? this.db.waitForPendingWrites(tier, cancelled)
+        : this.db.waitForSync
+          ? this.db.waitForSync(
+              tier,
+              this.trustedWriteIdentity(sessionFromWriteContext(sync.writeContext)) ?? null,
+            )
+          : this.db.waitForPendingWrites(tier, cancelled, true);
       const wait = this.awaitNativeRead(
-        Promise.resolve(this.db.waitForPendingWrites(tier, cancelled)).then(
-          (result) => result ?? new Uint8Array(),
-        ),
+        Promise.resolve(native).then((result) => result ?? new Uint8Array()),
         undefined,
         stop.signal,
       );
@@ -5125,10 +5172,11 @@ function updatedAtMsFromWriteContext(writeContext?: string | null): number | und
  * The explicit `$updatedAt` a write names (a backfill or import), or
  * `null` for an ordinary write. An ordinary write carries no time: the
  * replica's clock stamps it while it is pending, and the authority's clock
- * stamps it when it accepts it, so `$updatedAt` and `$acceptedAt` are the
- * acceptance time, not the device clock at authoring (an offline edit
- * synced later is stamped when it syncs), and a device with a fast clock
- * is not refused for writing in the future.
+ * stamps it when it accepts it, so its `$updatedAt` is the acceptance
+ * time, not the device clock at authoring (an offline edit synced later is
+ * stamped when it syncs), and a device with a fast clock is not refused
+ * for writing in the future. `$acceptedAt` is always the acceptance time,
+ * read from the version's accepted position, whatever `$updatedAt` says.
  */
 export function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
   return updatedAtMsFromWriteContext(writeContext) ?? null;
@@ -6088,22 +6136,6 @@ function coerceQueryPredicate(
           : coerceQueryLiteral(table, filter.column, filter.value, schema),
     };
   }
-  if (filter.op === "EnumMatch") {
-    const columnType = resolveQueryTable(schema, table)?.columns.find(
-      (entry) => entry.name === filter.column,
-    )?.column_type;
-    if (columnType?.type !== "EnumPayload") {
-      throw new Error(`enum match requires payload enum column "${filter.column}"`);
-    }
-    const entry = columnType.cases.find((candidate) => candidate.name === filter.case);
-    if (!entry) {
-      throw new Error(`unknown payload enum case "${filter.case}"`);
-    }
-    return {
-      ...filter,
-      payload: coerceEnumPayloadPredicate(filter.payload, entry.fields),
-    };
-  }
   if (filter.op === "IsNull" || filter.op === "IsNotNull") return filter;
   if (isQueryPredicateCmp(filter)) {
     return {
@@ -6112,49 +6144,6 @@ function coerceQueryPredicate(
     };
   }
   throw new Error(`unsupported query predicate ${JSON.stringify(filter)}`);
-}
-
-function coerceEnumPayloadPredicate(
-  predicate: QueryPredicate,
-  fields: ColumnDescriptor[],
-): QueryPredicate {
-  if (predicate.op === "All" || predicate.op === "Any") {
-    return {
-      ...predicate,
-      predicates: predicate.predicates.map((child) => coerceEnumPayloadPredicate(child, fields)),
-    };
-  }
-  if (predicate.op === "Not") {
-    return {
-      ...predicate,
-      predicate: coerceEnumPayloadPredicate(predicate.predicate, fields),
-    };
-  }
-  if (predicate.op === "EnumMatch") {
-    throw new Error("payload enum matches cannot be nested");
-  }
-  if (!("column" in predicate)) {
-    throw new Error("payload enum predicate must target a payload field");
-  }
-  const field = fields.find((candidate) => candidate.name === predicate.column);
-  if (!field) {
-    throw new Error(`unknown payload enum field "${predicate.column}"`);
-  }
-  if (predicate.op === "In") {
-    return {
-      ...predicate,
-      values: predicate.values.map((value) =>
-        coerceLiteralForColumnType(value, field.column_type, field.nullable),
-      ),
-    };
-  }
-  if (predicate.op === "Contains" || isQueryPredicateCmp(predicate)) {
-    return {
-      ...predicate,
-      value: coerceLiteralForColumnType(predicate.value, field.column_type, field.nullable),
-    };
-  }
-  return predicate;
 }
 
 function isQueryPredicateCmp(
@@ -6628,19 +6617,6 @@ function predicateToFilters(predicate: unknown): QueryPredicate[] | null {
   if (record.Not) {
     const predicate = predicateToFilterTree(record.Not);
     return predicate ? [{ op: "Not", predicate }] : null;
-  }
-  const enumMatch = record.EnumMatch;
-  if (enumMatch && typeof enumMatch === "object") {
-    const match = enumMatch as {
-      column?: unknown;
-      case?: unknown;
-      payload?: unknown;
-    };
-    const column = readColumnRef(match.column);
-    const payload = predicateToFilterTree(match.payload);
-    return column && typeof match.case === "string" && payload
-      ? [{ column, op: "EnumMatch", case: match.case, payload }]
-      : null;
   }
   const isNull = record.IsNull;
   if (isNull && typeof isNull === "object") {
@@ -7235,8 +7211,6 @@ function decodeBytes(
     case "Enum":
       if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
       return { type: "Text", value: textDecoder.decode(bytes.subarray(1)) };
-    case "EnumPayload":
-      return decodePayloadEnumBytes(type, bytes, storageType, nestedRowCarrier);
     case "Uuid":
       return { type: "Uuid", value: formatUuid(bytes) };
     case "Bytea":
@@ -7275,49 +7249,6 @@ function decodeBytes(
       return value;
     }
   }
-}
-
-function decodePayloadEnumBytes(
-  type: Extract<ColumnType, { type: "EnumPayload" }>,
-  bytes: Uint8Array,
-  storageType: ValueType | undefined,
-  nestedRowCarrier: NestedRowCarrier,
-): Value {
-  if (bytes.byteLength < 4) throw new Error("invalid Enum payload value");
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const nameLength = view.getUint32(0, true);
-  if (bytes.byteLength < 4 + nameLength) throw new Error("invalid Enum payload case");
-  const caseName = textDecoder.decode(bytes.subarray(4, 4 + nameLength));
-  const entry = type.cases.find((candidate) => candidate.name === caseName);
-  if (!entry) throw new Error("unknown Enum payload case");
-  const enumStorage = nonNullableStorageType(storageType);
-  const payloadDescriptor =
-    enumStorage?.tag === 17
-      ? enumStorage.enumSchema?.cases?.find((candidate) => candidate.name === caseName)?.payload
-      : undefined;
-  if (!payloadDescriptor || payloadDescriptor.length !== entry.fields.length) {
-    throw new Error("Enum payload descriptor mismatch");
-  }
-  const raw = bytes.subarray(4 + nameLength);
-  const decodeRecord = createRecordValueDecoder(payloadDescriptor);
-  return {
-    type: "Enum",
-    value: {
-      case: caseName,
-      values: entry.fields.map((field, index) => {
-        const fieldBytes = decodeRecord(raw, index);
-        return fieldBytes == null
-          ? { type: "Null" }
-          : decodeBytes(
-              field.column_type,
-              fieldBytes,
-              field.name,
-              payloadDescriptor[index]?.valueType,
-              nestedRowCarrier,
-            );
-      }),
-    },
-  };
 }
 
 function nonNullableStorageType(storageType?: ValueType): ValueType | undefined {
@@ -7644,19 +7575,6 @@ function runtimeSubscriptionValue(value: Value, type: ColumnType): Value {
       value: runtimeSubscriptionNestedRow(value.value, type.columns),
     };
   }
-  if (type.type === "EnumPayload" && value.type === "Enum") {
-    const payload = type.cases.find((entry) => entry.name === value.value.case)?.fields;
-    if (!payload) return value;
-    return {
-      type: "Enum",
-      value: {
-        case: value.value.case,
-        values: value.value.values.map((entry, index) =>
-          payload[index] ? runtimeSubscriptionValue(entry, payload[index]!.column_type) : entry,
-        ),
-      },
-    };
-  }
   return value;
 }
 
@@ -7697,12 +7615,8 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
 }
 
 export function parseUuid(value: string): Uint8Array {
-  const hex = value.replaceAll("-", "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid uuid ${value}`);
-  const bytes = new Uint8Array(16);
-  for (let i = 0; i < 16; i += 1) {
-    bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
+  const bytes = parseUuidBytes(value);
+  if (!bytes) throw new Error(`invalid uuid ${value}`);
   return bytes;
 }
 

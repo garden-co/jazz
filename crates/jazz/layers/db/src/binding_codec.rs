@@ -79,7 +79,7 @@ pub fn decode_named_cells(bytes: &[u8]) -> Result<BTreeMap<String, Value>, Strin
 /// a generated host artifact, but consumers must still decode its payloads
 /// through their ordinary production readers.
 pub const BINDING_CODEC_GOLDEN_FIXTURE: &str =
-    include_str!("../../../fixtures/binding_codec_golden.json");
+    include_str!("../fixtures/binding_codec_golden.json");
 
 /// The explicit binding provenance of one record-descriptor field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
