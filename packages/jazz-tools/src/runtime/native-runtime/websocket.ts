@@ -408,6 +408,17 @@ export class WebSocketCarrier {
   private closing = false;
   private terminated = false;
   private lastInbound = performance.now();
+  /** Messages received whose handling hasn't finished yet. */
+  private handlingMessages = 0;
+  /**
+   * A socket's error and close that came while messages were still being
+   * handled, reported once the last of them is: the HTTP stream hands a
+   * backend's last message and its close over in one read, and a refusal
+   * (`auth_failed`, say after `jazz.revokeUser`) read after the close would
+   * count as a dropped connection, retried for good. With no message being
+   * handled, they are reported at once, from the event itself.
+   */
+  private afterMessages: Array<() => void> = [];
   private silenceTimer: ReturnType<typeof setTimeout> | undefined;
   private handshakeTimer: ReturnType<typeof setTimeout> | undefined;
   /** Where to renew this session in place, when it rides on the app's cookie. */
@@ -455,37 +466,52 @@ export class WebSocketCarrier {
         this.close();
       },
     );
+    const reportAfterMessages = (run: () => void) => {
+      if (this.handlingMessages === 0) run();
+      else this.afterMessages.push(run);
+    };
     this.socket.addEventListener("message", (event) => {
       this.lastInbound = performance.now();
-      void this.handleMessage(event.data).catch((error) => {
-        this.reportTerminal(
-          {
-            code: "protocol_error",
-            retry: "never",
-            message: error instanceof Error ? error.message : String(error),
-          },
-          undefined,
-          false,
-        );
-        this.close();
-      });
+      this.handlingMessages += 1;
+      void this.handleMessage(event.data)
+        .catch((error) => {
+          this.reportTerminal(
+            {
+              code: "protocol_error",
+              retry: "never",
+              message: error instanceof Error ? error.message : String(error),
+            },
+            undefined,
+            false,
+          );
+          this.close();
+        })
+        .finally(() => {
+          this.handlingMessages -= 1;
+          if (this.handlingMessages > 0) return;
+          for (const run of this.afterMessages.splice(0)) run();
+        });
     });
-    this.socket.addEventListener("error", (event) => {
-      this.reportTerminal({
-        code: "websocket_error",
-        retry: "later",
-        // A native socket's error event says nothing; the HTTP stream and a
-        // backend client's failed upgrade hand an Error that does.
-        message: event instanceof Error ? event.message : "websocket transport error",
-      });
-    });
+    this.socket.addEventListener("error", (event) =>
+      reportAfterMessages(() =>
+        this.reportTerminal({
+          code: "websocket_error",
+          retry: "later",
+          // A native socket's error event says nothing; the HTTP stream and a
+          // backend client's failed upgrade hand an Error that does.
+          message: event instanceof Error ? event.message : "websocket transport error",
+        }),
+      ),
+    );
     this.socket.addEventListener("close", (event) => {
       const close = websocketCloseDetails(event);
-      this.reportTerminal({
-        code: "websocket_closed",
-        retry: "later",
-        message: `websocket closed (code=${close.code ?? "unknown"}, reason=${close.reason ?? "none"})`,
-      });
+      reportAfterMessages(() =>
+        this.reportTerminal({
+          code: "websocket_closed",
+          retry: "later",
+          message: `websocket closed (code=${close.code ?? "unknown"}, reason=${close.reason ?? "none"})`,
+        }),
+      );
     });
   }
 
