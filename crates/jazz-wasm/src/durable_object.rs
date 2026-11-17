@@ -1185,7 +1185,26 @@ mod core_host {
                 access: access.as_deref(),
             });
             let now = js_sys::Date::now() as u64;
-            let admission = match admit_by_core_secret(&prelude, upgrade, &self.secret, now) {
+            // A guest the backend relays proves who it is itself: its proof
+            // is checked, and its account founded or found, in the object's
+            // account registry, as native admits it.
+            let secret = self.secret.clone();
+            let app_id = jazz::tools::AppId::from_string(&self.app_id);
+            let mut guest = |token: &str, peer, audience: Option<&str>| {
+                let app_id = app_id.clone().map_err(|error| error.to_string())?;
+                let storage = self.registry()?;
+                jazz_server::portable::guest::admit_guest(
+                    &storage,
+                    token,
+                    peer,
+                    audience,
+                    app_id,
+                    now / 1000,
+                )
+                .map_err(|refusal| refusal.to_string())
+            };
+            let admission = match admit_by_core_secret(&prelude, upgrade, &secret, now, &mut guest)
+            {
                 Ok(admission) => admission,
                 Err(message) => return fail(jazz::wire::WireErrorCode::AuthFailed, message),
             };

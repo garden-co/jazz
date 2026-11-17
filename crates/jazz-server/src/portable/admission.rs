@@ -182,6 +182,11 @@ pub struct UpgradeCredential<'a> {
     pub access: Option<&'a str>,
 }
 
+/// Admits a relayed guest by its own proof: given the proof, the peer it
+/// must be and the audience the backend stated, the session to serve it as.
+pub type GuestVerifier<'a> =
+    dyn FnMut(&str, AuthorSubject, Option<&str>) -> Result<jazz::tools::Session, String> + 'a;
+
 /// Admit a socket to a core that admits only its app's backend, by the
 /// core's one `secret` (a Durable Object core): as a native core does with
 /// a backend credential and no trusted workload.
@@ -200,11 +205,16 @@ pub struct UpgradeCredential<'a> {
 /// - A stated session carries its [`SessionRevocation`]: when the backend's
 ///   `authenticate` started for it (`authenticatedAt`), else `now_ms`, the
 ///   time the core admits it (Unix ms).
+/// - A guest the backend relays (session access, the guest's own proof in
+///   `jwt_token`) is admitted by `guest`: given the proof, the peer it must
+///   be and the audience the backend stated (`local_first_audience`), the
+///   session to serve it as (see `portable::guest::admit_guest`).
 pub fn admit_by_core_secret(
     prelude: &WebSocketPrelude,
     upgrade: Option<UpgradeCredential<'_>>,
     secret: &str,
     now_ms: u64,
+    guest: &mut GuestVerifier<'_>,
 ) -> Result<WebSocketAdmission, String> {
     let peer_identity = crate::portable::session::ws_peer_identity(&prelude.peer_identity)?;
     let bundle = prelude
@@ -221,11 +231,26 @@ pub fn admit_by_core_secret(
             Some("admin") => (true, true),
             Some("backend") => (false, true),
             None => {
-                return Err(match auth.jwt_token {
-                    Some(_) => "a local-first proof is not verified by a Durable Object core yet: relay the guest as a backend-stated session",
-                    None => "Session required. Provide a backend session or a local-first proof.",
-                }
-                .to_owned());
+                let Some(token) = auth.jwt_token.as_deref() else {
+                    return Err(
+                        "Session required. Provide a backend session or a local-first proof."
+                            .to_owned(),
+                    );
+                };
+                let session = guest(
+                    token,
+                    peer_identity,
+                    prelude.local_first_audience.as_deref(),
+                )?;
+                return Ok(WebSocketAdmission {
+                    identity: peer_identity,
+                    claims: crate::portable::session::session_claims(session)?,
+                    trust: CommitUnitTrust::Session,
+                    credential: WebSocketCredential::Session,
+                    requested_link: prelude.requested_link,
+                    bundle,
+                    revocation: None,
+                });
             }
             Some(other) => return Err(format!("unknown backend access `{other}`")),
         },
@@ -261,7 +286,7 @@ pub fn admit_by_core_secret(
     }
     if auth.jwt_token.is_some() {
         return Err(
-            "a local-first proof is not verified by a Durable Object core yet: relay the guest as a backend-stated session"
+            "a guest's local-first proof is admitted on session access: relay it with the backend credential and no X-Jazz-Backend-Access"
                 .to_owned(),
         );
     }
@@ -333,7 +358,9 @@ mod core_secret_tests {
         prelude: &WebSocketPrelude,
         upgrade: Option<UpgradeCredential<'_>>,
     ) -> Result<WebSocketAdmission, String> {
-        admit_by_core_secret(prelude, upgrade, SECRET, NOW)
+        admit_by_core_secret(prelude, upgrade, SECRET, NOW, &mut |token, _, _| {
+            Err(format!("no guest verifier in this test (proof `{token}`)"))
+        })
     }
 
     /// The core secret on the upgrade admits the backend as a trusted
@@ -388,7 +415,8 @@ mod core_secret_tests {
 
     /// A user session the backend states is served as that user, under the
     /// user's policies, and only for the peer the prelude names; a guest's
-    /// own local-first proof is not verified here and is refused.
+    /// own local-first proof on backend access is refused (it comes on
+    /// session access).
     #[test]
     fn a_backend_stated_session_is_its_user_and_must_be_its_peer() {
         let stated = serde_json::json!({
@@ -412,10 +440,7 @@ mod core_secret_tests {
 
         let guest = prelude(serde_json::json!({ "jwt_token": "a.b.c" }), &alice());
         let refused = admit(&guest, upgrade(SECRET, "backend")).unwrap_err();
-        assert!(
-            refused.contains("local-first proof is not verified"),
-            "{refused}"
-        );
+        assert!(refused.contains("admitted on session access"), "{refused}");
     }
 
     /// A stated session carries what a revocation is checked against: its
@@ -473,6 +498,32 @@ mod core_secret_tests {
             }),
         )
         .unwrap_err();
-        assert!(refused.contains("local-first proof"), "{refused}");
+        assert!(refused.contains("no guest verifier"), "{refused}");
+
+        // The verifier's session is served as the guest, by its own proof.
+        // (What the verifier answers is its business: any session will do.)
+        let guest_session: jazz::tools::Session = serde_json::from_value(serde_json::json!({
+            "issuer": "https://idp.example", "user_id": "guest", "claims": {}
+        }))
+        .unwrap();
+        let admitted = admit_by_core_secret(
+            &guest,
+            Some(UpgradeCredential {
+                credential: SECRET,
+                access: None,
+            }),
+            SECRET,
+            NOW,
+            &mut |token, peer, audience| {
+                assert_eq!(token, "a.b.c");
+                assert_eq!(peer, alice());
+                assert_eq!(audience, None);
+                Ok(guest_session.clone())
+            },
+        )
+        .unwrap();
+        assert_eq!(admitted.trust, CommitUnitTrust::Session);
+        assert_eq!(admitted.credential, WebSocketCredential::Session);
+        assert!(admitted.revocation.is_none());
     }
 }
