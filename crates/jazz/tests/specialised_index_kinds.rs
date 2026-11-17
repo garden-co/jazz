@@ -698,3 +698,182 @@ fn vector_and_point_columns_compare_only_whole() {
         }
     }
 }
+
+/// The same refusals reach every other carrier of a comparison: a read
+/// policy's range or `contains`, a relation predicate's range or
+/// `contains`, and an aggregate's order or `min`/`max`/`sum`/`avg` over a
+/// vector or point column. Equality, grouping and `count` stay allowed.
+/// Policies are refused when the schema is compiled (the model's policy
+/// check); the engine refuses them again where it compiles them, for
+/// carriers that reach it unchecked.
+#[test]
+fn vector_and_point_refusals_reach_policies_relations_and_aggregates() {
+    use jazz::query::OrderDirection;
+    use jazz::tools::public_schema::{
+        RelationCmpOp, RelationColumnRef, RelationExpr, RelationPredicate, RelationProjectColumn,
+        RelationProjectExpr, RelationRowIdRef, RelationValueRef,
+    };
+    use jazz::tools::{CmpOp, PolicyExpr, PolicyValue, TablePolicies};
+
+    let reader = AuthorSubject::for_test_bytes([0xb0; 16]);
+    // A read of `places` as `reader` under read policy `read`, or why the
+    // schema or the read was refused.
+    let read_under = |read: PolicyExpr| -> Result<usize, String> {
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("places")
+                    .column("name", ColumnType::Text)
+                    .nullable_column("location", ColumnType::Point)
+                    .nullable_column("embedding", ColumnType::Vector { dimensions: 3 })
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(read)
+                            .with_insert(PolicyExpr::True),
+                    ),
+            )
+            .build();
+        let schema = JazzSchema::new(&source).map_err(|error| error.to_string())?;
+        let db = block_on(Db::open(config(schema))).map_err(|error| error.to_string())?;
+        let prepared = db
+            .prepare_query(&Query::from("places"))
+            .map_err(|error| error.to_string())?;
+        block_on(db.all_for_identity(&prepared, ReadOpts::default(), reader))
+            .map(|rows| rows.len())
+            .map_err(|error| error.to_string())
+    };
+    let refused = |result: Result<usize, String>, case: &str| {
+        let error = result.expect_err(case);
+        assert!(
+            error.contains("compare whole") || error.contains("operand type mismatch"),
+            "{case}: {error}"
+        );
+    };
+    for column in ["location", "embedding"] {
+        let literal = PolicyValue::Literal(jazz::tools::Value::Bytea(vec![0; 12]));
+        refused(
+            read_under(PolicyExpr::Cmp {
+                column: column.into(),
+                op: CmpOp::Gt,
+                value: literal.clone(),
+            }),
+            &format!("policy range on {column}"),
+        );
+        refused(
+            read_under(PolicyExpr::Contains {
+                column: column.into(),
+                value: literal.clone(),
+            }),
+            &format!("policy contains on {column}"),
+        );
+        assert!(
+            read_under(PolicyExpr::IsNotNull {
+                column: column.into(),
+            })
+            .is_ok(),
+            "policy isNotNull on {column}"
+        );
+
+        let place = |column: &str| RelationColumnRef {
+            scope: Some("p".to_owned()),
+            column: column.to_owned(),
+        };
+        let exists = |predicate: RelationPredicate| PolicyExpr::ExistsRel {
+            rel: RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "places".into(),
+                    alias: Some("p".to_owned()),
+                }),
+                predicate,
+            },
+        };
+        refused(
+            read_under(exists(RelationPredicate::Cmp {
+                left: place(column),
+                op: RelationCmpOp::Lt,
+                right: RelationValueRef::Literal(serde_json::json!(1)),
+            })),
+            &format!("relation range on {column}"),
+        );
+        refused(
+            read_under(exists(RelationPredicate::Contains {
+                left: place(column),
+                right: RelationValueRef::Literal(serde_json::json!(1)),
+            })),
+            &format!("relation contains on {column}"),
+        );
+        assert!(
+            read_under(exists(RelationPredicate::IsNotNull {
+                column: place(column),
+            }))
+            .is_ok(),
+            "relation isNotNull on {column}"
+        );
+
+        let db = open();
+        let run = |query: Query| {
+            db.prepare_query(&query)
+                .and_then(|prepared| block_on(db.all(&prepared, ReadOpts::default())))
+                .map(|rows| rows.len())
+                .map_err(|error| error.to_string())
+        };
+        // A relation query's own predicates.
+        for (name, predicate) in [
+            (
+                "range",
+                RelationPredicate::Cmp {
+                    left: place(column),
+                    op: RelationCmpOp::Ge,
+                    right: RelationValueRef::Literal(serde_json::json!(1)),
+                },
+            ),
+            (
+                "contains",
+                RelationPredicate::Contains {
+                    left: place(column),
+                    right: RelationValueRef::Literal(serde_json::json!(1)),
+                },
+            ),
+        ] {
+            let mut query = Query::from("places");
+            query.relation = Some(jazz::query::RelationQuery {
+                rel: RelationExpr::Project {
+                    input: Box::new(RelationExpr::Filter {
+                        input: Box::new(RelationExpr::TableScan {
+                            table: "places".into(),
+                            alias: Some("p".to_owned()),
+                        }),
+                        predicate,
+                    }),
+                    columns: std::iter::once(RelationProjectColumn {
+                        alias: "id".into(),
+                        expr: RelationProjectExpr::RowId(RelationRowIdRef::Current),
+                    })
+                    .chain(["name", "about", "location", "embedding"].map(|name| {
+                        RelationProjectColumn {
+                            alias: name.into(),
+                            expr: RelationProjectExpr::Column(place(name)),
+                        }
+                    }))
+                    .collect(),
+                },
+            });
+            refused(run(query), &format!("relation query {name} on {column}"));
+        }
+        assert!(run(Query::from("places").count().group_by(column)).is_ok());
+        refused(
+            run(Query::from("places")
+                .count()
+                .group_by(column)
+                .order_by(column, OrderDirection::Asc)),
+            &format!("aggregate ordered by {column}"),
+        );
+        for (name, query) in [
+            ("min", Query::from("places").min(column)),
+            ("max", Query::from("places").max(column)),
+            ("sum", Query::from("places").sum(column)),
+            ("avg", Query::from("places").avg(column)),
+        ] {
+            refused(run(query), &format!("{name} of {column}"));
+        }
+    }
+}

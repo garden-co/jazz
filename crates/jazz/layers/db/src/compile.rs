@@ -765,6 +765,13 @@ impl<'a> Ctx<'a> {
                 };
                 Ok((column_sql(table, alias, column)?, ty))
             };
+            // A vector or point has no order and no sum: only `count`.
+            if !matches!(output.function, F::Count)
+                && let Some(column) = output.column.as_deref()
+                && is_whole_only(table, column)
+            {
+                return Err(whole_only_refusal(&format!("`{}`", output.alias), column));
+            }
             // MIN and MAX of an enum column are variants, in the query
             // schema's declaration order.
             let enum_column = output
@@ -837,6 +844,9 @@ impl<'a> Ctx<'a> {
             let term = if let Some(rank) = ordered.get(&key.column) {
                 rank.clone()
             } else if aggregate.group_by.as_deref() == Some(key.column.as_str()) {
+                if is_whole_only(table, &key.column) {
+                    return Err(whole_only_refusal("an order", &key.column));
+                }
                 group.clone().expect("grouped")
             } else if aggregate.aggregates.iter().any(|a| a.alias == key.column) {
                 quote(&key.column)
@@ -2514,11 +2524,17 @@ impl<'a> Ctx<'a> {
                 op,
                 value: PolicyValue::SessionRef(path),
             } if is_claim(path) => {
+                if is_range(op) && is_whole_only(table, column) {
+                    return Err(whole_only_refusal("a range", column));
+                }
                 let left = self.column_term(table, alias, column)?;
                 let right = self.claim_term(session, path, table.column_type(column))?;
                 self.cmp(op.clone(), left, right)?
             }
             PolicyExpr::Cmp { column, op, value } => {
+                if is_range(op) && is_whole_only(table, column) {
+                    return Err(whole_only_refusal("a range", column));
+                }
                 let left = self.column_term(table, alias, column)?;
                 let right = self.policy_value(value, outer, session)?;
                 self.cmp(op.clone(), left, right)?
@@ -2538,6 +2554,9 @@ impl<'a> Ctx<'a> {
             PolicyExpr::SessionIsNull { path } => bool_sql(session.is_null(path)),
             PolicyExpr::SessionIsNotNull { path } => bool_sql(session.is_not_null(path)),
             PolicyExpr::Contains { column, value } => {
+                if is_whole_only(table, column) {
+                    return Err(whole_only_refusal("contains", column));
+                }
                 let left = self.column_term(table, alias, column)?;
                 let right = match value {
                     // An array column holds elements of its element type; a
@@ -3167,6 +3186,11 @@ impl<'a> Ctx<'a> {
             }
             RelationPredicate::Cmp { left, op, right } => {
                 let ty = self.rel_column_type(rel, left);
+                if !matches!(op, RelationCmpOp::Eq | RelationCmpOp::Ne)
+                    && ty.as_ref().is_some_and(is_whole_only_type)
+                {
+                    return Err(whole_only_refusal("a range", &left.column));
+                }
                 let right = self.rel_value_as(right, ty.as_ref(), rel, scope)?;
                 let left = self.resolve_term(rel, left)?;
                 let op = match op {
@@ -3195,6 +3219,13 @@ impl<'a> Ctx<'a> {
                 self.in_list(left, options)?
             }
             RelationPredicate::Contains { left, right } => {
+                if self
+                    .rel_column_type(rel, left)
+                    .as_ref()
+                    .is_some_and(is_whole_only_type)
+                {
+                    return Err(whole_only_refusal("contains", &left.column));
+                }
                 let ty = match self.rel_column_type(rel, left) {
                     Some(ValueType::Array(element)) => Some(*element),
                     Some(_) => Some(ValueType::String),
@@ -3513,16 +3544,27 @@ fn check_candidate(table: &Table, column: &str, option: &Operand) -> Result<(), 
 /// (SPEC 20.1). Its bytes have no order a range or `orderBy` could mean,
 /// and no part `contains` could find.
 fn is_whole_only(table: &Table, column: &str) -> bool {
-    fn whole(ty: &ValueType) -> bool {
-        match ty {
-            ValueType::Nullable(inner) => whole(inner),
-            ValueType::Vector(_) | ValueType::Point => true,
-            _ => false,
-        }
-    }
     table
         .column(column)
-        .is_some_and(|declared| whole(&declared.ty))
+        .is_some_and(|declared| is_whole_only_type(&declared.ty))
+}
+
+/// [`is_whole_only`] for a column's type.
+fn is_whole_only_type(ty: &ValueType) -> bool {
+    match ty {
+        ValueType::Nullable(inner) => is_whole_only_type(inner),
+        ValueType::Vector(_) | ValueType::Point => true,
+        _ => false,
+    }
+}
+
+/// The refusal of `what` (a range, `contains`, an order) on whole-only
+/// `column`.
+fn whole_only_refusal(what: &str, column: &str) -> Error {
+    query_error(format!(
+        "operand type mismatch: {what} on {column}: vector and point columns compare whole \
+         (eq, ne, in, notIn, isNull)"
+    ))
 }
 
 /// `contains` searches text, bytes or an array.
