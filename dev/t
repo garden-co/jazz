@@ -101,7 +101,7 @@ if [[ -z "$package" ]]; then
 fi
 features="testing,sqlite,transport-compression-zstd"
 case "$package" in
-  jazz) ;;
+  jazz-core) ;;
   jazz-db) features="testing,sqlite" ;;
   jazz-server) features="test,sqlite" ;;
   *) features="testing" ;;
