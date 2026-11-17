@@ -127,8 +127,6 @@ mod pending_commit_reopen;
 mod pending_rebase_scope;
 #[path = "../permission_advice.rs"]
 mod permission_advice;
-#[path = "../policy_activation.rs"]
-mod policy_activation;
 #[path = "../policy_check_plans.rs"]
 mod policy_check_plans;
 #[path = "../policy_claim_coercion.rs"]
