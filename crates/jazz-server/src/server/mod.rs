@@ -13,6 +13,7 @@ mod catalogue_storage;
 mod data_dir_corpus;
 #[cfg(feature = "embedded-server")]
 mod embedded;
+mod identity;
 pub use crate::runtime::{ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle};
 pub mod alpha59_alpha60;
 pub(crate) mod deployment;
@@ -29,6 +30,10 @@ pub(crate) use catalogue_storage::CatalogueStorage;
 #[cfg(feature = "embedded-server")]
 pub use embedded::{
     EmbeddedOutgoing, EmbeddedServer, EmbeddedSocketPeer, EmbeddedSocketSender, OpenSocketRefused,
+};
+pub use identity::{
+    IdentityOpen, RecordedIdentity, StoreIdentity, detach_store_identity, open_store_identity,
+    read_store_identity, set_store_app_id,
 };
 pub use shutdown::{ShutdownController, ShutdownPhase, WebSocketEntryRefused};
 #[cfg(feature = "embedded-server")]

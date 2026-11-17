@@ -26,7 +26,6 @@ use std::sync::{Arc, Mutex, Weak, mpsc as std_mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
 use crate::kv::HostKv;
 use crate::kv::HostSql;
 use jazz::catalogue::{CatalogueChange, CatalogueRows};
@@ -736,7 +735,6 @@ impl AppStore {
     }
 
     /// Key-value access to one host table.
-    #[cfg(test)]
     pub(crate) fn kv(&self, table: HostTable) -> Result<HostKv, String> {
         Ok(HostKv::new(
             table,
