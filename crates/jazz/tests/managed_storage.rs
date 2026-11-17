@@ -201,22 +201,46 @@ fn a_transaction_handles_stage_is_refused_on_managed_storage() {
 }
 
 /// A write that fails partway is undone whole on managed storage: its
-/// scope rolls back through the host's transaction, so nothing it wrote
-/// before failing (the large value's chunks) is left behind.
+/// scope rolls back through the host's transaction, so what it wrote
+/// before failing (the large value's chunks) is not left behind. A trigger
+/// in the object's SQL aborts the row's insert after its chunks are
+/// written.
 ///
 /// ```text
-/// insert 1 (300 KiB) ── insert 1 again (another 300 KiB) → refused ── same nodes as before
+/// insert 1 (300 KiB) ── insert 2 (300 KiB): chunks written, row aborted ── nodes as after 1
 /// ```
 #[test]
-fn a_failing_write_leaves_nothing_on_managed_storage() {
-    let db = open_on(EmulatedObjectSql::open_in_memory().unwrap());
+fn a_write_failing_partway_leaves_nothing_on_managed_storage() {
+    use jazz::storage::Backend as _;
+    let sql = EmulatedObjectSql::open_in_memory().unwrap();
+    let db = open_on(sql.clone());
     let mut first = seat("A", false);
     first.insert("notes".to_owned(), Value::String(text(1, LARGE)));
     block_on(db.insert("seats", first, row(1))).unwrap();
     let nodes = db.large_value_nodes_for_test().unwrap();
-    let mut again = seat("B", false);
-    again.insert("notes".to_owned(), Value::String(text(2, LARGE)));
-    assert!(block_on(db.insert("seats", again, row(1))).is_err());
+    let table: String = {
+        let mut cursor = sql
+            .query(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%seats%' \
+                 AND name NOT LIKE '\\_jazz%' ESCAPE '\\'",
+                &[],
+            )
+            .unwrap();
+        match cursor.next().unwrap().unwrap() {
+            [jazz::storage::Value::Text(name)] => String::from_utf8(name.clone()).unwrap(),
+            other => panic!("{other:?}"),
+        }
+    };
+    let quoted = table.replace('"', "\"\"");
+    sql.execute_script(&format!(
+        "CREATE TRIGGER refuse_second BEFORE INSERT ON \"{quoted}\" \
+         WHEN (SELECT count(*) FROM \"{quoted}\") > 0 \
+         BEGIN SELECT RAISE(ABORT, 'refused by the test'); END;"
+    ))
+    .unwrap();
+    let mut second = seat("B", false);
+    second.insert("notes".to_owned(), Value::String(text(2, LARGE)));
+    assert!(block_on(db.insert("seats", second, row(2))).is_err());
     assert_eq!(db.large_value_nodes_for_test().unwrap(), nodes);
     assert_eq!(seats(&db).len(), 1);
 }
