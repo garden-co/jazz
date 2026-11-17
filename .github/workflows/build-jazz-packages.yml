@@ -183,6 +183,27 @@ jobs:
           test -f crates/jazz-wasm/pkg/jazz_wasm.js
           test -f crates/jazz-wasm/pkg/jazz_wasm.d.ts
 
+      # `jazz-wasm/durable-object`: the core a Cloudflare Durable Object
+      # hosts. The whole script, not bare wasm-pack: it also patches the glue
+      # (reinstantiable.mjs) and deletes wasm-pack's `.gitignore` of `*`,
+      # which would keep the build out of the tarball.
+      - name: Build jazz-wasm Durable Object entry
+        run: pnpm --filter jazz-wasm build:durable-object
+
+      - name: Verify built jazz-wasm Durable Object artifacts
+        run: |
+          test -f crates/jazz-wasm/durable-object/pkg/jazz_wasm_do_bg.wasm
+          test -f crates/jazz-wasm/durable-object/pkg/jazz_wasm_do.js
+          test -d crates/jazz-wasm/durable-object/pkg/snippets
+          test ! -e crates/jazz-wasm/durable-object/pkg/.gitignore
+          grep --quiet __jazzReinstantiate crates/jazz-wasm/durable-object/pkg/jazz_wasm_do.js
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-wasm-durable-object-pkg
+          path: crates/jazz-wasm/durable-object/pkg
+          if-no-files-found: error
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-wasm-pkg
@@ -346,6 +367,16 @@ jobs:
         with:
           name: jazz-wasm-pkg
           path: crates/jazz-wasm/pkg
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-wasm-durable-object-pkg
+          path: crates/jazz-wasm/durable-object/pkg
+
+      # Fails unless `npm pack` puts durable-object/pkg/jazz_wasm_do_bg.wasm
+      # (and the rest of the Durable Object entry) in the jazz-wasm tarball.
+      - name: Verify the jazz-wasm tarball carries the Durable Object entry
+        run: pnpm --filter jazz-wasm check:durable-object-pack
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
