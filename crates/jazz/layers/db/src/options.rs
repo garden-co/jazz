@@ -506,7 +506,7 @@ pub enum Reason {
     IdentityMismatch,
     /// A search through a server-only index on a client, offline or below `Remote` tier (code `Query`, SPEC 20.9).
     IndexServerOnly,
-    /// A `Remote` search whose upstream did not offer `FEATURE_INDEX_SEARCH` (code `Query`, SPEC 20.4).
+    /// A `Remote` search whose upstream did not offer `FEATURE_SPECIALISED_INDEXES` (code `Query`, SPEC 20.4).
     IndexSearchUnsupportedUpstream,
     /// A search through an index the authority is still building; retry later (code `Backpressure`, SPEC 20.3).
     IndexBuilding,

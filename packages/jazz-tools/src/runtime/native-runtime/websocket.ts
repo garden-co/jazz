@@ -242,18 +242,19 @@ const WIRE_FRAME_HEARTBEAT = 7;
  */
 export const FEATURE_SERIALIZABLE_BRANCH_READS = 1 << 12;
 /**
- * `FEATURE_INDEX_SEARCH` in `crates/jazz/layers/protocol/src/wire.rs`: the
- * server decodes and answers queries with an index search (SPEC 20.4).
- * Without it, the core keeps such queries local and refuses them at
- * `Remote` tier.
+ * `FEATURE_SPECIALISED_INDEXES` in `crates/jazz/layers/protocol/src/wire.rs`:
+ * the peer understands SPEC 20 schemas (vector and point columns, index
+ * declarations) and answers index searches (SPEC 20.4). Without it, the
+ * core keeps searches local, refuses them at `Remote` tier, and sends no
+ * schema version that uses them.
  */
-export const FEATURE_INDEX_SEARCH = 1 << 15;
+export const FEATURE_SPECIALISED_INDEXES = 1 << 15;
 export const CLIENT_WIRE_FEATURES =
   FEATURE_PAYLOAD_ZSTD |
   FEATURE_AUTHORIZATION_SCOPE_VIEWS |
   FEATURE_AUXILIARY_CHUNKS |
   FEATURE_SERIALIZABLE_BRANCH_READS |
-  FEATURE_INDEX_SEARCH;
+  FEATURE_SPECIALISED_INDEXES;
 
 // The server route accepts WebSocket messages up to one MiB. Reserve enough
 // postcard framing bytes that a burst of otherwise-valid wire frames remains

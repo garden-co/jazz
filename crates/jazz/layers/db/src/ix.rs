@@ -264,13 +264,6 @@ pub(crate) fn candidates_over_cap(table: &str, index: &str) -> Error {
     )
 }
 
-fn search_error(table: &str, index: &str, detail: impl std::fmt::Display) -> Error {
-    Error::new(
-        ErrorCode::Query,
-        format!("search on {table}.{index}: {detail}"),
-    )
-}
-
 // ---------------------------------------------------------------------------
 // The registry
 // ---------------------------------------------------------------------------

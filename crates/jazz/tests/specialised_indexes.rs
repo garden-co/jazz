@@ -599,18 +599,18 @@ impl Transport for Gated {
         if self.search {
             all
         } else {
-            all & !jazz::wire::FEATURE_INDEX_SEARCH
+            all & !jazz::wire::FEATURE_SPECIALISED_INDEXES
         }
     }
 }
 
 /// A query with a search goes upstream only to an upstream that offered
-/// `FEATURE_INDEX_SEARCH` (an older server could not decode it): at
+/// `FEATURE_SPECIALISED_INDEXES` (an older server could not decode it): at
 /// `Remote` tier it is refused, typed; otherwise the replica answers it
 /// alone. Queries without a search sync as before.
 ///
 /// ```
-/// bob ──Read(search)──✗ (no FEATURE_INDEX_SEARCH) server
+/// bob ──Read(search)──✗ (no FEATURE_SPECIALISED_INDEXES) server
 ///  └── Remote: index_search_unsupported_upstream; LocalFirst: local rows
 /// ```
 #[test]
@@ -662,6 +662,110 @@ fn a_search_goes_upstream_only_to_an_upstream_that_offered_it() {
         }
     }
     assert_eq!(rows, [1], "answered by the replica");
+}
+
+/// The server end of a link whose client did or did not offer
+/// `FEATURE_SPECIALISED_INDEXES`, recording the catalogue versions sent.
+struct Downstream {
+    inner: Box<dyn Transport>,
+    specialised: bool,
+    versions: Rc<RefCell<Vec<jazz::ids::SchemaVersionId>>>,
+}
+
+impl Transport for Downstream {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        let catalogue = match &message {
+            SyncMessage::Welcome { catalogue, .. } | SyncMessage::Catalogue(catalogue) => {
+                Some(catalogue)
+            }
+            _ => None,
+        };
+        if let Some(catalogue) = catalogue {
+            self.versions
+                .borrow_mut()
+                .extend(catalogue.versions.iter().map(|v| v.schema.id));
+        }
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn features(&self) -> jazz::wire::WireFeatures {
+        let all = jazz::wire::current_wire_features();
+        if self.specialised {
+            all
+        } else {
+            all & !jazz::wire::FEATURE_SPECIALISED_INDEXES
+        }
+    }
+}
+
+/// A peer without `FEATURE_SPECIALISED_INDEXES` could not decode a schema
+/// version that declares a specialised index (or has a vector or point
+/// column): an older client would fail the whole catalogue and lose the
+/// link. The authority does not send it such a version; it sends it the
+/// others, and rows sync as before. A peer with the bit gets them all.
+///
+/// ```
+/// server: v1 (plain), v2 = v1 + text index
+///   ──Welcome[v1]────► bob   (no bit)   row 1 syncs
+///   ──Welcome[v1,v2]─► carol (the bit)
+/// ```
+#[test]
+fn an_index_only_version_is_not_sent_to_a_peer_without_the_bit() {
+    let plain = || {
+        TableSchemaBuilder::new("notes")
+            .column("title", ColumnType::Text)
+            .policies(allow_all_policies())
+    };
+    let v1 = compile_schema(&SchemaBuilder::new().table(plain()).build());
+    let v2 = compile_schema(
+        &SchemaBuilder::new()
+            .table(plain().text_index("search", [("title", 1)], "jazz-text/1:en", false))
+            .build(),
+    );
+    assert!(!v1.uses_specialised_features());
+    assert!(v2.uses_specialised_features());
+    let server = authority(v1.clone());
+    block_on(server.admit_schema_with_lenses(v2.clone(), &[])).unwrap();
+    insert(
+        &server,
+        1,
+        BTreeMap::from([("title".to_owned(), Value::String("Garden".into()))]),
+    );
+
+    let sent_to = |node: u8, specialised: bool| {
+        let replica = client(node, v1.clone());
+        let versions = Rc::new(RefCell::new(Vec::new()));
+        let (up, down) = jazz::db::duplex();
+        let link = block_on(replica.connect_upstream(up));
+        server
+            .accept_subscriber(
+                Box::new(Downstream {
+                    inner: down,
+                    specialised,
+                    versions: versions.clone(),
+                }),
+                alice(),
+            )
+            .unwrap();
+        let all = replica.prepare_query(&Query::from("notes")).unwrap();
+        let sub = block_on(replica.subscribe(&all, ReadOpts::default())).unwrap();
+        pump(&server, &[&replica]);
+        let rows = ids(&replica, &Query::from("notes")).len();
+        let versions = versions.borrow().clone();
+        drop((sub, link));
+        (versions, rows)
+    };
+
+    let (bob, bob_rows) = sent_to(1, false);
+    assert!(!bob.contains(&v2.version_id()), "{bob:?}");
+    assert_eq!(bob_rows, 1, "the link stayed up and the row synced");
+    let (carol, carol_rows) = sent_to(2, true);
+    assert!(carol.contains(&v2.version_id()), "{carol:?}");
+    assert_eq!(carol_rows, 1);
 }
 
 /// A row whose large value reaches a replica before its chunks is indexed

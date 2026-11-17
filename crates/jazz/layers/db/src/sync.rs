@@ -7443,6 +7443,13 @@ impl Inner {
         let mut versions = Vec::new();
         let mut sent = Vec::new();
         let mut sent_schemas = Vec::new();
+        // A peer without the SPEC 20 bit cannot decode a version with a
+        // vector or point column or a specialised index: such versions (and
+        // their lens cells) are not sent it (SPEC 20.4).
+        let specialised = self.sessions[index].transport.features()
+            & crate::wire::FEATURE_SPECIALISED_INDEXES
+            != 0;
+        let mut withheld = BTreeSet::new();
         for (version, names) in self.names.in_order() {
             let digest = crate::names::names_digest(names);
             let bytes = *version.as_bytes();
@@ -7463,6 +7470,10 @@ impl Inner {
                     None => continue,
                 }
             };
+            if !specialised && jazz.uses_specialised_features() {
+                withheld.insert(bytes);
+                continue;
+            }
             sent_schemas.push((jazz.clone(), names.clone()));
             versions.push(CatalogueVersion {
                 schema: crate::protocol::SchemaVersion {
@@ -7491,6 +7502,7 @@ impl Inner {
             .names
             .cells()
             .iter()
+            .filter(|cell| !withheld.contains(cell.since.as_bytes()))
             .map(|cell| {
                 let (source, default) = match &cell.rule {
                     crate::names::LensCellRule::Copy(source) => (Some(source.clone()), Cell::Null),
@@ -10339,7 +10351,7 @@ impl Db {
         let searchable = client
             .transport
             .as_ref()
-            .is_some_and(|t| t.features() & jazz_protocol::wire::FEATURE_INDEX_SEARCH != 0);
+            .is_some_and(|t| t.features() & jazz_protocol::wire::FEATURE_SPECIALISED_INDEXES != 0);
         if !searchable {
             reads.retain(|message| {
                 let SyncMessage::Read { id, query, .. } = message else {

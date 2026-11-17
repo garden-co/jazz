@@ -3329,7 +3329,8 @@ impl Db {
         // (SPEC 20.4, 20.11).
         if let Some(search) = crate::ix::search_of(&prepared.query)
             && opts.tier == ReadTier::Remote
-            && self.upstream_supports(jazz_protocol::wire::FEATURE_INDEX_SEARCH) == Some(false)
+            && self.upstream_supports(jazz_protocol::wire::FEATURE_SPECIALISED_INDEXES)
+                == Some(false)
         {
             return Err(crate::ix::unsupported_upstream(
                 &prepared.query.table,

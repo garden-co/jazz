@@ -159,6 +159,36 @@ impl JazzSchema {
         &self.public_schema
     }
 
+    /// Whether this version uses what SPEC 20 added: a vector or point
+    /// column (anywhere in a column's type) or a specialised index. A peer
+    /// without `FEATURE_SPECIALISED_INDEXES` cannot decode such a version,
+    /// so it is not sent one (SPEC 20.4).
+    pub fn uses_specialised_features(&self) -> bool {
+        fn uses(value_type: &jazz_types::records::ValueType) -> bool {
+            use jazz_types::records::ValueType;
+            match value_type {
+                ValueType::Vector(_) | ValueType::Point => true,
+                ValueType::Tuple(members) => members.iter().any(uses),
+                ValueType::Array(inner) | ValueType::Nullable(inner) => uses(inner),
+                ValueType::Record(descriptor) => descriptor
+                    .fields()
+                    .iter()
+                    .any(|field| uses(&field.value_type)),
+                ValueType::Enum(schema) => schema.cases.iter().any(|case| {
+                    case.payload
+                        .fields()
+                        .iter()
+                        .any(|field| uses(&field.value_type))
+                }),
+                _ => false,
+            }
+        }
+        self.runtime.tables.iter().any(|table| {
+            !table.specialised_indexes.is_empty()
+                || table.columns.iter().any(|column| uses(&column.column_type))
+        })
+    }
+
     /// Return the compiled application tables used by the runtime.
     pub fn tables(&self) -> &[TableSchema] {
         &self.runtime.tables

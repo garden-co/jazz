@@ -59,11 +59,12 @@ pub const FEATURE_HEARTBEAT: WireFeatures = 1 << 11;
 /// whose reads name their views (`WireKind::SerializableViews` in the sync
 /// layer) only over a link that negotiated this (jazz#5806).
 pub const FEATURE_SERIALIZABLE_BRANCH_READS: WireFeatures = 1 << 12;
-/// The peer decodes and answers queries with an index search
-/// (`Predicate::Search`, SPEC 20.4). A node sends such a query upstream
-/// only to an upstream that offered this; queries without a search are
-/// byte-identical either way.
-pub const FEATURE_INDEX_SEARCH: WireFeatures = 1 << 15;
+/// The peer understands SPEC 20 schemas (vector and point columns,
+/// specialised index declarations) and answers index searches
+/// (`Predicate::Search`, SPEC 20.4). A node sends a search upstream, and a
+/// schema version using any of these to a peer, only over a link that
+/// offered this; other queries and versions are byte-identical either way.
+pub const FEATURE_SPECIALISED_INDEXES: WireFeatures = 1 << 15;
 
 /// Bitset of optional protocol features advertised by one peer.
 pub type WireFeatures = u64;
@@ -844,7 +845,7 @@ fn default_transport_compression_features() -> WireFeatures {
 pub fn current_wire_features() -> WireFeatures {
     FEATURE_AUTHORIZATION_SCOPE_VIEWS
         | FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
-        | FEATURE_INDEX_SEARCH
+        | FEATURE_SPECIALISED_INDEXES
         | FEATURE_SERIALIZABLE_BRANCH_READS
         | runtime_transport_compression_features()
 }
@@ -1040,8 +1041,8 @@ mod tests {
     /// Index search is wire feature bit 15 (SPEC 20.4); bits 13 and 14 belong
     /// to other features in flight. No two features share a bit.
     #[test]
-    fn index_search_is_feature_bit_15_and_shares_it_with_nothing() {
-        assert_eq!(FEATURE_INDEX_SEARCH, 1 << 15);
+    fn specialised_indexes_is_feature_bit_15_and_shares_it_with_nothing() {
+        assert_eq!(FEATURE_SPECIALISED_INDEXES, 1 << 15);
         let features = [
             FEATURE_PAYLOAD_LZ4,
             FEATURE_PAYLOAD_ZSTD,
@@ -1050,7 +1051,7 @@ mod tests {
             FEATURE_THIN_RESULTS,
             FEATURE_HEARTBEAT,
             FEATURE_SERIALIZABLE_BRANCH_READS,
-            FEATURE_INDEX_SEARCH,
+            FEATURE_SPECIALISED_INDEXES,
         ];
         let mut seen: WireFeatures = 0;
         for feature in features {
@@ -1058,7 +1059,7 @@ mod tests {
             assert_eq!(seen & feature, 0, "{feature:#x} is taken");
             seen |= feature;
         }
-        assert_ne!(current_wire_features() & FEATURE_INDEX_SEARCH, 0);
+        assert_ne!(current_wire_features() & FEATURE_SPECIALISED_INDEXES, 0);
     }
 
     #[test]
