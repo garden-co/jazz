@@ -255,7 +255,7 @@ fn vector_search_keeps_the_k_most_similar_rows() {
     // Cosine ignores length.
     assert_eq!(ids(&db, &nearest([0.0, 0.0, 7.0], 2)), [4, 5]);
     let error = try_ids(&db, &nearest([0.0, 0.0, 0.0], 2)).expect_err("zero vector");
-    assert_eq!(error.code, jazz::db::ErrorCode::Query, "{error}");
+    assert!(error.message.contains("a cosine query vector cannot be zero"), "{error}");
     let error = try_ids(
         &db,
         &Query::from("places").search(

@@ -2501,6 +2501,18 @@ pub fn validate_search(table: &TableSchema, search: &IndexSearch) -> Result<(), 
                     expected.map_or(String::new(), |n| format!("; the index has {n}"))
                 )));
             }
+            let cosine = matches!(
+                &index.kind,
+                crate::model::public_schema::SpecialisedIndexKind::Vector {
+                    metric: crate::model::public_schema::VectorMetric::Cosine,
+                    ..
+                }
+            );
+            if cosine && vector.iter().all(|x| *x == 0.0) {
+                return Err(invalid(
+                    "a cosine query vector cannot be zero: it has no direction".into(),
+                ));
+            }
         }
         IndexOp::WithinRadius { lat, lng, meters } => {
             latitude("lat", *lat)?;
