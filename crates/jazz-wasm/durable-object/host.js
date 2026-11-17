@@ -3,14 +3,17 @@
 // app (named by its app id) holds the app's store in its own SQL and serves
 // the native server's routes for it:
 //
-//   GET  /health              200 once the store is open
-//   GET  /apps/{appId}/ws     WebSocket: prelude, Hello, then wire frames
+//   GET  /health                           200 once the store is open
+//   GET  /apps/{appId}/ws                  WebSocket: prelude, Hello, then wire frames
+//   POST /apps/{appId}/backend/admit       204 for the app's backend
+//   GET  /apps/{appId}/admin/migrations/graph, GET|POST /apps/{appId}/admin/bundles
 //
 // Bindings: JAZZ (this class's namespace), JAZZ_APP_ID, JAZZ_CORE_SECRET
-// (admits the app's backend: `X-Jazz-Backend-Credential` +
-// `X-Jazz-Backend-Access` on the upgrade, or the prelude's secrets), and,
-// until publication reaches the object, JAZZ_SCHEMA (the app's public
-// schema as JSON).
+// (admits the app's backend: native's `X-Jazz-Admin-Secret` /
+// `X-Jazz-Backend-Secret`, the `X-Jazz-Backend-Credential` +
+// `X-Jazz-Backend-Access` pair, or on a socket the prelude's secrets), and
+// optionally JAZZ_SCHEMA (a public schema's JSON, served until one is
+// published).
 import { DurableObject } from "cloudflare:workers";
 
 const decoder = new TextDecoder();
@@ -58,8 +61,27 @@ export function jazzCoreClass(wasm) {
         this.open();
         return new Response("ok");
       }
-      if (path !== `/apps/${this.env.JAZZ_APP_ID}/ws`) {
+      const prefix = `/apps/${this.env.JAZZ_APP_ID}/`;
+      if (!path.startsWith(prefix)) {
         return failure(404, "not_found", "route not found");
+      }
+      if (path !== `${prefix}ws`) {
+        const core = this.open();
+        const headers = request.headers;
+        const credentials = new wasm.HttpCredentials(
+          headers.get("X-Jazz-Admin-Secret") ?? undefined,
+          headers.get("X-Jazz-Backend-Secret") ?? undefined,
+          headers.get("X-Jazz-Backend-Credential") ?? undefined,
+          headers.get("X-Jazz-Backend-Access") ?? undefined,
+        );
+        const body = new Uint8Array(await request.arrayBuffer());
+        const answer = core.http(request.method, path.slice(prefix.length), credentials, body);
+        return answer.status === 204
+          ? new Response(null, { status: 204 })
+          : new Response(answer.body, {
+              status: answer.status,
+              headers: { "content-type": "application/json" },
+            });
       }
       if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
         return failure(426, "upgrade_required", "WebSocket upgrade required");

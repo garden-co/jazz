@@ -8,7 +8,7 @@ export interface JazzCoreEnv {
   JAZZ_APP_ID: string;
   /** Admits the app's backend; at least 32 characters, stable across deployments. */
   JAZZ_CORE_SECRET: string;
-  /** The app's public schema JSON, served until publication reaches the object. */
+  /** A public schema's JSON, served until one is published (optional). */
   JAZZ_SCHEMA?: string;
 }
 
