@@ -1755,3 +1755,104 @@ fn a_newer_unresolved_read_forgets_what_it_cannot_confirm_absent() {
         Ok(MissingKey::Unresolved(_))
     ));
 }
+
+/// A newer read whose chain forks from the known one replaces it, even at
+/// the same length: a server that hid one successor so another won does
+/// not make the honest successor's version absent.
+#[test]
+fn a_newer_read_of_another_fork_replaces_the_known_chain() {
+    use jazz_e2ee::protocol::space::SpaceChain;
+
+    let mut world = world(34);
+    let address = space(ROW);
+    let mut held = held_of(&world, ALICE, ROW);
+    let first = world.build_rotation(ALICE, false).unwrap();
+    let second = world.build_rotation(ALICE, false).unwrap();
+    let s1 = world.accept_rotation(first);
+    let s2 = world.accept_rotation(second);
+    // A read that withholds the first successor: the second wins.
+    let mut read = world.read_of(address.clone());
+    read.space.successors.retain(|row| row.row.epoch_id != s1);
+    let forked = SpaceChain::replay(&read.space, &read.directory(&world))
+        .unwrap()
+        .unwrap();
+    assert_eq!(forked.versions[1].epoch_id, s2);
+    world.next();
+    let honest = chain_of(&world, ROW);
+    assert_eq!(honest.versions[1].epoch_id, s1);
+    assert_eq!(honest.versions.len(), forked.versions.len());
+    assert!(forked.through() < honest.through());
+
+    held.observe_chain(&forked);
+    held.observe_chain(&honest);
+    assert_eq!(held.known(&address).unwrap().epochs()[1], s1);
+    assert_eq!(
+        held.settle_missing(&address, &s1, Some(&honest), true),
+        Ok(MissingKey::Report(DataError::KeyPending))
+    );
+    assert!(!held.known(&address).unwrap().is_absent(&s1));
+}
+
+/// Absence remembered from a resolved read is forgotten when a later read
+/// is unresolved before it, whatever cut the earlier read claimed.
+#[test]
+fn an_unresolved_read_forgets_absence_whatever_cut_was_claimed() {
+    use common::mechanisms::{OTHER_SEAL, OTHER_SIGN, custom_registry};
+    use jazz_e2ee::agility::MechanismConfig;
+    use jazz_e2ee::protocol::Position;
+    use jazz_e2ee::protocol::space::{AccountDirectory, SpaceChain};
+
+    let (registry, _) = custom_registry(OTHER_SEAL);
+    let mut world = World::with_registry(35, registry);
+    world.account(ALICE);
+    world.account_with(
+        BOB,
+        MechanismConfig {
+            signature: OTHER_SIGN.into(),
+            ..MechanismConfig::default()
+        },
+    );
+    world.add_member(ALICE);
+    world.add_member(BOB);
+    world.create(ALICE);
+    let address = space(ROW);
+    let builtin = Registry::builtin();
+    let read_chain = |world: &World, through: Option<Position>| {
+        let mut read = world.read();
+        if let Some(through) = through {
+            read.space.through = through;
+            for ledger in &mut read.ledgers {
+                ledger.through = through;
+            }
+        }
+        let directory = AccountDirectory::new(
+            &read.ledgers,
+            &world.shared.domain,
+            &builtin,
+            read.space.through,
+        )
+        .unwrap();
+        SpaceChain::replay(&read.space, &directory)
+            .unwrap()
+            .unwrap()
+    };
+    let mut held = held_of(&world, ALICE, ROW);
+    let inflated = read_chain(&world, Some(Position(1_000_000)));
+    let v0 = world.current();
+    world.deliver(ALICE, BOB, &v0);
+    let e1 = world.rotate(BOB);
+    let unresolved = read_chain(&world, None);
+    assert!(unresolved.through() < inflated.through());
+    assert!(inflated.unresolved.is_none() && unresolved.unresolved.is_some());
+
+    assert_eq!(
+        held.settle_missing(&address, &e1, Some(&inflated), true),
+        Ok(MissingKey::Report(DataError::InvalidCiphertext))
+    );
+    held.observe_chain(&unresolved);
+    assert!(!held.known(&address).unwrap().is_absent(&e1));
+    assert!(matches!(
+        held.settle_missing(&address, &e1, Some(&unresolved), true),
+        Ok(MissingKey::Unresolved(_))
+    ));
+}

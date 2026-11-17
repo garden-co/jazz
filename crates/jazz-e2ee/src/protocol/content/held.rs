@@ -31,7 +31,6 @@ use crate::registry::Registry;
 use super::super::domain::{AccountDomain, AppDomain};
 use super::super::error::{ProtocolError, ProtocolResult, UnsupportedCapability};
 use super::super::json;
-use super::super::position::Position;
 use super::super::records::space::{SpaceAddress, SpaceRoot, SpaceScope, SpaceSuccessor};
 use super::super::space::build::RootRecords;
 use super::super::space::keys::{Outcome, marker};
@@ -375,8 +374,6 @@ pub struct KnownChain {
     /// The capability the chain is unresolved for, past its last version.
     unresolved: Option<UnsupportedCapability>,
     absent: BTreeSet<String>,
-    /// The cut of the read these came from.
-    through: Option<Position>,
 }
 
 impl KnownChain {
@@ -394,39 +391,28 @@ impl KnownChain {
         self.absent.contains(epoch_id)
     }
 
-    /// Takes a newer read of the chain: when it advances (more versions,
-    /// or the chain is resolved further), becomes unresolved, or names
-    /// another root, the epochs remembered as absent are forgotten. A read at an earlier cut than
-    /// the known one, or one that does not advance it, changes nothing,
-    /// except one that extends the known chain (the same root, more
-    /// versions after the known ones), whatever cut it claims: no older
-    /// read shows that, so a cut the server inflated never freezes the
-    /// known chain.
+    /// Takes a read of the chain. The cut a read claims is not trusted
+    /// (the server gives it); what the read shows decides. It replaces the
+    /// known chain, forgetting the epochs remembered as absent, when it
+    /// names another root; when its versions are not a prefix of the known
+    /// ones (it extends them, or forks from them where both have a
+    /// version); or when it is unresolved and does not show exactly the
+    /// known versions already unresolved there: an unresolved read cannot
+    /// confirm absence past its unresolved point. Any other read (a prefix
+    /// of the known versions that is resolved, or the same read again) is
+    /// older or shows less, and changes nothing. Honest reads only ever
+    /// extend the chain or become unresolved at its end.
     fn observe(&mut self, chain: &SpaceChain) {
         let epochs: Vec<String> = chain
             .versions
             .iter()
             .map(|version| version.epoch_id.clone())
             .collect();
-        // The same root with more versions, the known ones first: no older
-        // read can show this, so it is taken whatever cut the read claims.
-        let extends = self.root_id == chain.root.row.id
-            && epochs.len() > self.epochs.len()
-            && epochs.starts_with(&self.epochs);
-        if !extends
-            && self
-                .through
-                .is_some_and(|through| chain.through() < through)
-        {
-            return;
-        }
         let other_root = self.root_id != chain.root.row.id;
-        let advanced = epochs.len() > self.epochs.len()
-            || (self.unresolved.is_some() && chain.unresolved.is_none());
-        // A newer read unresolved where the known one was not cannot
-        // confirm what that one showed absent past the unresolved point.
-        let uncertain = self.unresolved.is_none() && chain.unresolved.is_some();
-        if other_root || advanced || uncertain {
+        let not_prefix = !self.epochs.starts_with(&epochs);
+        let same_unresolved = epochs == self.epochs && self.unresolved.is_some();
+        let unresolved = chain.unresolved.is_some() && !same_unresolved;
+        if other_root || not_prefix || unresolved {
             self.root_id = chain.root.row.id.clone();
             self.epochs = epochs;
             self.unresolved = chain
@@ -434,7 +420,6 @@ impl KnownChain {
                 .as_ref()
                 .map(|unresolved| unresolved.capability);
             self.absent.clear();
-            self.through = self.through.max(Some(chain.through()));
         }
     }
 }
