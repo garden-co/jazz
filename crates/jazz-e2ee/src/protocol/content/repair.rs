@@ -35,7 +35,11 @@ pub const REPAIR_BATCH: usize = 100;
 #[derive(Debug, Clone, Copy)]
 pub struct RepairRow<'a> {
     pub row_id: &'a str,
-    /// The row's space coordinate: the space row's ID.
+    /// The row's space coordinate: the space row's ID. Only the ID is
+    /// compared with the losing root's address: every row of the target
+    /// table names a space of the table's one scope, and each cell is
+    /// bound to its full space address (§4.1), so a cell of another scope
+    /// does not open under the losing key and is skipped, never rewritten.
     pub space_identifier: &'a str,
     /// The row's encrypted cells, by column ID, as read.
     pub cells: &'a [(&'a str, &'a [u8])],

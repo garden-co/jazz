@@ -2565,7 +2565,12 @@ never fatal to the read (§4.2); a failed lineage record skips the space's
 keys and the space is acquired again. When the device rewrites the document,
 a held-key record skipped as unsupported is carried over unchanged, since it
 may hold a key only this device has, such as a `refused` key written by a
-newer client; a record that failed any other check may be dropped. Nothing in either record depends on the
+newer client; a record that failed any other check may be dropped.
+Unsupported here means a record of this format whose envelope or signature
+uses a mechanism this client lacks. A newer client that changes the
+record's encoding uses a new document format, which older clients refuse
+and never overwrite (§6.1); a record of this format that does not decode
+is malformed and may be dropped. Nothing in either record depends on the
 application schema, so a schema update never invalidates held keys; the cell
 context binds table, column and type (§4.1). Keeping a key replaces any
 record of the same device, root and epoch. `unpublished` is present only for
@@ -2877,6 +2882,13 @@ Limits:
   space. Nothing enforces it (§3.8); beyond it, costs grow past what the
   first release is designed for, and members' apps are told
   (`space-over-member-limit`).
+- **A space's chain is the one the server last showed.** Spaces have no
+  floor (§6.3a): a device follows the latest read of a space's roots and
+  successors. A server that leaves rows out of a read can make the device
+  fall back to an older chain, report a version it holds as invalid until a
+  later read shows it again, and, where the device holds keys of two roots
+  of one address, choose which of them it writes under. It cannot forge a
+  chain: every root and successor is signed and checked (§3.3).
 - **Any updater can add roots.** The server does not limit roots per space
   (R15). Roots after the first valid one are ignored by every client (§3.2);
   they cost storage only, and a creator whose root lost repairs its own rows.
