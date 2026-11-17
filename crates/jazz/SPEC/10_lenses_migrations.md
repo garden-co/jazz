@@ -1189,6 +1189,13 @@ n | fixpoint)` is `Gather`. In a predicate, a column is `scope.col` or
   reverse inheritance cycles when it compiles the schema, so a bound would
   be dropped rather than applied. A recursive relation's `maxDepth` is at
   most 64.
+  `allowedTo` is a rule's own check: it is not supported inside an
+  `exists` yet (its conditions, a hop's, or a relation's predicate), since
+  the engine checks inheritance only on the row a rule is for. The reader
+  refuses it there ("`allowedTo.op(…)` inside `exists` is not supported
+  yet"), naming the rule and pointing at the `allowedTo`; the TS DSL's
+  types and builder refuse it too. Repeat the other table's rule inside
+  the `exists` instead.
 - `anyOf(…)` and `allOf(…)` inside an expression are `Or`/`And` of any
   number of items; the writer uses them only for fewer than two.
 - Nesting deeper than 64 levels is refused.

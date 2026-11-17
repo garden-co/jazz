@@ -106,3 +106,40 @@ definePermissions({
   chats: { updateIf: true, updateTo: (c, old) => exists.chats({ size: old.size }) },
   members: {},
 });
+
+// `allowedTo` at a rule's top, alone or combined: fine.
+definePermissions({
+  chats: {},
+  members: {
+    read: (m) => allowedTo.read(m.chat),
+    update: (m) => not(allowedTo.update(m.chatId)),
+    delete: (m) =>
+      anyOf({ userId: session.user }, allOf(allowedTo.delete(m.chat), { role: "admin" })),
+  },
+});
+
+// `allowedTo` inside an `exists`: not supported yet.
+const m0 = schema.tables.members;
+// @ts-expect-error allowedTo in exists' conditions
+exists.members((m) => allowedTo.read(m.chat));
+// @ts-expect-error allowedTo in exists' conditions
+exists.members(allowedTo.read(schema.tables.members.chatId));
+// @ts-expect-error allowedTo combined, in exists' conditions
+exists.members((m) => anyOf({ userId: session.user }, allowedTo.read(m.chat)));
+// @ts-expect-error allowedTo negated, in exists' conditions
+exists.members((m) => not(allowedTo.read(m.chat)));
+// @ts-expect-error allowedTo in a hop's conditions
+exists.members({}).hop("chat", allowedTo.read(schema.tables.members.chatId));
+definePermissions({
+  // @ts-expect-error allowedTo in a relation's `.where`
+  chats: { read: (chat) => chat.members.where(allowedTo.read(schema.tables.members.chatId)) },
+  members: {},
+});
+// @ts-expect-error allowedTo in a relation predicate
+schema.from.members("m").where(allowedTo.read(schema.tables.members.chatId));
+const inheritsOrMine = anyOf({ "m.userId": session.user }, allowedTo.read(m0.chatId));
+// @ts-expect-error allowedTo combined, in a relation predicate
+schema.from.members("m").where(inheritsOrMine);
+// Other policies still go inside: fine.
+exists.members((m) => anyOf({ userId: session.user }, exists.chats({ id: m.chatId })));
+schema.from.members("m").where(anyOf({ "m.userId": session.user }, { "m.role": "admin" }));

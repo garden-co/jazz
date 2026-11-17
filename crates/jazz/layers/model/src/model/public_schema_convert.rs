@@ -59,6 +59,10 @@ pub struct SchemaConversionError {
     message: String,
     /// The `(table, column)` a policy named that the table doesn't have.
     unknown_column: Option<(String, String)>,
+    /// The rule refused, as `(table, slot)` (`slot` as in
+    /// `policies.select.using`): the table whose policy it is, whichever
+    /// tables its conditions read. Boxed to keep the error small.
+    rule: Option<Box<(String, String)>>,
 }
 
 impl SchemaConversionError {
@@ -67,7 +71,21 @@ impl SchemaConversionError {
             path: path.into(),
             message: message.into(),
             unknown_column: None,
+            rule: None,
         }
+    }
+
+    /// The refusal, without its path.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// The `(table, slot)` of the policy refused, when a policy was:
+    /// `("profiles", "select.using")`.
+    pub fn rule(&self) -> Option<(&str, &str)> {
+        self.rule
+            .as_deref()
+            .map(|(table, slot)| (table.as_str(), slot.as_str()))
     }
 
     /// The `(table, column)` of a policy that names a column its table
@@ -1107,8 +1125,16 @@ fn convert_optional_policy(
     path: &str,
     expr: Option<&PolicyExpr>,
 ) -> Result<Option<Query>, SchemaConversionError> {
-    expr.map(|expr| convert_policy(schema, table_schema, table, path, expr))
-        .transpose()
+    expr.map(|expr| {
+        convert_policy(schema, table_schema, table, path, expr).map_err(|mut error| {
+            if error.rule.is_none() {
+                let slot = path.strip_prefix("policies.").unwrap_or(path);
+                error.rule = Some(Box::new((table.as_str().to_owned(), slot.to_owned())));
+            }
+            error
+        })
+    })
+    .transpose()
 }
 
 fn convert_policy(
@@ -1442,7 +1468,7 @@ fn append_inherited_referencing_policy(
         )
     })?;
     let source_filter = convert_policy_predicate(
-        &source_table_name,
+        table,
         &format!("{path}.InheritsReferencing[{source_table}]"),
         source_policy,
     );
@@ -1560,8 +1586,10 @@ fn append_exists_policy_clause(
                 condition: nested_condition,
             } => nested_exists.push((index, nested_table.as_str(), nested_condition.as_ref())),
             PolicyExpr::ExistsRel { rel } => nested_exists_rel.push((index, rel)),
+            // The path is the rule's: `table`'s policy, wherever the
+            // condition's columns live.
             other => filters.push(convert_policy_predicate(
-                &exists_table_name,
+                table,
                 &format!("{path}.Exists[{index}]"),
                 other,
             )?),
@@ -2939,7 +2967,7 @@ fn append_inherited_policy_expanded_fallback(
     expansion_path: &mut Vec<(String, Operation)>,
 ) -> Result<Query, SchemaConversionError> {
     let parent_filter = convert_policy_predicate(
-        parent_table,
+        table,
         &format!("{path}.Inherits[{parent_table}]"),
         parent_policy,
     );

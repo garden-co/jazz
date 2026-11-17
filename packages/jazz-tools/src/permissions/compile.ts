@@ -71,6 +71,8 @@ export type NodeData =
       readonly op: "read" | "insert" | "update" | "delete";
       readonly target: HandleData;
       readonly maxDepth?: number;
+      /** Where in the user's code `allowedTo.<op>(…)` was called. */
+      readonly at?: string;
     }
   | {
       readonly k: "compare";
@@ -111,10 +113,27 @@ export function opOf(value: unknown): OpData | undefined {
 }
 
 /** A refusal of the permissions DSL (the caller adds the JSON path). */
-export class PermissionsDslError extends Error {}
+export class PermissionsDslError extends Error {
+  constructor(
+    message: string,
+    /** Where in the user's code the refused construct was written, when known. */
+    readonly location?: string,
+  ) {
+    super(message);
+  }
+}
 
-function fail(message: string): never {
-  throw new PermissionsDslError(message);
+function fail(message: string, location?: string): never {
+  throw new PermissionsDslError(message, location);
+}
+
+/**
+ * Why `allowedTo` inside an `exists` is refused: the engine checks
+ * inheritance only on the row a rule is for, not on rows an `exists`
+ * reaches. The loader of `jazz.permissions.json` says the same.
+ */
+export function allowedInExists(op: string): string {
+  return `\`allowedTo.${op}(…)\` inside \`exists\` is not supported yet: repeat the other table's ${op} rule there instead (e.g. share it as a helper function)`;
 }
 
 // ============================================================================
@@ -669,7 +688,7 @@ function relWhereText(data: NodeData & { k: "relWhere" }, ctx: Ctx): string {
 }
 
 function allowedText(data: NodeData & { k: "allowed" }, ctx: Ctx): string {
-  if (ctx.relation) fail("allowedTo.<op>(…) can't be used inside a relation's predicate");
+  if (ctx.relation || ctx.depth > 0) fail(allowedInExists(data.op), data.at);
   const target = data.target;
   let argument: string;
   if (target.k === "rel") {

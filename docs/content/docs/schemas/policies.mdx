@@ -537,6 +537,26 @@ Inheritance keeps each operation's own policy, and each update rule's before and
 TypeScript only offers relations of the rule's table, and `jazz-tools generate` checks their
 direction and target.
 
+`allowedTo` can't be used inside an `exists` yet (in its conditions, a `.hop`, a relation's
+`.where` or a relation query): it is only a rule's own check, alone or in `anyOf`, `allOf` and
+`not`. TypeScript rejects it there, and `jazz-tools generate` refuses a file that has it, with
+"`allowedTo.read(…)` inside `exists` is not supported yet". Repeat the other table's rule inside
+the `exists` instead, sharing it as a helper:
+
+```ts title="schema.ts"
+// Who may read a project, shared by the rules that need it.
+const readableProject = { owner_id: session.user };
+
+export const permissions = definePermissions({
+  projects: { read: readableProject },
+  todos: { read: (todo) => allowedTo.read(todo.project) },
+  todoShares: {
+    // Not `exists.todos({ id: share.todoId }, (todo) => allowedTo.read(todo.project))`:
+    read: (share) => exists.todos({ id: share.todoId }).hop("project", readableProject),
+  },
+});
+```
+
 <Tabs groupId="app-source" items={["schema.ts", "Generated JSON"]} persist>
 <Tab value="schema.ts">
 
