@@ -145,26 +145,37 @@ impl SealingKeys {
 
     /// The record a device of this account seals to when it delivers to
     /// its own account: the first valid record of the current epoch and
-    /// `mechanism` that `own`'s derivation check did not report, so a
-    /// record that does not derive is never used. `None` when there is
-    /// none: the device waits, as a sender does for "recipient
-    /// unsupported". `own` must be this account's keys of this generation;
-    /// anything else is [`ProtocolError::InconsistentEvidence`]. A device
-    /// opens envelopes sealed to its account with key pairs it derives
-    /// itself, never with a record (§2.12).
+    /// `mechanism` whose public key is the one the device derives from its
+    /// own key of that epoch (§2.12), so a record that does not derive is
+    /// never used, whenever it was published. Derivation is checked here,
+    /// against this read's records, never taken from an earlier report.
+    /// `None` when no such record exists, or when `registry` lacks
+    /// `mechanism`: the device waits, as a sender does for "recipient
+    /// unsupported". `own` must be this account's keys of this generation
+    /// and hold the current epoch's key; anything else is
+    /// [`ProtocolError::InconsistentEvidence`]. A device opens envelopes
+    /// sealed to its account with key pairs it derives itself, never with
+    /// a record.
     pub fn current_for_own(
         &self,
+        registry: &Registry,
         own: &AccountEpochKeys,
         mechanism: Mechanism<'_>,
     ) -> ProtocolResult<Option<&Accepted<AccountSealingKey>>> {
         self.check_same_chain(own)?;
-        let reported = own.non_derived_sealing_keys();
+        let Some(key) = own.get(&self.epoch_id) else {
+            return Err(ProtocolError::InconsistentEvidence);
+        };
+        let sealer = match registry.key_sealer(mechanism) {
+            Ok(sealer) => sealer,
+            Err(Error::UnknownMechanism) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let derived = derive::account_sealing_key_pair(sealer, key)?;
         Ok(self.valid.iter().find(|record| {
             record.row.epoch_id == self.epoch_id
                 && Mechanism::new(&record.row.mechanism, record.row.version) == mechanism
-                && !reported
-                    .iter()
-                    .any(|non_derived| non_derived.record_id == record.row.id)
+                && record.row.public_key == derived.public.bytes
         }))
     }
 

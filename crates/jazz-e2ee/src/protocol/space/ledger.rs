@@ -319,7 +319,7 @@ impl<'a> AccountDirectory<'a> {
             return Err(ProtocolError::InconsistentEvidence);
         };
         Ok(keys
-            .current_for_own(own, mechanism)?
+            .current_for_own(self.registry, own, mechanism)?
             .map(|record| self.stamp(account_id, &keys, record)))
     }
 

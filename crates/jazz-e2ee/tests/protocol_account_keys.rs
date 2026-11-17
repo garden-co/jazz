@@ -572,7 +572,12 @@ fn a_record_that_does_not_derive_is_reported_until_its_signer_is_removed() {
             keys.non_derived_sealing_keys(),
             std::slice::from_ref(&expected)
         );
-        assert_eq!(sealing.current_for_own(&keys, BUILTIN).unwrap(), None);
+        assert_eq!(
+            sealing
+                .current_for_own(&env.registry, &keys, BUILTIN)
+                .unwrap(),
+            None
+        );
     }
 
     // Laptop removes phone: the new epoch's co-published record derives.
@@ -590,7 +595,7 @@ fn a_record_that_does_not_derive_is_reported_until_its_signer_is_removed() {
     let keys = epoch_keys(&env, &ledger, &laptop);
     assert_eq!(
         sealing
-            .current_for_own(&keys, BUILTIN)
+            .current_for_own(&env.registry, &keys, BUILTIN)
             .unwrap()
             .map(|found| &found.row.id),
         Some(&removal.account_key.id)
@@ -765,5 +770,91 @@ fn record_at_a_reset_signed_by_another_device_is_not_valid() {
     let valid = valid_ids(&env, &ledger);
     for id in &forged {
         assert!(!valid.contains(id), "{id}");
+    }
+}
+
+/// A device's own selection checks derivation against the read it is given,
+/// never against an earlier report: keys taken before a non-derived record
+/// of the same epoch is published still refuse it, and a record that does
+/// derive is chosen even when a non-derived one comes first (§2.12).
+#[test]
+fn own_selection_checks_derivation_against_the_current_read() {
+    let (registry, _) = custom_registry(OTHER_SEAL);
+    let env = Env::with(registry, Default::default(), ALICE);
+    let mut rng = TestRandom(41);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    let epoch = ledger.state(&env).epoch_id().to_owned();
+
+    // Keys taken before anything of the new mechanism is published.
+    let cached = epoch_keys(&env, &ledger, &laptop);
+    assert!(cached.non_derived_sealing_keys().is_empty());
+
+    // Phone publishes a later record of the new mechanism that does not
+    // derive; senders select it, the cached keys know nothing of it.
+    let poison = crafted_with(
+        &env,
+        &phone,
+        &epoch,
+        OTHER_SEAL,
+        derived(&[9; 32]),
+        &mut rng,
+    );
+    let at = ledger.next();
+    ledger
+        .public
+        .account_keys
+        .push(Accepted::new(at, poison.clone()));
+    let sealing = ledger.replay(&env).sealing_keys().unwrap().unwrap();
+    assert_eq!(
+        sealing.current(OTHER_SEAL).map(|r| &r.row.id),
+        Some(&poison.id)
+    );
+    assert_eq!(
+        sealing
+            .current_for_own(&env.registry, &cached, OTHER_SEAL)
+            .unwrap(),
+        None
+    );
+    let fresh = epoch_keys(&env, &ledger, &laptop);
+    assert_eq!(
+        sealing
+            .current_for_own(&env.registry, &fresh, OTHER_SEAL)
+            .unwrap(),
+        None
+    );
+
+    // A record that derives, published after it, is the one the account's
+    // own devices use, with either set of keys.
+    let key = *ledger.acquire(&env, &laptop).unwrap().key();
+    let sealer = env.registry.key_sealer(OTHER_SEAL).unwrap();
+    let good_public = derive::account_sealing_key_pair(sealer, &key)
+        .unwrap()
+        .public
+        .bytes;
+    let good = crafted_with(&env, &laptop, &epoch, OTHER_SEAL, good_public, &mut rng);
+    let at = ledger.next();
+    ledger
+        .public
+        .account_keys
+        .push(Accepted::new(at, good.clone()));
+    let sealing = ledger.replay(&env).sealing_keys().unwrap().unwrap();
+    assert_eq!(
+        sealing.current(OTHER_SEAL).map(|r| &r.row.id),
+        Some(&poison.id)
+    );
+    for keys in [&cached, &fresh] {
+        assert_eq!(
+            sealing
+                .current_for_own(&env.registry, keys, OTHER_SEAL)
+                .unwrap()
+                .map(|r| &r.row.id),
+            Some(&good.id)
+        );
     }
 }
