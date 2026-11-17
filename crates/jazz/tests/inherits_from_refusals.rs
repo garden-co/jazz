@@ -6,6 +6,8 @@
 //! accepts an undeclared `uuid` address correlation for that table class
 //! alone.
 
+use crate::common;
+
 use jazz::tools::deployment::{
     DeploymentCatalogue, DeploymentError, DeploymentRequest, prepare_deployment,
 };
@@ -160,4 +162,62 @@ fn an_inherits_from_whose_candidate_has_another_is_refused() {
         .build();
     check_deployable_policies(&one_level).unwrap();
     deploy(&one_level).unwrap();
+}
+
+/// No read policy uses `InheritsFrom` (Jazz derives it for write policies
+/// only), and no sync support ships for one: a read policy holding one,
+/// directly or under `Or`, is refused. The read rules Jazz derives, an
+/// `exists` over the members table, deploy.
+///
+/// ```text
+/// members.select = IF(Select)                  ✗
+/// members.select = mine ∨ IF(Select)           ✗
+/// members.select = mine ∨ exists members(…)    ✓
+/// ```
+#[test]
+fn an_inherits_from_in_a_read_policy_is_refused() {
+    let mine = || PolicyExpr::eq_session("accountId", vec!["user".to_owned()]);
+    let members = |read: PolicyExpr| {
+        SchemaBuilder::new()
+            .table(projects())
+            .table(
+                address_table(
+                    MEMBERS,
+                    None,
+                    TablePolicies::new()
+                        .with_select(read)
+                        .with_insert(inherits_from(Operation::Select, "projects")),
+                )
+                .column("accountId", ColumnType::Uuid),
+            )
+            .build()
+    };
+    let direct = members(inherits_from(Operation::Select, "projects"));
+    assert_refused(
+        &direct,
+        UnsupportedPolicy::InheritsFromInReadPolicy,
+        "$.__e2ee_members.policies.select.using",
+    );
+    assert_refused(
+        &members(PolicyExpr::Or(vec![
+            mine(),
+            inherits_from(Operation::Select, "projects"),
+        ])),
+        UnsupportedPolicy::InheritsFromInReadPolicy,
+        "$.__e2ee_members.policies.select.using.Or[1]",
+    );
+
+    let derived = members(PolicyExpr::Or(vec![
+        mine(),
+        common::exists(
+            MEMBERS,
+            vec![
+                common::outer_eq("scopeId", "scopeId"),
+                common::outer_eq("identifier", "identifier"),
+                mine(),
+            ],
+        ),
+    ]));
+    check_deployable_policies(&derived).unwrap();
+    deploy(&derived).unwrap();
 }

@@ -4060,9 +4060,10 @@ impl Inner {
                     parts.iter().for_each(|part| clauses(part, out))
                 }
                 PolicyExpr::Not(part) => clauses(part, out),
-                // No support ships for an `InheritsFrom` in a read policy
-                // (Jazz derives it for write policies only): a replica
-                // lacking the candidate row grants less, never more.
+                // No support ships for an `InheritsFrom`: a deployment
+                // refuses one in a read policy (Jazz derives it for write
+                // policies only), and a replica lacking the candidate row
+                // would grant less, never more.
                 PolicyExpr::InheritsFrom { .. } | PolicyExpr::InsertedByThisTransaction => {}
                 _ => {}
             }

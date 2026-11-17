@@ -71,6 +71,9 @@ pub enum UnsupportedPolicy {
     /// `InheritsFrom` (itself included): the SQL compiler follows one
     /// level only, so every check of it would fail.
     NestedInheritsFrom,
+    /// An `InheritsFrom` in a read (`select`) policy, or in a policy one
+    /// inherits: no read rule needs it and no sync support ships for it.
+    InheritsFromInReadPolicy,
 }
 
 impl SchemaConversionError {
@@ -176,13 +179,20 @@ pub fn check_deployable_json_schemas(schema: &Schema) -> Result<(), SchemaConver
 /// another `InheritsFrom` (directly, through an inherited policy, or the
 /// same node naming its own table) is refused
 /// ([`UnsupportedPolicy::NestedInheritsFrom`]): the SQL compiler follows one
-/// level only, so every check of it would fail.
+/// level only, so every check of it would fail. An `InheritsFrom` a read
+/// (`select`) policy reaches is refused too
+/// ([`UnsupportedPolicy::InheritsFromInReadPolicy`]): Jazz derives the node
+/// for write policies only, and no sync support ships for it.
 ///
 /// A relation policy's unsupported shapes (output steps, query parameters,
 /// malformed union labels) are the schema compile's to refuse, which
 /// `jazz-tools validate`, the dev server and a deployment all run.
 pub fn check_deployable_policies(schema: &Schema) -> Result<(), SchemaConversionError> {
     for (name, table) in schema {
+        if let Some(read) = table.policies.select.using.as_ref() {
+            let path = format!("$.{}.policies.select.using", name.as_str());
+            refuse_inherits_from_in_read(schema, table, read, &path)?;
+        }
         let slots = [
             ("select.using", table.policies.select.using.as_ref()),
             (
@@ -267,6 +277,46 @@ fn refuse_nested_inherits_from(
                 }
             }
             Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Refuse the first part of read policy `expr` (of `table`) that reaches
+/// an `InheritsFrom` (see [`check_deployable_policies`]).
+fn refuse_inherits_from_in_read(
+    schema: &Schema,
+    table: &TableSchema,
+    expr: &PolicyExpr,
+    path: &str,
+) -> Result<(), SchemaConversionError> {
+    match expr {
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => {
+            let kind = if matches!(expr, PolicyExpr::And(_)) {
+                "And"
+            } else {
+                "Or"
+            };
+            for (index, part) in parts.iter().enumerate() {
+                refuse_inherits_from_in_read(
+                    schema,
+                    table,
+                    part,
+                    &format!("{path}.{kind}[{index}]"),
+                )?;
+            }
+            Ok(())
+        }
+        PolicyExpr::Not(inner) => {
+            refuse_inherits_from_in_read(schema, table, inner, &format!("{path}.Not"))
+        }
+        expr if reaches_inherits_from(schema, table, expr, &mut Vec::new()) => {
+            Err(SchemaConversionError::unsupported(
+                path,
+                "`InheritsFrom` is not supported in a read policy: Jazz derives it for write \
+                 policies only, and no sync support ships for it",
+                UnsupportedPolicy::InheritsFromInReadPolicy,
+            ))
         }
         _ => Ok(()),
     }
