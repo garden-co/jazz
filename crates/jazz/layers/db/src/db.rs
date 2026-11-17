@@ -3729,8 +3729,7 @@ impl Db {
     }
 
     /// Apply `change` to the store's catalogue in one transaction: publish
-    /// its rows, admit its versions in order, then make its schema current
-    /// at its revision. A change that fails anywhere leaves the file and
+    /// its rows, then admit its versions in order. A change that fails anywhere leaves the file and
     /// this database as they were.
     pub async fn apply_catalogue(
         &self,
@@ -3751,9 +3750,6 @@ impl Db {
             crate::catalogue::put(&self.inner().conn, &change.put)?;
             for (schema, lenses) in change.admit {
                 self.admit(schema, &lenses, None)?;
-            }
-            if let Some((revision, schema, lenses)) = change.activate {
-                self.admit(schema, &lenses, Some(Some(revision)))?;
             }
             Ok(())
         })();

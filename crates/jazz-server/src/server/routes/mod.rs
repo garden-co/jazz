@@ -1017,7 +1017,7 @@ mod tests {
                 .await
                 .expect("inspect runtime catalogue after lens"),
             (true, true),
-            "migration publication must activate target schema and lens together"
+            "migration publication must admit target schema and lens together"
         );
 
         let lens = state
