@@ -730,6 +730,9 @@ added by an updater.
 "string"`) or, during a schema conversion, an object with `type` and the
   conversion fields of [migrations](E2EE_MIGRATIONS.md) §3.2 (`from`, `to`,
   `convert`, `sealedType`); the string is shorthand for `{ "type": … }`.
+- **Encrypted columns are last-writer-wins.** The server cannot merge
+  ciphertext, so the deploy and code generation refuse a merge strategy
+  (`counter`, `g-set`, `text`, `markdown`, `html`) on an encrypted column.
 - The deploy and code generation refuse a `scope` that is not a table with an
   `id`, and a `space` column that is not `id` (with `scope` the table itself)
   or a `uuid` column referencing `scope`.
@@ -1456,10 +1459,16 @@ its epoch's creation, is not valid. A sender seals to the first valid record (po
 the account's current epoch and the selected mechanism; with none, sealing
 fails with "recipient unsupported" and the sender waits. A device of the
 account also checks that the record derives from `K`, for each mechanism it
-supports; one that does not is the intrinsic contradiction
-`conflicting-account-key` (§7), since only the account's own devices can
-write it. A record whose signer has no signing key published before it is
-not valid.
+supports. One that does not is reported (`conflicting-account-key`, §7) and
+ignored by that device; it never stops the device acquiring its account
+key. Only the account's own devices (or the server) can write such a record.
+Senders cannot check derivation, so until it is replaced their deliveries
+sealed to it do not open and are reported (§3.4). The remedy is to remove
+the device that signed it: the removal starts a new account epoch, whose
+co-published record is correct. A record whose signer has no signing key
+published before it is not valid. A record whose signer's signing mechanism
+this client does not support is skipped and reported as unsupported; it
+never fails the account's replay.
 
 Required behavioural tests, each a separate case: a record co-published by
 a bootstrap, by a reset and by a rotation is valid; a record co-published by
@@ -1467,7 +1476,12 @@ a rotation whose signer removes itself is valid; a record at a creation's
 position signed by another device (one active in the predecessor epoch, one
 admitted by the new membership, and one with no standing) is not; a later
 publication by an active device is valid, and one by a device that was not
-active, or for an epoch that is no longer current, is not.
+active, or for an epoch that is no longer current, is not; a valid later
+record that does not derive from the account key is reported and ignored,
+the account's devices still acquire the account key, and after the signing
+device is removed the new epoch's record is used; a record signed with an
+unsupported signing mechanism is skipped and reported, and the account's
+replay succeeds.
 
 Fixture: `K` = bytes `00`–`1f` and `m` = `jazz.wrap.hpke-x25519` v1
 (`H(m)` = `4a45324501156a617a7a2e777261702e68706b652d78323535313900000001`)
@@ -2497,7 +2511,7 @@ names the table, column, space and pending count.
 | Encryption failed           | `encryption-failed`                                                                                                                                                                              | Fail the write                                                                                      | Submit plaintext                                                                               |
 | Provider failure            | The mechanism's `CryptoFailure` (distinct from `InvalidCiphertext`, `InvalidInput`, `NoKeyForMechanism` and a `false` verification), and a writer's failure to read back output it just produced | Fail the operation loudly; preserve the error                                                       | Report it as key unavailable, corrupted ciphertext or an invalid proof; try the next candidate |
 | Unsupported capability      | `ledger-version`, `signing-mechanism`, `signing-version`                                                                                                                                         | Leave the dependent state unresolved                                                                | Treat the record as invalid                                                                    |
-| Intrinsic contradiction     | `conflicting-roots`, `conflicting-device-keys`, `conflicting-account-key`, `missing-root-key`, `missing-recipient-key`, `missing-signer-key`                                                     | Fail current replay; skip only a candidate decided at a fixed signed cutoff                         | Pick one of the conflicting rows                                                               |
+| Intrinsic contradiction     | `conflicting-roots`, `conflicting-device-keys`, `missing-root-key`, `missing-recipient-key`, `missing-signer-key`                                                                                | Fail current replay; skip only a candidate decided at a fixed signed cutoff                         | Pick one of the conflicting rows                                                               |
 | Unknown publication outcome | Publication outcome `unknown`                                                                                                                                                                    | Reconcile the original operation by its record IDs                                                  | Resubmit blindly or replay a callback or source                                                |
 | Recovery failures           | `recovery-cancelled`, `recovery-material-unusable`, `recovery-root-mismatch`, `recovery-delivery-missing`, `recovery-delivery-unusable`                                                          | Only candidate failures permit trying another delivery                                              | Attach private material to the error                                                           |
 | Unsupported shape           | An unsupported-query error naming the operation                                                                                                                                                  | Name the operation                                                                                  | Fall back to a scan                                                                            |
@@ -2507,6 +2521,10 @@ Publication stages: account `request`, `bootstrap`, `challenge`, `proof`,
 `approval`, `account-rotation`, `account-key`, `recovery-root`,
 `recovery-delivery`, `account-reset`; space `create`, `rotate`,
 `delivery`, `write`.
+
+`conflicting-account-key` is a report, not a contradiction: a valid sealing
+key record of the device's own account that does not derive from the
+account key is ignored by that device and reported (§2.12).
 
 The missing-key contradictions: `missing-root-key` (an accepted account
 root names a device with no published device keys, §1.2),
@@ -2593,6 +2611,11 @@ Properties:
 
 Limits:
 
+- **Older clients may miss a removal.** A client that cannot read a
+  member's account history (a newer format) does not rotate when that
+  member's device is removed, and does not deliver to it (§3.4). Clients
+  that can read it do. If every updater of a space runs such an older
+  client, the space is not rotated for that removal until one updates.
 - **Removal is detected from member rows; rotation is lazy.** Deleting a
   member's rows marks the space as needing rotation (§3.5); no `rotate`
   call is needed. The new key is made before the next encrypted write by an
