@@ -561,9 +561,12 @@ fn text_search_costs_are_capped() {
     jazz::set_postings_cap_for_test(None);
     assert_eq!(ids(&db, &text("berlin")), [1, 2]);
 
-    // "run run": a word that is both a whole term and the prefix has two
-    // slots, and its postings count once in the score.
-    assert_eq!(ids(&db, &text("run run")), ids(&db, &text("run")));
+    // "run run": a word that is both a whole term and the prefix keeps both
+    // slots (under `All` a row needs the whole term `run`, which Berlin's
+    // "running" stems to and Apia's "runners" does not), and a posting
+    // serving both counts once in the score.
+    assert_eq!(ids(&db, &text("run run")), [1]);
+    assert_eq!(ids(&db, &text("run")), [5, 1]);
 }
 
 /// Under `All`, every slot needs its own match: "running run" needs the
@@ -583,5 +586,6 @@ fn every_slot_of_an_all_search_needs_its_own_match() {
             mode: MatchMode::Any,
         },
     );
-    assert_eq!(ids(&db, &any), [2, 1]);
+    // The one-word "Runway" ranks its term above "Running club"'s.
+    assert_eq!(ids(&db, &any), [1, 2]);
 }

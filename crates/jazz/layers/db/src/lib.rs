@@ -55,6 +55,9 @@ pub mod values;
 
 #[cfg(feature = "testing")]
 pub use db::sync::{decode_session_read_cells_for_test, pruned_txs_lookups_for_test};
+/// Lower this thread's vector candidate cap (SPEC 20.5), for a test.
+#[cfg(any(test, feature = "testing"))]
+pub use ix::set_vector_cap_for_test;
 /// Implement text and vector indexes with tiny test kinds on this thread
 /// (see `ix::test_kind`).
 #[cfg(any(test, feature = "testing"))]
@@ -62,9 +65,6 @@ pub use ix::test_kind::use_test_kinds;
 /// Lower this thread's text search postings cap (SPEC 20.12), for a test.
 #[cfg(any(test, feature = "testing"))]
 pub use ix::text::set_postings_cap_for_test;
-/// Lower this thread's vector candidate cap (SPEC 20.5), for a test.
-#[cfg(any(test, feature = "testing"))]
-pub use ix::set_vector_cap_for_test;
 #[cfg(feature = "testing")]
 pub use large::{cell_ranges_for_test, full_materializations_for_test};
 
