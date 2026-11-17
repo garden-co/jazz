@@ -604,6 +604,32 @@ impl SubscriptionStream {
     }
 }
 
+/// What a store holds open between calls ([`Db::held_for_test`]).
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Held {
+    /// A transaction handle's staged writes are applied, in a SQLite
+    /// savepoint, for its next stage.
+    pub overlay: bool,
+    /// A callback transaction ([`Db::transaction`]) is open: its savepoint
+    /// spans the callback's awaits.
+    pub callback_transaction: bool,
+    /// Transaction handles that are open (staged, not committed or rolled
+    /// back).
+    pub open_batches: usize,
+    /// The connection is inside a SQLite transaction or savepoint.
+    pub sqlite_transaction: bool,
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl Held {
+    /// Nothing is held.
+    pub fn is_nothing(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Test-visible runtime counters.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeStats {
@@ -10209,6 +10235,24 @@ impl Db {
     pub fn overlay_replays_for_test(&self) -> usize {
         // A peek: the store gate would undo the cached overlay.
         self.inner.staging().overlay_replays
+    }
+
+    /// What this store holds open between calls: anything a later call
+    /// must find as it was left. A peek: the store gate would undo the
+    /// overlay, so it is read without passing it. A store serving as a
+    /// core must hold nothing between the calls it serves, so that it
+    /// also runs on storage that cannot keep a transaction open (Durable
+    /// Objects' `transactionSync`).
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn held_for_test(&self) -> Held {
+        let inner = self.inner.staging();
+        Held {
+            overlay: inner.overlay.is_some(),
+            callback_transaction: inner.tx.is_some(),
+            open_batches: inner.batches.len(),
+            sqlite_transaction: !inner.conn.is_autocommit(),
+        }
     }
 
     /// How many times a staged write's check copied the evidence set it

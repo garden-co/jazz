@@ -81,6 +81,7 @@ import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import {
   WebSocketCarrier,
   peerIdentityForWebSocketAuth,
+  classifyWireLinkFailure,
   isReauthenticateWireError,
   wireAuthFailureReason,
   type WebSocketConstructor,
@@ -539,7 +540,8 @@ export class ThinRuntime implements Runtime {
     this.lastLostMessage = error.message;
     // A planned swap that ends any other way is reported as that ending.
     this.reauthenticating = false;
-    if (isReauthenticateWireError(error) && wasBound) {
+    const kind = classifyWireLinkFailure(error, wasBound);
+    if (kind === "reauthenticate" && wasBound) {
       // The session reached the expiry the app's auth gave it: connect again
       // at once so `authenticate` decides with the current credential. The
       // app keeps seeing a connected link meanwhile; unanswered writes go
@@ -549,7 +551,11 @@ export class ThinRuntime implements Runtime {
       this.open();
       return;
     }
-    const authFailure = wireAuthFailureReason(error);
+    // The auth path follows the classification: an `auth_failed` with a retry
+    // this client does not know is a refusal it retries, not a refused
+    // credential (a reauthenticate before binding is still one).
+    const authFailure =
+      kind === "authRejected" || kind === "reauthenticate" ? wireAuthFailureReason(error) : null;
     if (authFailure) {
       // Refused before the drop publishes, so the link never reads
       // "connecting" in between.
@@ -563,9 +569,10 @@ export class ThinRuntime implements Runtime {
       this.authFailureCallback?.(authFailure);
       return;
     }
-    if (error.retry === "never") {
-      // Stopped for good, as `fatal`: only an explicit connect starts over,
-      // and requests waiting for a connection end now.
+    if (kind === "fatal") {
+      // Stopped for good: only an explicit connect starts over, and requests
+      // waiting for a connection end now. Decided by the code, so a
+      // malformed frame that says `later` does not loop.
       this.fatal(lostError);
       return;
     }
@@ -577,15 +584,19 @@ export class ThinRuntime implements Runtime {
     if (
       !this.stopped &&
       !this.outagePublished &&
-      ((!wasBound && error.code === "backpressure") ||
+      (kind === "refused" ||
         (this.failingSince !== undefined && Date.now() - this.failingSince >= this.outageReportMs))
     ) {
       this.outagePublished = true;
     }
     this.notifySyncStatus();
-    if (!this.wanted || this.closed || error.retry === "never") return;
+    if (!this.wanted || this.closed) return;
+    // The thin client keeps its own delays rather than the link's policy, but
+    // spreads them as the link does (equal jitter, within [d/2, d]), so
+    // clients dropped together do not reconnect together.
     const delays = this.reconnectDelaysMs;
-    const delay = delays[Math.min(this.attempt, delays.length - 1)] ?? 1_000;
+    const ceiling = delays[Math.min(this.attempt, delays.length - 1)] ?? 1_000;
+    const delay = ceiling / 2 + Math.random() * (ceiling / 2);
     this.attempt += 1;
     this.reconnectTimer = setTimeout(() => this.open(), delay);
   }

@@ -179,7 +179,7 @@ this document or public receipts.
 
 `changesets-release-pr.yml` creates versions/changelogs and the release PR; it does
 not publish. `publish-jazz-tools-alpha.yml` publishes packages and creates the
-source tag; `publish-jazz-crates-alpha.yml` then publishes the Rust crates (see "Rust crates
+source tag, then dispatches `publish-jazz-crates-alpha.yml`, which publishes the Rust crates (see "Rust crates
 on crates.io"). GitHub Release creation/publication is currently manual. Do not assume
 a green Changesets action or an existing tag means the packages or GitHub Release
 have been published.
@@ -213,8 +213,11 @@ fork jazz-wasm uses), which is published last, at its own version. Published cra
 upstream `sqlite-wasm-rs`: the root `[patch.crates-io]` only applies inside
 this workspace (and only to wasm builds).
 
-`publish-jazz-crates-alpha.yml` runs when "Publish jazz-tools alpha" succeeds on
-`release`. It publishes only after npm has jazz-tools at that version and
+`publish-jazz-crates-alpha.yml` is dispatched (`mode: publish`,
+`tag: v<version>`) by the `dispatch-crates` job of "Publish jazz-tools alpha",
+once its npm publish succeeds. crates.io trusted publishing refuses
+`workflow_run` triggers, so the workflow is only ever dispatched; it waits for
+the `publish` environment's approval like the npm job. It publishes only after npm has jazz-tools at that version and
 `v<version>` points at the release commit. It verifies every package
 (`cargo package`). Then, before publishing anything, it checks that every
 new crate's bootstrap token is set and that the OIDC exchange works, so a
@@ -251,8 +254,8 @@ crates are published with a short-lived token the first time:
    jazz-ruzstd, jazz-compression, jazz-text, jazz-types, jazz-model,
    jazz-protocol, jazz-db, jazz-core, jazz-native-transport, jazz-app-support,
    jazz-codegen, jazz-ffi, jazz-otel, jazz-server.
-3. **Publish:** let `publish-jazz-crates-alpha.yml` run after the npm publish, or
-   dispatch it with `mode: publish`, `tag: v<version>`. The summary at the
+3. **Publish:** "Publish jazz-tools alpha" dispatches `publish-jazz-crates-alpha.yml`
+   after the npm publish; to run it by hand, dispatch it with `mode: publish`, `tag: v<version>`. The summary at the
    end of its log shows which auth each crate used.
 4. **Afterwards, for every new crate:** add the same trusted publisher
    (`garden-co/jazz`, `publish-jazz-crates-alpha.yml`, environment `publish`). Then

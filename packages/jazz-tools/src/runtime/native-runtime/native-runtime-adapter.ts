@@ -112,7 +112,7 @@ import {
   WebSocketCarrier,
   WIRE_PROTOCOL_VERSION,
   isReconnectLaterWireError,
-  isReauthenticateWireError,
+  isLocalProtocolWireError,
   isSocketDropWireError,
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
@@ -121,7 +121,6 @@ import {
   type WebSocketConstructor,
   type WebSocketNegotiation,
   type WireError,
-  wireAuthFailureReason,
 } from "./websocket.js";
 import { isRenewableAuthFailure, mapAuthReason } from "../auth-state.js";
 import {
@@ -252,6 +251,10 @@ type NativeRestoreOptions = NativeWriteOptions & {
 
 type NativeDb = {
   captureSnapshot?(): NativeReadResult | Promise<NativeReadResult>;
+  /** NAPI: a thin session's transaction request, as its backend's client serves it. */
+  serveThinTransaction?(request: Uint8Array): NativeReadResult;
+  /** NAPI: end the thin session's open transactions. */
+  releaseThinTransactions?(): NativeReadResult;
   /** WASM settles its promise-shaped wait early once `cancelled` settles. */
   waitForPendingWrites?(
     tier: string,
@@ -617,10 +620,13 @@ type ServerConnectionAttempt = {
  * and the timer and steps the machine with one JSON document per input.
  */
 type NativeUpstreamLink = { handle(nowMs: number, input: string): string };
-type UpstreamLinkFailure = {
-  kind: "network" | "refused" | "serverNotReady" | "authRejected" | "fatal" | "reauthenticate";
-  message: string;
-};
+type UpstreamLinkFailure =
+  | {
+      kind: "network" | "refused" | "serverNotReady" | "authRejected" | "fatal" | "reauthenticate";
+      message: string;
+    }
+  /** A server's `WireError`, classified by the link. */
+  | { kind: "wire"; code: string; retry: string; message: string; admitted: boolean };
 type UpstreamLinkInput =
   | { type: "serverConfigured"; configured: boolean }
   | { type: "setOffline"; offline: boolean }
@@ -659,34 +665,20 @@ type UpstreamLinkStep = {
   status: UpstreamLinkStatus;
 };
 
-/** How the link machine should treat a server connection that ended with `error`. */
-function upstreamLinkFailure(error: WireError, negotiated: boolean): UpstreamLinkFailure {
-  const message = error.message;
-  // The server's session reached the expiry the app's auth gave it: a
-  // planned reconnect, so the app's auth decides again with this client's
-  // current credential (see `isReauthenticateWireError`).
-  if (isReauthenticateWireError(error)) return { kind: "reauthenticate", message };
-  if (wireAuthFailureReason(error)) return { kind: "authRejected", message };
-  // The server's bootstrap and overload signals. Before its hello, `not_ready`
-  // means the server is still starting; `backpressure` means it answered and
-  // refused this connection for now (such as the connection cap per user),
-  // which is retried like an outage but published at once with the server's
-  // reason. After its hello both end a link like an outage.
-  // `internal` with `later` is a server that cannot serve this session right
-  // now (its runtime shutting down in a rolling deploy): retried like
-  // overload, as `LinkFailure::from_wire_error` does.
-  if (isReconnectLaterWireError(error) || (error.code === "internal" && error.retry === "later")) {
-    if (negotiated) return { kind: "network", message };
-    return { kind: error.code === "not_ready" ? "serverNotReady" : "refused", message };
-  }
+/**
+ * How a server connection that ended with `error` is reported to the link.
+ * The carrier's own socket drops are a network outage; anything the server
+ * said goes to the link as it arrived, which classifies it in Rust
+ * (`LinkFailure::from_wire_error`) as it does for every host.
+ */
+function upstreamLinkFailure(error: WireError, admitted: boolean): UpstreamLinkFailure {
   // The network or the server dropped the socket. A local-first client must
   // survive an outage of any length, including one it was opened in.
-  if (isSocketDropWireError(error)) {
-    return { kind: "network", message };
-  }
-  // Anything else (a protocol error, an incompatible server) cannot succeed
-  // by retrying.
-  return { kind: "fatal", message };
+  if (isSocketDropWireError(error)) return { kind: "network", message: error.message };
+  // This client could not read what the server sent: a local protocol
+  // failure, not something the server said, so it stops as it always did.
+  if (isLocalProtocolWireError(error)) return { kind: "fatal", message: error.message };
+  return { kind: "wire", ...error, admitted };
 }
 
 function joinServerTransportRetirements(
@@ -2435,6 +2427,31 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.withPermissionAdviceTimeout(() =>
       request.call(this.db, table, parseUuid(objectId), delegated?.identity, delegated?.claims),
     );
+  }
+
+  /**
+   * @internal Serve one of a thin session's transaction requests (its wire
+   * frame) as the backend's client linked to the core as that session
+   * (SPEC 8.14); the answer is the response frame. A commit answers once the
+   * core accepted it. One request at a time.
+   */
+  serveThinTransaction(request: Uint8Array): Promise<Uint8Array> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.serveThinTransaction(request);
+    if (this.closed) return Promise.reject(new Error("the native runtime is closed"));
+    if (!this.db.serveThinTransaction)
+      return Promise.reject(new Error("this native binding serves no thin transactions"));
+    const served = this.db.serveThinTransaction(request);
+    this.scheduleCoreTick();
+    return this.awaitNativeRead(served);
+  }
+
+  /** @internal End the thin session's open transactions: nothing of them reached the core. */
+  async releaseThinTransactions(): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.releaseThinTransactions();
+    if (this.closed || !this.db.releaseThinTransactions) return;
+    const released = this.db.releaseThinTransactions();
+    this.scheduleCoreTick();
+    await this.awaitNativeRead(released);
   }
 
   captureSnapshot(): Promise<SnapshotRef> {

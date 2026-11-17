@@ -342,7 +342,12 @@ Store a file in a `bytes` column next to its metadata:
 import { schema as s } from "jazz-tools";
 
 export const schema = s.defineSchema({
-  files: s.table({ name: s.string(), type: s.string(), size: s.int(), content: s.bytes() }),
+  files: s.table({
+    name: s.string(),
+    type: s.string(),
+    size: s.int(),
+    content: s.bytes(),
+  }),
 });
 ```
 
@@ -549,7 +554,7 @@ A mutation can fail when you call it or while you wait:
   `PersistedWriteRejectedError` on the local-first client, and with a `ThinRemoteError` (code
   `WriteRejected`) on the thin client.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Swift", "Kotlin", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-mutation-errors-ts
@@ -559,6 +564,12 @@ A mutation can fail when you call it or while you wait:
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-mutation-errors-effect
     </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-mutation-errors-rust
+    </include>
+
   </Tab>
   <Tab value="Swift">
     <include cwd lang="swift">

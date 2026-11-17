@@ -58,7 +58,11 @@ If ownership can be transferred after creation, use an explicit `owner_id` colum
 import { schema as s } from "jazz-tools";
 
 export const schema = s.defineSchema({
-  todos: s.table({ title: s.string(), done: s.boolean(), owner_id: s.uuid() }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    owner_id: s.uuid(),
+  }),
 });
 
 const { definePermissions, session } = schema;
