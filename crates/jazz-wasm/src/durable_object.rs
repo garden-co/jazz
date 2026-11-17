@@ -2051,29 +2051,39 @@ mod core_host {
         /// After an assignment may have changed: end every guest socket
         /// whose identity no longer holds its account, as native ends it.
         fn recheck_guests(&mut self, storage: &jazz::storage::Storage) {
+            use jazz::wire::{WireError, WireErrorCode, WireRetry};
             for state in self.sockets.values_mut() {
                 let Some(identity) = state.guest else {
                     continue;
                 };
                 let (issuer, subject) = identity.principal_parts();
                 let principal = jazz::account_registry::Principal { issuer, subject };
-                let holds = match (identity.account_id(), accounts::login(storage, &principal)) {
-                    (Some(account), Ok(assignment)) => assignment.account == account,
-                    // The registry could not be read: the next change
-                    // checks again.
-                    (Some(_), Err(accounts::RegistryError::Unavailable(_))) => true,
-                    _ => false,
+                // As native's `account_still_admitted`: the assignment must
+                // still be the account the guest was admitted as; a refusal
+                // is told as the registry words it, and a registry that
+                // cannot be read closes the socket for a later retry.
+                let ends = match (identity.account_id(), accounts::login(storage, &principal)) {
+                    (Some(account), Ok(assignment)) if assignment.account == account => None,
+                    (_, Err(accounts::RegistryError::Unavailable(_))) => Some(WireError::new(
+                        WireErrorCode::NotReady,
+                        WireRetry::Later,
+                        "account registry unavailable",
+                    )),
+                    (_, Err(accounts::RegistryError::Decision(error))) => Some(WireError::new(
+                        WireErrorCode::AuthFailed,
+                        WireRetry::Never,
+                        error.to_string(),
+                    )),
+                    _ => Some(WireError::new(
+                        WireErrorCode::AuthFailed,
+                        WireRetry::Never,
+                        "account identity revoked",
+                    )),
                 };
-                if !holds {
+                if let Some(error) = ends {
                     state.held.clear();
                     state.held_bytes = 0;
-                    state.failed.get_or_insert_with(|| {
-                        jazz::wire::WireError::new(
-                            jazz::wire::WireErrorCode::AuthFailed,
-                            jazz::wire::WireRetry::Never,
-                            "account identity revoked",
-                        )
-                    });
+                    state.failed.get_or_insert(error);
                 }
             }
         }

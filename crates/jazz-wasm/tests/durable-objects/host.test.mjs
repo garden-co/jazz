@@ -625,6 +625,21 @@ test("a guest the backend relays syncs by its own proof, until its identity is r
     socket.send(fixture.testThinInsertNote(2n, "by a guest"));
     assert.deepEqual(await socket.next(), { id: 2, written: true });
 
+    // Another identity's assignment changing leaves the guest's socket be.
+    const other = await mf.dispatchFetch(
+      `http://core/apps/${APP}/admin/accounts/login-or-register`,
+      {
+        method: "POST",
+        headers: { "X-Jazz-Backend-Secret": SECRET, "content-type": "application/json" },
+        body: JSON.stringify({
+          identity: { issuer: "https://idp.example", subject: "someone-else" },
+        }),
+      },
+    );
+    assert.equal(other.status, 200);
+    socket.send(fixture.testThinInsertNote(3n, "still a guest"));
+    assert.deepEqual(await socket.next(), { id: 3, written: true });
+
     // Revoking the guest's identity ends its live socket.
     const revoked = await mf.dispatchFetch(`http://core/apps/${APP}/admin/accounts/revoke`, {
       method: "POST",
@@ -632,7 +647,7 @@ test("a guest the backend relays syncs by its own proof, until its identity is r
       body: JSON.stringify({ approver: principal, target: principal }),
     });
     assert.equal(revoked.status, 204, await revoked.clone().text());
-    assert.match((await socket.next()).error ?? "", /account identity revoked/);
+    assert.match((await socket.next()).error ?? "", /identity is not authorized/);
     await eventually(() => socket.closed(), "the guest's socket closes");
   } finally {
     await mf.dispose();
