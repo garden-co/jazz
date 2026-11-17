@@ -1946,7 +1946,6 @@ impl Db {
         names.admit(&conn, &schema)?;
         conn.execute_batch(sync::PENDING_DDL).map_err(storage)?;
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
-        conn.execute_batch(crate::ix::DDL).map_err(storage)?;
         let withheld: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '_jazz_withheld'",

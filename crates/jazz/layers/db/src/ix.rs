@@ -382,6 +382,15 @@ pub(crate) fn reconcile(conn: &Connection, schema: &Schema, replica: bool) -> Re
             );
         }
     }
+    // A store whose schemas never declared a specialised index gets none of
+    // the framework's tables: opening it creates no schema objects.
+    if desired.is_empty() && !framework_exists(conn)? {
+        let mut registry = registry.borrow_mut();
+        registry.by_table = BTreeMap::new();
+        registry.declared = declared;
+        return Ok(());
+    }
+    crate::db::execute_script(conn, DDL)?;
     let recorded = recorded(conn)?;
     let mut touched_tables = BTreeSet::new();
     for ((tbl, name), old) in &recorded {
@@ -482,6 +491,17 @@ pub(crate) fn reconcile(conn: &Connection, schema: &Schema, replica: bool) -> Re
     registry.by_table = by_table;
     registry.declared = declared;
     Ok(())
+}
+
+/// Whether this store has the framework's tables (some schema it opened
+/// declared a specialised index).
+fn framework_exists(conn: &Connection) -> Result<bool, Error> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_jazz_ix')",
+        [],
+        |r| r.get(0),
+    )
+    .map_err(storage)
 }
 
 /// The canonical declaration bytes `_jazz_ix.decl` records: the
@@ -725,6 +745,9 @@ pub(crate) fn build_step(conn: &Connection) -> Result<bool, Error> {
         return Ok(false);
     };
     let registry = registry.borrow();
+    if registry.by_table.is_empty() {
+        return Ok(false);
+    }
     let building: Option<(String, String, i64)> = conn
         .prepare_cached(
             "SELECT tbl, name, built FROM _jazz_ix WHERE state = ?1 ORDER BY tbl, name LIMIT 1",
