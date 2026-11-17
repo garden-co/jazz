@@ -843,6 +843,10 @@ struct Inner {
     /// Rows a unit's trusted writes (no write check) left behind, by stored
     /// table: they need no evidence, so its grounding starts from them.
     trusted_rows: RefCell<BTreeMap<String, BTreeSet<[u8; 16]>>>,
+    /// The inherited rows the commit at `.0` copied into a branch head:
+    /// (stored table, row, head key) to the base key it acted on. Its later
+    /// writes to the head row act on that base row (SPEC 7).
+    inherited_heads: RefCell<InheritedHeads>,
     /// The open transaction's seq and the tables it wrote.
     tx: Option<(u64, BTreeSet<String>)>,
     /// The identity the open callback transaction writes as. A write as
@@ -2240,6 +2244,7 @@ impl Db {
                 changed: RefCell::new(Vec::new()),
                 deferred: RefCell::new(None),
                 trusted_rows: RefCell::new(BTreeMap::new()),
+                inherited_heads: RefCell::new((0, HashMap::new())),
                 tx: None,
                 tx_identity: None,
                 publications: Vec::new(),
@@ -7347,10 +7352,12 @@ impl Inner {
     /// before the unit and the policy's other rows likewise, never the
     /// unit's own earlier writes. So the unit's decision does not depend on
     /// the order of its writes, and no write vouches for another's USING.
-    /// A row the unit created or revived has no committed state to act
-    /// on: the end-state check of its first write
-    /// ([`Inner::write_check`]) decides it. For such a row, and outside a
-    /// unit, this returns `None`: the caller checks the current version.
+    /// A branch-head row the unit copied from its base acts on that base
+    /// row, as the unit's first write to it did. A row the unit created or
+    /// revived has no committed state to act on: the end-state check of
+    /// its first write ([`Inner::write_check`]) decides it. For such a row,
+    /// and outside a unit, this returns `None`: the caller checks the
+    /// current version.
     fn holds_on_acted_row(
         &self,
         table: &Table,
@@ -7359,9 +7366,29 @@ impl Inner {
         seq: u64,
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
     ) -> Result<Option<bool>, Error> {
-        if self.deferred.borrow().is_none() || !self.was_live_before(table, row, key, seq)? {
+        if self.deferred.borrow().is_none() {
             return Ok(None);
         }
+        let acted = if self.was_live_before(table, row, key, seq)? {
+            key.to_vec()
+        } else {
+            let base = {
+                let heads = self.inherited_heads.borrow();
+                (heads.0 == seq)
+                    .then(|| {
+                        heads
+                            .1
+                            .get(&(table.stored.clone(), *row.0.as_bytes(), key.to_vec()))
+                            .cloned()
+                    })
+                    .flatten()
+            };
+            match base {
+                Some(from) if self.was_live_before(table, row, &from, seq)? => from,
+                _ => return Ok(None),
+            }
+        };
+        let key = &acted[..];
         let cut = Cut {
             unsettled: false,
             seq: self.own_pos(seq.saturating_sub(1)),
@@ -8486,6 +8513,16 @@ impl Inner {
         at: Option<&Cut>,
         seq: u64,
     ) -> Result<(), Error> {
+        {
+            let mut heads = self.inherited_heads.borrow_mut();
+            if heads.0 != seq {
+                *heads = (seq, HashMap::new());
+            }
+            heads
+                .1
+                .entry((table.stored.clone(), *row.0.as_bytes(), to.to_vec()))
+                .or_insert_with(|| from.to_vec());
+        }
         let columns = self.columns_list(table);
         let id = row.0.as_bytes().to_vec();
         // A frozen base is copied as it was at the cut.
@@ -9239,6 +9276,9 @@ impl Inner {
         })
     }
 }
+
+/// See [`Inner::inherited_heads`].
+type InheritedHeads = (u64, HashMap<(String, [u8; 16], Vec<u8>), Vec<u8>>);
 
 /// A write's own policy check, deferred to the end of its unit.
 #[derive(Clone, Copy, PartialEq, Eq)]

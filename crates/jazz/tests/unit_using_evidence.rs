@@ -25,7 +25,9 @@ use jazz::db::{
     RestoreOptions, SyncMessage, Transport, TransportError, UpdateOptions, WireKind, WireOp,
     WireTarget, WireWrite, WriteIdentity, block_on,
 };
+use jazz::db::{ExactWriteTarget, WriteTarget};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::protocol::{BranchSelector, BranchViewBase};
 use jazz::query::Query;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
@@ -75,6 +77,7 @@ fn schema() -> JazzSchema {
         ])),
     };
     let mine = cmp("owner", me());
+    let member_of_team = member.clone();
     compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -107,6 +110,37 @@ fn schema() -> JazzSchema {
                                     PolicyExpr::Or(vec![kept("pinned"), mine.clone()]),
                                 ]),
                             )
+                            .with_delete(mine.clone()),
+                    ),
+            )
+            .table(
+                // Only a team's members read its memos; anyone who may
+                // read one may edit it.
+                TableSchemaBuilder::new("memos")
+                    .column("team", ColumnType::Text)
+                    .column("body", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(member_of_team.clone())
+                            .with_insert(PolicyExpr::False)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(PolicyExpr::False),
+                    ),
+            )
+            .table(
+                // Notes on branches: any member edits one, its owner
+                // deletes it.
+                TableSchemaBuilder::new("drafts")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("team", ColumnType::Text)
+                    .column("owner", ColumnType::Text)
+                    .column("body", ColumnType::Text)
+                    .branch_by("branch_id")
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::False)
+                            .with_update(Some(member_of_team.clone()), member_of_team)
                             .with_delete(mine),
                     ),
             )
@@ -202,7 +236,92 @@ fn authority() -> Db {
         ))
         .unwrap();
     }
+    block_on(server.insert(
+        "memos",
+        BTreeMap::from([
+            ("team".to_owned(), text("blue")),
+            ("body".to_owned(), text("bob's")),
+        ]),
+        InsertOptions {
+            row_id: Some(memo_row()),
+            ..database()
+        },
+    ))
+    .unwrap();
+    block_on(server.insert(
+        "drafts",
+        BTreeMap::from([
+            ("team".to_owned(), text("red")),
+            ("owner".to_owned(), subject(bob())),
+            ("body".to_owned(), text("bob's")),
+        ]),
+        InsertOptions {
+            row_id: Some(note_row()),
+            target: ExactWriteTarget::Branch(base_branch()),
+            ..database()
+        },
+    ))
+    .unwrap();
     server
+}
+
+fn memo_row() -> RowUuid {
+    RowUuid::from_bytes([0x12; 16])
+}
+
+fn base_branch() -> BranchSelector {
+    BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([0xba; 16])))])
+}
+
+fn head_branch() -> BranchSelector {
+    BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([0xbe; 16])))])
+}
+
+/// Alice's view of the head branch over the base.
+fn draft_view() -> WriteTarget {
+    WriteTarget::BranchView {
+        head: head_branch(),
+        base: Some(BranchViewBase::Current(base_branch())),
+    }
+}
+
+fn draft_read() -> ReadOpts {
+    ReadOpts {
+        tier: ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    }
+    .branch_view(head_branch(), Some(BranchViewBase::Current(base_branch())))
+}
+
+/// The draft as `db`'s head view shows it: (owner is bob, body).
+fn draft(db: &Db) -> Option<(bool, String)> {
+    let prepared = db.prepare_query(&Query::from("drafts")).unwrap();
+    let rows = block_on(db.all(&prepared, draft_read())).unwrap();
+    rows.iter().find(|r| r.row_uuid() == note_row()).map(|r| {
+        (
+            r.cell("owner") == Some(subject(bob())),
+            match r.cell("body") {
+                Some(Value::String(body)) => body,
+                other => format!("{other:?}"),
+            },
+        )
+    })
+}
+
+fn memo(db: &Db) -> String {
+    let prepared = db.prepare_query(&Query::from("memos")).unwrap();
+    let rows = block_on(db.all(
+        &prepared,
+        ReadOpts {
+            tier: ReadTier::LocalOnly,
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    format!(
+        "{:?}",
+        rows.iter().map(|r| r.cell("body")).collect::<Vec<_>>()
+    )
 }
 
 /// The note as `db` holds it: (owner is bob, pinned, body), or `None` once
@@ -295,6 +414,9 @@ enum W {
     Delete(RowUuid),
     Restore(RowUuid),
     UpdateMember(&'static str),
+    UpdateMemo(&'static str),
+    UpdateDraft(&'static str, Value),
+    DeleteDraft,
 }
 
 fn wire(db: &Db, write: &W) -> WireOp {
@@ -326,6 +448,16 @@ fn wire(db: &Db, write: &W) -> WireOp {
             target: WireTarget::Root,
             at: None,
         },
+        W::UpdateMemo(body) => WireWrite::Update {
+            table: "memos".to_owned(),
+            row: *memo_row().as_bytes(),
+            cells: BTreeMap::from([(stored(db, "memos", "body"), text(body))]),
+            target: WireTarget::Root,
+            at: None,
+        },
+        W::UpdateDraft(..) | W::DeleteDraft => {
+            unreachable!("a branch-view write is uploaded by a client")
+        }
     }
     .into()
 }
@@ -617,6 +749,32 @@ fn staged(server: &Db, writes: &[W]) -> bool {
                 update_as_alice(),
             ))
             .map(drop),
+            W::UpdateMemo(body) => block_on(tx.update(
+                "memos",
+                memo_row(),
+                BTreeMap::from([("body".to_owned(), text(body))]),
+                update_as_alice(),
+            ))
+            .map(drop),
+            W::UpdateDraft(column, value) => block_on(tx.update(
+                "drafts",
+                note_row(),
+                BTreeMap::from([((*column).to_owned(), value.clone())]),
+                UpdateOptions {
+                    target: draft_view(),
+                    ..update_as_alice()
+                },
+            ))
+            .map(drop),
+            W::DeleteDraft => block_on(tx.delete(
+                "drafts",
+                note_row(),
+                DeleteOptions {
+                    target: draft_view(),
+                    ..delete_as_alice()
+                },
+            ))
+            .map(drop),
         };
         if result.is_err() {
             return false;
@@ -673,4 +831,102 @@ fn a_staged_transaction_cannot_take_a_note_over_and_delete_it() {
         note(&server, note_row()),
         Some((true, false, "two".to_owned()))
     );
+}
+
+// ---------------------------------------------------------------------
+// Read-for-write: the unit's own writes do not make a row readable.
+
+/// Moving her membership into `blue` in the unit does not let alice read,
+/// and so edit, a `blue` memo in it. In a later unit, it does.
+#[test]
+fn a_unit_s_writes_do_not_make_its_other_rows_readable_for_writing() {
+    let writes = [W::UpdateMember("blue"), W::UpdateMemo("alice's")];
+    let server = authority();
+    assert!(!upload(&server, 1, &writes));
+    assert!(!staged(&server, &writes));
+    assert_eq!(memo(&server), r#"[Some(String("bob's"))]"#);
+    // Planted positive: one unit after the other.
+    assert!(staged(&server, &[W::UpdateMember("blue")]));
+    assert!(upload(&server, 2, &[W::UpdateMemo("alice's")]));
+    assert_eq!(memo(&server), r#"[Some(String("alice's"))]"#);
+}
+
+// ---------------------------------------------------------------------
+// Branch views: a head row the unit copied from its base acts on the base.
+
+#[test]
+fn a_staged_branch_view_unit_cannot_take_a_draft_over_and_delete_it() {
+    let server = authority();
+    // Planted negative: alice may not delete bob's draft.
+    assert!(!staged(&server, &[W::DeleteDraft]));
+    assert!(!staged(
+        &server,
+        &[W::UpdateDraft("owner", subject(alice())), W::DeleteDraft]
+    ));
+    assert_eq!(draft(&server), Some((true, "bob's".to_owned())));
+    // Planted positive: a member edits the draft twice in one unit.
+    assert!(staged(
+        &server,
+        &[
+            W::UpdateDraft("body", text("one")),
+            W::UpdateDraft("body", text("two")),
+        ]
+    ));
+    assert_eq!(draft(&server), Some((true, "two".to_owned())));
+}
+
+#[test]
+fn a_client_branch_view_transaction_cannot_take_a_draft_over_and_delete_it() {
+    use duplex_transport::duplex;
+    let server = authority();
+    let client = block_on(Db::open(config(0xa1, alice()))).unwrap();
+    let (client_side, server_side) = duplex();
+    block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    let prepared = client.prepare_query(&Query::from("drafts")).unwrap();
+    let _live = block_on(
+        client.subscribe(
+            &prepared,
+            ReadOpts::default()
+                .branch_view(head_branch(), Some(BranchViewBase::Current(base_branch()))),
+        ),
+    )
+    .unwrap();
+    for _ in 0..6 {
+        block_on(client.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    assert!(draft(&client).is_some(), "the client holds the draft");
+
+    let batch = OpenTransactionId::new();
+    block_on(client.begin_mergeable(batch)).unwrap();
+    let tx = client.tx_ref(batch);
+    let staged = block_on(tx.update(
+        "drafts",
+        note_row(),
+        BTreeMap::from([("owner".to_owned(), subject(alice()))]),
+        UpdateOptions {
+            target: draft_view(),
+            ..Default::default()
+        },
+    ))
+    .and_then(|_| {
+        block_on(tx.delete(
+            "drafts",
+            note_row(),
+            DeleteOptions {
+                target: draft_view(),
+                ..Default::default()
+            },
+        ))
+    });
+    let committed = staged.and_then(|_| block_on(client.commit_mergeable_handle(batch)));
+    if let Ok(receipt) = committed {
+        let verdict = drive(
+            &[&client, &server],
+            client.wait_for_transaction(receipt.0, DurabilityTier::Global),
+        );
+        assert!(verdict.is_err(), "the authority accepted the takeover");
+    }
+    assert_eq!(draft(&server), Some((true, "bob's".to_owned())));
 }
