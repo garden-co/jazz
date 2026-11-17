@@ -6302,6 +6302,159 @@ mod tests {
         );
     }
 
+    /// A connection's prelude, `Hello` and `frames` sent back to back,
+    /// without waiting for the server's `Hello`, as a pipelining thin client
+    /// sends them (SPEC §8.1.2).
+    async fn send_ahead_of_hello(
+        addr: std::net::SocketAddr,
+        state: &Arc<ServerState>,
+        prelude: Vec<u8>,
+        requests: Vec<jazz::thin::ThinRequest>,
+    ) -> TestWs {
+        let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
+            .await
+            .expect("connect websocket");
+        ws.send(WsMessage::Binary(prelude.into())).await.unwrap();
+        ws.send(WsMessage::Binary(
+            ws_client_hello_batch_with_features(jazz::wire::FEATURE_THIN_RESULTS).into(),
+        ))
+        .await
+        .unwrap();
+        for request in requests {
+            let frame = encode_frame(&WireFrame::ThinRequest(request)).unwrap();
+            let batch = postcard::to_allocvec(&vec![frame]).unwrap();
+            ws.send(WsMessage::Binary(batch.into())).await.unwrap();
+        }
+        ws
+    }
+
+    fn insert_doc(id: u64, title: &str, owner: AuthorSubject) -> jazz::thin::ThinRequest {
+        jazz::thin::ThinRequest {
+            id,
+            op: jazz::thin::ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells(title, owner),
+                options: Vec::new(),
+                transaction: None,
+            },
+        }
+    }
+
+    // Pipelining (SPEC §8.1.2, §8.14): a thin client sends its schema and
+    // first requests right behind its `Hello`. The server reads none of them
+    // before it admitted the connection and said hello, then serves them in
+    // order, each against the schema declared before it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_requests_sent_before_the_servers_hello_are_served_in_order() {
+        use jazz::thin::{ThinBody, ThinOp, ThinRequest};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let bundle = current_bundle(addr, &state).await;
+        let mut ws = send_ahead_of_hello(
+            addr,
+            &state,
+            ws_pinned_session_prelude(alice, &bundle),
+            vec![
+                ThinRequest {
+                    id: 0,
+                    op: ThinOp::Schema {
+                        schema: serde_json::to_vec(&schema).unwrap(),
+                    },
+                },
+                insert_doc(1, "first", alice),
+                insert_doc(2, "second", alice),
+                ThinRequest {
+                    id: 3,
+                    op: ThinOp::Query {
+                        query: docs_query(),
+                        options: remote_read(),
+                        transaction: None,
+                    },
+                },
+            ],
+        )
+        .await;
+
+        let hello = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("an answer")
+            .expect("a frame")
+            .expect("a message");
+        assert!(
+            matches!(decode_ws_message(&hello).as_slice(), [WireFrame::Hello(_)]),
+            "the server says hello before it answers anything sent ahead"
+        );
+        let responses = thin_responses_until(&mut ws, |responses| responses.len() >= 4).await;
+        assert_eq!(
+            responses
+                .iter()
+                .map(|response| response.id)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3],
+            "answered in the order sent"
+        );
+        assert_eq!(responses[0].body, ThinBody::Ok);
+        let (ThinBody::Written { seq: first, .. }, ThinBody::Written { seq: second, .. }) =
+            (&responses[1].body, &responses[2].body)
+        else {
+            panic!("both inserts commit: {responses:?}");
+        };
+        assert!(first < second, "committed in the order sent");
+        let ThinBody::Rows { rows, .. } = &responses[3].body else {
+            panic!("the query answers rows: {:?}", responses[3]);
+        };
+        assert_eq!(
+            titles_of(jazz::binding_codec::decode_rows(rows).unwrap()),
+            vec!["first".to_owned(), "second".to_owned()],
+            "the query, sent after both inserts, sees them"
+        );
+    }
+
+    // A connection refused before its `Hello` never reads what was sent
+    // behind the client's: nothing sent ahead takes effect.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_connection_takes_nothing_sent_ahead_of_the_servers_hello() {
+        use jazz::thin::{ThinOp, ThinRequest};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let schema_request = || ThinRequest {
+            id: 0,
+            op: ThinOp::Schema {
+                schema: serde_json::to_vec(&schema).unwrap(),
+            },
+        };
+        // Refused at admission: a user session not pinned to the app's
+        // bundle, and a prelude that is not JSON.
+        for prelude in [ws_session_prelude(alice), b"not json".to_vec()] {
+            let mut ws = send_ahead_of_hello(
+                addr,
+                &state,
+                prelude,
+                vec![schema_request(), insert_doc(1, "refused", alice)],
+            )
+            .await;
+            let mut frames = Vec::new();
+            while let Ok(Some(Ok(message))) =
+                tokio::time::timeout(Duration::from_secs(5), ws.next()).await
+            {
+                frames.extend(decode_ws_message(&message));
+            }
+            assert!(
+                matches!(frames.as_slice(), [WireFrame::Error(_)]),
+                "refused with one error, then closed, answering nothing sent ahead: {frames:?}"
+            );
+        }
+
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut ws, &schema).await;
+        assert!(
+            thin_titles(&mut ws, 1, None).await.is_empty(),
+            "no insert sent ahead of a refusal was written"
+        );
+    }
+
     /// Publish the docs schema with `select` as its read policy, as a
     /// backend publishes its bundle on boot: the answer's status and body.
     async fn post_docs_bundle(
