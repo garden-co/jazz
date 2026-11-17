@@ -1,0 +1,48 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "392eedb6f00875a3d0fe9ac829b498e8abc79fdd65aefeed69fedff649ed54d2"
+  },
+  "tables": {
+    "canvases": {
+      "columns": { "chatId": "uuid" },
+      "relations": {
+        "chat": { "rel": "chats", "column": "chatId" },
+        "strokesViaCanvas": { "reverse": "strokes", "relation": "canvas" }
+      }
+    },
+    "chatMembers": {
+      "columns": { "chatId": "uuid", "userId": "uuid", "joinCode": "string?" },
+      "relations": { "chat": { "rel": "chats", "column": "chatId" } }
+    },
+    "chats": {
+      "columns": { "name": "string?", "isPublic": "boolean", "joinCode": "string?" },
+      "relations": {
+        "canvasesViaChat": { "reverse": "canvases", "relation": "chat" },
+        "chatMembersViaChat": { "reverse": "chatMembers", "relation": "chat" },
+        "messagesViaChat": { "reverse": "messages", "relation": "chat" }
+      }
+    },
+    "messages": {
+      "columns": { "chatId": "uuid", "text": "string", "senderId": "uuid" },
+      "relations": {
+        "chat": { "rel": "chats", "column": "chatId" },
+        "reactionsViaMessage": { "reverse": "reactions", "relation": "message" },
+        "sender": { "rel": "profiles", "column": "senderId" }
+      }
+    },
+    "profiles": {
+      "columns": { "userId": "uuid", "name": "string", "avatar": "string?" },
+      "relations": { "messagesViaSender": { "reverse": "messages", "relation": "sender" } }
+    },
+    "reactions": {
+      "columns": { "messageId": "uuid", "userId": "uuid", "emoji": "string" },
+      "relations": { "message": { "rel": "messages", "column": "messageId" } }
+    },
+    "strokes": {
+      "columns": { "canvasId": "uuid", "color": "string", "width": "int", "pointsJson": "string" },
+      "relations": { "canvas": { "rel": "canvases", "column": "canvasId" } }
+    }
+  }
+}

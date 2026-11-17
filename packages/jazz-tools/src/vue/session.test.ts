@@ -5,7 +5,7 @@ import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import { JazzProvider, useJazzSession } from "./session.js";
 import { ownJazzSession, startJazzSession, type JazzSession } from "../session/jazz-session.js";
-import { useJazzClient } from "./provider.js";
+import { JazzClientProvider, useJazzClient } from "./provider.js";
 import type { JazzClient } from "../web/create-jazz-client.js";
 vi.mock("../web/create-jazz-client.js", () => ({ openJazzClient: vi.fn() }));
 const account = Object.freeze({
@@ -107,5 +107,43 @@ describe("Vue session provider", () => {
     await logout;
     expect(session.getSnapshot().status).toBe("signed-out");
     await session.close();
+  });
+  it("a nested <JazzClientProvider client> reads its own client, not the session", async () => {
+    const { session } = await fixture();
+    const inner = {
+      db: { onAuthChanged: () => () => {} } as never,
+      session: {
+        user: "inner-account",
+        identity: { issuer: "https://issuer.example", subject: "inner" },
+        claims: {},
+        authMode: "external",
+      },
+      shutdown: vi.fn(async () => {}),
+    } as unknown as JazzClient;
+    let outerUser: string | undefined;
+    let nested: ReturnType<typeof useJazzSession> | undefined;
+    const Outer = defineComponent({
+      setup() {
+        outerUser = useJazzSession().snapshot.value.user?.accountId;
+        return () => h(JazzClientProvider, { client: inner }, { default: () => h(Inner) });
+      },
+    });
+    const Inner = defineComponent({
+      setup() {
+        nested = useJazzSession();
+        return () => h("p", "inner");
+      },
+    });
+    const app = createApp({
+      render: () => h(JazzProvider, { session }, { default: () => h(Outer) }),
+    });
+    app.mount(document.createElement("div"));
+    await flush();
+    expect(outerUser).toBe(account.id);
+    expect(nested!.snapshot.value.client).toBe(inner);
+    expect(nested!.snapshot.value.user?.accountId).toBe("inner-account");
+    await expect(nested!.signOut()).rejects.toThrow(/outside a Jazz session/);
+    expect(session.getSnapshot().status).toBe("ready");
+    app.unmount();
   });
 });

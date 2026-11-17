@@ -8,3 +8,6 @@
 pub mod heap_profiling;
 
 pub mod alpha59_alpha60;
+/// `generate` and `migrations create` on an app's directory, shared with
+/// the npm CLI through jazz-napi.
+pub use jazz_codegen::project as app_files;

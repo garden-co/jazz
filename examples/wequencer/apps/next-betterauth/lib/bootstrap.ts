@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { jazz } from "@/lib/jazz.server";
 
 /** Provision the signed-in profile outside the application's read path. */

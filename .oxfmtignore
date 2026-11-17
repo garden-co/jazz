@@ -17,6 +17,9 @@ dev/benchmarks/**/*.html
 **/jazz.app.json
 **/jazz.permissions.json
 
+# The codegen's golden bindings, byte for byte what the generator writes.
+crates/jazz-codegen/tests/apps/**
+
 # Pristine upstream copy; jazz.patch must record every change to it.
 vendor/sqlite-wasm-rs/**
 !vendor/sqlite-wasm-rs/JAZZ_PATCH.md

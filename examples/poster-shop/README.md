@@ -29,7 +29,7 @@ animation frame. Both are ordinary local-first updates.
 
 ## Authorization
 
-`permissions.ts` gives every child table its own role predicate (#1926).
+`jazz.permissions.json` gives every child table its own role predicate (#1926).
 No client can create a canvas or promote itself: canvases and first admins
 come only from the server bootstrap, and other memberships from an admin or
 the server invite route.

@@ -9,7 +9,7 @@ import { List, ListItem } from "@astryxdesign/core/List";
 import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
-import { app, type Show } from "../../schema.js";
+import { app, type Show } from "../../jazz.generated.js";
 import { removeFromCrew, rotateInvite, type CrewMember } from "../model/actions.js";
 import { useMe } from "../model/me.js";
 import { href, navigate } from "../router.js";

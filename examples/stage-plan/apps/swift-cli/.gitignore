@@ -1,0 +1,4 @@
+.build/
+.swiftpm/
+server.log
+demo.out

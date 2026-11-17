@@ -42,7 +42,7 @@ pub struct NativeTransportRequest {
     /// as a browser's request carries the app's cookie. Never sent to a core.
     pub authorization: Option<String>,
     /// The published permissions bundle a stated session is pinned to
-    /// (see [`crate::tools::AppContext::bundle`]).
+    /// (see `AppContext::bundle`, with the `runtime` feature).
     pub bundle: Option<String>,
     pub wake: Arc<dyn Fn() + Send + Sync>,
 }
@@ -118,11 +118,25 @@ pub enum NativeTransportError {
     /// [`Self::Terminal`] until the caller supplies a new credential.
     #[error("{0}")]
     AuthRejected(String),
+    /// The server answered the attempt with a wire error before its hello.
+    /// The shared link classifies it ([`crate::link::LinkFailure::from_wire_error`]),
+    /// so every host treats a server's answer the same way.
+    #[error("websocket rejected: {0:?}")]
+    Wire(crate::wire::WireError),
 }
 
 impl NativeTransportError {
+    /// Whether the attempt may succeed later without a change on this side:
+    /// the network failed, or the server is still starting.
     pub fn is_retryable(&self) -> bool {
-        matches!(self, Self::Retryable(_))
+        match self {
+            Self::Retryable(_) => true,
+            Self::Wire(error) => matches!(
+                crate::link::LinkFailure::from_wire_error(error, false),
+                crate::link::LinkFailure::Network(_) | crate::link::LinkFailure::ServerNotReady(_)
+            ),
+            Self::Terminal(_) | Self::AuthRejected(_) => false,
+        }
     }
 }
 

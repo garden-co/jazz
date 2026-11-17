@@ -1,4 +1,8 @@
 //! Native libsodium primitives. Envelope framing and context derivation live in TypeScript.
+// napi-derive registers `#[napi]` exports only outside `cfg(test)`, so the lib
+// test build sees this module's exports as unused.
+#![cfg_attr(test, allow(dead_code))]
+
 use std::sync::OnceLock;
 
 use libsodium_sys::{

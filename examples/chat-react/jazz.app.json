@@ -1,6 +1,9 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "392eedb6f00875a3d0fe9ac829b498e8abc79fdd65aefeed69fedff649ed54d2"
+  },
   "tables": {
     "canvases": {
       "columns": { "chatId": "uuid" },

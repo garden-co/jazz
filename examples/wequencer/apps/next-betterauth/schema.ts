@@ -1,8 +1,8 @@
 import { schema as s } from "jazz-tools";
-import { schema as betterAuthSchema } from "./schema-better-auth/schema";
-import { migrations } from "./migrations";
+import { tables as betterAuthSchema } from "./schema-better-auth/schema";
+import { permissions as betterAuthPermissions } from "./schema-better-auth/schema";
 
-const schema = {
+export const schema = s.defineSchema({
   ...betterAuthSchema,
   profiles: s.table(
     {
@@ -126,13 +126,97 @@ const schema = {
       { session: s.rel("sessions", "session_id"), profile: s.rel("profiles", "profile_id") },
     )
     .indexOnly(["session_id", "heartbeat_at"]),
-};
+});
 
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
-export type Session = s.RowOf<typeof app.sessions>;
-export type Track = s.RowOf<typeof app.tracks>;
-export type Step = s.RowOf<typeof app.steps>;
-export type Pattern = s.RowOf<typeof app.patterns>;
-export type Instrument = Track["instrument"];
-export type MemberRole = s.RowOf<typeof app.session_members>["role"];
+const { definePermissions, exists, allowedTo, session, anyOf, allOf } = schema;
+
+const isSessionMember = (session_id: s.Uuid) =>
+  exists.session_members({ session_id, member_author: session.user });
+
+const hasSessionRole = (session_id: s.Uuid, role: "owner" | "editor" | "viewer") =>
+  exists.session_members({ session_id, member_author: session.user, role });
+
+const canEditSession = (session_id: s.Uuid) =>
+  anyOf(hasSessionRole(session_id, "editor"), hasSessionRole(session_id, "owner"));
+
+// Administrative authority is the immutable system author of the session
+// row. `owner` is only the creator's initial collaboration role: deleting
+// or replacing that mutable membership row must not transfer or revoke the
+// creator's ability to administer the session.
+const createdByMe = { "$createdBy.account": session.user };
+
+const mine = { author: session.user };
+
+// A step's track and pattern must both belong to the step's session, and
+// the writer must be able to edit that session.
+const stepFitsSession = (step: s.Row<typeof schema, "steps">) =>
+  allOf(
+    canEditSession(step.session_id),
+    step.track.where({ session_id: step.session_id }),
+    step.pattern.where({ session_id: step.session_id }),
+  );
+
+export const permissions = definePermissions({
+  ...betterAuthPermissions,
+  patterns: {
+    read: (pattern) => isSessionMember(pattern.session_id),
+    insert: (pattern) => canEditSession(pattern.session_id),
+    update: (pattern) => canEditSession(pattern.session_id),
+    delete: (pattern) => pattern.session.where(createdByMe),
+  },
+  presence: {
+    read: (presence) => isSessionMember(presence.session_id),
+    insert: (presence) =>
+      allOf(isSessionMember(presence.session_id), allowedTo.update(presence.profile)),
+    update: (presence) =>
+      allOf(isSessionMember(presence.session_id), allowedTo.update(presence.profile)),
+    delete: createdByMe,
+  },
+  profiles: {
+    // Bandmates see each other's display name once that profile has shown
+    // presence in a session they can both read. Presence stays advisory: it
+    // only reveals a name, never grants a write.
+    read: (profile) => anyOf(mine, allowedTo.read(profile.presenceViaProfile)),
+    insert: mine,
+    update: mine,
+    delete: mine,
+  },
+  session_members: {
+    read: (member) => allowedTo.read(member.session),
+    insert: (member) => allowedTo.update(member.session),
+    update: false,
+    delete: (member) => allowedTo.update(member.session),
+  },
+  sessions: {
+    read: (sessionRow) => anyOf(createdByMe, isSessionMember(sessionRow.id)),
+    insert: true,
+    update: createdByMe,
+    delete: createdByMe,
+  },
+  steps: {
+    read: (step) => isSessionMember(step.session_id),
+    insert: stepFitsSession,
+    update: stepFitsSession,
+    delete: (step) => canEditSession(step.session_id),
+  },
+  tracks: {
+    read: (track) => isSessionMember(track.session_id),
+    insert: (track) => canEditSession(track.session_id),
+    update: (track) => canEditSession(track.session_id),
+    delete: (track) => track.session.where(createdByMe),
+  },
+  transport_observations: {
+    read: (observation) => isSessionMember(observation.session_id),
+    // An observation may name the playing pattern, which must be this session's.
+    insert: (observation) =>
+      allOf(
+        canEditSession(observation.session_id),
+        anyOf(
+          { pattern_id: null },
+          observation.pattern.where({ session_id: observation.session_id }),
+        ),
+      ),
+    update: (observation) => canEditSession(observation.session_id),
+    delete: (observation) => canEditSession(observation.session_id),
+  },
+});

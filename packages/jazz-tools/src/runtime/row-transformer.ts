@@ -14,12 +14,7 @@ import {
 import { normalizeIncludeEntries, type NormalizedIncludeSpec } from "./query-builder-shape.js";
 import { hiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
 
-import {
-  columnTransformDependencies,
-  dependencyContext,
-  storedDependencyValues,
-  type ColumnTransform,
-} from "./column-transforms.js";
+import type { ColumnTransform } from "./column-transforms.js";
 
 export type { WasmValue };
 
@@ -140,23 +135,17 @@ function buildIncludePlans(
 }
 
 type ReadColumnTransformRegistry = Readonly<
-  Record<
-    string,
-    Readonly<Record<string, Pick<ColumnTransform, "from" | "dependsOn" | "computed">>> | undefined
-  >
+  Record<string, Readonly<Record<string, Pick<ColumnTransform, "from" | "computed">>> | undefined>
 >;
 
 export function applyColumnTransforms(
   row: Record<string, unknown>,
-  transforms?: Readonly<Record<string, Pick<ColumnTransform, "from" | "dependsOn" | "computed">>>,
+  transforms?: Readonly<Record<string, Pick<ColumnTransform, "from" | "computed">>>,
   excludedColumns: readonly string[] = [],
-  stored?: Readonly<Record<string, unknown>>,
   appValues?: ReadonlyMap<string, unknown>,
   partialColumns?: Readonly<Record<string, unknown>>,
 ): Record<string, unknown> {
   if (!transforms) return row;
-  const source =
-    stored ?? storedDependencyValues(columnTransformDependencies(transforms).columns, row);
   for (const column in transforms) {
     if (
       !Object.hasOwn(transforms, column) ||
@@ -170,7 +159,7 @@ export function applyColumnTransforms(
       row[column] =
         appValues?.has(column) && (!partialColumns || !Object.hasOwn(partialColumns, column))
           ? appValues.get(column)
-          : transform.from(row[column], dependencyContext(transform, source));
+          : transform.from(row[column]);
   }
   return row;
 }
@@ -289,37 +278,18 @@ export function unwrapValue(v: WasmValue, columnType?: ColumnType, columnName?: 
     case "Boolean":
       return v.value;
     case "Integer":
-    case "BigInt":
     case "Double":
       return v.value;
+    case "BigInt":
+      // A schema default (what an insert returns for an omitted column)
+      // carries its value as the decimal string of the bindings' JSON.
+      return typeof v.value === "bigint" ? v.value : BigInt(v.value as number | string);
     case "Timestamp":
       return timestampToDate(v.value, columnName);
     case "Bytea":
       return toByteArray((v as { value: unknown }).value);
     case "Null":
       return null;
-    case "Enum": {
-      if (columnType?.type !== "EnumPayload") {
-        // Untyped paths (generic Row/Array fallbacks, direct runtime callers) have no
-        // field names to decode against; keep the case and values positionally.
-        return {
-          type: v.value.case,
-          values: v.value.values.map((entry) => unwrapValue(entry)),
-        };
-      }
-      const entry = columnType.cases.find((candidate) => candidate.name === v.value.case);
-      if (!entry || entry.fields.length !== v.value.values.length)
-        throw new Error("Invalid payload enum result");
-      return {
-        type: entry.name,
-        ...Object.fromEntries(
-          entry.fields.map((field, index) => [
-            field.name,
-            unwrapValue(v.value.values[index]!, field.column_type, field.name),
-          ]),
-        ),
-      };
-    }
     case "Array":
       if (columnType?.type === "Array") {
         return v.value.map((entry) => unwrapValue(entry, columnType.element));

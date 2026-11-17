@@ -1,0 +1,47 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "employees": {
+      "columns": {
+        "name": "string",
+        "manager": "uuid?",
+        "mentors": { "array": "uuid" },
+        "homeTeam": "uuid?"
+      },
+      "relations": {
+        "employeesViaManager": { "reverse": "employees", "relation": "managerRelation" },
+        "employeesViaMentors": { "reverse": "employees", "relation": "mentorsRelation" },
+        "homeTeamRelation": { "rel": "teams", "column": "homeTeam" },
+        "managerRelation": { "rel": "employees", "column": "manager" },
+        "mentorsRelation": { "rel": "employees", "column": "mentors" },
+        "projectsViaApprover": { "reverse": "projects", "relation": "approverRelation" },
+        "teamsViaLead": { "reverse": "teams", "relation": "leadRelation" }
+      }
+    },
+    "projects": {
+      "columns": { "name": "string", "team": "uuid", "approver": "uuid?" },
+      "relations": {
+        "approverRelation": { "rel": "employees", "column": "approver" },
+        "teamRelation": { "rel": "teams", "column": "team" },
+        "teamsViaFlagshipProject": { "reverse": "teams", "relation": "flagshipProjectRelation" }
+      }
+    },
+    "teams": {
+      "columns": {
+        "name": "string",
+        "lead": "uuid",
+        "parentTeam": "uuid?",
+        "flagshipProject": "uuid?"
+      },
+      "relations": {
+        "employeesViaHomeTeam": { "reverse": "employees", "relation": "homeTeamRelation" },
+        "flagshipProjectRelation": { "rel": "projects", "column": "flagshipProject" },
+        "leadRelation": { "rel": "employees", "column": "lead" },
+        "parentTeamRelation": { "rel": "teams", "column": "parentTeam" },
+        "projectsViaTeam": { "reverse": "projects", "relation": "teamRelation" },
+        "teamsViaParentTeam": { "reverse": "teams", "relation": "parentTeamRelation" }
+      }
+    }
+  }
+}

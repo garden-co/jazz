@@ -1,29 +1,15 @@
 import { expect } from "vitest";
-import type { Db, QueryBuilder, TableProxy } from "../../src/runtime/db.js";
+import type { Db, QueryBuilder } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
-export interface Todo {
-  id: string;
-  title: string;
-  rank: number | null;
-  done: boolean;
-}
+import { app, type Todo } from "./apps/local-subscription/jazz.generated.js";
 
-export const schema: WasmSchema = {
-  todos: {
-    columns: [
-      { name: "title", column_type: { type: "Text" }, nullable: false },
-      { name: "rank", column_type: { type: "Integer" }, nullable: true },
-      { name: "done", column_type: { type: "Boolean" }, nullable: false },
-    ],
-  },
-};
+export { app };
+export type { Todo };
 
-export const todos: TableProxy<Todo, Omit<Todo, "id">> = {
-  _table: "todos",
-  _schema: schema,
-  _rowType: {} as Todo,
-  _initType: {} as Omit<Todo, "id">,
-};
+/** The compiled schema of ./apps/local-subscription/, for hand-built queries. */
+export const schema: WasmSchema = app.wasmSchema;
+
+export const todos = app.todos;
 
 export function makeTodosQuery(body: {
   orderBy?: Array<[string, "asc" | "desc"]>;

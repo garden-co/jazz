@@ -36,12 +36,4 @@ describe("an app's shipped migrations", () => {
     expect(Object.keys(schema)).toEqual(["todos"]);
     expect(shippedMigrations(schema)).toBe(migrations);
   });
-
-  it("are none for an app that ships none", async () => {
-    const { shipMigrations, shippedMigrations } = await freshCopy();
-    const schema = { todos: { columns: [] } } as unknown as WasmSchema;
-    shipMigrations(schema, "none");
-    expect(shippedMigrations(schema)).toBeUndefined();
-    expect(() => shipMigrations(schema, undefined)).toThrow(/defineApp needs the app's migrations/);
-  });
 });

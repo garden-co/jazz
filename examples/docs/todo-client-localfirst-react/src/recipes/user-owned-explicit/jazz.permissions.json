@@ -1,0 +1,15 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "53847641d68d984b54456d712b35e264fb341716c215360b7faaa0bd5c68deee"
+  },
+  "tables": {
+    "todos": {
+      "read": "owner_id = session.user",
+      "insert": "true",
+      "update": "owner_id = session.user",
+      "delete": "owner_id = session.user"
+    }
+  }
+}

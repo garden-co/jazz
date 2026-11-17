@@ -1,6 +1,7 @@
 ---
 title: Jazz Cloud (deprecated)
 description: "Learn how to keep your app's data on Jazz Cloud, with your own backend in front for auth."
+languageTabs: main-backend
 ---
 
 <Callout type="warn" title="Deprecated">
@@ -38,8 +39,8 @@ Then point `createJazz` at Jazz Cloud with the `remote()` store:
 
 ```ts title="jazz.server.ts"
 import { createJazz, remote } from "jazz-tools/backend";
-import { app } from "./schema";
-import permissions from "./permissions";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const jazz = createJazz({
   app,

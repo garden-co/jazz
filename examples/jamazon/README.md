@@ -47,7 +47,7 @@ the Jazz design system.
   payments and runs a fulfilment worker that subscribes to paid orders and ships them after a
   short packing delay. Shoppers watch the order timeline (placed, paid, shipped) advance through
   the same live query.
-- **Permissions in `permissions.ts`.** The catalogue and stock are public and read-only. Carts
+- **Permissions in `jazz.permissions.json`.** The catalogue and stock are public and read-only. Carts
   and their lines belong to one account, quantities stay in range and a line cannot be moved into
   another cart. Orders, order lines, events and payments are readable by their shopper and
   written only by the backend.
@@ -105,13 +105,13 @@ Runs against a local Jazz server started by `createPolicyTestApp`:
 
 ## Layout
 
-| Path                          | What lives there                                               |
-| ----------------------------- | -------------------------------------------------------------- |
-| `schema.ts`, `permissions.ts` | Tables and row-level policies                                  |
-| `src/catalogue/catalogue.ts`  | The deterministic synthetic catalogue                          |
-| `src/lib/ids.ts`              | Deterministic (version 5) row ids                              |
-| `src/store/cart.ts`           | Cart hook, merge rules and guest cart claim                    |
-| `src/server/orders.ts`        | Checkout, payment and shipping workflow (backend authority)    |
-| `src/server/payments/`        | `PaymentProvider`, the sandbox and Stripe test mode            |
-| `src/server/fulfilment.ts`    | The worker that ships paid orders                              |
-| `src/components/`             | Storefront UI built from Astryx components with the Jazz theme |
+| Path                                     | What lives there                                               |
+| ---------------------------------------- | -------------------------------------------------------------- |
+| `jazz.app.json`, `jazz.permissions.json` | Tables and row-level policies                                  |
+| `src/catalogue/catalogue.ts`             | The deterministic synthetic catalogue                          |
+| `src/lib/ids.ts`                         | Deterministic (version 5) row ids                              |
+| `src/store/cart.ts`                      | Cart hook, merge rules and guest cart claim                    |
+| `src/server/orders.ts`                   | Checkout, payment and shipping workflow (backend authority)    |
+| `src/server/payments/`                   | `PaymentProvider`, the sandbox and Stripe test mode            |
+| `src/server/fulfilment.ts`               | The worker that ships paid orders                              |
+| `src/components/`                        | Storefront UI built from Astryx components with the Jazz theme |

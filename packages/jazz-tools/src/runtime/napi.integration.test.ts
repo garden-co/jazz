@@ -1,20 +1,22 @@
 import type { RowAuthor } from "../magic-columns.js";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { WebSocket as UndiciWebSocket } from "undici";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
-import { schema as s } from "../index.js";
 import { type TxId, type Row } from "./client.js";
 import type { Session } from "./context.js";
 import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
-import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
-import { deploy as deployProject } from "../dev/catalogue-project.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import type { CompiledPermissionsMap } from "../schema-permissions.js";
+import { deploy, startLocalJazzServer, testApp, testPermissions } from "../testing/index.js";
+import { publishLoadedDeployment } from "../dev/catalogue.js";
+import { DeploymentError, publishDeployment } from "../dev/catalogue-api.js";
+import type { PermissionsFile } from "../dev/codegen-napi.js";
+import { boundApp } from "../typed-app.js";
 import {
   createPersistentNapiNativeRuntimeAdapter,
   loadNapiModule,
@@ -124,38 +126,19 @@ const TEST_SCHEMA: WasmSchema = {
   },
 };
 
-const publicUnionApp = s.defineApp(
-  {
-    todos: s.table(
-      {
-        title: s.string(),
-        done: s.boolean(),
-      },
-      {},
-    ),
-  },
-  { migrations: "none" },
-);
-
-const publicUnionPermissions = s.definePermissions(publicUnionApp, ({ policy }) => {
-  policy.todos.allowRead.where({ done: false });
-  policy.todos.allowInsert.always();
-  policy.todos.allowUpdate.always();
-  policy.todos.allowDelete.always();
+const publicUnionApp = testApp({
+  tables: { todos: { columns: { title: "string", done: "boolean" } } },
 });
 
-const publicUnionBigIntApp = s.defineApp(
-  {
-    metrics: s.table(
-      {
-        label: s.string(),
-        value: s.bigint(),
-      },
-      {},
-    ),
+const publicUnionPermissions = testPermissions(publicUnionApp, {
+  tables: {
+    todos: { read: "done = false", insert: "true", update: "true", delete: "true" },
   },
-  { migrations: "none" },
-);
+});
+
+const publicUnionBigIntApp = testApp({
+  tables: { metrics: { columns: { label: "string", value: "bigint" } } },
+});
 
 const TIMESTAMP_SCHEMA: WasmSchema = {
   projects: {
@@ -176,12 +159,30 @@ const BYTEA_SCHEMA: WasmSchema = {
   },
 };
 
-let todoServerProjectPromise: Promise<LoadedSchemaProject> | null = null;
+type TodoServerProject = {
+  wasmSchema: WasmSchema;
+  permissions: CompiledPermissionsMap;
+  /** Its jazz.permissions.json, what a deployment takes. */
+  permissionsFile: PermissionsFile;
+};
 
-async function loadTodoServerProject(): Promise<LoadedSchemaProject> {
-  if (!todoServerProjectPromise) {
-    todoServerProjectPromise = loadCompiledSchema(TODO_SERVER_SCHEMA_DIR);
-  }
+let todoServerProjectPromise: Promise<TodoServerProject> | null = null;
+
+/** The todo-server-ts example's app, from its jazz.app.json and jazz.permissions.json. */
+async function loadTodoServerProject(): Promise<TodoServerProject> {
+  todoServerProjectPromise ??= (async () => {
+    const app = testApp(await readFile(join(TODO_SERVER_SCHEMA_DIR, "jazz.app.json"), "utf8"));
+    const permissionsText = await readFile(
+      join(TODO_SERVER_SCHEMA_DIR, "jazz.permissions.json"),
+      "utf8",
+    );
+    const permissions = testPermissions(app, permissionsText);
+    return {
+      wasmSchema: app.wasmSchema,
+      permissions,
+      permissionsFile: JSON.parse(permissionsText) as PermissionsFile,
+    };
+  })();
   return await todoServerProjectPromise;
 }
 
@@ -375,7 +376,7 @@ async function loadPolicyGraphPerfSchema(field: "mergedSchema" | "wasmSchema" = 
     Record<
       string,
       Omit<WasmSchema[string], "policies"> & {
-        policies?: import("../permissions/index.js").CompiledPermissions[string];
+        policies?: CompiledPermissionsMap[string];
       }
     >
   >;
@@ -390,38 +391,70 @@ async function loadPolicyGraphPerfSchema(field: "mergedSchema" | "wasmSchema" = 
   return { schema, permissions };
 }
 
-async function createPolicyGraphPerfSchemaDir(options?: {
-  includePermissionsFile?: boolean;
-}): Promise<string> {
-  const schemaDir = await createTempDir("jazz-napi-policy-graph-perf-schema-");
-  const fixtureJsonPath = fileURLToPath(
-    new URL("schema-source.json", POLICY_GRAPH_PERF_FIXTURE_DIR),
-  );
-  await writeFile(
-    join(schemaDir, "schema.ts"),
-    `
-      import { readFileSync } from "node:fs";
+/**
+ * Deploy the policy graph perf fixture as its project used to declare it: the
+ * fixture's `wasmSchema`, with the policies of its `mergedSchema`.
+ */
+async function deployPolicyGraphPerfFixture(options: {
+  serverUrl: string;
+  appId: string;
+  adminSecret: string;
+}): Promise<void> {
+  const { schema } = await loadPolicyGraphPerfSchema("wasmSchema");
+  const { permissions } = await loadPolicyGraphPerfSchema("mergedSchema");
+  await publishRawDeployment(options, await serverSchemaHash(options, schema), schema, permissions);
+}
 
-      const source = JSON.parse(readFileSync(${JSON.stringify(fixtureJsonPath)}, "utf8"));
-      export const app = { wasmSchema: source.wasmSchema };
-    `,
-  );
-  if (options?.includePermissionsFile ?? true) {
-    await writeFile(
-      join(schemaDir, "permissions.ts"),
-      `
-        import { readFileSync } from "node:fs";
+/**
+ * Publish a raw schema with engine policies as a deployment, as `deploy`
+ * publishes an app's: `hash` is the schema's hash (the server checks it).
+ */
+async function publishRawDeployment(
+  options: { serverUrl: string; appId: string; adminSecret: string },
+  hash: string,
+  schema: WasmSchema,
+  permissions: CompiledPermissionsMap,
+) {
+  return publishLoadedDeployment(options, {
+    deployment: {
+      targetSchemaHash: hash,
+      schemas: [{ hash, schema: { tables: schema } }],
+      migrations: [],
+      permissions,
+    },
+    warnings: [],
+  });
+}
 
-        const source = JSON.parse(readFileSync(${JSON.stringify(fixtureJsonPath)}, "utf8"));
-        export default Object.fromEntries(
-          Object.entries(source.mergedSchema).flatMap(([tableName, table]: [string, any]) =>
-            table.policies ? [[tableName, table.policies]] : [],
-          ),
-        );
-      `,
-    );
+/**
+ * The server's hash of a raw `schema` (with no app files to compile it
+ * from): it names the actual hash when refusing a schema claimed under
+ * another, and stores nothing.
+ */
+async function serverSchemaHash(
+  options: { serverUrl: string; appId: string; adminSecret: string },
+  schema: WasmSchema,
+): Promise<string> {
+  const claimed = "0".repeat(64);
+  try {
+    await publishDeployment(options.serverUrl, options, {
+      targetSchemaHash: claimed,
+      schemas: [{ hash: claimed, schema: { tables: schema } }],
+      migrations: [],
+      permissions: {},
+    });
+  } catch (error) {
+    const actual = (error as DeploymentError).details as { actual?: string } | undefined;
+    if (
+      error instanceof DeploymentError &&
+      error.code === "schema_hash_mismatch" &&
+      actual?.actual
+    ) {
+      return actual.actual;
+    }
+    throw error;
   }
-  return schemaDir;
+  throw new Error("the server took a schema under a made-up hash");
 }
 
 async function settleAsyncSyncWork(): Promise<void> {
@@ -771,8 +804,8 @@ describe("NAPI integration", () => {
         serverUrl: server.url,
         appId,
         adminSecret,
-        schema: todoServerProject.wasmSchema,
-        permissions: todoServerProject.permissions!,
+        app: todoServerProject.wasmSchema,
+        permissions: todoServerProject.permissionsFile,
       });
       const todoServerSchema = todoServerProject.wasmSchema;
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
@@ -965,13 +998,14 @@ describe("NAPI integration", () => {
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
-      await deployProject({
+      const todoServerProject = await loadTodoServerProject();
+      await deploy({
         serverUrl: server.url,
         appId,
         adminSecret,
-        schemaDir: TODO_SERVER_SCHEMA_DIR,
+        app: todoServerProject.wasmSchema,
+        permissions: todoServerProject.permissionsFile,
       });
-      const todoServerProject = await loadTodoServerProject();
       const todoServerSchema = todoServerProject.wasmSchema;
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
 
@@ -1089,7 +1123,6 @@ describe("NAPI integration", () => {
     const backendSecret = "napi-policy_graph-global-wait-deploy-secret";
     const adminSecret = "napi-policy_graph-global-wait-deploy-admin-secret";
     const { schema: policyGraphSchema, permissions } = await loadPolicyGraphPerfSchema();
-    const schemaDir = await createPolicyGraphPerfSchemaDir();
     let runtimeData: TempRuntimeData | null = null;
     const server = await startLocalJazzServer({
       appId,
@@ -1102,11 +1135,10 @@ describe("NAPI integration", () => {
     } | null = null;
 
     try {
-      await deployProject({
+      await deployPolicyGraphPerfFixture({
         serverUrl: server.url,
         appId,
         adminSecret,
-        schemaDir,
       });
 
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
@@ -1154,7 +1186,6 @@ describe("NAPI integration", () => {
       }
       await settleAsyncSyncWork();
       await cleanupTempRuntimeData(runtimeData);
-      await rm(schemaDir, { recursive: true, force: true });
       await server.stop();
     }
   }, 60_000);
@@ -1337,22 +1368,19 @@ describe("NAPI integration", () => {
     const backendSecret = "napi-policy_graph-reopen-secret";
     const adminSecret = "napi-policy_graph-reopen-admin-secret";
     const dataDir = await createTempDir("jazz-napi-policy_graph-reopen-server-");
-    let schemaDir: string | null = null;
     let server: Awaited<ReturnType<typeof startLocalJazzServer>> | null = null;
 
     try {
-      schemaDir = await createPolicyGraphPerfSchemaDir();
       server = await startLocalJazzServer({
         appId,
         backendSecret,
         adminSecret,
         dataDir,
       });
-      await deployProject({
+      await deployPolicyGraphPerfFixture({
         serverUrl: server.url,
         appId,
         adminSecret,
-        schemaDir,
       });
       await server.stop();
       server = null;
@@ -1368,9 +1396,6 @@ describe("NAPI integration", () => {
       if (server) {
         await server.stop();
       }
-      if (schemaDir) {
-        await rm(schemaDir, { recursive: true, force: true });
-      }
       await rm(dataDir, { recursive: true, force: true });
     }
   }, 60_000);
@@ -1383,7 +1408,6 @@ describe("NAPI integration", () => {
     const { schema: policyGraphSchema, permissions } = await loadPolicyGraphPerfSchema();
     const memberId = "00000000-0000-4000-8000-000000000001";
     const corporationId = randomUUID();
-    const schemaDir = await createPolicyGraphPerfSchemaDir();
     let server: Awaited<ReturnType<typeof startLocalJazzServer>> | null = null;
     let context: {
       asBackend(): Db;
@@ -1400,11 +1424,10 @@ describe("NAPI integration", () => {
         adminSecret,
         dataDir,
       });
-      await deployProject({
+      await deployPolicyGraphPerfFixture({
         serverUrl: server.url,
         appId,
         adminSecret,
-        schemaDir,
       });
       context = createJazzContext({
         appId,
@@ -1539,121 +1562,97 @@ describe("NAPI integration", () => {
       if (server) {
         await server.stop();
       }
-      await rm(schemaDir, { recursive: true, force: true });
       await rm(dataDir, { recursive: true, force: true });
     }
   }, 90_000);
 
   it("publishes inherited seeded-reachability permissions through the local server route", async () => {
     const appId = randomUUID();
-    const backendSecret = "napi-policy_graph-permissions-secret";
     const adminSecret = "napi-policy_graph-permissions-admin-secret";
-    const schemaDir = await createTempDir("jazz-napi-policy_graph-permissions-schema-");
+    const app = testApp({
+      tables: {
+        dropdown_entry: {
+          columns: { dropdowns_id: "uuid", label: "string" },
+          relations: { dropdowns: { rel: "dropdowns", column: "dropdowns_id" } },
+        },
+        dropdowns: {
+          columns: { name: "string" },
+          relations: {
+            dropdown_entryViaDropdowns: { reverse: "dropdown_entry", relation: "dropdowns" },
+            dropdowns_access_edgesViaResource: {
+              reverse: "dropdowns_access_edges",
+              relation: "resource",
+            },
+          },
+        },
+        dropdowns_access_edges: {
+          columns: {
+            resource_id: "uuid",
+            team_id: "uuid",
+            grant_role: "string",
+            administrator: "boolean",
+          },
+          relations: {
+            resource: { rel: "dropdowns", column: "resource_id" },
+            team: { rel: "team", column: "team_id" },
+          },
+        },
+        team: {
+          columns: { identity_key: "string" },
+          relations: {
+            dropdowns_access_edgesViaTeam: { reverse: "dropdowns_access_edges", relation: "team" },
+            team_entryViaTarget: { reverse: "team_entry", relation: "target" },
+            team_entryViaTeam: { reverse: "team_entry", relation: "team" },
+          },
+        },
+        team_entry: {
+          columns: { team_id: "uuid", target_id: "uuid", administrator: "boolean" },
+          relations: {
+            target: { rel: "team", column: "target_id" },
+            team: { rel: "team", column: "team_id" },
+          },
+        },
+      },
+    });
+    // Teams reachable from the user's entries along `target` (up to 32 hops),
+    // then their EDITOR edges to this dropdown.
+    const editorOfReachableTeam =
+      "exists (from recursive(seed: from team_entry join team as __hop_0 on team_entry.target_id = __hop_0.id where team_entry.team_id = session.user select __hop_0.id as id, step: from team_entry where team_entry.administrator = bool(false) and team_entry.team_id = id(frontier) select team_entry.target_id as id, frontier: id(row), dedupe: (id(row)), maxDepth: 32) join dropdowns_access_edges as __recursive_join_0 on team.id = __recursive_join_0.team_id where __recursive_join_0.resource_id = outer.id and __recursive_join_0.grant_role in [text('EDITOR')] and __recursive_join_0.administrator = bool(false) select __recursive_join_0.id as id)";
+    const permissions = {
+      format: 1,
+      tables: {
+        dropdown_entry: {
+          read: "allowedTo.read(dropdowns)",
+          insert: "allowedTo.update(dropdowns)",
+          update: "allowedTo.update(dropdowns)",
+          delete: "allowedTo.update(dropdowns)",
+        },
+        dropdowns: {
+          read: editorOfReachableTeam,
+          insert: "true",
+          update: {
+            old: editorOfReachableTeam,
+            new: "true",
+          },
+          delete: "true",
+        },
+        dropdowns_access_edges: {
+          read: "true",
+          insert: "true",
+          update: "true",
+          delete: "true",
+        },
+      },
+    };
     const server = await startLocalJazzServer({
       appId,
-      backendSecret,
+      backendSecret: "napi-policy_graph-permissions-secret",
       adminSecret,
     });
 
     try {
-      const publicApiImport = pathToFileURL(join(process.cwd(), "src/index.ts")).href;
-      await writeFile(
-        join(schemaDir, "schema.ts"),
-        `
-          import { schema as s } from ${JSON.stringify(publicApiImport)};
-
-          const schema = {
-            team: s.table({
-              identity_key: s.string(),
-            }, { "team_entryViaTeam": s.reverse("team_entry", "team"), "team_entryViaTarget": s.reverse("team_entry", "target"), "dropdowns_access_edgesViaTeam": s.reverse("dropdowns_access_edges", "team") }),
-            team_entry: s.table({
-              team_id: s.uuid(),
-              target_id: s.uuid(),
-              administrator: s.boolean(),
-            }, { "team": s.rel("team", "team_id"), "target": s.rel("team", "target_id") }),
-            dropdowns: s.table({
-              name: s.string(),
-            }, { "dropdowns_access_edgesViaResource": s.reverse("dropdowns_access_edges", "resource"), "dropdown_entryViaDropdowns": s.reverse("dropdown_entry", "dropdowns") }),
-            dropdowns_access_edges: s.table({
-              resource_id: s.uuid(),
-              team_id: s.uuid(),
-              grant_role: s.string(),
-              administrator: s.boolean(),
-            }, { "resource": s.rel("dropdowns", "resource_id"), "team": s.rel("team", "team_id") }),
-            dropdown_entry: s.table({
-              dropdowns_id: s.uuid(),
-              label: s.string(),
-            }, { "dropdowns": s.rel("dropdowns", "dropdowns_id") }),
-          };
-
-          type AppSchema = s.Schema<typeof schema>;
-          export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
-        `,
-      );
-      await writeFile(
-        join(schemaDir, "permissions.ts"),
-        `
-          import { schema as s } from ${JSON.stringify(publicApiImport)};
-          import { app } from "./schema.js";
-
-          export default s.definePermissions(app, ({ policy, allowedTo, session }) => {
-            const directlyReachableTeams = policy.team_entry
-              .where({ team_id: session.user })
-              .hopTo("target");
-            const memberReachableTeams = directlyReachableTeams.gather({
-              step: ({ current }) =>
-                policy.team_entry
-                  .where({ team_id: current, administrator: false })
-                  .hopTo("target"),
-              maxDepth: 32,
-            });
-
-            policy.dropdowns.allowRead.where((dropdown) =>
-              policy.exists(
-                memberReachableTeams.hopTo("dropdowns_access_edgesViaTeam").where({
-                  "dropdowns_access_edges.resource_id": dropdown.id,
-                  grant_role: { in: ["EDITOR"] },
-                  administrator: false,
-                }),
-              ),
-            );
-            policy.dropdowns.allowInsert.where({});
-            policy.dropdowns.allowUpdate
-              .whereOld((dropdown) =>
-                policy.exists(
-                  memberReachableTeams.hopTo("dropdowns_access_edgesViaTeam").where({
-                    "dropdowns_access_edges.resource_id": dropdown.id,
-                    grant_role: { in: ["EDITOR"] },
-                    administrator: false,
-                  }),
-                ),
-              )
-              .whereNew({});
-            policy.dropdowns.allowDelete.where({});
-
-            policy.dropdowns_access_edges.allowRead.where({});
-            policy.dropdowns_access_edges.allowInsert.where({});
-            policy.dropdowns_access_edges.allowUpdate.where({});
-            policy.dropdowns_access_edges.allowDelete.where({});
-
-            policy.dropdown_entry.allowRead.where(allowedTo.read("dropdowns"));
-            policy.dropdown_entry.allowInsert.where(allowedTo.update("dropdowns"));
-            policy.dropdown_entry.allowUpdate
-              .whereOld(allowedTo.update("dropdowns"))
-              .whereNew(allowedTo.update("dropdowns"));
-            policy.dropdown_entry.allowDelete.where(allowedTo.update("dropdowns"));
-          });
-        `,
-      );
-
-      await deployProject({
-        serverUrl: server.url,
-        appId,
-        adminSecret,
-        schemaDir,
-      });
+      await deploy({ serverUrl: server.url, appId, adminSecret, app, permissions });
     } finally {
-      await rm(schemaDir, { recursive: true, force: true });
       await server.stop();
     }
   }, 60_000);
@@ -1682,8 +1681,8 @@ describe("NAPI integration", () => {
         serverUrl: server.url,
         appId,
         adminSecret,
-        schema: todoServerProject.wasmSchema,
-        permissions: todoServerProject.permissions!,
+        app: todoServerProject.wasmSchema,
+        permissions: todoServerProject.permissionsFile,
       });
       const todoServerSchema = todoServerProject.wasmSchema;
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
@@ -1768,13 +1767,13 @@ describe("NAPI integration", () => {
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
-      const { bundle } = await deploy({
-        serverUrl: server.url,
-        appId,
-        adminSecret,
-        schema: TEST_SCHEMA,
-        permissions: {},
-      });
+      // TEST_SCHEMA as is, with no permissions; publicUnionApp has its columns.
+      const { bundle } = await publishRawDeployment(
+        { serverUrl: server.url, appId, adminSecret },
+        boundApp(publicUnionApp.wasmSchema)!.schema.current,
+        TEST_SCHEMA,
+        {},
+      );
 
       writerRuntimeData = await createTempRuntimeData("jazz-napi-sync-writer-");
       writerContext = createJazzContext({

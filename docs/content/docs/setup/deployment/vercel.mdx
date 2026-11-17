@@ -1,6 +1,7 @@
 ---
 title: Vercel
 description: "Learn how to run Jazz inside your Next.js app on Vercel, with each environment's data in its own Sandbox."
+languageTabs: main-backend
 ---
 
 On Vercel, your Next.js app is the whole deployment. The `vercel()` store keeps each namespace's
@@ -25,8 +26,8 @@ Use the `vercel()` store:
 
 ```ts title="jazz.server.ts"
 import { createJazz, perBranch, vercel } from "jazz-tools/backend";
-import { app } from "./schema";
-import permissions from "./permissions";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const jazz = createJazz({
   app,

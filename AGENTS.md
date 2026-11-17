@@ -35,11 +35,13 @@ layers, WASM + NAPI + React Native bindings.
 - **Docs sidebar.** A sidebar entry is either a page link or a folder
   expander, never both: docs folders get no `index.mdx` and no `"index"` in
   `meta.json`. Put an overview in its own page or in the pages that need it.
-- **Schema changes.** Never delete or move a store (an example's, a dev
-  backend's, a test fixture you didn't create) to get past a schema error: it
-  means a migration is missing. Run `npx jazz-tools migrations create` before
-  the first change to a schema a store already holds, and ship the app's
-  migrations with `defineApp(schema, { migrations })`.
+- **Schema changes.** Edit `schema.ts`, run
+  `npx jazz-tools migrations create --name <name>` and resolve every
+  `"TODO: …"` it writes, then run `npx jazz-tools generate` and commit
+  `schema.ts` and `migrations/` with the files it writes (`jazz.app.json`,
+  `jazz.permissions.json` and the bindings). Never edit those by hand. Never delete or move a store (an
+  example's, a dev backend's, a test fixture you didn't create) to get past a
+  schema error: it means a migration is missing.
 - **Backlog.** Follow-ups go in GitHub Issues, not in specs or docs.
 - **Changesets.** Name only published packages. Rust-facing notes go under
   `jazz-tools` (the crates ship at its version); private `@jazz/rust` makes

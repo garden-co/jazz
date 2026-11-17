@@ -64,40 +64,39 @@ join lookups fast on any column without you having to think about it, at the cos
 index entry per column per row. The `_id` index for each table doubles as the authoritative
 row manifest, so discovering all rows in a table is just an `_id` index scan.
 
-Sometimes you'll want to optimise for write performance or storage cost instead. Use
-`indexOnly()` to specify which columns in the table need indexes; only the columns you
-specify will be indexed.
+Sometimes you'll want to optimise for write performance or storage cost instead. List column
+names in the table's `indexes` to specify which columns need indexes; only the columns you
+list will be indexed.
 
 <Callout type="warn" title="Avoid overuse">
-  `table.indexOnly(["title", "done"])` does **not** mean "add indexes on `title` and `done`". It
-  means "**drop** the indexes on every other column on this table". Read it as _"index only these"_.
-  `indexOnly` is an optimisation that you're unlikely to need to begin with, and if not used
-  correctly, can significantly impact the performance of your app, especially on reads.
+  `"indexes": ["title", "done"]` does **not** mean "add indexes on `title` and `done`". It means
+  "**drop** the indexes on every other column on this table". Read it as _"index only these"_.
+  Listing columns in `indexes` is an optimisation that you're unlikely to need to begin with, and if
+  not used correctly, can significantly impact the performance of your app, especially on reads.
 </Callout>
 
-```ts title="schema.ts"
-import { schema as s } from "jazz-tools";
-
-const schema = {
-  todos: s
-    .table(
-      {
-        title: s.string(),
-        done: s.boolean(),
-        description: s.string().optional(),
-        activityLog: s.string().optional(),
+```json title="jazz.app.json"
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "tables": {
+    "todos": {
+      "columns": {
+        "title": "string",
+        "done": "boolean",
+        "description": "string?",
+        "activityLog": "string?"
       },
-      {},
-    )
-    .indexOnly(["title", "done"]),
-};
+      "indexes": ["title", "done"]
+    }
+  }
+}
 ```
 
 In this example, `where({ title: ... })` and `where({ done: ... })` are still index-backed.
 A query that filters on `description` or `activityLog` works, but falls back to scanning
 every row in the table.
 
-Use `indexOnly` when you're seeing slow writes and:
+List columns in `indexes` when you're seeing slow writes and:
 
 - The column holds large or rarely-queried data (long text, serialised metadata, audit logs).
 - The table is write-heavy and the per-column index cost is showing up in your performance data.
@@ -109,19 +108,28 @@ one column and sorts by another, like a room's newest messages, then sorts every
 before it can return the first page. Declare a composite index over both, in that order, and the
 page is read straight from the index:
 
-```ts title="schema.ts"
-const schema = {
-  messages: s
-    .table({ roomId: s.uuid(), text: s.string() }, {})
-    // app.messages.where({ roomId }).orderBy("$createdAt", "desc").limit(50)
-    .compositeIndex(["roomId", "$createdAt"]),
-};
+```json title="jazz.app.json"
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "tables": {
+    "messages": {
+      "$comment": "Serves app.messages.where({ roomId }).orderBy(\"$createdAt\", \"desc\").limit(50)",
+      "columns": {
+        "roomId": "uuid",
+        "text": "string"
+      },
+      "indexes": [["roomId", "$createdAt"]]
+    }
+  }
+}
 ```
+
+An array in `indexes` is a composite index. It adds to the per-column indexes; it doesn't drop them.
 
 A composite index takes two or more distinct declared columns, or the provenance timestamps
 `$createdAt` and `$updatedAt`, which every row carries. Adding one doesn't need a migration
 (see [Migrations](/docs/schemas/migrations)), but it does change the schema's hash: run
-`jazz-tools validate` and commit the regenerated `migrations/index.ts` with the index.
+`jazz-tools generate` and commit the regenerated `jazz.generated.ts` with the index.
 
 ### Deletion
 
@@ -166,24 +174,24 @@ to increment by one.
 
 #### Counters
 
-Use `.merge("counter")` on an integer or bigint column to keep deltas additive instead:
+Use `"merge": "counter"` on an integer or bigint column to keep deltas additive instead:
 
-```ts title="schema.ts"
-import { schema as s } from "jazz-tools";
-
-const schema = {
-  votes: s.table(
-    {
-      proposal: s.string(),
-      voteCount: s.int().merge("counter"),
-      totalVotingPower: s.bigint().merge("counter"),
-    },
-    {},
-  ),
-};
+```json title="jazz.app.json"
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "tables": {
+    "votes": {
+      "columns": {
+        "proposal": "string",
+        "voteCount": { "type": "int", "merge": "counter" },
+        "totalVotingPower": { "type": "bigint", "merge": "counter" }
+      }
+    }
+  }
+}
 ```
 
-With `merge("counter")`, every `update(...)` on the column is recorded as a delta from the
+With `"merge": "counter"`, every `update(...)` on the column is recorded as a delta from the
 value the writer was looking at. When concurrent edits meet, the deltas are summed: Alice's
 `+1` and Bob's `+1` both apply, and the `voteCount` correctly lands on `4`.
 
@@ -200,9 +208,9 @@ its maximum), the server applies the first and rejects the second with an explic
 "out of range" rejection, and the counter keeps the value it had.
 
 <Callout type="warn">
-  `merge("counter")` is only valid on **non-nullable integer or bigint columns**. Calling it on a
-  string, a nullable integer (`s.int().optional()`), a nullable bigint (`s.bigint().optional()`), or
-  any other type throws at schema construction time.
+  `"merge": "counter"` is only valid on **non-nullable integer or bigint columns**. Using it on a
+  string, a nullable integer (`"int?"`), a nullable bigint (`"bigint?"`), or any other type is
+  refused when the file is loaded.
 </Callout>
 
 #### Grow-only sets
@@ -212,21 +220,21 @@ default merge, if Alice adds `"urgent"` to a `tags` array while Bob concurrently
 `"blocked"`, the array is one field: the edit the server receives last replaces the whole
 array, and the other tag is silently dropped.
 
-Use `.merge("g-set")` to make an array column a grow-only set instead — concurrent writes converge
+Use `"merge": "g-set"` to make an array column a grow-only set instead — concurrent writes converge
 to the union of every replica's elements:
 
-```ts title="schema.ts"
-import { schema as s } from "jazz-tools";
-
-const schema = {
-  documents: s.table(
-    {
-      title: s.string(),
-      tags: s.array(s.string()).merge("g-set"),
-    },
-    {},
-  ),
-};
+```json title="jazz.app.json"
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "tables": {
+    "documents": {
+      "columns": {
+        "title": "string",
+        "tags": { "array": "string", "merge": "g-set" }
+      }
+    }
+  }
+}
 ```
 
 When concurrent edits meet, the merged array is the union of all contributed elements, deduplicated
@@ -241,16 +249,16 @@ Grow-only sets are useful for things like:
 - Any collection where you care about keeping every element rather than which device wrote last.
 
 <Callout type="warn">
-  `merge("g-set")` is **grow-only**: there is no element removal. It is only valid on **non-nullable
-  array columns**; calling it on any other type, or on a nullable array (`s.array(...).optional()`),
-  throws at schema construction time.
+  `"merge": "g-set"` is **grow-only**: there is no element removal. It is only valid on
+  **non-nullable array columns**; using it on any other type, or on a nullable array (`"optional":
+  true`), is refused when the file is loaded.
 </Callout>
 
 #### Text
 
 A string column has the same problem with prose: under the default merge, if Alice adds a sentence
 while Bob fixes a typo elsewhere in the same field, one of the two edits is lost. Use
-`.merge("text")`, `.merge("markdown")` or `.merge("html")` to merge the edits inside the string
+`"merge": "text"`, `"merge": "markdown"` or `"merge": "html"` to merge the edits inside the string
 instead. Core merges them against the version each writer started from, so changes to different
 parts of the text all survive. See
 [mergeable text columns](/docs/schemas/column-types#mergeable-text-columns) and

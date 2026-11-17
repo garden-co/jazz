@@ -9,7 +9,7 @@ import { List, ListItem } from "@astryxdesign/core/List";
 import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/SegmentedControl";
 import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { TextInput } from "@astryxdesign/core/TextInput";
-import { app } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
 import { useMe } from "../model/me.js";
 import { Page } from "./Page.js";
 

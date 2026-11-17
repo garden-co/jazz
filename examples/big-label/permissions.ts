@@ -1,187 +1,160 @@
-import { definePermissions } from "jazz-tools/permissions";
+import { schema as s } from "jazz-tools";
+import { schema } from "./schema";
 import { permissions as betterAuthPermissions } from "./schema-better-auth/schema";
-import { app } from "./schema";
 import { catalogueEditors, invitableRoles, roles } from "./src/roles";
+
+const { definePermissions, exists, allowedTo, session, anyOf, allOf } = schema;
 
 /**
  * Tenant admission has one authority: the app-owned backend bootstrap route.
  * Roles (see src/roles.ts): admins run the organization, editors maintain the
  * catalogue, viewers read it.
  */
-const tenantPermissions = definePermissions(app, ({ policy, session, allowedTo, allOf, anyOf }) => {
-  // userId is deliberately denormalized so this is an indexed membership lookup.
-  const member = (organizationId: unknown) =>
-    policy.memberships.exists.where({
-      organizationId: organizationId as never,
-      userId: session.user,
-    });
-  const admin = (organizationId: unknown) =>
-    policy.memberships.exists.where({
-      organizationId: organizationId as never,
-      userId: session.user,
-      role: "admin",
-    });
-  const editor = (organizationId: unknown) =>
+
+// userId is deliberately denormalized so this is an indexed membership lookup.
+const isOrgMember = (organizationId: s.Uuid) =>
+  exists.memberships({ organizationId, userId: session.user });
+
+const hasOrgRole = (organizationId: s.Uuid, role: string) =>
+  exists.memberships({ organizationId, userId: session.user, role });
+
+const isOrgAdmin = (organizationId: s.Uuid) => hasOrgRole(organizationId, "admin");
+
+const canEditCatalogue = (organizationId: s.Uuid) =>
+  anyOf(...catalogueEditors.map((role) => hasOrgRole(organizationId, role)));
+
+// Only the roles the app knows; a new member can't start as an admin.
+const roleIsOneOf = (allowed: readonly string[]) => anyOf(...allowed.map((role) => ({ role })));
+
+const mine = { userId: session.user };
+
+// Every relation a release points at must live in the release's tenant.
+const releaseRelationsInTenant = (release: s.Row<typeof schema, "releases">) =>
+  allOf(
+    release.artist.where({ organizationId: release.organizationId }),
     anyOf(
-      catalogueEditors.map((role) =>
-        policy.memberships.exists.where({
-          organizationId: organizationId as never,
-          userId: session.user,
-          role,
-        }),
-      ),
-    );
-  // Only the roles the app knows; a new member can't start as an admin.
-  const oneOfRoles = (allowed: readonly string[]) => anyOf(allowed.map((role) => ({ role })));
-  const personMatchesMembership = (row: { personId: unknown; userId: unknown }) =>
-    policy.people.exists.where({ id: row.personId as never, userId: row.userId as never });
-  const artistBelongsToRelease = (row: { artistId: unknown; organizationId: unknown }) =>
-    policy.artists.exists.where({
-      id: row.artistId as never,
-      organizationId: row.organizationId as never,
-    });
-  const catalogueBelongsToRelease = (row: { catalogueId: unknown; organizationId: unknown }) =>
-    anyOf([
-      { catalogueId: { isNull: true } },
-      policy.catalogues.exists.where({
-        id: row.catalogueId as never,
-        organizationId: row.organizationId as never,
-      }),
-    ]);
-  const teamMatchesAssignment = (row: { teamId: unknown; organizationId: unknown }) =>
-    policy.teams.exists.where({
-      id: row.teamId as never,
-      organizationId: row.organizationId as never,
-    });
-  const membershipMatchesAssignment = (row: { membershipId: unknown; organizationId: unknown }) =>
-    policy.memberships.exists.where({
-      id: row.membershipId as never,
-      organizationId: row.organizationId as never,
-    });
-  const releaseMatchesAssignment = (row: { releaseId: unknown; organizationId: unknown }) =>
-    policy.releases.exists.where({
-      id: row.releaseId as never,
-      organizationId: row.organizationId as never,
-    });
-
-  // You see your own profile and the people who share a label with you.
-  policy.people.allowRead.where(
-    anyOf([{ userId: session.user }, allowedTo.read("membershipsViaPerson")]),
+      { catalogueId: null },
+      release.catalogue.where({ organizationId: release.organizationId }),
+    ),
   );
-  // Profiles are created only by the trusted bootstrap transaction. This
-  // prevents a client-created duplicate from splitting a user's membership
-  // identity before their personal tenant is established.
-  policy.people.allowInsert.never();
-  policy.people.allowUpdate.whereOld({ userId: session.user }).whereNew({ userId: session.user });
-  policy.people.allowDelete.never();
 
-  policy.personEmails.allowRead.never();
-  policy.personEmails.allowInsert.never();
-  policy.personEmails.allowUpdate.never();
-  policy.personEmails.allowDelete.never();
-
-  policy.organizations.allowRead.where((row) => member(row.id));
-  policy.organizations.allowInsert.never();
-  policy.organizations.allowUpdate
-    .whereOld((row) => admin(row.id))
-    .whereNew((row) => admin(row.id));
-  policy.organizations.allowDelete.where((row) => admin(row.id));
-
-  policy.memberships.allowRead.where((row) => member(row.organizationId));
-  policy.memberships.allowInsert.where((row) =>
-    // The proposed row must not be able to make itself satisfy `admin(...)`.
+export const permissions = definePermissions({
+  ...betterAuthPermissions,
+  artists: {
+    read: (artist) => isOrgMember(artist.organizationId),
+    insert: (artist) => canEditCatalogue(artist.organizationId),
+    update: (artist) => canEditCatalogue(artist.organizationId),
+    delete: (artist) => isOrgAdmin(artist.organizationId),
+  },
+  catalogues: {
+    read: (catalogue) => isOrgMember(catalogue.organizationId),
+    insert: (catalogue) => isOrgAdmin(catalogue.organizationId),
+    update: (catalogue) => isOrgAdmin(catalogue.organizationId),
+    delete: (catalogue) => isOrgAdmin(catalogue.organizationId),
+  },
+  memberships: {
+    read: (membership) => isOrgMember(membership.organizationId),
+    // The proposed row must not be able to make itself satisfy `isOrgAdmin(...)`.
     // First admins come only from the trusted bootstrap route; existing admins
     // can invite non-admin members, and may promote them later through update.
-    allOf([admin(row.organizationId), personMatchesMembership(row), oneOfRoles(invitableRoles)]),
-  );
-  policy.memberships.allowUpdate
-    .whereOld((row) => admin(row.organizationId))
-    .whereNew((row) =>
-      allOf([admin(row.organizationId), personMatchesMembership(row), oneOfRoles(roles)]),
-    );
-  policy.memberships.allowDelete.where((row) => admin(row.organizationId));
-
-  policy.teams.allowRead.where((row) => member(row.organizationId));
-  policy.teams.allowInsert.where((row) => admin(row.organizationId));
-  policy.teams.allowUpdate
-    .whereOld((row) => admin(row.organizationId))
-    .whereNew((row) => admin(row.organizationId));
-  policy.teams.allowDelete.where((row) => admin(row.organizationId));
-
-  policy.artists.allowRead.where((row) => member(row.organizationId));
-  policy.artists.allowInsert.where((row) => editor(row.organizationId));
-  policy.artists.allowUpdate
-    .whereOld((row) => editor(row.organizationId))
-    .whereNew((row) => editor(row.organizationId));
-  policy.artists.allowDelete.where((row) => admin(row.organizationId));
-
-  policy.catalogues.allowRead.where((row) => member(row.organizationId));
-  policy.catalogues.allowInsert.where((row) => admin(row.organizationId));
-  policy.catalogues.allowUpdate
-    .whereOld((row) => admin(row.organizationId))
-    .whereNew((row) => admin(row.organizationId));
-  policy.catalogues.allowDelete.where((row) => admin(row.organizationId));
-
-  // Every relation a release points at must live in the release's tenant.
-  const releaseRelationsInTenant = (row: {
-    artistId: unknown;
-    catalogueId: unknown;
-    organizationId: unknown;
-  }) => allOf([artistBelongsToRelease(row), catalogueBelongsToRelease(row)]);
-  policy.releases.allowRead.where((row) => member(row.organizationId));
-  policy.releases.allowInsert.where((row) =>
-    allOf([editor(row.organizationId), releaseRelationsInTenant(row)]),
-  );
-  policy.releases.allowUpdate
-    .whereOld((row) => editor(row.organizationId))
-    .whereNew((row) => allOf([editor(row.organizationId), releaseRelationsInTenant(row)]));
-  policy.releases.allowDelete.where((row) => admin(row.organizationId));
-
-  policy.teamAssignments.allowRead.where(allowedTo.read("team"));
-  policy.teamAssignments.allowInsert.where((row) =>
-    allOf([allowedTo.insert("team"), teamMatchesAssignment(row), membershipMatchesAssignment(row)]),
-  );
-  policy.teamAssignments.allowUpdate
-    .whereOld(allowedTo.update("team"))
-    .whereNew((row) =>
-      allOf([
-        allowedTo.update("team"),
-        teamMatchesAssignment(row),
-        membershipMatchesAssignment(row),
-      ]),
-    );
-  policy.teamAssignments.allowDelete.where(allowedTo.delete("team"));
+    insert: (membership) =>
+      allOf(
+        isOrgAdmin(membership.organizationId),
+        membership.person.where({ userId: membership.userId }),
+        roleIsOneOf(invitableRoles),
+      ),
+    updateIf: (membership) => isOrgAdmin(membership.organizationId),
+    updateTo: (membership) =>
+      allOf(
+        isOrgAdmin(membership.organizationId),
+        membership.person.where({ userId: membership.userId }),
+        roleIsOneOf(roles),
+      ),
+    delete: (membership) => isOrgAdmin(membership.organizationId),
+  },
+  organizations: {
+    read: (organization) => isOrgMember(organization.id),
+    insert: false,
+    update: (organization) => isOrgAdmin(organization.id),
+    delete: (organization) => isOrgAdmin(organization.id),
+  },
+  people: {
+    // You see your own profile and the people who share a label with you.
+    read: (person) => anyOf(mine, allowedTo.read(person.membershipsViaPerson)),
+    // Profiles are created only by the trusted bootstrap transaction. This
+    // prevents a client-created duplicate from splitting a user's membership
+    // identity before their personal tenant is established.
+    insert: false,
+    update: mine,
+    delete: false,
+  },
+  personEmails: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
   // Per-person release roles (such as "owner") grant accountability, so only
   // admins hand them out, even though editors may edit the release itself.
-  policy.releaseAssignments.allowRead.where(allowedTo.read("release"));
-  policy.releaseAssignments.allowInsert.where((row) =>
-    allOf([
-      admin(row.organizationId),
-      releaseMatchesAssignment(row),
-      membershipMatchesAssignment(row),
-    ]),
-  );
-  policy.releaseAssignments.allowUpdate
-    .whereOld((row) => admin(row.organizationId))
-    .whereNew((row) =>
-      allOf([
-        admin(row.organizationId),
-        releaseMatchesAssignment(row),
-        membershipMatchesAssignment(row),
-      ]),
-    );
-  policy.releaseAssignments.allowDelete.where((row) => admin(row.organizationId));
-
+  releaseAssignments: {
+    read: (releaseAssignment) => allowedTo.read(releaseAssignment.release),
+    insert: (releaseAssignment) =>
+      allOf(
+        isOrgAdmin(releaseAssignment.organizationId),
+        releaseAssignment.release.where({ organizationId: releaseAssignment.organizationId }),
+        releaseAssignment.membership.where({ organizationId: releaseAssignment.organizationId }),
+      ),
+    updateIf: (releaseAssignment) => isOrgAdmin(releaseAssignment.organizationId),
+    updateTo: (releaseAssignment) =>
+      allOf(
+        isOrgAdmin(releaseAssignment.organizationId),
+        releaseAssignment.release.where({ organizationId: releaseAssignment.organizationId }),
+        releaseAssignment.membership.where({ organizationId: releaseAssignment.organizationId }),
+      ),
+    delete: (releaseAssignment) => isOrgAdmin(releaseAssignment.organizationId),
+  },
   // Editors staff releases with teams; the team must belong to the same tenant.
-  policy.releaseTeams.allowRead.where((row) => member(row.organizationId));
-  policy.releaseTeams.allowInsert.where((row) =>
-    allOf([editor(row.organizationId), releaseMatchesAssignment(row), teamMatchesAssignment(row)]),
-  );
-  policy.releaseTeams.allowUpdate.never();
-  policy.releaseTeams.allowDelete.where((row) => editor(row.organizationId));
+  releaseTeams: {
+    read: (releaseTeam) => isOrgMember(releaseTeam.organizationId),
+    insert: (releaseTeam) =>
+      allOf(
+        canEditCatalogue(releaseTeam.organizationId),
+        releaseTeam.release.where({ organizationId: releaseTeam.organizationId }),
+        releaseTeam.team.where({ organizationId: releaseTeam.organizationId }),
+      ),
+    update: false,
+    delete: (releaseTeam) => canEditCatalogue(releaseTeam.organizationId),
+  },
+  releases: {
+    read: (release) => isOrgMember(release.organizationId),
+    insert: (release) =>
+      allOf(canEditCatalogue(release.organizationId), releaseRelationsInTenant(release)),
+    updateIf: (release) => canEditCatalogue(release.organizationId),
+    updateTo: (release) =>
+      allOf(canEditCatalogue(release.organizationId), releaseRelationsInTenant(release)),
+    delete: (release) => isOrgAdmin(release.organizationId),
+  },
+  teamAssignments: {
+    read: (teamAssignment) => allowedTo.read(teamAssignment.team),
+    insert: (teamAssignment) =>
+      allOf(
+        allowedTo.insert(teamAssignment.team),
+        teamAssignment.team.where({ organizationId: teamAssignment.organizationId }),
+        teamAssignment.membership.where({ organizationId: teamAssignment.organizationId }),
+      ),
+    updateIf: (teamAssignment) => allowedTo.update(teamAssignment.team),
+    updateTo: (teamAssignment) =>
+      allOf(
+        allowedTo.update(teamAssignment.team),
+        teamAssignment.team.where({ organizationId: teamAssignment.organizationId }),
+        teamAssignment.membership.where({ organizationId: teamAssignment.organizationId }),
+      ),
+    delete: (teamAssignment) => allowedTo.delete(teamAssignment.team),
+  },
+  teams: {
+    read: (team) => isOrgMember(team.organizationId),
+    insert: (team) => isOrgAdmin(team.organizationId),
+    update: (team) => isOrgAdmin(team.organizationId),
+    delete: (team) => isOrgAdmin(team.organizationId),
+  },
 });
-
-export default {
-  ...betterAuthPermissions,
-  ...tenantPermissions,
-};

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "67d13063a05a9c0f085dd06f288a5a052765b0f9c38052d6fd52b132c12b7be0"
+  },
+  "tables": {
+    "attachments": { "read": "true", "insert": "true", "update": "true" },
+    "conversations": { "read": "true", "insert": "true", "update": "true" },
+    "tool_calls": { "read": "true", "insert": "true", "update": "true" },
+    "turns": { "read": "true", "insert": "true", "update": "true" }
+  }
+}

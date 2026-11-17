@@ -1,6 +1,6 @@
 // #region setup-ts
 import { createJazzClient } from "jazz-tools/client";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 import { renderTodoItem } from "./TodoItem.js";
 
 // Your backend serves Jazz at /jazz (createJazz); the browser names no app.

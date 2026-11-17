@@ -18,7 +18,7 @@ import {
 import { useAll } from "jazz-tools/react";
 import { UserPlus } from "lucide-react";
 import { useState } from "react";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { inviteLinkFor } from "@/src/lib/account-enrollment";
 
 type InviteRole = "editor" | "viewer";

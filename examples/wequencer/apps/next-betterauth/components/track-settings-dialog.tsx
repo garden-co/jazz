@@ -8,7 +8,7 @@ import { HStack } from "@astryxdesign/core/HStack";
 import { Selector } from "@astryxdesign/core/Selector";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { VStack } from "@astryxdesign/core/VStack";
-import { app, type Instrument, type Track } from "@/schema";
+import { app, type TrackInstrument as Instrument, type Track } from "@/jazz.generated";
 import { INSTRUMENTS } from "@/lib/instruments";
 import { volumeToGain } from "@/lib/audio";
 import type { ReportWrite } from "@/lib/report-write";
