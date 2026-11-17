@@ -981,6 +981,30 @@ describe("thin client", () => {
     await expect(db.all(app.notes)).rejects.toThrow(/bad envelope/);
   }, 60_000);
 
+  // An `auth_failed` with a retry this client doesn't know comes from a newer
+  // server: it is retried like any refusal, never taken as a refused
+  // credential that waits for a new one (native clients can't decode it).
+  it("retries a refusal whose retry it doesn't know instead of waiting for a credential", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    const internals = runtime as unknown as {
+      carrier: unknown;
+      lost(carrier: unknown, error: { code: string; retry: string; message: string }): void;
+    };
+    internals.lost(internals.carrier, {
+      code: "auth_failed",
+      retry: "unknown:9",
+      message: "token expired",
+    });
+    const link = db.getSyncStatus().link;
+    expect(link).not.toMatchObject({ reason: "auth" });
+    expect(link).toMatchObject({ retrying: true });
+    // It reconnects with the same credential.
+    await expect.poll(() => db.getSyncStatus().link.state).toBe("connected");
+  }, 60_000);
+
   // E12: a sign-out drains writes with `shutdown({ waitForSync: true })`.
   // Once the server refuses the sign-in (the user's access was revoked),
   // nothing answers a write that waits to go out, and nothing renews a

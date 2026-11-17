@@ -551,7 +551,11 @@ export class ThinRuntime implements Runtime {
       this.open();
       return;
     }
-    const authFailure = wireAuthFailureReason(error);
+    // The auth path follows the classification: an `auth_failed` with a retry
+    // this client does not know is a refusal it retries, not a refused
+    // credential (a reauthenticate before binding is still one).
+    const authFailure =
+      kind === "authRejected" || kind === "reauthenticate" ? wireAuthFailureReason(error) : null;
     if (authFailure) {
       // Refused before the drop publishes, so the link never reads
       // "connecting" in between.
