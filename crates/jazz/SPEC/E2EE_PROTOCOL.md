@@ -1811,19 +1811,42 @@ recipientAccountEpochId, envelope}`, with a random ID, sealed to that
   that cut, so a delivery is never sealed to an epoch that a since-removed
   device still holds; the device then re-reads. The authority accepts it
   only from a member to a member (R17). Two holders may both deliver; the
-  second delivery costs storage only. Once 3 distinct deliveries of one
-  version to a member are voided (counted by `deliveryId` over valid voids,
-  which every member reads, so all holders agree; several voids of one
-  delivery, for example by two devices of the recipient, count once), no
-  holder delivers that version to it again on its own. The member stays
-  `key-pending` until a rotation (`db.encryption.rotate(space)` by an
-  updater, §3.5), which delivers a new version to every member. The 3 is a
-  threshold on deciding, not a bound on rows: the delivery transaction does
-  not read other deliveries, so holders that act at once can each insert
-  one (the random delay makes this rare). A holder device delivers at most
-  once for each number of voids it has seen below 3, so at most 3 times per
-  version and member. This bounds what a member that voids good deliveries
-  can make others write.
+  second delivery costs storage only.
+- **Delivering with the member row.** A device that inserts another
+  account's member row and holds the current version (not an unpublished
+  key, §5.4) also stages, in the
+  same transaction, a delivery of the current version to that account, when
+  it knows the account's valid sealing key: the generated members API looks
+  it up online before staging ([core hooks](E2EE_CORE_HOOKS.md) H2). R17
+  accepts it on the member row the same transaction inserts, once that row
+  has passed its own check (Jazz's grounding rule). Offline, without a
+  sealing key, or for a member row written another way, it stages none and
+  ordinary delivery follows. Unless the transaction is serializable, this
+  delivery has no read set: if a `remove-device` successor supersedes the
+  account epoch it was sealed to before it is accepted, the space is marked
+  as needing rotation (§3.5), which is the safe direction. The usual
+  addition then waits for no other holder.
+- **Voided senders.** For a version and a member, the **voided senders** are
+  the sender accounts of the deliveries the member has voided (valid voids
+  only, R19, of deliveries sealed to an epoch of the member's current
+  generation; several voids of one delivery, or voided deliveries from one
+  sender, count once). Every member reads the voids and deliveries (R14), so
+  all holders agree. A delivery from a voided sender counts as absent, so a
+  sender that delivered badly cannot make honest holders stand down by
+  delivering first, and a holder whose account is a voided sender does not
+  deliver that version to that member again. Once a member has 3 voided
+  senders for a version, no holder delivers that version to it on its own:
+  every holder device emits `invalid-delivery` for each of those voided
+  deliveries (below), so an updater's application can remove a sender and
+  rotate, and the member stays `key-pending` until a rotation
+  (`db.encryption.rotate(space)` by an updater, §3.5), which delivers a new
+  version to every member. The cap counts accounts: one member delivering
+  badly uses one of the 3 places, and a member that voids good deliveries
+  makes at most 3 holder accounts deliver to it again. It is a threshold on
+  deciding, not a bound on rows: the delivery transaction does not read
+  other deliveries, so holder devices acting at once can each insert one
+  (the random delay makes this rare); each holder device delivers a version
+  to a member at most once per generation of that member.
 - **Receiving.** A member's devices watch deliveries addressed to their
   account and acquire the key (§3.3). While its account lacks a version
   that it needs, a member's device reports the space `key-pending` (§4.3).
@@ -1832,7 +1855,12 @@ recipientAccountEpochId, envelope}`, with a random ID, sealed to that
   it inserts one row `{scopeId, identifier, deliveryId, keyEpochId,
 recipientAccountId}` with a random ID into `__e2ee_space_delivery_voids`,
   in its own transaction, and emits an `invalid-delivery` encryption event
-  `{space, sender, recipient, keyEpochId}` once per delivery. Only the
+  `{space, sender, recipient, keyEpochId}` once per delivery. It voids only
+  a delivery of a version its account lacks and needs (the current version,
+  or a version that a cell it reads names), sealed to an epoch of its
+  current generation, and only when its account has no void of that
+  delivery yet (written by another of its devices, or before a restart);
+  other deliveries addressed to it are ignored. Only the
   delivery's recipient can void it, and only while it is a member (R19).
   The void needs no key, so a member that holds nothing can recover: every
   holder then treats the voided delivery as absent, sees that the member
@@ -1841,7 +1869,8 @@ recipientAccountId}` with a random ID into `__e2ee_space_delivery_voids`,
   member's runtime can show who sent a delivery that did not open, and the
   sender's own devices emit the same `invalid-delivery` event when they see
   a void of a delivery their account sent, so a defective client learns of
-  it. A void is not a key request: it can name only an existing delivery to
+  it, as do all holder devices once the member has 3 voided senders
+  (above). A void is not a key request: it can name only an existing delivery to
   its writer, so it gives nobody a way to ask for a key it was not
   delivered. A device does not void a delivery whose opening failed for any
   other reason: a provider failure (§0), a capability it lacks (§3.3,
@@ -1866,12 +1895,18 @@ holder, which it opens (also for a newly added updater that holds no
 version); the sender's device reports `invalid-delivery` for the void; a
 void by an account other than the delivery's recipient is refused (R19); a
 void naming a delivery that does not exist, or a delivery of another space
-or of another version, is refused (R19); after voids of 3 distinct
-deliveries of one version to one member, no holder delivers it to that
-member automatically, and the next rotation does; two voids of one delivery
-count once; several holders that see the same void at once may each
-deliver, every such delivery is accepted, and none delivers after the third
-distinct void; a delivery that fails with a provider error is not voided;
+or of another version, is refused (R19); after voided deliveries from 3
+distinct senders of one version to one member, no holder delivers it to that
+member automatically, every holder device reports `invalid-delivery` for
+them, and the next rotation delivers; one sender that delivers badly three
+times in a row, always first, uses one place, and an honest holder's
+delivery reaches the member; two voids of one delivery count once; voids of
+deliveries sealed to an earlier generation do not count after a reset;
+several holders that see the same void at once may each deliver, and every
+such delivery is accepted; a device that adds a member while holding the
+current version delivers to it in the same transaction, which is accepted
+in both insert orders; a junk delivery naming a version the recipient does
+not need is not voided; a delivery that fails with a provider error is not voided;
 in an otherwise idle space, a member that resets after it was delivered the
 current version receives it again with no other write to a space table; a
 member whose account sealing key appears only after a holder's first lookup
@@ -2058,11 +2093,15 @@ transaction has already staged, minus those it has staged deletes of ([core
 hooks](E2EE_CORE_HOOKS.md) H2). It sees the member rows of every space its
 account is a member of (it watches them) and otherwise loads them before
 staging, without acquiring any key (offline, from what its replica holds).
-It counts only rows the session can read: a session that is not a member
-reads only its own member rows (R12), so a creator adding itself by R12's
-creator clause (to a new space, or back to one it was removed from) counts
-no other members and is not refused. Once its row is accepted, its device
-sees the whole member set and reports an excess as below. The server does
+When the same transaction inserts the space row, the count starts from that
+transaction's staged rows, with nothing to load. A row for the session's
+own account, when the account has no member row in the space, can be
+accepted only by R12's creator clause (a session that is not a member
+fails read(row), R13), and is outside the limit: it is not
+counted or loaded. Such a session reads only its own member rows (R12), so
+a creator adding itself back to a full space is not refused; once its row
+is accepted, its device sees the whole member set and reports an excess as
+below. The server does
 not enforce the limit: Jazz policies can test only whether a matching row
 exists (`Exists`) and cannot count rows, and this design adds no check
 outside policies (§1.4). So concurrent or offline additions by several
@@ -2078,7 +2117,8 @@ distinct new accounts has the second refused; member rows for one account
 staged twice in one transaction count once; a member removed and another
 added in one transaction at 1,000 is accepted; a rolled-back transaction's
 staged rows do not count for the retry; a creator's first member row
-acquires no key and prepares no root; a removed creator re-adding itself to
+loads nothing, acquires no key and prepares no root, also in a binding with
+a synchronous callback; a removed creator re-adding itself to
 a full space is not refused, and its device then reports
 `space-over-member-limit`.
 
@@ -2112,7 +2152,8 @@ is made or abandoned.
   each, so of the order of a few hundred kilobytes per rotation, and
   re-evaluates who lacks a key once per batch, at a cost proportional to
   the members.
-- Adding a member costs one delivery, usually by one holder; each holder
+- Adding a member costs one delivery, usually in the adding transaction
+  (§3.4), otherwise by one holder; each holder
   device re-evaluates at a cost proportional to the members. Two holders
   may deliver at once; the second delivery costs storage only.
 - Deliveries are never deleted (R1): the server stores one per member per
@@ -2723,8 +2764,9 @@ Limits:
   skipped versions that no member still holds. Content that a later member
   must not see belongs in another space.
 - **Keys need a key holder's client online.** Nobody delivers keys but
-  members' clients (§3.4): a new member, a reset member, or a member who
-  missed a rotation's delivery waits, `key-pending`, until a device of a
+  members' clients (§3.4): a new member (unless the device that added it
+  held the key and delivered with the member row), a reset member, or a
+  member who missed a rotation's delivery waits, `key-pending`, until a device of a
   member holding the key is online. A rotation delivers to at most 100
   current members in its own transaction and to the rest in later batches
   from the rotator; members without a valid sealing key, or not yet reached
@@ -2767,12 +2809,15 @@ Limits:
   recipient voids such a delivery (§3.4), which needs no key, reports
   `invalid-delivery` naming the sender, and receives a fresh delivery from
   another holder; every member can see who sent the voided delivery. A
-  member that keeps delivering badly to someone delays that member's key,
-  and after voids of 3 distinct deliveries of one version holders stop re-delivering it
-  automatically until a rotation. Conversely, a member can void good
-  deliveries to itself, which makes each holder device write at most 3
-  deliveries of a version to it (holders acting at once can each write
-  one, §3.4). A member can also mark
+  member that keeps delivering badly to someone takes one of the 3 places
+  of voided senders, and its later deliveries count as absent, so honest
+  holders still deliver. Three members delivering badly together can lock
+  one member out of a version until an updater rotates; every holder device
+  then reports the senders (`invalid-delivery`), and after the rotation they
+  can do it again unless removed. Conversely, a member can void good
+  deliveries to itself, which makes at most 3 holder accounts deliver to it
+  again (holder devices acting at once can each write one, §3.4). A member
+  can also mark
   the space as needing rotation with a junk delivery naming a superseded
   account epoch (§3.5), which costs one rotation per version it names. The
   mark is conservative evidence, not proof of key possession. The
