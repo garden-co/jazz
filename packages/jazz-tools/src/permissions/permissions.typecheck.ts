@@ -106,3 +106,64 @@ definePermissions({
   chats: { updateIf: true, updateTo: (c, old) => exists.chats({ size: old.size }) },
   members: {},
 });
+
+// `allowedTo` at a rule's top, alone or combined: fine.
+definePermissions({
+  chats: {},
+  members: {
+    read: (m) => allowedTo.read(m.chat),
+    update: (m) => allOf({ userId: session.user }, allowedTo.update(m.chatId)),
+    delete: (m) =>
+      anyOf({ userId: session.user }, allOf(allowedTo.delete(m.chat), { role: "admin" })),
+  },
+});
+
+// `allowedTo` inside an `exists`: not supported yet.
+const m0 = schema.tables.members;
+// @ts-expect-error allowedTo in exists' conditions
+exists.members((m) => allowedTo.read(m.chat));
+// @ts-expect-error allowedTo in exists' conditions
+exists.members(allowedTo.read(schema.tables.members.chatId));
+// @ts-expect-error allowedTo combined, in exists' conditions
+exists.members((m) => anyOf({ userId: session.user }, allowedTo.read(m.chat)));
+// @ts-expect-error allowedTo combined, in exists' conditions (through a variable)
+exists.members(anyOf({ userId: session.user }, allowedTo.read(m0.chatId)));
+// @ts-expect-error allowedTo in a hop's conditions
+exists.members({}).hop("chat", allowedTo.read(schema.tables.members.chatId));
+definePermissions({
+  // @ts-expect-error allowedTo in a relation's `.where`
+  chats: { read: (chat) => chat.members.where(allowedTo.read(schema.tables.members.chatId)) },
+  members: {},
+});
+// @ts-expect-error allowedTo in a relation predicate
+schema.from.members("m").where(allowedTo.read(schema.tables.members.chatId));
+const inheritsOrMine = anyOf({ "m.userId": session.user }, allowedTo.read(m0.chatId));
+// @ts-expect-error allowedTo combined, in a relation predicate
+schema.from.members("m").where(inheritsOrMine);
+// Other policies still go inside: fine.
+exists.members((m) => anyOf({ userId: session.user }, exists.chats({ id: m.chatId })));
+schema.from.members("m").where(anyOf({ "m.userId": session.user }, { "m.role": "admin" }));
+
+// `not allowedTo…`: not supported yet, at any depth.
+// @ts-expect-error not of allowedTo
+not(allowedTo.read(m0.chatId));
+// @ts-expect-error not of allowedTo inside anyOf
+not(anyOf({ isPublic: true }, allowedTo.read(m0.chatId)));
+// @ts-expect-error not of not of allowedTo
+not(not(allowedTo.read(m0.chatId)));
+definePermissions({
+  chats: {},
+  members: {
+    // @ts-expect-error not of allowedTo in an update rule, beside other policies
+    update: (m) => anyOf({ userId: session.user }, not(allowedTo.update(m.chat))),
+  },
+});
+// `not` of anything else: fine, and its result goes inside an exists.
+exists.members((m) => not(anyOf({ userId: session.user }, exists.chats({ id: m.chatId }))));
+
+// An `any`-typed item (an untyped helper's value) doesn't count as allowedTo.
+declare const untyped: any;
+exists.members(anyOf({ userId: session.user }, untyped));
+exists.members(allOf(untyped));
+exists.members(not(untyped));
+not(untyped);

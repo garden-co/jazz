@@ -2716,6 +2716,11 @@ async fn connect_and_bridge(
                 "native relay socket connect failed: {error}"
             )));
         }
+        // The server answered before its hello: the shared link decides
+        // what its answer means, as it does for every host.
+        Err(NativeTransportError::Wire(error)) => {
+            return LinkEnd::Lost(LinkFailure::from_wire_error(&error, false));
+        }
         // Retrying the same request with the same credential cannot
         // succeed (#4248).
         Err(NativeTransportError::AuthRejected(error)) => {
@@ -2772,7 +2777,8 @@ async fn bridge_connection(
     path: &mut PathWatch,
 ) -> LinkEnd {
     // Losing an admitted link is an outage, whatever the transport calls it,
-    // unless the server refused the credential.
+    // unless the server refused the credential or ended it with a wire error,
+    // which the link classifies.
     let terminal_end = |terminal: NativeTransportTerminal| {
         LinkEnd::Lost(match terminal {
             NativeTransportTerminal::Failed(NativeTransportError::AuthRejected(error)) => {
@@ -2780,6 +2786,12 @@ async fn bridge_connection(
                     reason: AuthFailureReason::from_message(&error),
                     message: format!("native relay socket terminated: {error}"),
                 }
+            }
+            // Not reached: the native transport reports a server's wire error
+            // only before hello, as a failed connect. Were an admitted link to
+            // end with one, the link would classify it as admitted.
+            NativeTransportTerminal::Failed(NativeTransportError::Wire(error)) => {
+                LinkFailure::from_wire_error(&error, true)
             }
             NativeTransportTerminal::Failed(
                 NativeTransportError::Terminal(error) | NativeTransportError::Retryable(error),

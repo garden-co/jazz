@@ -1225,3 +1225,212 @@ async fn select_reads_transformed_columns_as_viewed() {
     assert_eq!(included.id, task.id);
     assert_eq!(included.values.as_deref(), Some("day-20000"));
 }
+
+/// Rust text offsets are UTF-8 bytes (`str` indices): splices and partial
+/// reads of multi-byte text land where `str` indexing says.
+#[tokio::test]
+async fn text_offsets_are_utf8_bytes() {
+    use jazz_app_support::{Edits, Page, Splice, ValuePart};
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let text = "héllo wörld 🎉!";
+    let task = jazz
+        .insert(NewTask {
+            r#type: Some(text.into()),
+            ..NewTask::new("units", 0, Vec::new())
+        })
+        .await
+        .unwrap();
+
+    // Each splice counts in the value the earlier ones produced.
+    let mut expected = text.to_owned();
+    expected.replace_range(1..3, "e"); // "é" is bytes 1..3
+    let world = expected.find("wörld").unwrap();
+    expected.replace_range(world..world + "wörld".len(), "world");
+    jazz.splice(
+        task.id,
+        tasks::r#type(),
+        Page::text(0..text.len()),
+        vec![
+            Splice::text(1, 2, "e"),
+            Splice::text(world, "wörld".len(), "world"),
+        ],
+    )
+    .await
+    .unwrap();
+    let jazz = &jazz;
+    let read = |id| async move { jazz.get::<Task>(id).await.unwrap().unwrap().r#type };
+    assert_eq!(read(task.id).await.as_deref(), Some(expected.as_str()));
+    assert_eq!(expected, "hello world 🎉!");
+
+    // A page that starts mid-text: offsets are relative to it, in bytes.
+    let party = expected.find('🎉').unwrap();
+    jazz.update_edited(
+        task.id,
+        TaskUpdate::default(),
+        Edits::new().splice(
+            tasks::r#type(),
+            Page::text(party..expected.len()),
+            vec![Splice::text(0, '🎉'.len_utf8(), "🎊🎊")],
+        ),
+    )
+    .await
+    .unwrap();
+    expected.replace_range(party..party + '🎉'.len_utf8(), "🎊🎊");
+    assert_eq!(read(task.id).await.as_deref(), Some(expected.as_str()));
+
+    // A partial read at UTF-8 byte offsets.
+    let confetti = expected.find('🎊').unwrap();
+    let part = jazz
+        .one(tasks::query().id(task.id).part(
+            tasks::r#type(),
+            ValuePart::text(confetti..confetti + 2 * '🎊'.len_utf8()),
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(part.r#type.as_deref(), Some("🎊🎊"));
+}
+
+/// A text offset inside a code point is refused, not rounded, and leaves
+/// the value as it was.
+#[tokio::test]
+async fn text_offsets_off_a_char_boundary_are_refused() {
+    use jazz_app_support::{Edits, Page, Splice, ValuePart};
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let text = "héllo 🎉";
+    let task = jazz
+        .insert(NewTask {
+            r#type: Some(text.into()),
+            ..NewTask::new("units", 0, Vec::new())
+        })
+        .await
+        .unwrap();
+    // Byte 2 is inside "é"; byte 8 is inside "🎉".
+    for (at, delete) in [(2, 0), (1, 1), (8, 0), (7, 2)] {
+        let refused = jazz
+            .splice(
+                task.id,
+                tasks::r#type(),
+                Page::text(0..text.len()),
+                vec![Splice::text(at, delete, "x")],
+            )
+            .await;
+        assert!(
+            matches!(refused, Err(Error::TextOffset(_))),
+            "{at}+{delete}: {refused:?}"
+        );
+    }
+    // A later splice of the batch is checked against the earlier ones'
+    // result: after "é" → "e", byte 2 is a boundary, but 2 + 1 inside "🎉"
+    // is not.
+    let refused = jazz
+        .update_edited(
+            task.id,
+            TaskUpdate::default(),
+            Edits::new().splice(
+                tasks::r#type(),
+                Page::text(0..text.len()),
+                vec![Splice::text(1, 2, "e"), Splice::text(7, 0, "x")],
+            ),
+        )
+        .await;
+    assert!(matches!(refused, Err(Error::TextOffset(_))), "{refused:?}");
+    let task_now = jazz.get::<Task>(task.id).await.unwrap().unwrap();
+    assert_eq!(task_now.r#type.as_deref(), Some(text));
+
+    let refused = jazz
+        .one(
+            tasks::query()
+                .id(task.id)
+                .part(tasks::r#type(), ValuePart::text(0..2)),
+        )
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+}
+
+/// A subscription's text splices count UTF-8 bytes in `at` and `delete`,
+/// with UTF-16 alongside for other hosts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscription_splices_count_utf8_bytes() {
+    use futures::StreamExt;
+    use jazz_app_support::ReadOptions;
+    let jazz = bindings::open(Config::new(AppId::random()), App)
+        .await
+        .unwrap();
+    let task = jazz
+        .insert(NewTask::new("🎉é", 0, Vec::new()))
+        .await
+        .unwrap();
+    let mut changes = jazz
+        .subscribe_with_options(
+            tasks::query(),
+            ReadOptions::default().splices(tasks::title()),
+        )
+        .await
+        .unwrap();
+    changes.next().await.unwrap().unwrap();
+    jazz.update(
+        task.id,
+        TaskUpdate {
+            title: Some("🎉éX".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let update = loop {
+        let delta = changes.next().await.unwrap().unwrap();
+        if let Some(updated) = delta.updated.into_iter().next() {
+            break updated;
+        }
+    };
+    let splice = &update.splices[0].1[0];
+    assert_eq!((splice.at, splice.delete), (6, 0));
+    assert_eq!((splice.at_utf16, splice.delete_utf16), (3, 0));
+    let mut shown = "🎉é".to_owned();
+    shown.replace_range(
+        splice.at as usize..(splice.at + splice.delete) as usize,
+        std::str::from_utf8(&splice.insert).unwrap(),
+    );
+    assert_eq!(shown, "🎉éX");
+}
+
+/// Anchors and ranges captured and resolved at UTF-8 byte offsets
+/// round-trip, and find their text again after an edit before them.
+#[test]
+fn text_anchors_count_utf8_bytes() {
+    use jazz_app_support::text::{Anchor, NotCharBoundary, Range, Side};
+    let text = "héllo wörld 🎉 end";
+    let at = text.find("wörld").unwrap();
+    let anchor = Anchor::capture_utf8(text, Some(1), at, Side::After).unwrap();
+    assert_eq!(anchor.resolve_utf8(text, Some(1)).position, at);
+    let range = Range::capture_utf8(text, Some(1), at..at + "wörld".len()).unwrap();
+    let resolved = range.resolve_utf8(text, Some(1));
+    assert_eq!(&text[resolved.start..resolved.end], "wörld");
+
+    let edited = format!("🎊🎊 {text}");
+    let moved = edited.find("wörld").unwrap();
+    let found = anchor.resolve_utf8(&edited, Some(2));
+    assert_eq!(found.position, moved);
+    assert!(found.confidence > 0.9, "{found:?}");
+    let found = range.resolve_utf8(&edited, Some(2));
+    assert_eq!(&edited[found.start..found.end], "wörld");
+
+    // The same anchor, counted in UTF-16 for other hosts.
+    assert_eq!(anchor.position, Some(text[..at].encode_utf16().count()));
+
+    assert_eq!(
+        Anchor::capture_utf8(text, None, 2, Side::After),
+        Err(NotCharBoundary { offset: 2 })
+    );
+    let emoji = text.find('🎉').unwrap();
+    assert_eq!(
+        Range::capture_utf8(text, None, 0..emoji + 1),
+        Err(NotCharBoundary { offset: emoji + 1 })
+    );
+    assert!(Anchor::capture_utf8(text, None, text.len() + 1, Side::Before).is_err());
+}

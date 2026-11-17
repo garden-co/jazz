@@ -2,7 +2,10 @@
 import { schema as s } from "jazz-tools";
 
 export const schema = s.defineSchema({
-  todos: s.table({ title: s.string(), done: s.boolean() }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+  }),
 });
 // #endregion schema
 

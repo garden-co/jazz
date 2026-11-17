@@ -15,6 +15,7 @@
     "setup/swift",
     "setup/kotlin",
     "setup/go",
+    "setup/rust",
     "---Working with Data---",
     "schemas",
     "reading",
