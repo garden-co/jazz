@@ -7,6 +7,8 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+#[path = "../address_policy_encoding.rs"]
+mod address_policy_encoding;
 #[path = "../aggregate_nullable_keys.rs"]
 mod aggregate_nullable_keys;
 #[path = "../aggregate_ordering.rs"]

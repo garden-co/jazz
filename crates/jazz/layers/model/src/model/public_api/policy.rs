@@ -512,6 +512,66 @@ mod tests {
         ])
     }
 
+    /// The address-policy variants' serde JSON, as stored in a permissions
+    /// bundle (`jazz-bundle-v1`, additive): named, with their fields, and
+    /// read back exactly. The bundle's canonical form and digest are pinned
+    /// with `canonical_json` (`crates/jazz/tests/address_policy_encoding.rs`).
+    #[test]
+    fn address_policy_json_is_pinned() {
+        for (expr, json) in [
+            (
+                PolicyExpr::InheritsFrom {
+                    operation: Operation::Select,
+                    table_column: "scopeId".into(),
+                    id_column: "identifier".into(),
+                    tables: vec!["projects".into()],
+                },
+                r#"{"type":"InheritsFrom","operation":"Select","table_column":"scopeId","id_column":"identifier","tables":["projects"]}"#,
+            ),
+            (
+                PolicyExpr::InheritsFrom {
+                    operation: Operation::Update,
+                    table_column: "scopeId".into(),
+                    id_column: "identifier".into(),
+                    tables: vec!["boards".into(), "projects".into()],
+                },
+                r#"{"type":"InheritsFrom","operation":"Update","table_column":"scopeId","id_column":"identifier","tables":["boards","projects"]}"#,
+            ),
+            (
+                PolicyExpr::InsertedByThisTransaction,
+                r#"{"type":"InsertedByThisTransaction"}"#,
+            ),
+            (
+                PolicyExpr::Cmp {
+                    column: "scopeId".into(),
+                    op: CmpOp::Eq,
+                    value: PolicyValue::TableIdentity {
+                        table: "projects".into(),
+                    },
+                },
+                r#"{"type":"Cmp","column":"scopeId","op":"Eq","value":{"type":"TableIdentity","table":"projects"}}"#,
+            ),
+        ] {
+            assert_eq!(serde_json::to_string(&expr).unwrap(), json);
+            assert_eq!(serde_json::from_str::<PolicyExpr>(json).unwrap(), expr);
+        }
+        for (input, error) in [
+            (
+                r#"{"type":"InheritsFrom","operation":"Select","table_column":"scopeId","id_column":"identifier"}"#,
+                "missing field `tables`",
+            ),
+            (
+                r#"{"type":"Cmp","column":"a","op":"Eq","value":{"type":"TableIdentity"}}"#,
+                "missing field `table`",
+            ),
+        ] {
+            let actual = serde_json::from_str::<PolicyExpr>(input)
+                .unwrap_err()
+                .to_string();
+            assert!(actual.starts_with(error), "{input}: {actual}");
+        }
+    }
+
     #[test]
     fn policy_expr_json_is_pinned() {
         let expr = every_policy_variant();
