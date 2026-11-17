@@ -1004,8 +1004,7 @@ the root of the floor's generation is not the one this device verified
 (for example a different generation-0 root), whatever later generations
 follow it. The checks run in that order: `stale-state`, then
 `root-not-mine`, then `device-no-longer-active`. Otherwise the floor
-advances to the newer state. The client runtime keeps floors for spaces as
-well (§6.3a).
+advances to the newer state (§6.3a).
 
 **Private verification.** A device that wants the account key also reads the
 private tables (same cut) and accepts: the identity only if it matches the
@@ -1173,25 +1172,9 @@ first **revoke the device's sign-in** with the application (so Jazz stops
 serving it); its spaces then need new keys. A device removal marks every
 space whose current version was sealed to an account epoch the removed
 device held as needing rotation (§3.5), and the next encrypted write by an
-updater rotates it. The SDK of the removing device does not wait for that:
-it queues a rotation of each marked space it holds the current key of, and
-works through the queue in the background at a bounded rate: one rotation
-at a time, at most 30 a minute by default (each rotation also writes up to
-1,000 deliveries, §3.8), spaces this device wrote to most recently first.
-Each is an ordinary rotation that the authority accepts only if the account
-may update the space row (R16). The queue lives in the running client; a
-restart rebuilds it from the needs-rotation marks of the spaces the device
-watches, and meanwhile every queued space is still rotated before the next
-encrypted write by an updater (§3.5). An explicit `rotate(space)` is not
-queued. A user in 3,000 spaces who removes a device therefore starts no
-burst: the rotations take about 100 minutes at the default rate. When the
-queue has been worked through, the SDK emits one `spaces-need-rotation`
-encryption event `{account, removedDeviceId, spaces}` listing the held
-spaces whose rotation was refused or could not be made (for example because
-no current key is held), so the application can ask an updater to rotate
-them. The SDK does not evaluate permissions locally (§3.2); it learns which
-spaces it may not rotate from the refusals. Developer documentation must
-say to revoke the sign-in first.
+updater rotates it, as after a member's removal. An application that
+wants it sooner calls `db.encryption.rotate(space)`. Developer documentation must
+say to revoke the sign-in first.say to revoke the sign-in first.
 
 **What removal achieves also depends on how the account signs in.** For an
 account authenticated by the application's own sign-in, a removed device can
@@ -1472,9 +1455,11 @@ A record for an epoch that is not in the account's chain, or accepted before
 its epoch's creation, is not valid. A sender seals to the first valid record (position, then ID) of
 the account's current epoch and the selected mechanism; with none, sealing
 fails with "recipient unsupported" and the sender waits. A device of the
-account also checks that the record derives from `K`; one that does not is
-the intrinsic contradiction `conflicting-account-key` (§7), since only the
-account's own devices can write it.
+account also checks that the record derives from `K`, for each mechanism it
+supports; one that does not is the intrinsic contradiction
+`conflicting-account-key` (§7), since only the account's own devices can
+write it. A record whose signer has no signing key published before it is
+not valid.
 
 Required behavioural tests, each a separate case: a record co-published by
 a bootstrap, by a reset and by a rotation is valid; a record co-published by
@@ -1708,17 +1693,22 @@ key whose marker verifies; every earlier version's key that the history
 links reach is thereby obtained too. A successor's `history` opens the key
 of its `historyEpochId`; versions strictly between that version and the
 successor were skipped by a recovery rotation (§3.5) and get no key from
-the chain: a device obtains them only from its own account envelope or a
+the chain (precisely: a version is skipped when no history link from the
+current version reaches it): a device obtains them only from its own account envelope or a
 delivery of that version. A candidate that provably fails to open or
 authenticate is skipped; a crypto provider failure fails the operation
 (§0). The client tries the current version first and then earlier ones, and
 keeps every key it accepts as a held key. When it does not obtain the
-current version, it waits for a delivery (§3.4).
+current version, it waits for a delivery (§3.4). A candidate sealed with a
+mechanism this client does not support is skipped and reported as
+unsupported, never as invalid.
 
 **Unresolved history.** A record needing a capability this client lacks
 (unsupported signing mechanism or ledger version) leaves the chain
 unresolved from there (§7, unsupported capability); the client does not skip
-it.
+it. A root candidate that needs such a capability, positioned before the
+first valid root, leaves the choice of root unresolved too, since the client
+cannot tell whether it is the first valid one.
 
 ### 3.4 Members and deliveries
 
@@ -1729,7 +1719,9 @@ applications and users never handle deliveries.
 - **Who lacks a key.** A member **lacks** version `v` when no accepted
   envelope of `v` (a delivery to it, or the `accountEnvelope` of `v`'s
   root or successor that it wrote) names an account epoch of its current
-  generation. Versions concerned are the current version and, after a
+  generation. A delivery at or before the root's position does not count
+  here, as in acquiring (§3.3); for key holders and the needs-rotation mark
+  (§3.5) it does, which is the safe direction. Versions concerned are the current version and, after a
   recovery rotation (§3.5), the skipped versions. A device-removal account
   rotation changes nothing here: the account's remaining devices open
   envelopes sealed to earlier epochs of the generation through its history
@@ -1826,7 +1818,9 @@ held (§1.1) by an account that is no longer a member, or was sealed to an
 account epoch that a later `remove-device` account successor (§2.8)
 superseded, so that a removed device can open it. "Later" means anywhere
 after that epoch in the account's chain, even with other successors in
-between. The mark is derived from tables every member can read (members,
+between. For an epoch of an earlier generation (the account was reset since),
+the removal is looked for in that generation's chain as it stood when the
+reset happened. The mark is derived from tables every member can read (members,
 roots, successors, deliveries and the public account successors, R10, R12,
 R14); nobody writes it and nobody can forget it.
 
@@ -1876,18 +1870,15 @@ rotation is rotated:
   the deadline, the write uses the current version. A refusal stops
   automatic rotation of the space on this device (below);
 - by `db.encryption.rotate(space)`, at once, when the application wants
-  the removal effective immediately;
-- after a device removal, by the removing device, queued at a bounded rate
-  (§2.8).
+  the removal effective immediately.
 
 Several removals before the next rotation are covered by one rotation.
 Writes by members who are not updaters stay under the current version until
 an updater rotates.
 
 **After a refusal.** When the authority refuses a rotation by this device,
-no automatic path rotates the space on this device while the client runs
-(the write path, and the queue after a device removal, which lists the
-space in `spaces-need-rotation` as refused, §2.8), and the device stops
+the write path does not rotate the space on this device while the client
+runs, and the device stops
 evaluating the mark for it. Explicit `db.encryption.rotate(space)` and
 `recoverRotation(space)` always attempt. As for creation (§3.2), this is
 kept only in memory, so a restart allows one more automatic attempt.
@@ -1998,8 +1989,8 @@ is made or abandoned.
   but a device syncs only those of the current version and of skipped
   versions it holds, plus every delivery addressed to its own account.
 - A device removal marks every space whose current version the removed
-  device could open; the removing device rotates them at a bounded rate
-  (§2.8), and each rotation costs as above.
+  device could open; each is rotated by the next encrypted write of an
+  updater (§2.8), at the cost above.
 - A device watches the public account rows of every member of every space
   it belongs to (above); the design figure is 10,000 watched accounts per
   device.
@@ -2408,13 +2399,12 @@ held keys.
 ### 6.3a Floors
 
 The runtime persists, next to the held-key documents of each scope `Dₐ(self)`,
-a **floor** for every account and space whose state it has verified:
-
-- an account: the cut, generation, canonical root of that generation, and
-  current epoch with its position (§2.4, "Floors"); for the device's own
-  account and for every account it replays (authors, delivery recipients);
-- a space: the cut, the root ID, and the current version with its chain
-  depth.
+a **floor** for every account whose state it has verified: the cut,
+generation, canonical root of that generation, and current epoch with its
+position (§2.4, "Floors"), for the device's own account and for every
+account it replays (authors, delivery recipients). Spaces have no floor: a
+space's state comes from the server, which E2EE does not protect against
+(§8).
 
 Each floor is signed by the device like a lineage record (`B(format, …)`,
 format `jazz-e2ee-floor-v1`) and advances only forward, after a verification
@@ -2425,8 +2415,8 @@ the runtime reads again; it never decrypts, writes or delivers with the older
 state. An account whose chain no longer contains the floor's root is
 `root-not-mine`, and an own-account floor whose device is no longer active is
 `device-no-longer-active` (§2.4). Floors are wiped with the held keys (§6.4).
-Protection starts at the device's first observation of each account or
-space: before it, the device has nothing to compare with (§8).
+Protection starts at the device's first observation of each account:
+before it, the device has nothing to compare with (§8).
 
 ### 6.4 Wipe rules
 
@@ -2457,8 +2447,7 @@ flattened into a bare `refused`. The data-error codes are exactly
 `key-unavailable`, `key-pending`, `space-pending`, `unsupported-format`,
 `invalid-ciphertext`, `empty-cell`, `superseded`, `stale-space` and
 `encryption-failed`. The encryption status events (not data errors) are
-`account-reset` (§2.11), `spaces-need-rotation` (§2.8),
-`invalid-delivery` (§3.4) and `space-over-member-limit` (§3.8). Account roots that do not count are reported with
+`account-reset` (§2.11), `invalid-delivery` (§3.4) and `space-over-member-limit` (§3.8). Account roots that do not count are reported with
 `root-malformed`, `root-foreign-account`, `root-key-mismatch`,
 `root-device-keys-missing`, `root-signature-invalid`, `root-kind-mismatch`
 or `root-unchained` (§2.4 step 1); they never fail replay.
@@ -2502,8 +2491,8 @@ Publication stages: account `request`, `bootstrap`, `challenge`, `proof`,
 
 The missing-key contradictions: `missing-root-key` (an accepted account
 root names a device with no published device keys, §1.2),
-`missing-signer-key` (a signed record's signer device has none at the
-record's position) and `missing-recipient-key` (an approval approves a
+`missing-signer-key` (a signer that is active at a signed record's
+position has none) and `missing-recipient-key` (an approval approves a
 device that has none). Replay cannot verify such records and fails closed.
 
 Serialization and transaction conflicts are retried internally only by
@@ -2710,10 +2699,12 @@ Limits:
 - **Rollback is detected only after a first observation.** A server can
   answer a read with an older cut, withholding rows accepted since (a device
   removal, a rotation, a retired recovery root), so that a client acts on
-  stale state. Each device keeps floors (§6.3a) and refuses evidence older
-  than what it has verified (`stale-state`); before its first observation of
-  an account or space, and after a wipe, it cannot tell a rolled-back history
-  from the real one. Other devices' floors do not protect it.
+  stale state. Each device keeps account floors (§6.3a) and refuses account
+  evidence older than what it has verified (`stale-state`); before its first
+  observation of an account, and after a wipe, it cannot tell a rolled-back
+  history from the real one. Other devices' floors do not protect it. Spaces
+  have no floors: a server can show a device an older state of a space (for
+  example, hide a rotation), as it can add a member row.
 - **Account reset needs no approval.** For an application that enables
   `allowAccountReset`, whoever can sign in as an app-authenticated account
   can reset it and then receive every space key it is a member of, with the
