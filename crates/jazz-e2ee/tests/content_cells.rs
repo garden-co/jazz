@@ -1645,3 +1645,28 @@ fn an_older_acquisition_never_settles_a_known_version_as_absent() {
     );
     assert!(held.known(&address).unwrap().is_absent(stray));
 }
+
+/// A read whose cut the server inflated does not freeze the chain the
+/// device knows: a later read that extends that chain is still taken.
+#[test]
+fn an_inflated_cut_never_hides_a_later_version() {
+    use jazz_e2ee::protocol::Position;
+    use jazz_e2ee::protocol::space::SpaceChain;
+
+    let mut world = world(32);
+    let address = space(ROW);
+    let mut held = held_of(&world, ALICE, ROW);
+    let mut read = world.read_of(address.clone());
+    read.space.through = Position(1_000_000);
+    for ledger in &mut read.ledgers {
+        ledger.through = Position(1_000_000);
+    }
+    let inflated = SpaceChain::replay(&read.space, &read.directory(&world))
+        .unwrap()
+        .unwrap();
+    held.observe_chain(&inflated);
+    let v1 = world.rotate(ALICE);
+    held.observe_chain(&chain_of(&world, ROW));
+    assert_eq!(held.known(&address).unwrap().epochs().len(), 2);
+    assert!(held.incomplete(&address), "the device lacks {v1}");
+}

@@ -397,19 +397,29 @@ impl KnownChain {
     /// Takes a newer read of the chain: when it advances (more versions,
     /// or the chain is resolved further) or names another root, the epochs
     /// remembered as absent are forgotten. A read at an earlier cut than
-    /// the known one, or one that does not advance it, changes nothing.
+    /// the known one, or one that does not advance it, changes nothing,
+    /// except one that extends the known chain (the same root, more
+    /// versions after the known ones), whatever cut it claims: no older
+    /// read shows that, so a cut the server inflated never freezes the
+    /// known chain.
     fn observe(&mut self, chain: &SpaceChain) {
-        if self
-            .through
-            .is_some_and(|through| chain.through() < through)
-        {
-            return;
-        }
         let epochs: Vec<String> = chain
             .versions
             .iter()
             .map(|version| version.epoch_id.clone())
             .collect();
+        // The same root with more versions, the known ones first: no older
+        // read can show this, so it is taken whatever cut the read claims.
+        let extends = self.root_id == chain.root.row.id
+            && epochs.len() > self.epochs.len()
+            && epochs.starts_with(&self.epochs);
+        if !extends
+            && self
+                .through
+                .is_some_and(|through| chain.through() < through)
+        {
+            return;
+        }
         let other_root = self.root_id != chain.root.row.id;
         let advanced = epochs.len() > self.epochs.len()
             || (self.unresolved.is_some() && chain.unresolved.is_none());
@@ -421,7 +431,7 @@ impl KnownChain {
                 .as_ref()
                 .map(|unresolved| unresolved.capability);
             self.absent.clear();
-            self.through = Some(chain.through());
+            self.through = self.through.max(Some(chain.through()));
         }
     }
 }
