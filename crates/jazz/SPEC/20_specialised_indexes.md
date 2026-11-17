@@ -480,10 +480,12 @@ version:
    in every script (`नमस्ते।दुनिया`, `مرحبا،عالم` and `x։y` are two words
    each), and ignored characters do not split a word and are left out of
    its term (`co\u{AD}operate` is `cooperate`). As in UAX #29 (WB6, WB7,
-   WB7b, WB7c), a few separators stay inside a word between letters: `'`,
-   `’` or `·` (U+00B7) between two word characters (`don't`, `O’Neill`,
-   Catalan `col·lecció`), and `׳` (U+05F3), `״` (U+05F4), `'` or `"` between
-   two Hebrew letters (`צה״ל`, `צה"ל`). Other separators split, so `e-mail`,
+   WB7b, WB7c), a few separators stay inside a word: `'` or `’` between two
+   word characters (`don't`, `O’Neill`); `·` (U+00B7) only between two `l`s,
+   the Catalan ela geminada (`col·lecció`; `3·4` and `Home·About` split);
+   and `׳` (U+05F3), `״` (U+05F4), `'` or `"` between two Hebrew letters
+   (`צה״ל`, `צה"ל`). The letter before one of these is found past any marks
+   and ignored characters (WB4), so `צהָ״ל` is one word. Other separators split, so `e-mail`,
    `3.14` and `snake_case` are two words each. A field is analyzed up to its first 65 536 terms (after step
    5); the rest of it is not indexed and does not count toward its length
    `L`. This bounds the postings one write creates; a value is never
@@ -522,8 +524,10 @@ indexed term equal to the word analyzed as a whole word (so a fully typed
 `running` meets the stem `run`), or any indexed term starting with the word
 folded but unstemmed (steps 1–3), compared as UTF-8 bytes. A partly typed
 word whose stem is shorter than what has been typed (`runn`) matches only
-once completed. A term equal to the prefix's whole-word term is not a
-separate slot (`run run` binds the prefix alone). A last word of one
+once completed. A term equal to the prefix's whole-word term keeps its own
+exact slot (`run run` binds the term `run` and the prefix `run`): the prefix
+slot also matches longer terms, so dropping it would loosen `All`. Each
+posting counts once in the score (20.5). A last word of one
 character is an exact term, not a prefix
 (a prefix has at least 2 characters), so `jazz b` does not expand to every
 term starting with `b`. A query with no terms and no prefix after analysis
