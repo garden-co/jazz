@@ -69,10 +69,11 @@ use crate::values::{
     unsupported,
 };
 pub use sync::{
-    ACCEPTED, AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
-    FrameJoiner, Image, MAX_SEQ, Outcome, PENDING, Pos, ReadSpan, RejectedTransaction,
-    RelationSnapshot, RemoteLinkHint, SerializedReadResult, Since, SubscriberId, SyncMessage,
-    Transport, TransportError, TxName, UploadRefusal, UploadStatus, Upstream, WireBase, WireChunk,
+    ACCEPTED, AccessProof, Acting, BuiltOn, CatalogueCell, CatalogueSchema, CatalogueUpdate,
+    CatalogueVersion, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad, FrameJoiner, Image,
+    MAX_SEQ, Outcome, PENDING, Pos, ReadSpan, RejectedTransaction, RelationSnapshot,
+    RemoteLinkHint, SerializedReadResult, Since, SubscriberId, SyncMessage, Transport,
+    TransportError, TxName, UploadRefusal, UploadStatus, Upstream, WireBase, WireChunk,
     WireChunkRef, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, WireTransport,
     WireTransportAdapter, WireWrite, WriteConflict, decode_message, duplex, encode_frames,
     validate_frame_batch_for_corpus,
@@ -918,6 +919,9 @@ struct Inner {
     /// The app's versions and lenses (see [`DbConfig::migrations`]): a
     /// version this store lacks is admitted along them.
     migrations: Migrations,
+    /// Catalogue versions an upstream sent that this build cannot read,
+    /// with why (see [`crate::sync::CatalogueSchema`]): skipped, not taken.
+    unsupported_versions: BTreeMap<crate::ids::SchemaVersionId, String>,
     /// Whether `_jazz_withheld` exists (see `sync::WITHHELD_DDL`): branch
     /// views over a base read it only then.
     withheld: std::cell::Cell<bool>,
@@ -2285,6 +2289,7 @@ impl Db {
                 capture: Vec::new(),
                 gone: RefCell::new(Vec::new()),
                 migrations: config.migrations,
+                unsupported_versions: BTreeMap::new(),
                 withheld: std::cell::Cell::new(withheld > 0),
                 follow_memo: Rc::default(),
                 pruned_txs: std::cell::Cell::new(None),
@@ -2367,6 +2372,29 @@ impl Db {
             }
         }
         Ok(())
+    }
+
+    /// The catalogue versions an upstream sent that this build cannot read
+    /// (a column type or other variant it does not know): each skipped, with a
+    /// `SchemaVersionUnsupported` error saying why. The store keeps syncing
+    /// the versions it knows.
+    pub fn unsupported_schema_versions(&self) -> Vec<(crate::ids::SchemaVersionId, Error)> {
+        self.inner()
+            .unsupported_versions
+            .iter()
+            .map(|(id, why)| {
+                let mut error = Error::new(
+                    ErrorCode::Schema,
+                    format!(
+                        "schema version {} is not supported by this version of Jazz ({why}); \
+                         upgrade it to read that version",
+                        id.0
+                    ),
+                );
+                error.reason = Some(Reason::SchemaVersionUnsupported);
+                (*id, error)
+            })
+            .collect()
     }
 
     /// This store's own commits the authority refused, with their payloads,
@@ -4351,6 +4379,9 @@ impl Inner {
         {
             return Err(authority_changed());
         }
+        // A version this build cannot read is skipped, with its lens
+        // cells; the versions it knows are taken as usual.
+        let (versions, cells) = self.skip_unsupported_versions(versions, cells);
         let mirrored = !versions.is_empty();
         if mirrored {
             self.mirror_versions(versions, cells, defaults)?;
@@ -4369,6 +4400,36 @@ impl Inner {
             }
         }
         Ok(mirrored)
+    }
+
+    /// `versions` without the ones this build cannot read (recorded in
+    /// `unsupported_versions`), and `cells` without those versions' cells.
+    fn skip_unsupported_versions(
+        &mut self,
+        versions: Vec<sync::CatalogueVersion>,
+        cells: Vec<sync::CatalogueCell>,
+    ) -> (Vec<sync::CatalogueVersion>, Vec<sync::CatalogueCell>) {
+        let mut skipped = BTreeSet::new();
+        let versions = versions
+            .into_iter()
+            .filter(|version| match &version.schema {
+                sync::CatalogueSchema::Known(_) => true,
+                sync::CatalogueSchema::Unsupported { id, error, .. } => {
+                    tracing::warn!(
+                        version = %id.0,
+                        "skipping a catalogue schema version this build cannot read: {error}"
+                    );
+                    self.unsupported_versions.insert(*id, error.clone());
+                    skipped.insert(*id.0.as_bytes());
+                    false
+                }
+            })
+            .collect();
+        let cells = cells
+            .into_iter()
+            .filter(|cell| !skipped.contains(&cell.since))
+            .collect();
+        (versions, cells)
     }
 
     /// Take the upstream's versions, names and lens cells: whole or not at
@@ -4551,7 +4612,10 @@ impl Inner {
                         })
                         .collect(),
                 };
-                (entry.schema.id, names, entry.schema.schema)
+                let sync::CatalogueSchema::Known(version) = entry.schema else {
+                    unreachable!("unsupported versions are skipped first")
+                };
+                (version.id, names, version.schema)
             })
             .collect();
         let mut fresh = std::collections::HashSet::new();

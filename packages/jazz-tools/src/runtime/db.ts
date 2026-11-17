@@ -2955,7 +2955,7 @@ export class Db {
    * agents and tests read the same through `window.__jazz.status()`.
    */
   getSyncStatus(): SyncStatus {
-    const next = this.connection.syncStatus();
+    const next = withAuthReason(this.connection.syncStatus(), this.authStateStore.getState().error);
     if (this.syncStatusSnapshot && sameSyncStatus(next, this.syncStatusSnapshot)) {
       return this.syncStatusSnapshot;
     }
@@ -2998,12 +2998,17 @@ export class Db {
       { once: true },
     );
     let published = this.getSyncStatus();
-    this.connection.onSyncStatusChange(() => {
+    const publish = () => {
       const status = this.getSyncStatus();
       if (status === published) return;
       published = status;
       listener(status);
-    }, subscription.signal);
+    };
+    this.connection.onSyncStatusChange(publish, subscription.signal);
+    // Why the server refused the credential may be known after the link
+    // went offline: the status says it then (`authReason`).
+    const stopAuth = this.authStateStore.onChange(publish);
+    subscription.signal.addEventListener("abort", stopAuth, { once: true });
     return end;
   }
 
@@ -4924,4 +4929,11 @@ function isRuntimeClosed(error: unknown): boolean {
   for (let current = error; current instanceof Error; current = current.cause)
     if (current instanceof RuntimeClosedError) return true;
   return false;
+}
+
+/** The status with why the server refused the credential, while the link is offline for it. */
+function withAuthReason(status: SyncStatus, reason: AuthFailureReason | undefined): SyncStatus {
+  const { link } = status;
+  if (link.state !== "offline" || link.reason !== "auth" || reason === undefined) return status;
+  return { ...status, link: { ...link, authReason: reason } };
 }

@@ -346,6 +346,8 @@ export interface Runtime {
   endCredentialWait?(): void;
   /** Register a callback invoked when the Rust transport rejects the JWT. */
   onAuthFailure(callback: (reason: string) => void): void;
+  /** Register a callback invoked when the server admits this client's link again. */
+  onAuthRestored?(callback: () => void): void;
 }
 
 /**
@@ -721,6 +723,8 @@ export interface SubscriptionCallbacks {
 
 export interface ConnectRuntimeOptions {
   onAuthFailure?: (reason: AuthFailureReason) => void;
+  /** The server admitted this client's link (again), so an earlier refusal no longer holds. */
+  onAuthRestored?: () => void;
 }
 
 type QueryExecutionDefaultsContext = {
@@ -1261,6 +1265,8 @@ export class JazzClient {
       this.handleCredentialRefusal(reason);
       onAuthFailure?.(reason);
     });
+    const onAuthRestored = runtimeOptions?.onAuthRestored;
+    if (onAuthRestored) this.runtime.onAuthRestored?.(onAuthRestored);
 
     this.runtime.onMutationError((event) => {
       console.error("Unhandled Jazz mutation error", event);

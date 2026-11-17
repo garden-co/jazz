@@ -146,6 +146,10 @@ export abstract class ConnectionManager {
       schema: runtimeSchema,
       migrations: shippedMigrations(schema),
       onAuthFailure: (reason) => this.host.markUnauthenticated(reason),
+      // Admitted again: the refusal's reason (`db.getAuthState().error`, and
+      // the sync status's `authReason`) no longer holds, as `onAuthRestored`
+      // clears it for a browser worker's connection.
+      onAuthRestored: () => this.host.clearAuthError(),
       foregroundNodeLease: this.foregroundNodeLease,
     });
     client.onMutationError((event) => this.host.onMutationError(event));
