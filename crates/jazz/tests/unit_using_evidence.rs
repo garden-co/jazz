@@ -196,11 +196,11 @@ fn config(node: u8, author: AuthorSubject) -> DbConfig {
 /// An authority where alice and bob are in team `red` and bob owns
 /// `note_row()` (and `other_row()`, in `blue`, a team alice is not in).
 fn authority() -> Db {
-    let server = block_on(Db::open_history_complete(config(
-        0xee,
-        AuthorSubject::SYSTEM,
-    )))
-    .unwrap();
+    authority_with(config(0xee, AuthorSubject::SYSTEM))
+}
+
+fn authority_with(config: DbConfig) -> Db {
+    let server = block_on(Db::open_history_complete(config)).unwrap();
     for (row, team, who) in [
         (alice_in(), "blue-less", alice()),
         (RowUuid::from_bytes([0x21; 16]), "red", alice()),
@@ -262,7 +262,48 @@ fn authority() -> Db {
         },
     ))
     .unwrap();
+    // The same row on another base, alice's.
+    block_on(server.insert(
+        "drafts",
+        BTreeMap::from([
+            ("team".to_owned(), text("red")),
+            ("owner".to_owned(), subject(alice())),
+            ("body".to_owned(), text("alice's")),
+        ]),
+        InsertOptions {
+            row_id: Some(note_row()),
+            target: ExactWriteTarget::Branch(alices_branch()),
+            ..database()
+        },
+    ))
+    .unwrap();
     server
+}
+
+fn alices_branch() -> BranchSelector {
+    BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([0xa2; 16])))])
+}
+
+/// The head branch over `base`.
+fn view_over(base: BranchSelector) -> WriteTarget {
+    WriteTarget::BranchView {
+        head: head_branch(),
+        base: Some(BranchViewBase::Current(base)),
+    }
+}
+
+/// The draft as the head view over `base` shows it on `db`: its body.
+fn draft_over(db: &Db, base: BranchSelector) -> Option<String> {
+    let prepared = db.prepare_query(&Query::from("drafts")).unwrap();
+    let opts = ReadOpts {
+        tier: ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    }
+    .branch_view(head_branch(), Some(BranchViewBase::Current(base)));
+    let rows = block_on(db.all(&prepared, opts)).unwrap();
+    rows.iter()
+        .find(|r| r.row_uuid() == note_row())
+        .map(|r| format!("{:?}", r.cell("body")))
 }
 
 fn memo_row() -> RowUuid {
@@ -929,4 +970,163 @@ fn a_client_branch_view_transaction_cannot_take_a_draft_over_and_delete_it() {
         assert!(verdict.is_err(), "the authority accepted the takeover");
     }
     assert_eq!(draft(&server), Some((true, "bob's".to_owned())));
+}
+
+// ---------------------------------------------------------------------
+// A head row's base is the one its own unit copied it from, never one
+// another unit's copy named.
+
+fn edit_draft(tx: &jazz::db::TxRef<'_>, base: BranchSelector, body: &str, who: WriteIdentity) {
+    block_on(tx.update(
+        "drafts",
+        note_row(),
+        BTreeMap::from([("body".to_owned(), text(body))]),
+        UpdateOptions {
+            identity: who,
+            target: view_over(base),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+}
+
+fn delete_draft(
+    tx: &jazz::db::TxRef<'_>,
+    base: BranchSelector,
+    who: WriteIdentity,
+) -> Result<(), jazz::db::Error> {
+    block_on(tx.delete(
+        "drafts",
+        note_row(),
+        DeleteOptions {
+            identity: who,
+            target: view_over(base),
+            ..Default::default()
+        },
+    ))
+    .map(drop)
+}
+
+/// Another open transaction's copy over bob's base does not make alice's
+/// own draft (over her base) bob's for her delete.
+#[test]
+fn another_staged_unit_s_copy_does_not_change_a_head_row_s_base() {
+    let alice = || WriteIdentity::Session(alice());
+    for other_first in [false, true] {
+        let server = authority();
+        let other = OpenTransactionId::new();
+        if other_first {
+            block_on(server.begin_mergeable(other)).unwrap();
+            edit_draft(
+                &server.tx_ref(other),
+                base_branch(),
+                "bob's, edited",
+                alice(),
+            );
+        }
+        let open = OpenTransactionId::new();
+        block_on(server.begin_mergeable(open)).unwrap();
+        let tx = server.tx_ref(open);
+        edit_draft(&tx, alices_branch(), "alice's, edited", alice());
+        delete_draft(&tx, alices_branch(), alice())
+            .unwrap_or_else(|e| panic!("other first {other_first}: {e}"));
+        block_on(server.commit_mergeable_handle(open))
+            .unwrap_or_else(|e| panic!("other first {other_first}: {e}"));
+        assert_eq!(draft_over(&server, alices_branch()), None);
+    }
+}
+
+/// A refused unit's copy over alice's base does not make bob's draft
+/// alice's for the next unit's delete, however soon it is decided: with
+/// the authority's clock standing still, the next unit takes the refused
+/// one's seq.
+#[test]
+fn a_refused_unit_s_copy_does_not_change_the_next_unit_s_base() {
+    use duplex_transport::duplex;
+    let server = authority_with(config(0xee, AuthorSubject::SYSTEM).with_clock(|| 1_000));
+    // Two of alice's devices, each holding both views of the draft.
+    let devices: Vec<Db> = [0xa1, 0xa3]
+        .into_iter()
+        .map(|node| {
+            let client = block_on(Db::open(config(node, alice()))).unwrap();
+            let (client_side, server_side) = duplex();
+            block_on(client.connect_upstream(client_side));
+            server.accept_subscriber(server_side, alice()).unwrap();
+            client
+        })
+        .collect();
+    let mut live = Vec::new();
+    for client in &devices {
+        let drafts = client.prepare_query(&Query::from("drafts")).unwrap();
+        for base in [base_branch(), alices_branch()] {
+            live.push(
+                block_on(
+                    client.subscribe(
+                        &drafts,
+                        ReadOpts::default()
+                            .branch_view(head_branch(), Some(BranchViewBase::Current(base))),
+                    ),
+                )
+                .unwrap(),
+            );
+        }
+        let members = client.prepare_query(&Query::from("members")).unwrap();
+        live.push(block_on(client.subscribe(&members, ReadOpts::default())).unwrap());
+    }
+    let pump = || {
+        for _ in 0..6 {
+            for client in &devices {
+                block_on(client.tick()).unwrap();
+            }
+            block_on(server.tick()).unwrap();
+        }
+    };
+    pump();
+    for client in &devices {
+        assert!(draft_over(client, base_branch()).is_some());
+        assert!(draft_over(client, alices_branch()).is_some());
+    }
+    let (one, two) = (&devices[0], &devices[1]);
+
+    // Unit A on one device: an edit over alice's base, and a write alice
+    // may not make.
+    let a = OpenTransactionId::new();
+    block_on(one.begin_mergeable(a)).unwrap();
+    let tx = one.tx_ref(a);
+    edit_draft(
+        &tx,
+        alices_branch(),
+        "alice's, edited",
+        WriteIdentity::default(),
+    );
+    block_on(tx.update(
+        "members",
+        RowUuid::from_bytes([0x22; 16]),
+        BTreeMap::from([("team".to_owned(), text("gone"))]),
+        UpdateOptions::default(),
+    ))
+    .unwrap();
+    let a = block_on(one.commit_mergeable_handle(a)).unwrap();
+    // Unit B on the other, decided right after A: bob's draft over his
+    // base, edited and deleted.
+    let b = OpenTransactionId::new();
+    block_on(two.begin_mergeable(b)).unwrap();
+    let tx = two.tx_ref(b);
+    edit_draft(
+        &tx,
+        base_branch(),
+        "bob's, edited",
+        WriteIdentity::default(),
+    );
+    delete_draft(&tx, base_branch(), WriteIdentity::default()).unwrap();
+    let b = block_on(two.commit_mergeable_handle(b)).unwrap();
+    let all: Vec<&Db> = devices.iter().chain([&server]).collect();
+    let refused_a = drive(&all, one.wait_for_transaction(a.0, DurabilityTier::Global)).is_err();
+    let refused_b = drive(&all, two.wait_for_transaction(b.0, DurabilityTier::Global)).is_err();
+    assert!(refused_a, "unit A is refused");
+    assert!(refused_b, "unit B deletes bob's draft");
+    assert_eq!(
+        draft_over(&server, base_branch()),
+        Some(format!("{:?}", Some(text("bob's"))))
+    );
 }
