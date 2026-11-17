@@ -520,11 +520,16 @@ pub enum Reason {
     SearchQueryTooLong,
     /// A text search whose prefix stands for more than 1 000 terms or that would read more than 200 000 postings (code `Query`, SPEC 20.12).
     SearchTooBroad,
+    /// An upstream's catalogue named a schema version this build cannot read
+    /// (a column type or schema key it does not know): the version is
+    /// skipped and the store keeps syncing the versions it knows (code
+    /// `Schema`).
+    SchemaVersionUnsupported,
 }
 
 impl Reason {
     /// Every reason, in declaration order.
-    pub const ALL: [Reason; 20] = [
+    pub const ALL: [Reason; 21] = [
         Reason::AuthorizationDenied,
         Reason::ClientClockTooFarAhead,
         Reason::SerializationConflict,
@@ -545,6 +550,7 @@ impl Reason {
         Reason::IndexDeclarationMismatch,
         Reason::SearchQueryTooLong,
         Reason::SearchTooBroad,
+        Reason::SchemaVersionUnsupported,
     ];
 
     /// The stable, snake_case name of this reason.
@@ -575,6 +581,7 @@ impl Reason {
             Reason::IndexDeclarationMismatch => "index_declaration_mismatch",
             Reason::SearchQueryTooLong => "search_query_too_long",
             Reason::SearchTooBroad => "search_too_broad",
+            Reason::SchemaVersionUnsupported => "schema_version_unsupported",
         }
     }
 

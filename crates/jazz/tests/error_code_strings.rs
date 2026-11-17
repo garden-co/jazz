@@ -83,6 +83,7 @@ fn pinned_reason(reason: Reason) -> &'static str {
         Reason::IndexDeclarationMismatch => "index_declaration_mismatch",
         Reason::SearchQueryTooLong => "search_query_too_long",
         Reason::SearchTooBroad => "search_too_broad",
+        Reason::SchemaVersionUnsupported => "schema_version_unsupported",
     }
 }
 

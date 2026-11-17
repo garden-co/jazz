@@ -3319,6 +3319,17 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   /**
+   * The upstream failure remote waits fail on now, and whether the client
+   * keeps reconnecting through it; null while there is none. A durable
+   * worker relays this as state to the tabs attached to it.
+   */
+  upstreamFailure(): { error: Error; retrying: boolean } | null {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.upstreamFailure();
+    const error = this.serverTransportError;
+    return error ? { error, retrying: this.serverTransportErrorRetrying } : null;
+  }
+
+  /**
    * The server refused a credential that nothing renews, so the link will
    * not reconnect on its own: end the waits and remote subscriptions held
    * for a new credential, as a terminal failure does (#3923). A later
@@ -5923,6 +5934,8 @@ const REJECTION_CODES_BY_REASON: Readonly<Record<NativeCoreErrorReason, string>>
   index_declaration_mismatch: "write_rejected",
   search_query_too_long: "write_rejected",
   search_too_broad: "write_rejected",
+  // A skipped catalogue version, never a write's fate.
+  schema_version_unsupported: "write_rejected",
 };
 
 /** A rejected wait's code, from the core reason every binding carries on it. */

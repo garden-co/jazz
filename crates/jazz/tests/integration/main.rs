@@ -29,6 +29,8 @@ mod bundle_permissions;
 mod callback_transaction_cancellation;
 #[path = "../catalogue_rows.rs"]
 mod catalogue_rows;
+#[path = "../catalogue_unsupported_versions.rs"]
+mod catalogue_unsupported_versions;
 #[path = "../claims_change.rs"]
 mod claims_change;
 #[path = "../claims_registry_refresh.rs"]
@@ -123,6 +125,8 @@ mod pending_rebase_scope;
 mod permission_advice;
 #[path = "../policy_activation.rs"]
 mod policy_activation;
+#[path = "../policy_check_plans.rs"]
+mod policy_check_plans;
 #[path = "../policy_claim_coercion.rs"]
 mod policy_claim_coercion;
 #[path = "../policy_support_rows.rs"]

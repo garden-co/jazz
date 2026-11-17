@@ -239,7 +239,7 @@ fn a_live_search_follows_the_policys_evidence() {
         let mut stream =
             block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), bob())).unwrap();
         block_on(db.tick()).unwrap();
-        let mut seen = |stream: &mut jazz::db::SubscriptionStream| {
+        let seen = |stream: &mut jazz::db::SubscriptionStream| {
             let (mut added, mut removed) = (Vec::new(), Vec::new());
             while let Some(event) = stream.try_next_event() {
                 match event {

@@ -1770,9 +1770,79 @@ pub enum ReadSpan {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CatalogueVersion {
     /// Its structural schema, without permissions.
-    pub schema: crate::protocol::SchemaVersion,
+    pub schema: CatalogueSchema,
     /// Per table: (name, stored name, per column (name, stored name)).
     pub names: Vec<(String, String, Vec<(String, String)>)>,
+}
+
+/// A catalogue version's schema as received. Its bytes are exactly a
+/// [`crate::protocol::SchemaVersion`]'s (the version id, then its public
+/// schema JSON), but each version decodes on its own: one this build cannot
+/// read (a column type or schema key it does not know, from a newer
+/// authority) is `Unsupported`, and the rest of the catalogue still applies
+/// (the receiver skips it with [`crate::options::Reason::SchemaVersionUnsupported`])
+/// instead of the whole message failing to decode and the link with it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CatalogueSchema {
+    Known(crate::protocol::SchemaVersion),
+    Unsupported {
+        id: crate::ids::SchemaVersionId,
+        /// Its public schema JSON, as sent.
+        json: Vec<u8>,
+        /// Why this build cannot read it.
+        error: String,
+    },
+}
+
+/// The wire layout of a [`crate::protocol::SchemaVersion`].
+#[derive(Serialize, Deserialize)]
+struct CatalogueSchemaWire {
+    id: crate::ids::SchemaVersionId,
+    public_schema_json: Vec<u8>,
+}
+
+impl CatalogueSchema {
+    /// The version's id, decoded or not.
+    pub fn id(&self) -> crate::ids::SchemaVersionId {
+        match self {
+            Self::Known(version) => version.id,
+            Self::Unsupported { id, .. } => *id,
+        }
+    }
+}
+
+impl Serialize for CatalogueSchema {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Known(version) => version.serialize(serializer),
+            Self::Unsupported { id, json, .. } => CatalogueSchemaWire {
+                id: *id,
+                public_schema_json: json.clone(),
+            }
+            .serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CatalogueSchema {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let CatalogueSchemaWire {
+            id,
+            public_schema_json,
+        } = CatalogueSchemaWire::deserialize(deserializer)?;
+        Ok(
+            match jazz_model::model::public_schema_convert::decode_public_schema_json(
+                &public_schema_json,
+            ) {
+                Ok(schema) => Self::Known(crate::protocol::SchemaVersion { id, schema }),
+                Err(error) => Self::Unsupported {
+                    id,
+                    json: public_schema_json,
+                    error,
+                },
+            },
+        )
+    }
 }
 
 /// A stored column a lens fills (see `crate::names::LensCell`): a copy
@@ -4550,7 +4620,8 @@ impl Inner {
             .iter()
         {
             let row = RowUuid::from_bytes(found.id);
-            let can = readable(
+            // Just read, nothing written since: an existing row.
+            let can = readable_existing(
                 self,
                 &follow.policies,
                 table,
@@ -7476,10 +7547,10 @@ impl Inner {
             }
             sent_schemas.push((jazz.clone(), names.clone()));
             versions.push(CatalogueVersion {
-                schema: crate::protocol::SchemaVersion {
+                schema: CatalogueSchema::Known(crate::protocol::SchemaVersion {
                     id: version,
                     schema: jazz.without_permissions(),
-                },
+                }),
                 names: names
                     .tables
                     .iter()
@@ -15391,6 +15462,22 @@ fn readable(
     };
     let table = owned_table(policies, table)?;
     inner.check_in(policies, table, row, key, author, Operation::Select)
+}
+
+/// [`readable`] for a row the caller just read from this store, at `key`.
+fn readable_existing(
+    inner: &Inner,
+    policies: &Schema,
+    table: &str,
+    row: RowUuid,
+    key: &[u8],
+    identity: Option<AuthorSubject>,
+) -> Result<bool, Error> {
+    let Some(author) = identity else {
+        return Ok(true);
+    };
+    let table = owned_table(policies, table)?;
+    inner.check_in_existing(policies, table, row, key, author, Operation::Select)
 }
 
 /// The current schema's table stored as `stored`.

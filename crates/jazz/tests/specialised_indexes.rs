@@ -683,7 +683,7 @@ impl Transport for Downstream {
         if let Some(catalogue) = catalogue {
             self.versions
                 .borrow_mut()
-                .extend(catalogue.versions.iter().map(|v| v.schema.id));
+                .extend(catalogue.versions.iter().map(|v| v.schema.id()));
         }
         self.inner.send(message)
     }
