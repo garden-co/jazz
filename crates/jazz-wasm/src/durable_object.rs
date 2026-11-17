@@ -923,8 +923,47 @@ mod core_host {
         thin: bool,
         /// Split thin requests being joined.
         assembler: jazz::thin::ThinAssembler,
-        /// Input its session's budget had no room for yet, oldest first.
+        /// Input its session's budget had no room for yet, oldest first,
+        /// and its bytes: a Durable Object cannot stop reading a socket, so
+        /// the object holds it, up to [`HELD_LIMIT`].
         held: VecDeque<Held>,
+        held_bytes: usize,
+        /// Why the socket ends: its error frame goes out with its output.
+        failed: Option<jazz::wire::WireError>,
+    }
+
+    /// The most input a socket may have held for room (twice a session's
+    /// ingress budget, 2 × 8 MiB): a peer sending faster than the engine
+    /// takes it is ended with `Backpressure` (it reconnects later) instead
+    /// of growing the object's memory toward the isolate's limit.
+    const HELD_LIMIT: usize = 16 * 1024 * 1024;
+
+    impl Socket {
+        fn hold(&mut self, input: Held, bytes: usize) {
+            self.held.push_back(input);
+            self.held_bytes += bytes;
+            if self.held_bytes > HELD_LIMIT && self.failed.is_none() {
+                self.held.clear();
+                self.held_bytes = 0;
+                self.failed = Some(jazz::wire::WireError::new(
+                    jazz::wire::WireErrorCode::Backpressure,
+                    jazz::wire::WireRetry::Later,
+                    "the connection sent more than the core could take: reconnect later",
+                ));
+            }
+        }
+
+        fn fail(&mut self, message: impl std::fmt::Display) {
+            self.held.clear();
+            self.held_bytes = 0;
+            self.failed.get_or_insert_with(|| {
+                jazz::wire::WireError::new(
+                    jazz::wire::WireErrorCode::MalformedFrame,
+                    jazz::wire::WireRetry::Never,
+                    message.to_string(),
+                )
+            });
+        }
     }
 
     enum Held {
@@ -1082,6 +1121,8 @@ mod core_host {
                     thin: link.thin,
                     assembler: jazz::thin::ThinAssembler::default(),
                     held: VecDeque::new(),
+                    held_bytes: 0,
+                    failed: None,
                 },
             );
             let hello = encode_ws_frame_batches(&[link.server_hello])
@@ -1095,94 +1136,34 @@ mod core_host {
         }
 
         /// Take a message `socket` delivered (a batch of encoded frames).
-        /// An error ends the connection (send `output` first).
+        /// A malformed message, or input past what the socket may hold,
+        /// ends that socket alone: its error frame comes with its `output`.
         pub fn receive(&mut self, socket: u32, message: &[u8]) -> Result<(), JsValue> {
             let Some(state) = self.sockets.get_mut(&socket) else {
                 return Err(js("unknown socket"));
             };
-            let frames = decode_ws_encoded_frame_batch(message).map_err(js)?;
-            if !state.thin {
-                state.held.push_back(Held::Frames(frames, message.len()));
-            } else {
-                for frame in frames {
-                    let len = frame.len();
-                    let request = match jazz::wire::decode_frame(&frame).map_err(js)? {
-                        jazz::wire::WireFrame::ThinRequest(request) => Some((request, len, false)),
-                        jazz::wire::WireFrame::ThinPart(part) => {
-                            let total = part.total().map_err(js)?;
-                            match state.assembler.push(part).map_err(js)? {
-                                Some(joined) => {
-                                    match jazz::wire::decode_postcard_frame(&joined).map_err(js)? {
-                                        jazz::wire::WireFrame::ThinRequest(request) => {
-                                            Some((request, total, true))
-                                        }
-                                        _ => return Err(js("a split thin frame is not a request")),
-                                    }
-                                }
-                                None => None,
-                            }
-                        }
-                        _ => return Err(js("a thin connection sends only thin requests")),
-                    };
-                    if let Some((request, bytes, split)) = request {
-                        state.held.push_back(Held::Thin(request, bytes, split));
-                    }
-                }
-            }
-            self.admit_held(socket)
-        }
-
-        fn admit_held(&mut self, socket: u32) -> Result<(), JsValue> {
-            let Some(core) = self.core.as_mut() else {
+            if state.failed.is_some() {
                 return Ok(());
-            };
-            let Some(state) = self.sockets.get_mut(&socket) else {
-                return Ok(());
-            };
-            while let Some(next) = state.held.pop_front() {
-                let admitted = match next {
-                    Held::Frames(frames, bytes) => {
-                        let retry = Held::Frames(frames.clone(), bytes);
-                        (
-                            core.receive_frames(state.session, frames, bytes)
-                                .map_err(js)?,
-                            retry,
-                        )
-                    }
-                    Held::Thin(request, bytes, split) => {
-                        let retry = Held::Thin(request.clone(), bytes, split);
-                        (
-                            core.receive_thin_request(state.session, request, bytes, split)
-                                .map_err(js)?,
-                            retry,
-                        )
-                    }
-                };
-                if !admitted.0 {
-                    state.held.push_front(admitted.1);
-                    break;
-                }
             }
+            if let Err(error) = Self::read(state, message) {
+                state.fail(error);
+            }
+            self.admit_held(socket);
             Ok(())
         }
 
-        /// Run the engine, admitting input held for room as room frees,
-        /// until it wants no further tick. Take every socket's `output`
-        /// after it (output taken can make the core want another tick:
-        /// call `tick` again while `wantsTick`).
-        pub fn tick(&mut self) -> Result<(), JsValue> {
-            loop {
-                let Some(core) = self.core.as_mut() else {
-                    return Ok(());
-                };
-                core.tick();
-                let sockets: Vec<u32> = self.sockets.keys().copied().collect();
-                for socket in sockets {
-                    self.admit_held(socket)?;
-                }
-                if !self.core.as_ref().is_some_and(ServerCore::inbound_pending) {
-                    return Ok(());
-                }
+        /// Ticks the engine once, admitting input held for room as room
+        /// frees. Take every socket's `output` after it, and tick again
+        /// while `wantsTick`: a host returns to its event loop between
+        /// ticks, so output goes out as it is made.
+        pub fn tick(&mut self) {
+            let Some(core) = self.core.as_mut() else {
+                return;
+            };
+            core.tick();
+            let sockets: Vec<u32> = self.sockets.keys().copied().collect();
+            for socket in sockets {
+                self.admit_held(socket);
             }
         }
 
@@ -1209,6 +1190,7 @@ mod core_host {
             };
             let mut batches = Vec::new();
             let mut ended = false;
+            let failed = state.failed.clone();
             let taken = match self.core.as_mut() {
                 Some(core) => core.take_output(state.session),
                 None => Vec::new(),
@@ -1225,6 +1207,10 @@ mod core_host {
                         ended = true;
                     }
                 }
+            }
+            if let Some(error) = failed {
+                batches.push(js_sys::Uint8Array::from(error_frame(&error).as_slice()));
+                ended = true;
             }
             if ended {
                 self.close(socket);
@@ -1248,6 +1234,75 @@ mod core_host {
     }
 
     impl DurableObjectCore {
+        /// Decode `message` into the socket's held input.
+        fn read(state: &mut Socket, message: &[u8]) -> Result<(), String> {
+            let frames = decode_ws_encoded_frame_batch(message).map_err(|e| e.to_string())?;
+            if !state.thin {
+                state.hold(Held::Frames(frames, message.len()), message.len());
+                return Ok(());
+            }
+            for frame in frames {
+                let len = frame.len();
+                let request = match jazz::wire::decode_frame(&frame).map_err(|e| e.to_string())? {
+                    jazz::wire::WireFrame::ThinRequest(request) => Some((request, len, false)),
+                    jazz::wire::WireFrame::ThinPart(part) => {
+                        let total = part.total()?;
+                        match state.assembler.push(part)? {
+                            Some(joined) => match jazz::wire::decode_postcard_frame(&joined)
+                                .map_err(|e| e.to_string())?
+                            {
+                                jazz::wire::WireFrame::ThinRequest(request) => {
+                                    Some((request, total, true))
+                                }
+                                _ => return Err("a split thin frame is not a request".to_owned()),
+                            },
+                            None => None,
+                        }
+                    }
+                    _ => return Err("a thin connection sends only thin requests".to_owned()),
+                };
+                if let Some((request, bytes, split)) = request {
+                    state.hold(Held::Thin(request, bytes, split), bytes);
+                }
+            }
+            Ok(())
+        }
+
+        /// Hand the engine what `socket` holds, oldest first, while its
+        /// session's budget has room. An input the engine refuses (a thin
+        /// request over the most one takes) ends that socket alone.
+        fn admit_held(&mut self, socket: u32) {
+            let Some(core) = self.core.as_mut() else {
+                return;
+            };
+            let Some(state) = self.sockets.get_mut(&socket) else {
+                return;
+            };
+            while let Some(next) = state.held.pop_front() {
+                let (admitted, bytes) = match &next {
+                    Held::Frames(frames, bytes) => (
+                        core.receive_frames(state.session, frames.clone(), *bytes),
+                        *bytes,
+                    ),
+                    Held::Thin(request, bytes, split) => (
+                        core.receive_thin_request(state.session, request.clone(), *bytes, *split),
+                        *bytes,
+                    ),
+                };
+                match admitted {
+                    Ok(true) => state.held_bytes -= bytes,
+                    Ok(false) => {
+                        state.held.push_front(next);
+                        break;
+                    }
+                    Err(error) => {
+                        state.fail(error);
+                        break;
+                    }
+                }
+            }
+        }
+
         /// Open the core if a schema is known: the store's published
         /// catalogue (the engine then serves its current revision), else
         /// `configured` (a public schema's JSON). Without either, the core
