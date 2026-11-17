@@ -29,7 +29,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("createJazz on a Durable Object c
     entry.jazz = createJazz({
       app,
       permissions,
-      store: durableObjects({ url: core.url, appId: core.appId, secret: core.secret }),
+      store: durableObjects({ url: core.url, secret: core.secret }),
     });
     await entry.jazz.ready();
     return entry as { core: DurableObjectCore; jazz: Jazz };
@@ -54,7 +54,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("createJazz on a Durable Object c
   it("answers /health, and 426 to the socket route without an upgrade", async () => {
     const { core } = await start(false);
     expect(await (await fetch(`${core.url}/health`)).text()).toBe("ok");
-    expect((await fetch(`${core.url}/apps/${core.appId}/ws`)).status).toBe(426);
+    expect((await fetch(`${core.url}/apps/${await core.appId()}/ws`)).status).toBe(426);
     await stop();
   });
 
