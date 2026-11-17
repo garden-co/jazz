@@ -192,7 +192,7 @@ fn wrapper_failure_is_not_an_invalid_possession_proof() {
     let env = &flaky.env;
     let mut rng = TestRandom(33);
     let laptop = env.device(&mut rng);
-    let phone = env.device(&mut rng);
+    let mut phone = env.device(&mut rng);
     let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(env, &laptop, 0, &mut rng);
@@ -200,7 +200,8 @@ fn wrapper_failure_is_not_an_invalid_possession_proof() {
     let writer = env.writer();
     let state = ledger.state(env);
     let challenge = build::challenge(&writer, &state, &laptop, &phone.request(), &mut rng).unwrap();
-    let proof = build::respond(&writer, &state, &phone, &challenge.challenge, &mut rng).unwrap();
+    let proof =
+        build::respond(&writer, &state, &mut phone, &challenge.challenge, &mut rng).unwrap();
 
     flaky.wrapper_fails.store(true, Ordering::SeqCst);
     assert_eq!(

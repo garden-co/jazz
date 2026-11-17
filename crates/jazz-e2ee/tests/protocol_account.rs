@@ -380,7 +380,7 @@ fn recovery_restores_a_new_device() {
     let records = build::recovery_approve(
         &env.writer(),
         &state,
-        &replacement,
+        &mut replacement.clone(),
         &restored,
         &account_key,
         &mut rng,
@@ -404,7 +404,7 @@ fn recovery_restores_a_new_device() {
         build::recovery_approve(
             &env.writer(),
             &state,
-            &replacement,
+            &mut replacement.clone(),
             &restored,
             &acquired,
             &mut rng
@@ -504,7 +504,7 @@ fn retired_recovery_root_no_longer_approves() {
     let stale = build::recovery_approve(
         &env.writer(),
         &before,
-        &replacement,
+        &mut replacement.clone(),
         &recovery,
         &key,
         &mut rng,
@@ -527,7 +527,7 @@ fn retired_recovery_root_no_longer_approves() {
         build::recovery_approve(
             &env.writer(),
             &state,
-            &replacement,
+            &mut replacement.clone(),
             &recovery,
             &new_key,
             &mut rng
@@ -973,11 +973,24 @@ fn approval_handshake_refusals() {
     );
     let challenge = build::challenge(&writer, &state, &laptop, &phone.request(), &mut rng).unwrap();
     assert_eq!(
-        build::respond(&writer, &state, &tablet, &challenge.challenge, &mut rng).unwrap_err(),
+        build::respond(
+            &writer,
+            &state,
+            &mut tablet.clone(),
+            &challenge.challenge,
+            &mut rng
+        )
+        .unwrap_err(),
         refused(RefusalCode::StaleChallenge)
     );
-    let mut proof =
-        build::respond(&writer, &state, &phone, &challenge.challenge, &mut rng).unwrap();
+    let mut proof = build::respond(
+        &writer,
+        &state,
+        &mut phone.clone(),
+        &challenge.challenge,
+        &mut rng,
+    )
+    .unwrap();
     let last = proof.proof.len() - 1;
     proof.proof[last] ^= 1;
     assert_eq!(
@@ -1236,9 +1249,16 @@ fn recover_with(
     let key = ledger.acquire(env, holder).unwrap();
     let mut state = ledger.state(env);
     state.active.remove(&device.id);
-    let records = build::recovery_approve(&env.writer(), &state, device, recovery, &key, rng)
-        .unwrap()
-        .expect("not active in the given state");
+    let records = build::recovery_approve(
+        &env.writer(),
+        &state,
+        &mut device.clone(),
+        recovery,
+        &key,
+        rng,
+    )
+    .unwrap()
+    .expect("not active in the given state");
     let at = ledger.next();
     ledger
         .private
@@ -2024,7 +2044,7 @@ fn a_challenge_over_substituted_requester_keys_is_refused() {
     let env = Env::new(ALICE);
     let mut rng = TestRandom(31);
     let laptop = env.device(&mut rng);
-    let phone = env.device(&mut rng);
+    let mut phone = env.device(&mut rng);
     let mallory = env.device(&mut rng);
     let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
@@ -2046,15 +2066,18 @@ fn a_challenge_over_substituted_requester_keys_is_refused() {
     let fake_request = jazz_e2ee::protocol::records::account::DeviceRequest {
         id: phone.id.clone(),
         keys: mallory.keys(),
-        nonce_commitment: nonce_commitment(&phone.id, &mallory.approval_nonce.0[..])
-            .unwrap()
-            .to_vec(),
+        nonce_commitment: nonce_commitment(
+            &phone.id,
+            &mallory.approval_nonce.as_ref().unwrap().0[..],
+        )
+        .unwrap()
+        .to_vec(),
     };
     let writer = env.writer();
     let challenge =
         build::challenge(&writer, &shown_state, &laptop, &fake_request, &mut rng).unwrap();
     assert_eq!(
-        build::respond(&writer, &real, &phone, &challenge.challenge, &mut rng).unwrap_err(),
+        build::respond(&writer, &real, &mut phone, &challenge.challenge, &mut rng).unwrap_err(),
         refused(RefusalCode::InvalidChallenge)
     );
 }
@@ -2072,7 +2095,7 @@ fn approval_codes_match_and_neither_nonce_can_be_changed() {
     let env = Env::new(ALICE);
     let mut rng = TestRandom(32);
     let laptop = env.device(&mut rng);
-    let phone = env.device(&mut rng);
+    let mut phone = env.device(&mut rng);
     let stranger = env.device(&mut rng);
     let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
@@ -2083,7 +2106,10 @@ fn approval_codes_match_and_neither_nonce_can_be_changed() {
     let writer = env.writer();
     let request = phone.request();
     let challenge = build::challenge(&writer, &state, &laptop, &request, &mut rng).unwrap();
-    let proof = build::respond(&writer, &state, &phone, &challenge.challenge, &mut rng).unwrap();
+    let own_nonce = phone.approval_nonce.as_ref().unwrap().0.to_vec();
+    let proof =
+        build::respond(&writer, &state, &mut phone, &challenge.challenge, &mut rng).unwrap();
+    assert_eq!(proof.nonce, own_nonce);
     build::verify_possession(
         &writer,
         &challenge.challenge,
@@ -2097,18 +2123,11 @@ fn approval_codes_match_and_neither_nonce_can_be_changed() {
         approval_code(&env.application(), ALICE, coordinates, keys, n_a, n_r).unwrap()
     };
     let on_approver = code(&request.keys, &challenge.challenge.nonce, &proof.nonce);
-    let on_phone = code(
-        &phone.keys(),
-        &challenge.challenge.nonce,
-        &phone.approval_nonce.0[..],
-    );
+    let on_phone = code(&phone.keys(), &challenge.challenge.nonce, &own_nonce);
     assert_eq!(on_approver, on_phone);
     assert_eq!(on_approver.len(), 6);
     assert!(on_approver.bytes().all(|byte| byte.is_ascii_digit()));
-    assert_ne!(
-        on_phone,
-        code(&phone.keys(), &[0; 32], &phone.approval_nonce.0[..])
-    );
+    assert_ne!(on_phone, code(&phone.keys(), &[0; 32], &own_nonce));
     assert_ne!(
         on_phone,
         code(&phone.keys(), &challenge.challenge.nonce, &[0; 32])
@@ -2134,7 +2153,7 @@ fn approval_codes_match_and_neither_nonce_can_be_changed() {
     by_stranger.signature = signing::sign(&signature::Builtin, &stranger.signing, &bytes).unwrap();
     for bad in [other_nonce, tampered, by_stranger] {
         assert_eq!(
-            build::respond(&writer, &state, &phone, &bad, &mut rng).unwrap_err(),
+            build::respond(&writer, &state, &mut phone.clone(), &bad, &mut rng).unwrap_err(),
             refused(RefusalCode::InvalidChallenge)
         );
     }
@@ -2240,4 +2259,85 @@ fn private_verification_requires_the_signed_challenge_and_the_nonce() {
     .unwrap();
     proof.signature = signing::sign(&signature::Builtin, &phone.signing, &bytes).unwrap();
     assert_eq!(count(&renonced), 1);
+}
+
+/// A device answers one challenge with its approval nonce (§2.2, §2.5): a
+/// second, even correctly signed, is refused (`invalid-challenge`), so
+/// whoever saw `n_R` revealed cannot search for a challenge nonce matching
+/// another code. A bad challenge does not spend the nonce.
+#[test]
+fn the_approval_nonce_answers_one_challenge() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(34);
+    let laptop = env.device(&mut rng);
+    let mut phone = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    let state = ledger.state(&env);
+    let writer = env.writer();
+    let first = build::challenge(&writer, &state, &laptop, &phone.request(), &mut rng).unwrap();
+    let mut tampered = first.challenge.clone();
+    tampered.nonce = vec![7; 32];
+    assert_eq!(
+        build::respond(&writer, &state, &mut phone, &tampered, &mut rng).unwrap_err(),
+        refused(RefusalCode::InvalidChallenge)
+    );
+    build::respond(&writer, &state, &mut phone, &first.challenge, &mut rng).unwrap();
+    assert!(phone.approval_nonce.is_none());
+    let second = build::challenge(&writer, &state, &laptop, &phone.request(), &mut rng).unwrap();
+    assert_eq!(
+        build::respond(&writer, &state, &mut phone, &second.challenge, &mut rng).unwrap_err(),
+        refused(RefusalCode::InvalidChallenge)
+    );
+}
+
+/// `approve` completes a challenge for the request it was signed over only:
+/// a request swapped in at completion (another nonce commitment, with a
+/// proof re-signed to open it) is refused as `stale-challenge` before any
+/// key is delivered.
+#[test]
+fn approve_refuses_a_request_other_than_the_challenged_one() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(35);
+    let laptop = env.device(&mut rng);
+    let mut phone = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    let key = ledger.acquire(&env, &laptop).unwrap();
+    let state = ledger.state(&env);
+    let writer = env.writer();
+    let request = phone.request();
+    let challenge = build::challenge(&writer, &state, &laptop, &request, &mut rng).unwrap();
+    let proof =
+        build::respond(&writer, &state, &mut phone, &challenge.challenge, &mut rng).unwrap();
+
+    let other_nonce = [5u8; 32];
+    let mut swapped = request.clone();
+    swapped.nonce_commitment = nonce_commitment(&phone.id, &other_nonce).unwrap().to_vec();
+    let mut reproof = proof.clone();
+    reproof.nonce = other_nonce.to_vec();
+    let bytes = proof_signed_bytes(
+        &env.application(),
+        ALICE,
+        challenge.challenge.coordinates(),
+        &reproof.proof,
+        &reproof.nonce,
+    )
+    .unwrap();
+    reproof.signature = signing::sign(&signature::Builtin, &phone.signing, &bytes).unwrap();
+    assert_eq!(
+        build::approve(
+            &writer, &state, &laptop, &challenge, &reproof, &swapped, &key, &mut rng
+        )
+        .unwrap_err(),
+        refused(RefusalCode::StaleChallenge)
+    );
+    build::approve(
+        &writer, &state, &laptop, &challenge, &proof, &request, &key, &mut rng,
+    )
+    .unwrap();
 }

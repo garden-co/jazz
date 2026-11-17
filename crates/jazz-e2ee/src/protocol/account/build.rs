@@ -77,15 +77,21 @@ impl core::fmt::Debug for ApprovalNonce {
 }
 
 /// This install's encryption identity in one account domain (§2.1). Its
-/// approval nonce is good for one approval attempt: a device whose attempt
-/// failed or was cancelled after it revealed the nonce starts again as a new
-/// device, with a new ID and request (§2.5).
+/// approval nonce answers one challenge (§2.2, §2.5): [`respond`] and
+/// [`recovery_approve`] take it, and refuse a further challenge. A device
+/// whose attempt failed or was cancelled after that starts again as a new
+/// device, with a new ID and request. The runtime persists the nonce's
+/// spent state with the device; a copy of a device does not make it usable
+/// again.
 #[derive(Debug, Clone)]
 pub struct LocalDevice {
     pub id: String,
     pub sealing: KeyPair,
     pub signing: KeyPair,
-    pub approval_nonce: ApprovalNonce,
+    /// The commitment to the approval nonce, which the request carries.
+    pub approval_commitment: [u8; 32],
+    /// The approval nonce until a challenge was answered with it.
+    pub approval_nonce: Option<ApprovalNonce>,
 }
 
 impl LocalDevice {
@@ -97,11 +103,14 @@ impl LocalDevice {
         scope: &AccountDomain,
         rng: &mut dyn RandomSource,
     ) -> ProtocolResult<Self> {
+        let id = ids::random_v4(rng)?;
+        let nonce = random_key(rng)?;
         let device = Self {
-            id: ids::random_v4(rng)?,
+            approval_commitment: nonce_commitment(&id, &nonce[..])?,
+            approval_nonce: Some(ApprovalNonce(nonce)),
+            id,
             sealing: suite.key_seal.generate_key_pair(rng)?,
             signing: suite.signature.generate_key_pair(rng)?,
-            approval_nonce: ApprovalNonce(random_key(rng)?),
         };
         device.check(suite, registry, scope, rng)?;
         Ok(device)
@@ -148,9 +157,7 @@ impl LocalDevice {
         DeviceRequest {
             id: self.id.clone(),
             keys: self.keys(),
-            nonce_commitment: nonce_commitment(&self.id, &self.approval_nonce.0[..])
-                .expect("a framed device ID and nonce")
-                .to_vec(),
+            nonce_commitment: self.approval_commitment.to_vec(),
         }
     }
 
@@ -506,6 +513,9 @@ pub fn account_sealing_key(
 pub struct Challenge {
     pub challenge: DeviceChallenge,
     pub secret: Zeroizing<[u8; 32]>,
+    /// The request the challenge was signed over; [`approve`] completes
+    /// the challenge for this request only.
+    pub request: DeviceRequest,
 }
 
 impl core::fmt::Debug for Challenge {
@@ -570,7 +580,11 @@ pub fn challenge(
         envelope,
         &nonce[..],
     )?;
-    Ok(Challenge { challenge, secret })
+    Ok(Challenge {
+        challenge,
+        secret,
+        request: requester.clone(),
+    })
 }
 
 /// A challenge row signed by `approver` over the requester keys and nonce
@@ -618,7 +632,7 @@ fn signed_challenge(
 pub fn respond(
     writer: &AccountWriter<'_>,
     state: &AccountState,
-    device: &LocalDevice,
+    device: &mut LocalDevice,
     challenge: &DeviceChallenge,
     rng: &mut dyn RandomSource,
 ) -> ProtocolResult<DeviceProof> {
@@ -651,7 +665,12 @@ pub fn respond(
     )? {
         return refuse(RefusalCode::InvalidChallenge);
     }
-    prove(writer, device, challenge, rng)
+    // The nonce answers one challenge only: a second would let whoever
+    // sent the first search for a challenge nonce matching another code.
+    let Some(nonce) = device.approval_nonce.take() else {
+        return refuse(RefusalCode::InvalidChallenge);
+    };
+    prove(writer, device, challenge, &nonce, rng)
 }
 
 /// Opens the challenge's secret and proves possession of both keys. The
@@ -661,6 +680,7 @@ fn prove(
     writer: &AccountWriter<'_>,
     device: &LocalDevice,
     challenge: &DeviceChallenge,
+    nonce: &ApprovalNonce,
     rng: &mut dyn RandomSource,
 ) -> ProtocolResult<DeviceProof> {
     let application = writer.application()?;
@@ -673,7 +693,7 @@ fn prove(
     )?;
     let proof_context = approval_context(&application, writer.account_id, coordinates, "proof")?;
     let proof = writer.wrap(&secret, &proof_context, &Z32, rng)?;
-    let nonce = device.approval_nonce.0.to_vec();
+    let nonce = nonce.0.to_vec();
     let bytes = proof_signed_bytes(&application, writer.account_id, coordinates, &proof, &nonce)?;
     Ok(DeviceProof {
         id: challenge.id.clone(),
@@ -831,6 +851,7 @@ pub fn approve(
 ) -> ProtocolResult<ApprovalRecords> {
     if challenge.challenge.epoch_id != state.epoch_id()
         || challenge.challenge.device_id != requester.id
+        || *requester != challenge.request
     {
         return refuse(RefusalCode::StaleChallenge);
     }
@@ -875,7 +896,7 @@ pub struct RecoveryApprovalRecords {
 pub fn recovery_approve(
     writer: &AccountWriter<'_>,
     state: &AccountState,
-    device: &LocalDevice,
+    device: &mut LocalDevice,
     recovery: &RecoveryKeys,
     account_key: &AccountKey,
     rng: &mut dyn RandomSource,
@@ -920,7 +941,10 @@ pub fn recovery_approve(
         envelope,
         &nonce[..],
     )?;
-    let proof = prove(writer, device, &challenge, rng)?;
+    let Some(approval_nonce) = device.approval_nonce.take() else {
+        return refuse(RefusalCode::InvalidChallenge);
+    };
+    let proof = prove(writer, device, &challenge, &approval_nonce, rng)?;
     verify_possession(writer, &challenge, &proof, &request, &secret)?;
     let records = approval_records(
         writer,
