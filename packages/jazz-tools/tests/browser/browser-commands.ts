@@ -88,6 +88,26 @@ export function storageQuotaBrowserCommands(): StorageQuotaBrowserCommands {
   return commands as unknown as StorageQuotaBrowserCommands;
 }
 
+export interface SharedWorkerTimerBrowserCommands {
+  /**
+   * Timers armed by the SharedWorker named for `key` since the first call
+   * (which installs the probe). Chromium only.
+   */
+  sharedWorkerTimerCounts(key: string): Promise<{
+    timeouts: number;
+    serverPumpTimeouts: number;
+    microtasks: number;
+    posts: number;
+  }>;
+}
+
+export function sharedWorkerTimerBrowserCommands(): SharedWorkerTimerBrowserCommands {
+  if (!hasFunction(commands, "sharedWorkerTimerCounts")) {
+    throw new Error("Browser test project is missing the shared worker timer command.");
+  }
+  return commands as unknown as SharedWorkerTimerBrowserCommands;
+}
+
 function hasFunction(value: object, key: string): boolean {
   return key in value && typeof Reflect.get(value, key) === "function";
 }

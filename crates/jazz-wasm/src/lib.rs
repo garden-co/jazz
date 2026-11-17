@@ -596,6 +596,15 @@ impl WasmDbInner {
                 let _ = scheduler.call1(&JsValue::NULL, &JsValue::from_str("immediate"));
             }
         }));
+        // A core deadline (a read's wait running out): the host's timer
+        // ticks then, as the adapter does for any `after:` wake.
+        let timer = Rc::clone(&host);
+        *binding.hooks.schedule_tick_after.borrow_mut() = Some(Box::new(move |ms| {
+            let scheduler = timer.tick_scheduler.borrow().clone();
+            if let Some(scheduler) = scheduler {
+                let _ = scheduler.call1(&JsValue::NULL, &JsValue::from_str(&format!("after:{ms}")));
+            }
+        }));
         let reporter = Rc::clone(&host);
         *binding.hooks.rejected.borrow_mut() =
             Some(Box::new(move |tx_id, error, serializable, claimed| {

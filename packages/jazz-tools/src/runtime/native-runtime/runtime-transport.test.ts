@@ -3696,6 +3696,78 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.close();
   });
 
+  it("goes idle once a connected server and an attached tab have nothing to do", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    let dbTicks = 0;
+    const server = new OutboundReportingTransport();
+    const tab = new OutboundReportingTransport();
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => server,
+            tick: () => {
+              dbTicks += 1;
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const tabFrames: Uint8Array[] = [];
+    const errors: unknown[] = [];
+    const pump = new BrowserWorkerTransportPump(
+      runtime,
+      tab,
+      (frames) => tabFrames.push(...frames),
+      (error) => errors.push(error),
+    );
+    try {
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(sockets).toHaveLength(1);
+      const settledTicks = dbTicks;
+
+      // No writes, no frames, no core deadline: nothing may tick. Before the
+      // fix the server pump and the tab pump re-armed each other every 16ms.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(dbTicks).toBe(settledTicks);
+
+      // Frames the core queues still leave promptly on both links.
+      server.queue(Uint8Array.from([9, 1]));
+      tab.queue(Uint8Array.from([9, 2]));
+      await vi.advanceTimersByTimeAsync(20);
+      const sentToServer = sockets[0]!.sent
+        .filter((data): data is Uint8Array => data instanceof Uint8Array)
+        .flatMap((data) => decodeWebSocketFrameBatch(data));
+      expect(sentToServer).toContainEqual(Uint8Array.from([9, 1]));
+      expect(tabFrames).toContainEqual(Uint8Array.from([9, 2]));
+
+      // ...and sending them does not restart the loop.
+      const afterSendTicks = dbTicks;
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(dbTicks - afterSendTicks).toBeLessThanOrEqual(2);
+      expect(errors).toEqual([]);
+    } finally {
+      pump.close();
+      await runtime.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("yields recurring deferred core work with an attached peer pump to the host task", async () => {
     let schedulerCallback: ((urgency: "immediate" | "deferred") => void) | undefined;
     let dbTicks = 0;
@@ -4033,6 +4105,33 @@ class FakeTransport implements Transport {
   tick(): number {
     this.tickCount += 1;
     return 0;
+  }
+}
+
+/** A transport that, like the native link, reports each frame it queues. */
+class OutboundReportingTransport extends FakeTransport {
+  private readonly pending: Uint8Array[] = [];
+  private outboundReady: (() => void) | undefined;
+
+  constructor() {
+    super([]);
+  }
+
+  queue(frame: Uint8Array): void {
+    this.pending.push(frame);
+    this.outboundReady?.();
+  }
+
+  override recvWireFrames(): unknown[] {
+    return this.pending.splice(0);
+  }
+
+  setOutboundScheduler(callback: () => void): void {
+    this.outboundReady = callback;
+  }
+
+  clearOutboundScheduler(): void {
+    this.outboundReady = undefined;
   }
 }
 

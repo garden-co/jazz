@@ -650,6 +650,8 @@ pub struct SchemaPublication {
 
 struct Inner {
     conn: Connection,
+    /// When time alone next changes an outcome; see [`sync::Wakes`].
+    wakes: Rc<sync::Wakes>,
     /// One-way, owner-wide fence for new application mutations during close.
     mutation_admission_closed: bool,
     /// Enum variants a write may hold though its schema does not declare
@@ -1996,6 +1998,7 @@ impl Db {
             defer_fetches: false,
             inner: Rc::new(Store::new(Inner {
                 conn,
+                wakes: Rc::default(),
                 mutation_admission_closed: false,
                 kept_variants: BTreeMap::new(),
                 #[cfg(any(test, feature = "testing"))]
@@ -2402,6 +2405,11 @@ impl Db {
         if let Some(code) = self.inner().failing_ticks.pop_front() {
             return Err(Error::new(code, "a tick failure injected by a test"));
         }
+        // The host ticked: whatever it was asked to wake for is spent, even
+        // if its timer fired a little early (Node's timers run on the
+        // event loop's cached clock). Every check still waiting reports its
+        // deadline again this tick or on its next poll.
+        self.inner().wakes.host_ticked();
         self.sync_tick()?;
         {
             let mut inner = self.inner();
@@ -3347,6 +3355,13 @@ impl Db {
                 let deadline =
                     sync::remote_deadline(&opts, non_durable, sync::may_wait(hint.get()));
                 let live = hint.get().hint == RemoteLinkHint::Live;
+                // An opening released by time alone needs a tick then, even
+                // if nothing polls its stream first.
+                if let Some(Some(at)) = deadline {
+                    let inner = self.inner();
+                    inner.wakes.wake_at(at);
+                    inner.wakes.note_link(hint.get());
+                }
                 deadline.map(|deadline| sync::Gate {
                     answered: answered.clone(),
                     global: global.clone(),
@@ -3354,6 +3369,7 @@ impl Db {
                     live,
                     deadline,
                     relay_view: non_durable && opts.tier != ReadTier::Remote,
+                    wakes: Rc::clone(&self.inner().wakes),
                 })
             }
             _ => None,

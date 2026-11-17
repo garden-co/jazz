@@ -21,7 +21,13 @@ export type AuxiliaryRelayTrace = Readonly<{
 }>;
 
 export interface PeerTransportRuntime {
-  onPeerTransportWork(listener: (requiresDistinctPass?: boolean) => void): () => void;
+  /**
+   * `passCompleted` marks the notification a finished core pass sends; it
+   * asks for a drain, not for another pass.
+   */
+  onPeerTransportWork(
+    listener: (requiresDistinctPass?: boolean, passCompleted?: boolean) => void,
+  ): () => void;
   notifyPeerTransportActivity?(): void;
   progressPeerTransport(): Promise<void>;
   retirePeerTransport(transport: Transport): Promise<void>;
@@ -45,8 +51,22 @@ export class BrowserWorkerTransportPump {
   private completedGeneration = 0;
   private readonly flushWaiters = new Set<{ target: number; resolve: () => void }>();
   private readonly removeWorkListener: () => void;
-  private readonly handleRuntimeWork = (requiresDistinctPass?: boolean) =>
+  // Set once the transport reports its queued outbound frames itself.
+  private outboundEvents = false;
+  private readonly handleRuntimeWork = (
+    requiresDistinctPass?: boolean,
+    passCompleted?: boolean,
+  ) => {
+    // A finished pass already queued its frames, and this transport reports
+    // them through the outbound scheduler. Asking for another pass here would
+    // tick the core again, whose end-of-pass notification wakes this pump
+    // again: the runtime would never go idle.
+    if (passCompleted && !requiresDistinctPass && this.outboundEvents) {
+      this.scheduleOutboundDrain();
+      return;
+    }
     this.schedule(requiresDistinctPass ?? false);
+  };
   constructor(
     private readonly runtime: PeerTransportRuntime,
     private readonly transport: Transport,
@@ -64,7 +84,10 @@ export class BrowserWorkerTransportPump {
     this.removeWorkListener = runtime.onPeerTransportWork(this.handleRuntimeWork);
     try {
       this.transport.setAuxiliaryTraceEnabled?.(onAuxiliaryTrace !== undefined);
-      this.transport.setOutboundScheduler?.(() => this.scheduleOutboundDrain());
+      if (this.transport.setOutboundScheduler) {
+        this.transport.setOutboundScheduler(() => this.scheduleOutboundDrain());
+        this.outboundEvents = true;
+      }
     } catch (error) {
       // The caller still owns the transport until construction succeeds.
       // Revoke this partial pump before undoing hooks: a queued callback must

@@ -1024,7 +1024,9 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
   private serverInboundRouting: Promise<void> = Promise.resolve();
   private serverInboundProcessed = false;
-  private readonly peerTransportWorkListeners = new Set<(requiresDistinctPass?: boolean) => void>();
+  private readonly peerTransportWorkListeners = new Set<
+    (requiresDistinctPass?: boolean, passCompleted?: boolean) => void
+  >();
   private readonly auxiliaryTraceListeners = new Set<(entries: AuxiliaryRelayTrace[]) => void>();
   private readonly queryCoverageTraceListeners = new Set<
     (entry: {
@@ -1050,6 +1052,13 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverPumpScheduled = false;
   private serverPumpRunning = false;
   private serverPumpAgain = false;
+  // Set when the server transport reports a queued outbound frame while a
+  // pump is running; that pump's next drain consumes it (see
+  // `onServerOutboundReady`).
+  private serverOutboundPending = false;
+  // The current server transport reports queued outbound frames itself, so a
+  // core tick does not need to speculatively wake the server pump.
+  private serverOutboundEvents = false;
   private serverConnectionGeneration = 0;
   private closed = false;
   // A foreground lease handoff closes mutation admission before it snapshots
@@ -1257,7 +1266,9 @@ export class NativeRuntimeAdapter implements Runtime {
     return await this.db.connectUpstream();
   }
 
-  onPeerTransportWork(listener: (requiresDistinctPass?: boolean) => void): () => void {
+  onPeerTransportWork(
+    listener: (requiresDistinctPass?: boolean, passCompleted?: boolean) => void,
+  ): () => void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.onPeerTransportWork(listener);
     this.peerTransportWorkListeners.add(listener);
     return () => {
@@ -3135,6 +3146,12 @@ export class NativeRuntimeAdapter implements Runtime {
         }
         attempt.transport = transport;
         this.serverTransport = transport;
+        this.serverOutboundPending = false;
+        this.serverOutboundEvents = false;
+        if (transport.setOutboundScheduler) {
+          transport.setOutboundScheduler(() => this.onServerOutboundReady(transport));
+          this.serverOutboundEvents = true;
+        }
         transport.setAuxiliaryTraceEnabled?.(this.auxiliaryTraceListeners.size > 0);
         this.watchAuxiliaryOutbound(transport, carrier, generation).catch((error) =>
           this.handleServerTransportError(error, generation),
@@ -4288,8 +4305,11 @@ export class NativeRuntimeAdapter implements Runtime {
         this.syncStatusPublisher.changed();
         this.reportSlowQueries();
         this.pumpSubscriptions();
-        this.scheduleServerPump();
-        this.notifyPeerTransportWork();
+        this.scheduleServerPumpAfterTick();
+        // A finished pass only has frames to drain: it must not ask every peer
+        // pump for another pass, or the peer pumps and the server pump keep
+        // re-arming each other and the runtime never goes idle.
+        this.notifyPeerTransportWork(false, true);
         if (!this.coreProgressAllowed() || !this.coreTickAgain) break;
         if (round + 1 >= MAX_CORE_TICKS_PER_TURN) {
           yielded = true;
@@ -4455,6 +4475,33 @@ export class NativeRuntimeAdapter implements Runtime {
     }, SERVER_PUMP_DEBOUNCE_MS);
   }
 
+  /**
+   * After a core tick, wake the server pump only when the tick can have left
+   * it work. A transport that reports its queued outbound frames wakes the
+   * pump itself (`onServerOutboundReady`), so an idle tick schedules nothing;
+   * a refusal is still noticed here because it queues no frame. Transports
+   * without that report keep the conservative wake after every tick.
+   */
+  private scheduleServerPumpAfterTick(): void {
+    const transport = this.serverTransport;
+    if (!transport) return;
+    if (!this.serverOutboundEvents || transport.upstreamRefusal?.() != null) {
+      this.scheduleServerPump();
+    }
+  }
+
+  /** The server transport queued an outbound frame. */
+  private onServerOutboundReady(transport: Transport): void {
+    if (this.closed || transport !== this.serverTransport) return;
+    if (this.serverPumpRunning) {
+      // The running pump drains the transport after its tick. Only a frame
+      // queued after that drain needs another pump.
+      this.serverOutboundPending = true;
+      return;
+    }
+    this.scheduleServerPump();
+  }
+
   /** Run a pump without awaiting it. A failure becomes the connection's
    * terminal error rather than an unhandled rejection that crashes Node. */
   private startServerPump(): void {
@@ -4464,9 +4511,14 @@ export class NativeRuntimeAdapter implements Runtime {
     );
   }
 
-  private notifyPeerTransportWork(requiresDistinctPass = false): void {
+  /**
+   * Wake the peer transport pumps. `passCompleted` marks the notification a
+   * core pass sends when it finishes: a pump whose transport reports its own
+   * outbound frames only drains on it instead of requesting another pass.
+   */
+  private notifyPeerTransportWork(requiresDistinctPass = false, passCompleted = false): void {
     for (const listener of this.peerTransportWorkListeners) {
-      listener(requiresDistinctPass);
+      listener(requiresDistinctPass, passCompleted);
     }
   }
 
@@ -4515,6 +4567,8 @@ export class NativeRuntimeAdapter implements Runtime {
           return;
         }
         if (this.stopRefusedUpstream(transport)) return;
+        // This drain takes every frame queued so far.
+        this.serverOutboundPending = false;
         const frames = normalizeTransportFrames(transport.recvWireFrames());
         if (frames.length > 0) {
           this.sendServerFrames(frames, carrier, generation);
@@ -4527,6 +4581,10 @@ export class NativeRuntimeAdapter implements Runtime {
       this.serverPumpAgain = true;
     } finally {
       this.serverPumpRunning = false;
+      if (this.serverOutboundPending && transport === this.serverTransport) {
+        this.serverOutboundPending = false;
+        this.serverPumpAgain = true;
+      }
       if (this.serverPumpAgain) {
         this.serverPumpAgain = false;
         this.scheduleServerPump();

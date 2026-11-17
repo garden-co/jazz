@@ -71,9 +71,6 @@ const NATIVE_RELAY_OWNER_COMMAND_MAX: usize = 1_024;
 /// Rounds of one drive before the owner yields to queued commands. A drive
 /// that hits it continues on the next owner turn.
 const NATIVE_RELAY_DRIVE_ROUNDS: usize = 64;
-/// How often the owner re-checks time-bound work (a subscription waiting for
-/// its first answer, a read waiting for the server) while some is pending.
-const NATIVE_RELAY_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// Bounds on the per-foreground handles a JavaScript runtime may hold open.
 const NATIVE_RELAY_FOREGROUND_PENDING_MAX: usize = 64;
 const NATIVE_RELAY_FOREGROUND_TRANSACTION_MAX: usize = 64;
@@ -194,6 +191,9 @@ pub struct NativeRelayWire {
     outbound: Arc<Mutex<FrameQueue>>,
     /// Signalled when outbound frames are queued.
     outbound_ready: Arc<tokio::sync::Notify>,
+    /// Signalled when the owner drains a full inbound queue: frames the
+    /// carrier left on its socket for want of room can come in now.
+    inbound_room: Arc<tokio::sync::Notify>,
     /// Set when the owner retired this connection: no more frames cross it.
     retired: Arc<AtomicBool>,
     /// Why the relay's database dropped this connection on its own (see
@@ -248,7 +248,14 @@ impl NativeRelayWire {
     }
 
     fn take_inbound(&self) -> Vec<Vec<u8>> {
-        Self::lock(&self.inbound).frames.drain(..).collect()
+        let mut inbound = Self::lock(&self.inbound);
+        let was_full = inbound.frames.len() >= NATIVE_RELAY_QUEUE_MAX_MESSAGES;
+        let frames: Vec<Vec<u8>> = inbound.frames.drain(..).collect();
+        drop(inbound);
+        if was_full {
+            self.inbound_room.notify_one();
+        }
+        frames
     }
 
     fn push_outbound(&self, frames: Vec<Vec<u8>>) {
@@ -847,11 +854,8 @@ impl Foreground {
         Ok(())
     }
 
-    /// Whether time-bound work is pending that a drive must re-check.
-    fn awaits_time(&self) -> bool {
-        !self.pending.is_empty() || self.subscriptions.values().any(|s| !s.opened)
-    }
-
+    /// Tell the foreground's JavaScript runtime there is something to read,
+    /// if the last drive produced any (`notify`), so it reads once per drive.
     fn wake(&mut self) {
         if !std::mem::take(&mut self.notify) {
             return;
@@ -914,15 +918,28 @@ pub(crate) struct RelayWorker {
     rebuilt: bool,
     /// The last drive stopped at its round bound with work left.
     redrive: bool,
-    /// When time-bound waits were last evaluated.
-    timed: Instant,
+    /// The earliest instant a binding asked to be ticked at for time alone
+    /// to change an outcome (a read's wait running out): the owner sleeps
+    /// until then, not on a polling interval.
+    wake_at: Rc<Cell<Option<Instant>>>,
+    /// Drives the owner has run, for tests that check an idle relay sleeps.
+    #[cfg(test)]
+    drives: usize,
 }
 
-/// A binding's tick requests set `dirty`; the owner's drive ticks it.
-fn hook(binding: &Binding) -> Rc<Cell<bool>> {
+/// A binding's tick requests set `dirty`; the owner's drive ticks it. Its
+/// timed requests move `wake_at` earlier.
+fn hook(binding: &Binding, wake_at: &Rc<Cell<Option<Instant>>>) -> Rc<Cell<bool>> {
     let dirty = Rc::new(Cell::new(true));
     let flag = Rc::clone(&dirty);
     *binding.hooks.schedule_tick.borrow_mut() = Some(Box::new(move || flag.set(true)));
+    let wake_at = Rc::clone(wake_at);
+    *binding.hooks.schedule_tick_after.borrow_mut() = Some(Box::new(move |ms| {
+        let at = Instant::now() + Duration::from_millis(ms);
+        if wake_at.get().is_none_or(|earliest| at < earliest) {
+            wake_at.set(Some(at));
+        }
+    }));
     dirty
 }
 
@@ -1003,7 +1020,8 @@ impl RelayWorker {
         ))
         .map_err(|error| RelayError::Host(error.into()))?;
         let persistent = Binding::new(db, config.identity, false);
-        let persistent_dirty = hook(&persistent);
+        let wake_at = Rc::default();
+        let persistent_dirty = hook(&persistent, &wake_at);
         Ok(Self {
             schema: config.schema,
             migrations: config.migrations,
@@ -1021,7 +1039,9 @@ impl RelayWorker {
             remote_link_hint: None,
             rebuilt: false,
             redrive: false,
-            timed: Instant::now(),
+            wake_at,
+            #[cfg(test)]
+            drives: 0,
         })
     }
 
@@ -1033,8 +1053,8 @@ impl RelayWorker {
                     Err(mpsc::TryRecvError::Empty) => None,
                     Err(mpsc::TryRecvError::Disconnected) => break,
                 }
-            } else if self.awaits_time() {
-                match receiver.recv_timeout(NATIVE_RELAY_POLL_INTERVAL) {
+            } else if let Some(at) = self.wake_at.get() {
+                match receiver.recv_timeout(at.saturating_duration_since(Instant::now())) {
                     Ok(command) => Some(command),
                     Err(mpsc::RecvTimeoutError::Timeout) => None,
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -1054,25 +1074,19 @@ impl RelayWorker {
                 }
                 None => {}
             }
-            // Time-bound waits are evaluated on tick, at least once a poll
-            // interval: also while commands keep arriving (a foreground
-            // polling its pending reads).
-            if self.awaits_time() && self.timed.elapsed() >= NATIVE_RELAY_POLL_INTERVAL {
-                self.timed = Instant::now();
+            // A binding's deadline passed: tick them all, as a waiting check
+            // only notices its deadline on a tick. Checked after every
+            // command too, so a stream of them cannot postpone it.
+            if self.wake_at.get().is_some_and(|at| at <= Instant::now()) {
+                self.wake_at.set(None);
                 for client in self.clients.values() {
-                    if client.awaits_time() {
-                        client.dirty.set(true);
-                    }
+                    client.dirty.set(true);
                 }
                 self.persistent_dirty.set(true);
             }
             self.drive();
         }
         self.shutdown();
-    }
-
-    fn awaits_time(&self) -> bool {
-        self.clients.values().any(Foreground::awaits_time)
     }
 
     fn shutdown(&mut self) {
@@ -1122,7 +1136,7 @@ impl RelayWorker {
         db.set_identity_claims(identity.author, claims.clone());
         let binding = Binding::new(db, identity, false);
         binding.set_non_durable_client();
-        let dirty = hook(&binding);
+        let dirty = hook(&binding, &self.wake_at);
         let mutation_errors = Rc::new(RefCell::new(Vec::new()));
         let reports = Rc::clone(&mutation_errors);
         *binding.hooks.rejected.borrow_mut() =
@@ -1277,6 +1291,12 @@ impl RelayWorker {
         self.persistent.pending_upload_count()
     }
 
+    /// Drives the owner has run so far.
+    #[cfg(test)]
+    pub(crate) fn drives(&self) -> usize {
+        self.drives
+    }
+
     /// The current upstream connection's generation (tests carry the
     /// upstream themselves, and serve each new connection afresh).
     #[cfg(test)]
@@ -1370,7 +1390,7 @@ impl RelayWorker {
         let claims = self.claims.clone().unwrap_or_default();
         db.set_identity_claims(author, claims.clone());
         self.persistent = Binding::new(db, self.identity, false);
-        self.persistent_dirty = hook(&self.persistent);
+        self.persistent_dirty = hook(&self.persistent, &self.wake_at);
         for client in self.clients.values_mut() {
             client.authority = self.persistent.clone();
             client.served = self
@@ -1389,6 +1409,10 @@ impl RelayWorker {
 
     /// Tick what asked for a tick and move frames until nothing moves.
     pub(crate) fn drive(&mut self) {
+        #[cfg(test)]
+        {
+            self.drives += 1;
+        }
         self.redrive = false;
         for round in 0.. {
             if round == NATIVE_RELAY_DRIVE_ROUNDS {
@@ -2875,9 +2899,13 @@ async fn bridge_connection(
                     "native relay socket dropped: {reason}"
                 )));
             }
+            // Every input has a signal: queued outbound frames, inbound
+            // frames and a freed send queue (the socket's wake), cancellation
+            // (the same wake) and room for frames left on the socket. No
+            // polling interval, so an idle link sleeps.
             _ = wire.outbound_ready.notified() => {},
             _ = wake.notified() => {},
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+            _ = wire.inbound_room.notified() => {},
         }
     }
 }

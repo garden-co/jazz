@@ -1592,6 +1592,133 @@ fn a_tabs_first_load_wait_reaches_its_worker() {
     assert_eq!(rows_in(&drive(&links, read).unwrap()), 1);
 }
 
+/// A worker asks its host for a tick when a tab's first-load wait runs
+/// out, so the tab's opening arrives with no other traffic driving ticks: a
+/// host need not tick on a timer of its own to notice core deadlines.
+///
+/// ```text
+/// tab ──subscribe(wait 300ms)──► worker ──read──► server (never answers)
+///                                  │
+///                                  └── asks its host: tick in ≤300ms
+/// host timer ──tick──► worker serves its store ──► tab's opening
+/// ```
+#[test]
+fn a_worker_asks_its_host_to_tick_when_a_tabs_first_load_wait_runs_out() {
+    let server = authority();
+    let worker = open(0xb8);
+    let requested: Rc<std::cell::RefCell<Vec<u64>>> = Rc::default();
+    let record = Rc::clone(&requested);
+    *worker.hooks.schedule_tick_after.borrow_mut() =
+        Some(Box::new(move |ms| record.borrow_mut().push(ms)));
+    worker.set_remote_link_hint("live").unwrap();
+    // Connected, but the server never answers: its frames are never carried.
+    let _up = worker.connect_upstream();
+    let _down = server
+        .accept_subscriber(worker.author(), Default::default())
+        .unwrap();
+    worker.insert("notes", &title("worker's"), &none()).unwrap();
+    let (tab, tab_up, tab_down) = tab_over(&worker, open(0xb9));
+    let links = [(&tab_up, &tab_down)];
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let wait = json!({ "tier": "local-first", "first_load_remote_wait_ms": 300 });
+
+    let mut stream = tab.subscribe(&query, &wait, None, None).unwrap();
+    let opening = tab.next_event(&mut stream);
+    let mut opening = pin!(opening);
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(opening.as_mut().poll(&mut context).is_pending());
+    pump(&links);
+    assert!(
+        opening.as_mut().poll(&mut context).is_pending(),
+        "the opening waits for the server first"
+    );
+    let delay = requested
+        .borrow()
+        .iter()
+        .copied()
+        .filter(|ms| (1..=300).contains(ms))
+        .min()
+        .expect("the worker asks its host for a tick when the wait runs out");
+
+    // Only what the host does when that timer fires: tick the worker once,
+    // then carry its frames to the tab.
+    std::thread::sleep(std::time::Duration::from_millis(delay));
+    block_on(worker.tick()).unwrap();
+    for _ in 0..4 {
+        tab_up.receive(tab_down.take_outbound());
+        block_on(tab.tick()).unwrap();
+        if let Poll::Ready(event) = opening.as_mut().poll(&mut context) {
+            assert_eq!(delta_rows(binding_host::event_chunk(event).unwrap()), 1);
+            return;
+        }
+    }
+    panic!("the tab's opening did not arrive after the worker's timed tick");
+}
+
+/// A host timer may fire a little before the deadline it was asked for
+/// (Node's timers run on the event loop's cached clock). The worker then
+/// asks again for the time left, rather than treating the wake as still
+/// owed and waiting forever.
+///
+/// ```text
+/// worker ──asks──► host: tick in 300ms
+/// host timer fires early ──tick──► wait not over yet
+/// worker ──asks──► host: tick in the time left ──tick──► opening
+/// ```
+#[test]
+fn a_worker_asks_again_when_its_hosts_timer_fires_early() {
+    let server = authority();
+    let worker = open(0xba);
+    let requested: Rc<std::cell::RefCell<Vec<u64>>> = Rc::default();
+    let record = Rc::clone(&requested);
+    *worker.hooks.schedule_tick_after.borrow_mut() =
+        Some(Box::new(move |ms| record.borrow_mut().push(ms)));
+    worker.set_remote_link_hint("live").unwrap();
+    let _up = worker.connect_upstream();
+    let _down = server
+        .accept_subscriber(worker.author(), Default::default())
+        .unwrap();
+    worker.insert("notes", &title("worker's"), &none()).unwrap();
+    let (tab, tab_up, tab_down) = tab_over(&worker, open(0xbb));
+    let links = [(&tab_up, &tab_down)];
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let wait = json!({ "tier": "local-first", "first_load_remote_wait_ms": 300 });
+
+    let mut stream = tab.subscribe(&query, &wait, None, None).unwrap();
+    let opening = tab.next_event(&mut stream);
+    let mut opening = pin!(opening);
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(opening.as_mut().poll(&mut context).is_pending());
+    pump(&links);
+    assert!(
+        !requested.borrow().is_empty(),
+        "the worker asks for a timed tick"
+    );
+
+    // The host's timer fires early: a tick well before the wait ends.
+    requested.borrow_mut().clear();
+    block_on(worker.tick()).unwrap();
+    let delay = requested
+        .borrow()
+        .iter()
+        .copied()
+        .filter(|ms| (1..=300).contains(ms))
+        .min()
+        .expect("the worker asks again for the time left");
+
+    std::thread::sleep(std::time::Duration::from_millis(delay));
+    block_on(worker.tick()).unwrap();
+    for _ in 0..4 {
+        tab_up.receive(tab_down.take_outbound());
+        block_on(tab.tick()).unwrap();
+        if let Poll::Ready(event) = opening.as_mut().poll(&mut context) {
+            assert_eq!(delta_rows(binding_host::event_chunk(event).unwrap()), 1);
+            return;
+        }
+    }
+    panic!("the tab's opening did not arrive after the re-requested tick");
+}
+
 /// Whether a subscription event is ready now, without moving any frames.
 fn event_ready(binding: &Binding, stream: &mut jazz::db::SubscriptionStream) -> bool {
     let mut context = Context::from_waker(Waker::noop());

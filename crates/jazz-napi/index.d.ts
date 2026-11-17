@@ -407,6 +407,13 @@ export declare class Transport {
   sendWireFrames(frames: Array<Uint8Array>): void
   recvWireFrames(): Array<Uint8Array>
   /**
+   * Call `callback` (on the JS thread, at most once per turn) whenever
+   * the database queues a frame for this link, so the host drains it
+   * then instead of after every tick.
+   */
+  setOutboundScheduler(callback: () => void): void
+  clearOutboundScheduler(): void
+  /**
    * Tick the database this link belongs to: apply received frames, send
    * what is due. Returns the number of frames waiting to be sent.
    */

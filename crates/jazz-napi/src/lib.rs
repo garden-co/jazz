@@ -977,6 +977,18 @@ type MutationErrorCallback =
     ThreadsafeFunction<serde_json::Value, (), serde_json::Value, napi::Status, false, true>;
 
 impl Host {
+    /// A core deadline: tick after `ms`. Not coalesced with an immediate
+    /// request, which may already have run; the adapter keeps the earliest.
+    fn request_tick_after(&self, ms: u64) {
+        let scheduler = self.tick_scheduler.borrow();
+        if let Some(scheduler) = scheduler.as_ref() {
+            scheduler.call(
+                Ok(format!("after:{ms}")),
+                ThreadsafeFunctionCallMode::NonBlocking,
+            );
+        }
+    }
+
     fn request_tick(&self) {
         let scheduler = self.tick_scheduler.borrow();
         let Some(scheduler) = scheduler.as_ref() else {
@@ -1034,6 +1046,9 @@ impl Inner {
         let scheduler = Rc::clone(&host);
         *binding.hooks.schedule_tick.borrow_mut() =
             Some(Box::new(move || scheduler.request_tick()));
+        let timer = Rc::clone(&host);
+        *binding.hooks.schedule_tick_after.borrow_mut() =
+            Some(Box::new(move |ms| timer.request_tick_after(ms)));
         let reporter = Rc::clone(&host);
         *binding.hooks.rejected.borrow_mut() =
             Some(Box::new(move |tx_id, error, serializable, _| {
@@ -1737,6 +1752,44 @@ impl Transport {
             .collect()
     }
 
+    /// Call `callback` (on the JS thread, at most once per turn) whenever
+    /// the database queues a frame for this link, so the host drains it
+    /// then instead of after every tick.
+    #[napi(
+        js_name = "setOutboundScheduler",
+        ts_args_type = "callback: () => void"
+    )]
+    pub fn set_outbound_scheduler(&self, callback: Function<'_, (), ()>) -> js::Result<()> {
+        let queued = Arc::new(AtomicBool::new(false));
+        let delivered = Arc::clone(&queued);
+        // Weak: a wake for queued frames must not by itself keep Node's
+        // event loop alive. The socket carrying the link does that while it
+        // is open; once the client and server stop, the process exits.
+        let callback = callback
+            .build_threadsafe_function::<()>()
+            .callee_handled::<false>()
+            .weak::<true>()
+            .build_callback(move |_| {
+                // Clear before calling JS: a frame it queues re-arms.
+                delivered.store(false, Ordering::Release);
+                Ok(())
+            })?;
+        self.link.set_outbound_ready(Some(Box::new(move || {
+            if queued.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            if callback.call((), ThreadsafeFunctionCallMode::NonBlocking) != napi::Status::Ok {
+                queued.store(false, Ordering::Release);
+            }
+        })));
+        Ok(())
+    }
+
+    #[napi(js_name = "clearOutboundScheduler")]
+    pub fn clear_outbound_scheduler(&self) {
+        self.link.set_outbound_ready(None);
+    }
+
     /// Tick the database this link belongs to: apply received frames, send
     /// what is due. Returns the number of frames waiting to be sent.
     #[napi]
@@ -1761,6 +1814,8 @@ impl Transport {
 
     #[napi]
     pub fn close(&mut self) -> bool {
+        // A closed link queues nothing more; release the host's callback.
+        self.link.set_outbound_ready(None);
         self.link.close()
     }
 }
