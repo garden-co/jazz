@@ -163,6 +163,8 @@ mod relation_queries;
 mod relation_results;
 #[path = "../relational_delete_retraction.rs"]
 mod relational_delete_retraction;
+#[path = "../relations_parity.rs"]
+mod relations_parity;
 #[path = "../relay_local_seqs.rs"]
 mod relay_local_seqs;
 #[path = "../relay_policy_subscriptions.rs"]
