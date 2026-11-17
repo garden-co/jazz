@@ -109,22 +109,37 @@ where
     }
 }
 
-/// Recognize the legacy ordered-KV encoding by its exact metadata table layout
-/// and format marker, without interpreting arbitrary tables as Jazz storage.
+/// Recognize the legacy ordered-KV encoding by its metadata columns and
+/// format marker, independently of how SQLite spells the table's DDL.
 async fn is_groove_sqlite<S: jazz_sql::Sql>(conn: &mut S) -> Result<bool, Error>
 where
     S::Error: std::fmt::Display,
 {
-    let ddl: Option<String> = conn
+    let table: Option<String> = conn
         .query_optional(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'meta'",
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'meta' COLLATE NOCASE",
             &[],
             |row| row.get(0),
         )
         .await
         .map_err(storage)?;
-    if ddl.as_deref()
-        != Some("CREATE TABLE meta (key TEXT PRIMARY KEY, value BLOB NOT NULL) STRICT")
+    if table.is_none() {
+        return Ok(false);
+    }
+    let columns: Vec<(String, i64)> = conn
+        .query_rows("PRAGMA table_info('meta')", &[], |row| {
+            Ok((row.get(1)?, row.get(5)?))
+        })
+        .await
+        .map_err(storage)?;
+    // Groove keys its metadata by `key`. Require that indexed lookup so an
+    // unrelated application's unindexed metadata never causes a full scan.
+    let primary: Vec<_> = columns.iter().filter(|(_, pk)| *pk != 0).collect();
+    if primary.len() != 1
+        || !primary[0].0.eq_ignore_ascii_case("key")
+        || !columns
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("value"))
     {
         return Ok(false);
     }
