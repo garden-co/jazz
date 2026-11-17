@@ -1,5 +1,5 @@
 # Generates tables.rs (the analyzer `jazz-text/1`'s character tables, SPEC
-# 20.10.1) from Unicode 16.0.0: CaseFolding.txt and Python's unicodedata,
+# 20.10.1: segmentation classes, case folding, `jazz-text/fold/1`) from Unicode 16.0.0: CaseFolding.txt and Python's unicodedata,
 # which must be 16.0.0 (Python 3.14). Run from this directory:
 #
 #   curl -O https://www.unicode.org/Public/16.0.0/ucd/CaseFolding.txt
@@ -66,25 +66,46 @@ o.append("/// `jazz-text/fold/1`, longer results: ligatures and `ß`.")
 o.append("#[rustfmt::skip]\npub(super) const FOLD_MANY: &[(u16, &str)] = &[")
 for c, d in many: o.append(f"    (0x{c:04X}, \"{d}\"), // {chr(c)}")
 o.append("];\n")
-# jazz-text's `word` table (crates/jazz-text/src/merge.rs), copied; a test
-# checks the two agree.
-NOT_WORD=[(0x0080,0x00BF),(0xD7,0xD7),(0xF7,0xF7),(0x0E00,0x0FFF),(0x1000,0x109F),(0x1680,0x1680),(0x1780,0x17FF),(0x2000,0x2BFF),(0x2E00,0x2E7F),(0x2E80,0x303F),(0x3040,0x31FF),(0x3400,0x4DBF),(0x4E00,0x9FFF),(0xA000,0xA4CF),(0xF900,0xFAFF),(0xFE30,0xFE4F),(0xFE50,0xFE6F),(0xFF00,0xFF0F),(0xFF1A,0xFF20),(0xFF3B,0xFF40),(0xFF5B,0xFF65),(0xFF66,0xFF9F),(0xFFF0,0xFFFF),(0x1F000,0x1FAFF),(0x20000,0x3FFFF)]
-def word(c):
-    if c<128: return chr(c).isalnum()
-    return not any(lo<=c<=hi for lo,hi in NOT_WORD)
-def ranges(pred):
-    out=[];start=None
-    for c in range(0x110000):
-        if 0xD800<=c<0xE000: p=False
-        else: p=pred(c)
-        if p and start is None: start=c
-        if not p and start is not None: out.append((start,c-1));start=None
-    return out
-ln=lambda c: u.category(chr(c))[0]=='L' or u.category(chr(c)) in('Nd','Nl')
-STANDALONE=ranges(lambda c: not word(c) and ln(c))
-o.append("/// Characters that `jazz-text` cuts into units of their own and that are\n/// letters or digits (Unicode 16.0.0 general category L, Nd or Nl): the\n/// ideographs, kana, Thai, Lao, Myanmar, Khmer and letterlike symbols.")
-o.append("#[rustfmt::skip]\npub(super) const STANDALONE_LETTERS: &[(u32, u32)] = &[")
-for i in range(0, len(STANDALONE), 4): o.append("    " + " ".join(f"(0x{a:04X}, 0x{b:04X})," for a, b in STANDALONE[i:i+4]))
+# Character classes for segmentation (step 1). Frozen with the analyzer,
+# independent of jazz-text's merge tokenizer.
+SEP, WORD, MARK, ALONE, IGNORE = range(5)
+# Ignored inside a word: soft hyphen, zero-width (non-)joiner, word joiner,
+# byte order mark.
+IGNORED = {0x00AD, 0x200C, 0x200D, 0x2060, 0xFEFF}
+# Blocks of the scripts written without spaces between words: their letters
+# and digits are words of one character each.
+UNSPACED = [(0x0E00, 0x0FFF), (0x1000, 0x109F), (0x1780, 0x17FF), (0x2E80, 0x2FDF),
+            (0x3000, 0x31FF), (0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xA000, 0xA4CF),
+            (0xF900, 0xFAFF), (0xFF66, 0xFF9F), (0x20000, 0x3FFFF)]
+def cls(c):
+    if 0xD800 <= c < 0xE000: return SEP
+    if c in IGNORED: return IGNORE
+    g = u.category(chr(c))
+    if g == 'Cn': return WORD
+    unspaced = any(lo <= c <= hi for lo, hi in UNSPACED)
+    if g[0] == 'M':
+        # A mark completes the character before it: in the unspaced scripts
+        # it stays with its standalone letter; elsewhere it is part of a word.
+        return MARK if unspaced else WORD
+    if g[0] == 'L' or g in ('Nd', 'Nl'):
+        return ALONE if unspaced else WORD
+    return SEP
+bounds = []
+prev = None
+for c in range(0x110000):
+    k = cls(c)
+    if k != prev:
+        bounds.append((c, k)); prev = k
+o.append("/// Character classes for segmentation (Unicode 16.0.0), as the first code\n/// point of each run packed with its class: `first << 3 | class`, class\n/// 0 separator, 1 word, 2 mark, 3 standalone letter, 4 ignored.")
+o.append("#[rustfmt::skip]\npub(super) const CLASSES: &[u32] = &[")
+for i in range(0, len(bounds), 6): o.append("    " + " ".join(f"0x{(c << 3) | k:08X}," for c, k in bounds[i:i+6]))
 o.append("];")
 print("\n".join(o))
-print(len(runs), len(one), len(many), file=sys.stderr)
+print(len(runs), len(one), len(many), len(bounds), file=sys.stderr)
+# The digest and counts `segmentation_classes_are_pinned` asserts.
+h, counts = 0xcbf29ce484222325, [0] * 5
+for c in range(0x110000):
+    if 0xD800 <= c < 0xE000: continue
+    k = cls(c); counts[k] += 1
+    h = ((h ^ k) * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+print(f"classes digest 0x{h:016x} counts {counts}", file=sys.stderr)

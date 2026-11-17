@@ -117,6 +117,32 @@ term 6e6577  # "new"
 term 6c696e65  # "line"
 term 6e627370  # "nbsp"
 
+analyzer jazz-text/1:en
+text e0a4a8e0a4aee0a4b8e0a58de0a4a4e0a587e0a5a4e0a4a6e0a581e0a4a8e0a4bfe0a4afe0a4be20d985d8b1d8add8a8d8a7d88cd8b9d8a7d984d98520d7a9d79cd795d79dd783d7a2d795d79cd79d2078d6897920efbbbf626f6d  # "नमस\u{94d}त\u{947}।द\u{941}निया مرحبا،عالم שלום׃עולם x։y \u{feff}bom"
+term e0a4a8e0a4aee0a4b8e0a58de0a4a4e0a587  # "नमस\u{94d}त\u{947}"
+term e0a4a6e0a581e0a4a8e0a4bfe0a4afe0a4be  # "द\u{941}निया"
+term d985d8b1d8add8a8d8a7  # "مرحبا"
+term d8b9d8a7d984d985  # "عالم"
+term d7a9d79cd795d79d  # "שלום"
+term d7a2d795d79cd79d  # "עולם"
+term 78  # "x"
+term 79  # "y"
+term 626f6d  # "bom"
+
+analyzer jazz-text/1:en
+text 636fc2ad6f706572617465206669efbbbf6e6520d985db8ce2808cd8aed988d8a7d987d985  # "co\u{ad}operate fi\u{feff}ne می\u{200c}خواهم"
+term 636f6f706572  # "cooper"
+term 66696e65  # "fine"
+term d985db8cd8aed988d8a7d987d985  # "میخواهم"
+
+analyzer jazz-text/1:en
+text 65e1aab0782065e1b780782065e28390782065efb8a07820e8919bf3a08480  # "e\u{1ab0}x e\u{1dc0}x e\u{20d0}x e\u{fe20}x 葛\u{e0100}"
+term 6578  # "ex"
+term 6578  # "ex"
+term 6578  # "ex"
+term 6578  # "ex"
+term e8919b  # "葛"
+
 analyzer jazz-text/1:simple
 text   # ""
 
@@ -232,3 +258,29 @@ term 746162  # "tab"
 term 6e6577  # "new"
 term 6c696e65  # "line"
 term 6e627370  # "nbsp"
+
+analyzer jazz-text/1:simple
+text e0a4a8e0a4aee0a4b8e0a58de0a4a4e0a587e0a5a4e0a4a6e0a581e0a4a8e0a4bfe0a4afe0a4be20d985d8b1d8add8a8d8a7d88cd8b9d8a7d984d98520d7a9d79cd795d79dd783d7a2d795d79cd79d2078d6897920efbbbf626f6d  # "नमस\u{94d}त\u{947}।द\u{941}निया مرحبا،عالم שלום׃עולם x։y \u{feff}bom"
+term e0a4a8e0a4aee0a4b8e0a58de0a4a4e0a587  # "नमस\u{94d}त\u{947}"
+term e0a4a6e0a581e0a4a8e0a4bfe0a4afe0a4be  # "द\u{941}निया"
+term d985d8b1d8add8a8d8a7  # "مرحبا"
+term d8b9d8a7d984d985  # "عالم"
+term d7a9d79cd795d79d  # "שלום"
+term d7a2d795d79cd79d  # "עולם"
+term 78  # "x"
+term 79  # "y"
+term 626f6d  # "bom"
+
+analyzer jazz-text/1:simple
+text 636fc2ad6f706572617465206669efbbbf6e6520d985db8ce2808cd8aed988d8a7d987d985  # "co\u{ad}operate fi\u{feff}ne می\u{200c}خواهم"
+term 636f6f706572617465  # "cooperate"
+term 66696e65  # "fine"
+term d985db8cd8aed988d8a7d987d985  # "میخواهم"
+
+analyzer jazz-text/1:simple
+text 65e1aab0782065e1b780782065e28390782065efb8a07820e8919bf3a08480  # "e\u{1ab0}x e\u{1dc0}x e\u{20d0}x e\u{fe20}x 葛\u{e0100}"
+term 6578  # "ex"
+term 6578  # "ex"
+term 6578  # "ex"
+term 6578  # "ex"
+term e8919b  # "葛"

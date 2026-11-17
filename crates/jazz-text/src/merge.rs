@@ -262,7 +262,7 @@ fn cuttable(word: &str) -> bool {
 
 /// A word or number token: word characters (and the marks completing
 /// them) alone, so not a list marker such as `1.`.
-pub(crate) fn word_token(token: &str) -> bool {
+fn word_token(token: &str) -> bool {
     !token.is_empty() && token.chars().all(|c| word(c) || extends(c))
 }
 
@@ -1055,7 +1055,7 @@ const ENTITY_MAX_BYTES: usize = 32;
 
 /// The byte length of the token `rest` starts with (at least one char),
 /// with the marks, joiners and modifiers that complete its last character.
-pub(crate) fn token_len(format: TextFormat, rest: &str, line_start: bool) -> usize {
+fn token_len(format: TextFormat, rest: &str, line_start: bool) -> usize {
     let mut len = base_token_len(format, rest, line_start);
     // Two regional indicators make one flag.
     let regional = |c: Option<char>| c.is_some_and(|c| ('\u{1F1E6}'..='\u{1F1FF}').contains(&c));
