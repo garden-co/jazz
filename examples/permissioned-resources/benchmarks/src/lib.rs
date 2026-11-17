@@ -853,7 +853,8 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
         FileOptions::default(),
     ))
     .expect("open core");
-    block_on(core.transaction(async |tx| {
+    block_on(async {
+        let tx = core.mergeable_tx().await?;
         for write in &plan.writes {
             tx.insert(
                 &write.table,
@@ -865,8 +866,8 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
             )
             .await?;
         }
-        Ok(())
-    }))
+        tx.commit().await
+    })
     .expect("seed core");
     Seeded {
         _core_dir: dir,

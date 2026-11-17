@@ -298,7 +298,6 @@ fn held_for_test_sees_what_a_transaction_handle_keeps_between_calls() {
     let held = db.db.held_for_test();
     assert!(held.overlay, "staging leaves the overlay applied");
     assert!(held.sqlite_transaction, "in its savepoint");
-    assert!(!held.callback_transaction);
 
     assert!(titles(&db).is_empty());
     let held = db.db.held_for_test();

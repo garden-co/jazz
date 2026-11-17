@@ -260,7 +260,8 @@ fn one_commit_may_hold_the_same_large_value_twice() {
     let alice = open(1, user(1));
     connect(&server, &alice, user(1));
     let body = text(41, LARGE);
-    block_on(alice.transaction(async |tx| {
+    block_on(async {
+        let tx = alice.mergeable_tx().await?;
         for n in [1, 2] {
             tx.insert(
                 "docs",
@@ -275,8 +276,8 @@ fn one_commit_may_hold_the_same_large_value_twice() {
             )
             .await?;
         }
-        Ok(())
-    }))
+        tx.commit().await
+    })
     .unwrap();
     pump(&server, &[&alice]);
     for n in [1, 2] {

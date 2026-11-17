@@ -8847,8 +8847,7 @@ impl Db {
         self.inner.borrow().client.is_some()
     }
 
-    /// Record a local commit's upload (client only); inside an open
-    /// transaction the ops join it. It reads and writes the store, so
+    /// Record a local commit's upload (client only). It reads and writes the store, so
     /// it runs inside the commit's SQLite transaction: an error leaves the
     /// replica's sync state as it was, and the caller rolls the commit back.
     /// `ops` name tables and columns as the schema the write ran under
@@ -8863,23 +8862,14 @@ impl Db {
         relayed: Option<Relayed>,
     ) -> Result<(), Error> {
         let ops = {
-            let mut inner = self.inner.borrow_mut();
+            let inner = self.inner.borrow_mut();
             if inner.client.is_none() {
                 return Ok(());
             }
             let schema = inner.schema.clone();
-            let ops = ops
-                .into_iter()
+            ops.into_iter()
                 .map(|op| inner.stored_op(op, &schema))
-                .collect::<Result<Vec<_>, _>>()?;
-            if inner.tx.is_some() {
-                // As in `record_upload_under_stored_view`: no session write
-                // joins a callback transaction.
-                debug_assert!(!ops.iter().any(StagedOp::is_session));
-                inner.capture.extend(ops);
-                return Ok(());
-            }
-            ops
+                .collect::<Result<Vec<_>, _>>()?
         };
         self.record_stored_upload(ops, seq, kind, relayed, None)
     }
@@ -8918,17 +8908,6 @@ impl Db {
         claims: Option<BTreeMap<String, Value>>,
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
-        if inner.tx.is_some() {
-            // No local write joins a callback transaction as a session:
-            // `Db::write_op` refuses a write as another identity, and a
-            // transaction handle's commit is refused while it is open. So
-            // no session claims travel with `capture`. (A relay's apply of a
-            // downstream upload during `tick` can still land here:
-            // jazz#6038.)
-            debug_assert!(!ops.iter().any(StagedOp::is_session) && claims.is_none());
-            inner.capture.extend(ops);
-            return Ok(());
-        }
         // A read-only serializable commit still goes up: the authority
         // validates its reads.
         if (ops.is_empty() && !kind.validates_reads()) || seq != inner.seq {
