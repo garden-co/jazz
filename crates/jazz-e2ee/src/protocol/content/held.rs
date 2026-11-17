@@ -395,8 +395,8 @@ impl KnownChain {
     }
 
     /// Takes a newer read of the chain: when it advances (more versions,
-    /// or the chain is resolved further) or names another root, the epochs
-    /// remembered as absent are forgotten. A read at an earlier cut than
+    /// or the chain is resolved further), becomes unresolved, or names
+    /// another root, the epochs remembered as absent are forgotten. A read at an earlier cut than
     /// the known one, or one that does not advance it, changes nothing,
     /// except one that extends the known chain (the same root, more
     /// versions after the known ones), whatever cut it claims: no older
@@ -423,7 +423,10 @@ impl KnownChain {
         let other_root = self.root_id != chain.root.row.id;
         let advanced = epochs.len() > self.epochs.len()
             || (self.unresolved.is_some() && chain.unresolved.is_none());
-        if other_root || advanced {
+        // A newer read unresolved where the known one was not cannot
+        // confirm what that one showed absent past the unresolved point.
+        let uncertain = self.unresolved.is_none() && chain.unresolved.is_some();
+        if other_root || advanced || uncertain {
             self.root_id = chain.root.row.id.clone();
             self.epochs = epochs;
             self.unresolved = chain

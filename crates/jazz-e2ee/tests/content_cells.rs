@@ -1670,3 +1670,88 @@ fn an_inflated_cut_never_hides_a_later_version() {
     assert_eq!(held.known(&address).unwrap().epochs().len(), 2);
     assert!(held.incomplete(&address), "the device lacks {v1}");
 }
+
+/// An epoch remembered as absent from a resolved chain is forgotten when a
+/// newer read is unresolved before it: that read cannot confirm it absent,
+/// so the cell is acquired again and settles as unresolved.
+#[test]
+fn a_newer_unresolved_read_forgets_what_it_cannot_confirm_absent() {
+    use common::mechanisms::{OTHER_SEAL, OTHER_SIGN, custom_registry};
+    use jazz_e2ee::agility::MechanismConfig;
+    use jazz_e2ee::protocol::space::{AccountDirectory, SpaceChain};
+
+    let (registry, _) = custom_registry(OTHER_SEAL);
+    let mut world = World::with_registry(33, registry);
+    world.account(ALICE);
+    world.account_with(
+        BOB,
+        MechanismConfig {
+            signature: OTHER_SIGN.into(),
+            ..MechanismConfig::default()
+        },
+    );
+    world.add_member(ALICE);
+    world.add_member(BOB);
+    world.create(ALICE);
+    let address = space(ROW);
+    let builtin = Registry::builtin();
+    let read_chain = |world: &World| {
+        let read = world.read();
+        let directory = AccountDirectory::new(
+            &read.ledgers,
+            &world.shared.domain,
+            &builtin,
+            read.space.through,
+        )
+        .unwrap();
+        SpaceChain::replay(&read.space, &directory)
+            .unwrap()
+            .unwrap()
+    };
+    let mut held = held_of(&world, ALICE, ROW);
+    let resolved = read_chain(&world);
+    let v0 = world.current();
+    world.deliver(ALICE, BOB, &v0);
+    let e1 = world.rotate(BOB);
+    let unresolved = read_chain(&world);
+    assert_eq!(unresolved.versions.len(), resolved.versions.len());
+    assert!(resolved.unresolved.is_none() && unresolved.unresolved.is_some());
+    // A cell under E1, as Bob, who holds it, writes it.
+    let bob = held_of(&world, BOB, ROW);
+    let domain = shared(&world);
+    let target = row(&domain, &address, ROW_1);
+    let (stored, _) = seal_title(&world, &write_key(&bob, &address), &target, "e1");
+    let open = |held: &HeldKeys| {
+        open_cell(
+            &world.shared.registry,
+            held,
+            &target,
+            &title(),
+            &stored,
+            false,
+        )
+        .unwrap()
+    };
+
+    assert_eq!(
+        held.settle_missing(&address, &e1, Some(&resolved), true),
+        Ok(MissingKey::Report(DataError::InvalidCiphertext))
+    );
+    assert!(held.known(&address).unwrap().is_absent(&e1));
+    assert_eq!(
+        open(&held),
+        Opened::Unreadable(DataError::InvalidCiphertext)
+    );
+    held.observe_chain(&unresolved);
+    assert!(!held.known(&address).unwrap().is_absent(&e1));
+    assert_eq!(
+        open(&held),
+        Opened::Missing {
+            epoch_id: e1.clone()
+        }
+    );
+    assert!(matches!(
+        held.settle_missing(&address, &e1, Some(&unresolved), true),
+        Ok(MissingKey::Unresolved(_))
+    ));
+}
