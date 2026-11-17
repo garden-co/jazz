@@ -354,7 +354,9 @@ fn canonical_predicate_key(predicate: &Predicate) -> Vec<u8> {
             bytes.push(b'0');
             put_bytes(&mut bytes, &canonical_operand_key(operand));
         }
-        Predicate::Removed(removed) => match *removed {},
+        Predicate::Removed(removed)
+        | Predicate::ReservedStartsWith(removed)
+        | Predicate::ReservedEndsWith(removed) => match *removed {},
         Predicate::Search(search) => {
             bytes.push(b's');
             put_str(&mut bytes, &search.index);

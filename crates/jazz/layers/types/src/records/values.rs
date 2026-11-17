@@ -3038,3 +3038,21 @@ mod variable_array_offset_tests {
 fn u32_to_usize(value: u32) -> Result<usize, Error> {
     value.try_into().map_err(|_| Error::LengthOverflow)
 }
+
+/// The `vector` and `point` column types' durable numbers (SPEC 20.1): the
+/// `ValueType` binding tags (its serde variant indices, 19 and 20) and the
+/// persisted descriptor nodes (27 and 28). Other features take the numbers
+/// after them.
+#[cfg(test)]
+mod specialised_type_tags {
+    use super::*;
+
+    #[test]
+    fn vector_and_point_tags_are_pinned() {
+        assert_eq!(DESCRIPTOR_NODE_VECTOR, 27);
+        assert_eq!(DESCRIPTOR_NODE_POINT, 28);
+        let tag = |ty: ValueType| postcard::to_allocvec(&ty).unwrap()[0];
+        assert_eq!(tag(ValueType::Vector(3)), 19);
+        assert_eq!(tag(ValueType::Point), 20);
+    }
+}

@@ -616,8 +616,13 @@ pub enum Predicate {
     Removed(RemovedVariant),
     /// Nullable value is null.
     IsNull(Operand),
-    /// A specialised index search (SPEC 20.4). Appended last, so every
-    /// other predicate keeps its encoding. Valid only as a top-level
+    /// The slot of jazz#5983's `StartsWith` (postcard tag 13), held so
+    /// that `Search` keeps tag 15 whichever lands first.
+    ReservedStartsWith(RemovedVariant),
+    /// The slot of jazz#5983's `EndsWith` (postcard tag 14).
+    ReservedEndsWith(RemovedVariant),
+    /// A specialised index search (SPEC 20.4), postcard tag 15, after the
+    /// two slots above, so every other predicate keeps its encoding. Valid only as a top-level
     /// filter of a query, at most once, and never in a policy, a join, an
     /// include or under `Any`/`Not`.
     Search(IndexSearch),
@@ -721,7 +726,9 @@ impl Predicate {
                 }
             }
             Self::Not(predicate) => predicate.for_each_operand_mut(f),
-            Self::Removed(removed) => match *removed {},
+            Self::Removed(removed)
+            | Self::ReservedStartsWith(removed)
+            | Self::ReservedEndsWith(removed) => match *removed {},
             Self::Eq(left, right)
             | Self::Ne(left, right)
             | Self::Gt(left, right)
@@ -749,7 +756,9 @@ impl Predicate {
                 predicates.iter().any(|predicate| predicate.any_operand(f))
             }
             Self::Not(predicate) => predicate.any_operand(f),
-            Self::Removed(removed) => match *removed {},
+            Self::Removed(removed)
+            | Self::ReservedStartsWith(removed)
+            | Self::ReservedEndsWith(removed) => match *removed {},
             Self::Eq(left, right)
             | Self::Ne(left, right)
             | Self::Gt(left, right)

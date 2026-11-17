@@ -1699,7 +1699,9 @@ fn rewrite_flat_join_predicate_columns(
             rewrite_operand(value)?;
             options.iter_mut().try_for_each(rewrite_operand)
         }
-        Predicate::Removed(removed) => match *removed {},
+        Predicate::Removed(removed)
+        | Predicate::ReservedStartsWith(removed)
+        | Predicate::ReservedEndsWith(removed) => match *removed {},
         Predicate::IsNull(operand) => rewrite_operand(operand),
         Predicate::Search(_) => Err(QueryError::SearchMisplaced("in a flat join".into())),
     }
@@ -2577,7 +2579,9 @@ fn validate_predicate(
                 "nested in a condition, a join, a policy or a subquery".into(),
             ));
         }
-        Predicate::Removed(removed) => match *removed {},
+        Predicate::Removed(removed)
+        | Predicate::ReservedStartsWith(removed)
+        | Predicate::ReservedEndsWith(removed) => match *removed {},
         _ => {}
     }
     if let ParameterPhase::Prepare(domain) = params {
@@ -2616,7 +2620,9 @@ fn validate_predicate(
         Predicate::All(_) | Predicate::Any(_) | Predicate::Not(_) | Predicate::Search(_) => {
             unreachable!("recursive predicates and searches handled by the shared traversal")
         }
-        Predicate::Removed(removed) => match *removed {},
+        Predicate::Removed(removed)
+        | Predicate::ReservedStartsWith(removed)
+        | Predicate::ReservedEndsWith(removed) => match *removed {},
         Predicate::Eq(left, right) | Predicate::Ne(left, right) => {
             validate_comparable_operands(table, left, right, params).map(|_| ())
         }

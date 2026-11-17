@@ -532,7 +532,9 @@ fn coerce_predicate_typed_literals(
             }
         }
         Predicate::IsNull(_) | Predicate::Search(_) => {}
-        Predicate::Removed(removed) => match *removed {},
+        Predicate::Removed(removed)
+        | Predicate::ReservedStartsWith(removed)
+        | Predicate::ReservedEndsWith(removed) => match *removed {},
     }
 }
 

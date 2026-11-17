@@ -834,7 +834,9 @@ fn predicate(predicate: &Predicate, scope: &str) -> std::result::Result<Relation
         Predicate::IsNull(operand) => RelationPredicate::IsNull {
             column: column(operand)?,
         },
-        Predicate::Removed(removed) => match *removed {},
+        Predicate::Removed(removed)
+        | Predicate::ReservedStartsWith(removed)
+        | Predicate::ReservedEndsWith(removed) => match *removed {},
         Predicate::Search(_) => {
             return Err("an index search cannot follow a relation".to_owned());
         }

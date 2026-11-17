@@ -1873,7 +1873,8 @@ mod tests {
             assert!(serde_json::from_str::<Predicate>(r#"{"Removed":null}"#).is_err());
         }
 
-        /// `Predicate::Search` (SPEC 20.4) is appended last: every other
+        /// `Predicate::Search` (SPEC 20.4) is postcard tag 15 (0x0f): 13 and
+        /// 14 are held for jazz#5983's `StartsWith`/`EndsWith`. Every other
         /// predicate keeps its tag, and each op's JSON and postcard bytes
         /// are pinned here.
         #[test]
@@ -1885,7 +1886,7 @@ mod tests {
                         mode: MatchMode::Any,
                     },
                     r#"{"Search":{"index":"s","op":{"Match":{"text":"garden","mode":"Any"}}}}"#,
-                    "0d0173000667617264656e00",
+                    "0f0173000667617264656e00",
                 ),
                 (
                     IndexOp::Match {
@@ -1893,7 +1894,7 @@ mod tests {
                         mode: MatchMode::All,
                     },
                     r#"{"Search":{"index":"s","op":{"Match":{"text":"garden","mode":"All"}}}}"#,
-                    "0d0173000667617264656e01",
+                    "0f0173000667617264656e01",
                 ),
                 (
                     IndexOp::Nearest {
@@ -1901,7 +1902,7 @@ mod tests {
                         k: 3,
                     },
                     r#"{"Search":{"index":"s","op":{"Nearest":{"vector":[1.0,-0.5],"k":3}}}}"#,
-                    "0d017301020000803f000000bf03",
+                    "0f017301020000803f000000bf03",
                 ),
                 (
                     IndexOp::WithinRadius {
@@ -1910,7 +1911,7 @@ mod tests {
                         meters: 500.0,
                     },
                     r#"{"Search":{"index":"s","op":{"WithinRadius":{"lat":52.5,"lng":13.4,"meters":500.0}}}}"#,
-                    "0d0173020000000000404a40cdcccccccccc2a400000000000407f40",
+                    "0f0173020000000000404a40cdcccccccccc2a400000000000407f40",
                 ),
                 (
                     IndexOp::WithinBox {
@@ -1920,7 +1921,7 @@ mod tests {
                         east: -170.0,
                     },
                     r#"{"Search":{"index":"s","op":{"WithinBox":{"south":-20.0,"west":170.0,"north":-10.0,"east":-170.0}}}}"#,
-                    "0d01730300000000000034c0000000000040654000000000000024c000000000004065c0",
+                    "0f01730300000000000034c0000000000040654000000000000024c000000000004065c0",
                 ),
             ] {
                 let predicate = Predicate::Search(IndexSearch {
@@ -1944,9 +1945,19 @@ mod tests {
         #[test]
         fn unknown_match_modes_are_refused() {
             assert!(
-                postcard::from_bytes::<Predicate>(&hex::decode("0d0173000667617264656e02").unwrap())
+                postcard::from_bytes::<Predicate>(&hex::decode("0f0173000667617264656e02").unwrap())
                     .is_err()
             );
+            // Tags 13 and 14 hold jazz#5983's slots: nothing decodes there.
+            for tag in ["0d", "0e"] {
+                assert!(
+                    postcard::from_bytes::<Predicate>(
+                        &hex::decode(format!("{tag}0173000667617264656e00")).unwrap()
+                    )
+                    .is_err(),
+                    "{tag}"
+                );
+            }
             assert!(
                 serde_json::from_str::<Predicate>(
                     r#"{"Search":{"index":"s","op":{"Match":{"text":"g","mode":"Most"}}}}"#

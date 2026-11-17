@@ -2289,7 +2289,9 @@ impl<'a> Ctx<'a> {
                 Term::NaN => "0".to_owned(),
                 term => format!("({} IS NULL)", term.sql().expect("present")),
             },
-            Predicate::Removed(removed) => match *removed {},
+            Predicate::Removed(removed)
+            | Predicate::ReservedStartsWith(removed)
+            | Predicate::ReservedEndsWith(removed) => match *removed {},
             Predicate::Search(_) => {
                 return Err(query_error(
                     "an index search is valid only as a top-level filter of a query, not nested \
