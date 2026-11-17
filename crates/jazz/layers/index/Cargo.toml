@@ -3,12 +3,19 @@ name = "jazz-index"
 version.workspace = true
 edition = "2024"
 description = "Jazz's specialised index kinds (SPEC 20): text analysis and impacts, vector scores, geo cells. Pure functions, no storage."
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 # Only what builds the library: tests, benches and their fixtures stay in the repo.
-include = ["src/**", "README.md"]
+include = [
+    "src/**",
+    "!src/**/tests.rs",
+    "!src/text/testdata/**",
+    "!src/text/gen_tables.py",
+    "README.md",
+]
 
 [features]
 default = ["text", "vector", "geo"]
