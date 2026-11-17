@@ -1429,9 +1429,9 @@ member whose current generation is above 0, emits an `account-reset`
 encryption event `{account, space, generation}` once per space, account and
 generation, next to the unreadable-row reports (§4.3), so the application
 can show "<account>'s encryption was reset". An account that reset before
-it joined the space is shown the same way. A runtime reads a member's public
-roots when it sees that member lack a version (a reset makes it lack every
-version), not continually (§3.8).
+it joined the space is shown the same way. Member devices watch the public
+roots of the space's members (§3.8), so a reset is seen, and redelivered
+to, even when no space table changes.
 
 ### 2.12 Account sealing keys
 
@@ -1594,9 +1594,9 @@ update the space row cannot create it.
 - **Creation refused**: the authority refused the root row itself (R15).
   The SDK reports a publication error of stage `create` with code
   `space-create-refused`, naming the space, and the device records a
-  creation suppression for the space (below). A refusal of a transaction
-  that holds only the root (`createSpace`, the background creation) is
-  always this outcome.
+  creation suppression for the space (below). When the transaction holds
+  only the root (`createSpace`, the background creation), a policy refusal
+  of it is this outcome; a conflict or another failure of it is the next.
 - **Transaction failed otherwise**: the transaction that carried the root
   failed definitively for another reason: another of its rows was refused,
   it conflicted, or a refusal does not name the root. The transaction's own
@@ -1700,9 +1700,24 @@ transactions are runtime publications, retried internally after a conflict
 (§7). It needs Jazz update permission on the rows: a row whose repair is
 refused is skipped and stays unreadable to others. It does not run offline.
 
-**Key retention.** The losing key is kept, marked `refused`, until a pass
-over the space's rows, made while the real key is held, finds no cell
-naming the losing epoch other than in rows whose repair was refused. A
+**Key retention.** A key marked `refused` is never selected for a new write
+(§5.2), but a transaction that sealed cells under it earlier may still be
+open: a callback or handle transaction that has staged them and not yet
+committed ([core hooks](E2EE_CORE_HOOKS.md) H2). The runtime counts, in
+memory, the open transactions that sealed under each unpublished or
+refused key; one leaves the count when it commits, rolls back or is
+abandoned. The losing key is kept, marked `refused`, until no such
+transaction is open and then a pass over the space's rows, begun after
+the last one closed and made while the real key is held, finds no cell
+naming the losing epoch other than in rows whose repair was refused. The
+pass reads the device's replica, which holds its own committed writes that
+are not yet accepted (pending, or of unknown outcome): their cells count as
+remaining and are repaired like any other, since a serializable snapshot
+includes the device's own unsettled commits; if such a write is refused
+later, the repair's read no longer matches and it re-reads. An unknown
+outcome is never treated as refused, and no write is replayed. Open
+transactions live in memory only, so one open at a restart was never
+committed and cannot publish; after a restart the replica alone decides. A
 conflict, an interruption or a restart before then keeps the key, and the
 next pass starts again from the rows themselves (no cursor is needed). Only
 then is the key discarded (§5.4).
@@ -1712,7 +1727,12 @@ after the space's root is known, another member writes `new` to R under the
 real key; A's repair, which read `old`, conflicts, re-reads and leaves
 `new` untouched; a repair interrupted between batches keeps the key and
 finishes after a restart; a row whose repair is refused stays unreadable to
-others and the key is then discarded.
+others and the key is then discarded; a handle transaction that sealed a
+cell under the losing key stays open across a complete pass, the key is
+kept, the handle then commits, and the next pass repairs the row; a
+committed write under the losing key whose outcome is unknown at a restart
+keeps the key after the restart and is repaired, and a refusal of it lets
+the key be discarded.
 
 ### 3.3 Key chain and acquiring a key
 
@@ -1769,7 +1789,8 @@ applications and users never handle deliveries.
   envelopes sealed to earlier epochs of the generation through its history
   (§2.12), and the space is marked as needing rotation instead (§3.5). A
   reset starts a new generation, so a reset member lacks every version
-  until someone delivers again (§2.11).
+  until someone delivers again (§2.11). A member's current generation comes
+  from its public roots, which member devices watch (§3.8).
 - **Delivering.** Every device holding keys of a space watches its member
   rows, and the deliveries and voids of the versions concerned (the current
   version, and skipped versions it holds), not those of earlier versions
@@ -1780,7 +1801,8 @@ applications and users never handle deliveries.
   version of **that** space's chain, and takes the key from that space's
   held-key document (§6.2) only. It then reads the member's public account
   history (R10), finds its current account epoch and that epoch's valid
-  sealing key (§2.12) (without one it waits), and inserts the delivery
+  sealing key (§2.12) (without one it waits, watching the member's
+  `__e2ee_account_keys` rows until one appears, §3.8), and inserts the delivery
   `{scopeId, identifier, keyEpochId, senderAccountId, recipientAccountId,
 recipientAccountEpochId, envelope}`, with a random ID, sealed to that
   key, in a ledger transaction whose read set includes the member's public
@@ -1789,14 +1811,19 @@ recipientAccountEpochId, envelope}`, with a random ID, sealed to that
   that cut, so a delivery is never sealed to an epoch that a since-removed
   device still holds; the device then re-reads. The authority accepts it
   only from a member to a member (R17). Two holders may both deliver; the
-  second delivery costs storage only. Holders deliver a version to a member
-  automatically at most 3 times while earlier deliveries of it are voided:
-  once a member has voided 3 deliveries of one version (counted from the
-  voids, which every member reads, so all holders agree), no holder delivers
-  that version to it again on its own. The member stays `key-pending` until
-  a rotation (`db.encryption.rotate(space)` by an updater, §3.5), which
-  delivers a new version to every member. This bounds what a member that
-  voids good deliveries can make others write.
+  second delivery costs storage only. Once 3 distinct deliveries of one
+  version to a member are voided (counted by `deliveryId` over valid voids,
+  which every member reads, so all holders agree; several voids of one
+  delivery, for example by two devices of the recipient, count once), no
+  holder delivers that version to it again on its own. The member stays
+  `key-pending` until a rotation (`db.encryption.rotate(space)` by an
+  updater, §3.5), which delivers a new version to every member. The 3 is a
+  threshold on deciding, not a bound on rows: the delivery transaction does
+  not read other deliveries, so holders that act at once can each insert
+  one (the random delay makes this rare). A holder device delivers at most
+  once for each number of voids it has seen below 3, so at most 3 times per
+  version and member. This bounds what a member that voids good deliveries
+  can make others write.
 - **Receiving.** A member's devices watch deliveries addressed to their
   account and acquire the key (§3.3). While its account lacks a version
   that it needs, a member's device reports the space `key-pending` (§4.3).
@@ -1839,10 +1866,16 @@ holder, which it opens (also for a newly added updater that holds no
 version); the sender's device reports `invalid-delivery` for the void; a
 void by an account other than the delivery's recipient is refused (R19); a
 void naming a delivery that does not exist, or a delivery of another space
-or of another version, is refused (R19); after 3 voids of one version by
-one member, no holder delivers it to that member automatically, and the
-next rotation does; a delivery that fails with a provider error is not
-voided.
+or of another version, is refused (R19); after voids of 3 distinct
+deliveries of one version to one member, no holder delivers it to that
+member automatically, and the next rotation does; two voids of one delivery
+count once; several holders that see the same void at once may each
+deliver, every such delivery is accepted, and none delivers after the third
+distinct void; a delivery that fails with a provider error is not voided;
+in an otherwise idle space, a member that resets after it was delivered the
+current version receives it again with no other write to a space table; a
+member whose account sealing key appears only after a holder's first lookup
+found none receives the version with no other write to a space table.
 
 ### 3.5 Rotation and removal
 
@@ -1896,8 +1929,8 @@ history of an account holding the current version changes (a new account
 successor, in particular a `remove-device`), even when no space table
 changed, at a cost proportional to the members and the current version's
 envelopes. Only a device that may act on the mark evaluates it: one that
-holds the current version and has not been refused a rotation of the space
-since its account's member rows or the space row last changed. Other
+holds the current version and has no rotation suppression for the space
+(below). Other
 devices do not watch the members' account histories for the mark. These are
 the subscriptions of [core hooks](E2EE_CORE_HOOKS.md) H6.
 
@@ -1920,9 +1953,8 @@ rotation is rotated:
   the rotation in its own transaction and, online, the write waits for its
   outcome within its own deadline and then uses `K'`. If the rotation is
   refused (the writer is not an updater), offline, or not decided within
-  the deadline, the write uses the current version. A device that was
-  refused does not try again for that space until the space is marked again
-  by a further removal;
+  the deadline, the write uses the current version. A refusal records a
+  rotation suppression (below);
 - by `db.encryption.rotate(space)`, at once, when the application wants
   the removal effective immediately;
 - after a device removal, by the removing device, queued at a bounded rate
@@ -1931,6 +1963,30 @@ rotation is rotated:
 Several removals before the next rotation are covered by one rotation.
 Writes by members who are not updaters stay under the current version until
 an updater rotates.
+
+**Rotation suppression.** When the authority refuses a rotation by this
+device, the runtime records a rotation suppression for the space, with its
+account's member rows for the space and the space row as it sees them. While
+it holds, no automatic path rotates the space on this device (the write
+path, and the queue after a device removal, which lists the space in
+`spaces-need-rotation` as refused, §2.8), and the device neither evaluates
+the mark nor watches members' account successors for it. It is lifted only
+when the device sees its account's member rows for the space or the space
+row differ from those recorded (it watches the space row while the
+suppression holds, [core hooks](E2EE_CORE_HOOKS.md) H6); the device then
+evaluates the mark again and may make one new attempt. A further removal,
+or any other change to other accounts' member rows, lifts nothing: it does
+not change the authority's answer to this device. Explicit
+`db.encryption.rotate(space)` and `recoverRotation(space)` always attempt,
+whatever the suppression, and a refusal records it again. Like the creation
+suppression (§3.2), it lives only in the running client's memory and is
+dropped once the device holds a newer version; a restart costs at most one
+refused automatic attempt per space.
+
+Required tests: a member refused a rotation makes no new automatic attempt
+after a further removal; after the space row changes so that it may update
+it, its next encrypted write rotates once; an explicit `rotate` while
+suppressed attempts.
 
 **Recovery rotation.** When no online member holds the current version (for
 example the only holder lost its device right after rotating), an updater
@@ -1996,30 +2052,56 @@ member.
 
 **Where it is enforced.** On the client. The E2EE runtime refuses, when the
 insert is staged, a member row that would give the space more than 1,000
-member accounts; it counts from the space's member rows, which it watches
-for every space its account is a member of and otherwise loads before
-staging (offline, from what its replica holds) ([core
-hooks](E2EE_CORE_HOOKS.md) H2). The server does not enforce the limit:
-Jazz policies can test only whether a matching row exists (`Exists`) and
-cannot count rows, and this design adds no check outside policies (§1.4).
-So concurrent or offline additions by several updaters, a trusted backend
-that writes member rows without the E2EE runtime, or a modified client can
-exceed it. Every member's runtime that sees more than 1,000 member accounts
+member accounts. It counts the distinct accounts the staging transaction
+would leave: the space's member rows it sees, plus the member rows the same
+transaction has already staged, minus those it has staged deletes of ([core
+hooks](E2EE_CORE_HOOKS.md) H2). It sees the member rows of every space its
+account is a member of (it watches them) and otherwise loads them before
+staging, without acquiring any key (offline, from what its replica holds).
+It counts only rows the session can read: a session that is not a member
+reads only its own member rows (R12), so a creator adding itself by R12's
+creator clause (to a new space, or back to one it was removed from) counts
+no other members and is not refused. Once its row is accepted, its device
+sees the whole member set and reports an excess as below. The server does
+not enforce the limit: Jazz policies can test only whether a matching row
+exists (`Exists`) and cannot count rows, and this design adds no check
+outside policies (§1.4). So concurrent or offline additions by several
+updaters, a creator re-adding itself, a trusted backend that writes member
+rows without the E2EE runtime, or a modified client can exceed it. The limit
+is a supported-size safeguard, not a capacity guarantee. Every member's runtime that sees more than 1,000 member accounts
 in a space emits a `space-over-member-limit` encryption event `{space,
 members}` once per space and keeps working; the costs below then grow
 beyond what the first release is designed for.
 
+Required tests: with 999 member accounts, one transaction staging two
+distinct new accounts has the second refused; member rows for one account
+staged twice in one transaction count once; a member removed and another
+added in one transaction at 1,000 is accepted; a rolled-back transaction's
+staged rows do not count for the retry; a creator's first member row
+acquires no key and prepares no root; a removed creator re-adding itself to
+a full space is not refused, and its device then reports
+`space-over-member-limit`.
+
 **What a device watches.** Per space its account is a member of: the
 space's member rows (at most 1,000), its roots and successors (one per
-version), and the deliveries and voids of the versions concerned: the
-current version, and skipped versions it holds (§3.4). Deliveries of
-earlier versions are not watched: the newest key opens them. Its own
-account's member rows and the deliveries addressed to its account are
-watched across spaces. The public account history of members is watched
-only by a device that may act on the needs-rotation mark (§3.5); other
-public account rows are read when they are needed: a member's sealing key
-in the delivery transaction (§3.4), and a member's public roots when the
-member is seen to lack a version, which is how a reset shows (§2.11).
+version), the deliveries and voids of the versions concerned (the current
+version, and skipped versions it holds, §3.4), and the public account roots
+of its member accounts (one per generation), since who lacks a version
+depends on each member's current generation (§2.11). Deliveries of earlier
+versions are not watched: the newest key opens them. Its own account's
+member rows and the deliveries addressed to its account (of every version)
+are watched across spaces. A member's `__e2ee_account_keys` rows are watched
+only while a delivery to it waits for a valid sealing key (§3.4), and the
+members' public account successors only by a device that may act on the
+needs-rotation mark (§3.5); the delivery transaction reads the rest of a
+member's account history when it needs it (§3.4). Watches of public account
+rows are shared across spaces: one subscription per table over the accounts
+the device needs, replaced (the new one opened before the old one closes)
+when that set changes. A watch is opened before the decision it guards is
+first made, and the decision is made from the watch's results, so no change
+between a read and the watch is missed. An account leaves the set when it
+is no longer a member of any space that needs it, or its waiting delivery
+is made or abandoned.
 
 **Costs at the limit.** In a space of 1,000 members:
 
@@ -2035,7 +2117,8 @@ member is seen to lack a version, which is how a reset shows (§2.11).
   may deliver at once; the second delivery costs storage only.
 - Deliveries are never deleted (R1): the server stores one per member per
   version (1,000 rotations of a 1,000-member space leave a million rows),
-  but a device syncs only the current version's.
+  but a device syncs only those of the current version and of skipped
+  versions it holds, plus every delivery addressed to its own account.
 - A device removal marks every space whose current version the removed
   device could open; the removing device rotates them at a bounded rate
   (§2.8), and each rotation costs as above.
@@ -2685,10 +2768,11 @@ Limits:
   `invalid-delivery` naming the sender, and receives a fresh delivery from
   another holder; every member can see who sent the voided delivery. A
   member that keeps delivering badly to someone delays that member's key,
-  and after 3 voids of one version holders stop re-delivering it
+  and after voids of 3 distinct deliveries of one version holders stop re-delivering it
   automatically until a rotation. Conversely, a member can void good
-  deliveries to itself, which makes holders write at most 3 more deliveries
-  per version. A member can also mark
+  deliveries to itself, which makes each holder device write at most 3
+  deliveries of a version to it (holders acting at once can each write
+  one, §3.4). A member can also mark
   the space as needing rotation with a junk delivery naming a superseded
   account epoch (§3.5), which costs one rotation per version it names. The
   mark is conservative evidence, not proof of key possession. The
@@ -2769,6 +2853,7 @@ Limits:
   bytes a permitted writer submits; readers detect and leave out bad cells.
 - **Internal records are never deleted** (R1), except member rows.
   Deliveries grow with members and rotations (one per member per version on
-  the server; devices sync only the current version's, §3.8), and a deleted
+  the server; devices sync those of the current version and held skipped
+  versions, and those addressed to their own account, §3.8), and a deleted
   space row or account leaves its records (§1.3). This is accepted for the
   first release; the cost is to be measured with key-version growth.
