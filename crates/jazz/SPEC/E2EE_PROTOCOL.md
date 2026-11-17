@@ -369,7 +369,7 @@ wherever it enters JSON. Optional columns
 | `__e2ee_device_keys`               | `deviceId` and the six key columns of the request                                                                                                                                         | random          | public     | Public projection of the request's keys; must equal it. Written by the device.                          |
 | `__e2ee_account_identities`        | `ledgerVersion` (1), `generation`, `deviceId`, `epochId`, `envelope`, `verification`                                                                                                      | identity ID     | private    | Private account root: root epoch key sealed to the first device, plus its marker. Written at bootstrap. |
 | `__e2ee_account_roots`             | `ledgerVersion` (1), `generation`, `accountId`, `deviceId`, `epochId`, `kind`, `localFirstPublicKey?`, `localFirstSignature?`                                                             | random          | public     | Public account root. Written at bootstrap in the same transaction as the identity.                      |
-| `__e2ee_device_challenges`         | `deviceId`, `epochId`, `envelope`                                                                                                                                                         | challenge ID    | private    | An approval challenge to a requesting device. Written by the approving device.                          |
+| `__e2ee_device_challenges`         | `deviceId`, `epochId`, `envelope`, `signerId`, `signature`                                                                                                                                | challenge ID    | private    | An approval challenge to a requesting device. Written by the approving device.                          |
 | `__e2ee_device_proofs`             | `challengeId`, `proof`, `signature`                                                                                                                                                       | challenge ID    | private    | The requesting device's possession proof.                                                               |
 | `__e2ee_device_approvals`          | `challengeId`, `signerId`, `verification`, `signature`                                                                                                                                    | challenge ID    | private    | Private approval with its account-key marker.                                                           |
 | `__e2ee_device_deliveries`         | `challengeId`, `envelope`, `verification`                                                                                                                                                 | challenge ID    | private    | Account epoch key sealed to the approved device.                                                        |
@@ -1052,9 +1052,16 @@ challenge.deviceId}`.
    and holds the authenticated current account key; the requester is not
    removed and its request matches its keys. Generate a 32-byte secret `S`,
    kept only in memory. Insert challenge `{id, deviceId, epochId: current,
-envelope: seal(requester.pub, P("challenge"), S)}`.
+envelope: E = seal(requester.pub, P("challenge"), S), signerId,
+signature: sign(P("challenge-signature:" ‖ signerId) ‖
+frame[env(signingMechanism, signingPublicKey), env(mechanism, publicKey),
+E])}`, signed over the requester's key columns as the approver was shown
+   them.
 2. **Response** (stage `proof`, requesting device). The challenge targets this
-   device in the current epoch. Open `S` (32 bytes). Insert proof `{id:
+   device in the current epoch, and its `signerId` is an active device whose
+   signature verifies over this device's own key columns; otherwise the
+   requester refuses it (`invalid-challenge`): the approver was shown other
+   keys. Open `S` (32 bytes). Insert proof `{id:
 challengeId, proof: wrap(S, P("proof"), Z32), signature:
 sign(P("proof-signature") ‖ frame[proof])}`.
 3. **Completion** (stage `approval`, approving device). The challenge epoch
@@ -1081,6 +1088,26 @@ frame[E], Z32)}`.
 
    Every marker is unwrapped again and every signature verified before
    submission. The secret is erased when the operation ends.
+
+**Approval code.** The keys row of a requesting device is unsigned (R4), so
+the approver sees the requester's keys only as the server shows them. Both
+devices therefore display a six-digit **approval code**: the first four
+bytes (big-endian) of `SHA-256(P("approval-code") ‖ frame[env(signingMechanism,
+signingPublicKey), env(mechanism, publicKey)])` modulo 10⁶, zero-padded,
+with the requester's key columns: the approver's from the keys it was shown
+and its challenge, the requester's from its own keys and the challenge it
+accepted. The SDK shows the code on both devices and asks the user to
+confirm they match before approving; a mismatch means the server showed the
+approver other keys, and the user cancels. The challenge signature makes the
+code meaningful: a server that substituted keys must fix them before the
+approver chooses the challenge ID, and cannot present the requester a
+challenge for its real keys, so it matches the code only by a one in a
+million chance. An approval made without comparing the codes trusts the
+server's view of the requester's keys (§8). Private verification (§2.4)
+accepts an approval only if its challenge's signature verifies under the
+approval signer's key over the requester's keys. A recovery (§2.9) signs its
+own challenge, the device being both approver and requester; its recovery
+root is what authorises it.
 
 Approval delivers the **account epoch key**, not any device private key.
 Space keys reach the new device through its account: they are sealed to the
@@ -1233,10 +1260,14 @@ account, table: "__e2ee_device_removal_requests", row: id, column:
 epoch has another active device: a recovery root can restore access but
 cannot complete the removal, so the account's only device cannot leave this
 way. The device stays an active member, and keeps its keys, until it is
-removed; nothing else about it changes.
+removed; nothing else about it changes. The SDK shows it as "removal
+pending, waiting for another device", never as removed. A request does not
+outlive a reset: after one, a device approved again under the same ID is
+not removed by its earlier request.
 
 A request is **pending** while it is valid (its device was active with
-`epochId` at the request's position, and its signature verifies) and its
+`epochId` at the request's position, `epochId` is of the account's current
+generation, and its signature verifies) and its
 device is still active; a request that cannot be verified, including one
 with a signing mechanism the client lacks, is not pending. Any other active
 device that holds the current key and sees a pending request completes it,
@@ -1936,6 +1967,10 @@ successor already superseded; the space is then marked although no key was
 transferred. This reveals no key to anyone who is not a member; it costs a
 rotation, and the member can repeat it for each new version. It is a
 member-induced availability and cost limit, like bad deliveries (§3.4, §8).
+A member whose own account history contradicts itself (§3.4, "A member
+this client cannot evaluate") can do the same without naming anyone else:
+a junk delivery to itself names it for the current version, and it marks
+the space; again at most one rotation per version.
 A rotation clears the mark it answers, since the new version is delivered
 to current members' current account epochs only, unless such a record is
 written again for the new version.
@@ -2629,6 +2664,7 @@ Refusal codes:
 | `stale-challenge`               | The challenge is unknown, for another device, or not of the current account epoch (§2.5).                                                                                 |
 | `approval-closed`               | The approval handle was closed or belongs to another operation.                                                                                                           |
 | `invalid-possession-proof`      | The requesting device's possession proof failed (§2.5).                                                                                                                   |
+| `invalid-challenge`             | A challenge not signed, over the requesting device's own keys, by an active device of the account (§2.5).                                                                 |
 | `target-not-active`             | The device or recovery root to remove or retire is not active (§2.8).                                                                                                     |
 | `self-removal`                  | A device tried to remove itself; another active device must remove it (§2.8).                                                                                             |
 | `no-other-device`               | A removal request with no other active device to complete it (§2.8).                                                                                                      |
@@ -2785,7 +2821,9 @@ Limits:
   removed. A member
   can also mark
   the space as needing rotation with a junk delivery naming a superseded
-  account epoch (§3.5), which costs one rotation per version it names. The
+  account epoch (§3.5), which costs one rotation per version it names. A member
+  whose own account history contradicts itself can do the same with a junk
+  delivery to itself. The
   mark is conservative evidence, not proof of key possession. The
   application's remedy is removing that member.
 - **Supported size.** The first release supports up to 1,000 members per
@@ -2803,6 +2841,12 @@ Limits:
 - **Writes with a held key are not freshness-checked.** A device holding an
   older version's key may write under it until it obtains a newer one or
   Jazz permissions refuse (§5.1).
+- **Approving a device trusts its keys unless the codes are compared.** The
+  approver sees a requesting device's keys as the server shows them. Both
+  devices display an approval code (§2.5); a user who confirms they match
+  defeats a substitution, except by a one in a million chance. An approval
+  made without comparing them lets a dishonest server approve its own keys
+  under the requesting device's ID and receive the account key.
 - **App account roots are trusted on first use.** A local-first account's
   root is signed by the key its account ID derives from, so no one without
   the secret can forge or replace it, or reset the account (§2.3, §2.4),

@@ -99,6 +99,9 @@ pub enum RefusalCode {
     StaleChallenge,
     ApprovalClosed,
     InvalidPossessionProof,
+    /// A challenge not signed, over this device's own keys, by an active
+    /// device of the account (§2.5).
+    InvalidChallenge,
     TargetNotActive,
     /// A device cannot remove itself (§2.8): another device does it.
     SelfRemoval,
@@ -126,6 +129,7 @@ impl RefusalCode {
             Self::StaleChallenge => "stale-challenge",
             Self::ApprovalClosed => "approval-closed",
             Self::InvalidPossessionProof => "invalid-possession-proof",
+            Self::InvalidChallenge => "invalid-challenge",
             Self::TargetNotActive => "target-not-active",
             Self::SelfRemoval => "self-removal",
             Self::NoOtherDevice => "no-other-device",

@@ -215,7 +215,7 @@ impl Ledger {
         let writer = env.writer();
         let state = self.state(env);
         let challenge =
-            build::challenge(&writer, &state, &approver.id, &requester.request(), rng).unwrap();
+            build::challenge(&writer, &state, approver, &requester.request(), rng).unwrap();
         let at = self.next();
         self.private
             .challenges

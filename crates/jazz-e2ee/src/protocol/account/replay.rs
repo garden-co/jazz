@@ -752,7 +752,7 @@ impl<'a> AccountReplay<'a> {
             }
         }
 
-        let removal_requested = self.pending_removals(view, &current.active)?;
+        let removal_requested = self.pending_removals(view, &epochs, &current.active)?;
         Ok(Some(AccountState {
             account_id: view.account_id.clone(),
             generation: root.row.generation,
@@ -772,18 +772,23 @@ impl<'a> AccountReplay<'a> {
 
     /// The devices of `active` with a valid removal request in `view`
     /// (§2.8): signed by the device itself, active with the request's
-    /// account epoch at its position. A request that cannot be verified,
+    /// account epoch at its position, that epoch being of the current
+    /// generation (`epochs`). A request that cannot be verified,
     /// including one signed with a mechanism this client lacks, is not
     /// pending: it is a request, not evidence anything else depends on.
     fn pending_removals(
         &self,
         view: &PublicAccountLedger,
+        epochs: &[AccountEpoch],
         active: &BTreeSet<String>,
     ) -> ProtocolResult<BTreeSet<String>> {
         let mut pending = BTreeSet::new();
         for request in &view.removal_requests {
             let row = &request.row;
+            // Scoped to the current generation: a request from before a
+            // reset never removes a device approved again after it.
             if row.account_id != view.account_id
+                || !epochs.iter().any(|epoch| epoch.epoch_id == row.epoch_id)
                 || !active.contains(&row.device_id)
                 || pending.contains(&row.device_id)
                 || row.validate().is_err()

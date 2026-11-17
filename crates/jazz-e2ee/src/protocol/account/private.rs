@@ -12,7 +12,7 @@ use super::super::json;
 use super::super::position::{Accepted, Position};
 use super::super::records::account::{
     AccountIdentity, AccountSuccessor, DeviceApproval, DeviceChallenge, DeviceDelivery,
-    DeviceProof, DeviceRequest, approval_signed_bytes, proof_signed_bytes,
+    DeviceProof, DeviceRequest, approval_signed_bytes, challenge_signed_bytes, proof_signed_bytes,
 };
 use super::super::signing;
 use super::ledger::{PrivateAccountLedger, PublicAccountLedger};
@@ -195,6 +195,28 @@ pub fn verify_private(
         ) else {
             continue;
         };
+        // The approver signed the challenge over the requester keys it was
+        // shown (§2.5); they must be the requester's. It is verified under
+        // the approval signer's key, and the signer's ID is in the signed
+        // column, so a challenge another device signed does not verify.
+        let Ok(challenge_bytes) = challenge_signed_bytes(
+            application,
+            account_id,
+            coordinates,
+            &challenge.row.signer_id,
+            &recipient.keys,
+            &challenge.row.envelope,
+        ) else {
+            continue;
+        };
+        if !signing::verify(
+            registry,
+            &signer.keys.signing_key(),
+            &challenge_bytes,
+            &challenge.row.signature,
+        )? {
+            continue;
+        }
         let (Ok(proof_bytes), Ok(approval_bytes)) = (
             proof_signed_bytes(application, account_id, coordinates, &proof.row.proof),
             approval_signed_bytes(

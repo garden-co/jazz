@@ -89,6 +89,10 @@ pub struct DeviceChallenge {
     pub device_id: String,
     pub epoch_id: String,
     pub envelope: Vec<u8>,
+    /// The approving device, which signs the challenge over the requester
+    /// keys it was shown (§2.5).
+    pub signer_id: String,
+    pub signature: Vec<u8>,
 }
 
 /// `__e2ee_device_proofs`; row ID = challenge ID.
@@ -375,7 +379,9 @@ impl DeviceChallenge {
         ensure_id(&self.id, IdForm::Random, "invalid challenge ID")?;
         ensure_id(&self.device_id, IdForm::Random, "invalid device ID")?;
         ensure_id(&self.epoch_id, IdForm::Random, "invalid epoch ID")?;
-        ensure_bytes(&self.envelope, "empty challenge envelope")
+        ensure_id(&self.signer_id, IdForm::Random, "invalid signer ID")?;
+        ensure_bytes(&self.envelope, "empty challenge envelope")?;
+        ensure_bytes(&self.signature, "empty challenge signature")
     }
 
     pub fn coordinates(&self) -> ChallengeCoordinates<'_> {
@@ -930,6 +936,57 @@ pub fn approval_context(
         epoch: challenge.epoch_id,
         recipient: challenge.device_id,
     })
+}
+
+/// The challenge signature's bytes (§2.5): `P("challenge-signature:" ‖
+/// signerId) ‖ frame[env(signingMechanism, signingPublicKey),
+/// env(mechanism, publicKey), envelope]`, with the requester's key columns
+/// as the approver was shown them. The requester checks it against its own
+/// keys, so a server that showed the approver other keys cannot present the
+/// requester a challenge for its real ones.
+pub fn challenge_signed_bytes(
+    application: &AccountDomain,
+    account_id: &str,
+    challenge: ChallengeCoordinates<'_>,
+    signer_id: &str,
+    requester_keys: &KeyColumns,
+    envelope: &[u8],
+) -> ProtocolResult<Vec<u8>> {
+    requester_keys.validate()?;
+    let column = format!("challenge-signature:{signer_id}");
+    append_framed(
+        approval_context(application, account_id, challenge, &column)?,
+        &[
+            &requester_keys.signing_envelope()?,
+            &requester_keys.sealing_envelope()?,
+            envelope,
+        ],
+    )
+}
+
+/// The approval comparison code (§2.5): six decimal digits, zero-padded,
+/// from the first four bytes (big-endian) of `SHA-256(P("approval-code") ‖
+/// frame[env(signingMechanism, signingPublicKey), env(mechanism,
+/// publicKey)])` modulo 10⁶, with the requester's key columns. The approver
+/// computes it from the keys it was shown, the requester from its own; the
+/// user confirms they match before approving.
+pub fn approval_code(
+    application: &AccountDomain,
+    account_id: &str,
+    challenge: ChallengeCoordinates<'_>,
+    requester_keys: &KeyColumns,
+) -> ProtocolResult<String> {
+    requester_keys.validate()?;
+    let bytes = append_framed(
+        approval_context(application, account_id, challenge, "approval-code")?,
+        &[
+            &requester_keys.signing_envelope()?,
+            &requester_keys.sealing_envelope()?,
+        ],
+    )?;
+    let digest = crate::primitives::hash::sha256(&bytes);
+    let value = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) % 1_000_000;
+    Ok(format!("{value:06}"))
 }
 
 /// The proof signature's bytes: `P("proof-signature") ‖ frame[proof]`.

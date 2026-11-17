@@ -17,7 +17,9 @@ use crate::registry::{Registry, Suite};
 
 use super::super::derive::{self, RecoveryKeys};
 use super::super::domain::{AccountDomain, AppDomain};
-use super::super::error::{ProtocolError, ProtocolResult, RecoveryFailure, RefusalCode};
+use super::super::error::{
+    IntrinsicContradiction, ProtocolError, ProtocolResult, RecoveryFailure, RefusalCode,
+};
 use super::super::ids;
 use super::super::json;
 use super::super::local_first::LocalFirstIdentity;
@@ -27,8 +29,8 @@ use super::super::records::account::{
     ChallengeCoordinates, DeviceApproval, DeviceChallenge, DeviceDelivery, DeviceKeysRow,
     DeviceProof, DeviceRemovalRequest, DeviceRequest, LEDGER_VERSION, PublicAccountSuccessor,
     PublicDeviceApproval, RecoveryDelivery, RecoveryRoot, approval_context, approval_signed_bytes,
-    delivery_marker_context, identity_context, proof_signed_bytes, recovery_delivery_context,
-    successor_context,
+    challenge_signed_bytes, delivery_marker_context, identity_context, proof_signed_bytes,
+    recovery_delivery_context, successor_context,
 };
 use super::super::signing;
 use super::key::AccountKey;
@@ -543,11 +545,11 @@ fn current_key<'k>(state: &AccountState, key: &'k AccountKey) -> ProtocolResult<
 pub fn challenge(
     writer: &AccountWriter<'_>,
     state: &AccountState,
-    approver_id: &str,
+    approver: &LocalDevice,
     requester: &DeviceRequest,
     rng: &mut dyn RandomSource,
 ) -> ProtocolResult<Challenge> {
-    if !state.is_active(approver_id) {
+    if !state.is_active(&approver.id) {
         return refuse(RefusalCode::DeviceNotActive);
     }
     if state.is_removed(&requester.id) {
@@ -566,19 +568,56 @@ pub fn challenge(
     };
     let context = approval_context(&application, writer.account_id, coordinates, "challenge")?;
     let envelope = writer.seal(&requester.keys.sealing_key(), &context, &secret, rng)?;
-    Ok(Challenge {
-        challenge: DeviceChallenge {
-            id: id.clone(),
-            device_id: requester.id.clone(),
-            epoch_id: state.epoch_id().to_owned(),
-            envelope,
-        },
-        secret,
+    let challenge = signed_challenge(
+        writer,
+        &application,
+        &id,
+        approver,
+        requester,
+        state.epoch_id(),
+        envelope,
+    )?;
+    Ok(Challenge { challenge, secret })
+}
+
+/// A challenge row signed by `approver` over the requester keys it was
+/// shown (§2.5).
+fn signed_challenge(
+    writer: &AccountWriter<'_>,
+    application: &super::super::domain::AccountDomain,
+    id: &str,
+    approver: &LocalDevice,
+    requester: &DeviceRequest,
+    epoch_id: &str,
+    envelope: Vec<u8>,
+) -> ProtocolResult<DeviceChallenge> {
+    let coordinates = ChallengeCoordinates {
+        id,
+        device_id: &requester.id,
+        epoch_id,
+    };
+    let bytes = challenge_signed_bytes(
+        application,
+        writer.account_id,
+        coordinates,
+        &approver.id,
+        &requester.keys,
+        &envelope,
+    )?;
+    Ok(DeviceChallenge {
+        id: id.to_owned(),
+        device_id: requester.id.clone(),
+        epoch_id: epoch_id.to_owned(),
+        signer_id: approver.id.clone(),
+        signature: writer.sign(&approver.signing, &bytes)?,
+        envelope,
     })
 }
 
-/// Response (§2.5 step 2): the requester opens the secret and proves
-/// possession of both its keys.
+/// Response (§2.5 step 2): the requester checks that an active device of
+/// the account signed the challenge over the requester's own keys
+/// (`invalid-challenge` otherwise: the approver was shown other keys), opens
+/// the secret and proves possession of both its keys.
 pub fn respond(
     writer: &AccountWriter<'_>,
     state: &AccountState,
@@ -589,6 +628,43 @@ pub fn respond(
     if challenge.device_id != device.id || challenge.epoch_id != state.epoch_id() {
         return refuse(RefusalCode::StaleChallenge);
     }
+    if challenge.validate().is_err() || !state.is_active(&challenge.signer_id) {
+        return refuse(RefusalCode::InvalidChallenge);
+    }
+    let signer_keys = state
+        .keys
+        .get(&challenge.signer_id)
+        .ok_or(ProtocolError::Intrinsic(
+            IntrinsicContradiction::MissingSignerKey,
+        ))?;
+    let bytes = challenge_signed_bytes(
+        &writer.application()?,
+        writer.account_id,
+        challenge.coordinates(),
+        &challenge.signer_id,
+        &device.keys(),
+        &challenge.envelope,
+    )?;
+    if !signing::verify(
+        writer.registry,
+        &signer_keys.signing_key(),
+        &bytes,
+        &challenge.signature,
+    )? {
+        return refuse(RefusalCode::InvalidChallenge);
+    }
+    prove(writer, device, challenge, rng)
+}
+
+/// Opens the challenge's secret and proves possession of both keys. The
+/// caller has checked the challenge: [`respond`], or a recovery, where the
+/// device wrote its own challenge in this process.
+fn prove(
+    writer: &AccountWriter<'_>,
+    device: &LocalDevice,
+    challenge: &DeviceChallenge,
+    rng: &mut dyn RandomSource,
+) -> ProtocolResult<DeviceProof> {
     let application = writer.application()?;
     let coordinates = challenge.coordinates();
     let context = approval_context(&application, writer.account_id, coordinates, "challenge")?;
@@ -822,13 +898,19 @@ pub fn recovery_approve(
     };
     let secret = random_key(rng)?;
     let context = approval_context(&application, writer.account_id, coordinates, "challenge")?;
-    let challenge = DeviceChallenge {
-        id: id.clone(),
-        device_id: device.id.clone(),
-        epoch_id: state.epoch_id().to_owned(),
-        envelope: writer.seal(&device.sealing.public, &context, &secret, rng)?,
-    };
-    let proof = respond(writer, state, device, &challenge, rng)?;
+    let envelope = writer.seal(&device.sealing.public, &context, &secret, rng)?;
+    // A recovery is approved by the recovery root, not an active device: the
+    // device signs its own challenge, which it never receives from anyone.
+    let challenge = signed_challenge(
+        writer,
+        &application,
+        &id,
+        device,
+        &request,
+        state.epoch_id(),
+        envelope,
+    )?;
+    let proof = prove(writer, device, &challenge, rng)?;
     verify_possession(writer, &challenge, &proof, &request, &secret)?;
     let records = approval_records(
         writer,
