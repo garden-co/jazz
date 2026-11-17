@@ -172,7 +172,13 @@ export interface Runtime {
    */
   waitForPendingWrites?(
     tier?: string,
-    options?: { throughOutage?: boolean; inFlightStreams?: AbortSignal; signal?: AbortSignal },
+    options?: {
+      throughOutage?: boolean;
+      inFlightStreams?: AbortSignal;
+      signal?: AbortSignal;
+      /** Wait as `waitForSync` for this session's writes (none: the runtime's own). */
+      sync?: { writeContext?: string | null };
+    },
   ): Promise<void>;
   /** @internal Close mutation admission and report the foreground TxTime high-water. */
   quiesceForegroundTxTimeHighWater?(): Promise<bigint>;
@@ -191,6 +197,10 @@ export interface Runtime {
   hasStagedTransactionWrites?(id: OpenTransactionId): boolean | undefined;
   /** Capture behind earlier owner operations without waiting for server acceptance. */
   captureSnapshot?(): Promise<SnapshotRef>;
+  /** @internal A thin session's transaction request, served by its backend's client (NAPI). */
+  serveThinTransaction?(request: Uint8Array): Promise<Uint8Array>;
+  /** @internal End the thin session's open transactions (NAPI). */
+  releaseThinTransactions?(): Promise<void>;
   readonly preparationOwner?: object;
   /** @internal Live reachability of the upstream server, for read scheduling only. */
   remoteLinkState?(): RemoteLinkState;
@@ -1274,6 +1284,18 @@ export class JazzClient {
     return new JazzClient(runtime, context, runtimeOptions);
   }
 
+  /** @internal See {@link Runtime.serveThinTransaction}. */
+  serveThinTransaction(request: Uint8Array): Promise<Uint8Array> {
+    if (!this.runtime.serveThinTransaction)
+      return Promise.reject(new Error("this runtime serves no thin transactions"));
+    return this.runtime.serveThinTransaction(request);
+  }
+
+  /** @internal See {@link Runtime.releaseThinTransactions}. */
+  async releaseThinTransactions(): Promise<void> {
+    await this.runtime.releaseThinTransactions?.();
+  }
+
   captureSnapshot(): Promise<SnapshotRef> {
     if (!this.runtime.captureSnapshot) return Promise.reject(new UnsupportedSnapshotError());
     return this.runtime.captureSnapshot();
@@ -1609,6 +1631,20 @@ export class JazzClient {
       ...resolved,
       openTransactionId: options.openTransactionId,
     };
+  }
+
+  /**
+   * @internal `db.waitForSync` for the writes `session` makes through this
+   * client (none: its own), on the runtime's native path.
+   */
+  async waitForSyncAs(session: Session | undefined, signal?: AbortSignal): Promise<void> {
+    if (!this.runtime.waitForPendingWrites)
+      throw new Error("Runtime does not support waiting for sync");
+    await this.runtime.waitForPendingWrites("global", {
+      throughOutage: true,
+      signal,
+      sync: { writeContext: this.writeContext(session) ?? null },
+    });
   }
 
   /**

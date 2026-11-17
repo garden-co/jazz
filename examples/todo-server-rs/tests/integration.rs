@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use ::jazz_app::{AppId, Backend, Config, Jazz, ReadTier, Storage};
+use ::jazz_app_support::{AppId, Backend, Config, Jazz, ReadTier, Storage};
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -213,9 +213,11 @@ async fn live_todos_stream_every_change() {
     server.abort();
 }
 
-/// As the app's backend: the service publishes the app's bundle, acts as
-/// one user, and what it writes reaches another user's backend (with a
-/// fresh store) through the server, under the app's permissions.
+/// In-process, main-backend mode against `jazz-server` stands in for the
+/// TypeScript main backend (the service itself is a backend client:
+/// `examples/rust-backend-clients` runs it against `createJazz`): what one
+/// user writes reaches another user's client (with a fresh store) through
+/// the server, under the app's permissions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn writes_resync_through_the_server() {
     let app_id = AppId::random();
@@ -296,7 +298,7 @@ fn bindings_are_current() {
 }
 
 fn jazz_app_source(file: &[u8]) -> String {
-    ::jazz_app::jazz::tools::deployment::artifact::source_hash(file)
+    ::jazz_app_support::jazz::tools::deployment::artifact::source_hash(file)
 }
 
 /// Stopping ends the live streams, so a graceful shutdown isn't held open

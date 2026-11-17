@@ -95,10 +95,10 @@ pub enum DeploymentError {
     Cycle { schemas: Vec<SchemaHash> },
     #[error(
         "migration history has disconnected roots: {}. No migration connects these schema versions. \
-         Run `jazz-tools migrations create --name <name>` to write the missing migration and add it \
+         Run `npx jazz-tools migrations create --name <name>` to write the missing migration and add it \
          to migrations/index.ts, then deploy again. If one of them is \
          a version your store already runs that migrations/snapshots has no snapshot of, check out \
-         that schema.ts and run `jazz-tools migrations create` to snapshot it first",
+         that schema.ts and run `npx jazz-tools migrations create` to snapshot it first",
         display_hashes(.roots, ", ")
     )]
     DisconnectedGraph { roots: Vec<SchemaHash> },
@@ -312,6 +312,14 @@ pub fn prepare_deployment(
     // it still opens (see `check_deployable_policies`).
     jazz_model::model::public_schema_convert::check_deployable_policies(&target).map_err(
         |error| DeploymentError::InvalidPermissions {
+            schema: request.target_schema_hash,
+            reason: error.to_string(),
+        },
+    )?;
+    // Declared JSON Schemas the browser runtime would refuse (see
+    // `json_schema_support`); a store already holding one still opens.
+    jazz_model::model::public_schema_convert::check_deployable_json_schemas(&target).map_err(
+        |error| DeploymentError::InvalidSchema {
             schema: request.target_schema_hash,
             reason: error.to_string(),
         },

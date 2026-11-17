@@ -9,6 +9,11 @@ Readme and license are copied; benchmark, corpus, and repository tooling are omi
 `jazz.patch` records every change to copied upstream files. Reproduce by unpacking
 the crates.io 0.8.3 archive and running `patch -p1 < jazz.patch` at its root.
 The package has a distinct local name `jazz-ruzstd`; it is not a global Cargo patch.
+It is published to crates.io under that name, at the upstream version, for
+jazz-compression's optional `ruzstd` feature. The manifest keeps the
+`rustc-dep-of-std` feature as a no-op and drops its three std-build
+dependencies (`compiler_builtins`, `rustc-std-workspace-core`/`-alloc`),
+which only matter when ruzstd is built as part of the standard library.
 
 ## Why a local patch
 

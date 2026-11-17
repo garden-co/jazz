@@ -11,10 +11,15 @@ use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
 use crate::handle::Jazz;
+use crate::include::Row;
 use crate::table::{self, Implementations, Table};
 
 /// A change to a subscribed query's rows. Apply its parts in order:
 /// `removed`, then `updated`, then `added` (see [`Rows::apply`]).
+///
+/// Each part names the result it changes by its `key`. A row can be
+/// several results: a history read has one per version of a row, and a
+/// union one per arm that matches the row, all sharing the row's id.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Delta<T> {
     pub removed: Vec<Removed>,
@@ -26,22 +31,44 @@ pub struct Delta<T> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Added<T> {
+    /// The result this is.
+    pub key: ResultKey,
     pub index: usize,
     pub row: T,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Updated<T> {
+    /// The result that changed.
+    pub key: ResultKey,
     pub id: ObjectId,
     pub old_index: usize,
     pub new_index: usize,
     /// The row's new value; `None` when it only moved.
     pub row: Option<T>,
+    /// Per column named in [`crate::ReadOptions::splices`], the edits that
+    /// turn the value the previous delta showed into this one, in order.
+    /// A column without an entry has none to offer: read its new value.
+    pub splices: Vec<(String, Vec<ValueSplice>)>,
 }
 
+/// One edit of a large value in a subscription update: replace `delete`
+/// bytes at byte offset `at` with `insert` (UTF-8 for text). On a text
+/// column `at` and `delete` are UTF-8 byte offsets, `str` indices, so
+/// `value.replace_range(at..at + delete, insert)` applies it to a Rust
+/// `String`. Text edits also carry the same edit in UTF-16 code units
+/// (`at_utf16`, `delete_utf16`), for hosts whose strings count those
+/// (Kotlin, JavaScript); Rust code doesn't need them.
+pub use jazz::db::LargeValueDeltaSplice as ValueSplice;
+
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Removed {
+    /// The result that went.
+    pub key: ResultKey,
     pub id: ObjectId,
     pub index: usize,
 }
@@ -50,37 +77,54 @@ pub struct Removed {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rows<T> {
     rows: Vec<T>,
+    /// Each row's result, in the same order.
+    keys: Vec<ResultKey>,
 }
 
 impl<T> Default for Rows<T> {
     fn default() -> Self {
-        Self { rows: Vec::new() }
+        Self {
+            rows: Vec::new(),
+            keys: Vec::new(),
+        }
     }
 }
 
-impl<T: Table> Rows<T> {
+impl<T: Row> Rows<T> {
     pub fn apply(&mut self, delta: Delta<T>) {
         for removed in delta.removed {
-            self.rows.retain(|row| row.id() != removed.id);
+            if let Some(at) = self.position(&removed.key) {
+                self.rows.remove(at);
+                self.keys.remove(at);
+            }
         }
         for updated in delta.updated {
-            let held = self.rows.iter().position(|row| row.id() == updated.id);
-            let row = match (held, updated.row) {
+            let row = match (self.position(&updated.key), updated.row) {
                 (Some(at), Some(row)) => {
                     self.rows.remove(at);
+                    self.keys.remove(at);
                     row
                 }
-                (Some(at), None) => self.rows.remove(at),
+                (Some(at), None) => {
+                    self.keys.remove(at);
+                    self.rows.remove(at)
+                }
                 (None, Some(row)) => row,
                 (None, None) => continue,
             };
             let at = updated.new_index.min(self.rows.len());
             self.rows.insert(at, row);
+            self.keys.insert(at, updated.key);
         }
         for added in delta.added {
             let at = added.index.min(self.rows.len());
             self.rows.insert(at, added.row);
+            self.keys.insert(at, added.key);
         }
+    }
+
+    fn position(&self, key: &ResultKey) -> Option<usize> {
+        self.keys.iter().position(|held| held == key)
     }
 
     pub fn as_slice(&self) -> &[T] {
@@ -118,7 +162,7 @@ impl<T> Stream for Subscription<T> {
 
 /// Runs on the client's thread: forwards `stream`'s deltas, typed, until
 /// either side ends.
-pub(crate) async fn forward<T: Table>(
+pub(crate) async fn forward<T: Row>(
     mut stream: SubscriptionStream,
     sender: mpsc::UnboundedSender<Result<Delta<T>>>,
     implementations: Implementations,
@@ -142,14 +186,14 @@ pub(crate) async fn forward<T: Table>(
     }
 }
 
-fn row_id<T: Table>(key: &ResultKey) -> Result<ObjectId> {
+fn row_id<T: Row>(key: &ResultKey) -> Result<ObjectId> {
     key.row_id().ok_or_else(|| Error::Decode {
-        table: T::NAME,
+        table: <T::Table as Table>::NAME,
         message: "a joined result is not a row".into(),
     })
 }
 
-fn typed<T: Table>(delta: OrderedRowDelta, implementations: &Implementations) -> Result<Delta<T>> {
+fn typed<T: Row>(delta: OrderedRowDelta, implementations: &Implementations) -> Result<Delta<T>> {
     Ok(Delta {
         removed: delta
             .removed
@@ -157,6 +201,7 @@ fn typed<T: Table>(delta: OrderedRowDelta, implementations: &Implementations) ->
             .map(|removed| {
                 Ok(Removed {
                     id: row_id::<T>(&removed.id)?,
+                    key: removed.id,
                     index: removed.index,
                 })
             })
@@ -167,6 +212,7 @@ fn typed<T: Table>(delta: OrderedRowDelta, implementations: &Implementations) ->
             .map(|updated| {
                 let id = row_id::<T>(&updated.id)?;
                 Ok(Updated {
+                    key: updated.id,
                     id,
                     old_index: updated.old_index,
                     new_index: updated.new_index,
@@ -174,6 +220,7 @@ fn typed<T: Table>(delta: OrderedRowDelta, implementations: &Implementations) ->
                         .row
                         .map(|row| table::decode(id, row.fields, implementations))
                         .transpose()?,
+                    splices: updated.splices,
                 })
             })
             .collect::<Result<_>>()?,
@@ -184,6 +231,7 @@ fn typed<T: Table>(delta: OrderedRowDelta, implementations: &Implementations) ->
                 Ok(Added {
                     index: added.index,
                     row: table::decode(row_id::<T>(&added.id)?, added.row.fields, implementations)?,
+                    key: added.id,
                 })
             })
             .collect::<Result<_>>()?,

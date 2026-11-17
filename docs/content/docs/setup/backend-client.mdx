@@ -1,6 +1,7 @@
 ---
 title: Backend Client
 description: "Learn how to connect other trusted machines to Jazz through your main backend, for machine-to-machine access."
+languageTabs: backend
 ---
 
 Your [main backend](/docs/how-jazz-works#how-a-backend-talks-to-jazz) is the one that runs `createJazz`: browsers and apps sync
@@ -62,38 +63,119 @@ export const jazz = createJazz({
 
 A token from a listed issuer that fails any check is refused. It never reaches `authenticate`.
 
+<Callout type="warn" title="Keep workload and user tokens apart">
+  Your users' bearer tokens must not come from an issuer listed in `backendClients`: such a token is
+  checked only as a workload's, and if it doesn't match it's refused and never reaches
+  `authenticate`, so the user just appears signed out (`{ "user": null }`), with no error. Cookie
+  sessions aren't affected. Give each workload claims no user token can carry, or a user token that
+  matches would be admitted as that workload.
+</Callout>
+
 ## Connect from the machine
 
 On the machine, open a Jazz session against your main backend and pass a function that returns a
 fresh token. Jazz calls it for every request and socket, so short-lived tokens just work:
 
-```ts title="import-job.ts"
-import { createJazzClient } from "jazz-tools/backend";
-import { app } from "./jazz.generated";
-import permissions from "./jazz.permissions.json" with { type: "json" };
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust", "Go"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    ```ts title="import-job.ts"
+    import { createJazzClient } from "jazz-tools/backend";
+    import { app } from "./jazz.generated";
+    import permissions from "./jazz.permissions.json" with { type: "json" };
 
-const session = await createJazzClient({
-  app,
-  permissions,
-  serverUrl: "https://my-app.com/jazz",
-  driver: { type: "memory" },
-  credential: githubOidcToken,
-});
+    const session = await createJazzClient({
+      app,
+      permissions,
+      serverUrl: "https://my-app.com/jazz",
+      driver: { type: "memory" },
+      credential: githubOidcToken,
+    });
 
-await session.db.insert(app.imports, { source: "nightly" }).wait({ tier: "global" });
-await session.close(); // uploads queued writes first, for up to 10 seconds
+    await session.db.insert(app.imports, { source: "nightly" }).wait({ tier: "global" });
+    await session.close(); // uploads queued writes first, for up to 10 seconds
 
-// GitHub Actions hands out OIDC tokens to jobs with `permissions: id-token: write`.
-async function githubOidcToken() {
-  const url = `${process.env.ACTIONS_ID_TOKEN_REQUEST_URL}&audience=jazz:my-app`;
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}`,
-    },
-  });
-  return (await response.json()).value as string;
-}
-```
+    // GitHub Actions hands out OIDC tokens to jobs with `permissions: id-token: write`.
+    async function githubOidcToken() {
+      const url = `${process.env.ACTIONS_ID_TOKEN_REQUEST_URL}&audience=jazz:my-app`;
+      const response = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}`,
+        },
+      });
+      return (await response.json()).value as string;
+    }
+    ```
+
+  </Tab>
+  <Tab value="Rust">
+    Depend on the `jazz-app-support` crate. Write your app's schema and permissions in `schema.ts`
+    beside `Cargo.toml` (the same schema and permissions as your TypeScript main backend), and run
+    `npx jazz-tools generate`: it writes `jazz.app.json`, `jazz.permissions.json` and
+    `src/jazz_app.rs`, the typed bindings. The crate needs no `package.json`:
+
+    ```toml title="Cargo.toml"
+    [dependencies]
+    jazz-app-support = "=2.0.0-alpha.66"
+    serde_json = "1"
+    tokio = { version = "1", features = ["full"] }
+    ```
+
+    Run it with `npx`: the standalone `jazz-tools` binary refuses to write beside a `schema.ts`,
+    though its `generate --check` still works. Commit `schema.ts` and the generated files, and
+    declare the bindings with `mod jazz_app;`. The [Reading](/docs/reading/queries)
+    and [Writing](/docs/writing/writing-data) pages have a Rust tab for each example.
+
+    `Config::credential(…)` takes a function that returns a fresh token, like TS's `credential`. Your
+    main backend's `backendClients` decide whether it's a trusted or a scoped client:
+
+    <include cwd lang="rust" meta='title="src/main.rs"'>
+      ../examples/docs/backend-client-rs/src/lib.rs#backend-client-connect-rust
+    </include>
+
+    A backend client needs your app's `jazz.permissions.json`, as TypeScript's `createJazzClient`
+    takes `permissions`: it checks the users it acts for by them. The generated `jazz_app::open`
+    embeds only the schema, so open with
+    `Jazz::open(AppFiles::new(jazz_app::APP, None).with_permissions(…), config)`.
+
+    If your main backend can't upgrade sockets, the client falls back to its HTTP stream, as
+    TypeScript clients do.
+
+    <include cwd lang="rust" meta='title="src/main.rs"'>
+      ../examples/docs/backend-client-rs/src/lib.rs#backend-client-trusted-rust
+    </include>
+
+    `job.close(timeout)` first waits for the writes the client holds to reach the backend, for up to
+    the timeout, then stops it. With `Storage::Memory`, writes still queued are lost and `close`
+    returns `Error::Unsynced { pending }`; `Duration::ZERO` closes at once:
+
+    <include cwd lang="rust" meta='title="src/main.rs"'>
+      ../examples/docs/backend-client-rs/src/lib.rs#backend-client-close-rust
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    `jazz.Credential(provider)` takes a function that returns a fresh token, like TS's `credential`.
+    A backend client needs the app's permissions too, and your main backend's `backendClients`
+    decide whether it's a trusted or a scoped client:
+
+    <include cwd lang="go" meta='title="main.go"'>
+      ../examples/stage-plan/apps/go-cli/backend_client_snippets_test.go#backend-client-connect-go
+    </include>
+
+    <include cwd lang="go" meta='title="main.go"'>
+      ../examples/stage-plan/apps/go-cli/backend_client_snippets_test.go#backend-client-trusted-go
+    </include>
+
+    `client.Shutdown(ctx)` waits until `ctx`'s deadline (10 seconds if it has none) for queued writes
+    to reach your main backend, then closes. With memory storage, writes still pending are lost, and
+    it returns `jazz.ErrUnsynced` with `Error.Pending` counting them:
+
+    <include cwd lang="go" meta='title="main.go"'>
+      ../examples/stage-plan/apps/go-cli/backend_client_snippets_test.go#backend-client-close-go
+    </include>
+
+  </Tab>
+</Tabs>
 
 `session.close()` first waits for the writes the client holds to reach the backend, for up to
 10 seconds (`close({ timeoutMs })`). With the memory driver, writes that still haven't arrived are
@@ -105,6 +187,13 @@ identity can hold at most 4 sync sockets at a time for now, so keep to four work
 identity.
 While your main backend is unreachable, `createJazzClient` waits without logging anything, so give a job
 its own timeout.
+
+A backend client reads from your main backend by default: `db.all(query)` (TypeScript) and
+`jazz.all(query)` (Rust) ask the server, so a job sees what other clients wrote. While the main
+backend is unreachable, such a read, and a subscription's first result, waits until it's back; it
+doesn't fail or answer from the local store. Give a job its own timeout, or read local data
+explicitly when an answer now matters more than a fresh one: `db.all(query, { tier: "local-first" })`
+in TypeScript, `jazz.all_with(query, ReadTier::LocalFirst)` in Rust.
 
 The session opens as whatever your main backend trusts the token as: with backend authority for a
 trusted machine, or signed in as its user for a scoped one. Your main backend's API routes see the
@@ -123,18 +212,44 @@ database as that user, just like `jazz.forReqUser(request)` in your main backend
 user's identity and are checked against that user's permissions. `userId` is the id your main
 backend's `authenticate` names the user by.
 
-```ts title="digest-job.ts"
-import { isNoJazzAccountError } from "jazz-tools/backend";
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust", "Go"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    ```ts title="digest-job.ts"
+    import { isNoJazzAccountError } from "jazz-tools/backend";
 
-const { client } = session.getSnapshot();
-try {
-  const db = await client!.forUser("user_123", { claims: { org: "acme" } });
-  await db.insert(app.notifications, { text: "Your weekly digest" }).wait({ tier: "global" });
-} catch (error) {
-  if (!isNoJazzAccountError(error)) throw error;
-  // This user hasn't signed in yet, so they have no account to act as.
-}
-```
+    const { client } = session.getSnapshot();
+    try {
+      const db = await client!.forUser("user_123", { claims: { org: "acme" } });
+      await db.insert(app.notifications, { text: "Your weekly digest" }).wait({ tier: "global" });
+    } catch (error) {
+      if (!isNoJazzAccountError(error)) throw error;
+      // This user hasn't signed in yet, so they have no account to act as.
+    }
+    ```
+
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust" meta='title="src/main.rs"'>
+      ../examples/docs/backend-client-rs/src/lib.rs#backend-client-for-user-rust
+    </include>
+
+    `job.for_user(user_id, claims)` fails with `Error::NoAccount` for a user with no account yet,
+    and with `Error::Refused` when your main backend refuses the identity.
+    It fails with `Error::BundleMismatch` when your main backend names the permissions it serves and
+    they aren't the ones this client was opened with: open it with your app's published
+    `jazz.permissions.json`.
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go" meta='title="main.go"'>
+      ../examples/stage-plan/apps/go-cli/backend_client_snippets_test.go#backend-client-for-user-go
+    </include>
+
+    `client.ForUser(ctx, userID, claims)` returns an error matching `jazz.ErrNoAccount` for a user
+    with no account yet, and `jazz.ErrPermission` when your main backend refuses the identity.
+
+  </Tab>
+</Tabs>
 
 - `forUser` never creates an account. A user with no account yet rejects with a
   `NoJazzAccountError` (`code: "no_account"`). They get one when they first sign in, or when your
@@ -143,6 +258,12 @@ try {
   permissions see exactly the `claims` you pass as the user's claims, and `{}` when you pass none.
 - If your main backend refuses the identity, for example because it was revoked, `forUser`
   rejects with an error whose `status` is 403.
+- The user's reads are checked by the client itself, against the `permissions` you opened it
+  with, so they must match the `jazz.permissions.json` your main backend serves. The client
+  checks this: if its app and permissions make a different bundle from the one your main backend
+  publishes, `forUser` rejects with `code: "bundle_mismatch"`, naming both bundle ids. Redeploy
+  the client with the current `jazz.generated.ts` and `jazz.permissions.json`. The client's own
+  system reads and writes are unaffected.
 - Only a trusted client has `forUser`. On a scoped client it throws, because that client already
   acts as its user. In your main backend itself, use `jazz.forReqUser`.
 

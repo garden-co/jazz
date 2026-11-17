@@ -1,6 +1,7 @@
 ---
 title: Your Own Server
 description: "Learn how to run Jazz in your own Node server, VM or container, with the data in SQLite on its disk."
+languageTabs: main-backend
 ---
 
 On your own machine, Jazz is part of your backend's process, with the data in a directory on its
@@ -81,11 +82,18 @@ directory keeps its objects under its own prefix, claims that prefix the first t
 deletes the chunks it no longer needs. Another data directory is refused on a prefix that is
 already claimed.
 
-The data directory records its choice in `<path>/blob-store`. You can move an existing directory
+The store records its choice in its `jazz.sqlite`. You can move an existing directory
 from `"sqlite"` to `files()` or `s3()` later; any other switch is not supported yet and refuses to
 start, so treat it as a one-way choice. A blob directory belongs to exactly one data directory, so two data directories can't share
-one. To copy a data directory, give the copy its own blob directory or prefix and delete its
-`store-id` and `blob-store` files before it first starts, or it claims the original's.
+one. To copy a data directory, run `npx jazz-tools store detach <path>` on the stopped copy before it
+first starts, or it claims the original's chunks. A `blobs/` directory copied inside it becomes the
+copy's own; a blob directory outside it, or a prefix, is the original's, so give the copy its own (a
+copied chunk directory without its `owner` file, or a new `s3()` prefix).
+
+A data directory keeps the app id it was first started with and refuses to start with another
+`--app-id`. To change it (a wrong first start, or a renamed app), stop the server and run
+`npx jazz-tools store set-app-id <path> <app id>`. Local-first guests' accounts are derived from the
+app id, so they no longer match after a change.
 
 History keeps every version of a row, so deleting rows doesn't free their large values, and there
 is no way to erase them yet. Expect blob storage to only grow.
@@ -175,9 +183,8 @@ origin can't sign in with your app's cookie yet, even with `allowedOrigins`; ser
 
 ## Data on another machine
 
-When the data should live apart from your app servers (several app instances sharing one database,
-serverless functions, an existing Jazz Cloud app), keep it in [Jazz Cloud](/docs/setup/deployment/jazz-cloud)
-and point `createJazz` at it with `remote()`:
+An existing app on [Jazz Cloud (deprecated)](/docs/setup/deployment/jazz-cloud) keeps its data
+there: point `createJazz` at it with `remote()`:
 
 ```ts title="jazz.server.ts"
 import { createJazz, remote } from "jazz-tools/backend";
@@ -216,7 +223,7 @@ Alpha.59 ran Jazz as its own process (`jazz-tools server`), and clients connecte
   [`fromJWT()`](/docs/setup/auth/custom#tokens-from-your-identity-provider).
 - **`jazz-tools deploy` is gone.** Your backend applies its schema, migrations and permissions
   each time it starts.
-- **Move the data directory with the import tool** (see
+- **Move the data directory with alpha.65's import tool** (see
   [Upgrading from alpha.59](/docs/operating/backups-and-upgrades#self-hosted-alpha59-servers)).
   The import keeps large values inside `jazz.sqlite`. On its first start your backend moves them
   to `blobs/`, or wherever `blobs` points, without logging anything. Run the import's `verify`

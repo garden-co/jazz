@@ -8,13 +8,27 @@ description: "Learn how to keep the data in your backend's Jazz directory safe a
 Everything your [main backend](/docs/how-jazz-works#how-a-backend-talks-to-jazz) stores lives in the directory you pass to
 `sqlite({ path })`:
 
-| File or folder                         | What it is                                                                                                   |
-| :------------------------------------- | :----------------------------------------------------------------------------------------------------------- |
-| `jazz.sqlite` (with `-wal` and `-shm`) | Rows, history, schemas, permissions and the index of large-value chunks                                      |
-| `blobs/`                               | The chunks of large values, unless you chose [another place](/docs/setup/deployment/own-server#large-values) |
-| `app-id`                               | The app this directory belongs to                                                                            |
-| `store-id`, `blob-store`               | This directory's identity, and where its chunks live                                                         |
-| `jazz.lock`                            | Held by the running process, so a second one on the same directory is refused                                |
+| File or folder                         | What it is                                                                                                                                       |
+| :------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `jazz.sqlite` (with `-wal` and `-shm`) | Rows, history, schemas, permissions, the index of large-value chunks, and the store's identity: its app id, its own id and where its chunks live |
+| `blobs/`                               | The chunks of large values, unless you chose [another place](/docs/setup/deployment/own-server#large-values)                                     |
+| `app-id`, `store-id`, `blob-store`     | Copies of the identity in `jazz.sqlite`, kept so an earlier release opened on the directory reads the same one                                   |
+| `inspect-token-secret`                 | A secret: what [Inspector](/docs/tooling/inspector) agent tokens are signed with (readable by its owner only, never in `jazz.sqlite`)            |
+| `jazz.lock`                            | Held by the running process, so a second one on the same directory is refused                                                                    |
+
+`jazz.sqlite` holds the identity; the files are copies each start rewrites from it. A copy that
+disagrees with `jazz.sqlite` (edited, or from another store) is refused with an error naming both,
+never chosen.
+
+A store keeps the app id it was first started with, and refuses to start for another one. If it was
+first started with the wrong one, or your app's id changed, stop the backend and set it:
+
+```sh
+npx jazz-tools store set-app-id ./data <app id>
+```
+
+Local-first guests' accounts are derived from the app id, so after a change they no longer match
+the ones their devices hold: change it only for a store whose users haven't relied on the old one.
 
 If your chunks are in another directory (`files({ dir })`) or a bucket (`s3()`), they're part of the
 data too.
@@ -22,6 +36,10 @@ data too.
 ## Backing up
 
 Back up the whole directory together, and its chunk directory or bucket prefix with it:
+
+- **Keep `inspect-token-secret` as a secret**, apart from the data if you like: it signs Inspector
+  agent tokens. Restoring `jazz.sqlite` without it revokes every token issued before; a new one is
+  made on the next start.
 
 - **Stop the backend first**, or snapshot the disk it's on atomically (a volume snapshot). Copying
   `jazz.sqlite` while it's being written can give you a copy that doesn't open.
@@ -34,9 +52,22 @@ Back up the whole directory together, and its chunk directory or bucket prefix w
 
 To restore in place, stop the backend, put the files back, and start it again.
 
-To restore into a new place while the original keeps running, such as a staging copy, give the copy
-its own chunk directory or `s3()` prefix and delete its `store-id` and `blob-store` files before it
-first starts. Otherwise it claims the original's chunks.
+`jazz.sqlite` is the whole store: a copy of it opens as the same store, for the same app, with the
+same chunks.
+
+To restore into a new place while the original keeps running, such as a staging copy, make the copy
+a store of its own before it first starts, and give it its own chunk directory or `s3()` prefix:
+
+```sh
+npx jazz-tools store detach ./staging-data
+```
+
+Otherwise it claims the original's chunks, and deletes the ones it no longer needs. The copy keeps
+the app id, so it still serves the same app, and gets an `inspect-token-secret` of its own, so agent
+tokens the original issued don't open it.
+
+Apart from that secret and the chunks, `jazz.sqlite` is the whole store: a copy of it opens as the
+same store, for the same app, with its large values where they were.
 
 ## Upgrading between releases
 
@@ -56,108 +87,203 @@ once the new deployment has woken it, promoting the old deployment again doesn't
 To try an upgrade first, deploy it to a preview branch: with the per-branch setup, that preview gets
 a core of its own, separate from production's (a dry run with its own data, not a copy).
 
-## Upgrading from alpha.64
+{/* Older jazz-tools link the section by its previous anchor. */}
 
-alpha.65 makes `jazz.app.json` and `jazz.permissions.json` your app's only source: the TypeScript
-schema, permissions and migrations DSL is gone. `schema.ts`, `permissions.ts` and `migrations/`
-are replaced by:
+<a id="upgrading-from-alpha64" />
+
+## Upgrading from alpha.65
+
+alpha.66 keeps your schema in TypeScript, and moves your permissions next to it. `schema.ts` now
+exports `schema` (`s.defineSchema({ … })`) and `permissions` (`schema.definePermissions({ … })`),
+written in a new permissions DSL. `npx jazz-tools generate` reads it and writes:
 
 - `jazz.app.json`, your tables plus the schema history and migrations your app ships;
 - `jazz.permissions.json`, your policies;
-- `jazz.generated.ts`, typed bindings written by `npx jazz-tools generate`;
-- `jazz.computed.ts`, for apps with computed fields or transforms.
+- `jazz.generated.ts`, the typed bindings your app code imports.
 
-[Defining Tables](/docs/schemas/defining-tables) explains how they fit together. Your queries and
-writes keep their shape: `app.todos.where(…)`, `db.insert(app.todos, …)` and the hooks work as
-before.
+The two JSON files are generated: commit them, but don't edit them. `generate` refuses to overwrite
+a hand-edited one unless you pass `--force`. `migrations/` keeps its migration files and snapshots;
+`migrations/index.ts` is gone. [Defining Tables](/docs/schemas/defining-tables) explains how the
+files fit together. Your queries and writes keep their shape: `app.todos.where(…)`,
+`db.insert(app.todos, …)` and the hooks work as before.
 
 ### Run `jazz-tools upgrade` and review the diff
 
-Run the upgrade in the app's directory **before** you bump the dependency, while alpha.64 is still
+Run the upgrade in the app's directory **before** you bump the dependency, while alpha.65 is still
 installed, on a clean Git working tree:
 
 ```bash
-npx jazz-tools@2.0.0-alpha.65 upgrade
+npx jazz-tools@2.0.0-alpha.66 upgrade
 ```
 
-`npx jazz-tools upgrade` on its own would run the installed alpha.64, which has no `upgrade`. Pass
-`--dir <path>` for an app elsewhere, `--dry-run` to see everything it would do without writing,
-and `--skip-typecheck` to skip the final typecheck. Then bump `jazz-tools` (and `jazz-napi`, if you
-depend on it) to alpha.65 and reinstall; an exact `2.0.0-alpha.64` pin in `package.json` is
-rewritten for you.
+`npx jazz-tools upgrade` on its own would run the installed alpha.65, which has no `upgrade`. Pass
+`--dir <path>` for an app elsewhere, `--schema-dir <path>` when `schema.ts` isn't in the app's
+directory, `src` or `src/lib`, `--dry-run` to see everything it would do without writing, and
+`--skip-typecheck` to skip the final typecheck.
 
-Review the diff before you commit. `upgrade`:
+`upgrade`:
 
-1. Runs the installed alpha.64's `jazz-tools validate --check`, so `jazz.app.json` and
-   `jazz.permissions.json` hold exactly your current schema, history and permissions. These are the
-   files alpha.63 and alpha.64 already generated; from now on you edit them.
-2. Moves `s.computed` fields and `.transform` columns into `jazz.app.json`'s `computed` and
-   `transforms`, with their types read from your TypeScript, and moves their callbacks unchanged
-   into a new `jazz.computed.ts`.
-3. Checks that `jazz.app.json` carries every version and migration `migrations/` ships, then
-   deletes `schema.ts`, `permissions.ts`, `migrations/` and helper files only they used (such as
-   `schema-better-auth/schema.ts`). Migration files your app never shipped are deleted with them,
-   and listed.
-4. Moves anything else `schema.ts` exported (constants, type aliases) into `app-extras.ts`, rewritten
-   against the generated types. Aliases the bindings already provide, such as
-   `type Todo = s.RowOf<typeof app.todos>`, are replaced by the generated type.
-5. Rewrites imports and code, listing each change as `file:line`: `./schema` becomes
+1. Runs the installed alpha.65's `jazz-tools validate --check`, so `jazz.app.json` and
+   `jazz.permissions.json` hold exactly your current schema, history and permissions. The new
+   permissions are printed from that file, so a stale one is refused.
+2. Rewrites `schema.ts`: `s.defineApp(schema, { migrations })` becomes
+   `export const schema = s.defineSchema({ … })`, keeping your comments. Anything else `schema.ts`
+   exported (constants, type aliases) moves to `app-extras.ts`; the app and row types now come from
+   `jazz.generated.ts`.
+3. Prints the permissions from `jazz.permissions.json` into `schema.ts` in the new DSL, and deletes
+   `permissions.ts`. Conditions that repeat become helper functions (`isChatMember`, `rule1`, …):
+   rename them, and bring back what the old `permissions.ts` said in comments or constants. A large
+   `permissions.ts` (over 150 lines) keeps its own file, rewritten to import `schema` from
+   `./schema`. A tables module `schema.ts` spreads, such as Better Auth's
+   `schema-better-auth/schema.ts`, now exports `tables` and `permissions`. `defs` in
+   `jazz.permissions.json` are expanded where they are called, and the checks they named become
+   helper functions again; the report lists them.
+4. Rewrites imports and code, listing each change as `file:line`: `./schema` becomes
    `./jazz.generated` (and `./app-extras`), backends import
    `import permissions from "./jazz.permissions.json" with { type: "json" }`, `app.slice(…)`
    becomes `app`, `s.RowOf<…>` becomes the generated row type, and tsconfig gets
    `resolveJsonModule` where needed. `package.json` scripts that call `jazz-tools validate` now
    call `jazz-tools generate`.
-6. Writes `jazz.generated.ts` and typechecks your `.ts` and `.tsx` files, reporting each error as
-   `file:line:col`. It doesn't roll anything back: fix what it reports. For `.svelte` and `.vue`
-   files, run `svelte-check` or `vue-tsc` yourself.
-7. Notes policy expressions `jazz.permissions.json` repeats, which you may want to name in
-   [`defs`](/docs/schemas/policies#named-conditions-defs).
+5. Deletes `migrations/index.ts`. The migration files and snapshots stay.
+6. Runs `generate`.
+7. Checks that the schema hashes and the bundle id are the same as before, so the converted app
+   deploys exactly as the old one did. If they differ, or `generate` fails, it puts every file back
+   byte for byte, bindings included, removes any `migrations/` it created, and stops.
+8. Typechecks your `.ts` and `.tsx` files, reporting each error as `file:line:col`. It doesn't roll
+   anything back for these: fix what it reports. For `.svelte` and `.vue` files, run `svelte-check`
+   or `vue-tsc` yourself.
 
-Things to check in the diff:
+Then review the diff, commit, and bump `jazz-tools` (and `jazz-napi`, if you depend on it) to
+alpha.66 and reinstall. Things to check in the diff:
 
-- **Computed types.** A string-literal union becomes an `enum`; `string`, `boolean`, `Date` and
-  `bigint` map directly. A `number` becomes `int` or `float` when the callback shows which;
-  otherwise `upgrade` writes a `"TODO: …"` type, skips generating and typechecking, and tells you to
-  resolve it and run `npx jazz-tools generate`. Object and array results become `json` columns with
-  a JSON Schema read from the TypeScript type: check it.
-- **Computed `from`.** It lists the columns each callback reads. A callback that uses the whole row
-  lists every column: narrow it.
-- **Transform names.** A transform written inline on a column is named `<table><Column>`, a named
-  one keeps its `const`'s name.
-- **Left for you.** Code `upgrade` won't convert, such as other files still calling the DSL or
-  importing `migrations/`, is listed at the end.
+- **Helper names.** The printed helpers have names `upgrade` made up. Give them names that say what
+  they check.
+- **Left for you.** Code `upgrade` won't convert, such as other files still importing
+  `permissions.ts` dynamically, is listed at the end.
+
+### Apps without `schema.ts`
+
+An alpha.65 app may have no `schema.ts` at all: its `jazz.app.json` and `jazz.permissions.json`
+are its source, written by hand or by an agent. `upgrade` converts it too, with the same command.
+It doesn't need the app's alpha.65 or `typescript` installed, since the JSON is what it reads:
+
+1. It prints `schema.ts` from the two files: the tables with `s.defineSchema`, then the permissions
+   in the new DSL. `defs` are expanded where they are called, and repeated checks become helper
+   functions, named for what they check (`isChatMember`). A long or vague one gets a placeholder
+   such as `rule1`: rename it.
+2. It writes `migrations/` from the files' `history` and `migrations`: a snapshot of each version,
+   the current one included, in `migrations/snapshots/`, and a migration file for each step.
+3. It runs `generate`, which writes the two JSON files back from `schema.ts` (overwriting them,
+   since they have no `$generated` marker yet) and the bindings for the app's language, such as
+   `jazz.generated.ts`, or `src/jazz_app.rs` for a Rust crate on `jazz-app-support`. It then checks
+   that the schema hashes and the bundle id are the same as before. If they differ, or `generate`
+   fails, it puts every file back and stops.
+
+It refuses a policy the new DSL can't express (listed by its JSON path), a `defs` call with the
+wrong number of arguments, and a `schema.ts` or `migrations/` file that already exists. `--dir`,
+`--schema-dir` (the directory holding `jazz.app.json`) and `--dry-run` work as above.
+
+From then on, `schema.ts` is the source: change it and run `generate`, rather than editing the JSON.
+Until the app has a `schema.ts`, `generate` and `migrations create` refuse it and point you here.
 
 ### What it refuses
 
-Every refusal comes before the first write, so your project is left as it was. Each says what to
-do, with `file:line`:
+Every refusal before `generate` runs comes before the first write, so your project is left as it
+was. Each says what to do, with `file:line` where there is one:
 
-- **`dependsOn` transforms.** A transform is now pure: it converts one value and can't read other
-  columns. A `.transform({ dependsOn })`, or any transform that isn't exactly `{ from, to }`, is
-  refused. Rework it as a [computed field](/docs/schemas/column-types#computed-columns) (read-only)
-  or as plain columns your code converts.
-- **Computed fields it can't move:** one that reads another computed field or a magic column such
-  as `$createdAt`, or whose callback is imported from another file or uses the schema DSL.
 - **Stale files.** `validate --check` failing, or a `schema.ts` changed since its latest migration
-  snapshot: run alpha.64's `npx jazz-tools migrations create --name <name>` first, then upgrade.
-- **History it would lose:** a version or migration in `migrations/` that `jazz.app.json` doesn't
-  carry.
-- **A `schema.ts` it can't read:** two apps, no `s.defineApp(…)`, tables or columns outside the
-  schema object, a DSL-built export other files import, or no `typescript` installed.
-- **Imports it can't rewrite:** a default import from `schema.ts`, a name `schema.ts` doesn't
-  export, or anything but the default export of `permissions.ts`.
-- **Files it would overwrite:** an existing `jazz.computed.ts`, `app-extras.ts` or
-  `jazz.generated.ts`.
+  snapshot: run alpha.65's `npx jazz-tools validate` or
+  `npx jazz-tools migrations create --name <name>` first, commit, then upgrade.
+- **The wrong `jazz-tools` installed:** `upgrade` needs the app's alpha.65 (or older) installed to
+  check the files, and `typescript` to read `schema.ts`.
+- **Computed fields and transforms** in an app with `schema.ts`, refused with
+  ``computed columns and transforms is not supported yet by `jazz-tools upgrade` ``. `upgrade`
+  doesn't convert them yet: take them out, upgrade, and add them back as in
+  [Computed fields and transforms](#computed-fields-and-transforms). An app without `schema.ts` is
+  converted with them.
+- **Permissions the new DSL can't express yet**, listed with the policy and the reason.
+- **Permissions that read the environment, when a policy in `jazz.permissions.json` is a bare
+  `"true"`** (on its own or inside `anyOf`/`allOf`). alpha.65 compiled a condition on an unset
+  variable to `true`, so the policy may allow more than `permissions.ts` says. `upgrade` names each
+  `table.operation` and each variable read: set those variables and re-run alpha.65's
+  `npx jazz-tools validate`, or fix `permissions.ts`, then upgrade again.
+- **A `schema.ts` it can't read:** two apps, no `s.defineApp(…)`, no `schema` import from
+  `jazz-tools`, or a DSL-built export other files import.
+- **Imports it can't rewrite:** such as a re-export of anything but `permissions.ts`'s default
+  export.
+- **Files it would overwrite:** an existing `app-extras.ts`.
+
+Other permissions that read the environment (`process.env.X`) aren't refused: the printed policy
+uses the value alpha.65's `validate` resolved, under a `// TODO` comment naming the variable, and the
+report lists each read under "Left for you". Make the value explicit, or compute it in a helper. `defs` in an app with
+`schema.ts` aren't refused either: step 1 compares what alpha.65 writes with the expanded files by
+schema hashes and bundle id.
+
+### Computed fields and transforms
+
+`upgrade` refuses an app whose `schema.ts` has computed fields (`s.computed((row) => …)`) or column
+transforms (`.transform({ from, to })`). Convert them by hand around the upgrade. Neither is stored,
+so the schema hashes and the bundle id don't change, and `upgrade` still checks that they don't.
+
+1. **Before upgrading,** with alpha.65 still installed, take them out of `schema.ts`: delete each
+   computed field from the table's second argument, and each column's `.transform(…)`, keeping the
+   stored type (`dueAt: s.timestamp().transform(isoDate)` becomes `dueAt: s.timestamp()`). Keep the
+   callbacks aside for step 4. Run alpha.65's `npx jazz-tools validate` and commit.
+2. **Run `upgrade`** as above. Its typecheck reports the code that still uses the removed fields:
+   that's expected until steps 3 to 5 put them back.
+3. **In the new `schema.ts`,** declare them in the table's columns:
+   - a computed field as `s.computed(type, [columns it reads])`. It reads stored columns of its
+     table, or `"id"`. An optional result is an optional type, such as `s.int().optional()`;
+   - a transformed column as its stored type, then `.transform("name", viewType)`.
+
+   ```ts
+   tasks: s.table({
+     title: s.string(),
+     score: s.int(),
+     dueAt: s.timestamp().transform("isoDate", s.string()),
+     tags: s.string().transform("tags", s.array(s.string())),
+     priority: s.computed(s.enum("low", "medium", "high"), ["score"]),
+     label: s.computed(s.string(), ["title", "score"]),
+   }),
+   ```
+
+4. **Put the callbacks in `jazz.computed.ts`,** beside `schema.ts`. A computed field gets the row,
+   typed with the columns it declared it reads. A transform's `from` turns the stored value into
+   the one your app sees, and `to` turns it back. Jazz never calls them with `null`.
+
+   ```ts
+   import type { AppComputed, AppTransforms } from "./jazz.generated";
+
+   export const computed = {
+     tasks: {
+       priority: (row) => (row.score >= 8 ? "high" : row.score >= 4 ? "medium" : "low"),
+       label: ({ title, score }) => `${title} (${score})`,
+     },
+   } satisfies AppComputed;
+
+   export const transforms = {
+     isoDate: {
+       from: (stored: Date) => stored.toISOString(),
+       to: (view: string) => new Date(view),
+     },
+     tags: { from: (stored: string) => stored.split(","), to: (view: string[]) => view.join(",") },
+   } satisfies AppTransforms;
+   ```
+
+5. **Bump to alpha.66 and run `npx jazz-tools generate`.** `jazz.app.json` gains the `computed`
+   fields and `transforms`, and `jazz.generated.ts` binds `jazz.computed.ts`. A missing or extra
+   implementation is a type error naming the field.
+
+[Column Types](/docs/schemas/column-types#computed-columns) has the details.
 
 ### Other changes
 
-- **`jazz-tools validate` is now `jazz-tools generate`.** It checks both files and writes
-  `jazz.generated.ts`; `generate --check` is for CI. `validate` fails with a message naming the new
-  command.
-- **Schema changes start in `jazz.app.json`.** Edit `tables`, run
-  `npx jazz-tools migrations create --name <name>`, resolve the `"TODO: …"` entries it writes, then
-  run `npx jazz-tools generate`. `--fromHash`, `--toHash` and `--migrations-dir` are gone. See
-  [Migrations](/docs/schemas/migrations).
+- **`jazz-tools validate` is now `jazz-tools generate`.** It reads `schema.ts`, writes the two JSON
+  files and `jazz.generated.ts`; `generate --check` is for CI. `validate` fails with a message
+  naming the new command.
+- **Schema changes start in `schema.ts`.** Edit it, run
+  `npx jazz-tools migrations create --name <name>`, fill in the migration it writes in
+  `migrations/`, then run `npx jazz-tools generate`. See [Migrations](/docs/schemas/migrations).
 - **Slicing is removed.** `s.defineSliceableApp` and `app.slice(…)` are gone: the generated module
   declares every table's types directly, so a large schema no longer needs a smaller typed surface.
   `upgrade` rewrites `app.slice(…)` to `app`, and a leftover `slices` key in `jazz.app.json` loads
@@ -165,18 +291,30 @@ do, with `file:line`:
 - **`createJazz({ app, permissions })`** takes the generated `app` and the imported
   `jazz.permissions.json`, and refuses to start with bindings generated from another
   `jazz.app.json`: run `npx jazz-tools generate` and commit the result.
-- **Tests:** `createPolicyTestApp(app, permissions, expect)` takes the same two. A test that defined
-  an app inline with the DSL uses `testApp({ tables: … })` from `jazz-tools/testing` instead; see
+- **Tests:** `createPolicyTestApp(app, permissions, expect)` takes the same two. See
   [Testing](/docs/tooling/testing).
-- **Removed:** the `schema` and `migration` namespaces (`s.table`, `s.defineApp`,
-  `s.definePermissions`, `m.defineMigration`, …), `appMigrations`, `defineShippedApp` and
-  `{ migrations: "none" }`. Their names still exist for this release and throw an error pointing
-  here.
+- **`useSession()` (Svelte: `getSession()`) is deprecated**: read `useJazzSession().user`
+  (Svelte: `$session.user` with `const session = getJazzSession()`) instead. Its `user` (the account
+  ID) is `user.accountId`; `identity` and `claims` keep their names. `authMode` becomes
+  `user?.kind`: `"backend"` for `"external"`, `"device"` for `"local-first"`, and `user === null`
+  for `"anonymous"`. In Vue read `snapshot.value.user`, in Solid `snapshot().user`. The old hooks
+  still work for this release and warn once.
+- **`defs` are gone** from `jazz.permissions.json`. alpha.66 refuses a file that has them, with a
+  hint to inline each definition or write the app in `schema.ts`; `upgrade` does both. In
+  `schema.ts`, a repeated condition is a plain TypeScript function or constant.
+- **Condition objects in the new permissions DSL.** An array value means "one of":
+  `{ role: ["admin", "editor"] }` is `role in ['admin', 'editor']`, and a one-item array such as
+  `{ role: ["admin"] }` is still `in`. A key whose value is `undefined` throws: leave the key out, or
+  use `null` to check for an empty column.
+- **Removed:** `s.defineApp` (use `s.defineSchema`), the callback `s.definePermissions` and
+  `definePermissions(app, …)` (use `const { definePermissions } = schema`), `migrations/index.ts`,
+  `appMigrations`, `defineShippedApp` and `{ migrations: "none" }`. Their names still exist for this
+  release and throw an error pointing to `npx jazz-tools upgrade`.
 
 ## Upgrading from alpha.61
 
-The sections from here on describe older releases, in the TypeScript DSL those releases used:
-follow them with that release installed, one release at a time, before upgrading to alpha.65.
+The sections from here on describe older releases, in the schema and permissions DSL those releases
+used: follow them with that release installed, one release at a time, before upgrading to alpha.66.
 
 - **`createJazz` refuses `{ migrations: "none" }` with a store that keeps its data.** An app
   defined with `s.defineApp(schema, { migrations: "none" })` ships no schema history, so a
@@ -194,7 +332,7 @@ follow them with that release installed, one release at a time, before upgrading
 
   then run `npx jazz-tools migrations create`. It records `schema.ts` as the app's first version
   and generates `migrations/index.ts`. Commit the `migrations/` directory with your schema. See
-  [Shipping migrations with your app](/docs/schemas/migrations#shipping-migrations-with-your-app).
+  [Shipping migrations with your app](/docs/schemas/migrations#where-migrations-live).
 
 - **Schema history first.** If your app still uses `{ migrations: "none" }`, run
   `npx jazz-tools migrations create` on your current, unchanged `schema.ts` before anything below
@@ -347,11 +485,16 @@ a store: on Android that also deletes SecureStore, and with it a device account.
 
 ## Upgrading from alpha.59
 
-Alpha.60 changes how Jazz runs, so an alpha.59 app needs more than a version bump:
+Upgrade an alpha.59 app in two moves: first to **alpha.65**, as described below, then from alpha.65
+to the current release as in [Upgrading from alpha.65](#upgrading-from-alpha65). alpha.65 is the
+last release that ships the alpha.59 exporter and importer, so pin `jazz-tools@2.0.0-alpha.65` (and
+the other Jazz packages at the same version) for the first move.
+
+Alpha.60 changed how Jazz runs, so an alpha.59 app needs more than a version bump:
 
 - **Jazz runs inside your backend.** Clients no longer talk to a Jazz server with a JWT. Add a main
-  backend with `createJazz` (see [Your Own Server](/docs/setup/deployment/own-server)), and have it point at Jazz
-  Cloud with `remote()` if that's where your data is. The core admits only its own app's backend, so
+  backend with `createJazz` (see [Your Own Server](/docs/setup/deployment/own-server)), and, if your data is on Jazz
+  Cloud (deprecated), have it point there with `remote()`. The core admits only its own app's backend, so
   browsers can't connect to it directly any more.
 - **Auth moves into `authenticate`.** Your backend decides who each request is. To keep returning
   users on their old accounts, return the old token's `sub` as `userId` (see
@@ -360,7 +503,7 @@ Alpha.60 changes how Jazz runs, so an alpha.59 app needs more than a version bum
   Ship the new client in the same release as the new backend. A client left on alpha.59 looks
   healthy: its session reports ready and local writes succeed, but nothing syncs and nothing is
   logged. Against a `createJazz` backend, queries and waits that need the server reject with a bare
-  `Error: [object Event]`, and a reloaded alpha.59 tab never signs in. Against Jazz Cloud, the first query that waits for the server rejects with "this Jazz
+  `Error: [object Event]`, and a reloaded alpha.59 tab never signs in. Against Jazz Cloud (deprecated), the first query that waits for the server rejects with "this Jazz
   client speaks wire protocol 3..=3, older than this server's 6".
 - **The storage engine is now SQLite.** Alpha.59's data directory doesn't open in alpha.60.
 
@@ -403,7 +546,7 @@ starts:
   `jazz.createAccountFor(userId)` in your sign-in route; see
   [Users without an account](/docs/setup/deployment/own-server#users-without-an-account).
 
-### Data on Jazz Cloud
+### Data on Jazz Cloud (deprecated)
 
 Jazz Cloud moves your app's data to alpha.60 for you. The move keeps every row with its history,
 authors and timestamps, your current schema and permissions, and every account. It also links each
@@ -412,8 +555,11 @@ account.
 
 ### Self-hosted alpha.59 servers
 
-Move a self-hosted data directory with the same import tool Jazz Cloud uses. You need only the two
-downloads below, no Node or Rust toolchain, and nothing writes to your alpha.59 directory.
+Move a self-hosted data directory with the alpha.65 exporter and importer, attached to the
+[v2.0.0-alpha.65 release](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.65). Later
+releases don't ship them: the import gives you an alpha.65 data directory, and you upgrade from
+there. You need only the two downloads below, no Node or Rust toolchain, and nothing writes to your
+alpha.59 directory.
 
 Before you start:
 
@@ -438,7 +584,7 @@ Then:
 2. **Download the tools.** Get `jazz-alpha59-alpha60-export-<platform>` and
    `jazz-alpha59-alpha60-import-<platform>` (`linux-x64`, `linux-arm64` or `darwin-arm64`) and the
    two checksum files from the
-   [v2.0.0-alpha.60 release](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.60). Each
+   [v2.0.0-alpha.65 release](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.65). Each
    checksum file lists every platform, so check with `--ignore-missing`, then rename the tools to
    drop the platform suffix and make them executable:
 
@@ -466,7 +612,8 @@ Then:
    ./jazz-alpha59-alpha60-import verify --dump app.dump --data-dir ./data-new --app-id <appId>
    ```
 
-5. **Start your new backend** with `sqlite({ path: "./data-new" })`, then deploy the new client.
+5. **Start your new backend** on alpha.65 with `sqlite({ path: "./data-new" })`, then deploy the
+   new client, also on alpha.65.
    If your alpha.59 app had local-first guests, pass your old app ID as `scope` to the client, so
    each guest's device finds its account again:
 
@@ -481,9 +628,12 @@ Then:
    on that origin, guests aren't picked up automatically.
    Keep `./data` and the dump until you're happy with the result.
 
+6. **Upgrade from alpha.65** to the current release as in
+   [Upgrading from alpha.65](#upgrading-from-alpha65). The data directory needs nothing more.
+
 `--app-id` is your app's ID exactly as before, case included: the import uses it to link each
 returning user's old sign-in to their account, as `jazz:backend` with their old `sub` (as [`fromJWT()`](/docs/setup/auth/custom) returns it), and to keep
-local-first guests on their accounts once the client is scoped to the alpha.59 app ID (step 5). It's written to `<data-dir>/app-id`, so your code never needs
+local-first guests on their accounts once the client is scoped to the alpha.59 app ID (step 5). The store keeps it in `jazz.sqlite`, so your code never needs
 it: `sqlite({ path })` runs as the old app. Pass
 `--no-backend-identity-links` to skip that. The dump holds all your app's data, so store it like the
 data directory and delete it when you're done.

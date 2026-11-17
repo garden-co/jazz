@@ -1,4 +1,4 @@
-import { useDb, useSession } from "jazz-tools/react";
+import { useDb, useJazzSession } from "jazz-tools/react";
 import { BrushIcon, PlusIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -19,8 +19,8 @@ interface ActionMenuProps {
 
 export function ActionMenu({ chatId, disabled = false }: ActionMenuProps) {
   const db = useDb();
-  const session = useSession();
-  const userId = session?.user;
+  const session = useJazzSession();
+  const userId = session.user?.accountId;
   const sharedWriteOptions: { tier: DurabilityTier } = {
     tier: db.getConfig().serverUrl ? "global" : "local",
   };
