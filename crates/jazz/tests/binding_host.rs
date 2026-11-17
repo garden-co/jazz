@@ -274,6 +274,48 @@ fn staging_many_inserts_replays_no_earlier_write() {
     assert_eq!(db.db.evidence_copies_for_test(), 0);
 }
 
+/// What a transaction handle leaves open between its calls, seen through
+/// `Db::held_for_test`. From outside the store the overlay is invisible:
+/// any other use of the store undoes it first. The handle itself stays
+/// open (and its writes staged) until commit or rollback.
+///
+/// ```text
+/// begin ── insert ──────── read ───────── insert ──── commit
+///   batch   batch+overlay   batch          batch+overlay  nothing
+/// ```
+#[test]
+fn held_for_test_sees_what_a_transaction_handle_keeps_between_calls() {
+    let db = authority();
+    assert!(db.db.held_for_test().is_nothing());
+    let tx = &OpenTransactionId::new().to_string();
+    db.begin_transaction(tx, "mergeable", None, None).unwrap();
+    let held = db.db.held_for_test();
+    assert_eq!(held.open_batches, 1);
+    assert!(!held.overlay && !held.sqlite_transaction);
+
+    db.insert_in_transaction(tx, "notes", &title("staged"), &none())
+        .unwrap();
+    let held = db.db.held_for_test();
+    assert!(held.overlay, "staging leaves the overlay applied");
+    assert!(held.sqlite_transaction, "in its savepoint");
+    assert!(!held.callback_transaction);
+
+    assert!(titles(&db).is_empty());
+    let held = db.db.held_for_test();
+    assert!(
+        !held.overlay && !held.sqlite_transaction,
+        "a read undoes it"
+    );
+    assert_eq!(held.open_batches, 1);
+
+    db.insert_in_transaction(tx, "notes", &title("more"), &none())
+        .unwrap();
+    assert!(db.db.held_for_test().overlay);
+    assert!(db.commit_transaction(tx, None).unwrap().rejected.is_none());
+    assert!(db.db.held_for_test().is_nothing());
+    assert_eq!(titles(&db).len(), 2);
+}
+
 /// The backend's own writes (no session) are checked by no policy, so
 /// their rows are trusted. Staging many of them in one transaction neither
 /// replays earlier writes nor copies the batch's written-row set for each

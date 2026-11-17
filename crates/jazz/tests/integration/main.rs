@@ -75,6 +75,8 @@ mod history_reads;
 mod host_tables;
 #[path = "../include_live.rs"]
 mod include_live;
+#[path = "../kept_plans.rs"]
+mod kept_plans;
 #[path = "../large_value_append.rs"]
 mod large_value_append;
 #[path = "../large_value_chunk_store.rs"]
@@ -123,6 +125,8 @@ mod pending_rebase_scope;
 mod permission_advice;
 #[path = "../policy_activation.rs"]
 mod policy_activation;
+#[path = "../policy_check_plans.rs"]
+mod policy_check_plans;
 #[path = "../policy_claim_coercion.rs"]
 mod policy_claim_coercion;
 #[path = "../policy_support_rows.rs"]
@@ -143,8 +147,12 @@ mod recheck_sync;
 mod reconnect_fanout;
 #[path = "../rejected_retry_store.rs"]
 mod rejected_retry_store;
+#[path = "../relation_literal_types.rs"]
+mod relation_literal_types;
 #[path = "../relation_policies.rs"]
 mod relation_policies;
+#[path = "../relation_policy_validation.rs"]
+mod relation_policy_validation;
 #[path = "../relation_queries.rs"]
 mod relation_queries;
 #[path = "../relation_results.rs"]
@@ -259,6 +267,8 @@ mod transaction_policy_exists;
 mod transaction_read_tiers;
 #[path = "../union_queries.rs"]
 mod union_queries;
+#[path = "../unsupported_json_schemas.rs"]
+mod unsupported_json_schemas;
 #[path = "../uuid_page_probe.rs"]
 mod uuid_page_probe;
 #[path = "../write_check_evidence.rs"]

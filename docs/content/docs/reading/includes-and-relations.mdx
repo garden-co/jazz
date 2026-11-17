@@ -30,11 +30,16 @@ export const schema = s.defineSchema({
       children: s.reverse("todos", "parent"),
     },
   ),
-  projects: s.table({ name: s.string() }, { todos: s.reverse("todos", "project") }),
+  projects: s.table(
+    {
+      name: s.string(),
+    },
+    { todos: s.reverse("todos", "project") },
+  ),
 });
 ```
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-includes-ts
@@ -45,9 +50,21 @@ export const schema = s.defineSchema({
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-includes-effect
     </include>
   </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-includes-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#reading-includes-swift
+    </include>
+
+  </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-includes-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#reading-includes-kotlin
     </include>
 
   </Tab>
@@ -86,12 +103,12 @@ Jazz does not generate an inverse or infer names from UUID columns.
   </Tab>
   <Tab value="Swift">
     <include cwd lang="swift">
-      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#reading-reverse-relation-swift
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#reading-reverse-relation-swift
     </include>
   </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-reverse-relation-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#reading-reverse-relation-kotlin
     </include>
 
   </Tab>
@@ -110,7 +127,7 @@ relation.
 
 Use `select(...)` to narrow a row to `id` plus the columns you pick. You can combine it with `include(...)`, and select within included rows too.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-select-ts
@@ -121,9 +138,21 @@ Use `select(...)` to narrow a row to `id` plus the columns you pick. You can com
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-select-effect
     </include>
   </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-select-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#reading-select-swift
+    </include>
+
+  </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-select-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#reading-select-kotlin
     </include>
 
   </Tab>
@@ -143,6 +172,10 @@ Text coordinates use JavaScript UTF-16 code units by default, so they match
 `String.prototype.slice`; use `fromUtf8` and `toUtf8` when interoperating with
 a byte-oriented protocol. Jazz rejects a range that would split a UTF-8 code
 point or UTF-16 surrogate pair rather than rounding it.
+
+In Rust, text ranges are UTF-8 byte offsets, `str` indices:
+`query.part(column, ValuePart::text(from..to))` reads `&text[from..to]`.
+`ValuePart::TextUtf16` is there for interop with hosts that count UTF-16.
 
 A range past the end of the value is clamped to it, like
 `String.prototype.slice`: one that starts past the end returns an empty string
@@ -222,7 +255,10 @@ The splices turn the value the previous update showed into the new one. They
 apply in order, so each splice's offsets are in the value the earlier ones
 produced. A `string` column's splices count UTF-16 code units (like
 `String.prototype.slice`) and insert a string. A `bytes` column's splices count
-bytes and insert a `Uint8Array`. They work the same for your own writes and for
+bytes and insert a `Uint8Array`. In Rust, a `ValueSplice`'s `at` and `delete`
+count UTF-8 bytes on a `string` column too, so
+`text.replace_range(at..at + delete, insert)` applies it; `at_utf16` and
+`delete_utf16` carry the same edit for hosts that count UTF-16. They work the same for your own writes and for
 changes that arrive from other clients. Jazz computes them by comparing the
 value's chunk trees, so a small edit to a large value only reads the chunks
 that changed.
@@ -259,7 +295,7 @@ hidden by permissions. The included field is `null`. A nullable, unset reference
 Use `.requireIncludes()` when every included, non-nullable forward reference must resolve. It drops
 a source row if one of those required targets is unavailable.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-require-includes-ts
@@ -269,6 +305,12 @@ a source row if one of those required targets is unavailable.
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-require-includes-effect
     </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-require-includes-rust
+    </include>
+
   </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
@@ -312,8 +354,36 @@ Depth is counted from the start relation: `maxDepth: 0` returns only the start r
 `maxDepth: 1` may also return rows reached by one `step` hop. A zero bound never performs an
 implicit first hop.
 
-<include cwd lang="ts">
-  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-recursive-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-recursive-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-recursive-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#reading-recursive-swift
+    </include>
+
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#reading-recursive-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#reading-recursive-go
+    </include>
+
+  </Tab>
+</Tabs>
 
 This starts from all incomplete todos, then follows each todo's `parentId` &rarr; `parent` relation up to 10 levels deep, returning the full lineage.

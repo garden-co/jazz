@@ -1,5 +1,0 @@
----
-"jazz-tools": patch
----
-
-**TypeScript is the source of a TS app again.** `schema.ts` defines the tables with the .64 builders inside `export const schema = s.defineSchema({ … })`, and the permissions with the new permissions DSL: `export const permissions = schema.definePermissions({ <table>: { read, insert, update | updateIf + updateTo, delete } })`, using `exists.<t>({…}).hop(…)`, `row.<rel>.where({…})`, `allowedTo.<op>(…)`, `anyOf`/`allOf`/`not`, the comparison helpers and `session`. Every table must be listed, and types check columns, values, relations and rule keys. `npx jazz-tools generate` loads the TS and writes `jazz.app.json` and `jazz.permissions.json` (generated artifacts with a `$generated` digest; a hand-edited file is refused unless `--force`) and then the bindings; `--check` writes nothing. History comes from `migrations/*.ts` and their snapshots, written by `jazz-tools migrations create`. The Better Auth adapter's generator writes `schema-better-auth/schema.ts` exporting `tables` and `permissions`. Runtime code keeps importing `app` from `./jazz.generated`.

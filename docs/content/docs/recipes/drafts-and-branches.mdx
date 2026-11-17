@@ -30,7 +30,12 @@ The smallest useful model adds a normal string column to the table and passes it
 import { schema as s } from "jazz-tools";
 
 export const schema = s.defineSchema({
-  documents: s.table({ branch: s.string(), title: s.string() }).branchBy("branch"),
+  documents: s
+    .table({
+      branch: s.string(),
+      title: s.string(),
+    })
+    .branchBy("branch"),
 });
 ```
 
