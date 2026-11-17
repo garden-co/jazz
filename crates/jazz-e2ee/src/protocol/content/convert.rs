@@ -301,8 +301,14 @@ pub struct SourceIndex<'a> {
 /// precedence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversionPlan {
-    /// `None` when no source predicate is needed: no row of the space has
-    /// a present source.
+    /// `None` when no source predicate is planned: no row of the space had
+    /// a present source when the runtime counted, and no [`SourceIndex`]
+    /// reaches source rows (or the device holds no key of the source's
+    /// space). A source can be written again after the count (migrations
+    /// §3.7: a client before the conversion, or one that knows it before
+    /// activation, writes the source until the seal), so this plan holds
+    /// only while the count stays zero: the runtime counts again when
+    /// source rows change and plans a live query again.
     pub source: Option<QueryPlan>,
     pub target: QueryPlan,
 }
@@ -313,7 +319,9 @@ pub struct ConversionPlan {
 /// before planning. Without a [`SourceIndex`] (an arbitrary `convert`
 /// without `reverse`, an untagged source, an encrypt or a tag backfill), a
 /// space with pending rows fails [`ContentError::ConversionPending`]; it
-/// never returns a result that could miss them.
+/// never returns a result that could miss them. With one, the source
+/// predicate is planned even when nothing is pending, so a source written
+/// after the count is still found.
 #[allow(clippy::too_many_arguments)]
 pub fn plan_conversion_equality(
     tagger: &dyn EqualityTagger,
@@ -326,13 +334,13 @@ pub fn plan_conversion_equality(
     online: bool,
 ) -> ContentResult<ConversionPlan> {
     let target = plan_equality(tagger, held, table, column, value, online)?;
-    if pending == 0 {
-        return Ok(ConversionPlan {
-            source: None,
-            target,
-        });
-    }
     let Some(source) = source.filter(|source| source.column.equality.is_some()) else {
+        if pending == 0 {
+            return Ok(ConversionPlan {
+                source: None,
+                target,
+            });
+        }
         return Err(ContentError::ConversionPending { pending });
     };
     if source.values.len() > MAX_REVERSE_VALUES {
@@ -359,6 +367,14 @@ pub fn plan_conversion_equality(
         epochs: Vec::new(),
         incomplete: false,
     }));
+    // With nothing pending, a source space this device holds no key of
+    // does not hold up the query: no row needs that key now.
+    if pending == 0 && source == QueryPlan::NeedsKey {
+        return Ok(ConversionPlan {
+            source: None,
+            target,
+        });
+    }
     Ok(ConversionPlan {
         source: Some(source),
         target,

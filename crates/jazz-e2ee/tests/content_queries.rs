@@ -314,6 +314,63 @@ fn a_query_on_a_converting_column() {
 }
 
 #[test]
+fn a_converting_query_keeps_its_source_predicate_when_nothing_is_pending() {
+    let mut world = world(6);
+    world.add_member_of(OTHER_ROW, ALICE);
+    world.create_of(OTHER_ROW, ALICE);
+    let domain = shared(&world);
+    let old = space(ROW);
+    let new = space(OTHER_ROW);
+    let tagger = world
+        .shared
+        .registry
+        .select(&MechanismConfig::default())
+        .unwrap()
+        .equality;
+    let value = EqualityValue::Text("x");
+    let target = table(&domain, &new);
+    let identity = SourceIndex {
+        table: table(&domain, &old),
+        column: title(),
+        values: &[EqualityValue::Text("x")],
+    };
+    let mut held = held_of(&world, ALICE, ROW);
+    held.hold(acquire_held(&world, ALICE, OTHER_ROW)).unwrap();
+    let plan_with = |held: &HeldKeys, source: Option<&SourceIndex<'_>>, pending| {
+        plan_conversion_equality(
+            tagger,
+            held,
+            &target,
+            &title(),
+            &value,
+            source,
+            pending,
+            true,
+        )
+        .unwrap()
+    };
+    // A source written after the count (a client before the conversion,
+    // until the seal) is still reached by its index.
+    let pending = plan_with(&held, Some(&identity), 3);
+    let none_pending = plan_with(&held, Some(&identity), 0);
+    assert!(matches!(none_pending.source, Some(QueryPlan::Tokens(_))));
+    assert_eq!(none_pending, pending);
+    // No index: nothing to plan; the runtime counts again.
+    let untagged = SourceIndex {
+        column: notes(),
+        ..identity
+    };
+    assert_eq!(plan_with(&held, Some(&untagged), 0).source, None);
+    // No key of the old space: nothing pending needs it now.
+    let new_only = held_of(&world, ALICE, OTHER_ROW);
+    assert_eq!(plan_with(&new_only, Some(&identity), 0).source, None);
+    assert_eq!(
+        plan_with(&new_only, Some(&identity), 3).source,
+        Some(QueryPlan::NeedsKey)
+    );
+}
+
+#[test]
 fn the_source_decides_whenever_it_is_present() {
     // A present source wins over any target, so a stale target tag never
     // selects the row's value.

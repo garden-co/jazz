@@ -213,6 +213,11 @@ returned.
   space); the runtime runs it as an ordinary read before planning and hands
   the result to the query hook, which never reads `Db` itself (H4).
 
+A count of zero holds only when it is taken: until the seal (§3.7) a client
+can write a source again. A query therefore keeps the source predicate
+whenever it can compute one, and a live query without one counts again when
+source rows change and is planned again.
+
 ### 3.4 Writes while a conversion is partial
 
 - The write hook (H2) writes the target and clears the source in the same
