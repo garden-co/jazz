@@ -143,6 +143,16 @@ term 6578  # "ex"
 term 6578  # "ex"
 term e8919b  # "葛"
 
+analyzer jazz-text/1:en
+text 636f6cc2b76c65636369c3b320d7a6d794d7b4d79c20d7a6d79422d79c20d792d7b3d799d7a8d7a4d7942061c2b7207361792022686922  # "col·lecció צה״ל צה\"ל ג׳ירפה a· say \"hi\""
+term 636f6c6c656363696f  # "colleccio"
+term d7a6d794d79c  # "צהל"
+term d7a6d794d79c  # "צהל"
+term d79227d799d7a8d7a4d794  # "ג'ירפה"
+term 61  # "a"
+term 736179  # "say"
+term 6869  # "hi"
+
 analyzer jazz-text/1:simple
 text   # ""
 
@@ -284,3 +294,13 @@ term 6578  # "ex"
 term 6578  # "ex"
 term 6578  # "ex"
 term e8919b  # "葛"
+
+analyzer jazz-text/1:simple
+text 636f6cc2b76c65636369c3b320d7a6d794d7b4d79c20d7a6d79422d79c20d792d7b3d799d7a8d7a4d7942061c2b7207361792022686922  # "col·lecció צה״ל צה\"ל ג׳ירפה a· say \"hi\""
+term 636f6c6c656363696f  # "colleccio"
+term d7a6d794d79c  # "צהל"
+term d7a6d794d79c  # "צהל"
+term d79227d799d7a8d7a4d794  # "ג'ירפה"
+term 61  # "a"
+term 736179  # "say"
+term 6869  # "hi"
