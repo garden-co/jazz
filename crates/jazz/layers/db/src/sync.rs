@@ -2962,6 +2962,34 @@ impl Session {
     }
 }
 
+/// Per stored table, how many composite support column sets the server's
+/// sessions hold, summed over sessions: shared by every session's
+/// [`Watches`], so a tick can tell at once whether a written row of a
+/// table may match a composite watch at all.
+#[derive(Clone, Default)]
+pub(crate) struct CompositeTables(Rc<RefCell<HashMap<String, usize>>>);
+
+impl CompositeTables {
+    fn add(&self, table: &str) {
+        *self.0.borrow_mut().entry(table.to_owned()).or_default() += 1;
+    }
+
+    fn remove(&self, table: &str, sets: usize) {
+        let mut tables = self.0.borrow_mut();
+        if let Some(count) = tables.get_mut(table) {
+            *count -= sets.min(*count);
+            if *count == 0 {
+                tables.remove(table);
+            }
+        }
+    }
+
+    /// Whether any session holds a composite watch on `table`.
+    fn any(&self, table: &str) -> bool {
+        self.0.borrow().contains_key(table)
+    }
+}
+
 /// A session's coherence watches, each held by the subscriptions that
 /// rely on it (or by the fetch being served, for its duration): a key stays
 /// watched while one holds it, so an ended subscription leaves nothing
@@ -2991,6 +3019,20 @@ struct Watches {
     /// against each set (see [`composite_keys`]). A set goes with the last
     /// watch naming it, so a write pays only for the keys still followed.
     composite_sets: HashMap<String, HashMap<Vec<String>, u32>>,
+    /// The server-wide count of composite column sets by table, which
+    /// these sets are counted in; `None` for a placeholder.
+    composite_tables: Option<CompositeTables>,
+}
+
+impl Drop for Watches {
+    /// An ended session's composite sets leave the server-wide count.
+    fn drop(&mut self) {
+        if let Some(tables) = &self.composite_tables {
+            for (table, sets) in &self.composite_sets {
+                tables.remove(table, sets.len());
+            }
+        }
+    }
 }
 
 /// A row by stored table and id.
@@ -3095,6 +3137,9 @@ impl Watches {
                 *count -= 1;
                 if *count == 0 {
                     sets.remove(&set);
+                    if let Some(tables) = &self.composite_tables {
+                        tables.remove(&table, 1);
+                    }
                 }
             }
             if sets.is_empty() {
@@ -3135,12 +3180,18 @@ impl Watches {
         set: Vec<String>,
     ) -> (bool, bool) {
         if !self.composites.contains_key(&key) {
-            *self
+            let count = self
                 .composite_sets
                 .entry(table.to_owned())
                 .or_default()
                 .entry(set.clone())
-                .or_default() += 1;
+                .or_default();
+            if *count == 0
+                && let Some(tables) = &self.composite_tables
+            {
+                tables.add(table);
+            }
+            *count += 1;
             self.composites.insert(key, (table.to_owned(), set));
         }
         self.hold(owner, key)
@@ -9674,6 +9725,23 @@ impl Db {
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn composite_watches_for_test(&self) -> (usize, usize) {
+        debug_assert_eq!(
+            self.inner
+                .borrow()
+                .composite_tables
+                .0
+                .borrow()
+                .values()
+                .sum::<usize>(),
+            self.inner
+                .borrow()
+                .sessions
+                .iter()
+                .flat_map(|session| session.watch.composite_sets.values())
+                .map(HashMap::len)
+                .sum::<usize>(),
+            "the server-wide count matches the sessions' sets"
+        );
         let inner = self.inner.borrow();
         let keys = inner
             .sessions
@@ -9687,6 +9755,15 @@ impl Db {
             .map(HashMap::len)
             .sum();
         (keys, sets)
+    }
+
+    /// How many times a tick gathered the sessions' composite support
+    /// column sets for a written table: never for a table no session
+    /// follows on several columns.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn composite_scans_for_test(&self) -> usize {
+        self.inner.borrow().composite_scans.get()
     }
 
     /// One-shot read records, answer slots, and queued one-shot requests.
@@ -11940,6 +12017,7 @@ impl Db {
         inner.accepted += 1;
         let generation = inner.accepted;
         let mut session = Session::new(transport, identity);
+        session.watch.composite_tables = Some(inner.composite_tables.clone());
         session.claims = claims;
         session.bundle = bundle;
         session.generation = generation;
@@ -12449,6 +12527,14 @@ impl Db {
             if composite_sets.contains_key(table.as_str()) {
                 continue;
             }
+            // No session follows the table on several columns: no set to
+            // gather from them.
+            if !inner.composite_tables.any(table) {
+                composite_sets.insert(table, BTreeSet::new());
+                continue;
+            }
+            #[cfg(any(test, feature = "testing"))]
+            inner.composite_scans.set(inner.composite_scans.get() + 1);
             let sets: BTreeSet<&Vec<String>> = inner
                 .sessions
                 .iter()

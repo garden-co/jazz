@@ -1399,3 +1399,47 @@ fn composite_support_watches_go_with_their_subscriptions() {
     pump(&server, &client);
     assert!(!local(&client, "members").contains(&id(7, 5)));
 }
+
+/// A tick gathers the sessions' composite support column sets for a
+/// written table only while some session follows that table on several
+/// columns: with none, a write costs nothing per session for them. This
+/// counts the gatherings through a test hook, as nothing public shows them.
+///
+/// ```text
+/// write, no composite watch      ──► no gathering
+/// alice follows p1; write        ──► gathered
+/// alice drops p1; write          ──► no gathering
+/// ```
+#[test]
+fn a_write_gathers_composite_sets_only_while_some_are_followed() {
+    let (server, client) = spaces();
+    let me = Value::String(alice().principal_parts().1);
+    insert_member(&server, member(1, "p1", me.clone()));
+    insert_member(&server, member(2, "p1", Value::String("bob".into())));
+    pump(&server, &client);
+    assert_eq!(server.composite_scans_for_test(), 0, "nothing followed");
+
+    let stream = my_membership(&client, "p1");
+    pump(&server, &client);
+    let before = server.composite_scans_for_test();
+    insert_member(&server, member(3, "p1", Value::String("carol".into())));
+    pump(&server, &client);
+    let followed = server.composite_scans_for_test();
+    assert!(
+        followed > before,
+        "a followed table's write gathers the sets"
+    );
+    assert!(local(&client, "members").contains(&id(7, 3)));
+
+    drop(stream);
+    pump(&server, &client);
+    assert_eq!(server.composite_watches_for_test(), (0, 0));
+    let after = server.composite_scans_for_test();
+    insert_member(&server, member(4, "p1", Value::String("dave".into())));
+    pump(&server, &client);
+    assert_eq!(
+        server.composite_scans_for_test(),
+        after,
+        "nothing followed again"
+    );
+}
