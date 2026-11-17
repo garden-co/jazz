@@ -6,8 +6,8 @@ use super::super::ids::{self, IdForm};
 use super::super::position::{Accepted, Position, before, check_read};
 use super::super::records::account::{
     AccountIdentity, AccountRoot, AccountSealingKey, AccountSuccessor, DeviceApproval,
-    DeviceChallenge, DeviceDelivery, DeviceKeysRow, DeviceProof, DeviceRequest,
-    PublicAccountSuccessor, PublicDeviceApproval, RecoveryDelivery, RecoveryRoot,
+    DeviceChallenge, DeviceDelivery, DeviceKeysRow, DeviceProof, DeviceRemovalRequest,
+    DeviceRequest, PublicAccountSuccessor, PublicDeviceApproval, RecoveryDelivery, RecoveryRoot,
 };
 
 /// The public rows of one account at cut `through` (R10). Device keys are
@@ -25,6 +25,8 @@ pub struct PublicAccountLedger {
     pub successors: Vec<Accepted<PublicAccountSuccessor>>,
     pub recovery_roots: Vec<Accepted<RecoveryRoot>>,
     pub account_keys: Vec<Accepted<AccountSealingKey>>,
+    /// `__e2ee_device_removal_requests` (§2.8).
+    pub removal_requests: Vec<Accepted<DeviceRemovalRequest>>,
 }
 
 impl PublicAccountLedger {
@@ -39,6 +41,7 @@ impl PublicAccountLedger {
             successors: Vec::new(),
             recovery_roots: Vec::new(),
             account_keys: Vec::new(),
+            removal_requests: Vec::new(),
         }
     }
 
@@ -53,7 +56,8 @@ impl PublicAccountLedger {
         check_read(&self.approvals, self.through)?;
         check_read(&self.successors, self.through)?;
         check_read(&self.recovery_roots, self.through)?;
-        check_read(&self.account_keys, self.through)
+        check_read(&self.account_keys, self.through)?;
+        check_read(&self.removal_requests, self.through)
     }
 
     /// The rows accepted strictly before `cut` (§2.4, "State as of a
@@ -68,6 +72,7 @@ impl PublicAccountLedger {
             successors: before(&self.successors, cut),
             recovery_roots: before(&self.recovery_roots, cut),
             account_keys: before(&self.account_keys, cut),
+            removal_requests: before(&self.removal_requests, cut),
         }
     }
 

@@ -1805,3 +1805,122 @@ fn a_device_cannot_remove_itself() {
         ProtocolError::AccountKeyUnavailable
     );
 }
+
+/// Accepts `request` at the next position.
+fn accept_request(
+    ledger: &mut Ledger,
+    request: jazz_e2ee::protocol::records::account::DeviceRemovalRequest,
+) {
+    let at = ledger.next();
+    ledger
+        .public
+        .removal_requests
+        .push(Accepted::new(at, request));
+}
+
+/// A device leaves by requesting its removal (§2.8): it stays an active
+/// member until another device completes the request with an ordinary
+/// removal, which it then sees as `device-no-longer-active`, and it never
+/// holds the new epoch's key.
+#[test]
+fn a_removal_request_is_completed_by_another_device() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(26);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    let before = ledger.state(&env);
+    let floor = before.floor(ledger.public.through, Some(&phone.id));
+
+    let request = build::removal_request(&env.writer(), &before, &phone, &mut rng).unwrap();
+    accept_request(&mut ledger, request);
+    let state = ledger.state(&env);
+    assert_eq!(state.removal_requested, [phone.id.clone()].into());
+    assert!(state.is_active(&phone.id), "a full member until removed");
+    assert_eq!(state.epoch_id(), before.epoch_id());
+    ledger.acquire(&env, &phone).unwrap();
+
+    ledger.rotate(
+        &env,
+        &laptop,
+        RotationTarget::RemoveDevice(phone.id.clone()),
+        &mut rng,
+    );
+    let state = ledger.state(&env);
+    assert!(state.is_removed(&phone.id));
+    assert!(state.removal_requested.is_empty(), "complete once removed");
+    assert_eq!(
+        ledger.acquire(&env, &phone).unwrap_err(),
+        ProtocolError::AccountKeyUnavailable
+    );
+    assert_eq!(
+        state
+            .check_floor(ledger.public.through, &floor)
+            .unwrap_err(),
+        ProtocolError::DeviceNoLongerActive
+    );
+}
+
+/// An account's only device cannot request its removal: nobody could
+/// complete it (`no-other-device`).
+#[test]
+fn the_only_device_cannot_request_its_removal() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(27);
+    let laptop = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    let state = ledger.state(&env);
+    assert_eq!(
+        build::removal_request(&env.writer(), &state, &laptop, &mut rng).unwrap_err(),
+        refused(RefusalCode::NoOtherDevice)
+    );
+}
+
+/// Only a request the device itself signed while active is pending: one
+/// with a bad signature, one signed by another device, or one by a device
+/// that was not active with its epoch is not. Such rows never stop a valid
+/// request from being pending.
+#[test]
+fn only_a_valid_removal_request_is_pending() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(28);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    let state = ledger.state(&env);
+    let valid = build::removal_request(&env.writer(), &state, &phone, &mut rng).unwrap();
+
+    let mut tampered = valid.clone();
+    tampered.id = ids::random_v4(&mut rng).unwrap();
+    let last = tampered.signature.len() - 1;
+    tampered.signature[last] ^= 1;
+    let mut by_laptop = valid.clone();
+    by_laptop.id = ids::random_v4(&mut rng).unwrap();
+    let bytes = by_laptop.signed_bytes(&env.application()).unwrap();
+    by_laptop.signature = signing::sign(&signature::Builtin, &laptop.signing, &bytes).unwrap();
+    let mut other_epoch = valid.clone();
+    other_epoch.id = ids::random_v4(&mut rng).unwrap();
+    other_epoch.epoch_id = ids::random_v4(&mut rng).unwrap();
+    let bytes = other_epoch.signed_bytes(&env.application()).unwrap();
+    other_epoch.signature = signing::sign(&signature::Builtin, &phone.signing, &bytes).unwrap();
+    for invalid in [tampered, by_laptop, other_epoch] {
+        let mut with = ledger.clone();
+        accept_request(&mut with, invalid.clone());
+        assert!(with.state(&env).removal_requested.is_empty());
+        accept_request(&mut with, valid.clone());
+        assert_eq!(
+            with.state(&env).removal_requested,
+            [phone.id.clone()].into()
+        );
+    }
+}

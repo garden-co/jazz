@@ -102,6 +102,9 @@ pub enum RefusalCode {
     TargetNotActive,
     /// A device cannot remove itself (§2.8): another device does it.
     SelfRemoval,
+    /// A removal request with no other active device to complete it
+    /// (§2.8): the account would be left with no device.
+    NoOtherDevice,
     UnsupportedRecipient,
     AccountResetNotAllowed,
     SpacePending,
@@ -125,6 +128,7 @@ impl RefusalCode {
             Self::InvalidPossessionProof => "invalid-possession-proof",
             Self::TargetNotActive => "target-not-active",
             Self::SelfRemoval => "self-removal",
+            Self::NoOtherDevice => "no-other-device",
             Self::UnsupportedRecipient => "unsupported-recipient",
             Self::AccountResetNotAllowed => "account-reset-not-allowed",
             Self::SpacePending => "space-pending",
