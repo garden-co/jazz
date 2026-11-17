@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { useAll, useSession } from "jazz-tools/react";
+import { useAll, useJazzSession } from "jazz-tools/react";
 import { Button } from "@astryxdesign/core/Button";
 import { ClickableCard } from "@astryxdesign/core/ClickableCard";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
@@ -10,14 +10,14 @@ import { Grid } from "@astryxdesign/core/Grid";
 import { Heading } from "@astryxdesign/core/Heading";
 import { HStack } from "@astryxdesign/core/HStack";
 import { Spinner } from "@astryxdesign/core/Spinner";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { AccountId } from "@/components/account-id";
 import { PageColumn } from "@/components/page-column";
 import { NewSessionDialog } from "@/components/new-session-dialog";
 
 export function SessionBrowser() {
   const router = useRouter();
-  const author = useSession()?.user;
+  const author = useJazzSession().user?.accountId;
   const { data: sessions = [], isLoading } = useAll(app.sessions.orderBy("$createdAt", "desc"));
   const [isCreating, setIsCreating] = useState(false);
 

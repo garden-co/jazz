@@ -1,0 +1,49 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "baskets": {
+      "columns": {
+        "itemId": "uuid"
+      },
+      "relations": {
+        "item": {
+          "rel": "items",
+          "column": "itemId"
+        }
+      }
+    },
+    "items": {
+      "columns": {
+        "score": {
+          "type": "int",
+          "default": 5
+        },
+        "text": {
+          "type": "string",
+          "default": "hello"
+        }
+      },
+      "computed": {
+        "priority": {
+          "type": {
+            "enum": [
+              "low",
+              "high"
+            ]
+          },
+          "from": [
+            "score"
+          ]
+        },
+        "description": {
+          "type": "string",
+          "from": [
+            "id",
+            "text"
+          ]
+        }
+      }
+    }
+  }
+}

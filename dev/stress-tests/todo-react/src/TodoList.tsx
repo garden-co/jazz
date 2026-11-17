@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { useAll, useSession } from "jazz-tools/react";
-import { app } from "../schema";
+import { useAll, useJazzSession } from "jazz-tools/react";
+import { app } from "../jazz.generated";
 
 export function TodoList() {
   const [filterTitle, setFilterTitle] = useState("");
@@ -20,8 +20,8 @@ export function TodoList() {
   // #region reading-reactive-hooks-react
   const { data: todos = [], db } = useAll(todosQuery);
   // #endregion reading-reactive-hooks-react
-  const session = useSession();
-  const sessionUserId = session?.user ?? null;
+  const session = useJazzSession();
+  const sessionUserId = session.user?.accountId ?? null;
   const [title, setTitle] = useState("");
 
   const handleSubmit = (e: React.FormEvent) => {

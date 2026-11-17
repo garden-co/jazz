@@ -1,6 +1,6 @@
 import { createSignal } from "solid-js";
 import { useDb } from "jazz-tools/solid";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 
 export function QuickstartAdd() {
   const db = useDb();

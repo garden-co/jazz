@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/test-app.js";
 import { createAccountDbWithRuntimeSource } from "../accounts/context.js";
 import { DefaultRuntimeSource } from "./default-runtime-source.js";
 import type { JazzClient } from "./client.js";
@@ -18,15 +18,30 @@ class ProjectionSource extends DefaultRuntimeSource {
 it.each(["constant", "identity"] as const)(
   "uses an ID-only physical projection when selecting only the %s computed field",
   async (column) => {
-    const app = s.defineApp(
+    const app = testApp(
       {
-        rows: s.table(
-          { large: s.bytes() },
-          { constant: s.computed(() => "constant"), identity: s.computed((row) => row.id) },
-        ),
-        parents: s.table({ targetId: s.uuid() }, { target: s.rel("rows", "targetId") }),
+        tables: {
+          rows: {
+            columns: { large: "bytes" },
+            computed: {
+              constant: { type: "string", from: [] },
+              identity: { type: "uuid", from: ["id"] },
+            },
+          },
+          parents: {
+            columns: { targetId: "uuid" },
+            relations: { target: { rel: "rows", column: "targetId" } },
+          },
+        },
       },
-      { migrations: "none" },
+      {
+        computed: {
+          rows: {
+            constant: () => "constant",
+            identity: (row: { id: string }) => row.id,
+          },
+        },
+      },
     );
     const source = new ProjectionSource();
     const db = await createAccountDbWithRuntimeSource(
@@ -70,31 +85,20 @@ it.each(["constant", "identity"] as const)(
 );
 
 it("fetches only the stored inputs of callbacks evaluated by a computed read", async () => {
-  const base = s.table(
+  const app = testApp(
     {
-      amount: s.int().transform({
-        dependsOn: ["text"],
-        from: (value, context: Readonly<{ text: string }>) => value + context.text.length,
-        to: (value: number) => value,
-      }),
-      text: s.string().transform({
-        dependsOn: ["large"],
-        from: (value, context: Readonly<{ large: Uint8Array }>) =>
-          `${value}:${context.large.length}`,
-        to: (value: string) => value,
-      }),
-      large: s.bytes(),
+      tables: {
+        rows: {
+          columns: { amount: "int", text: "string", large: "bytes" },
+          computed: { summary: { type: "string", from: ["amount", "text"] } },
+        },
+      },
     },
-    { derived: s.computed((row) => row.amount) },
-  );
-  const app = s.defineApp(
     {
-      rows: s.table(base.columns, {
-        ...base.relations,
-        nested: s.computed((row) => `value:${row.derived}`),
-      }),
+      computed: {
+        rows: { summary: (row: { amount: number; text: string }) => `${row.text}:${row.amount}` },
+      },
     },
-    { migrations: "none" },
   );
   const source = new ProjectionSource();
   const db = await createAccountDbWithRuntimeSource(
@@ -115,16 +119,18 @@ it("fetches only the stored inputs of callbacks evaluated by a computed read", a
       return request.select_columns.map((column) => column.column).sort();
     };
 
-    await expect(db.one(app.rows.where({ id: row.id }).select("nested"))).resolves.toEqual({
+    await expect(db.one(app.rows.where({ id: row.id }).select("summary"))).resolves.toEqual({
       id: row.id,
-      nested: "value:4",
+      summary: "raw:1",
     });
     expect(selectedColumns()).toEqual(["amount", "text"]);
 
-    await expect(db.one(app.rows.where({ id: row.id }).select("nested", "text"))).resolves.toEqual({
+    await expect(
+      db.one(app.rows.where({ id: row.id }).select("summary", "large")),
+    ).resolves.toEqual({
       id: row.id,
-      nested: "value:4",
-      text: "raw:3",
+      summary: "raw:1",
+      large: new Uint8Array([1, 2, 3]),
     });
     expect(selectedColumns()).toEqual(["amount", "large", "text"]);
   } finally {
@@ -134,14 +140,23 @@ it("fetches only the stored inputs of callbacks evaluated by a computed read", a
 });
 
 it("reuses available inputs and batches missing dependencies without whole-row reads", async () => {
-  const app = s.defineApp(
+  const app = testApp(
     {
-      rows: s.table(
-        { useLeft: s.boolean(), left: s.int(), right: s.int(), large: s.bytes() },
-        { value: s.computed((row) => (row.useLeft ? row.left : row.right)) },
-      ),
+      tables: {
+        rows: {
+          columns: { useLeft: "boolean", left: "int", right: "int", large: "bytes" },
+          computed: { value: { type: "int", from: ["useLeft", "left", "right"] } },
+        },
+      },
     },
-    { migrations: "none" },
+    {
+      computed: {
+        rows: {
+          value: (row: { useLeft: boolean; left: number; right: number }) =>
+            row.useLeft ? row.left : row.right,
+        },
+      },
+    },
   );
   const source = new ProjectionSource();
   const db = await createAccountDbWithRuntimeSource(
@@ -173,14 +188,23 @@ it("reuses available inputs and batches missing dependencies without whole-row r
 });
 
 it("reuses subscription dependencies while still discovering newly taken branches", async () => {
-  const app = s.defineApp(
+  const app = testApp(
     {
-      rows: s.table(
-        { useLeft: s.boolean(), left: s.int(), right: s.int(), large: s.bytes() },
-        { value: s.computed((row) => (row.useLeft ? row.left : row.right)) },
-      ),
+      tables: {
+        rows: {
+          columns: { useLeft: "boolean", left: "int", right: "int", large: "bytes" },
+          computed: { value: { type: "int", from: ["useLeft", "left", "right"] } },
+        },
+      },
     },
-    { migrations: "none" },
+    {
+      computed: {
+        rows: {
+          value: (row: { useLeft: boolean; left: number; right: number }) =>
+            row.useLeft ? row.left : row.right,
+        },
+      },
+    },
   );
   const source = new ProjectionSource();
   const db = await createAccountDbWithRuntimeSource(
@@ -242,14 +266,23 @@ it("reuses subscription dependencies while still discovering newly taken branche
 });
 
 it("keeps an in-flight read independent of another read extending partially warm hints", async () => {
-  const app = s.defineApp(
+  const app = testApp(
     {
-      rows: s.table(
-        { useLeft: s.boolean(), left: s.int(), right: s.int() },
-        { value: s.computed((row) => (row.useLeft ? row.left : row.right)) },
-      ),
+      tables: {
+        rows: {
+          columns: { useLeft: "boolean", left: "int", right: "int" },
+          computed: { value: { type: "int", from: ["useLeft", "left", "right"] } },
+        },
+      },
     },
-    { migrations: "none" },
+    {
+      computed: {
+        rows: {
+          value: (row: { useLeft: boolean; left: number; right: number }) =>
+            row.useLeft ? row.left : row.right,
+        },
+      },
+    },
   );
   const source = new ProjectionSource();
   const db = await createAccountDbWithRuntimeSource(

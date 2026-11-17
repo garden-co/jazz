@@ -52,7 +52,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { useAll } from "jazz-tools/vue";
-import { app, type Band } from "../../schema.js";
+import { app, type Band } from "../../jazz.generated.js";
 import { bandLink, inviteLink as buildInviteLink } from "../lib/routes.js";
 import { newInviteCode } from "../seed-loader.js";
 import { reportWriteError } from "../lib/write-errors.js";

@@ -1524,7 +1524,10 @@ mod tests {
         let moved = |what: &str, change: &dyn Fn()| {
             let before = tag_epoch();
             change();
-            assert!(tag_epoch() > before, "{what} left the tag epoch at {before}");
+            assert!(
+                tag_epoch() > before,
+                "{what} left the tag epoch at {before}"
+            );
         };
         moved("interning", &|| {
             names.intern(&conn, "t", "c", &["b", "a"]).unwrap();
@@ -1543,7 +1546,9 @@ mod tests {
         let snapshot = std::cell::Cell::new(Some(names.tags().snapshot()));
         names.intern(&conn, "t", "c", &["later"]).unwrap();
         moved("a restore", &|| {
-            names.tags().restore(snapshot.take().expect("restored once"));
+            names
+                .tags()
+                .restore(snapshot.take().expect("restored once"));
         });
     }
 
@@ -1558,10 +1563,17 @@ mod tests {
             let names = Names::load(&conn).unwrap();
             let start = tag_epoch();
             names.intern(&conn, "t", "c", &["a"]).unwrap();
-            assert!(tag_epoch() > start, "interning moved its own thread's epoch");
+            assert!(
+                tag_epoch() > start,
+                "interning moved its own thread's epoch"
+            );
         })
         .join()
         .unwrap();
-        assert_eq!(tag_epoch(), before, "another thread's interning moved this epoch");
+        assert_eq!(
+            tag_epoch(),
+            before,
+            "another thread's interning moved this epoch"
+        );
     }
 }

@@ -10,8 +10,8 @@ the same: a function that reads your session and returns a user id.
 
 ```ts title="jazz.server.ts"
 import { createJazz, remote } from "jazz-tools/backend";
-import { app } from "./schema";
-import permissions from "./permissions";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 import { getUser } from "./your-auth";
 
 export const jazz = createJazz({
@@ -245,11 +245,32 @@ issued), call `jazz.linkIdentity({ from, to })`.
 
 `claims` from `authenticate` are available to your policies under `session.claims`.
 
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-session-claims-ts
-</include>
+For an app with this `todos` table:
 
-See [Declarative Permissions](/docs/schemas/policies) for the full claims API.
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  todos: s.table({
+    title: s.string(),
+    owner_id: s.uuid(),
+  }),
+});
+```
+
+a user reads their own todos, and a user whose `role` claim is `manager` reads all of them:
+
+```ts title="schema.ts"
+const { definePermissions, session, anyOf, eq } = schema;
+
+export const permissions = definePermissions({
+  todos: {
+    read: anyOf({ owner_id: session.user }, eq(session.claims.role, "manager")),
+  },
+});
+```
+
+See [Declarative Permissions](/docs/schemas/policies) for more on claims.
 
 ## Ownership and provenance
 
@@ -273,9 +294,9 @@ authorship.
 Apps on alpha.59 signed users in with JWTs, so their accounts belong to identities like
 `{ issuer: "https://idp.example.com", subject: "user_01" }`. `createJazz` names users
 `{ issuer: "jazz:backend", subject: userId }` instead. The alpha.59 import
-(`jazz-alpha59-alpha60-import import`, a binary on the release's GitHub page) links each user's `jazz:backend` identity to their existing account. Its
+(`jazz-alpha59-alpha60-import import`, a binary on the [v2.0.0-alpha.65 release](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.65); see [Self-hosted alpha.59 servers](/docs/operating/backups-and-upgrades#self-hosted-alpha59-servers)) links each user's `jazz:backend` identity to their existing account. Its
 `--app-id` must be exactly the app ID your alpha.59 app used, which is the `appId` you pass to
-`remote()` on Jazz Cloud. With `sqlite()` the import writes it into the data directory, so your
+`remote()` on Jazz Cloud (deprecated). With `sqlite()` the import writes it into the data directory, so your
 code doesn't pass it. If your
 `authenticate` returns the old token's `sub` as `userId` (which `fromJWT` does), returning users
 open their old accounts and keep all their data. Pass `--no-backend-identity-links` to skip this.

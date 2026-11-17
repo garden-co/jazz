@@ -123,8 +123,15 @@ pub(crate) fn subscribe_with(
 /// Applies queued deltas to the maintained result; returns the ids the
 /// deltas reported as added or updated.
 pub(crate) fn apply(live: &mut Live) -> BTreeSet<RowUuid> {
+    let events: Vec<SubscriptionEvent> =
+        std::iter::from_fn(|| live.stream.try_next_event()).collect();
+    apply_events(live, events)
+}
+
+/// [`apply`] for events already taken from the stream.
+fn apply_events(live: &mut Live, events: Vec<SubscriptionEvent>) -> BTreeSet<RowUuid> {
     let mut reported = BTreeSet::new();
-    while let Some(event) = live.stream.try_next_event() {
+    for event in events {
         let SubscriptionEvent::Delta {
             reset,
             added,
@@ -1936,6 +1943,220 @@ fn r7_a_relation_named_like_a_column_keeps_the_column() {
         reported[0],
         BTreeSet::from([id(MESSAGES, 0), id(MESSAGES, 1)])
     );
+}
+
+/// The events `live` has been sent since it last read, without applying
+/// them.
+fn pending(live: &mut Live) -> Vec<SubscriptionEvent> {
+    std::iter::from_fn(|| live.stream.try_next_event()).collect()
+}
+
+/// R8. A re-check followed by a re-nest (an edit of a root row another
+/// root's relation holds) reaches a member as one delta: the edited row
+/// and the row quoting it change together, never one without the other.
+///
+/// ```
+/// thread: messages WHERE chat = 0, reply (messages)
+/// writer ──edit m0 (m1 quotes it)──► one delta: m0 and m1
+/// ```
+#[test]
+fn r8_a_recheck_and_its_renest_reach_a_member_as_one_delta() {
+    let db = open(chat_schema(None), 1);
+    chat(&db, 0, "c0");
+    chat(&db, 9, "c9");
+    message(&db, 0, 0, 0, None);
+    message(&db, 1, 0, 1, Some(0));
+    message(&db, 2, 0, 2, None);
+    let mut lives = vec![subscribe(
+        &db,
+        "thread",
+        Query::from("messages")
+            .filter(in_chat(0))
+            .order_by("sent_at", OrderDirection::Asc)
+            .array_subquery(reply()),
+        None,
+    )];
+    check(&db, &mut lives, "subscribe");
+    let before = db.fanout_stats();
+    update(
+        &db,
+        "messages",
+        id(MESSAGES, 0),
+        &[("body", text("edited"))],
+    );
+    let after = db.fanout_stats();
+    assert_eq!(
+        (after.reran - before.reran, after.renested - before.renested),
+        (0, 1),
+        "a re-check and a re-nest: {after:?}"
+    );
+    let events = pending(&mut lives[0]);
+    let [
+        SubscriptionEvent::Delta {
+            reset: false,
+            added,
+            updated,
+            removed,
+            ..
+        },
+    ] = events.as_slice()
+    else {
+        panic!("one delta for one commit, got {events:?}");
+    };
+    assert!(added.is_empty() && removed.is_empty(), "{events:?}");
+    let ids: Vec<(RowUuid, Option<usize>, usize)> = updated
+        .iter()
+        .map(|row| (row.row_uuid(), row.previous_index, row.index))
+        .collect();
+    assert_eq!(
+        ids,
+        vec![(id(MESSAGES, 0), Some(0), 0), (id(MESSAGES, 1), Some(1), 1)]
+    );
+    // Applied as a member applies it, the delta is the fresh read.
+    apply_events(&mut lives[0], events);
+    check(&db, &mut lives, "m0 edited");
+    // The same with the edit moving m0 out of the thread: m0 leaves and
+    // m1's reply empties, in one delta.
+    update(
+        &db,
+        "messages",
+        id(MESSAGES, 0),
+        &[("chat", uuid(id(CHATS, 9)))],
+    );
+    let events = pending(&mut lives[0]);
+    assert_eq!(events.len(), 1, "one delta for one commit, got {events:?}");
+    apply_events(&mut lives[0], events);
+    check(&db, &mut lives, "m0 moved out");
+}
+
+/// R9. A re-check that fails (a read error, not missing chunks) ends the
+/// subscription: no re-nest follows it, and nothing is sent after the
+/// rejection.
+#[test]
+fn r9_no_renest_follows_a_rejected_recheck() {
+    let db = open(chat_schema(None), 1);
+    chat(&db, 0, "c0");
+    message(&db, 0, 0, 0, None);
+    message(&db, 1, 0, 1, Some(0));
+    let mut lives = vec![subscribe(
+        &db,
+        "thread",
+        Query::from("messages")
+            .filter(in_chat(0))
+            .order_by("sent_at", OrderDirection::Asc)
+            .array_subquery(reply()),
+        None,
+    )];
+    check(&db, &mut lives, "subscribe");
+    let before = db.fanout_stats();
+    jazz::db::fail_rechecks_for_test(1);
+    update(
+        &db,
+        "messages",
+        id(MESSAGES, 0),
+        &[("body", text("edited"))],
+    );
+    jazz::db::fail_rechecks_for_test(0);
+    let after = db.fanout_stats();
+    assert_eq!(
+        (after.reran - before.reran, after.renested - before.renested),
+        (0, 0),
+        "no re-nest, no re-run after the rejection: {after:?}"
+    );
+    let events = pending(&mut lives[0]);
+    assert!(
+        matches!(events.as_slice(), [SubscriptionEvent::Rejected { .. }]),
+        "the rejection, and nothing after it: {events:?}"
+    );
+}
+
+/// R10. A partial re-nest types a merged nested relation as a full run
+/// does: as the widest of its non-empty siblings' types, not the first
+/// sibling's. Chat 0's first message has no replies, so its `replies` is
+/// empty and keeps the type the last run declared; its second message has
+/// one reply, by u0. A rename and then a delete of u0 nest again only
+/// `messages.replies.writer`, merging `messages` and `replies` in part.
+/// The delete empties the reply's `writer`, which narrows that message's
+/// `replies` type: the chat's `messages` must take it from that message,
+/// not from the empty first one.
+///
+/// ```
+/// chat list: chats, messages { replies (messages) { writer (users) } }
+/// writer ──rename u0──► chat 0's messages.replies.writer nested again
+/// writer ──delete u0──► chat 0's m1.replies[m3].writer empty
+/// ```
+#[test]
+fn r10_a_partial_renest_types_a_nested_relation_as_its_widest_sibling() {
+    let db = open(chat_schema(None), 1);
+    person(&db, 0, "u0");
+    chat(&db, 0, "c0");
+    chat(&db, 1, "c1");
+    message(&db, 0, 0, 0, None);
+    message(&db, 1, 0, 1, None);
+    // m1's reply sits in another chat, by u0; m0 has none.
+    message(&db, 3, 1, 3, Some(1));
+    by(&db, 3, 0);
+    let mut lives = vec![subscribe(
+        &db,
+        "chat list",
+        Query::from("chats").array_subquery(
+            ArraySubquery::new("messages", "messages", "chat", "id")
+                .order_by("sent_at", OrderDirection::Asc)
+                .nested(replies().nested(writer())),
+        ),
+        None,
+    )];
+    check(&db, &mut lives, "subscribe");
+    for (what, write) in [
+        (
+            "u0 renamed",
+            Box::new(|| update(&db, "users", id(USERS, 0), &[("name", text("renamed"))]))
+                as Box<dyn Fn()>,
+        ),
+        (
+            "u0 deleted",
+            Box::new(|| {
+                block_on(db.delete("users", id(USERS, 0), Default::default())).unwrap();
+            }),
+        ),
+    ] {
+        let before = db.fanout_stats();
+        write();
+        let after = db.fanout_stats();
+        assert_eq!(
+            (
+                after.reran - before.reran,
+                after.renested - before.renested,
+                after.renested_narrowly - before.renested_narrowly,
+            ),
+            (0, 1, 1),
+            "{what}: a partial re-nest of chat 0, no re-run: {after:?}"
+        );
+        let events = pending(&mut lives[0]);
+        let sent: Vec<(RowUuid, Vec<jazz::records::ValueType>)> = events
+            .iter()
+            .flat_map(|event| match event {
+                SubscriptionEvent::Delta { updated, .. } => updated
+                    .iter()
+                    .map(|row| (row.row_uuid(), row.cell_types().to_vec()))
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        let full =
+            block_on(db.all_nested_for_test(&lives[0].query, ReadOpts::default(), None)).unwrap();
+        let full: Vec<(RowUuid, Vec<jazz::records::ValueType>)> = full
+            .iter()
+            .filter(|row| row.row_uuid() == id(CHATS, 0))
+            .map(|row| (row.row_uuid(), row.cell_types().to_vec()))
+            .collect();
+        assert_eq!(
+            sent, full,
+            "{what}: the re-nested chat is declared as a full run declares it"
+        );
+        apply_events(&mut lives[0], events);
+        check(&db, &mut lives, what);
+    }
 }
 
 // ---- randomized differentials ----------------------------------------------

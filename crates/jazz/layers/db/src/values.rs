@@ -232,6 +232,35 @@ pub enum Sql {
 }
 
 impl Sql {
+    /// The value as an in-process key: a type tag, then the payload (bytes
+    /// as hex). Two values get the same key exactly when their `Debug`
+    /// prints are equal (the form keys used before), without running the
+    /// formatter: the tag keeps the variants apart, an integer prints in
+    /// decimal, a real by its bits (shortest round-trip printing is
+    /// injective on non-NaN reals, -0.0 included) and every NaN as one key,
+    /// as `Debug` prints them all as `NaN` (SQLite stores none, see
+    /// [`to_sql`]). Keys are compared and hashed in this process only.
+    pub(crate) fn key(&self) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let hex = |tag: char, bytes: &[u8]| {
+            let mut out = String::with_capacity(1 + 2 * bytes.len());
+            out.push(tag);
+            for byte in bytes {
+                out.push(char::from(HEX[usize::from(byte >> 4)]));
+                out.push(char::from(HEX[usize::from(byte & 15)]));
+            }
+            out
+        };
+        match self {
+            Sql::Null => "N".to_owned(),
+            Sql::Integer(v) => format!("I{v}"),
+            Sql::Real(v) if v.is_nan() => "RNaN".to_owned(),
+            Sql::Real(v) => hex('R', &v.to_bits().to_be_bytes()),
+            Sql::Text(bytes) => hex('T', bytes),
+            Sql::Blob(bytes) => hex('B', bytes),
+        }
+    }
+
     pub(crate) fn as_ref(&self) -> ValueRef<'_> {
         match self {
             Sql::Null => ValueRef::Null,
@@ -2385,5 +2414,78 @@ impl JsonCheck {
         let compiled = crate::tools::CompiledSchema::new(schema)
             .map_err(|error| crate::tools::json_schema_failure(error, path))?;
         Ok(Some(self.compiled.get_or_init(|| compiled)))
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::Sql;
+
+    /// The keys this form replaced: `Debug` prints.
+    fn old(value: &Sql) -> String {
+        format!("{value:?}")
+    }
+
+    fn edge_values() -> Vec<Sql> {
+        let mut out = vec![Sql::Null];
+        for v in [0, 1, -1, 10, i64::MIN, i64::MAX] {
+            out.push(Sql::Integer(v));
+        }
+        for v in [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            0.1,
+            1e300,
+            f64::MIN_POSITIVE,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            -f64::NAN,
+            f64::from_bits(0x7ff8_0000_0000_0001),
+        ] {
+            out.push(Sql::Real(v));
+        }
+        for bytes in [&b""[..], b"1", b"a", b"ab", b"\x00", b"\xff\x00", b"I1"] {
+            out.push(Sql::Text(bytes.to_vec()));
+            out.push(Sql::Blob(bytes.to_vec()));
+        }
+        out
+    }
+
+    /// Same key exactly when the old key was the same, both ways: a pair
+    /// that matched and no longer does would be a missed wake.
+    #[test]
+    fn keys_keep_the_equality_classes_of_debug_prints() {
+        let mut values = edge_values();
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..4000 {
+            let r = next();
+            values.push(match r % 5 {
+                0 => Sql::Null,
+                1 => Sql::Integer((next() % 7) as i64 - 3),
+                2 => Sql::Real(f64::from_bits(next())),
+                3 => Sql::Text((0..r % 4).map(|_| (next() % 3) as u8).collect()),
+                _ => Sql::Blob((0..r % 4).map(|_| (next() % 3) as u8).collect()),
+            });
+        }
+        for a in &values[..200] {
+            for b in &values {
+                assert_eq!(
+                    old(a) == old(b),
+                    a.key() == b.key(),
+                    "{a:?} vs {b:?}: keys {} / {}",
+                    a.key(),
+                    b.key()
+                );
+            }
+        }
     }
 }

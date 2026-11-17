@@ -1,22 +1,22 @@
 import { expect, it } from "vitest";
-import { schema } from "../../src/schema-namespace.js";
 import { ReadTier } from "../../src/runtime/client.js";
 import { withNativeRelayFixture } from "./fixture.js";
 import { encodeNativeForegroundCommand, decodeNativeForegroundResponse } from "jazz-rn/relay";
-import type { TestJazz } from "../../src/testing/index.js";
+import { testApp, testPermissions, type TestJazz } from "../../src/testing/index.js";
 
-const app = schema.defineApp(
-  {
-    notes: schema.table({ title: schema.string() }, {}),
+const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
+const permissionsFile = {
+  format: 1,
+  tables: {
+    notes: {
+      read: "$createdBy.account = session.user",
+      insert: "true",
+      update: "true",
+      delete: "false",
+    },
   },
-  { migrations: "none" },
-);
-const permissions = schema.definePermissions(app, ({ policy, session }) => [
-  policy.notes.allowRead.where({ $createdBy: session.user }),
-  policy.notes.allowInsert.always(),
-  policy.notes.allowUpdate.always(),
-  policy.notes.allowDelete.never(),
-]);
+};
+const permissions = testPermissions(app, permissionsFile);
 
 // Opaque operation ownership and explicit cancellation are below the public
 // can* promise API; exercise the real native byte boundary, not a fake waiter.
@@ -34,10 +34,10 @@ it("isolates pending advice handles and retires them on cancel and close", async
       appId: server.appId,
       serverUrl: server.url,
       adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
+      app,
+      permissions: permissionsFile,
     });
-    backend = await startTestJazz({ core: server, app, permissions });
+    backend = await startTestJazz({ core: server, app, permissions: permissionsFile });
     await withNativeRelayFixture(
       app,
       permissions,
@@ -142,10 +142,10 @@ it("uses authority dry runs and admitted identity across scopes, disconnect, and
       appId: server.appId,
       serverUrl: server.url,
       adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
+      app,
+      permissions: permissionsFile,
     });
-    backend = await startTestJazz({ core: server, app, permissions });
+    backend = await startTestJazz({ core: server, app, permissions: permissionsFile });
     await withNativeRelayFixture(
       app,
       permissions,

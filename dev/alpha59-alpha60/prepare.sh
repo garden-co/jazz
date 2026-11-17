@@ -65,6 +65,20 @@ hook "$here/export/hooks/account_migrate_export.rs" "$dir/crates/jazz/layers/typ
 # The dump format, shared with `jazz-alpha59-alpha60-import`.
 rm -rf "$dir/crates/jazz-alpha59-alpha60-dump"
 cp -R "$crates/jazz-alpha59-alpha60-dump" "$dir/crates/jazz-alpha59-alpha60-dump"
+# Its package keys inherit this workspace's [workspace.package], which
+# alpha.59's lacks: write this workspace's values in instead.
+perl -0 -i -e '
+  my ($root) = @ARGV; shift @ARGV;
+  open my $fh, "<", $root or die "$root: $!";
+  local $/; my $text = <$fh>;
+  my ($section) = $text =~ /^\[workspace\.package\]\n(.*?)(?=^\[|\z)/ms or die "no [workspace.package] in $root";
+  my %value = $section =~ /^([a-z-]+) = (.+)$/mg;
+  my $manifest = <>;
+  $manifest =~ s{^([a-z-]+)\.workspace = true$}{
+    defined $value{$1} ? "$1 = $value{$1}" : die "[workspace.package] has no $1\n"
+  }mge;
+  print $manifest;
+' "$here/../../Cargo.toml" "$dir/crates/jazz-alpha59-alpha60-dump/Cargo.toml"
 install_tool "$dir" export
 install_tool "$dir" produce
 echo "alpha59-alpha60 exporter ready in $dir: cargo build --release -p jazz-alpha59-alpha60-export"

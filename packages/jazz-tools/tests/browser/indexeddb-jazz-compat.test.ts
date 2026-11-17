@@ -25,9 +25,11 @@ import lastGrooveCorpus from "../../fixtures/groove-linear-history-browser-jazz-
 import preLinearCorpus from "../../fixtures/pre-linear-browser-jazz-corpus.json?raw";
 import sqliteCorpus from "../../fixtures/sqlite-v1-browser-jazz-corpus.json?raw";
 import { jazzStorageCorpusBrowserCommands } from "./browser-commands.js";
-import { ReadTier, schema as s, type DbConfig } from "../../src/index.js";
+import { ReadTier, type DbConfig } from "../../src/index.js";
+import { app } from "./apps/indexeddb-corpus/jazz.generated.js";
+import permissions from "./apps/indexeddb-corpus/jazz.permissions.json";
+import { app as corruptionApp } from "./apps/indexeddb-corruption/jazz.generated.js";
 import { createAccountManager } from "../../src/accounts/create-account-manager.js";
-import { deploy } from "../../src/dev/catalogue.js";
 import { accountRegistryUrl } from "../../src/accounts/context.js";
 import { createBrowserPhysicalDatabaseName } from "../../src/runtime/browser-worker-config.js";
 import { type Db } from "../../src/runtime/db.js";
@@ -42,6 +44,7 @@ import {
   IndexedDbPageStore,
 } from "../../src/runtime/indexeddb-page-store.js";
 import {
+  deploy,
   createJazzServerTransportControl,
   getJazzServerInfo,
   startJazzApp,
@@ -55,53 +58,9 @@ import {
   withTimeout,
 } from "./support.js";
 
-const app = s.defineApp(
-  {
-    projects: s.table(
-      {
-        name: s.string(),
-      },
-      { documentsViaProject: s.reverse("documents", "project") },
-    ),
-    documents: s
-      .table(
-        {
-          branch: s.string(),
-          title: s.string(),
-          projectId: s.uuid(),
-          body: s.string(),
-        },
-        { project: s.rel("projects", "projectId") },
-      )
-      .branchBy("branch"),
-    notes: s
-      .table(
-        {
-          branch: s.string(),
-          title: s.string(),
-          secret: s.boolean(),
-        },
-        {},
-      )
-      .branchBy("branch"),
-  },
-  { migrations: "none" },
-);
-
-const permissions = s.definePermissions(app, ({ policy }) => [
-  policy.projects.allowRead.always(),
-  policy.projects.allowInsert.always(),
-  policy.projects.allowUpdate.always(),
-  policy.projects.allowDelete.always(),
-  policy.documents.allowRead.always(),
-  policy.documents.allowInsert.always(),
-  policy.documents.allowUpdate.always(),
-  policy.documents.allowDelete.always(),
-  policy.notes.allowRead.where({ secret: false }),
-  policy.notes.allowInsert.always(),
-  policy.notes.allowUpdate.always(),
-  policy.notes.allowDelete.always(),
-]);
+// apps/indexeddb-corpus: projects, and documents (of a project) and notes,
+// both branched by `branch`. Everything is open, except that only non-secret
+// notes are readable.
 
 /** The draft of the notes viewed over main. */
 const NOTES_VIEW = { branch: "draft", base: "main" } as const;
@@ -109,18 +68,7 @@ const NOTES_VIEW = { branch: "draft", base: "main" } as const;
 // Keep the corrupt-open receipt deliberately small. The broader corpus above
 // exercises branches and large values; this isolates storage admission from
 // any schema-level query work that cannot run after an invalid epoch anyway.
-const corruptionApp = s.defineApp(
-  {
-    todos: s.table(
-      {
-        title: s.string(),
-        done: s.boolean(),
-      },
-      {},
-    ),
-  },
-  { migrations: "none" },
-);
+// corruptionApp (apps/indexeddb-corruption): todos { title, done }.
 
 /** The producer's account; every pinned corpus was written under it. */
 const CORPUS_SECRET = "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
@@ -198,11 +146,11 @@ describe("browser Jazz storage compatibility corpus", () => {
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: app.wasmSchema,
-      permissions,
+      app,
+      permissions: permissions,
     });
     const server = await startJazzApp(core, {
-      schema: app.wasmSchema,
+      schema: app,
       permissions,
     });
     const transport = transportCleanup.trackTransport(

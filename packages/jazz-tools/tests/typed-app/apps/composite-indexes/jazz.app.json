@@ -1,0 +1,10 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "documents": {
+      "columns": { "ownerId": "uuid", "updatedAt": "timestamp" },
+      "indexes": ["ownerId", ["ownerId", "updatedAt"]]
+    }
+  }
+}

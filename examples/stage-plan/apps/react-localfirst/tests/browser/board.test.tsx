@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createJazzClient, type JazzSession } from "jazz-tools";
 import { memoryAccountStore } from "../../../../../testing/accounts.js";
 import { App } from "../../src/App.js";
-import { app } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
 import { SCOPE, serverUrl } from "./test-constants.js";
 
 async function waitFor<T>(

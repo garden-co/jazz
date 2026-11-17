@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useAll, useSession } from "jazz-tools/react";
+import { useAll, useJazzSession } from "jazz-tools/react";
 import { AppShell } from "@astryxdesign/core/AppShell";
 import { Avatar } from "@astryxdesign/core/Avatar";
 import { Button } from "@astryxdesign/core/Button";
@@ -15,7 +15,7 @@ import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
 import { useToast } from "@astryxdesign/core/Toast";
 import { TopNav, TopNavHeading } from "@astryxdesign/core/TopNav";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 import { fileTableQuery } from "./file-list-query.js";
 import { FolderIndex } from "./folders.js";
 import { readFileBlob, saveBlob } from "./large-values.js";
@@ -37,7 +37,7 @@ function clearInviteHash() {
 
 export function FileBrowser() {
   const showToast = useToast();
-  const userId = useSession()?.user ?? undefined;
+  const userId = useJazzSession().user?.accountId ?? undefined;
   const profile = useEnsureProfile(userId);
   const isWide = useMediaQuery("(min-width: 1100px)");
 
