@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::catalogue::{BundleId, Permissions, bundle_id, permissions_of};
 use crate::schema::JazzSchema;
 use crate::tools::public_schema::{
-    ColumnType, Schema, SchemaHash, TableName, TablePolicies, TableSchema,
+    ColumnType, OperationPolicy, Schema, SchemaHash, TableName, TablePolicies, TableSchema,
 };
 
 use super::published::{
@@ -1309,7 +1309,16 @@ fn compute_bundle(
     }
     let refuse = |error: String| ArtifactError::in_file(PERMISSIONS_FILE, error);
     let compiled = JazzSchema::new(&target).map_err(|error| {
-        let mut message = format!("permissions: {error}");
+        // A refused policy is named as this file names it, by its table
+        // and operation: the engine's path names its own slots.
+        let rule = error.rule().and_then(|(table, slot)| {
+            let policies = permissions.get(&TableName::from(table))?;
+            Some(format!("tables.{table}.{}", rule_path(policies, slot)?))
+        });
+        let mut message = match rule {
+            Some(rule) => format!("{rule}: {}", error.message()),
+            None => format!("permissions: {error}"),
+        };
         // The engine checks a relation's `outer.` columns, which the loader
         // can't place; say so when the one it misses is a computed field.
         if let Some((_, field)) = error
@@ -1328,6 +1337,43 @@ fn compute_bundle(
         &permissions_of(compiled.public_schema()),
     )
     .map_err(|error| refuse(format!("permissions: {error}")))
+}
+
+/// Where the permissions file holds the engine's policy `slot`
+/// (`select.using`, `update.with_check`, …) of a table with `policies`:
+/// `read`, `update.new`, `read.withCheck`, as [`permissions_file::read`]
+/// reads them.
+fn rule_path(policies: &TablePolicies, slot: &str) -> Option<String> {
+    let (operation, side) = slot.split_once('.')?;
+    let two_sided = |policy: &OperationPolicy, usual_using: bool| {
+        if usual_using {
+            policy.with_check.is_some()
+        } else {
+            policy.using.is_some()
+        }
+    };
+    let side_key = if side == "using" {
+        "using"
+    } else {
+        "withCheck"
+    };
+    Some(match operation {
+        "select" | "delete" | "insert" => {
+            let (name, policy, usual_using) = match operation {
+                "select" => ("read", &policies.select, true),
+                "delete" => ("delete", &policies.delete, true),
+                _ => ("insert", &policies.insert, false),
+            };
+            if two_sided(policy, usual_using) {
+                format!("{name}.{side_key}")
+            } else {
+                name.to_string()
+            }
+        }
+        "update" if policies.update.using == policies.update.with_check => "update".to_string(),
+        "update" => format!("update.{}", if side == "using" { "old" } else { "new" }),
+        _ => return None,
+    })
 }
 
 fn check_codegen(codegen: &Codegen, current: &Schema) -> Result<(), ArtifactError> {
