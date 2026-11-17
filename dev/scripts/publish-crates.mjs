@@ -36,6 +36,60 @@ function cargo(args, env = {}) {
   if (result.status !== 0) throw new Error(`cargo ${args[0]} failed (exit ${result.status})`);
 }
 
+/**
+ * When crates.io's rate limit lets the next publish through, from its 429
+ * message ("... Please try again after Tue, 17 Nov 2026 00:06:08 GMT", or
+ * just "after 00:06:08 GMT"). Null if `output` isn't a rate-limit refusal.
+ */
+export function rateLimitRetryAt(output, now = new Date()) {
+  if (!/429|Too Many Requests/.test(output)) return null;
+  const after = output.match(/try again after ([^\n]*?GMT)/);
+  if (!after) return new Date(now.getTime() + 10 * 60_000);
+  const full = Date.parse(after[1]);
+  if (!Number.isNaN(full)) return new Date(full);
+  const time = after[1].match(/(\d{1,2}):(\d{2}):(\d{2})/);
+  if (!time) return new Date(now.getTime() + 10 * 60_000);
+  const at = new Date(now);
+  at.setUTCHours(Number(time[1]), Number(time[2]), Number(time[3]), 0);
+  if (at <= now) at.setUTCDate(at.getUTCDate() + 1);
+  return at;
+}
+
+/**
+ * `cargo publish` for one crate. On crates.io's rate limit (new crates: a
+ * burst of 5, then 1 per 10 minutes) it waits until the time crates.io names,
+ * plus a margin, and tries again, for at most CRATES_IO_MAX_WAIT_MINUTES
+ * (default 180) in all, so one approved run publishes every new crate.
+ */
+let waitedMs = 0;
+async function publishCrate(name, token) {
+  const maxWaitMs = Number(process.env.CRATES_IO_MAX_WAIT_MINUTES ?? 180) * 60_000;
+  const args = ["publish", "--allow-dirty", "--no-verify", "-p", name];
+  for (;;) {
+    console.log(`==> cargo ${args.join(" ")}`);
+    const result = spawnSync("cargo", args, {
+      encoding: "utf8",
+      env: { ...process.env, CARGO_REGISTRY_TOKEN: token },
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    process.stdout.write(result.stdout ?? "");
+    process.stderr.write(result.stderr ?? "");
+    if (result.status === 0) return;
+    const retryAt = rateLimitRetryAt(`${result.stdout}\n${result.stderr}`);
+    if (!retryAt) throw new Error(`cargo publish -p ${name} failed (exit ${result.status})`);
+    const waitMs = Math.max(0, retryAt.getTime() - Date.now()) + 15_000;
+    if (waitedMs + waitMs > maxWaitMs)
+      throw new Error(
+        `crates.io rate limit: ${name} would wait past CRATES_IO_MAX_WAIT_MINUTES; re-run to resume`,
+      );
+    console.log(
+      `==> crates.io rate limit: waiting until ${new Date(Date.now() + waitMs).toISOString()} to publish ${name}`,
+    );
+    waitedMs += waitMs;
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+}
+
 /** `{ exists, published }` for one crate and version, from the crates.io API. */
 export async function registryState(name, version, fetchImpl = fetch) {
   const headers = { "User-Agent": USER_AGENT, Accept: "application/json" };
@@ -134,9 +188,7 @@ async function main() {
     // without it keeps the run inside the trusted-publishing token's lifetime.
     // Cargo waits until each crate is in the index before the next.
     console.log(`==> ${name}@${version} via ${auth}`);
-    cargo(["publish", "--allow-dirty", "--no-verify", "-p", name], {
-      CARGO_REGISTRY_TOKEN: token,
-    });
+    await publishCrate(name, token);
     summary.push(`${name}@${version}: published via ${auth}`);
   }
   console.log("\nCrates:");
