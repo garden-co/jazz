@@ -1,0 +1,35 @@
+# NOT ENABLED: a macOS job for the KMP spike, kept out of .github/workflows.
+# Linux can't run cinterop for Apple targets, so this is where iOS gets
+# checked: build libjazz_ffi.a for the simulator, compile the klib, link the
+# test binary and run the common tests on an iOS simulator.
+#
+# To run it once: copy to .github/workflows/kmp-spike-ios.yml on the
+# kotlin/kmp-spike branch and push (the push trigger is limited to that
+# branch). workflow_dispatch alone wouldn't do: GitHub only offers it for
+# workflows on the default branch.
+name: kmp-spike-ios
+on:
+  push:
+    branches: [kotlin/kmp-spike]
+    paths: [packages/jazz-kotlin-kmp/**, .github/workflows/kmp-spike-ios.yml]
+  workflow_dispatch:
+jobs:
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim,aarch64-apple-ios
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 21 }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: 8.14.3 }
+      - name: libjazz_ffi.a for the iOS simulator and device
+        run: |
+          cargo rustc -p jazz-ffi --lib --target aarch64-apple-ios-sim --crate-type staticlib
+          cargo rustc -p jazz-ffi --lib --target aarch64-apple-ios --crate-type staticlib
+      - name: iOS klibs, and the common tests on the simulator
+        working-directory: packages/jazz-kotlin-kmp
+        run: gradle --no-daemon --console=plain compileKotlinIosArm64 iosSimulatorArm64Test
