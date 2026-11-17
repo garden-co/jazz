@@ -208,10 +208,6 @@ impl Analyzer {
             let hi = successor(&lo);
             Some(PrefixTerm { exact, lo, hi })
         });
-        // The prefix slot already matches its whole-word term exactly.
-        if let Some(p) = &prefix {
-            terms.retain(|t| *t != p.exact);
-        }
         if terms.len() + usize::from(prefix.is_some()) > MAX_QUERY_TERMS {
             return Err(QueryError::TooManyTerms);
         }
@@ -302,7 +298,9 @@ fn words(text: &str) -> impl Iterator<Item = &str> {
                 Class::Mark | Class::Ignored => true,
                 Class::Word => !alone,
                 Class::Alone | Class::Separator => {
-                    let before = rest[start..end].chars().next_back();
+                    // WB4: marks and ignored characters before `c` belong
+                    // to the letter they follow.
+                    let before = rest[start..end].chars().rev().find(|&b| !extends(b));
                     let after = rest[end + c.len_utf8()..].chars().next();
                     !alone && joins(c, before, after)
                 }
@@ -318,18 +316,30 @@ fn words(text: &str) -> impl Iterator<Item = &str> {
 }
 
 /// Whether the separator `c` between `before` and `after` stays inside a
-/// word (UAX #29's MidLetter rules): an apostrophe (`'`, `’`) or a middle
-/// dot (`·`, Catalan `col·lecció`) between two word characters, and a
-/// geresh or gershayim (`׳`, `״`, or ASCII `'`, `"`) between two Hebrew
-/// letters (`צה״ל`, as WB7b and WB7c).
+/// word (UAX #29's MidLetter rules, narrowed): an apostrophe (`'`, `’`)
+/// between two word characters; a middle dot (`·`) between two `l`s, the
+/// Catalan ela geminada (`col·lecció`), so `3·4` and `Home·About` split;
+/// and a geresh or gershayim (`׳`, `״`, or ASCII `'`, `"`) between two
+/// Hebrew letters (`צה״ל`, as WB7b and WB7c).
 fn joins(c: char, before: Option<char>, after: Option<char>) -> bool {
     let word = |x: Option<char>| x.is_some_and(|x| class(x) == Class::Word);
+    let ell = |x: Option<char>| matches!(x, Some('l' | 'L'));
     let hebrew = |x: Option<char>| x.is_some_and(hebrew_letter);
     match c {
-        '\'' | '\u{2019}' | '\u{00B7}' => word(before) && word(after),
+        '\'' | '\u{2019}' => word(before) && word(after),
+        '\u{00B7}' => ell(before) && ell(after),
         '"' | '\u{05F3}' | '\u{05F4}' => hebrew(before) && hebrew(after),
         _ => false,
     }
+}
+
+/// Whether `c` extends the character before it (UAX #29 WB4): a combining
+/// mark (the combining-diacritics blocks, Hebrew points and accents, marks
+/// of the unspaced scripts) or an ignored character.
+fn extends(c: char) -> bool {
+    dropped_mark(c as u32)
+        || matches!(class(c), Class::Mark | Class::Ignored)
+        || matches!(c as u32, 0x0591..=0x05BD | 0x05BF | 0x05C1..=0x05C2 | 0x05C4..=0x05C5 | 0x05C7)
 }
 
 /// UAX #29's Hebrew_Letter: the Hebrew letters and their presentation forms.
