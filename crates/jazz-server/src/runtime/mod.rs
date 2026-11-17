@@ -42,7 +42,7 @@ use jazz::protocol::MigrationLens;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{TableName, TablePolicies};
-use jazz::wire::{WireAuthorityEndpoint, WireErrorCode, WireFeatures, WireRetry};
+use jazz::wire::{WireErrorCode, WireRetry};
 use tokio::sync::mpsc as tokio_mpsc;
 
 // What only the native host uses (`host`, through `use super::*`).
@@ -156,18 +156,7 @@ pub enum NodeRole {
 
 pub use crate::portable::admission::{CommitUnitTrust, ServerLinkAdmission};
 
-/// Authority endpoints and features negotiated for one connection.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ConnectionSessionContext {
-    /// This server's endpoint for the connection.
-    pub local: WireAuthorityEndpoint,
-    /// The peer's endpoint, when it advertised one.
-    pub remote: Option<WireAuthorityEndpoint>,
-    /// The admitted identity of the link.
-    pub link_identity: AuthorSubject,
-    /// The negotiated wire features.
-    pub negotiated_features: WireFeatures,
-}
+pub use crate::portable::handshake::ConnectionSessionContext;
 
 /// Opaque handle for one admitted session.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

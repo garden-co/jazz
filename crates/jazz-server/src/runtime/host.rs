@@ -1179,7 +1179,7 @@ impl ServerRuntimeHandle {
         claims: BTreeMap<String, Value>,
         bundle: Option<jazz::catalogue::BundleId>,
         trust: CommitUnitTrust,
-        _negotiated_features: WireFeatures,
+        _negotiated_features: jazz::wire::WireFeatures,
         _session_context: Option<ConnectionSessionContext>,
         link_admission: ServerLinkAdmission,
     ) -> Result<ServerSession, SessionOpenError> {

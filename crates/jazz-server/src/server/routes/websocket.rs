@@ -9,21 +9,23 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(test)]
+use crate::portable::admission::ws_link_admission;
 use crate::portable::admission::{
     RequestedWebSocketLink, SessionRevocation, WebSocketAdmission, WebSocketCredential,
-    WebSocketPrelude, ws_link_admission,
+    WebSocketPrelude,
 };
 use crate::portable::session::{session_claims, ws_peer_identity, ws_validate_session_identity};
 #[cfg(test)]
 use crate::portable::websocket_codec::decode_ws_frame_batch;
+#[cfg(test)]
+use crate::portable::websocket_codec::decode_ws_hello;
 use crate::portable::websocket_codec::{
-    decode_ws_encoded_frame_batch, decode_ws_hello, encode_ws_frame_batches,
-    ws_foreign_version_refusal,
+    decode_ws_encoded_frame_batch, encode_ws_frame_batches, ws_foreign_version_refusal,
 };
+#[cfg(test)]
 use crate::runtime::ServerLinkAdmission;
-use crate::runtime::{
-    CommitUnitTrust, ConnectionSessionContext, ServerRuntimeHandle, ServerSession,
-};
+use crate::runtime::{CommitUnitTrust, ServerRuntimeHandle, ServerSession};
 use axum::{
     extract::FromRequestParts as _,
     extract::State,
@@ -32,16 +34,15 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures::{SinkExt as _, StreamExt as _};
-use jazz::ids::{AuthorSubject, NodeUuid};
+use jazz::ids::AuthorSubject;
 use jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
 #[cfg(test)]
 use jazz::records::Value as CoreValue;
 #[cfg(test)]
 use jazz::tools::Session;
-use jazz::wire::{
-    WireAuthorityEndpoint, WireError, WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry,
-    current_wire_features, encode_frame, negotiate_wire,
-};
+use jazz::wire::{WireError, WireErrorCode, WireFrame, WireRetry, encode_frame};
+#[cfg(test)]
+use jazz::wire::{WireHello, WirePeerRole, current_wire_features};
 use tokio::sync::mpsc;
 
 use super::metered_socket::{MeteredWebSocket, PeerActivity};
@@ -975,7 +976,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         }
     };
 
-    let remote_hello = match decode_ws_hello(&first) {
+    let hello = match crate::portable::handshake::negotiate_hello(&first, bootstrap_catalogue) {
         Ok(hello) => hello,
         Err(error) => {
             send_ws_error(&mut socket, error).await;
@@ -983,39 +984,6 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
             return;
         }
     };
-
-    // Thin clients (SPEC 8.14) are served on the same route: a client that
-    // advertises thin results is answered with results, not sync.
-    let negotiated = match negotiate_wire(
-        &remote_hello,
-        current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS | jazz::wire::FEATURE_HEARTBEAT,
-    ) {
-        Ok(negotiated) => negotiated,
-        Err(error) => {
-            send_ws_error(&mut socket, error).await;
-            let _ = socket.close().await;
-            return;
-        }
-    };
-    // A downstream browser may be authority-unbound while still accepting the
-    // server's authenticated authority in its response Hello.  The server
-    // never installs scoped authority semantics without an admitted remote
-    // endpoint (below), so this directional capability advertisement does not
-    // turn a client self-assertion into authority proof.
-
-    if bootstrap_catalogue {
-        send_ws_error(
-            &mut socket,
-            WireError::new(
-                WireErrorCode::UnsupportedFeature,
-                WireRetry::Never,
-                "edge catalogue bootstrap is no longer supported; open an ordinary client session",
-            ),
-        )
-        .await;
-        let _ = socket.close().await;
-        return;
-    }
 
     let Some(core_server_shell) = state.runtime_for_client() else {
         let message = if state.shutdown.is_shutting_down() {
@@ -1036,57 +1004,16 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         let _ = socket.close().await;
         return;
     };
-    // Every admitted server link receives a fresh server endpoint. A browser
-    // client need not (and must not) self-assert one merely to learn which
-    // authority issued its downstream fates.
-    let server_endpoint = WireAuthorityEndpoint::fresh(NodeUuid::from_bytes([0x5e; 16]));
-    let session_context =
-        if negotiated.features & jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS != 0 {
-            // An authenticated client can request current rows without itself
-            // being an authority. Retain our receipt epoch and its admitted identity
-            // independently of whether it advertises a remote authority endpoint.
-            Some(ConnectionSessionContext {
-                local: server_endpoint,
-                remote: remote_hello.authority,
-                link_identity: admission.identity,
-                negotiated_features: negotiated.features,
-            })
-        } else {
-            None
-        };
-    let link_admission =
-        match ws_link_admission(&admission, negotiated.features, server_endpoint.epoch) {
-            Ok(link_admission) => link_admission,
-            Err(error) => {
-                send_ws_error(&mut socket, error).await;
-                let _ = socket.close().await;
-                return;
-            }
-        };
-    let thin = negotiated.features & jazz::wire::FEATURE_THIN_RESULTS != 0;
+    let link = match crate::portable::handshake::link(&admission, &hello) {
+        Ok(link) => link,
+        Err(error) => {
+            send_ws_error(&mut socket, error).await;
+            let _ = socket.close().await;
+            return;
+        }
+    };
+    let thin = link.thin;
     let mut thin_reader = ThinReader::default();
-    // A thin connection is one session reading finished results: it holds
-    // no replica to relay for tabs, so it is never a client relay. An admin
-    // link is served as SYSTEM either way. `session_context` is for sync
-    // links alone.
-    if thin
-        && matches!(
-            link_admission,
-            ServerLinkAdmission::ScopeIsolatedClientRelay { .. }
-        )
-    {
-        send_ws_error(
-            &mut socket,
-            WireError::new(
-                WireErrorCode::UnsupportedFeature,
-                WireRetry::Never,
-                "a thin connection serves one session: it cannot relay for other tabs",
-            ),
-        )
-        .await;
-        let _ = socket.close().await;
-        return;
-    }
     let opened = if thin {
         core_server_shell
             .open_thin_session(
@@ -1103,9 +1030,9 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                 admission.claims,
                 admission.bundle,
                 admission.trust,
-                negotiated.features,
-                session_context,
-                link_admission,
+                hello.features,
+                link.session_context,
+                link.link_admission,
             )
             .await
     };
@@ -1117,26 +1044,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
             return;
         }
     };
-    let server_hello = WireFrame::Hello(
-        WireHello::current(WirePeerRole::Core, negotiated.features)
-            .with_authority(server_endpoint.node, server_endpoint.epoch),
-    );
-    let server_hello = match encode_frame(&server_hello) {
-        Ok(frame) => frame,
-        Err(error) => {
-            send_ws_error(
-                &mut socket,
-                WireError::new(
-                    WireErrorCode::Internal,
-                    WireRetry::Never,
-                    format!("failed to encode websocket server hello: {error}"),
-                ),
-            )
-            .await;
-            let _ = socket.close().await;
-            return;
-        }
-    };
+    let server_hello = link.server_hello;
     // From here the peer can be heard from; until now it ranked as the most
     // recent connection (see `WS_STILL_HANDSHAKING`).
     admission_registration.heard();
@@ -1148,8 +1056,8 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     }
 
     tracing::info!(
-        protocol_version = negotiated.protocol_version,
-        features = negotiated.features,
+        protocol_version = hello.protocol_version,
+        features = hello.features,
         identity = ?admission.identity,
         "websocket negotiated"
     );
@@ -1227,7 +1135,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     // (`peer_activity`): a large message on a slow uplink can take longer
     // than the timeout to complete, and its bytes are the peer at work.
     let mut last_inbound = tokio::time::Instant::now();
-    let heartbeat = negotiated.features & jazz::wire::FEATURE_HEARTBEAT != 0;
+    let heartbeat = hello.features & jazz::wire::FEATURE_HEARTBEAT != 0;
     let mut keepalive = tokio::time::interval_at(
         last_inbound + WS_KEEPALIVE_PING_INTERVAL,
         WS_KEEPALIVE_PING_INTERVAL,
