@@ -2343,8 +2343,17 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     const hello = new Promise<void>((resolve) => (helloArrived = resolve));
     // A refusal before the Hello waits for it, briefly: a client sends it
     // right behind its prelude, while `authenticate` runs.
-    const awaitHello = () =>
-      Promise.race([hello, new Promise<void>((resolve) => setTimeout(resolve, HELLO_WAIT_MS))]);
+    const awaitHello = async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          hello,
+          new Promise<void>((resolve) => (timer = setTimeout(resolve, HELLO_WAIT_MS))),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+    };
     let thin: ThinRelay | undefined;
     // The prelude the core admitted the session's socket with: its own
     // client connects with the same.
@@ -2475,6 +2484,8 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         if (at === null) {
           // `authenticate` named the user with an answer already expired.
           warnExpiredAnswer();
+          await awaitHello();
+          if (ended) return false;
           onEvent(null, {
             kind: "message",
             data: authFailedBatch(

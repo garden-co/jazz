@@ -1949,5 +1949,69 @@ async fn a_refused_sign_in_names_its_reason_to_a_client_that_reads_one() {
     };
     assert_eq!(error.reason, None);
     assert!(error.message.contains("missing"), "{}", error.message);
+
+    // A signed-in user's socket, with the bit: the first error it gets.
+    let account = app.endpoint.create_account_for("jo").await.unwrap();
+    let peer = jazz::ids::AuthorSubject::authenticated("jazz:backend", "jo")
+        .unwrap()
+        .with_account(account)
+        .canonical()
+        .to_owned();
+    let ws_path = app.path("ws");
+    let first_error = async |endpoint: Endpoint| {
+        let ws_path = ws_path.clone();
+        let prelude = serde_json::to_vec(&json!({
+            "peer_identity": peer,
+            "auth": { "backend_session": { "user_id": "jo" } },
+        }))
+        .unwrap();
+        let hello =
+            encode_websocket_frame_batch(&[encode_frame(&WireFrame::Hello(WireHello::current(
+                WirePeerRole::Client,
+                current_wire_features() | FEATURE_TYPED_ERROR_REASON,
+            )))
+            .unwrap()])
+            .unwrap();
+        let incoming =
+            futures::stream::iter(vec![prelude, hello]).chain(futures::stream::pending());
+        let (sent, received) = futures::channel::mpsc::unbounded::<Vec<u8>>();
+        let serving = tokio::spawn(async move {
+            endpoint
+                .serve_socket(
+                    Request::new("GET", &ws_path).header("authorization", "Bearer token-jo"),
+                    Box::pin(incoming),
+                    sent.sink_map_err(|_| ()),
+                )
+                .await
+        });
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            received
+                .filter_map(async |batch| {
+                    let frame = decode_websocket_frame_batch(&batch).ok()?.remove(0);
+                    match decode_frame_with_error_reason(&frame) {
+                        Ok(WireFrame::Error(error)) => Some(error),
+                        _ => None,
+                    }
+                })
+                .boxed()
+                .next(),
+        )
+        .await
+        .expect("an error in time")
+        .expect("an error");
+        serving.abort();
+        error
+    };
+    // A session whose deadline passed by its admission (a zero TTL).
+    let error = first_error(app.endpoint.clone().session_ttl(Duration::ZERO)).await;
+    assert_eq!(error.reason, Some(WireErrorReason::Expired), "{error:?}");
+    // The planned reconnect before a short session ends.
+    let error = first_error(app.endpoint.clone().session_ttl(Duration::from_secs(2))).await;
+    assert_eq!(
+        error.reason,
+        Some(WireErrorReason::Reauthenticate),
+        "{error:?}"
+    );
     app.stop().await;
 }
