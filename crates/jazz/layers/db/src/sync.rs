@@ -13218,7 +13218,7 @@ impl Db {
             // mask base rows they match ship with them.
             let mut opening_masks = Vec::new();
             for (id, queue, group, list) in subs {
-                let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain(..).collect();
+                let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain_all();
                 if events.is_empty() {
                     continue;
                 }
@@ -14269,6 +14269,7 @@ impl Db {
                 policy,
                 wait.read,
                 SettledBy::Always(authority),
+                fanout::Backlog::Replica,
             )?;
             let session = &mut inner.sessions[index];
             if let Some((_, _, windowed, _)) = session.subs.remove(&id) {
@@ -14461,6 +14462,7 @@ impl Db {
                         Some((_, signal)) => SettledBy::Link(signal.clone()),
                         None => SettledBy::Always(authority),
                     },
+                    fanout::Backlog::Replica,
                 );
                 if attached.is_some() {
                     match &subscribed {
@@ -14588,7 +14590,7 @@ impl Db {
                     dropped.set(dropped.get() + 1);
                     // Rows the result lost since the last tick were not
                     // re-checked yet: the client may still hold them.
-                    let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain(..).collect();
+                    let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain_all();
                     if let Some(group) = group.upgrade() {
                         let table = group.borrow().root().to_owned();
                         for event in events {
