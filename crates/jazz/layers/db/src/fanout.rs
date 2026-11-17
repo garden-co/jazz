@@ -178,6 +178,18 @@ struct Member {
     /// settles it globally.
     settled: sync::SettledBy,
     told: std::cell::Cell<Option<DurabilityTier>>,
+    joined: std::cell::Cell<Joined>,
+}
+
+/// Where a member stands with its group's result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Joined {
+    /// Told nothing yet: it waits for an opening of a current result. A
+    /// group that awaits chunks holds rows that may be stale, so a member
+    /// that joins it then waits with it instead of opening on them.
+    AwaitingOpening,
+    /// Opened: follows the group's deltas.
+    Open,
 }
 
 /// One shared live result.
@@ -309,24 +321,50 @@ pub(super) struct Fanout {
 
 /// The canonical form of a stored SQL value, for watch matching.
 fn canon(value: &Sql) -> String {
-    format!("{value:?}")
+    value.key()
 }
 
 fn canon_value(value: &Value) -> Option<String> {
     to_sql(value).ok().flatten().map(|sql| canon(&sql))
 }
 
-/// A value's canonical form ([`canon_value`]) as column `column` stores it:
-/// an enum variant's name as its tag where it has one, so it matches the
-/// cells of a changed row's image.
-fn stored_canon(column: Option<&crate::values::Column>, value: String) -> String {
+/// Enum variants a store keeps for an import (`Db::keep_variants_for_import`),
+/// by table and column as the importing schemas name them.
+type KeptVariants = BTreeMap<(String, String), BTreeSet<String>>;
+
+/// A value's canonical form ([`canon_value`]) as column `column` stores it,
+/// so it matches the cells of a changed row's image: an enum variant's name
+/// as its tag. `None` for a variant the store keeps for an import (`kept`)
+/// that has no tag yet: it gets its tag only when a row first stores it,
+/// after this key would have been made. A key on it could never match the
+/// rows it stands for, so the caller watches the table whole instead.
+///
+/// Any other name with no tag (a typo, a session claim outside the enum)
+/// keeps its name: no row can ever hold it, so a key that matches nothing
+/// is exact. `kept` is matched by the variant's name alone, in any table
+/// and column: the importing schemas may name the table and column other
+/// than the reader's schema does, and a wider watch is only extra wakes.
+fn stored_canon(
+    column: Option<&crate::values::Column>,
+    value: String,
+    kept: &KeptVariants,
+) -> Option<String> {
     let Some(tags) = column.and_then(|column| column.tags.as_ref()) else {
-        return value;
+        return Some(value);
     };
     let tags = tags.borrow();
-    tags.iter()
+    let tagged = tags
+        .iter()
         .find(|(_, name)| canon(&Sql::Text(name.as_bytes().to_vec())) == value)
-        .map_or(value, |(tag, _)| canon(&Sql::Integer(tag)))
+        .map(|(tag, _)| canon(&Sql::Integer(tag)));
+    if tagged.is_some() {
+        return tagged;
+    }
+    let kept = kept
+        .values()
+        .flatten()
+        .any(|name| canon(&Sql::Text(name.as_bytes().to_vec())) == value);
+    (!kept).then_some(value)
 }
 
 impl Fanout {
@@ -455,7 +493,8 @@ impl Fanout {
             }
             for member in &group.members {
                 let now = member.settled.tier();
-                if member.settled.get()
+                if member.joined.get() == Joined::Open
+                    && member.settled.get()
                     && member.told.get().is_none_or(|told| told < now)
                     && let Some(queue) = member.queue.upgrade()
                 {
@@ -501,12 +540,18 @@ impl Inner {
             position: format!("{:?}", read.position),
         };
         let now = settled.get();
-        let member = |queue: &Queue| Member {
+        // `opened`: the member's queue starts with an opening.
+        let member = |queue: &Queue, opened: bool| Member {
             queue: Rc::downgrade(queue),
             shape: prepared.shape,
             bound: !prepared.binding.is_empty(),
             settled: settled.clone(),
-            told: std::cell::Cell::new(now.then(|| settled.tier())),
+            told: std::cell::Cell::new((opened && now).then(|| settled.tier())),
+            joined: std::cell::Cell::new(if opened {
+                Joined::Open
+            } else {
+                Joined::AwaitingOpening
+            }),
         };
         let tier = settled.tier();
         let open = |rows: &[CurrentRow]| {
@@ -528,12 +573,15 @@ impl Inner {
             .cloned()
         {
             let mut group = handle.borrow_mut();
-            let queue: Queue = Rc::new(RefCell::new(if group.opened {
+            // While the group awaits chunks its rows may be stale: the
+            // joiner opens with the group's next successful run instead.
+            let opened = group.opened && !group.awaiting;
+            let queue: Queue = Rc::new(RefCell::new(if opened {
                 VecDeque::from([open(&group.rows)])
             } else {
                 VecDeque::new()
             }));
-            group.members.push(member(&queue));
+            group.members.push(member(&queue, opened));
             self.fan.stats.shared_joins += 1;
             return Ok((queue, Rc::downgrade(&handle)));
         }
@@ -594,7 +642,7 @@ impl Inner {
             identity,
             read,
             rows,
-            members: vec![member(&queue)],
+            members: vec![member(&queue, !awaiting)],
             watches,
             evidence,
             recheck,
@@ -838,19 +886,21 @@ impl Inner {
                     let governing = policies.by_stored(&root.stored)?;
                     // As for a query key: only an application column is in
                     // a changed row's image (`$createdBy.account` is not).
-                    governing.columns.iter().any(|c| c.name == column).then(|| {
-                        let value = stored_canon(governing.column(&column), value);
-                        (governing.stored_name(&column).to_owned(), value)
-                    })
+                    if !governing.columns.iter().any(|c| c.name == column) {
+                        return None;
+                    }
+                    let value =
+                        stored_canon(governing.column(&column), value, &self.kept_variants)?;
+                    Some((governing.stored_name(&column).to_owned(), value))
                 });
             root_key(query, &prepared.binding)
                 // Only an application column is in a changed row's image;
                 // a key on anything else (`$createdBy.identity.subject`,
                 // `id`) would never be hit.
                 .filter(|(column, _)| root.columns.iter().any(|c| c.name == *column))
-                .map(|(column, value)| {
-                    let value = stored_canon(root.column(&column), value);
-                    (root.stored_name(&column).to_owned(), value)
+                .and_then(|(column, value)| {
+                    let value = stored_canon(root.column(&column), value, &self.kept_variants)?;
+                    Some((root.stored_name(&column).to_owned(), value))
                 })
                 .or(policy_root_key)
         }
@@ -941,6 +991,7 @@ impl Inner {
             let mut walk = EvidenceWalk {
                 policies,
                 session: &session,
+                kept: &self.kept_variants,
                 out: Evidence::new(),
                 through: Vec::new(),
             };
@@ -2015,6 +2066,9 @@ impl Inner {
             // Settlement withheld while waiting is published now.
             group.push(delta(false, Vec::new(), Vec::new(), Vec::new()));
         }
+        // Members that joined while the group waited saw no rows: they
+        // open on the current ones (the deltas above went to the others).
+        group.open_waiting(&rows);
         // Order keys that are not shown may have moved even when no row
         // did: read them again with the rows.
         group.rows = rows;
@@ -2068,37 +2122,66 @@ fn refresh_includes(group: &mut Group, changed: &BTreeSet<(String, RowUuid)>) {
 }
 
 impl Group {
+    /// Publish `event` to every member. A delta reaches only opened
+    /// members; an opening opens the others too.
     fn push(&mut self, event: SubscriptionEvent) {
         self.members.retain(|m| m.queue.strong_count() > 0);
         for member in &self.members {
-            if let Some(queue) = member.queue.upgrade() {
-                let mut event = event.clone();
-                if let SubscriptionEvent::Delta {
-                    reset,
-                    added,
-                    settled,
-                    tier,
-                    ..
-                } = &mut event
-                {
-                    *settled = member.settled.get();
-                    *tier = member.settled.tier();
-                    let told = settled.then_some(*tier);
-                    if *reset || told != member.told.get() {
-                        tracing::debug!(
-                            target: "jazz::sync",
-                            table = %self.query().table,
-                            opening = *reset,
-                            rows = added.len(),
-                            settled = *settled,
-                            tier = ?*tier,
-                            "subscription delivered",
-                        );
-                    }
-                    member.told.set(told);
-                }
-                queue.borrow_mut().push_back(event);
+            Self::deliver(self.query(), member, event.clone());
+        }
+    }
+
+    /// Open the members still waiting for an opening on `rows`.
+    fn open_waiting(&mut self, rows: &[CurrentRow]) {
+        if self
+            .members
+            .iter()
+            .all(|member| member.joined.get() == Joined::Open)
+        {
+            return;
+        }
+        let event = opening(rows);
+        for member in &self.members {
+            if member.joined.get() == Joined::AwaitingOpening {
+                Self::deliver(self.query(), member, event.clone());
             }
+        }
+    }
+
+    fn deliver(query: &Query, member: &Member, event: SubscriptionEvent) {
+        match &event {
+            SubscriptionEvent::Delta { reset: true, .. } => member.joined.set(Joined::Open),
+            // A delta is relative to an opening this member has not had.
+            SubscriptionEvent::Delta { .. } if member.joined.get() != Joined::Open => return,
+            _ => {}
+        }
+        if let Some(queue) = member.queue.upgrade() {
+            let mut event = event;
+            if let SubscriptionEvent::Delta {
+                reset,
+                added,
+                settled,
+                tier,
+                ..
+            } = &mut event
+            {
+                *settled = member.settled.get();
+                *tier = member.settled.tier();
+                let told = settled.then_some(*tier);
+                if *reset || told != member.told.get() {
+                    tracing::debug!(
+                        target: "jazz::sync",
+                        table = %query.table,
+                        opening = *reset,
+                        rows = added.len(),
+                        settled = *settled,
+                        tier = ?*tier,
+                        "subscription delivered",
+                    );
+                }
+                member.told.set(told);
+            }
+            queue.borrow_mut().push_back(event);
         }
     }
 }
@@ -2597,6 +2680,8 @@ fn conjuncts(condition: &PolicyExpr) -> Vec<&PolicyExpr> {
 struct EvidenceWalk<'a> {
     policies: &'a Schema,
     session: &'a Session,
+    /// The variants the store keeps for an import ([`stored_canon`]).
+    kept: &'a KeptVariants,
     out: Evidence,
     /// The tables (and operations) whose policies an `INHERITS` is being
     /// read through: a chain back to one is watched whole.
@@ -2683,7 +2768,7 @@ impl EvidenceWalk<'_> {
                 }
                 let pin = conjuncts(condition)
                     .into_iter()
-                    .find_map(|c| value_pin(target, c, self.session));
+                    .find_map(|c| value_pin(target, c, self.session, self.kept));
                 self.occurrence(target, pin, columns);
                 true
             }
@@ -2747,7 +2832,7 @@ impl EvidenceWalk<'_> {
         }
         let pin = conjuncts(policy)
             .into_iter()
-            .find_map(|c| value_pin(table, c, self.session));
+            .find_map(|c| value_pin(table, c, self.session, self.kept));
         self.occurrence(table, pin, columns);
         true
     }
@@ -2774,7 +2859,12 @@ type Pin = (String, String);
 /// against a UUID (or a claim spelling one, as the policy compares it),
 /// text against text, an integer against an integer, a boolean against a
 /// boolean, an enum against a variant name.
-fn value_pin(table: &Table, conjunct: &PolicyExpr, session: &Session) -> Option<Pin> {
+fn value_pin(
+    table: &Table,
+    conjunct: &PolicyExpr,
+    session: &Session,
+    kept: &KeptVariants,
+) -> Option<Pin> {
     use crate::tools::PolicyValue;
     let PolicyExpr::Cmp {
         column,
@@ -2807,7 +2897,7 @@ fn value_pin(table: &Table, conjunct: &PolicyExpr, session: &Session) -> Option<
         (ValueType::Bool, value @ Value::Bool(_)) => value,
         _ => return None,
     };
-    let value = stored_canon(Some(stored), canon_value(&value)?);
+    let value = stored_canon(Some(stored), canon_value(&value)?, kept)?;
     Some((stored.stored.clone(), value))
 }
 
@@ -2839,7 +2929,13 @@ pub(super) fn stored_pins(
         .filter_map(|(table, pin)| {
             let table = schema.table(&table).ok()?;
             let pin = pin.map(|(column, value)| {
-                let value = stored_canon(table.column(&column), value);
+                // These pins are made anew for each tick's writes, after
+                // their cells are stored: a variant with no tag yet is in
+                // none of them, and its name, which no cell holds, rightly
+                // matches none. So no variant counts as kept here.
+                let value =
+                    stored_canon(table.column(&column), value.clone(), &KeptVariants::new())
+                        .unwrap_or(value);
                 (table.stored_name(&column).to_owned(), value)
             });
             Some((table.stored.clone(), pin))

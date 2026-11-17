@@ -3,16 +3,16 @@ import { page, userEvent } from "vitest/browser";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { JazzClientConfig } from "jazz-tools";
-import { deployApp } from "../../../../../../packages/jazz-tools/src/dev/catalogue";
 import {
   getJazzServerInfo,
   jazzAppFetch,
   jazzAppUserUrl,
   startJazzApp,
+  deploy as deployApp,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server";
 import { memoryAccountStore } from "../../../../../testing/accounts";
-import permissions from "../../permissions";
-import { app } from "../../schema";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
+import { app } from "../../jazz.generated";
 import { BandChatPreview } from "../../src/BandChat";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

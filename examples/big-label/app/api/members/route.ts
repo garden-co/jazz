@@ -1,4 +1,4 @@
-import { app } from "../../../schema";
+import { app } from "../../../jazz.generated";
 import { jazz } from "../../../src/lib/jazz.server";
 import { addMember, findPersonByEmail } from "../../../src/lib/members";
 import { requestAccount } from "../../../src/lib/request-account";

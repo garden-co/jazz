@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../../schema-namespace.js";
-import { defineApp } from "../../typed-app.js";
+import { testApp } from "../../testing/test-app.js";
 import type { ColumnDescriptor, WasmSchema } from "../../drivers/types.js";
 import { createRecord } from "./native-codec.js";
 import { decodeNestedRowBytes, formatUuid, rowsFromBatches } from "./native-runtime-adapter.js";
@@ -176,7 +175,7 @@ describe("native row descriptor cache keys", () => {
     );
   });
 
-  it("includes payload enum registry identity when cases match", () => {
+  it("includes tag-17 enum registry identity when cases match", () => {
     const firstRegistry = {
       tag: 17,
       enumSchema: {
@@ -224,7 +223,7 @@ describe("native row descriptor cache keys", () => {
       tag: 12,
       enumSchema: { registryId: 7, name: "status", variants: ["draft", "archived"] },
     };
-    const payloadEnum = {
+    const recordEnum = {
       tag: 17,
       enumSchema: {
         registryId: 3,
@@ -232,7 +231,7 @@ describe("native row descriptor cache keys", () => {
         cases: [{ name: "message", payload: [{ name: "body", valueType: { tag: 8 } }] }],
       },
     };
-    const changedPayloadEnum = {
+    const changedRecordEnum = {
       tag: 17,
       enumSchema: {
         registryId: 3,
@@ -240,7 +239,7 @@ describe("native row descriptor cache keys", () => {
         cases: [{ name: "message", payload: [{ name: "body", valueType: { tag: 4 } }] }],
       },
     };
-    const changedPayloadEnumCase = {
+    const changedRecordEnumCase = {
       tag: 17,
       enumSchema: {
         registryId: 3,
@@ -255,18 +254,18 @@ describe("native row descriptor cache keys", () => {
     expect(valueTypeCacheKey(nullableText)).not.toBe(valueTypeCacheKey(nullableInteger));
     expect(valueTypeCacheKey(scalarEnum)).not.toBe(valueTypeCacheKey(otherScalarEnumRegistry));
     expect(valueTypeCacheKey(scalarEnum)).not.toBe(valueTypeCacheKey(otherScalarEnumVariants));
-    expect(valueTypeCacheKey(payloadEnum)).not.toBe(valueTypeCacheKey(changedPayloadEnum));
-    expect(valueTypeCacheKey(payloadEnum)).not.toBe(valueTypeCacheKey(changedPayloadEnumCase));
+    expect(valueTypeCacheKey(recordEnum)).not.toBe(valueTypeCacheKey(changedRecordEnum));
+    expect(valueTypeCacheKey(recordEnum)).not.toBe(valueTypeCacheKey(changedRecordEnumCase));
     expect(
       nativeRowFieldPlanCacheKey({
         table: "events",
-        descriptor: [{ kind: "stored-column", id: 1, outputName: "event", valueType: payloadEnum }],
+        descriptor: [{ kind: "stored-column", id: 1, outputName: "event", valueType: recordEnum }],
       }),
     ).not.toBe(
       nativeRowFieldPlanCacheKey({
         table: "events",
         descriptor: [
-          { kind: "stored-column", id: 1, outputName: "event", valueType: changedPayloadEnum },
+          { kind: "stored-column", id: 1, outputName: "event", valueType: changedRecordEnum },
         ],
       }),
     );
@@ -492,12 +491,13 @@ function concatBytes(chunks: Uint8Array[]): Uint8Array {
 }
 
 it("preserves stored application columns named like internal metadata", () => {
-  const app = defineApp(
-    {
-      notes: { parents: s.string(), schema_version: s.string(), authored_columns: s.string() },
+  const app = testApp({
+    tables: {
+      notes: {
+        columns: { parents: "string", schema_version: "string", authored_columns: "string" },
+      },
     },
-    { migrations: "none" },
-  );
+  });
   const names = ["parents", "schema_version", "authored_columns"];
   const rows = rowsFromBatches(
     [

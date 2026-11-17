@@ -1,4 +1,5 @@
 import { rel, reverse } from "./relationships.js";
+import { ENUM_CASES_NOT_SUPPORTED } from "./schema-errors.js";
 // DSL for defining schemas and migrations
 
 import type { StandardJSONSchemaV1 } from "@standard-schema/spec";
@@ -57,7 +58,10 @@ function isJsonObject(value: unknown): value is JsonSchema {
 }
 
 function normalizeJsonSchema<Output>(schema: JsonSchemaSource<Output>): JsonSchema {
-  const maybeStandard = "~standard" in schema ? schema["~standard"] : undefined;
+  const maybeStandard =
+    "~standard" in schema
+      ? (schema as StandardJSONSchemaV1<unknown, Output>)["~standard"]
+      : undefined;
   if (maybeStandard) {
     const converted = maybeStandard.jsonSchema.output({ target: "draft-07" });
     if (!isJsonObject(converted)) {
@@ -91,11 +95,11 @@ interface ColumnBuilder {
   optional(): this;
   default(value: unknown): this;
   merge(strategy: ColumnMergeStrategyName): this;
-  transform(transform: ColumnTransform<unknown, unknown>): ColumnBuilder;
+  transform(name: string, view: ColumnBuilder): ColumnBuilder;
   _build(name: string): Column;
   _sqlType: SqlType;
   _references: string | undefined;
-  _transform?: ColumnTransform<unknown, unknown>;
+  _transform?: ColumnTransform;
   _allowExternalProvenanceName?: true;
 }
 
@@ -156,45 +160,27 @@ export type TypedColumnBuilder<
     strategy: AllowedColumnMergeStrategy<Sql, Optional>,
   ): ColumnAlias<Sql, Optional, Ref, HasDefault, Value, Init>;
   /**
-   * Transform stored column values at the TypeScript boundary.
-   *
-   * @experimental This API may change before the stable release.
+   * Store the column through the app-wide transform `name`: the engine keeps
+   * this column's type, code reads and writes `view`'s. Every language
+   * implements the transform (in TS, `jazz.computed.ts`). Permissions see
+   * the stored value.
    */
-  transform<
-    TransformedValue,
-    const Dependencies extends readonly string[] = readonly [],
-    StoredContext extends Record<Dependencies[number], unknown> = Record<
-      Dependencies[number],
-      unknown
-    >,
-    InputContext extends Record<Dependencies[number], unknown> = Record<
-      Dependencies[number],
-      unknown
-    >,
-  >(transform: {
-    dependsOn?: Dependencies;
-    from(
-      value: MaybeOptional<TSTypeFromSqlType<Sql>, Optional>,
-      dependencies: Readonly<StoredContext>,
-    ): TransformedValue;
-    to(
-      value: TransformedValue,
-      dependencies: Readonly<InputContext>,
-    ): MaybeOptional<TSTypeFromSqlType<Sql>, Optional>;
-  }): DependentColumn<
-    Sql,
-    Optional,
-    Ref,
-    HasDefault,
-    TransformedValue,
-    Dependencies,
-    StoredContext,
-    InputContext
-  >;
+  transform<const Name extends string>(
+    name: Name,
+    view: AnyTypedColumnBuilder,
+  ): ColumnAlias<Sql, Optional, Ref, HasDefault, Value, Init>;
   /**
    * Make the column nullable
    */
   optional(): ColumnAlias<Sql, true, Ref, HasDefault, Value, Init>;
+  /**
+   * The column holds ids of `table`'s rows, for a reference no forward
+   * relation names (a forward relation's column references its table
+   * without it).
+   */
+  references<const Target extends string>(
+    table: Target,
+  ): ColumnAlias<Sql, Optional, Target, HasDefault, Value, Init>;
 };
 
 // This is a constraint for builder input positions, not a public builder
@@ -228,10 +214,15 @@ export function hasExternalProvenanceNameAllowance(column: {
   return column._allowExternalProvenanceName === true;
 }
 /** A client-side, read-only field with no stored column. */
-export interface ComputedColumn<Value = unknown> {
+/**
+ * A field computed in code from stored columns of the same row (`s.computed`):
+ * not stored, so only its type and inputs are declared here; the
+ * implementation lives in `jazz.computed.ts`.
+ */
+export interface ComputedColumn<Value = unknown, From extends string = string> {
   readonly _computed: {
-    readonly rowColumns: readonly string[];
-    readonly compute: (row: Readonly<Record<string, unknown>>) => Value;
+    readonly type: ColumnBuilder;
+    readonly from: readonly From[];
   };
   readonly _transform?: never;
   readonly _allowExternalProvenanceName?: never;
@@ -241,6 +232,24 @@ export interface ComputedColumn<Value = unknown> {
   readonly __jazzHasDefault: false;
   readonly __jazzValue: Readonly<Value>;
   readonly __jazzInitValue: never;
+}
+
+/** `s.computed(type, from)`: a field of the row computed in code from `from`'s stored columns. */
+export function computed<const T extends AnyTypedColumnBuilder, const From extends string>(
+  type: T,
+  from: readonly From[],
+): ComputedColumn<
+  ColumnBuilderOptional<T> extends true ? ColumnBuilderValue<T> | null : ColumnBuilderValue<T>,
+  From
+> {
+  const builder = type as unknown as ColumnBuilder;
+  if (!builder || typeof builder !== "object" || !("_sqlType" in builder))
+    throw new TypeError("s.computed(type, from) requires a column type such as s.int().");
+  if (!Array.isArray(from) || from.some((name) => typeof name !== "string"))
+    throw new TypeError("s.computed(type, from) requires the array of columns it reads.");
+  return Object.freeze({
+    _computed: Object.freeze({ type: builder, from: Object.freeze([...from]) }),
+  }) as unknown as ComputedColumn<never, From>;
 }
 
 export type AnyColumnDefinition = AnyTypedColumnBuilder | ComputedColumn;
@@ -262,54 +271,11 @@ export type ColumnBuilderValue<TBuilder extends AnyColumnDefinition> = TBuilder[
 export type ColumnBuilderInitValue<TBuilder extends AnyColumnDefinition> =
   TBuilder["__jazzInitValue"];
 
-export interface ColumnTransform<Stored = unknown, View = unknown> {
-  readonly dependsOn?: readonly string[];
-  from(value: Stored, dependencies: Readonly<Record<string, unknown>>): View;
-  to(value: View, dependencies: Readonly<Record<string, unknown>>): Stored;
+/** A column's transform: its app-wide name and the type code sees. */
+export interface ColumnTransform {
+  readonly name: string;
+  readonly view: ColumnBuilder;
 }
-
-type DependentColumn<
-  Sql extends SqlType,
-  Optional extends boolean,
-  Ref extends string | undefined,
-  HasDefault extends boolean,
-  Value,
-  Dependencies extends readonly string[],
-  StoredContext,
-  InputContext,
-> = Omit<
-  ColumnAlias<Sql, Optional, Ref, HasDefault, Value, Value>,
-  "default" | "optional" | "merge"
-> & {
-  readonly __jazzDependencies: Dependencies;
-  readonly __jazzStoredDependencies: StoredContext;
-  readonly __jazzInputDependencies: InputContext;
-  default(
-    value: MaybeOptional<ColumnDefaultValue<Sql>, Optional>,
-  ): DependentColumn<Sql, Optional, Ref, true, Value, Dependencies, StoredContext, InputContext>;
-  optional(): DependentColumn<
-    Sql,
-    true,
-    Ref,
-    HasDefault,
-    Value,
-    Dependencies,
-    StoredContext,
-    InputContext
-  >;
-  merge(
-    strategy: AllowedColumnMergeStrategy<Sql, Optional>,
-  ): DependentColumn<
-    Sql,
-    Optional,
-    Ref,
-    HasDefault,
-    Value,
-    Dependencies,
-    StoredContext,
-    InputContext
-  >;
-};
 
 export type StringColumn<
   Optional extends boolean = false,
@@ -497,7 +463,7 @@ abstract class BaseColumnBuilder implements ColumnBuilder {
   private _nullable = false;
   private _default: unknown = undefined;
   private _mergeStrategy: ColumnMergeStrategy | undefined;
-  _transform?: ColumnTransform<unknown, unknown>;
+  _transform?: ColumnTransform;
   abstract readonly _sqlType: SqlType;
 
   optional(): this {
@@ -520,8 +486,26 @@ abstract class BaseColumnBuilder implements ColumnBuilder {
     return this;
   }
 
-  transform(transform: ColumnTransform<unknown, unknown>): this {
-    this._transform = transform;
+  transform(name: string, view: ColumnBuilder): this {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
+      throw new Error(`.transform(name, view): "${name}" is not an identifier.`);
+    if (view._transform || view._sqlType === undefined)
+      throw new Error(`.transform("${name}", view): view must be a plain column type.`);
+    this._transform = { name, view };
+    return this;
+  }
+
+  private _referencesTable: string | undefined;
+
+  references(table: string): this {
+    const sqlType = this._sqlType;
+    const uuid =
+      sqlType === "UUID" ||
+      (typeof sqlType === "object" && sqlType.kind === "ARRAY" && sqlType.element === "UUID");
+    if (!uuid) throw new Error(".references(table) is only for uuid and uuid-array columns.");
+    if (typeof table !== "string" || !table)
+      throw new Error(".references(table) requires a table name.");
+    this._referencesTable = table;
     return this;
   }
 
@@ -530,13 +514,14 @@ abstract class BaseColumnBuilder implements ColumnBuilder {
       name,
       sqlType: this._sqlType,
       nullable: this._nullable,
+      ...(this._referencesTable === undefined ? {} : { references: this._referencesTable }),
       ...(this._default === undefined ? {} : { default: this._default }),
       ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
     };
   }
 
   get _references(): string | undefined {
-    return undefined;
+    return this._referencesTable;
   }
 }
 
@@ -549,46 +534,9 @@ class ScalarBuilder extends BaseColumnBuilder {
 class EnumBuilder extends BaseColumnBuilder {
   public _sqlType: EnumSqlType;
 
-  constructor(variantsOrCases: string[] | Record<string, ColumnBuilder>) {
+  constructor(variants: string[]) {
     super();
-    if (Array.isArray(variantsOrCases)) {
-      this._sqlType = { kind: "ENUM", variants: normalizeEnumVariants(variantsOrCases) };
-      return;
-    }
-    const cases: EnumCaseSqlType[] = [];
-    for (const [caseName, payload] of Object.entries(variantsOrCases)) {
-      if (!caseName) throw new Error("Enum case names cannot be empty strings.");
-      const fields: Column[] = [];
-      for (const [fieldName, builder] of Object.entries(
-        payload as unknown as Record<string, ColumnBuilder>,
-      )) {
-        if (fieldName === "type") {
-          throw new Error('Enum payload field name "type" is reserved for the discriminant.');
-        }
-        assertUserColumnNameAllowed(fieldName);
-        if (builder._references !== undefined) {
-          throw new Error("Enum payload fields cannot use references; use a UUID value instead.");
-        }
-        const field = builder._build(fieldName);
-        if (typeof field.sqlType !== "string") {
-          throw new Error(
-            "Payload enum v1 fields must be scalar columns; arrays and nested enums are not supported yet.",
-          );
-        }
-        if (containsReference(field.sqlType)) {
-          throw new Error(
-            "Enum payload fields cannot contain references; use UUID values instead.",
-          );
-        }
-        fields.push(field);
-      }
-      cases.push({ name: caseName, fields });
-    }
-    if (cases.length === 0) throw new Error("Payload enums must declare at least one case.");
-    if (new Set(cases.map((entry) => entry.name)).size !== cases.length) {
-      throw new Error("Enum case names must be unique.");
-    }
-    this._sqlType = { kind: "ENUM", cases };
+    this._sqlType = { kind: "ENUM", variants: normalizeEnumVariants(variants) };
   }
 }
 
@@ -630,7 +578,8 @@ class ArrayBuilder<T extends ColumnBuilder> extends BaseColumnBuilder {
   }
 
   _build(name: string): Column {
-    return { ...super._build(name), references: this._references };
+    const references = this._references;
+    return { ...super._build(name), ...(references === undefined ? {} : { references }) };
   }
 
   get _sqlType(): SqlType {
@@ -638,7 +587,7 @@ class ArrayBuilder<T extends ColumnBuilder> extends BaseColumnBuilder {
   }
 
   get _references(): string | undefined {
-    return this._element._references;
+    return super._references ?? this._element._references;
   }
 }
 
@@ -892,31 +841,12 @@ export const schemaColumns = {
   },
   enum: ((...input: unknown[]) => {
     if (input.length === 1 && typeof input[0] === "object" && input[0] !== null) {
-      return new EnumBuilder(input[0] as Record<string, ColumnBuilder>);
+      throw new Error(ENUM_CASES_NOT_SUPPORTED);
     }
     return new EnumBuilder(input as string[]);
-  }) as unknown as {
-    <const Variants extends readonly [string, ...string[]]>(
-      ...variants: Variants
-    ): EnumColumn<Variants>;
-    <const Cases extends Record<string, Record<string, AnyTypedColumnBuilder>>>(
-      cases: Cases,
-    ): EnumCasesColumn<
-      {
-        [Name in keyof Cases & string]: {
-          name: Name;
-          fields: {
-            [Field in keyof Cases[Name] & string]: Column & {
-              name: Field;
-              sqlType: ColumnBuilderSqlType<Cases[Name][Field]>;
-              nullable: ColumnBuilderOptional<Cases[Name][Field]>;
-              __jazzHasDefault: ColumnBuilderHasDefault<Cases[Name][Field]>;
-            };
-          }[keyof Cases[Name] & string][];
-        };
-      }[keyof Cases & string][]
-    >;
-  },
+  }) as unknown as <const Variants extends readonly [string, ...string[]]>(
+    ...variants: Variants
+  ) => EnumColumn<Variants>,
   rel,
   reverse,
   array: <Builder extends AnyTypedColumnBuilder>(element: Builder) =>
@@ -931,11 +861,11 @@ export const migrationOperations = {
   /**
    * Add a new column to the table
    */
-  add: new AddBuilder(),
+  add: /*#__PURE__*/ new AddBuilder(),
   /**
    * Drop a column from the table
    */
-  drop: new DropBuilder(),
+  drop: /*#__PURE__*/ new DropBuilder(),
   /**
    * Rename a column in the table
    */
@@ -944,43 +874,3 @@ export const migrationOperations = {
     oldName,
   }),
 };
-
-// ============================================================================
-// Schema side-effect collection
-// ============================================================================
-
-let collectedTables: Table[] = [];
-
-export function table<const T extends Record<string, ColumnBuilder>>(
-  name: string,
-  columns: T & NoExplicitIdColumn,
-): void {
-  if (arguments.length > 2) {
-    throw new Error(
-      "Inline table permissions are no longer supported in schema.ts. " +
-        "Define policies in permissions.ts with definePermissions(...).",
-    );
-  }
-
-  const cols: Column[] = [];
-  for (const [colName, builder] of Object.entries(columns as Record<string, ColumnBuilder>)) {
-    assertUserTableColumnNameAllowed(colName);
-    const column = builder._build(colName);
-    if (hasExternalProvenanceNameAllowance(builder)) column.allowExternalProvenanceName = true;
-    cols.push(column);
-  }
-  collectedTables.push({
-    name,
-    columns: cols,
-  });
-}
-
-export function getCollectedSchema(): Schema {
-  const schema = { tables: [...collectedTables] };
-  collectedTables = [];
-  return schema;
-}
-
-export function resetCollectedState(): void {
-  collectedTables = [];
-}

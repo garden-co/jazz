@@ -1,3 +1,5 @@
+import { warnSessionHookDeprecated } from "../session/deprecated-session-hook.js";
+import { SessionContext } from "./session-context.js";
 import { createContext, useContext, type JSX, type Accessor, Show } from "solid-js";
 import type { PublicSession } from "../runtime/context.js";
 import {
@@ -31,7 +33,10 @@ export function JazzClientProvider(props: JazzClientProviderProps) {
   return (
     <Show when={clientReady()} keyed fallback={props.fallback ?? null}>
       {(client) => (
-        <JazzClientContext.Provider value={client}>{props.children}</JazzClientContext.Provider>
+        // Its children read this client, not an enclosing <JazzProvider>'s session.
+        <SessionContext.Provider value={undefined}>
+          <JazzClientContext.Provider value={client}>{props.children}</JazzClientContext.Provider>
+        </SessionContext.Provider>
       )}
     </Show>
   );
@@ -64,7 +69,12 @@ export function useDb<TDb = Db>(): Accessor<TDb> {
   return () => client.db as TDb;
 }
 
+/**
+ * @deprecated Use `useJazzSession().snapshot().user`: the same user, with
+ * `user` as `accountId`. Warns once in development; removed in a later alpha.
+ */
 export function useSession(): Accessor<PublicSession | null> {
+  warnSessionHookDeprecated("useSession()", "useJazzSession().snapshot().user");
   const client = useJazzClient();
   return () => client.session;
 }

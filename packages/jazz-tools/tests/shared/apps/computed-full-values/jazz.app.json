@@ -1,0 +1,49 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "rows": {
+      "columns": {
+        "text": {
+          "type": "string",
+          "transform": "upperCase"
+        },
+        "json": {
+          "json": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "extra": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "title",
+              "extra"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "bytes": "bytes"
+      },
+      "computed": {
+        "summary": {
+          "type": "string",
+          "from": [
+            "text",
+            "json",
+            "bytes"
+          ]
+        }
+      }
+    }
+  },
+  "transforms": {
+    "upperCase": {
+      "stored": "string",
+      "view": "string"
+    }
+  }
+}

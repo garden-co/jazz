@@ -386,9 +386,6 @@ fn schema_hash_matches_portable_column_types_cross_runtime_fixture() {
             "json",
             "enum",
             "enum-reordered",
-            "enum-payload",
-            "enum-payload-reordered",
-            "enum-payload-nullable-field",
             "timestamp",
             "uuid",
             "bytea",
@@ -526,25 +523,6 @@ fn schema_hash_matches_default_values_cross_runtime_fixture() {
                 variants: vec!["draft".into(), "active".into()],
             },
             Some(Value::Text("active".into())),
-        ),
-        (
-            "enum-payload",
-            ColumnType::EnumPayload {
-                cases: vec![
-                    EnumCaseDescriptor {
-                        name: "created".into(),
-                        fields: vec![ColumnDescriptor::new("title", ColumnType::Text)],
-                    },
-                    EnumCaseDescriptor {
-                        name: "deleted".into(),
-                        fields: vec![],
-                    },
-                ],
-            },
-            Some(Value::Enum {
-                case: "created".into(),
-                values: vec![Value::Text("hello".into())],
-            }),
         ),
         ("null", ColumnType::Text, Some(Value::Null)),
         ("absent", ColumnType::Text, None),
@@ -1068,13 +1046,9 @@ fn value_json_shape_is_pinned() {
             id: None,
             values: vec![],
         },
-        Value::Enum {
-            case: "c".into(),
-            values: vec![Value::Array(vec![Value::Integer(2)])],
-        },
         Value::Null,
     ]);
-    let json = r#"{"type":"Array","value":[{"type":"Integer","value":-1},{"type":"BigInt","value":"-9223372036854775808"},{"type":"Double","value":0.5},{"type":"Boolean","value":false},{"type":"Text","value":"t"},{"type":"Timestamp","value":9},{"type":"Uuid","value":"07070707-0707-0707-0707-070707070707"},{"type":"TransactionId","value":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]},{"type":"Bytea","value":[0,255]},{"type":"Row","value":{"id":"07070707-0707-0707-0707-070707070707","values":[{"type":"Null"}]}},{"type":"Row","value":{"values":[]}},{"type":"Enum","value":{"case":"c","values":[{"type":"Array","value":[{"type":"Integer","value":2}]}]}},{"type":"Null"}]}"#;
+    let json = r#"{"type":"Array","value":[{"type":"Integer","value":-1},{"type":"BigInt","value":"-9223372036854775808"},{"type":"Double","value":0.5},{"type":"Boolean","value":false},{"type":"Text","value":"t"},{"type":"Timestamp","value":9},{"type":"Uuid","value":"07070707-0707-0707-0707-070707070707"},{"type":"TransactionId","value":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]},{"type":"Bytea","value":[0,255]},{"type":"Row","value":{"id":"07070707-0707-0707-0707-070707070707","values":[{"type":"Null"}]}},{"type":"Row","value":{"values":[]}},{"type":"Null"}]}"#;
     assert_eq!(serde_json::to_string(&value).unwrap(), json);
     assert_eq!(serde_json::from_str::<Value>(json).unwrap(), value);
     let row = |values| Value::Row { id: None, values };
@@ -1082,13 +1056,6 @@ fn value_json_shape_is_pinned() {
         (
             r#"{"value":[{"value":{"values":[{"type":"Null"}]},"type":"Row"}],"type":"Array"}"#,
             Value::Array(vec![row(vec![Value::Null])]),
-        ),
-        (
-            r#"{"value":[{"value":["c",[]],"type":"Enum"}],"type":"Array"}"#,
-            Value::Array(vec![Value::Enum {
-                case: "c".into(),
-                values: vec![],
-            }]),
         ),
         (
             r#"{"type":"Row","value":{"values":[],"extra":1}}"#,
@@ -1113,13 +1080,9 @@ fn value_json_shape_is_pinned() {
             "missing field `values` at line 1 column 33",
         ),
         (
-            r#"{"type":"Enum","value":{"values":[]}}"#,
-            "missing field `case` at line 1 column 36",
-        ),
-        (
             r#"{"type":"Nope"}"#,
             "unknown variant `Nope`, expected one of `Integer`, `BigInt`, `Double`, `Boolean`, \
-             `Text`, `Timestamp`, `Uuid`, `TransactionId`, `Bytea`, `Array`, `Row`, `Enum`, \
+             `Text`, `Timestamp`, `Uuid`, `TransactionId`, `Bytea`, `Array`, `Row`, \
              `Null` at line 1 column 14",
         ),
         (
@@ -1147,4 +1110,42 @@ fn value_json_shape_is_pinned() {
         postcard::from_bytes::<Value>(&[0, 1]).unwrap_err(),
         postcard::Error::SerdeDeCustom
     );
+}
+
+/// A column type 2.0.0-alpha.64 accepted, an enum whose cases carry fields,
+/// still decodes from a stored schema and hashes as .64 hashed it (these
+/// are .64's cross-runtime fixture hashes), so a store whose catalogue
+/// holds such a version opens.
+#[test]
+fn legacy_payload_enum_columns_hash_as_alpha_64_did() {
+    let cases = [
+        (
+            r#"{"type":"EnumPayload","cases":[{"name":"created","fields":[{"name":"title","column_type":{"type":"Text"},"nullable":false}]},{"name":"deleted","fields":[]}]}"#,
+            "2556ae3abd5c72c359507a583419b0eec11d12f0d4fc9dd6bd06f7276097281f",
+        ),
+        (
+            r#"{"type":"EnumPayload","cases":[{"name":"deleted","fields":[]},{"name":"created","fields":[{"name":"title","column_type":{"type":"Text"},"nullable":false}]}]}"#,
+            "89165a453f1d1805ffa2af2eaaf4d7014399a8d44ef0be690c538a610f1ea135",
+        ),
+        (
+            r#"{"type":"EnumPayload","cases":[{"name":"created","fields":[{"name":"title","column_type":{"type":"Text"},"nullable":true}]},{"name":"deleted","fields":[]}]}"#,
+            "a820544a5c3f8e7632d9f578344fccfcf4e6ced02aae9b977359b53fc977bb3f",
+        ),
+        (
+            r#"{"type":"Array","element":{"type":"Row","columns":[{"name":"path","column_type":{"type":"Text"},"nullable":false},{"name":"entries","column_type":{"type":"Array","element":{"type":"Row","columns":[{"name":"score","column_type":{"type":"Double"},"nullable":false},{"name":"kind","column_type":{"type":"Enum","variants":["a","b"]},"nullable":true}]}},"nullable":false},{"name":"event","column_type":{"type":"EnumPayload","cases":[{"name":"changed","fields":[{"name":"by","column_type":{"type":"Uuid"},"nullable":false},{"name":"diff","column_type":{"type":"Bytea"},"nullable":true}]}]},"nullable":true}]}}"#,
+            "e19e301349458093efd4c414b765d50e7f4bdff4bf5150874e9551aa9266f398",
+        ),
+    ];
+    for (json, hash) in cases {
+        let column_type: ColumnType = serde_json::from_str(json).expect(json);
+        // It writes back as it was read.
+        assert_eq!(
+            serde_json::to_value(&column_type).unwrap(),
+            serde_json::from_str::<serde_json::Value>(json).unwrap()
+        );
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("values").column("value", column_type))
+            .build();
+        assert_eq!(SchemaHash::compute(&schema).to_hex(), hash, "{json}");
+    }
 }

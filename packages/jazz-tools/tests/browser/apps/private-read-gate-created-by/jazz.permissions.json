@@ -1,0 +1,12 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "todos": {
+      "read": "$createdBy.account = session.user",
+      "insert": "true",
+      "update": "$createdBy.account = session.user",
+      "delete": "$createdBy.account = session.user"
+    }
+  }
+}

@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "undici";
 import type { RuntimeSubscriptionDelta, WasmSchema } from "../../drivers/types.js";
-import { deploy } from "../../dev/catalogue.js";
+import { publishLoadedDeployment } from "../../dev/catalogue.js";
 import { fetchSchemaHashes, fetchStoredWasmSchema } from "../../dev/catalogue-api.js";
-import { startLocalJazzServer, type LocalJazzServerHandle } from "../../testing/index.js";
+import { startLocalJazzServer, testApp, type LocalJazzServerHandle } from "../../testing/index.js";
+import { boundApp } from "../../typed-app.js";
 import { JazzClient } from "../client.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "../testing/wasm-runtime-test-utils.js";
 
@@ -447,14 +448,26 @@ describe("NativeRuntimeAdapter server convergence", () => {
   );
 });
 
+/** `schema`'s columns as a `jazz.app.json`: its hash, which the server checks against `schema`. */
+const schemaApp = testApp({
+  tables: { todos: { columns: { title: "string", done: "boolean" } } },
+});
+
+/** Publish `schema` as is, allowing everything, as a deployment. */
 async function publishSchema(server: LocalJazzServerHandle): Promise<{ hash: string }> {
-  const result = await deploy({
-    appId: server.appId,
-    serverUrl: server.url,
-    adminSecret: server.adminSecret,
-    schema,
-    permissions: allowAll(schema),
-  });
+  const hash = boundApp(schemaApp.wasmSchema)!.schema.current;
+  const result = await publishLoadedDeployment(
+    { appId: server.appId, serverUrl: server.url, adminSecret: server.adminSecret },
+    {
+      deployment: {
+        targetSchemaHash: hash,
+        schemas: [{ hash, schema: { tables: schema } }],
+        migrations: [],
+        permissions: allowAll(schema),
+      },
+      warnings: [],
+    },
+  );
 
   return { hash: result.schema.hash };
 }

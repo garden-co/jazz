@@ -645,6 +645,61 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
+  it("SO-U14d a rejected entry with readers subscribes again once the link recovers", async () => {
+    const harness = createUnitHarness();
+    try {
+      const { entry } = harness.makeEntry();
+      const onError = vi.fn();
+      const onReset = vi.fn();
+      const onfulfilled = vi.fn();
+      const unsubscribe = entry.subscribe({ onError, onReset, onfulfilled });
+      const refusal = Object.assign(new Error("server authority changed"), {
+        code: "authority_changed",
+      });
+      harness.emitError(0, refusal);
+      expect(entry.status).toBe("rejected");
+      expect(onError).toHaveBeenCalledWith(refusal);
+
+      harness.manager.retryRejected();
+
+      expect(harness.calls).toHaveLength(2);
+      expect(harness.calls[0]!.unsubscribe).toHaveBeenCalledOnce();
+      expect(onReset).toHaveBeenCalledOnce();
+      expect(entry.status).toBe("pending");
+      // The old subscription's late events are ignored.
+      harness.emitError(0, new Error("late"));
+      expect(entry.status).toBe("pending");
+
+      harness.emit(1, makeDelta([makeTodo("1")]));
+      expect(entry.status).toBe("fulfilled");
+      expect(onfulfilled).toHaveBeenLastCalledWith([makeTodo("1")]);
+      await expect(entry.promise).resolves.toEqual([makeTodo("1")]);
+
+      // Nothing to retry: a fulfilled entry keeps its subscription.
+      harness.manager.retryRejected();
+      expect(harness.calls).toHaveLength(2);
+      unsubscribe();
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U14e a rejected entry nobody reads is not retried", async () => {
+    const harness = createUnitHarness();
+    try {
+      const { entry } = harness.makeEntry();
+      harness.emitError(0, new Error("refused"));
+      expect(entry.status).toBe("rejected");
+
+      harness.manager.retryRejected();
+
+      expect(harness.calls).toHaveLength(1);
+      expect(entry.status).toBe("rejected");
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
   it("SO-U14a asynchronous subscription admission failure marks entry rejected", async () => {
     const harness = createUnitHarness();
     const admissionError = new Error("browser storage open failed");
@@ -988,6 +1043,46 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
         expect(harness.calls[1]?.unsubscribe).toHaveBeenCalledOnce();
         await vi.advanceTimersByTimeAsync(29_000);
         expect((harness.manager as any).slots.has(key)).toBe(false);
+      } finally {
+        await harness.manager.shutdown();
+      }
+    });
+
+    it("a returning listener hears a failed resubscription once", async () => {
+      vi.useFakeTimers();
+      const harness = createUnitHarness();
+      try {
+        const { key } = await opened(harness);
+        await vi.advanceTimersByTimeAsync(1_000);
+        const failure = new Error("resubscribe failed");
+        harness.setThrowOnSubscribe(failure);
+        const onError = vi.fn();
+        const onfulfilled = vi.fn();
+        const off = harness.manager.getCacheEntry<Todo>(key).subscribe({ onError, onfulfilled });
+        expect(onError).toHaveBeenCalledOnce();
+        expect(onError).toHaveBeenCalledWith(failure);
+        expect(onfulfilled).not.toHaveBeenCalled();
+        expect(harness.manager.peekState<Todo>(key)).toMatchObject({ status: "rejected" });
+        off();
+      } finally {
+        await harness.manager.shutdown();
+      }
+    });
+
+    it("a returning listener hears an asynchronous resubscription failure once", async () => {
+      vi.useFakeTimers();
+      const harness = createUnitHarness();
+      try {
+        const { key } = await opened(harness);
+        await vi.advanceTimersByTimeAsync(1_000);
+        const failure = new Error("admission refused");
+        harness.setNextReadiness(Promise.reject(failure));
+        const onError = vi.fn();
+        const off = harness.manager.getCacheEntry<Todo>(key).subscribe({ onError });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(onError).toHaveBeenCalledOnce();
+        expect(onError).toHaveBeenCalledWith(failure);
+        off();
       } finally {
         await harness.manager.shutdown();
       }

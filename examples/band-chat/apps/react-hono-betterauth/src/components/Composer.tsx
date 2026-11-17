@@ -9,7 +9,7 @@ import {
   Thumbnail,
   Token,
 } from "@astryxdesign/core";
-import { app } from "../../schema";
+import { app } from "../../jazz.generated";
 import { attachmentAccept, attachmentProblem, formatBytes, isImageType } from "../lib/attachments";
 import { useObjectUrl } from "../lib/use-object-url";
 import { writeRejectionReason } from "../lib/write-rejection";

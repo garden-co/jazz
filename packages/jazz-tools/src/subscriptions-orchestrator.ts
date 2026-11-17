@@ -239,6 +239,26 @@ export class SubscriptionsOrchestrator {
     }
   }
 
+  /**
+   * The upstream link is connected again (after `db.reconnect()`, a network
+   * outage, or a store reset). A rejected entry has no subscription left, so
+   * without this a reader that stays mounted would keep the rejection for
+   * good, even when it no longer holds (an authority change the reconnect
+   * fixed, say). Every rejected entry that still has readers subscribes again
+   * from `pending`; one whose readers left is destroyed on its cleanup
+   * deadline as before. An error that does hold (an invalid query) is
+   * reported again, once per recovery.
+   */
+  retryRejected(): void {
+    for (const slot of Array.from(this.slots.values())) {
+      if (slot.phase !== "live") continue;
+      const entry = slot.entry;
+      if (entry.state.status !== "rejected" || entry.listeners.size === 0) continue;
+      this.trace("retry", entry);
+      this.resubscribeEntry(entry);
+    }
+  }
+
   async shutdown(): Promise<void> {
     for (const slot of this.slots.values()) {
       if (slot.phase === "live") this.destroyEntry(slot.entry);
@@ -356,9 +376,15 @@ export class SubscriptionsOrchestrator {
       subscribe: (callbacks) => {
         this.cancelCleanup(entry);
         entry.listeners.add(callbacks);
-        if (entry.parked) this.unparkEntry(entry);
+        // A resubscription that fails at once already told every listener,
+        // this one included.
+        let told = false;
+        if (entry.parked) {
+          this.unparkEntry(entry);
+          told = entry.state.status === "rejected";
+        }
 
-        if (entry.state.status === "rejected") {
+        if (entry.state.status === "rejected" && !told) {
           callbacks.onError?.(entry.state.error);
         }
 
@@ -460,6 +486,8 @@ export class SubscriptionsOrchestrator {
       entry.unsubscribe();
     }
     entry.unsubscribe = undefined;
+    // Whatever the old subscription still delivers is ignored.
+    entry.generation += 1;
     entry.parked = false;
     entry.listeners.clear();
     this.cancelCleanup(entry);
@@ -544,7 +572,7 @@ export class SubscriptionsOrchestrator {
   /**
    * Reset an entry to a fresh `pending` state with a new deferred, so a later
    * suspense read awaits the reload rather than the stale resolved promise.
-   * Used by session-change resubscription.
+   * Used by session-change resubscription and by {@link retryRejected}.
    */
   private resetEntryToPending<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
     const next = makeDeferred<T[]>();

@@ -7,16 +7,23 @@ use base64::Engine as _;
 
 use crate::tools::ObjectId;
 use crate::tools::public_schema::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, EnumCaseDescriptor, HistoryRetention,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, HistoryRetention, LegacyEnumCase,
     RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 
 use super::super::published::{PublishLensOp, PublishMigrationRequest, PublishTableLens};
 use super::json::Json;
-use super::{Codegen, CodegenRelation, CodegenTable, TsOnlyColumn};
+use super::{
+    Codegen, CodegenRelation, CodegenTable, ComputedField, FieldType, TransformDecl, TsOnlyColumn,
+};
 
 /// A refusal at a JSON path of the app file.
 pub type Refusal = (String, String);
+
+/// Why an `enum` given as an object of cases with fields is refused: Jazz
+/// had such columns declared but no store could hold them, and they were
+/// removed in 2.0.0-alpha.66.
+const PAYLOAD_ENUM_REFUSAL: &str = "enum cases with fields are not supported; use a string enum plus a nullable column per field, or a json column (see https://github.com/garden-co/jazz/issues/5758)";
 
 fn refuse(path: impl Into<String>, message: impl Into<String>) -> Refusal {
     (path.into(), message.into())
@@ -35,7 +42,55 @@ pub struct AppFile {
     /// Migrations, with `from`/`to` still as version names (`None` = current).
     pub migrations: Vec<(String, Option<String>, Vec<PublishTableLens>)>,
     pub codegen: Codegen,
+    /// What loads but is ignored (a .63 file's `slices` and `tsOnly`).
+    pub warnings: Vec<String>,
 }
+
+// The keys each object of the file takes (besides `$comment`), which the
+// JSON Schema in docs/public/schemas/ must list too.
+pub const TOP_KEYS: &[&str] = &[
+    // Legacy (before alpha.66): `$schema` carries the version now.
+    "format",
+    "$schema",
+    "$generated",
+    "tables",
+    "history",
+    "migrations",
+    "transforms",
+    "slices",
+];
+pub const TABLE_KEYS: &[&str] = &[
+    "columns",
+    "relations",
+    "indexes",
+    "branchBy",
+    "history",
+    "computed",
+    "tsOnly",
+];
+pub const COLUMN_KEYS: &[&str] = &[
+    "type",
+    "enum",
+    "json",
+    "array",
+    "optional",
+    "default",
+    "merge",
+    "references",
+    "transform",
+];
+pub const MIGRATION_KEYS: &[&str] = &[
+    "name",
+    "from",
+    "to",
+    "createTables",
+    "dropTables",
+    "renameTables",
+    "migrate",
+];
+pub const TRANSFORM_KEYS: &[&str] = &["stored", "view"];
+pub const COMPUTED_KEYS: &[&str] = &["type", "from"];
+pub const VERSION_KEYS: &[&str] = &["tables"];
 
 /// Keys of `object` that aren't `allowed` (nor `$comment`) are refused.
 fn only_keys(object: &[(String, Json)], allowed: &[&str], path: &str) -> Result<(), Refusal> {
@@ -110,30 +165,67 @@ fn identifier(name: &str, path: &str) -> Result<(), Refusal> {
 
 pub fn read(root: &Json) -> Result<AppFile, Refusal> {
     let top = object(root, "(top)")?;
-    only_keys(
-        top,
-        &[
-            "format",
-            "$schema",
-            "tables",
-            "history",
-            "migrations",
-            "slices",
-        ],
-        "(top)",
-    )?;
+    only_keys(top, TOP_KEYS, "(top)")?;
+    let mut warnings = Vec::new();
     let tables_json = root
         .get("tables")
         .ok_or_else(|| refuse("(top)", "no `tables`"))?;
     let mut codegen = Codegen::default();
-    let current = read_tables(tables_json, "tables", Some(&mut codegen))?;
+    let current = read_tables(tables_json, "tables", Some((&mut codegen, &mut warnings)))?;
+    refuse_current_enum_cases(&current)?;
+    if let Some(transforms) = root.get("transforms") {
+        for (name, spec) in object(transforms, "transforms")? {
+            let path = format!("transforms.{name}");
+            identifier(name, &path)?;
+            let fields = object(spec, &path)?;
+            only_keys(fields, TRANSFORM_KEYS, &path)?;
+            let side = |key: &str| -> Result<ColumnType, Refusal> {
+                let value = spec.get(key).ok_or_else(|| {
+                    refuse(
+                        &path,
+                        format!(
+                            "a transform needs `{key}`, e.g. {{ \"stored\": \"timestamp\", \"view\": \"string\" }}"
+                        ),
+                    )
+                })?;
+                let sub = format!("{path}.{key}");
+                let column = read_column(key, value, &sub)?;
+                if column.nullable {
+                    return Err(refuse(
+                        sub,
+                        "a transform's types carry no `?`: the column it is named on says whether it is optional",
+                    ));
+                }
+                plain_type(&column, value, &sub)?;
+                Ok(column.column_type)
+            };
+            let decl = TransformDecl {
+                stored: side("stored")?,
+                view: side("view")?,
+            };
+            codegen.transforms.insert(name.clone(), decl);
+        }
+    }
 
     let mut history = Vec::new();
     if let Some(versions) = root.get("history") {
         for (name, version) in object(versions, "history")? {
             let path = format!("history.{name}");
+            // JavaScript moves integer keys below 2^32 - 1 first in every
+            // object, so a tool round-tripping the file would reorder such
+            // versions. (A 12-hex short hash never is one: twelve digits
+            // are either at least 10^11 or start with a zero.)
+            if is_array_index(name) {
+                return Err(refuse(
+                    &path,
+                    format!(
+                        "`{name}` can't name a version: JavaScript reorders integer keys, so \
+                         `history`'s order wouldn't survive a JS tool; use e.g. `v{name}`"
+                    ),
+                ));
+            }
             let fields = object(version, &path)?;
-            only_keys(fields, &["tables"], &path)?;
+            only_keys(fields, VERSION_KEYS, &path)?;
             let tables = version
                 .get("tables")
                 .ok_or_else(|| refuse(&path, "no `tables`"))?;
@@ -155,25 +247,57 @@ pub fn read(root: &Json) -> Result<AppFile, Refusal> {
         }
     }
 
-    if let Some(slices) = root.get("slices") {
-        for (name, tables) in object(slices, "slices")? {
-            codegen
-                .slices
-                .insert(name.clone(), names(tables, &format!("slices.{name}"))?);
-        }
+    if root.get("slices").is_some() {
+        warnings.push(
+            "slices: schema slicing is gone in alpha.66, so `slices` is ignored; \
+             `jazz-tools upgrade` removes it"
+                .to_string(),
+        );
     }
     Ok(AppFile {
         current,
         history,
         migrations,
         codegen,
+        warnings,
     })
+}
+
+/// Whether JavaScript treats `key` as an array index (a canonical integer
+/// below 2^32 - 1), which objects order before every other key.
+fn is_array_index(key: &str) -> bool {
+    key.parse::<u32>()
+        .is_ok_and(|n| n < u32::MAX && n.to_string() == key)
+}
+
+/// The current tables may not declare an enum whose cases carry fields;
+/// an earlier version in `history`, and a migration from it, may (Jazz
+/// read them before 2.0.0-alpha.66), so such an app can migrate away.
+fn refuse_current_enum_cases(current: &Schema) -> Result<(), Refusal> {
+    fn declares(ty: &ColumnType) -> bool {
+        match ty {
+            ColumnType::LegacyEnumPayload { .. } => true,
+            ColumnType::Array { element } => declares(element),
+            _ => false,
+        }
+    }
+    for (table, schema) in current.iter() {
+        for column in &schema.columns.columns {
+            if declares(&column.column_type) {
+                return Err(refuse(
+                    format!("tables.{}.columns.{}", table.as_str(), column.name_str()),
+                    PAYLOAD_ENUM_REFUSAL,
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn read_tables(
     value: &Json,
     path: &str,
-    mut codegen: Option<&mut Codegen>,
+    mut codegen: Option<(&mut Codegen, &mut Vec<String>)>,
 ) -> Result<Schema, Refusal> {
     let mut schema = Schema::new();
     let mut forwards: Vec<(String, String, String)> = Vec::new();
@@ -181,26 +305,72 @@ fn read_tables(
         let path = format!("{path}.{name}");
         identifier(name, &path)?;
         let fields = object(table, &path)?;
-        only_keys(
-            fields,
-            &[
-                "columns",
-                "relations",
-                "indexes",
-                "branchBy",
-                "history",
-                "tsOnly",
-            ],
-            &path,
-        )?;
+        only_keys(fields, TABLE_KEYS, &path)?;
+        let current = codegen.is_some();
+        for key in ["computed", "tsOnly"] {
+            if !current && table.get(key).is_some() {
+                return Err(refuse(
+                    format!("{path}.{key}"),
+                    "only the current `tables` declare computed fields and transforms",
+                ));
+            }
+        }
         let columns_json = table
             .get("columns")
             .ok_or_else(|| refuse(&path, "no `columns`"))?;
         let mut columns = Vec::new();
+        let mut transforms = BTreeMap::new();
         for (column, spec) in object(columns_json, &format!("{path}.columns"))? {
             let column_path = format!("{path}.columns.{column}");
             identifier(column, &column_path)?;
+            if let Some(transform) = spec.get("transform") {
+                let transform_path = format!("{column_path}.transform");
+                if !current {
+                    return Err(refuse(
+                        transform_path,
+                        "only the current `tables` declare computed fields and transforms",
+                    ));
+                }
+                let name = string(transform, &transform_path)?;
+                transforms.insert(column.clone(), name.to_string());
+            }
             columns.push(read_column(column, spec, &column_path)?);
+        }
+        let mut computed = Vec::new();
+        if let Some(fields) = table.get("computed") {
+            for (field, spec) in object(fields, &format!("{path}.computed"))? {
+                let field_path = format!("{path}.computed.{field}");
+                identifier(field, &field_path)?;
+                let entries = object(spec, &field_path)?;
+                only_keys(entries, COMPUTED_KEYS, &field_path)?;
+                let example = "e.g. { \"type\": \"int\", \"from\": [\"score\"] }";
+                let ty = spec.get("type").ok_or_else(|| {
+                    refuse(
+                        &field_path,
+                        format!("a computed field needs `type`, {example}"),
+                    )
+                })?;
+                let type_path = format!("{field_path}.type");
+                let column = read_column(field, ty, &type_path)?;
+                plain_type(&column, ty, &type_path)?;
+                let from = names(
+                    spec.get("from").ok_or_else(|| {
+                        refuse(
+                            &field_path,
+                            format!("a computed field needs `from`, {example}"),
+                        )
+                    })?,
+                    &format!("{field_path}.from"),
+                )?;
+                computed.push(ComputedField {
+                    name: field.clone(),
+                    field_type: FieldType {
+                        column_type: column.column_type,
+                        nullable: column.nullable,
+                    },
+                    from,
+                });
+            }
         }
         let mut relations = BTreeMap::new();
         if let Some(rels) = table.get("relations") {
@@ -264,6 +434,42 @@ fn read_tables(
                 }
             }
         }
+        // An index names stored columns (a composite one also `$createdAt`
+        // or `$updatedAt`).
+        let column_names: Vec<&str> = columns.iter().map(|c| c.name_str()).collect();
+        let check_index =
+            |column: &str, item_path: String, composite: bool| -> Result<(), Refusal> {
+                if column_names.contains(&column)
+                    || (composite && matches!(column, "$createdAt" | "$updatedAt"))
+                {
+                    return Ok(());
+                }
+                if computed.iter().any(|f| f.name == column) {
+                    return Err(refuse(
+                        item_path,
+                        format!(
+                            "`{column}` is a computed field, which isn't stored, so it can't be \
+                         indexed; index the columns it's computed from"
+                        ),
+                    ));
+                }
+                Err(refuse(
+                    item_path,
+                    format!(
+                        "table {name} has no column `{column}`{}",
+                        super::expr::did_you_mean(column, column_names.iter().copied())
+                    ),
+                ))
+            };
+        for (i, column) in indexed_columns.iter().flatten().enumerate() {
+            check_index(column, format!("{path}.indexes[{i}]"), false)?;
+        }
+        for (i, index) in composite_indexes.iter().enumerate() {
+            for column in index {
+                check_index(column, format!("{path}.indexes"), true)
+                    .map_err(|(p, m)| (format!("{p}.composite[{i}]"), m))?;
+            }
+        }
         let branch_by = match table.get("branchBy") {
             Some(value) => names(value, &format!("{path}.branchBy"))?,
             None => Vec::new(),
@@ -280,6 +486,12 @@ fn read_tables(
         };
         let mut ts_only = Vec::new();
         if let Some(fields) = table.get("tsOnly") {
+            if let Some((_, warnings)) = codegen.as_mut() {
+                warnings.push(format!(
+                    "{path}.tsOnly: `tsOnly` (written before alpha.66) is ignored; \
+                     declare those fields in schema.ts with `s.computed(…)` or `.transform(…)`"
+                ));
+            }
             for (field, kind) in object(fields, &format!("{path}.tsOnly"))? {
                 ts_only.push(match kind.as_str() {
                     Some("computed") => TsOnlyColumn::Computed {
@@ -297,12 +509,21 @@ fn read_tables(
                 });
             }
         }
-        if let Some(codegen) = codegen.as_deref_mut()
-            && (!relations.is_empty() || !ts_only.is_empty())
+        if let Some((codegen, _)) = codegen.as_mut()
+            && (!relations.is_empty()
+                || !ts_only.is_empty()
+                || !computed.is_empty()
+                || !transforms.is_empty())
         {
-            codegen
-                .tables
-                .insert(name.clone(), CodegenTable { relations, ts_only });
+            codegen.tables.insert(
+                name.clone(),
+                CodegenTable {
+                    relations,
+                    computed,
+                    transforms,
+                    ts_only,
+                },
+            );
         }
         schema.insert(
             TableName::from(name.as_str()),
@@ -345,6 +566,29 @@ fn read_tables(
     Ok(schema)
 }
 
+/// A computed field's or transform's type: a type and `?`, without the
+/// options only a stored column has.
+fn plain_type(column: &ColumnDescriptor, spec: &Json, path: &str) -> Result<(), Refusal> {
+    let option = if spec.get("transform").is_some() {
+        Some("transform")
+    } else if column.default.is_some() {
+        Some("default")
+    } else if column.merge_strategy.is_some() {
+        Some("merge")
+    } else if column.references.is_some() {
+        Some("references")
+    } else {
+        None
+    };
+    match option {
+        Some(option) => Err(refuse(
+            format!("{path}.{option}"),
+            format!("`{option}` is for stored columns; this is a type only"),
+        )),
+        None => Ok(()),
+    }
+}
+
 fn scalar(name: &str) -> Option<ColumnType> {
     Some(match name {
         "string" => ColumnType::Text,
@@ -375,20 +619,7 @@ fn read_column(name: &str, spec: &Json, path: &str) -> Result<ColumnDescriptor, 
     let (column_type, mut nullable) = read_type(spec, path)?;
     let mut descriptor = ColumnDescriptor::new(name, column_type);
     if let Json::Object(fields) = spec {
-        only_keys(
-            fields,
-            &[
-                "type",
-                "enum",
-                "json",
-                "array",
-                "optional",
-                "default",
-                "merge",
-                "references",
-            ],
-            path,
-        )?;
+        only_keys(fields, COLUMN_KEYS, path)?;
         if let Some(optional) = spec.get("optional") {
             match optional {
                 Json::Bool(b) => nullable |= b,
@@ -468,7 +699,8 @@ fn read_type(spec: &Json, path: &str) -> Result<(ColumnType, bool), Refusal> {
                         Json::Array(_) => ColumnType::Enum {
                             variants: names(value, &sub)?,
                         },
-                        Json::Object(cases) => ColumnType::EnumPayload {
+                        // Only history may hold one (see `refuse_current_enum_cases`).
+                        Json::Object(cases) => ColumnType::LegacyEnumPayload {
                             cases: cases
                                 .iter()
                                 .map(|(case, fields)| {
@@ -483,7 +715,7 @@ fn read_type(spec: &Json, path: &str) -> Result<(ColumnType, bool), Refusal> {
                                             )
                                         })
                                         .collect::<Result<_, _>>()?;
-                                    Ok(EnumCaseDescriptor {
+                                    Ok(LegacyEnumCase {
                                         name: case.clone(),
                                         fields,
                                     })
@@ -556,29 +788,6 @@ fn read_value(value: &Json, ty: &ColumnType, path: &str) -> Result<Value, Refusa
                 .map(|(i, item)| read_value(item, element, &format!("{path}[{i}]")))
                 .collect::<Result<_, _>>()?,
         ),
-        (ColumnType::EnumPayload { cases }, Json::Object(entries)) if entries.len() == 1 => {
-            let (case, fields) = &entries[0];
-            let descriptor = cases
-                .iter()
-                .find(|c| &c.name == case)
-                .ok_or_else(|| refuse(path, format!("unknown case `{case}`")))?;
-            let values = descriptor
-                .fields
-                .iter()
-                .map(|field| {
-                    let value = fields.get(field.name_str()).unwrap_or(&Json::Null);
-                    read_value(
-                        value,
-                        &field.column_type,
-                        &format!("{path}.{case}.{}", field.name_str()),
-                    )
-                })
-                .collect::<Result<_, _>>()?;
-            Value::Enum {
-                case: case.clone(),
-                values,
-            }
-        }
         _ => return Err(wrong()),
     })
 }
@@ -590,18 +799,7 @@ fn read_migration(
     current: &Schema,
 ) -> Result<(String, Option<String>, Vec<PublishTableLens>), Refusal> {
     let fields = object(item, path)?;
-    only_keys(
-        fields,
-        &[
-            "from",
-            "to",
-            "createTables",
-            "dropTables",
-            "renameTables",
-            "migrate",
-        ],
-        path,
-    )?;
+    only_keys(fields, MIGRATION_KEYS, path)?;
     let version = |key: &str| -> Result<Option<String>, Refusal> {
         let Some(value) = item.get(key) else {
             return Ok(None);
@@ -618,6 +816,9 @@ fn read_migration(
         }
         Ok(Some(name.to_string()))
     };
+    if let Some(name) = item.get("name") {
+        string(name, &format!("{path}.name"))?;
+    }
     let from = version("from")?
         .ok_or_else(|| refuse(path, "a migration needs `from`, a version of `history`"))?;
     let to = version("to")?;
@@ -660,8 +861,16 @@ fn read_migration(
     }
     if let Some(migrate) = item.get("migrate") {
         for (table, columns) in object(migrate, &format!("{path}.migrate"))? {
+            if table == "$comment" {
+                string(columns, &format!("{path}.migrate.$comment"))?;
+                continue;
+            }
             let mut l = lens(&mut lenses, table);
             for (column, op) in object(columns, &format!("{path}.migrate.{table}"))? {
+                if column == "$comment" {
+                    string(op, &format!("{path}.migrate.{table}.$comment"))?;
+                    continue;
+                }
                 let op_path = format!("{path}.migrate.{table}.{column}");
                 let fields = object(op, &op_path)?;
                 let ty_in = |schema: &Schema, key: &str| -> Result<ColumnType, Refusal> {
@@ -752,16 +961,10 @@ pub fn write(
     migrations: &[(Option<String>, Option<String>, &PublishMigrationRequest)],
     codegen: &Codegen,
 ) -> Result<Json, String> {
-    let mut top = vec![
-        (
-            "format".to_string(),
-            Json::Number(super::FORMAT.to_string()),
-        ),
-        (
-            "tables".to_string(),
-            write_tables(current, Some(codegen)).map_err(|e| format!("tables.{e}"))?,
-        ),
-    ];
+    let mut top = vec![(
+        "tables".to_string(),
+        write_tables(current, Some(codegen)).map_err(|e| format!("tables.{e}"))?,
+    )];
     if !history.is_empty() {
         top.push((
             "history".into(),
@@ -797,24 +1000,34 @@ pub fn write(
             ),
         ));
     }
-    if !codegen.slices.is_empty() {
+    if !codegen.transforms.is_empty() {
         top.push((
-            "slices".into(),
+            "transforms".into(),
             Json::Object(
                 codegen
-                    .slices
+                    .transforms
                     .iter()
-                    .map(|(name, tables)| {
-                        (
+                    .map(|(name, decl)| {
+                        Ok((
                             name.clone(),
-                            Json::Array(tables.iter().map(Json::string).collect()),
-                        )
+                            Json::Object(vec![
+                                ("stored".into(), write_type(&decl.stored)?),
+                                ("view".into(), write_type(&decl.view)?),
+                            ]),
+                        ))
                     })
-                    .collect(),
+                    .collect::<Result<_, String>>()
+                    .map_err(|e| format!("transforms: {e}"))?,
             ),
         ));
     }
     Ok(Json::Object(top))
+}
+
+/// A history version's `tables`: a schema without relations, computed fields
+/// or transforms.
+pub fn write_version_tables(schema: &Schema) -> Result<Json, String> {
+    write_tables(schema, None)
 }
 
 fn write_tables(schema: &Schema, codegen: Option<&Codegen>) -> Result<Json, String> {
@@ -837,11 +1050,12 @@ fn write_tables(schema: &Schema, codegen: Option<&Codegen>) -> Result<Json, Stri
                     .iter()
                     .map(|c| {
                         let explicit = c.references.as_ref().filter(|t| !covered(c.name_str(), t));
-                        Ok((
-                            c.name_str().to_string(),
-                            write_column(c, explicit)
-                                .map_err(|e| format!("{name}.columns.{}: {e}", c.name_str()))?,
-                        ))
+                        let mut spec = write_column(c, explicit)
+                            .map_err(|e| format!("{name}.columns.{}: {e}", c.name_str()))?;
+                        if let Some(transform) = info.and_then(|i| i.transforms.get(c.name_str())) {
+                            spec = with_transform(spec, transform);
+                        }
+                        Ok((c.name_str().to_string(), spec))
                     })
                     .collect::<Result<_, String>>()?,
             ),
@@ -908,6 +1122,34 @@ fn write_tables(schema: &Schema, codegen: Option<&Codegen>) -> Result<Json, Stri
         if table.history == HistoryRetention::Latest {
             fields.push(("history".into(), Json::string("latest")));
         }
+        if let Some(info) = info.filter(|i| !i.computed.is_empty()) {
+            fields.push((
+                "computed".into(),
+                Json::Object(
+                    info.computed
+                        .iter()
+                        .map(|field| {
+                            let mut ty = ColumnDescriptor::new(
+                                field.name.as_str(),
+                                field.field_type.column_type.clone(),
+                            );
+                            ty.nullable = field.field_type.nullable;
+                            Ok((
+                                field.name.clone(),
+                                Json::Object(vec![
+                                    ("type".into(), write_column(&ty, None)?),
+                                    (
+                                        "from".into(),
+                                        Json::Array(field.from.iter().map(Json::string).collect()),
+                                    ),
+                                ]),
+                            ))
+                        })
+                        .collect::<Result<_, String>>()
+                        .map_err(|e| format!("{name}.computed: {e}"))?,
+                ),
+            ));
+        }
         if let Some(info) = info.filter(|i| !i.ts_only.is_empty()) {
             fields.push((
                 "tsOnly".into(),
@@ -932,6 +1174,11 @@ fn write_tables(schema: &Schema, codegen: Option<&Codegen>) -> Result<Json, Stri
 }
 
 /// A column type's spec, without options.
+/// A column type's spec, without options, as the file writes it.
+pub fn type_spec(ty: &ColumnType) -> Result<Json, String> {
+    write_type(ty)
+}
+
 fn write_type(ty: &ColumnType) -> Result<Json, String> {
     Ok(match ty {
         ColumnType::Text => Json::string("string"),
@@ -946,7 +1193,13 @@ fn write_type(ty: &ColumnType) -> Result<Json, String> {
             "enum",
             Json::Array(variants.iter().map(Json::string).collect()),
         )]),
-        ColumnType::EnumPayload { cases } => Json::object(vec![(
+        ColumnType::Json { schema } => Json::object(vec![(
+            "json",
+            schema.as_ref().map_or(Json::Bool(true), from_serde),
+        )]),
+        ColumnType::Array { element } => Json::object(vec![("array", write_type(element)?)]),
+        // Written back as read, for the history that holds it.
+        ColumnType::LegacyEnumPayload { cases } => Json::object(vec![(
             "enum",
             Json::Object(
                 cases
@@ -970,12 +1223,7 @@ fn write_type(ty: &ColumnType) -> Result<Json, String> {
                     .collect::<Result<_, String>>()?,
             ),
         )]),
-        ColumnType::Json { schema } => Json::object(vec![(
-            "json",
-            schema.as_ref().map_or(Json::Bool(true), from_serde),
-        )]),
-        ColumnType::Array { element } => Json::object(vec![("array", write_type(element)?)]),
-        ColumnType::ScalarEnum { .. } | ColumnType::CatalogueEnumPayload { .. } => {
+        ColumnType::ScalarEnum { .. } => {
             return Err(super::expr::unsupported("a catalogue-native enum"));
         }
         ColumnType::TransactionId => {
@@ -983,6 +1231,23 @@ fn write_type(ty: &ColumnType) -> Result<Json, String> {
         }
         ColumnType::Row { .. } => return Err(super::expr::unsupported("a row column")),
     })
+}
+
+/// `spec` naming `transform`: in object form, `transform` last.
+fn with_transform(spec: Json, transform: &str) -> Json {
+    let mut fields = match spec {
+        Json::String(text) => match text.strip_suffix('?') {
+            Some(base) => vec![
+                ("type".to_string(), Json::string(base)),
+                ("optional".to_string(), Json::Bool(true)),
+            ],
+            None => vec![("type".to_string(), Json::String(text))],
+        },
+        Json::Object(fields) => fields,
+        other => return other,
+    };
+    fields.push(("transform".into(), Json::string(transform)));
+    Json::Object(fields)
 }
 
 fn write_column(column: &ColumnDescriptor, references: Option<&TableName>) -> Result<Json, String> {
@@ -1024,6 +1289,11 @@ fn write_column(column: &ColumnDescriptor, references: Option<&TableName>) -> Re
     Ok(Json::Object(fields))
 }
 
+/// A value of `ty` as the file writes it.
+pub fn value_spec(value: &Value, ty: &ColumnType) -> Result<Json, String> {
+    write_value(value, ty)
+}
+
 fn write_value(value: &Value, ty: &ColumnType) -> Result<Json, String> {
     Ok(match (value, ty) {
         (Value::Null, _) => Json::Null,
@@ -1051,25 +1321,6 @@ fn write_value(value: &Value, ty: &ColumnType) -> Result<Json, String> {
                 .map(|v| write_value(v, element))
                 .collect::<Result<_, _>>()?,
         ),
-        (Value::Enum { case, values }, ColumnType::EnumPayload { cases }) => {
-            let descriptor = cases
-                .iter()
-                .find(|c| &c.name == case)
-                .ok_or_else(|| super::expr::unsupported("an enum default of an unknown case"))?;
-            Json::Object(vec![(
-                case.clone(),
-                Json::Object(
-                    descriptor
-                        .fields
-                        .iter()
-                        .zip(values)
-                        .map(|(f, v)| {
-                            Ok((f.name_str().to_string(), write_value(v, &f.column_type)?))
-                        })
-                        .collect::<Result<_, String>>()?,
-                ),
-            )])
-        }
         (other, _) => return Err(super::expr::unsupported(&format!("the default {other:?}"))),
     })
 }

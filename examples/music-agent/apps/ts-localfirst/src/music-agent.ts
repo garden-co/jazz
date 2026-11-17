@@ -1,5 +1,5 @@
 import type { Db, StreamingValueSource } from "jazz-tools";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 
 export type Role = "user" | "assistant" | "tool";
 

@@ -1,0 +1,7 @@
+{
+  "format": 1,
+  "$comment": "Embedded Inspector hosts are ordinary sessions and must be able to read.",
+  "tables": {
+    "todos": { "read": "true", "update": "true" }
+  }
+}
