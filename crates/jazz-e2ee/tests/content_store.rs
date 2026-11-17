@@ -1090,4 +1090,21 @@ fn a_document_whose_keys_all_need_a_newer_client_can_still_be_rewritten() {
         reloaded.unsupported, carried,
         "every record is carried at its depth"
     );
+
+    // A key acquired later is kept into the key-less space and the
+    // document rewritten: the new key loads and the records stay carried.
+    let mut base = owner
+        .load(&decode_document(&stored).unwrap())
+        .unwrap()
+        .lineage
+        .expect("the key-less space");
+    base.keep(acquire_held(&world, ALICE, ROW)).unwrap();
+    let rewritten = owner
+        .seal_document(&base, &carried, 2, &mut TestRandom(6))
+        .unwrap()
+        .encode()
+        .unwrap();
+    let reloaded = owner.load(&decode_document(&rewritten).unwrap()).unwrap();
+    assert!(reloaded.space.is_some(), "the kept key loads");
+    assert_eq!(reloaded.unsupported, carried);
 }

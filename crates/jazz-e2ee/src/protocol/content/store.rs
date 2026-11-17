@@ -95,7 +95,9 @@ pub struct Loaded {
     /// When the lineage checked but no key of the document loaded: that
     /// lineage as a held space with no keys. A rewrite builds on it
     /// ([`Loaded::rewrite_base`]), so carried records keep the depth they
-    /// need. `None` otherwise.
+    /// need; a key acquired later is merged into it with
+    /// [`HeldSpace::keep`] before the rewrite. It holds no key, so it is
+    /// not for [`HeldKeys::hold`] or reads. `None` otherwise.
     pub lineage: Option<HeldSpace>,
     pub rejected: Vec<Rejected>,
     /// The key records skipped as [`Rejection::Unsupported`], as stored:
