@@ -92,6 +92,44 @@ fn accumulation_is_sequential() {
     assert_eq!(sequential, 0.0);
 }
 
+/// The summation runs in index order: `[1, 1e30, -1e30]·[1, 1, 1]` is
+/// `(1 + 1e30) - 1e30 = 0` in order, but `1` summed in reverse, so a
+/// reversed or pairwise implementation fails here.
+#[test]
+fn accumulation_is_in_index_order() {
+    let q = [1.0f32, 1e30, -1e30];
+    let s = [1.0f32, 1.0, 1.0];
+    assert_eq!(score(Metric::Dot, &q, &s), -0.0);
+    assert_eq!(score(Metric::Dot, &q, &s).to_bits(), (-0.0f64).to_bits());
+    let reversed_q: Vec<f32> = q.iter().rev().copied().collect();
+    assert_eq!(
+        score(Metric::Dot, &reversed_q, &s),
+        -1.0,
+        "reversed order differs"
+    );
+}
+
+/// `l2` squares and adds separately: with a fused multiply-add the last
+/// bit of this sum differs (`...cc45` instead of `...cc44`, found against
+/// an FMA reference).
+#[test]
+fn l2_is_not_fused() {
+    let bits = |b: [u32; 2]| b.map(f32::from_bits);
+    let a = bits([0xbf1cce38, 0x3cbc2b07]);
+    let b = bits([0x3f9e9c51, 0x3fbb967d]);
+    let got = score(Metric::L2, &a, &b);
+    assert_eq!(got.to_bits(), 0x401609e1f8c6cc44);
+    let fused = a.iter().zip(&b).fold(0.0f64, |sum, (&x, &y)| {
+        let d = f64::from(x) - f64::from(y);
+        d.mul_add(d, sum)
+    });
+    assert_eq!(
+        fused.to_bits(),
+        0x401609e1f8c6cc45,
+        "the case separates FMA"
+    );
+}
+
 /// Non-finite values are refused for every metric, the zero vector only for
 /// cosine, with the offending position named.
 #[test]
