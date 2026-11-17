@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::portable::session::{session_claims, ws_peer_identity, ws_validate_session_identity};
 #[cfg(test)]
 use crate::portable::websocket_codec::decode_ws_frame_batch;
 use crate::portable::websocket_codec::{
@@ -30,6 +31,7 @@ use futures::{SinkExt as _, StreamExt as _};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
 use jazz::records::Value as CoreValue;
+#[cfg(test)]
 use jazz::tools::Session;
 use jazz::wire::{
     WireAuthorityEndpoint, WireError, WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry,
@@ -919,51 +921,6 @@ async fn account_admission_current(
         }
     }
     account_still_admitted(state, identity).await
-}
-
-fn session_claims(
-    session: jazz::tools::public_schema::Session,
-) -> Result<BTreeMap<String, CoreValue>, String> {
-    let author = session
-        .author_subject()
-        .map_err(|error| error.to_string())?;
-    let provider_claims = match session.claims {
-        serde_json::Value::Object(map) => {
-            // Middleware exposes these convenient aliases to server handlers,
-            // but they duplicate the verified transport identity. A relay
-            // capability must use the one canonical binding vocabulary: the
-            // shared admission constructor derives `claims.iss`/`claims.sub`,
-            // `user`, and `authMode` from the verified AuthorSubject.
-            map.into_iter().collect()
-        }
-        _ => BTreeMap::new(),
-    };
-    let provider_claims =
-        crate::runtime::auth_admission::jwt_json_claims_to_policy_claims(provider_claims)
-            .map_err(|error| error.to_string())?;
-    Ok(crate::runtime::auth_admission::admitted_session_claims(
-        &session.issuer,
-        &session.user_id,
-        author,
-        provider_claims,
-    ))
-}
-
-fn ws_peer_identity(identity: &str) -> Result<AuthorSubject, String> {
-    AuthorSubject::from_canonical(identity).map_err(|error| error.to_string())
-}
-
-fn ws_validate_session_identity(
-    session: &Session,
-    peer_identity: AuthorSubject,
-) -> Result<(), String> {
-    let session_identity = session
-        .author_subject()
-        .map_err(|error| error.to_string())?;
-    if session_identity != peer_identity {
-        return Err("websocket peer_identity must match authenticated session author".to_owned());
-    }
-    Ok(())
 }
 
 /// How long a new connection's peer may take to send its prelude and Hello.
