@@ -4,5 +4,6 @@
 //! the network, the file system or the clock, so it compiles for wasm32.
 //! Each host keeps its own I/O around it.
 
+pub mod admission;
 pub mod session;
 pub mod websocket_codec;
