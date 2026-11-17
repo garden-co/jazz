@@ -70,6 +70,7 @@ const RESERVED: &[&str] = &[
     "JsonValue",
     "Date",
     "Uint8Array",
+    "Float32Array",
 ];
 
 /// Type names, with what each was derived from, so a clash names both.
@@ -551,6 +552,8 @@ fn kind(ty: &ColumnType) -> &'static str {
         ColumnType::Json { .. } => "json",
         ColumnType::Enum { .. } | ColumnType::ScalarEnum { .. } => "enum",
         ColumnType::Array { .. } => "array",
+        ColumnType::Vector { .. } => "vector",
+        ColumnType::Point => "point",
         // The loader refuses these in a file's current tables.
         ColumnType::TransactionId
         | ColumnType::Row { .. }
@@ -571,6 +574,9 @@ pub(crate) fn ts_type(ty: &ColumnType) -> String {
         ColumnType::BigInt => "bigint".into(),
         ColumnType::Timestamp => "Date".into(),
         ColumnType::Bytea => "Uint8Array".into(),
+        ColumnType::Vector { .. } => "Float32Array".into(),
+        // GeoJSON order (SPEC 10.10): longitude first.
+        ColumnType::Point => "readonly [lng: number, lat: number]".into(),
         ColumnType::Json { schema: None } => "JsonValue".into(),
         ColumnType::Json {
             schema: Some(schema),

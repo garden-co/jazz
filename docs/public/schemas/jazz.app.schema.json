@@ -207,18 +207,28 @@
       }
     },
     "column": {
-      "description": "A type string (\"string\", \"uuid?\", …) or an object with one of type / enum / json / array and options.",
+      "description": "A type string (\"string\", \"uuid?\", \"point\", …) or an object with one of type / enum / json / array / vector and options. A point's value is [lng, lat] (GeoJSON order: longitude first).",
       "anyOf": [
         {
           "type": "string",
-          "pattern": "^(string|int|bigint|float|boolean|timestamp|uuid|bytes)\\??$"
+          "pattern": "^(string|int|bigint|float|boolean|timestamp|uuid|bytes|point)\\??$"
         },
         {
           "type": "object",
           "additionalProperties": false,
           "properties": {
             "type": {
-              "enum": ["string", "int", "bigint", "float", "boolean", "timestamp", "uuid", "bytes"]
+              "enum": [
+                "string",
+                "int",
+                "bigint",
+                "float",
+                "boolean",
+                "timestamp",
+                "uuid",
+                "bytes",
+                "point"
+              ]
             },
             "enum": {
               "type": "array",
@@ -227,6 +237,12 @@
             "json": {},
             "array": {
               "$ref": "#/$defs/columnType"
+            },
+            "vector": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096,
+              "description": "A vector of this many float32 values (SPEC 20.1), e.g. { \"vector\": 384 }. Its default is an array of that many numbers."
             },
             "optional": {
               "type": "boolean"
@@ -253,13 +269,23 @@
       "anyOf": [
         {
           "type": "string",
-          "pattern": "^(string|int|bigint|float|boolean|timestamp|uuid|bytes)\\??$"
+          "pattern": "^(string|int|bigint|float|boolean|timestamp|uuid|bytes|point)\\??$"
         },
         {
           "type": "object",
           "properties": {
             "type": {
-              "enum": ["string", "int", "bigint", "float", "boolean", "timestamp", "uuid", "bytes"]
+              "enum": [
+                "string",
+                "int",
+                "bigint",
+                "float",
+                "boolean",
+                "timestamp",
+                "uuid",
+                "bytes",
+                "point"
+              ]
             },
             "enum": {
               "type": "array",
@@ -362,7 +388,7 @@
       "anyOf": [
         {
           "type": "string",
-          "pattern": "^(string|int|bigint|float|boolean|timestamp|uuid|bytes)$"
+          "pattern": "^(string|int|bigint|float|boolean|timestamp|uuid|bytes|point)$"
         },
         {
           "type": "object",
@@ -371,7 +397,17 @@
           "maxProperties": 1,
           "properties": {
             "type": {
-              "enum": ["string", "int", "bigint", "float", "boolean", "timestamp", "uuid", "bytes"]
+              "enum": [
+                "string",
+                "int",
+                "bigint",
+                "float",
+                "boolean",
+                "timestamp",
+                "uuid",
+                "bytes",
+                "point"
+              ]
             },
             "enum": {
               "type": "array",

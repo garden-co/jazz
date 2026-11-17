@@ -1,0 +1,27 @@
+[package]
+name = "jazz-index"
+version.workspace = true
+edition = "2024"
+description = "Jazz's specialised index kinds (SPEC 20): text analysis and impacts, vector scores, geo cells. Pure functions, no storage."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+# Nothing published depends on it yet; `jazz-core` will when the index framework
+# lands, and then this goes (dev/scripts/check-lockstep-versions.mjs).
+publish = false
+# Only what builds the library: tests, benches and their fixtures stay in the repo.
+include = ["src/**", "README.md"]
+
+[features]
+default = ["text", "vector", "geo"]
+# Each kind is a feature so its WASM size can be measured and dropped (SPEC 20.12).
+text = ["dep:jazz-text"]
+vector = []
+geo = []
+
+[dependencies]
+jazz-text = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = "1.0.145"

@@ -131,6 +131,19 @@ pub enum ColumnType {
     /// Heterogeneous row/tuple of values with a known schema.
     /// Used for nested rows (e.g., array of rows from subquery).
     Row { columns: Box<RowDescriptor> },
+    /// `dimensions` IEEE-754 binary32 values (SPEC 20.1), `1..=4096`,
+    /// carried as [`Value::Bytea`](super::Value::Bytea) of exactly
+    /// `4 * dimensions` bytes in encoding `f32le/1`; NaN and infinities are
+    /// refused at admission. Written `{ "vector": n }` in `jazz.app.json`.
+    /// Appended last so existing serde variant indices are unchanged.
+    Vector { dimensions: u32 },
+    /// A WGS84 point (SPEC 20.1), carried as
+    /// [`Value::Bytea`](super::Value::Bytea) of exactly 16 bytes in encoding
+    /// `point-f64le/1`: longitude then latitude, binary64 little-endian
+    /// (GeoJSON order). Non-finite or out-of-range coordinates are refused
+    /// at admission. Written `"point"` in `jazz.app.json`. Appended last so
+    /// existing serde variant indices are unchanged.
+    Point,
 }
 
 impl ColumnType {

@@ -9,7 +9,9 @@ const BINDINGS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/bindings");
 
 #[test]
 fn committed_bindings_are_generated() {
-    for app in ["todos", "tasks", "guarded", "drafts", "clashes"] {
+    for app in [
+        "todos", "tasks", "docs", "places", "guarded", "drafts", "clashes",
+    ] {
         let file = std::fs::read(format!("{FIXTURES}/{app}/jazz.app.json")).unwrap();
         let generated = jazz_codegen::generate(Lang::Rust, &file).unwrap();
         let path = format!("{BINDINGS}/{app}.rs");
@@ -45,7 +47,9 @@ fn an_app_with_enum_cases_carrying_fields_is_refused() {
 /// were generated from, for `--check` and `migrations create`.
 #[test]
 fn committed_bindings_read_back() {
-    for app in ["todos", "tasks", "guarded", "drafts", "clashes"] {
+    for app in [
+        "todos", "tasks", "docs", "places", "guarded", "drafts", "clashes",
+    ] {
         let file = std::fs::read(format!("{FIXTURES}/{app}/jazz.app.json")).unwrap();
         let committed = std::fs::read_to_string(format!("{BINDINGS}/{app}.rs")).unwrap();
         let loaded = jazz_codegen::App::load(&file).unwrap();
