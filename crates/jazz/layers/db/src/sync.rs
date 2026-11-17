@@ -4789,6 +4789,35 @@ impl Inner {
         contains: bool,
         value: &Sql,
     ) -> Result<Rc<Vec<Image>>, Error> {
+        // `value` is portable, as images carry it (see
+        // [`Inner::portable_enums`]): an enum variant by its name, whatever
+        // column it came from. An enum column's cells hold this store's tags
+        // for it, so the lookup binds the tag; watch keys stay on the name,
+        // as written rows' keys are. A name the column has no tag for stays
+        // a name, which no cell holds.
+        let tagged;
+        let value = match value {
+            Sql::Text(name)
+                if !contains
+                    && column != "id"
+                    && self
+                        .names
+                        .stored_type(table, column)
+                        .is_some_and(crate::values::is_enum_type) =>
+            {
+                let tag = std::str::from_utf8(name)
+                    .ok()
+                    .and_then(|name| self.names.tags().column(table, column).borrow().tag(name));
+                match tag {
+                    Some(tag) => {
+                        tagged = Sql::Integer(tag);
+                        &tagged
+                    }
+                    None => value,
+                }
+            }
+            _ => value,
+        };
         let read = || {
             let filter = if column == "id" {
                 "id = ?1".to_owned()
