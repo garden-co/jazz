@@ -501,10 +501,10 @@ export class ThinRuntime implements Runtime {
         this.attempt = 0;
         this.bound = true;
         this.reauthenticating = false;
-        // Admitted: whatever refused the credential before holds no more.
-        this.authRestoredCallback?.();
         this.refused = false;
         this.refusal = undefined;
+        // Admitted: whatever refused the credential before holds no more.
+        this.authRestoredCallback?.();
         this.stopped = false;
         this.clearOutage();
         this.notifySyncStatus();
