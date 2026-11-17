@@ -157,8 +157,10 @@ export function JazzProvider(props: JazzProviderProps) {
     // Solid's synchronous keyed Show disposal and cleanup run before this queued acknowledgement.
     queueMicrotask(() => lease.acknowledge(observed));
   });
-  // The session publishes a snapshot only when something in it changed, so
-  // a new one in `error` is a new failure (or recovery) for the view to show.
+  // A new view per snapshot in `error` is right: the session is in `error`
+  // only before its core exists or while the core itself is in `error`, and
+  // the core leaves `error` only through another status. So a new snapshot
+  // here always brings a new failure (or recovery) to show.
   const fallback = () => (
     <Show
       when={
