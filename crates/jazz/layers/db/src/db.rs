@@ -27,7 +27,7 @@ pub use crate::options::{
     UpdateOptions, UpsertOptions, WriteIdentity, WriteTarget, block_on,
 };
 
-use crate::compile::{Compiled, Ctx, Cut, Overlay as CutOverlay, Session, View};
+use crate::compile::{Compiled, Ctx, Cut, InsertedRows, Overlay as CutOverlay, Session, View};
 use crate::tools::{CmpOp, PolicyExpr};
 
 #[path = "fanout.rs"]
@@ -832,7 +832,7 @@ struct Inner {
     /// unit), by stored table: what `InsertedByThisTransaction` holds for
     /// in its write checks. Kept after the unit's checks end, so a staged
     /// write's batch can note them, until the next unit starts.
-    unit_inserts: RefCell<GroundedRows>,
+    unit_inserts: RefCell<InsertedRows>,
     /// The open transaction's seq and the tables it wrote.
     tx: Option<(u64, BTreeSet<String>)>,
     publications: Vec<SchemaPublication>,
@@ -6597,15 +6597,16 @@ impl Inner {
         self.unit_inserts.borrow_mut().clear();
     }
 
-    /// Note a unit's fresh insert of `row` (see [`Inner::unit_inserts`]).
-    /// A write outside a unit is a single write: it has none.
-    fn note_unit_insert(&self, table: &Table, row: RowUuid) {
+    /// Note a unit's fresh insert of `row` on branch `key` (see
+    /// [`Inner::unit_inserts`]). A write outside a unit is a single write:
+    /// it has none.
+    fn note_unit_insert(&self, table: &Table, row: RowUuid, key: &[u8]) {
         if self.deferred.borrow().is_some() {
             self.unit_inserts
                 .borrow_mut()
                 .entry(table.stored.clone())
                 .or_default()
-                .insert(*row.0.as_bytes());
+                .insert((*row.0.as_bytes(), key.to_vec()));
         }
     }
 
@@ -6648,7 +6649,7 @@ impl Inner {
         &self,
         seq: u64,
         grounded: Arc<GroundedRows>,
-        inserted: Arc<GroundedRows>,
+        inserted: Arc<InsertedRows>,
     ) -> Result<(), Error> {
         let pending = self.deferred.borrow_mut().take().unwrap_or_default();
         let trusted = std::mem::take(&mut *self.trusted_rows.borrow_mut());
@@ -6657,7 +6658,7 @@ impl Inner {
             Arc::make_mut(&mut inserted)
                 .entry(table.clone())
                 .or_default()
-                .extend(rows);
+                .extend(rows.iter().cloned());
         }
         // Nothing to ground: writes no policy checks (a backend's own, a
         // replica's) leave only trusted rows, and merging those into the
@@ -6689,7 +6690,7 @@ impl Inner {
         mut pending: Vec<DeferredCheck>,
         seq: u64,
         mut grounded: Arc<GroundedRows>,
-        inserted: Arc<GroundedRows>,
+        inserted: Arc<InsertedRows>,
     ) -> Result<(), Error> {
         // Each check runs under the schema its write was staged with.
         let mut live = Vec::with_capacity(pending.len());
@@ -6810,7 +6811,7 @@ impl Inner {
         &self,
         rounds: Vec<(DeferredCheck, usize, BTreeSet<String>)>,
         seq: u64,
-        inserted: &Arc<GroundedRows>,
+        inserted: &Arc<InsertedRows>,
         evidence: &mut EvidenceBudget,
     ) -> Result<(), Error> {
         // Per stored table and round: how many writes passed in it, and
@@ -8357,7 +8358,7 @@ impl Inner {
             .push((table.stored.clone(), row, key.clone()));
         // The row had no version, the unit's own writes included: a fresh
         // insert.
-        self.note_unit_insert(table, row);
+        self.note_unit_insert(table, row, &key);
         if let Some(author) = self.checked(who) {
             self.write_check(table, row, &key, author, WriteCheck::Insert, seq)?;
         } else {
@@ -8615,7 +8616,7 @@ impl Inner {
             && self.deferred.borrow().is_some()
             && !self.existed_before(table, row, &key, seq)?
         {
-            self.note_unit_insert(table, row);
+            self.note_unit_insert(table, row, &key);
         }
         // The new row is checked on the evidence SPEC 7 gives a WITH CHECK
         // ([`Inner::write_check`]): a same-table EXISTS compares the new row
@@ -9689,7 +9690,7 @@ struct Batch {
     /// The rows `ops` inserted fresh, by stored table: what a later staged
     /// write's `InsertedByThisTransaction` holds for (see
     /// [`Db::in_overlay`]).
-    inserted: Arc<GroundedRows>,
+    inserted: Arc<InsertedRows>,
     /// What the batch's partial large-value updates built: descriptors
     /// derived from stored trees and the nodes consolidations prepared,
     /// trusted and stored whenever the staged writes apply.

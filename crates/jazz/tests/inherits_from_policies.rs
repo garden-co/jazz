@@ -1240,3 +1240,122 @@ fn an_unknown_table_identity_grants_nothing_under_not() {
     assert!(replica.table_identity("notes").unwrap().is_some());
     assert_eq!(read(&replica), 1, "the confirmed identity binds");
 }
+
+/// The creator clause's fresh insert is one row on one branch: a unit that
+/// inserts project P on branch A does not count as inserting P on branch
+/// B, which alice created in an earlier unit.
+///
+/// ```text
+/// earlier: alice inserts P@B
+/// alice ──{ insert P@A, insert member(P, ws = B) }──► ✗
+/// alice ──{ insert P@A, insert member(P, ws = A) }──► ✓
+/// ```
+#[test]
+fn the_creator_clause_names_the_branch_the_unit_inserted() {
+    let ws = |byte: u8| Value::Uuid(uuid::Uuid::from_bytes([byte; 16]));
+    let branch = |byte: u8| {
+        jazz::db::ExactWriteTarget::Branch(jazz::protocol::BranchSelector::new([("ws", ws(byte))]))
+    };
+    let creator = PolicyExpr::And(vec![
+        cmp("accountId", me()),
+        exists(
+            "projects",
+            vec![
+                cmp("id", this("identifier")),
+                cmp("ws", this("ws")),
+                session_eq("$createdBy.account", &["user"]),
+                PolicyExpr::InsertedByThisTransaction,
+            ],
+        ),
+    ]);
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("projects")
+                    .column("ws", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .branch_by("ws")
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new(MEMBERS)
+                    .column("scopeId", ColumnType::Uuid)
+                    .column("identifier", ColumnType::Uuid)
+                    .column("accountId", ColumnType::Uuid)
+                    .column("ws", ColumnType::Uuid)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(creator),
+                    ),
+            )
+            .build(),
+    );
+    let server = block_on(Db::open_history_complete(DbConfig::new(
+        schema,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xee; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    let insert_project = |tx: OpenTransactionId, project: RowUuid, on: u8| {
+        block_on(server.tx_ref(tx).insert(
+            "projects",
+            project_cells("p"),
+            InsertOptions {
+                row_id: Some(project),
+                identity: WriteIdentity::Session(alice()),
+                target: branch(on),
+                ..Default::default()
+            },
+        ))
+        .map(drop)
+    };
+    let insert_member = |tx: OpenTransactionId, project: RowUuid, on: u8| {
+        block_on(server.tx_ref(tx).insert(
+            MEMBERS,
+            BTreeMap::from([
+                ("scopeId".to_owned(), ws(0)),
+                ("identifier".to_owned(), uuid(project)),
+                ("accountId".to_owned(), account(alice())),
+                ("ws".to_owned(), ws(on)),
+            ]),
+            InsertOptions {
+                identity: WriteIdentity::Session(alice()),
+                ..Default::default()
+            },
+        ))
+        .map(drop)
+    };
+    let unit = |writes: &dyn Fn(OpenTransactionId) -> Result<(), jazz::db::Error>| {
+        let tx = OpenTransactionId::new();
+        block_on(server.begin_mergeable(tx)).unwrap();
+        let staged = writes(tx);
+        if staged.is_err() {
+            let _ = server.abandon_transaction_handle(tx);
+            return staged;
+        }
+        block_on(server.commit_mergeable_handle(tx)).map(drop)
+    };
+    let (a, b) = (0x0a, 0x0b);
+    // Alone, and among enough other fresh projects that the unit's inserts
+    // are bound as one list rather than one by one.
+    for (project, others) in [(id(0x30), 0), (id(0x31), 20)] {
+        let unit_on = |member_on: u8| {
+            unit(&|tx| {
+                for _ in 0..others {
+                    insert_project(tx, RowUuid(uuid::Uuid::new_v4()), a)?;
+                }
+                insert_project(tx, project, a)?;
+                insert_member(tx, project, member_on)
+            })
+        };
+        unit(&|tx| insert_project(tx, project, b)).unwrap();
+        assert_denied(
+            unit_on(b),
+            &format!("{others} others: P@B was not inserted by this unit"),
+        );
+        unit_on(a).unwrap_or_else(|e| panic!("{others} others: P@A was: {e:?}"));
+    }
+}

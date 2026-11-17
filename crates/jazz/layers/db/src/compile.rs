@@ -296,8 +296,12 @@ pub struct Cut {
     /// A write check's unit's fresh inserts, by stored table: the rows
     /// [`PolicyExpr::InsertedByThisTransaction`] holds for. Empty outside a
     /// write check.
-    pub inserted: std::sync::Arc<BTreeMap<String, BTreeSet<[u8; 16]>>>,
+    pub inserted: std::sync::Arc<InsertedRows>,
 }
+
+/// A unit's fresh inserts, by stored table: each row by its id and branch
+/// key, so a row with the same id on another branch is not one of them.
+pub type InsertedRows = BTreeMap<String, BTreeSet<([u8; 16], Vec<u8>)>>;
 
 /// The versions at a write check's `own` that its policy sees (SPEC 7);
 /// every other row the unit wrote reads as committed.
@@ -2571,23 +2575,39 @@ impl<'a> Ctx<'a> {
                 tables,
                 session,
             )?,
-            // The unit's fresh inserts into the `Exists`'s table: a row read
-            // through the cut is one of them only once it is grounded, so
-            // the node never grants on a row that is not yet evidence.
+            // The unit's fresh inserts into the `Exists`'s table, each on
+            // its own branch: a row read through the cut is one of them only
+            // once it is grounded, so the node never grants on a row that is
+            // not yet evidence.
             PolicyExpr::InsertedByThisTransaction => {
                 match (outer, self.cut.as_ref().map(|cut| cut.inserted.clone())) {
                     (Some(_), Some(inserted)) => match inserted.get(&table.stored) {
-                        Some(ids) if !ids.is_empty() => {
-                            let ids = if ids.len() > BOUND_LIST_MAX {
-                                let array = self.bind(json_ids(ids.iter().map(|id| id.as_slice())));
-                                format!("SELECT unhex(value) FROM json_each({array})")
+                        Some(rows) if !rows.is_empty() => {
+                            let rows = if rows.len() > BOUND_LIST_MAX {
+                                let pairs: Vec<serde_json::Value> = rows
+                                    .iter()
+                                    .map(|(id, key)| serde_json::json!([hex(id), hex(key)]))
+                                    .collect();
+                                let array = self.bind(Sql::Text(
+                                    serde_json::Value::Array(pairs).to_string().into_bytes(),
+                                ));
+                                format!(
+                                    "SELECT unhex(json_extract(value, '$[0]')), \
+                                     unhex(json_extract(value, '$[1]')) FROM json_each({array})"
+                                )
                             } else {
-                                ids.iter()
-                                    .map(|id| self.bind(Sql::Blob(id.to_vec())))
+                                let pairs = rows
+                                    .iter()
+                                    .map(|(id, key)| {
+                                        let id = self.bind(Sql::Blob(id.to_vec()));
+                                        let key = self.bind(Sql::Blob(key.clone()));
+                                        format!("({id}, {key})")
+                                    })
                                     .collect::<Vec<_>>()
-                                    .join(", ")
+                                    .join(", ");
+                                format!("VALUES {pairs}")
                             };
-                            format!("({alias}.id IN ({ids}))")
+                            format!("(({alias}.id, {alias}._branch) IN ({rows}))")
                         }
                         _ => "0".to_owned(),
                     },
