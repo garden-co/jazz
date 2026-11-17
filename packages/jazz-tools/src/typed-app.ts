@@ -29,7 +29,9 @@ export type ColumnKind =
   | "bytes"
   | "json"
   | "enum"
-  | "array";
+  | "array"
+  | "vector"
+  | "point";
 
 /** One stored column in the generated type map. */
 export interface ColumnTypes {
@@ -208,7 +210,12 @@ type WhereInputForColumn<C extends ColumnTypes> = C["kind"] extends "string"
                         C["nullable"],
                         { contains?: ArrayElement<C["value"]> } & Membership<C["value"]>
                       >
-                    : never;
+                    : // Whole values, bit for bit (SPEC 6.1.1); nearness is an index search.
+                      C["kind"] extends "vector"
+                      ? WhereEqNe<Float32Array, C["nullable"], Membership<Float32Array | number[]>>
+                      : C["kind"] extends "point"
+                        ? WhereEqNe<C["value"], C["nullable"], Membership<C["value"]>>
+                        : never;
 
 export type TableWhereInput<
   TSchema extends SchemaLike,
