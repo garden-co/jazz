@@ -102,16 +102,15 @@ pub enum ColumnType {
     /// catalogue source round-tripping; ordinary application enums use `Enum`.
     #[doc(hidden)]
     ScalarEnum { name: String, variants: Vec<String> },
-    /// Catalogue-native payload enum with an explicit compiled type name.
-    /// Ordinary application payload enums use `EnumPayload`.
+    /// An enum whose cases carry fields, as 2.0.0-alpha.64 and earlier
+    /// accepted it. Jazz has no such columns any more (jazz#5758); this
+    /// reads them back where an older store or app history still names one,
+    /// so it opens and can migrate away. A current schema declaring one is
+    /// refused, and the column holds no values: no store ever wrote one
+    /// (jazz#5621).
     #[doc(hidden)]
-    CatalogueEnumPayload {
-        name: String,
-        cases: Vec<EnumCaseDescriptor>,
-    },
-    /// Discriminated enum whose selected case carries a named record payload.
-    /// This is a column type, never a top-level Jazz row union.
-    EnumPayload { cases: Vec<EnumCaseDescriptor> },
+    #[serde(rename = "EnumPayload")]
+    LegacyEnumPayload { cases: Vec<LegacyEnumCase> },
     /// 8-byte unsigned timestamp (Unix milliseconds).
     Timestamp,
     /// 8-byte IEEE 754 double-precision float (f64).
@@ -158,9 +157,10 @@ impl ColumnType {
     }
 }
 
-/// One named payload case of a column-local discriminated enum.
+/// One case of a [`ColumnType::LegacyEnumPayload`], as it was declared.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnumCaseDescriptor {
+pub struct LegacyEnumCase {
     pub name: String,
     pub fields: Vec<ColumnDescriptor>,
 }
@@ -437,9 +437,11 @@ pub struct TableSchema {
     pub columns: RowDescriptor,
     /// User columns that should have secondary indexes.
     ///
-    /// `None` preserves historical behavior and indexes every declared user
-    /// column. `Some(columns)` opts into indexing only that explicit subset.
-    /// Internal `_id` and `_id_deleted` indexes are always maintained.
+    /// `None` (no `indexes` in `jazz.app.json`) declares none: storage then
+    /// indexes only the relation (reference) columns, which it always indexes
+    /// (`convert_table` maps `None` to an empty set). `Some(columns)` adds
+    /// single-column indexes on those columns. Internal `_id` and
+    /// `_id_deleted` indexes are always maintained.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexed_columns: Option<Vec<ColumnName>>,
     /// Ordered multi-column indexes. The first column can be constrained by an

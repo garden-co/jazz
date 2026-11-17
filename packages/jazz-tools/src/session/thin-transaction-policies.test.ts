@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { afterEach, expect, it } from "vitest";
 import type { AccountStore } from "../accounts/persistence.js";
 import { startTestJazz, testApp, type TestJazz } from "../testing/index.js";
@@ -86,6 +87,38 @@ it("lets a thin client's transaction satisfy exists with a row it inserted itsel
   const boardId = await result.wait({ tier: "global" });
   expect((await db.all(app.members.where({ boardId }))).map((m) => m.role)).toEqual(["owner"]);
   expect((await db.all(app.boards)).map((b) => b.name)).toEqual(["Retro"]);
+}, 60_000);
+
+it("checks a thin client's transaction as a whole, so the order of its writes doesn't matter", async () => {
+  server = await startTestJazz({
+    app,
+    permissions,
+    coreOptions: { inMemory: true },
+  });
+  const session = await createJazzClient({
+    scope: server.appId,
+    serverUrl: server.url,
+    store: memoryStore(),
+    initial: "device",
+    driver: { type: "memory" },
+  });
+  sessions.push(session);
+  const client = session.getSnapshot().client!;
+  const db = client.db;
+  expect(isThinDb(db)).toBe(true);
+  const me = client.session!.user!;
+
+  // The membership first: alone, its policy would refuse it, since the
+  // board it needs is staged after it. The backend serves the transaction
+  // and the core checks it once it is finished, in the state it leaves.
+  const boardId = randomUUID();
+  const result = await db.transaction(async (tx) => {
+    tx.insert(app.members, { boardId, userId: me, role: "owner" });
+    tx.insert(app.boards, { name: "Planning" }, { id: boardId });
+  });
+  await result.wait({ tier: "global" });
+  expect((await db.all(app.members.where({ boardId }))).map((m) => m.role)).toEqual(["owner"]);
+  expect((await db.all(app.boards)).map((b) => b.name)).toEqual(["Planning"]);
 }, 60_000);
 
 // A note may be added where its author may update the branch: the branch

@@ -365,6 +365,7 @@ function listSourceFiles(dir: string): string[] {
 describe("package root public API", () => {
   it("has one auth object, the session: no account manager, handles or Db opener", () => {
     expect(packageRoot).toHaveProperty("createJazzClient");
+    expect(packageRoot).toHaveProperty("startJazzClient");
     expect(packageRoot).toHaveProperty("AccountAuthError");
     for (const removed of [
       "createAccountManager",

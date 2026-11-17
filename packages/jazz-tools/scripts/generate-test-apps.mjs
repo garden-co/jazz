@@ -2,8 +2,10 @@
 /**
  * Regenerate the `jazz.generated.ts` of every committed test app: each
  * directory under tests/ and src/ holding a `jazz.app.json` beside a
- * `jazz.generated.ts` (or under an `apps/` directory), as
- * `jazz-tools validate --schema-dir <dir>` writes it. Browser and React
+ * `jazz.generated.ts` (or under an `apps/` directory), as jazz-codegen
+ * writes it from the JSON. These fixtures have no schema.ts, which
+ * `jazz-tools generate` requires, so this script is their only writer
+ * (test fixtures, not an authoring path). Browser and React
  * Native tests can't load jazz-napi, so their apps are committed with their
  * bindings; this keeps those bindings in step with the files.
  *

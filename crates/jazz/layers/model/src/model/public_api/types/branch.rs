@@ -245,14 +245,6 @@ fn hash_value(hasher: &mut jazz_types::sha256::Hasher, value: &Value) {
                 hash_value(hasher, inner);
             }
         }
-        Value::Enum { case, values } => {
-            hasher.update(&[14]);
-            hash_cstr(hasher, case);
-            hasher.update(&(values.len() as u64).to_le_bytes());
-            for inner in values {
-                hash_value(hasher, inner);
-            }
-        }
         Value::Null => {
             hasher.update(&[9]);
         }
@@ -265,7 +257,9 @@ fn hash_cstr(hasher: &mut jazz_types::sha256::Hasher, value: &str) {
     hasher.update(&[0]);
 }
 
-fn hash_enum_payload_cases(hasher: &mut jazz_types::sha256::Hasher, cases: &[EnumCaseDescriptor]) {
+/// A legacy payload enum's cases, encoded as 2.0.0-alpha.64 encoded them,
+/// so a stored schema that declared one still hashes to its key.
+fn hash_legacy_enum_cases(hasher: &mut jazz_types::sha256::Hasher, cases: &[LegacyEnumCase]) {
     hasher.update(&(cases.len() as u64).to_le_bytes());
     for case in cases {
         hash_cstr(hasher, &case.name);
@@ -313,14 +307,10 @@ fn hash_column_type(hasher: &mut jazz_types::sha256::Hasher, col_type: &ColumnTy
                 hash_cstr(hasher, variant);
             }
         }
-        ColumnType::CatalogueEnumPayload { name, cases } => {
-            hasher.update(&[15]);
-            hash_cstr(hasher, name);
-            hash_enum_payload_cases(hasher, cases);
-        }
-        ColumnType::EnumPayload { cases } => {
+        // Tag 13, as `EnumPayload` was (15 was the catalogue-native form).
+        ColumnType::LegacyEnumPayload { cases } => {
             hasher.update(&[13]);
-            hash_enum_payload_cases(hasher, cases);
+            hash_legacy_enum_cases(hasher, cases);
         }
         ColumnType::Timestamp => {
             hasher.update(&[5]);

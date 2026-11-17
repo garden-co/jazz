@@ -645,6 +645,21 @@ labels supplied by their normalized source. A builder without such declared
 identity MUST reject that shape; it MUST NOT invent an ordinal merely to retain
 duplicate derivations.
 
+An arm the author leaves unnamed gets one label on every client, decided in
+Rust (`jazz.union-arm-label.v2`): `derived:v2:` and the lowercase hex SHA-256
+of `jazz.union-arm-label.v2`, a NUL byte, and the arm's own `jazz-relation-v1`
+canonical relation bytes (the tree shape identity hashes), with any union
+inside the arm labelled first. The label depends only on what the arm reads,
+so reordering or inserting arms does not rekey the others, and two identical
+unnamed arms of one union MUST be refused (the author names them to read the
+same query twice). Builders in Rust and the FFI derive it directly; a client
+binding sends an unnamed arm as an empty label in the native query Postcard
+carrier, and only the client-query decoders (the binding host and the thin
+server) accept that and fill it before preparing the query. Storage and peer
+decoders keep refusing empty labels, so a stored or forwarded query always
+carries its labels. `fixtures/union_arm_label_v2.json` pins preimages and
+labels.
+
 A history root's optional transaction uses the full packed HLC and originating
 node UUID, with no node-local aliases. History joins and union arms remain
 unsupported. `fixtures/result-key.json` pins a history key and the binding golden
