@@ -1130,3 +1130,101 @@ fn a_refused_unit_s_copy_does_not_change_the_next_unit_s_base() {
         Some(format!("{:?}", Some(text("bob's"))))
     );
 }
+
+/// A unit staged at the authority acts on the base its own commit copies
+/// from, never one an upload decided in between named: the upload settled
+/// the staging overlay, and with the clock standing still the commit takes
+/// the refused upload's seq.
+#[test]
+fn an_upload_decided_while_a_unit_is_staged_does_not_change_its_base() {
+    use duplex_transport::duplex;
+    let server = authority_with(config(0xee, AuthorSubject::SYSTEM).with_clock(|| 1_000));
+    // A third base, where the row is alice's too.
+    let third =
+        BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([0xa3; 16])))]);
+    block_on(server.insert(
+        "drafts",
+        BTreeMap::from([
+            ("team".to_owned(), text("red")),
+            ("owner".to_owned(), subject(alice())),
+            ("body".to_owned(), text("alice's")),
+        ]),
+        InsertOptions {
+            row_id: Some(note_row()),
+            target: ExactWriteTarget::Branch(third.clone()),
+            ..database()
+        },
+    ))
+    .unwrap();
+    let client = block_on(Db::open(config(0xa1, alice()))).unwrap();
+    let (client_side, server_side) = duplex();
+    block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    let drafts = client.prepare_query(&Query::from("drafts")).unwrap();
+    let _draft = block_on(
+        client.subscribe(
+            &drafts,
+            ReadOpts::default()
+                .branch_view(head_branch(), Some(BranchViewBase::Current(third.clone()))),
+        ),
+    )
+    .unwrap();
+    let members = client.prepare_query(&Query::from("members")).unwrap();
+    let _members = block_on(client.subscribe(&members, ReadOpts::default())).unwrap();
+    let pump = || {
+        for _ in 0..6 {
+            block_on(client.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+    };
+    pump();
+    assert!(draft_over(&client, third.clone()).is_some());
+
+    // Alice stages an edit and a delete over her base.
+    let alice_session = || WriteIdentity::Session(alice());
+    let open = OpenTransactionId::new();
+    block_on(server.begin_mergeable(open)).unwrap();
+    let tx = server.tx_ref(open);
+    edit_draft(&tx, alices_branch(), "alice's, edited", alice_session());
+    delete_draft(&tx, alices_branch(), alice_session()).unwrap();
+    // Bob takes that row back.
+    block_on(server.update(
+        "drafts",
+        note_row(),
+        BTreeMap::from([("owner".to_owned(), subject(bob()))]),
+        jazz::db::UpdateOptions {
+            identity: WriteIdentity::Database,
+            target: WriteTarget::BranchView {
+                head: alices_branch(),
+                base: None,
+            },
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    // A refused upload copies the row into the head from the third base.
+    let refused = OpenTransactionId::new();
+    block_on(client.begin_mergeable(refused)).unwrap();
+    let up = client.tx_ref(refused);
+    edit_draft(&up, third, "alice's, edited", WriteIdentity::default());
+    block_on(up.update(
+        "members",
+        RowUuid::from_bytes([0x22; 16]),
+        BTreeMap::from([("team".to_owned(), text("gone"))]),
+        UpdateOptions::default(),
+    ))
+    .unwrap();
+    let refused = block_on(client.commit_mergeable_handle(refused)).unwrap();
+    let verdict = drive(
+        &[&client, &server],
+        client.wait_for_transaction(refused.0, DurabilityTier::Global),
+    );
+    assert!(verdict.is_err(), "the upload is refused");
+
+    // Alice's commit: the row she deletes is bob's now.
+    assert!(
+        block_on(server.commit_mergeable_handle(open)).is_err(),
+        "the commit deletes bob's row"
+    );
+    assert!(draft_over(&server, alices_branch()).is_some());
+}
