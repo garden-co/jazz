@@ -206,6 +206,11 @@ impl From<jazz_app_support::Error> for JazzErrorKind {
         // contract 1 host sees exactly what it did before.
         match error {
             E::Rejected(reason) => rejection(&reason, message),
+            E::WriteRejected { code, .. } => match code.as_str() {
+                "permission_denied" => Self::Permission(message),
+                "serialization_conflict" | "transaction_conflict" => Self::Conflict(message),
+                _ => Self::Refused(message),
+            },
             E::Unsupported(what) => unsupported(what),
             // E::Refused: the backend refused who the client is (a credential
             // trusted neither way, a refused link); `for_user` reports its

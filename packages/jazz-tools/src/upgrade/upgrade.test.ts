@@ -366,6 +366,31 @@ describe("jazz-tools upgrade: conversions", () => {
     );
   });
 
+  it("types a printed helper's enum parameter as the enum, so the typecheck passes (adopter eval t3)", async () => {
+    const dir = fixture("roles");
+    const before = await identityOf(dir);
+    const report = await upgradeProject({ dir, generate: testGenerate });
+    expect(await identityOf(dir)).toEqual(before);
+    const schema = readFileSync(join(dir, "schema.ts"), "utf8");
+    expect(schema).toMatch(/role: "admin" \| "editor" \| "viewer"/);
+    expect(schema).not.toContain('s.Value<"string">');
+    // Errors the app had before (its own server deps) are reported apart; upgrade adds none.
+    expect(report.typeErrors).toEqual([]);
+  });
+
+  it("renames a bare `import { schema }` from jazz-tools to `s` rather than refusing (adopter eval t6)", async () => {
+    const dir = fixture("bare-schema");
+    const before = await identityOf(dir);
+    const report = await upgrade(dir);
+    expect(await identityOf(dir)).toEqual(before);
+    const schema = readFileSync(join(dir, "schema.ts"), "utf8");
+    expect(schema).toContain('import { schema as s } from "jazz-tools";');
+    expect(schema).toContain("export const schema = s.defineSchema(");
+    expect(report.rewrites.join("\n")).toContain(
+      "`import { schema }` from jazz-tools → `import { schema as s }`",
+    );
+  });
+
   it("writes nothing on a dry run", async () => {
     const dir = fixture("chat");
     const before = projectFiles(dir);

@@ -3,8 +3,8 @@ name: Attach language artifacts
 # Builds jazz-ffi (the core the Swift, Kotlin and Go bindings link) for each
 # platform and attaches it to a GitHub release, next to the UniFFI-generated
 # Swift and Kotlin sources, so the language packages can download a
-# prebuilt library instead of building Rust. Dispatched with the exporter
-# for the release, after the npm publish pushes the tag and while the
+# prebuilt library instead of building Rust. Dispatched for the release,
+# after the npm publish pushes the tag and while the
 # release is still a draft (assets are never replaced once it is
 # published). `dry-run` builds and uploads workflow artifacts only; a pull
 # request changing this file runs it so.
@@ -121,8 +121,8 @@ jobs:
     steps:
       - name: Validate inputs
         run: |
-          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
-            echo "::error::version must look like 2.0.0-alpha.N or 2.0.0-alpha.N-rc.M, got '${VERSION}'"
+          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+((\.[0-9]+)?-rc\.[0-9]+)?$ ]]; then
+            echo "::error::version must look like 2.0.0-alpha.N, 2.0.0-alpha.N-rc.M or 2.0.0-alpha.N.K-rc.M, got '${VERSION}'"
             exit 1
           fi
 

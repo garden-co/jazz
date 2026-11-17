@@ -822,6 +822,18 @@ impl<'a> Writer<'a> {
                 "    public static func open(_ config: {RT}.Config) async throws -> {RT}.Client {{\n        try await {RT}.Client.open(app: app, config: config)\n    }}\n"
             );
         }
+        out.push_str(
+            "    /// A session of the app, following who is signed in (a device account,\n    /// your sign-in's `bearer` token, or no one) through its Jazz endpoint\n    /// `serverUrl`: `try await session.client()` is the signed-in user's\n    /// client, and in SwiftUI `JazzRoot(session) { … } signedOut: { … }`\n    /// hands it to your views.\n",
+        );
+        let (param, arg) = if self.has_computed {
+            (", computed: some Computed", "computed")
+        } else {
+            ("", "nil")
+        };
+        let _ = writeln!(
+            out,
+            "    public static func session(\n        appId: Swift.String, serverUrl: Swift.String,\n        bearer: (@Sendable ({RT}.TokenReason) async throws -> Swift.String?)? = nil,\n        start: {RT}.JazzSession.Start? = nil, linkGuest: Swift.Bool = true,\n        storage: {RT}.Config.Storage = .persistent, dataDir: Swift.String? = nil{param}\n    ) -> {RT}.JazzSession {{\n        {RT}.JazzSession(\n            app: app, appId: appId, serverUrl: serverUrl, bearer: bearer, start: start, linkGuest: linkGuest,\n            storage: storage, dataDir: dataDir, implementations: {arg})\n    }}\n"
+        );
         out
     }
 }

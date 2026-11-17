@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 
 use jazz::binding_codec;
 use jazz::binding_host::{
@@ -24,7 +24,7 @@ use jazz::thin::{ThinBody, ThinOp, ThinRequest, ThinResponse};
 use jazz::wire::{WireErrorCode, WireFrame, WireRetry, encode_frame};
 use tokio::sync::mpsc as tokio_mpsc;
 
-use super::{Outbound, Owner, SESSION_QUEUE_BUDGET, ServerSession, ThinIngress};
+use super::{Egress, Outbound, Owner, SESSION_QUEUE_BUDGET, ServerSession, ThinIngress};
 
 /// A transaction a thin session began and has not ended.
 struct ThinTransaction {
@@ -83,7 +83,9 @@ pub(super) struct ThinSession {
     /// cannot keep the others' events waiting.
     next_subscription: u64,
     output: tokio_mpsc::UnboundedSender<Outbound>,
-    egress: Arc<AtomicUsize>,
+    egress: Arc<Egress>,
+    /// Whether its client is reading.
+    clock: super::ReadClock,
 }
 
 impl ThinSession {
@@ -92,7 +94,7 @@ impl ThinSession {
         claims: Option<BTreeMap<String, Value>>,
         bundle: Option<jazz::catalogue::BundleId>,
         output: tokio_mpsc::UnboundedSender<Outbound>,
-        egress: Arc<AtomicUsize>,
+        egress: Arc<Egress>,
     ) -> Self {
         Self {
             identity,
@@ -107,7 +109,31 @@ impl ThinSession {
             next_subscription: 0,
             output,
             egress,
+            clock: super::ReadClock::default(),
         }
+    }
+
+    /// How far its client is behind the minimum read rate with its egress
+    /// at the budget, if it is ([`super::ReadClock`]).
+    pub(super) fn stalled_for(
+        &self,
+        now: std::time::Instant,
+        min_rate: u64,
+    ) -> Option<std::time::Duration> {
+        self.clock.check(&self.egress, now, min_rate)
+    }
+
+    /// Output it holds in server memory: handed to the socket side, not yet
+    /// written.
+    /// (Its live queries' undelivered events are bounded in the core,
+    /// which coalesces a backlog past its limit.)
+    pub(super) fn undrained(&self) -> usize {
+        self.egress.load(Ordering::Acquire)
+    }
+
+    /// Tell the client its session ends with `error`.
+    pub(super) fn fail(&self, error: jazz::wire::WireError) {
+        let _ = self.output.send((Err(error), 0));
     }
 
     fn has_room(&self) -> bool {
@@ -140,6 +166,7 @@ impl ThinSession {
         }
         let bytes = frames.iter().map(Vec::len).sum::<usize>();
         self.egress.fetch_add(bytes, Ordering::AcqRel);
+        self.clock.handed(bytes);
         self.output.send((Ok(frames), bytes)).is_ok()
     }
 
@@ -368,7 +395,7 @@ impl Owner {
         claims: BTreeMap<String, Value>,
         bundle: Option<jazz::catalogue::BundleId>,
         output: tokio_mpsc::UnboundedSender<Outbound>,
-        egress: Arc<AtomicUsize>,
+        egress: Arc<Egress>,
     ) -> Result<(), jazz::db::Error> {
         // Admitted on the same terms as a sync session: a pinned bundle must
         // resolve here, and a createJazz app serves only pinned sessions.
@@ -402,6 +429,14 @@ impl Owner {
             self.close_thin_session(*id);
         }
         ending.len()
+    }
+
+    /// Thin-client transactions open on this core, across its sessions:
+    /// the only thing it may hold between the calls it serves, until the
+    /// core stops running them (the app's backend runs them instead).
+    #[cfg(test)]
+    pub(super) fn open_thin_transactions(&self) -> usize {
+        self.thin.values().map(|thin| thin.transactions.len()).sum()
     }
 
     pub(super) fn close_thin_session(&mut self, session: ServerSession) {
@@ -806,7 +841,7 @@ fn serve_thin_op(
                 return Err(argument("a live query with this id is already open"));
             }
             let opts = read_opts(&options_json(options)?).map_err(host_error)?;
-            let query: jazz::query::Query = postcard::from_bytes(query)
+            let query = jazz::query::decode_client_query_postcard(query)
                 .map_err(|error| argument(format!("undecodable query: {error}")))?;
             let opened = db.prepare_query(&query).and_then(|mut prepared| {
                 if let Some((author, claims)) = scope {

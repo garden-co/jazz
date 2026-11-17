@@ -298,7 +298,10 @@ db.update(
 ```
 
 For byte-oriented text, use `{ fromUtf8, toUtf8 }` in `within` and
-`{ atUtf8, deleteUtf8, insert }` in each splice. Jazz rejects out-of-range
+`{ atUtf8, deleteUtf8, insert }` in each splice. In Rust, text pages and
+splices count UTF-8 bytes (`str` indices): `jazz.splice(id, column,
+Page::text(from..to), vec![Splice::text(at, delete, "revised")])`, and an
+offset inside a code point fails with `Error::TextOffset`. Jazz rejects out-of-range
 coordinates and text boundaries that split a code point or surrogate pair. This
 revision does not add a page-staleness/CAS check; keep page coordinates aligned
 with the value your application last read. `update(..., { applyDiffs })` is for
@@ -339,7 +342,12 @@ Store a file in a `bytes` column next to its metadata:
 import { schema as s } from "jazz-tools";
 
 export const schema = s.defineSchema({
-  files: s.table({ name: s.string(), type: s.string(), size: s.int(), content: s.bytes() }),
+  files: s.table({
+    name: s.string(),
+    type: s.string(),
+    size: s.int(),
+    content: s.bytes(),
+  }),
 });
 ```
 
@@ -491,9 +499,9 @@ is reset automatically. To sync with the new server, reset the local store: in t
 `await db.deleteClientStorage()`; in Node, delete the client's data directory and open
 it again. Writes that never reached the old server are lost with the store.
 
-In the browser, tabs that sync through a shared worker may not yet see this: a tab's `global` waits
-can keep waiting after the worker's link was refused. Treat `authority-changed` in a multi-tab app as
-best effort for now.
+In the browser, every tab that syncs through the shared worker sees this too, including a tab opened
+or reloaded after the refusal: its `global` waits fail the same way and its sync status shows
+`offline` with the reason `authority-changed`, while local reads and writes keep working.
 
 In the browser, `offline` can also have the reason `held-by-another-tab`, with `retrying: true`.
 When a guest signs up in one tab, another tab may still hold the account's local store as the
@@ -546,7 +554,7 @@ A mutation can fail when you call it or while you wait:
   `PersistedWriteRejectedError` on the local-first client, and with a `ThinRemoteError` (code
   `WriteRejected`) on the thin client.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Swift", "Kotlin", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-mutation-errors-ts
@@ -556,6 +564,12 @@ A mutation can fail when you call it or while you wait:
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-mutation-errors-effect
     </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-mutation-errors-rust
+    </include>
+
   </Tab>
   <Tab value="Swift">
     <include cwd lang="swift">

@@ -9,6 +9,12 @@ import type { AccountHandle } from "../accounts/state.js";
 import { NoKeptDeviceAccountError } from "./no-kept-device-account-error.js";
 import { exportLocalFirstSecret } from "../accounts/enrollment.js";
 import { createListeners, toError } from "../runtime/util.js";
+import {
+  localFirstUnavailableOf,
+  type LocalFirstUnavailable,
+} from "../runtime/local-first-unavailable.js";
+
+export type { LocalFirstUnavailable };
 
 const DEVICE_ISSUER = "urn:jazz:local-first";
 const SYSTEM_ISSUER = "urn:jazz:system";
@@ -103,6 +109,14 @@ export interface JazzSessionSnapshot<Client> {
    * same `client` and `db` carry on). False while there is no client.
    */
   readonly localFirst: boolean;
+  /**
+   * Why `client` runs thin although the session was given a local-first
+   * client (`client`): set when loading or opening it failed, for example
+   * `{ reason: "wasm-mismatch", message: "local-first unavailable: WASM
+   * fingerprint mismatch" }` for a stale or mismatched `.wasm` asset. The
+   * client still works, against the server only. Cleared once it upgrades.
+   */
+  readonly localFirstUnavailable?: LocalFirstUnavailable;
   readonly pending?: JazzSessionOperation;
   readonly error?: Error;
   /**
@@ -274,6 +288,9 @@ export function ownJazzSession<Config, Client>(
           : "session"))
       : undefined;
     const account = current?.account;
+    const localFirst = status === "ready" && clientIsLocalFirst(current?.client);
+    const localFirstUnavailable =
+      status === "ready" && !localFirst ? localFirstUnavailableOf(current?.client) : undefined;
     const next: JazzSessionSnapshot<Client> = {
       status,
       user:
@@ -281,7 +298,8 @@ export function ownJazzSession<Config, Client>(
           ? snapshot.user
           : userOfAccount(account),
       ...(status === "ready" ? { client: current?.client } : {}),
-      localFirst: status === "ready" && clientIsLocalFirst(current?.client),
+      localFirst,
+      ...(localFirstUnavailable ? { localFirstUnavailable } : {}),
       ...(current?.pending ? { pending: CORE_OPERATION[current.pending] } : {}),
       ...(error ? { error } : {}),
       ...(recovery ? { recovery } : {}),
@@ -292,6 +310,7 @@ export function ownJazzSession<Config, Client>(
       snapshot.client === next.client &&
       snapshot.user === next.user &&
       snapshot.localFirst === next.localFirst &&
+      snapshot.localFirstUnavailable === next.localFirstUnavailable &&
       snapshot.pending === next.pending &&
       snapshot.error === next.error &&
       snapshot.recovery === next.recovery &&

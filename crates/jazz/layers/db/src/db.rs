@@ -2,7 +2,7 @@
 
 use crate::values::CachedRow;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::task::{Poll, Waker};
@@ -34,13 +34,17 @@ use crate::tools::{CmpOp, PolicyExpr};
 mod fanout;
 pub use fanout::FanoutStats;
 #[cfg(any(test, feature = "testing"))]
-pub use fanout::{set_correlation_filter_for_test, set_policy_pins_for_test};
+pub use fanout::{
+    fail_rechecks_for_test, set_correlation_filter_for_test, set_fanout_oracle_for_test,
+    set_policy_pins_for_test,
+};
 #[path = "large_ops.rs"]
 mod large_ops;
 pub(crate) use large_ops::byte_splices;
 pub use large_ops::{
     JsonSetEdit, LargeValueDeltaSplice, LargeValueStagingPolicy, LargeValueUpdate,
-    LargeValueUpdatePage, LargeValueUpdateSplice, StreamingMutationKind, StreamingValueUpload,
+    LargeValueUpdatePage, LargeValueUpdateSplice, NOT_CHAR_BOUNDARY, StreamingMutationKind,
+    StreamingValueUpload,
 };
 #[path = "sync.rs"]
 pub(crate) mod sync;
@@ -184,6 +188,9 @@ impl PreparedQuery {
         self
     }
 }
+
+/// How many validated query shapes a db remembers before it starts over.
+const VALIDATED_SHAPES_MAX: usize = 4096;
 
 fn short(hash: jazz_types::sha256::Hash) -> [u8; 16] {
     hash.as_bytes()[..16].try_into().expect("16 bytes")
@@ -512,8 +519,9 @@ pub struct SubscriptionStream {
     /// A withheld opening, released as one reset of the current rows.
     gate: Option<sync::Gate>,
     group: Weak<RefCell<fanout::Group>>,
-    /// Why the server refused the remote read, once it has; reported once.
-    refused: Option<Rc<RefCell<Option<Error>>>>,
+    /// The remote read it follows: why the server refused it, once it
+    /// has, is reported once and ends the stream.
+    refused: Option<Rc<sync::ReadSignal>>,
     /// The remote attachment to release on drop.
     remote: Option<(
         Rc<Store>,
@@ -541,10 +549,9 @@ impl Drop for SubscriptionStream {
 
 impl SubscriptionStream {
     pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
-        let refused = self.refused.as_ref().and_then(|refused| {
-            refused
-                .borrow()
-                .as_ref()
+        let refused = self.refused.as_ref().and_then(|signal| {
+            signal
+                .refusal()
                 .map(|error| (error.code, error.message.clone(), error.to_string()))
         });
         if let Some((code, message, reason)) = refused {
@@ -570,8 +577,11 @@ impl SubscriptionStream {
             {
                 return None;
             }
-            let settled = gate.answered.get();
-            let global = settled && gate.global.get();
+            // Opened on an answer, or past its wait: either way it reports
+            // what the read was last confirmed as (an outage leaves that
+            // standing).
+            let settled = gate.signal.confirmed();
+            let global = settled && gate.signal.confirmed_globally();
             self.gate = None;
             self.queue.borrow_mut().clear();
             let group = self.group.upgrade()?;
@@ -603,6 +613,32 @@ impl SubscriptionStream {
     }
 }
 
+/// What a store holds open between calls ([`Db::held_for_test`]).
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Held {
+    /// A transaction handle's staged writes are applied, in a SQLite
+    /// savepoint, for its next stage.
+    pub overlay: bool,
+    /// A callback transaction ([`Db::transaction`]) is open: its savepoint
+    /// spans the callback's awaits.
+    pub callback_transaction: bool,
+    /// Transaction handles that are open (staged, not committed or rolled
+    /// back).
+    pub open_batches: usize,
+    /// The connection is inside a SQLite transaction or savepoint.
+    pub sqlite_transaction: bool,
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl Held {
+    /// Nothing is held.
+    pub fn is_nothing(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Test-visible runtime counters.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeStats {
@@ -620,6 +656,10 @@ pub struct SchemaPublication {
 
 struct Inner {
     conn: crate::storage::Storage,
+    /// Query shapes (with their binding) `prepare` has already validated
+    /// against this schema version: it validates each once. Cleared when
+    /// it reaches [`VALIDATED_SHAPES_MAX`].
+    validated_shapes: HashSet<([u8; 16], [u8; 16])>,
     /// One-way, owner-wide fence for new application mutations during close.
     mutation_admission_closed: bool,
     /// Enum variants a write may hold though its schema does not declare
@@ -791,6 +831,11 @@ struct Inner {
     pub(crate) claims: HashMap<AuthorSubject, BTreeMap<String, Value>>,
     /// Live subscription groups and their invalidation index.
     fan: fanout::Fanout,
+    /// Policy-check statements kept per (schema, table, operation, author):
+    /// see [`Inner::check_in`]. Per store, not per thread: one thread can
+    /// host several stores, and a schema one of them frees can be
+    /// reallocated at the same address for another.
+    check_plans: RefCell<CheckPlans>,
     /// Rows written since the last dispatch: (table, id, branch key).
     changed: RefCell<Vec<(String, RowUuid, Vec<u8>)>>,
     /// The write checks of the unit being applied, run at its end.
@@ -800,6 +845,10 @@ struct Inner {
     trusted_rows: RefCell<BTreeMap<String, BTreeSet<[u8; 16]>>>,
     /// The open transaction's seq and the tables it wrote.
     tx: Option<(u64, BTreeSet<String>)>,
+    /// The identity the open callback transaction writes as. A write as
+    /// any other identity while it is open would join its commit, and
+    /// upload under its author and claims, so it is refused.
+    tx_identity: Option<WriteIdentity>,
     publications: Vec<SchemaPublication>,
     /// Set once connected upstream: this store is a replica.
     client: Option<sync::Client>,
@@ -859,10 +908,6 @@ struct Inner {
     since_tick: Vec<(String, RowUuid, Vec<u8>)>,
     /// Ops of the open local transaction, for upload, by stored names.
     pub(crate) capture: Vec<StagedOp>,
-    /// The claims the open local transaction's session writes were staged
-    /// with: its upload carries these, not whatever its author's claims
-    /// are by the time it commits.
-    pub(crate) capture_claims: Option<BTreeMap<String, Value>>,
     /// Images a replica dropped since the last dispatch (evictions and
     /// rebases), for keyed invalidation.
     gone: RefCell<Vec<sync::Image>>,
@@ -1115,6 +1160,164 @@ struct RelationRun<'q> {
     /// Each relation is then read once per run, so there is nothing to
     /// cache for it.
     batch: bool,
+    /// A live result's relation statements, kept across its runs
+    /// ([`Inner::nest_relations_kept`]); `None` for any other read.
+    kept: Option<&'q mut RelationPlans>,
+    /// The relation columns from the root down to the level being nested:
+    /// with the relation's own column, what names its kept statement.
+    path: Vec<String>,
+}
+
+/// A live result's compiled relation statements, kept across its runs: a
+/// re-run (or a later chunk of parents) rebinds only the parents' list
+/// instead of compiling the relation again. Keyed by the relation's path
+/// from the root (one result's query names one relation per path), its
+/// parents' shape and whether they bind as blobs; `None` where the
+/// children are too wide to batch.
+///
+/// A statement is compiled from the schema, the reader's sessions, the
+/// relation and the store's enum tags; it is kept only while all of them
+/// are as they were ([`PlanStamp`]).
+#[derive(Default)]
+pub(crate) struct RelationPlans {
+    stamp: Option<PlanStamp>,
+    by: HashMap<(String, bool, bool), Option<(Compiled, usize)>>,
+    /// Statements reused (for [`FanoutStats::kept_plans`]).
+    pub(crate) hits: u64,
+}
+
+impl RelationPlans {
+    /// Drop every kept statement (the result's schema or claims changed).
+    pub(crate) fn clear(&mut self) {
+        self.stamp = None;
+        self.by.clear();
+    }
+}
+
+/// What a kept statement was compiled under. The schema is held, not just
+/// its address, so a schema built later cannot pass for it.
+pub(crate) struct PlanStamp {
+    schema: Rc<Schema>,
+    sessions: (Option<Session>, Session),
+    withheld: bool,
+    settled_only: bool,
+    include_deleted: bool,
+    history_origin: Option<[u8; 16]>,
+    tags: u64,
+}
+
+/// What a statement compiled now would be compiled under
+/// ([`Inner::plan_inputs`]): compared with a kept [`PlanStamp`] where it
+/// stands, and copied into one only when they differ.
+pub(crate) struct PlanInputs<'a> {
+    schema: &'a Rc<Schema>,
+    sessions: &'a (Option<Session>, Session),
+    withheld: bool,
+    settled_only: bool,
+    include_deleted: bool,
+    history_origin: Option<[u8; 16]>,
+    tags: u64,
+}
+
+impl PlanStamp {
+    fn holds(&self, now: &PlanInputs<'_>) -> bool {
+        Rc::ptr_eq(&self.schema, now.schema)
+            && same_sessions(&self.sessions, now.sessions)
+            && self.withheld == now.withheld
+            && self.settled_only == now.settled_only
+            && self.include_deleted == now.include_deleted
+            && self.history_origin == now.history_origin
+            && self.tags == now.tags
+    }
+
+    /// Whether the statements kept under `kept` are still what `now`
+    /// compiles. If not, `kept` becomes `now`'s stamp and the caller drops
+    /// its statements.
+    pub(crate) fn keep(kept: &mut Option<PlanStamp>, now: &PlanInputs<'_>) -> bool {
+        if kept.as_ref().is_some_and(|kept| kept.holds(now)) {
+            return true;
+        }
+        *kept = Some(PlanStamp {
+            schema: now.schema.clone(),
+            sessions: now.sessions.clone(),
+            withheld: now.withheld,
+            settled_only: now.settled_only,
+            include_deleted: now.include_deleted,
+            history_origin: now.history_origin,
+            tags: now.tags,
+        });
+        false
+    }
+}
+
+/// Whether two reads authorize as the same identity with the same claims:
+/// what a compiled read binds of its sessions.
+fn same_sessions(a: &(Option<Session>, Session), b: &(Option<Session>, Session)) -> bool {
+    let same = |a: &Session, b: &Session| {
+        a.system == b.system
+            && a.issuer == b.issuer
+            && a.subject == b.subject
+            && a.account == b.account
+            && a.claims == b.claims
+    };
+    match (&a.0, &b.0) {
+        (None, None) => {}
+        (Some(x), Some(y)) if same(x, y) => {}
+        _ => return false,
+    }
+    same(&a.1, &b.1)
+}
+
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static PLAN_ORACLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether every kept statement is compared with one compiled afresh.
+pub(crate) fn plan_oracle() -> bool {
+    #[cfg(any(test, feature = "testing"))]
+    {
+        PLAN_ORACLE.with(std::cell::Cell::get)
+    }
+    #[cfg(not(any(test, feature = "testing")))]
+    {
+        false
+    }
+}
+
+/// Tests only: compare every kept statement (a relation's or a re-check's)
+/// with one compiled afresh, on this thread, and panic where they differ.
+#[cfg(any(test, feature = "testing"))]
+pub fn set_plan_oracle_for_test(on: bool) {
+    PLAN_ORACLE.with(|cell| cell.set(on));
+}
+
+/// Whether two compiles of one read are the same statement.
+pub(crate) fn same_compiled(a: &Compiled, b: &Compiled) -> bool {
+    a.sql == b.sql
+        && a.params == b.params
+        && a.tables == b.tables
+        && a.aggregate == b.aggregate
+        && a.joined == b.joined
+        && a.versioned == b.versioned
+        && a.union == b.union
+        && a.writer == b.writer
+        && a.partial == b.partial
+        && a.projection.len() == b.projection.len()
+        && a.projection.iter().zip(&b.projection).all(|(x, y)| {
+            x.0 == y.0
+                && x.1 == y.1
+                // An enum cell's tags are the store's own entry for the
+                // stored column (`TagRegistry::column`), which every
+                // compile under one schema hands out: the same column is
+                // the same `Rc`, and equal tags in another one would be
+                // another column's.
+                && match (&x.2, &y.2) {
+                    (None, None) => true,
+                    (Some(p), Some(q)) => Rc::ptr_eq(p, q),
+                    _ => false,
+                }
+        })
 }
 
 impl<'q> RelationRun<'q> {
@@ -1133,6 +1336,8 @@ impl<'q> RelationRun<'q> {
             cells: HashMap::new(),
             children: HashMap::new(),
             batch: relation_batch(),
+            kept: None,
+            path: Vec::new(),
         }
     }
 
@@ -1961,6 +2166,7 @@ impl Db {
             defer_fetches: false,
             inner: Rc::new(Store::new(Inner {
                 conn: conn.into(),
+                validated_shapes: HashSet::new(),
                 mutation_admission_closed: false,
                 kept_variants: BTreeMap::new(),
                 #[cfg(any(test, feature = "testing"))]
@@ -2030,10 +2236,12 @@ impl Db {
                 ),
                 claims: HashMap::new(),
                 fan: fanout::Fanout::default(),
+                check_plans: RefCell::new(CheckPlans::default()),
                 changed: RefCell::new(Vec::new()),
                 deferred: RefCell::new(None),
                 trusted_rows: RefCell::new(BTreeMap::new()),
                 tx: None,
+                tx_identity: None,
                 publications: Vec::new(),
                 client: None,
                 non_durable: false,
@@ -2054,7 +2262,6 @@ impl Db {
                 accepted: 0,
                 since_tick: Vec::new(),
                 capture: Vec::new(),
-                capture_claims: None,
                 gone: RefCell::new(Vec::new()),
                 migrations: config.migrations,
                 withheld: std::cell::Cell::new(withheld > 0),
@@ -3139,18 +3346,28 @@ impl Db {
         query: &Query,
         binding: BTreeMap<String, Value>,
     ) -> Result<PreparedQuery, Error> {
-        let inner = self.inner();
+        let mut inner = self.inner();
         let normalized = normalize_relation(query, &inner.schema)?;
         let query = normalized.as_ref().unwrap_or(query);
-        // Validate: tables, columns, parameters, supported forms. Read
-        // options are not known yet: validate the widest read (deleted rows
-        // included, so their metadata columns are accepted).
-        let session = Session::system();
-        Ctx::new(&inner.schema, None, &session, &binding).compile_query(query, true)?;
         let shape = jazz_types::sha256::hash(
             format!("{query:?}{:?}", inner.schema.jazz.version_id()).as_bytes(),
         );
         let bound = jazz_types::sha256::hash(format!("{binding:?}").as_bytes());
+        let key = (short(shape), short(bound));
+        if !inner.validated_shapes.contains(&key) {
+            // Validate: tables, columns, parameters, supported forms, and
+            // every relation as its reads will compile it. Read options are
+            // not known yet: validate the widest read (deleted rows
+            // included, so their metadata columns are accepted). Once per
+            // shape: reads, fanout and paging don't validate again.
+            let session = Session::system();
+            Ctx::new(&inner.schema, None, &session, &binding).compile_query(query, true)?;
+            Ctx::new(&inner.schema, None, &session, &binding).validate_prepared(query)?;
+            if inner.validated_shapes.len() >= VALIDATED_SHAPES_MAX {
+                inner.validated_shapes.clear();
+            }
+            inner.validated_shapes.insert(key);
+        }
         Ok(PreparedQuery {
             query: query.clone(),
             binding,
@@ -3298,22 +3515,19 @@ impl Db {
             },
             None => read,
         };
-        let remote = attached.map(|(_, flags)| flags);
+        let remote = attached.map(|(_, signal)| signal);
         let settled = match (&remote, client) {
-            (Some((answered, _, global)), _) => {
-                sync::SettledBy::Remote(answered.clone(), global.clone())
-            }
+            (Some(signal), _) => sync::SettledBy::Remote(signal.clone()),
             (None, true) => sync::SettledBy::Never,
             (None, false) => sync::SettledBy::Always(self.inner().authority),
         };
         let gate = match (&remote, self.link_hint()) {
-            (Some((answered, _, global)), Some(hint)) => {
+            (Some(signal), Some(hint)) => {
                 let deadline =
                     sync::remote_deadline(&opts, non_durable, sync::may_wait(hint.get()));
                 let live = hint.get().hint == RemoteLinkHint::Live;
                 deadline.map(|deadline| sync::Gate {
-                    answered: answered.clone(),
-                    global: global.clone(),
+                    signal: signal.clone(),
                     hint,
                     live,
                     deadline,
@@ -3345,7 +3559,7 @@ impl Db {
             dropped: inner.fan.dropped.clone(),
             gate,
             group,
-            refused: remote.as_ref().map(|(_, refused, _)| refused.clone()),
+            refused: remote.clone(),
             remote: remote.zip(reach).map(|(_, reach)| {
                 (
                     self.inner.clone(),
@@ -3525,6 +3739,15 @@ impl Db {
     /// upload: it is recorded for the authority, which decides its fate.
     fn write_op(&self, mut op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
         self.inner().require_mutation_admission()?;
+        // A write while a callback transaction is open joins its commit:
+        // only one made as that transaction's identity may (its own).
+        if let (Some(open), Some(identity)) = (self.inner().tx_identity, op.identity())
+            && identity != open
+        {
+            return Err(unsupported(
+                "a write as another identity while a transaction is open",
+            ));
+        }
         self.with_upload(|| {
             let table = op.table().to_owned();
             let (prior, mark) = {
@@ -3708,6 +3931,7 @@ impl Db {
             inner.changed.borrow_mut().clear();
             let seq = inner.fresh_seq();
             inner.tx = Some((seq, BTreeSet::new()));
+            inner.tx_identity = Some(identity);
         }
         // Until the unit commits or is rolled back below, dropping this
         // future (cancellation) or unwinding out of the callback rolls it
@@ -3727,10 +3951,8 @@ impl Db {
         let changed = {
             let mut inner = self.inner();
             let (seq, tables) = inner.tx.take().expect("open transaction");
-            captured = (
-                std::mem::take(&mut inner.capture),
-                inner.capture_claims.take(),
-            );
+            inner.tx_identity = None;
+            captured = std::mem::take(&mut inner.capture);
             prior = inner.seq;
             match &result {
                 Ok(_) => {
@@ -3752,9 +3974,10 @@ impl Db {
         let value = result?;
         let (seq, _) = changed.expect("committed");
         // The upload record joins the transaction's SQLite savepoint.
-        let (captured, claims) = captured;
-        let recorded =
-            self.record_stored_upload(captured, seq, sync::Kind::Mergeable, None, claims);
+        // A callback transaction writes as the database or attributed
+        // (`transaction_as`), never as a session, so no session claims
+        // travel with it.
+        let recorded = self.record_stored_upload(captured, seq, sync::Kind::Mergeable, None, None);
         if let Err(error) = recorded {
             guard.armed = false;
             self.inner().roll_back_callback_tx(Some(prior))?;
@@ -4019,6 +4242,10 @@ impl Db {
             if make_current {
                 inner.owner_version = target.jazz.version_id();
                 inner.owner = Rc::new(target);
+                // Kept checks were compiled under the old policies; drop
+                // them now, before a fallible step below can return
+                // without reaching `reset_everything`.
+                inner.clear_check_plans();
                 // Read policies that changed may read differently from
                 // here: a subscription resuming from before opens fresh.
                 let mut digest = jazz_types::sha256::Hasher::new();
@@ -4730,8 +4957,8 @@ impl Inner {
     /// so it closes mutation admission.
     fn roll_back_callback_tx(&mut self, restore_seq: Option<u64>) -> Result<(), Error> {
         self.tx = None;
+        self.tx_identity = None;
         self.capture.clear();
-        self.capture_claims = None;
         self.writer = None;
         self.clear_derived();
         if let Some(seq) = restore_seq {
@@ -5479,6 +5706,57 @@ impl Inner {
         read: &ReadSpec,
         roots: Vec<CurrentRow>,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.nest_relations_in(prepared, identity, read, roots, None)
+    }
+
+    /// [`Self::nest_relations`] for a live result that keeps its relation
+    /// statements in `plans` across runs. They are used only for a read
+    /// with no branch view and no cut, and dropped first when what they
+    /// were compiled under changed ([`PlanStamp`]). `prepared` may be the
+    /// result's own query, narrowed at its root, or with relations pruned
+    /// by a scoped re-nest: a kept statement is named by its relation's
+    /// path, and a scoped re-nest prunes only optional relations (a level
+    /// whose dropped relation is required is read whole), so the children
+    /// statement on a path, which reads only the required nested
+    /// relations, is the same with or without the pruning.
+    pub(crate) fn nest_relations_kept(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+        roots: Vec<CurrentRow>,
+        plans: &mut RelationPlans,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.nest_relations_in(prepared, identity, read, roots, Some(plans))
+    }
+
+    /// What a statement compiled now for `prepared`, read as `sessions`
+    /// through `read` (no view, no cut), is compiled under.
+    pub(crate) fn plan_inputs<'a>(
+        &'a self,
+        prepared: &'a PreparedQuery,
+        sessions: &'a (Option<Session>, Session),
+        read: &ReadSpec,
+    ) -> PlanInputs<'a> {
+        PlanInputs {
+            schema: prepared.schema.as_ref().unwrap_or(&self.owner),
+            sessions,
+            withheld: self.withheld.get(),
+            settled_only: read.settled_only,
+            include_deleted: read.include_deleted,
+            history_origin: self.history_origin(),
+            tags: crate::values::tag_epoch(),
+        }
+    }
+
+    fn nest_relations_in(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+        roots: Vec<CurrentRow>,
+        plans: Option<&mut RelationPlans>,
+    ) -> Result<Vec<CurrentRow>, Error> {
         if prepared.query.array_subqueries.is_empty() {
             return Ok(roots);
         }
@@ -5494,6 +5772,18 @@ impl Inner {
             read
         };
         let mut run = RelationRun::new(self, prepared, identity, read);
+        if let Some(plans) = plans
+            && read.view.is_none()
+            && read.cut.is_none()
+        {
+            if !PlanStamp::keep(
+                &mut plans.stamp,
+                &self.plan_inputs(prepared, &run.sessions, read),
+            ) {
+                plans.by.clear();
+            }
+            run.kept = Some(plans);
+        }
         self.nest(
             &mut run,
             &prepared.query.table,
@@ -5914,9 +6204,7 @@ impl Inner {
                 batchable = false;
                 break;
             };
-            let Some((compiled, _)) = run
-                .ctx(self)
-                .compile_children_batch(array, elements, list, blobs)?
+            let Some((compiled, _)) = self.children_batch(run, array, elements, list, blobs)?
             else {
                 // The children's width does not depend on the chunk.
                 debug_assert_eq!(n, 0);
@@ -5939,7 +6227,11 @@ impl Inner {
                 .map(|parent| self.relation(run, array, parent))
                 .collect();
         }
-        let nodes = self.nest(run, &array.table, &array.nested_arrays, rows)?;
+        // The levels below this one are on its path.
+        run.path.push(array.column_name.clone());
+        let nodes = self.nest(run, &array.table, &array.nested_arrays, rows);
+        run.path.pop();
+        let nodes = nodes?;
         let mut groups: Vec<Vec<ResultNode>> = (0..values.len()).map(|_| Vec::new()).collect();
         for (at, node) in keys.into_iter().zip(nodes) {
             groups[at].push(node);
@@ -5967,6 +6259,64 @@ impl Inner {
                 }
             })
             .collect())
+    }
+
+    /// The batched children statement of `array` for the parents' JSON
+    /// `list` ([`Ctx::compile_children_batch`]): a live result's kept one
+    /// with `list` bound in, else compiled (and kept, for a live result).
+    fn children_batch(
+        &self,
+        run: &mut RelationRun<'_>,
+        array: &crate::query::ArraySubquery,
+        elements: bool,
+        list: Sql,
+        blobs: bool,
+    ) -> Result<Option<(Compiled, usize)>, Error> {
+        if run.kept.is_none() {
+            return run
+                .ctx(self)
+                .compile_children_batch(array, elements, list, blobs);
+        }
+        let mut path = run.path.join("\u{1f}");
+        path.push('\u{1f}');
+        path.push_str(&array.column_name);
+        let key = (path, elements, blobs);
+        let kept = run
+            .kept
+            .as_ref()
+            .and_then(|plans| plans.by.get(&key).cloned());
+        let Some(kept) = kept else {
+            let fresh = run
+                .ctx(self)
+                .compile_children_batch(array, elements, list, blobs)?;
+            if let Some(plans) = run.kept.as_mut() {
+                plans.by.insert(key, fresh.clone());
+            }
+            return Ok(fresh);
+        };
+        if let Some(plans) = run.kept.as_mut() {
+            plans.hits += 1;
+        }
+        let kept = kept.map(|(mut compiled, at)| {
+            compiled.params[at] = list.clone();
+            (compiled, at)
+        });
+        if plan_oracle() {
+            let fresh = run
+                .ctx(self)
+                .compile_children_batch(array, elements, list, blobs)?;
+            let same = match (&kept, &fresh) {
+                (None, None) => true,
+                (Some((a, i)), Some((b, j))) => i == j && same_compiled(a, b),
+                _ => false,
+            };
+            assert!(
+                same,
+                "a kept relation statement differs from a fresh one: {}",
+                key.0.replace('\u{1f}', ".")
+            );
+        }
+        Ok(kept)
     }
 
     /// The value of row `id` that `array` correlates its children with
@@ -6357,6 +6707,22 @@ impl Inner {
         cut: Option<Cut>,
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
     ) -> Result<(String, Vec<Sql>, OverlayRead), Error> {
+        let (condition, mut params, read) = self.policy_condition_in(schema, cut, policy)?;
+        let sql = policy_check_sql(table, &condition, params.len());
+        params.push(Sql::Blob(row.0.as_bytes().to_vec()));
+        params.push(Sql::Blob(key.to_vec()));
+        Ok((sql, params, read))
+    }
+
+    /// A policy compiled in `schema` as an SQL boolean over the row `a`,
+    /// with its parameters (none for the row and branch yet) and what of
+    /// the cut's overlay it reads.
+    fn policy_condition_in(
+        &self,
+        schema: &Schema,
+        cut: Option<Cut>,
+        policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
+    ) -> Result<(String, Vec<Sql>, OverlayRead), Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
         let mut ctx = Ctx::new(schema, None, &claims, &binding).with_cut(cut, false);
@@ -6365,16 +6731,7 @@ impl Inner {
             rows: ctx.overlaid_rows,
             tables: std::mem::take(&mut ctx.overlay_tables),
         };
-        let mut params = ctx.params;
-        params.push(Sql::Blob(row.0.as_bytes().to_vec()));
-        params.push(Sql::Blob(key.to_vec()));
-        let sql = format!(
-            "SELECT COALESCE({condition}, 0) FROM {} AS a WHERE a.id = ?{} AND a._branch = ?{}",
-            quote(&table.stored),
-            params.len() - 1,
-            params.len()
-        );
-        Ok((sql, params, read))
+        Ok((condition, ctx.params, read))
     }
 
     /// SQLite's plan for the INSERT check a unit ending now would run on
@@ -6489,7 +6846,121 @@ impl Inner {
     }
 
     /// [`Inner::check`] by `schema`'s policies (`table` is `schema`'s).
+    ///
+    /// The statement is a function of the schema, the table, the operation,
+    /// the author with its claims, and the enum tags it was compiled under;
+    /// only the row and branch parameters differ per call. So it is kept
+    /// ([`CheckPlans`]) and compiled again only when one of those changed.
     pub(crate) fn check_in(
+        &self,
+        schema: &Schema,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        author: AuthorSubject,
+        operation: Operation,
+    ) -> Result<bool, Error> {
+        self.check_in_planned(schema, table, row, key, author, operation, false)
+    }
+
+    /// [`Inner::check_in`] for a row the caller has just read from this
+    /// store's stored table, at this branch key, with nothing written since:
+    /// a policy that compiles to the constant `1` passes it without running
+    /// a statement. For a row that is not there the statement would fail
+    /// (it reads no row), so the caller must have read it.
+    pub(crate) fn check_in_existing(
+        &self,
+        schema: &Schema,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        author: AuthorSubject,
+        operation: Operation,
+    ) -> Result<bool, Error> {
+        self.check_in_planned(schema, table, row, key, author, operation, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn check_in_planned(
+        &self,
+        schema: &Schema,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        author: AuthorSubject,
+        operation: Operation,
+        existing: bool,
+    ) -> Result<bool, Error> {
+        let plan_key = self
+            .check_plans
+            .borrow()
+            .key(schema, table, operation, author);
+        let claims = self.claims.get(&author);
+        let epoch = crate::values::tag_epoch();
+        let kept = self.check_plans.borrow().get(&plan_key, claims, epoch);
+        let plan = match kept {
+            Some(plan) => plan,
+            None => {
+                let session = self.session(author);
+                let (condition, params, _) = self.policy_condition_in(schema, None, |ctx| {
+                    ctx.operation_policy(table, operation, "a", &session)
+                })?;
+                let plan = Rc::new(CheckPlan {
+                    claims: claims.cloned(),
+                    epoch,
+                    sql: policy_check_sql(table, &condition, params.len()),
+                    constant: condition == "1" && params.is_empty(),
+                    params,
+                });
+                self.check_plans.borrow_mut().put(plan_key, plan.clone());
+                plan
+            }
+        };
+        if existing && plan.constant {
+            debug_assert!(
+                self.row_at(table, row, key)?,
+                "check_in_existing on a row {row:?} of {} that is not there",
+                table.stored
+            );
+            return Ok(true);
+        }
+        let mut params = plan.params.clone();
+        params.push(Sql::Blob(row.0.as_bytes().to_vec()));
+        params.push(Sql::Blob(key.to_vec()));
+        let value: i64 = self
+            .conn
+            .cached_row(&plan.sql, params_from_iter(params.iter()), |r| r.get(0))
+            .map_err(storage)?;
+        Ok(value != 0)
+    }
+
+    /// Whether stored table `table` holds `row` at branch key `key`.
+    fn row_at(&self, table: &Table, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
+        self.conn
+            .prepare_cached(&format!(
+                "SELECT 1 FROM {} WHERE id = ?1 AND _branch = ?2",
+                quote(&table.stored)
+            ))
+            .and_then(|mut statement| {
+                statement
+                    .query_row(rusqlite::params![row.0.as_bytes().as_slice(), key], |_| {
+                        Ok(())
+                    })
+                    .optional()
+            })
+            .map(|found| found.is_some())
+            .map_err(storage)
+    }
+
+    /// Drop the kept policy checks (the schema changed).
+    pub(crate) fn clear_check_plans(&self) {
+        self.check_plans.borrow_mut().clear();
+    }
+
+    /// [`Inner::check_in`] compiled afresh, as before plans were kept: the
+    /// oracle the kept plans are tested against.
+    #[cfg(any(test, feature = "testing"))]
+    fn check_in_fresh(
         &self,
         schema: &Schema,
         table: &Table,
@@ -10210,6 +10681,24 @@ impl Db {
         self.inner.staging().overlay_replays
     }
 
+    /// What this store holds open between calls: anything a later call
+    /// must find as it was left. A peek: the store gate would undo the
+    /// overlay, so it is read without passing it. A store serving as a
+    /// core must hold nothing between the calls it serves, so that it
+    /// also runs on storage that cannot keep a transaction open (Durable
+    /// Objects' `transactionSync`).
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn held_for_test(&self) -> Held {
+        let inner = self.inner.staging();
+        Held {
+            overlay: inner.overlay.is_some(),
+            callback_transaction: inner.tx.is_some(),
+            open_batches: inner.batches.len(),
+            sqlite_transaction: !inner.conn.is_autocommit(),
+        }
+    }
+
     /// How many times a staged write's check copied the evidence set it
     /// shares with its batch (see [`Batch::rows`]).
     #[cfg(any(test, feature = "testing"))]
@@ -10256,6 +10745,7 @@ impl Db {
     }
 
     pub async fn commit_mergeable_handle(&self, id: OpenTransactionId) -> Result<TxReceipt, Error> {
+        self.refuse_commit_in_callback_tx()?;
         let batch = self.take_batch(id)?;
         if !matches!(batch.kind, BatchKind::Mergeable) {
             return Err(rejected(format!("transaction {id:?} is not mergeable")));
@@ -10274,6 +10764,7 @@ impl Db {
         &self,
         id: OpenTransactionId,
     ) -> Result<TxReceipt, Error> {
+        self.refuse_commit_in_callback_tx()?;
         let batch = self.take_batch(id)?;
         let BatchKind::Serializable {
             snapshot,
@@ -10433,8 +10924,23 @@ impl Db {
         self.with_upload(|| self.commit_ops_now(batch, kind))
     }
 
+    /// A transaction handle's commit while a callback transaction is open
+    /// would join that transaction's commit (and be undone with it), so it
+    /// is refused; the handle stays open, to commit once the callback
+    /// transaction has finished.
+    fn refuse_commit_in_callback_tx(&self) -> Result<(), Error> {
+        if self.inner().tx.is_some() {
+            return Err(unsupported(
+                "committing a transaction while a callback transaction is open",
+            ));
+        }
+        Ok(())
+    }
+
     fn commit_ops_now(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
         self.inner().require_mutation_admission()?;
+        // Its handle's commit refused this before taking the batch.
+        self.refuse_commit_in_callback_tx()?;
         let ops = &batch.ops;
         let (seq, prior, mark) = {
             let mut inner = self.inner();
@@ -11485,5 +11991,335 @@ fn migration_path(
     match walk(migrations, target, &admitted, &mut visiting) {
         Some(path) if path.len() > 1 || !path[0].1.is_empty() => path,
         _ => Vec::new(),
+    }
+}
+
+/// The statement checking a policy `condition` (with `params` leading
+/// parameters) on one row of `table` at one branch key: the row and the
+/// key are the next two parameters.
+fn policy_check_sql(table: &Table, condition: &str, params: usize) -> String {
+    format!(
+        "SELECT COALESCE({condition}, 0) FROM {} AS a WHERE a.id = ?{} AND a._branch = ?{}",
+        quote(&table.stored),
+        params + 1,
+        params + 2
+    )
+}
+
+/// A policy check's statement for one [`CheckKey`], under the claims and
+/// the enum-tag epoch it was compiled with.
+struct CheckPlan {
+    claims: Option<BTreeMap<String, Value>>,
+    epoch: u64,
+    sql: String,
+    /// The parameters before the row and branch ones.
+    params: Vec<Sql>,
+    /// The policy compiled to `1`: any existing row passes.
+    constant: bool,
+}
+
+/// What a kept policy check was compiled for. The version, bundle, naming
+/// and governing schema keep schemas of different versions apart; they do
+/// not tell two policy sets of one version apart (a permissions-only
+/// change keeps the version, and the new schema may take the old one's
+/// address). That is why a schema change clears every kept check
+/// ([`Inner::clear_check_plans`] from `reset_everything`).
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct CheckKey {
+    schema: usize,
+    version: crate::ids::SchemaVersionId,
+    bundle: Option<crate::catalogue::BundleId>,
+    stored_names: bool,
+    governing: Option<(
+        usize,
+        crate::ids::SchemaVersionId,
+        Option<crate::catalogue::BundleId>,
+    )>,
+    table: String,
+    operation: Operation,
+    author: AuthorSubject,
+}
+
+impl CheckKey {
+    fn new(schema: &Schema, table: &Table, operation: Operation, author: AuthorSubject) -> Self {
+        Self {
+            schema: std::ptr::from_ref(schema) as usize,
+            version: schema.version,
+            bundle: schema.bundle,
+            stored_names: schema.stored_names,
+            governing: schema.policies_from.as_ref().map(|governing| {
+                (
+                    Rc::as_ptr(governing) as usize,
+                    governing.version,
+                    governing.bundle,
+                )
+            }),
+            table: table.stored.clone(),
+            operation,
+            author,
+        }
+    }
+}
+
+/// The kept policy checks of a store. A key keeps a plan for each of the
+/// last [`CheckPlans::PER_KEY`] claims it was checked under, so an author
+/// whose claims alternate (a session served with request claims beside its
+/// own) does not compile on every switch. At [`CheckPlans::cap`] keys the
+/// store forgets them all and starts again: authors come and go, and the
+/// map must not grow with every one a long-lived server has seen. A store
+/// whose live keys (authors × tables × operations × schemas) exceed the
+/// cap therefore compiles about as often as with no kept checks at all.
+struct CheckPlans {
+    plans: HashMap<CheckKey, Vec<Rc<CheckPlan>>>,
+    cap: usize,
+    /// Tests: key every schema as if it took the address of the last one
+    /// dropped, which an allocator may or may not do.
+    #[cfg(any(test, feature = "testing"))]
+    reused_addresses: bool,
+}
+
+impl Default for CheckPlans {
+    fn default() -> Self {
+        Self {
+            plans: HashMap::new(),
+            cap: Self::CAP,
+            #[cfg(any(test, feature = "testing"))]
+            reused_addresses: false,
+        }
+    }
+}
+
+impl CheckPlans {
+    /// Each kept key costs about 1.8 KB of resident memory with one claims
+    /// set (its key, the statement's text and parameters, the claims it
+    /// was compiled under, and the map entry), measured as the RSS growth
+    /// of 8 000 authors each kept once under a membership `EXISTS` read
+    /// policy; a key holding [`CheckPlans::PER_KEY`] claims sets costs up
+    /// to about twice that. At 16 384 keys the worst case was about 30 MB
+    /// per store, up to 60 MB with two claims sets per key. At 4 096 it is
+    /// about 7 MB, up to 15 MB, while still holding every author of a
+    /// deployment of a few hundred authors × tables × operations.
+    const CAP: usize = 4_096;
+    const PER_KEY: usize = 2;
+
+    fn key(
+        &self,
+        schema: &Schema,
+        table: &Table,
+        operation: Operation,
+        author: AuthorSubject,
+    ) -> CheckKey {
+        #[allow(unused_mut)]
+        let mut key = CheckKey::new(schema, table, operation, author);
+        #[cfg(any(test, feature = "testing"))]
+        if self.reused_addresses {
+            key.schema = 0;
+            if let Some((address, ..)) = &mut key.governing {
+                *address = 0;
+            }
+        }
+        key
+    }
+
+    fn get(
+        &self,
+        key: &CheckKey,
+        claims: Option<&BTreeMap<String, Value>>,
+        epoch: u64,
+    ) -> Option<Rc<CheckPlan>> {
+        self.plans
+            .get(key)?
+            .iter()
+            .find(|plan| plan.epoch == epoch && plan.claims.as_ref() == claims)
+            .cloned()
+    }
+
+    fn put(&mut self, key: CheckKey, plan: Rc<CheckPlan>) {
+        if self.plans.len() >= self.cap && !self.plans.contains_key(&key) {
+            self.plans.clear();
+        }
+        let kept = self.plans.entry(key).or_default();
+        kept.retain(|old| old.epoch == plan.epoch && old.claims != plan.claims);
+        kept.insert(0, plan);
+        kept.truncate(Self::PER_KEY);
+    }
+
+    fn clear(&mut self) {
+        self.plans.clear();
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl Db {
+    /// For each branch key `row` of `table` is stored at: `author`'s
+    /// `operation` check as a store runs it (kept plans; `existing`: as for
+    /// a row just read), and compiled afresh.
+    pub fn policy_check_for_test(
+        &self,
+        table: &str,
+        row: RowUuid,
+        author: AuthorSubject,
+        operation: Operation,
+        existing: bool,
+    ) -> Result<Vec<(bool, bool)>, Error> {
+        let inner = self.inner();
+        let schema = inner.schema.clone();
+        let table = schema.table(table)?;
+        let keys: Vec<Vec<u8>> = {
+            let mut statement = inner
+                .conn
+                .prepare(&format!(
+                    "SELECT _branch FROM {} WHERE id = ?1",
+                    quote(&table.stored)
+                ))
+                .map_err(storage)?;
+            let rows = statement
+                .query_map([row.0.as_bytes().as_slice()], |r| r.get::<_, Vec<u8>>(0))
+                .map_err(storage)?;
+            rows.collect::<Result<_, _>>().map_err(storage)?
+        };
+        keys.iter()
+            .map(|key| {
+                let kept = if existing {
+                    inner.check_in_existing(&schema, table, row, key, author, operation)?
+                } else {
+                    inner.check_in(&schema, table, row, key, author, operation)?
+                };
+                let fresh = inner.check_in_fresh(&schema, table, row, key, author, operation)?;
+                Ok((kept, fresh))
+            })
+            .collect()
+    }
+
+    /// `author`'s plain `operation` check of `row`, which `table` does not
+    /// hold, at the branch key `beside` is stored at: as a store runs it
+    /// (kept plans) and compiled afresh. Each is `None` where it errs.
+    pub fn absent_policy_check_for_test(
+        &self,
+        table: &str,
+        row: RowUuid,
+        beside: RowUuid,
+        author: AuthorSubject,
+        operation: Operation,
+    ) -> Result<(Option<bool>, Option<bool>), Error> {
+        let inner = self.inner();
+        let schema = inner.schema.clone();
+        let table = schema.table(table)?;
+        let key: Vec<u8> = inner
+            .conn
+            .query_row(
+                &format!("SELECT _branch FROM {} WHERE id = ?1", quote(&table.stored)),
+                [beside.0.as_bytes().as_slice()],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        assert!(!inner.row_at(table, row, &key)?, "{row:?} is stored");
+        Ok((
+            inner
+                .check_in(&schema, table, row, &key, author, operation)
+                .ok(),
+            inner
+                .check_in_fresh(&schema, table, row, &key, author, operation)
+                .ok(),
+        ))
+    }
+
+    /// How many (schema, table, operation, author) keys hold kept checks.
+    pub fn check_plan_keys_for_test(&self) -> usize {
+        self.inner().check_plans.borrow().plans.len()
+    }
+
+    /// Key kept checks as if every new schema took the address of the one
+    /// it replaced.
+    pub fn reuse_check_key_addresses_for_test(&self) {
+        self.inner().check_plans.borrow_mut().reused_addresses = true;
+    }
+
+    /// Bound the kept checks at `cap` keys.
+    pub fn set_check_plan_cap_for_test(&self, cap: usize) {
+        self.inner().check_plans.borrow_mut().cap = cap;
+    }
+}
+
+#[cfg(test)]
+mod check_plan_tests {
+    use super::*;
+
+    fn key(table: &str) -> CheckKey {
+        CheckKey {
+            schema: 0,
+            version: crate::ids::SchemaVersionId::from_bytes([0; 16]),
+            bundle: None,
+            stored_names: false,
+            governing: None,
+            table: table.to_owned(),
+            operation: Operation::Select,
+            author: AuthorSubject::SYSTEM,
+        }
+    }
+
+    fn claims(role: &str) -> Option<BTreeMap<String, Value>> {
+        Some(BTreeMap::from([(
+            "role".to_owned(),
+            Value::String(role.to_owned()),
+        )]))
+    }
+
+    fn plan(role: &str, epoch: u64) -> Rc<CheckPlan> {
+        Rc::new(CheckPlan {
+            claims: claims(role),
+            epoch,
+            sql: role.to_owned(),
+            params: Vec::new(),
+            constant: false,
+        })
+    }
+
+    fn kept(plans: &CheckPlans, table: &str, role: &str, epoch: u64) -> bool {
+        plans
+            .get(&key(table), claims(role).as_ref(), epoch)
+            .is_some_and(|plan| plan.sql == role)
+    }
+
+    /// A key keeps its last two claim sets, the newest displacing the
+    /// oldest, and only plans of the current tag epoch.
+    #[test]
+    fn a_key_keeps_its_last_two_claim_sets_of_one_epoch() {
+        let mut plans = CheckPlans::default();
+        plans.put(key("docs"), plan("a", 1));
+        plans.put(key("docs"), plan("b", 1));
+        assert!(kept(&plans, "docs", "a", 1) && kept(&plans, "docs", "b", 1));
+        assert!(!kept(&plans, "docs", "a", 2), "another epoch");
+        assert!(!kept(&plans, "docs", "c", 1), "other claims");
+        assert!(!kept(&plans, "teams", "a", 1), "another key");
+        plans.put(key("docs"), plan("c", 1));
+        assert!(!kept(&plans, "docs", "a", 1), "the oldest left");
+        assert!(kept(&plans, "docs", "b", 1) && kept(&plans, "docs", "c", 1));
+        // The same claims again replace their plan, not the other one.
+        plans.put(key("docs"), plan("b", 1));
+        assert!(kept(&plans, "docs", "b", 1) && kept(&plans, "docs", "c", 1));
+        plans.put(key("docs"), plan("b", 2));
+        assert!(kept(&plans, "docs", "b", 2));
+        assert!(!kept(&plans, "docs", "c", 1) && !kept(&plans, "docs", "c", 2));
+        assert_eq!(plans.plans[&key("docs")].len(), 1, "stale epochs left");
+    }
+
+    /// A new key at the cap forgets every kept check; a kept key's new plan
+    /// does not.
+    #[test]
+    fn a_new_key_at_the_cap_forgets_the_rest() {
+        let mut plans = CheckPlans {
+            cap: 2,
+            ..Default::default()
+        };
+        plans.put(key("a"), plan("r", 1));
+        plans.put(key("b"), plan("r", 1));
+        plans.put(key("b"), plan("s", 1));
+        assert!(
+            kept(&plans, "a", "r", 1) && kept(&plans, "b", "r", 1) && kept(&plans, "b", "s", 1)
+        );
+        plans.put(key("c"), plan("r", 1));
+        assert_eq!(plans.plans.len(), 1);
+        assert!(kept(&plans, "c", "r", 1) && !kept(&plans, "a", "r", 1));
     }
 }

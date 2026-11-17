@@ -171,7 +171,12 @@ as editor presence or cursors, keep only each row's latest version with `.histor
 
 ```ts title="schema.ts"
 export const schema = s.defineSchema({
-  presence: s.table({ doc: s.string(), cursor: s.string() }).history("latest"),
+  presence: s
+    .table({
+      doc: s.string(),
+      cursor: s.string(),
+    })
+    .history("latest"),
 });
 ```
 
