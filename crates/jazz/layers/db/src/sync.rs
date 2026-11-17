@@ -3825,7 +3825,11 @@ fn composite<'p>(parts: impl IntoIterator<Item = (&'p str, &'p Sql)>) -> (String
 
 /// The composite watches (see [`composite`]) a written row of `table` with
 /// `cells` matches: one per column set `sets` names whose cells the row
-/// holds, none of them NULL.
+/// holds, none of them NULL. A row NULL in a set's column (or holding a
+/// chunked value there, which an image's cell shows as NULL) matches no
+/// key over that set: a key is followed only over the parts whose parent
+/// cell is not NULL ([`Inner::follow_support`]), and the parts left out
+/// make a smaller set (or the single key of one column) that it matches.
 fn composite_keys<'s>(
     table: &str,
     sets: impl IntoIterator<Item = &'s Vec<String>>,
@@ -4608,7 +4612,6 @@ impl Inner {
                 },
                 Support::Array {
                     table,
-                    inner,
                     nested,
                     policy_depth,
                     composite,
@@ -4616,24 +4619,34 @@ impl Inner {
                 } if !composite.is_empty() => {
                     // One composite key: the children equal to the row on
                     // every equality at once, each by the parent's cell as
-                    // its image carries it. A NULL anywhere matches none.
-                    let Some(parts) = composite
+                    // its image carries it. A policy `=` is the null-safe
+                    // `IS`, so a part whose parent cell is NULL (or a
+                    // chunked value, which an image's cell does not show)
+                    // is left out: that only widens the support, and a
+                    // written child with a NULL there still matches the
+                    // key of the parts left. So no composite key holds a
+                    // NULL, as no written row's does ([`composite_keys`]).
+                    let parts: Vec<(String, Sql)> = composite
                         .iter()
-                        .map(|also| match image_cell(image, &also.outer) {
+                        .filter_map(|also| match image_cell(image, &also.outer) {
                             Some(Sql::Null) | None => None,
                             Some(value) => Some((also.inner.clone(), value)),
                         })
-                        .collect::<Option<Vec<(String, Sql)>>>()
-                    else {
-                        continue;
+                        .collect();
+                    // One part left is the single key of its column, as a
+                    // correlation on that column alone follows it; none
+                    // left, nothing, as a NULL leading equality alone.
+                    let (column, composite) = match &parts[..] {
+                        [] => continue,
+                        [(column, _)] => (column, &[][..]),
+                        [(column, _), ..] => (column, &parts[..]),
                     };
-                    let lead = parts[0].1.clone();
                     self.follow_value(
                         table,
-                        inner,
-                        lead,
+                        column,
+                        parts[0].1.clone(),
                         false,
-                        &parts,
+                        composite,
                         nested,
                         *policy_depth,
                         floor,

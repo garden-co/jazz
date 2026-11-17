@@ -1443,3 +1443,108 @@ fn a_write_gathers_composite_sets_only_while_some_are_followed() {
         "nothing followed again"
     );
 }
+
+/// `documents` readable through a grant of the same `kind` and `team`,
+/// where `team` may be NULL on both sides: the authority compiles a
+/// policy `=` to the null-safe `IS`, so a NULL-team grant opens a NULL-team
+/// document.
+fn nullable_team_schema() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("grants")
+                    .column("kind", ColumnType::Text)
+                    .nullable_column("team", ColumnType::Text)
+                    .column("user", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("documents")
+                    .column("kind", ColumnType::Text)
+                    .nullable_column("team", ColumnType::Text)
+                    .column("title", ColumnType::Text)
+                    .policies(read_and_allow_all_writes(exists(
+                        "grants",
+                        vec![
+                            outer_eq("kind", "kind"),
+                            outer_eq("team", "team"),
+                            session_eq("user", &ME),
+                        ],
+                    ))),
+            )
+            .build(),
+    )
+}
+
+/// Alice's NULL-team grant `grants[1]` and a NULL-team document, with the
+/// client subscribed to `documents` through the relay.
+fn seed_null_team(at: &Relayed) -> (impl Sized, impl Fn() -> BTreeMap<String, Value>) {
+    let me = Value::String(alice().principal_parts().1);
+    let grant = move || {
+        cells(&[
+            ("kind", Value::String("doc".into())),
+            ("team", Value::Nullable(None)),
+            ("user", me.clone()),
+        ])
+    };
+    at.seed("grants", id(1, 1), grant());
+    at.seed(
+        "documents",
+        id(2, 1),
+        cells(&[
+            ("kind", Value::String("doc".into())),
+            ("team", Value::Nullable(None)),
+            ("title", Value::String("doc".into())),
+        ]),
+    );
+    (at.subscribe(Query::from("documents")), grant)
+}
+
+/// A NULL in a further equality still ships what the read rests on: the
+/// authority reads `team = this.team` as `team IS this.team`, so the
+/// NULL-team grant opens the NULL-team document. Support leaves the NULL
+/// part out of its key (`kind` alone is followed), so the relay gets the
+/// grant and can evaluate alice's read.
+///
+/// ```text
+/// server: grant 1 (doc, NULL), document (doc, NULL)
+/// alice ──subscribe documents──► relay ◄── document + grant 1
+/// ```
+#[test]
+fn a_null_further_equality_ships_its_support_through_a_relay() {
+    let at = Relayed::open(nullable_team_schema);
+    let _documents = seed_null_team(&at);
+    assert_eq!(local(&at.client, "documents"), [id(2, 1)]);
+    assert_eq!(
+        local(&at.relay, "grants"),
+        [id(1, 1)],
+        "the NULL-team grant the relay evaluates alice's read with"
+    );
+}
+
+/// A later NULL-team grant reaches the relay through the followed key: it
+/// replaces alice's grant, and the relay holds it once the first is
+/// deleted, so the document stays readable there.
+///
+/// ```text
+/// server: + grant 2 (doc, NULL), - grant 1 ──► relay holds grant 2
+/// ```
+#[test]
+fn a_later_null_further_equality_grant_reaches_the_relay() {
+    let at = Relayed::open(nullable_team_schema);
+    let (_documents, grant) = seed_null_team(&at);
+    at.seed("grants", id(1, 2), grant());
+    at.pump();
+    block_on(at.server.delete("grants", id(1, 1), Default::default())).unwrap();
+    at.pump();
+    assert_eq!(
+        local(&at.relay, "grants"),
+        [id(1, 2)],
+        "a later NULL-team grant reached the relay"
+    );
+    assert_eq!(
+        local(&at.client, "documents"),
+        [id(2, 1)],
+        "the document stays readable"
+    );
+}
