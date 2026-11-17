@@ -28,6 +28,7 @@ const PUBLIC_SUCCESSOR_POLICY: &str = "jazz.e2ee.public-account-successor.v1";
 const RECOVERY_POLICY: &str = "jazz.e2ee.recovery.v1";
 const LOCAL_FIRST_ROOT_POLICY: &str = "jazz.e2ee.local-first-account-root.v1";
 const ACCOUNT_KEY_POLICY: &str = "jazz.e2ee.account-key.v1";
+const REMOVAL_REQUEST_POLICY: &str = "jazz.e2ee.device-removal-request.v1";
 const SCOPE: &str = "account";
 
 /// `__e2ee_device_requests`: a device's identity; row ID = device ID.
@@ -216,7 +217,20 @@ pub struct AccountSealingKey {
     pub signature: Vec<u8>,
 }
 
+/// `__e2ee_device_removal_requests`: a device's signed request to be removed
+/// from its account (§2.8). A device never removes itself; another active
+/// device completes the request with a `remove-device` rotation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceRemovalRequest {
+    pub id: String,
+    pub account_id: String,
+    pub epoch_id: String,
+    pub device_id: String,
+    pub signature: Vec<u8>,
+}
+
 row_id!(
+    DeviceRemovalRequest,
     DeviceRequest,
     DeviceKeysRow,
     AccountIdentity,
@@ -758,6 +772,40 @@ impl RecoveryRoot {
             &self.keys.signing_envelope()?,
             &self.keys.sealing_envelope()?,
         ])
+    }
+}
+
+impl DeviceRemovalRequest {
+    /// A complete received request.
+    pub fn validate(&self) -> ProtocolResult<()> {
+        self.check_unsigned()?;
+        ensure_bytes(&self.signature, "empty removal request signature")
+    }
+
+    fn check_unsigned(&self) -> ProtocolResult<()> {
+        ensure_id(&self.id, IdForm::Random, "invalid removal request ID")?;
+        ensure_account(&self.account_id, "invalid account ID")?;
+        ensure_id(&self.epoch_id, IdForm::Random, "invalid epoch ID")?;
+        ensure_id(&self.device_id, IdForm::Random, "invalid device ID")
+    }
+
+    /// `ctx{application: D, policy: "jazz.e2ee.device-removal-request.v1",
+    /// scope: "account", identifier: account, table:
+    /// "__e2ee_device_removal_requests", row: id, column: "signature", epoch,
+    /// recipient: deviceId}`, signed by the device itself (§2.8).
+    pub fn signed_bytes(&self, application: &AccountDomain) -> ProtocolResult<Vec<u8>> {
+        self.check_unsigned()?;
+        context(CryptoContext {
+            application: application.as_str(),
+            policy: REMOVAL_REQUEST_POLICY,
+            scope: SCOPE,
+            identifier: &self.account_id,
+            table: "__e2ee_device_removal_requests",
+            row: &self.id,
+            column: "signature",
+            epoch: &self.epoch_id,
+            recipient: &self.device_id,
+        })
     }
 }
 

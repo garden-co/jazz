@@ -378,6 +378,7 @@ wherever it enters JSON. Optional columns
 | `__e2ee_public_account_successors` | the private columns minus `verification`, `history`, `deliveries`                                                                                                                         | same as private | public     | Key-free signed rotation: the membership change.                                                        |
 | `__e2ee_recovery_roots`            | `accountId`, `signerId`, `epochId`, `publicKey`, `mechanism`, `version`, `signingPublicKey`, `signingMechanism`, `signingVersion`, `signature`                                            | root ID         | public     | A registered recovery credential, signed by an active device.                                           |
 | `__e2ee_recovery_deliveries`       | `rootId`, `epochId`, `envelope`                                                                                                                                                           | random          | private    | Account epoch key sealed to a recovery root.                                                            |
+| `__e2ee_device_removal_requests`   | `accountId`, `epochId`, `deviceId`, `signature`                                                                                                                                           | random          | public     | A device's signed request to be removed; another active device completes it (§2.8).                     |
 | `__e2ee_account_keys`              | `accountId`, `epochId`, `signerId`, `mechanism`, `version`, `publicKey`, `signature`                                                                                                      | random          | public     | An account epoch's sealing public key (§2.12), signed by an active device.                              |
 
 `action` is `remove-device` or `retire-recovery-root`; the matching target
@@ -531,12 +532,13 @@ Account and device tables (fixed policies):
   and the target (removed device's request or retired recovery root) belong
   to that account; the target columns match `action` (§1.2); the
   private and public rows share their ID and are inserted in one
-  transaction.
+  transaction. Removal requests: `accountId = session account`, and the
+  request of `deviceId` belongs to that account.
 - R9. Recovery roots: `accountId = session account`, signer request of the
   same account. Recovery deliveries: the root's `accountId` is the session
   account; read by creator.
 - R10. Public tables (roots, device keys, public approvals, public successors,
-  recovery roots, account keys) readable by every `local-first` or `external`
+  recovery roots, account keys, removal requests) readable by every `local-first` or `external`
   session, so other accounts can replay an account's history.
 - R11. `__e2ee_account_keys`: insert only with `accountId = session account`
   and a signer request of the same account; readable like the other public
@@ -961,7 +963,8 @@ Replay of an account (`replayOrderedAccount`) is over public rows at one cut:
    that error; it is not skipped.
 
 The result is the current account epoch, its active devices, removed devices,
-active and retired recovery roots.
+active and retired recovery roots, and the active devices with a pending
+removal request (§2.8).
 
 **State as of a position.** Every check of the form "author (signer, sender)
 device active, with account epoch `e`, at its position" uses the account's
@@ -1129,8 +1132,8 @@ other than the author) or `retire-recovery-root` (target: an active recovery
 root). A device never removes itself (`self-removal`): the author generates
 `K'`, so a device removing itself would keep the new epoch's key, and every
 space key later sealed to the account at that epoch. Another active device
-removes it, and the account's last device cannot be removed (signing out
-and wiping the device is the way to stop using it). The author is active
+removes it: a device that wants to leave writes a removal request (below).
+The author is active
 and holds the current key `K`, authenticated (§2.6) against a state with
 exactly the public approvals of the current epoch that the rotation's state
 has: a key authenticated at an earlier read, before an approval that has
@@ -1219,6 +1222,38 @@ is to move to a new account. The SDK says so when removing a device of a
 local-first account. Removal still serves its other purposes there (retiring
 an unused install, rotating away a device whose secret was never stored, such
 as a device that only held a link).
+
+**Removing the device you are on.** A device leaves its account by writing a
+**removal request** `{id, accountId, epochId: current, deviceId: itself,
+signature}`, signed by itself over `ctx{application: D, policy:
+"jazz.e2ee.device-removal-request.v1", scope: "account", identifier:
+account, table: "__e2ee_device_removal_requests", row: id, column:
+"signature", epoch: epochId, recipient: deviceId}` (stage
+`account-rotation`). It is refused with `no-other-device` unless the current
+epoch has another active device: a recovery root can restore access but
+cannot complete the removal, so the account's only device cannot leave this
+way. The device stays an active member, and keeps its keys, until it is
+removed; nothing else about it changes.
+
+A request is **pending** while it is valid (its device was active with
+`epochId` at the request's position, and its signature verifies) and its
+device is still active; a request that cannot be verified, including one
+with a signing mechanism the client lacks, is not pending. Any other active
+device that holds the current key and sees a pending request completes it,
+automatically and once, with the ordinary `remove-device` rotation of that
+device above, so the requesting device never holds the new epoch's key. When
+the requesting device then sees that it is no longer active
+(`device-no-longer-active`, §2.4 "Floors"), it wipes its E2EE state for the
+account (§6.4); it wipes nothing before, so a user never loses keys before
+another device holds the account. There is no cancellation: a device that
+wants to stay after its request is removed and enrols again (§2.1).
+
+Required tests: a pending request is completed by another device, after
+which the requesting device is not active, cannot acquire the new key and
+fails its floor with `device-no-longer-active`; the only device's request is
+refused with `no-other-device`; a request with a bad signature, signed by
+another device, or naming an epoch its device was not active in is not
+pending, and does not stop a valid request from being pending.
 
 ### 2.9 Recovery
 
@@ -2587,6 +2622,7 @@ Refusal codes:
 | `invalid-possession-proof`      | The requesting device's possession proof failed (§2.5).                                                                                                                   |
 | `target-not-active`             | The device or recovery root to remove or retire is not active (§2.8).                                                                                                     |
 | `self-removal`                  | A device tried to remove itself; another active device must remove it (§2.8).                                                                                             |
+| `no-other-device`               | A removal request with no other active device to complete it (§2.8).                                                                                                      |
 | `unsupported-recipient`         | A recipient device, recovery root or account has no key of the selected mechanism (§0, §2.12).                                                                            |
 | `account-reset-not-allowed`     | An account reset by a local-first session, or where the application has not enabled `allowAccountReset` (§2.11).                                                          |
 | `space-pending`                 | An encrypted write to a space that has no valid root, after this device's creation of it was refused while the client runs (§3.2).                                        |
@@ -2808,7 +2844,9 @@ Limits:
 - **A stolen active device can remove the owner's other devices.** Any
   active device may remove any other, so whoever holds one can remove the
   owner's devices first and keep the account's new keys. A device cannot
-  remove itself, so a removal always comes from a device that stays. For an
+  remove itself, so a removal always comes from a device that stays; a
+  removal request it writes only gets it removed by the owner's next
+  device, without its ever holding the new key. For an
   app account the remedy is to revoke the stolen device's sign-in and then
   remove it; for a local-first account, a new account.
 - **Local-first recovery is as strong as the account secret.** The E2EE

@@ -25,8 +25,8 @@ use super::super::records::KeyColumns;
 use super::super::records::account::{
     AccountAction, AccountIdentity, AccountKind, AccountRoot, AccountSealingKey, AccountSuccessor,
     ChallengeCoordinates, DeviceApproval, DeviceChallenge, DeviceDelivery, DeviceKeysRow,
-    DeviceProof, DeviceRequest, LEDGER_VERSION, PublicAccountSuccessor, PublicDeviceApproval,
-    RecoveryDelivery, RecoveryRoot, approval_context, approval_signed_bytes,
+    DeviceProof, DeviceRemovalRequest, DeviceRequest, LEDGER_VERSION, PublicAccountSuccessor,
+    PublicDeviceApproval, RecoveryDelivery, RecoveryRoot, approval_context, approval_signed_bytes,
     delivery_marker_context, identity_context, proof_signed_bytes, recovery_delivery_context,
     successor_context,
 };
@@ -999,6 +999,37 @@ pub fn held_recovery_roots(state: &AccountState, device: &str) -> Vec<String> {
         })
         .map(|root| root.row.id.clone())
         .collect()
+}
+
+/// A removal request for `device` itself (§2.8, stage `account-rotation`):
+/// how a device leaves its account, since it never removes itself. Refused
+/// unless it is active and the current epoch has another active device to
+/// complete the request (`no-other-device`). The device stays an active
+/// member, and keeps its keys, until another device removes it.
+pub fn removal_request(
+    writer: &AccountWriter<'_>,
+    state: &AccountState,
+    device: &LocalDevice,
+    rng: &mut dyn RandomSource,
+) -> ProtocolResult<DeviceRemovalRequest> {
+    if !state.is_active(&device.id) {
+        return refuse(RefusalCode::DeviceNotActive);
+    }
+    if !state.active.iter().any(|other| *other != device.id) {
+        return refuse(RefusalCode::NoOtherDevice);
+    }
+    let mut request = DeviceRemovalRequest {
+        id: ids::random_v4(rng)?,
+        account_id: writer.account_id.to_owned(),
+        epoch_id: state.epoch_id().to_owned(),
+        device_id: device.id.clone(),
+        signature: Vec::new(),
+    };
+    request.signature = writer.sign(
+        &device.signing,
+        &request.signed_bytes(&writer.application()?)?,
+    )?;
+    Ok(request)
 }
 
 /// A recovery root registration (§2.9, stage `recovery-root`), signed by an

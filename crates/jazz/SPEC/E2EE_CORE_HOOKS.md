@@ -152,6 +152,7 @@ The hooks are installed with a new `DbConfig::with_e2ee(Rc<dyn E2eeHooks>)` (to 
 
 - **Recommendation: no new core hook.** The runtime opens ordinary local subscriptions on the internal tables, as the client's own identity:
   - its own account's `__e2ee_members` rows (by `accountId`), which name the spaces it is a member of, and the deliveries addressed to its account (by `recipientAccountId`);
+  - its own account's `__e2ee_device_removal_requests` (by `accountId`), so a pending request of another of its devices is completed (spec §2.8);
   - per space it is a member of: the space's member rows (at most 1,000 in a supported space, spec §3.8), `__e2ee_spaces` and `__e2ee_space_successors` (each by `(scopeId, identifier)`), and `__e2ee_space_deliveries` of the versions concerned only, the current version and skipped versions it holds (by `(scopeId, identifier, keyEpochId)`); all readable to members, spec R12, R14. Deliveries of earlier versions are not watched (spec §3.4, §3.8);
   - the public `__e2ee_account_roots` of the members of those spaces, so a member's reset (a new generation, which makes it lack every version) is seen when no space table changes (spec §2.11, §3.4);
   - while a delivery to a member waits for a valid sealing key, that member's `__e2ee_account_keys` rows (spec §2.12, §3.4);

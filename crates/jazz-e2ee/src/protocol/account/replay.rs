@@ -81,6 +81,9 @@ pub struct AccountState {
     pub retired_recovery_roots: BTreeMap<String, Position>,
     /// Device keys by device ID, as of the cut.
     pub keys: BTreeMap<String, KeyColumns>,
+    /// Active devices with a pending removal request (§2.8): another active
+    /// device completes each with a `remove-device` rotation.
+    pub removal_requested: BTreeSet<String>,
 }
 
 impl AccountState {
@@ -749,6 +752,7 @@ impl<'a> AccountReplay<'a> {
             }
         }
 
+        let removal_requested = self.pending_removals(view, &current.active)?;
         Ok(Some(AccountState {
             account_id: view.account_id.clone(),
             generation: root.row.generation,
@@ -762,7 +766,51 @@ impl<'a> AccountReplay<'a> {
             recovery_roots,
             retired_recovery_roots: run.retired,
             keys,
+            removal_requested,
         }))
+    }
+
+    /// The devices of `active` with a valid removal request in `view`
+    /// (§2.8): signed by the device itself, active with the request's
+    /// account epoch at its position. A request that cannot be verified,
+    /// including one signed with a mechanism this client lacks, is not
+    /// pending: it is a request, not evidence anything else depends on.
+    fn pending_removals(
+        &self,
+        view: &PublicAccountLedger,
+        active: &BTreeSet<String>,
+    ) -> ProtocolResult<BTreeSet<String>> {
+        let mut pending = BTreeSet::new();
+        for request in &view.removal_requests {
+            let row = &request.row;
+            if row.account_id != view.account_id
+                || !active.contains(&row.device_id)
+                || pending.contains(&row.device_id)
+                || row.validate().is_err()
+            {
+                continue;
+            }
+            let Ok(bytes) = row.signed_bytes(&self.application) else {
+                continue;
+            };
+            let Some(state) = self.as_of(request.position)? else {
+                continue;
+            };
+            if !state.is_active_in(&row.device_id, &row.epoch_id) {
+                continue;
+            }
+            let Some(key) = state.keys.get(&row.device_id) else {
+                continue;
+            };
+            match signing::verify(self.registry, &key.signing_key(), &bytes, &row.signature) {
+                Ok(true) => {
+                    pending.insert(row.device_id.clone());
+                }
+                Ok(false) | Err(ProtocolError::Unsupported(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(pending)
     }
 
     /// Validity of a recovery root by itself (§2.9): its signer was active

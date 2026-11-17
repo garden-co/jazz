@@ -442,6 +442,10 @@ const SIGNED_DIGESTS: &[(&str, &str)] = &[
         "811b76df3c20c55eb998dccd393fa952b1309c4d6b1f108db6bc8b19575a7d2d",
     ),
     (
+        "device removal request",
+        "ba7a8549121b1bb6f4d937db0298deace3c411856e1f3a00d359d8dd3dd90a4b",
+    ),
+    (
         "space root",
         "f347181edf79d1fb84704603d172525025a6ab76c9f31bde9661d64cdd28c140",
     ),
@@ -832,6 +836,28 @@ fn signed_bytes() {
                 "",
             ),
             &[&env("jazz.wrap.hpke-x25519", &[0x11; 32])],
+        ),
+    ));
+    let removal_request = DeviceRemovalRequest {
+        id: R1.into(),
+        account_id: ALICE.into(),
+        epoch_id: E1.into(),
+        device_id: D2.into(),
+        signature: vec![],
+    };
+    cases.push((
+        "device removal request",
+        removal_request.signed_bytes(&da).unwrap(),
+        ctx(
+            da.as_str(),
+            "jazz.e2ee.device-removal-request.v1",
+            "account",
+            ALICE,
+            "__e2ee_device_removal_requests",
+            R1,
+            "signature",
+            E1,
+            D2,
         ),
     ));
 
