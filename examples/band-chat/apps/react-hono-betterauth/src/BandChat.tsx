@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { JazzClientConfig } from "jazz-tools";
-import { JazzProvider, useAll, useSession } from "jazz-tools/react";
+import { JazzProvider, useAll, useJazzSession } from "jazz-tools/react";
 import { AppShell, Button, Center, EmptyState, Spinner } from "@astryxdesign/core";
 import { app, type Profile } from "../jazz.generated";
 import { ThemeProvider } from "../components/theme-provider";
@@ -21,8 +21,8 @@ export interface BandChatProps {
 
 /** Rendered inside the external-auth provider in the Next dashboard. */
 export function BandChat(props: BandChatProps) {
-  const session = useSession();
-  const author = session?.user;
+  const session = useJazzSession();
+  const author = session.user?.accountId;
   return author ? <Workspace author={author} {...props} /> : <Loading label="Loading identity…" />;
 }
 

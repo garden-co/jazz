@@ -2,18 +2,28 @@ import type { Where } from "better-auth/adapters";
 import { describe, expect, it } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import {
-  filterListByWhere,
-  isQuerySupported,
   isWhereBySingleField,
+  matchesResidual,
   paginateList,
-  sortListByField,
+  planBetterAuthQuery,
+  UnsupportedBetterAuthQueryError,
 } from "./utils.js";
 
 // Better Auth normalizes adapter filters before they reach this adapter.
 // Keep fixtures at that boundary so every default is explicit.
 type NormalizedWhere = Required<Where>;
 
-describe("isQuerySupported", () => {
+describe("planBetterAuthQuery", () => {
+  const isQuerySupported = (tableSchema: WasmSchema[string], where: NormalizedWhere[]) => {
+    try {
+      planBetterAuthQuery("t", tableSchema, where);
+      return true;
+    } catch (error) {
+      expect(error).toBeInstanceOf(UnsupportedBetterAuthQueryError);
+      return false;
+    }
+  };
+
   const tableSchema = {
     columns: [
       {
@@ -253,679 +263,103 @@ describe("isQuerySupported", () => {
     ).toBe(false);
   });
 
+  it("names the refused pattern in a typed error", () => {
+    const refusal = (() => {
+      try {
+        planBetterAuthQuery("better_auth_user", tableSchema, [
+          { field: "age", operator: "gte", value: 18, connector: "AND", mode: "sensitive" },
+          { field: "active", operator: "eq", value: true, connector: "OR", mode: "sensitive" },
+        ]);
+      } catch (error) {
+        return error as UnsupportedBetterAuthQueryError;
+      }
+    })();
+    expect(refusal?.code).toBe("unsupported_better_auth_query");
+    expect(refusal?.message).toBe(
+      'Reading "better_auth_user" with an OR connector is not supported by the Jazz Better Auth adapter yet',
+    );
+  });
+
+  it("ignores the connector on the first condition, which joins nothing", () => {
+    expect(
+      isQuerySupported(tableSchema, [
+        { field: "age", operator: "gte", value: 18, connector: "OR", mode: "sensitive" },
+      ]),
+    ).toBe(true);
+  });
+
+  it("lowers starts_with and ends_with to contains plus an exact residual check", () => {
+    const where: NormalizedWhere[] = [
+      { field: "age", operator: "gte", value: 18, connector: "AND", mode: "sensitive" },
+      {
+        field: "email_address",
+        operator: "starts_with",
+        value: "ali",
+        connector: "AND",
+        mode: "sensitive",
+      },
+      {
+        field: "email_address",
+        operator: "ends_with",
+        value: ".com",
+        connector: "AND",
+        mode: "sensitive",
+      },
+    ];
+
+    const plan = planBetterAuthQuery("t", tableSchema, where);
+
+    expect(plan.conditions.map(({ field, operator, value }) => [field, operator, value])).toEqual([
+      ["age", "gte", 18],
+      ["email_address", "contains", "ali"],
+      ["email_address", "contains", ".com"],
+    ]);
+    expect(plan.residual).toEqual([where[1], where[2]]);
+    expect(matchesResidual({ email_address: "alice@x.com" }, plan.residual)).toBe(true);
+    // `contains` matches these; the residual must not.
+    expect(matchesResidual({ email_address: "bali@x.com" }, plan.residual)).toBe(false);
+    expect(matchesResidual({ email_address: "alice@x.com.au" }, plan.residual)).toBe(false);
+    expect(matchesResidual({ email_address: null }, plan.residual)).toBe(false);
+  });
+
+  it("rejects starts_with and ends_with where contains is unsupported", () => {
+    expect(
+      isQuerySupported(tableSchema, [
+        { field: "id", operator: "starts_with", value: "row", connector: "AND", mode: "sensitive" },
+      ]),
+    ).toBe(false);
+    expect(
+      isQuerySupported(tableSchema, [
+        { field: "age", operator: "ends_with", value: "1", connector: "AND", mode: "sensitive" },
+      ]),
+    ).toBe(false);
+  });
+
+  it("rejects case-insensitive string matches, which the engine does not do", () => {
+    expect(
+      isQuerySupported(tableSchema, [
+        {
+          field: "email_address",
+          operator: "eq",
+          value: "A@B.C",
+          connector: "AND",
+          mode: "insensitive",
+        },
+      ]),
+    ).toBe(false);
+    expect(
+      isQuerySupported(tableSchema, [
+        { field: "age", operator: "eq", value: 18, connector: "AND", mode: "insensitive" },
+      ]),
+    ).toBe(true);
+  });
+
   it("rejects unsupported column types", () => {
     expect(
       isQuerySupported(tableSchema, [
         { field: "uuidCol", operator: "eq", value: "row-1", connector: "AND", mode: "sensitive" },
       ]),
     ).toBe(false);
-  });
-});
-
-describe("filterListByWhere", () => {
-  const testData = [
-    { id: 1, name: "Alice", age: 25, email: "alice@example.com", active: true },
-    { id: 2, name: "Bob", age: 30, email: "bob@example.com", active: false },
-    {
-      id: 3,
-      name: "Charlie",
-      age: 35,
-      email: "charlie@example.com",
-      active: true,
-    },
-    { id: 4, name: "David", age: 28, email: "david@test.com", active: true },
-    { id: 5, name: "Eve", age: 22, email: "eve@example.com", active: false },
-  ];
-
-  describe("basic functionality", () => {
-    it("should return all data when where is undefined", () => {
-      const result = filterListByWhere(testData, undefined);
-      expect(result).toEqual(testData);
-    });
-
-    it("should return all data when where is empty array", () => {
-      const result = filterListByWhere(testData, []);
-      expect(result).toEqual(testData);
-    });
-
-    it("should throw error when data is not an array", () => {
-      expect(() => filterListByWhere(null as any, [])).toThrow("Expected data to be an array");
-      expect(() => filterListByWhere(undefined as any, [])).toThrow("Expected data to be an array");
-      expect(() => filterListByWhere("string" as any, [])).toThrow("Expected data to be an array");
-    });
-
-    it("should throw error when where is not an array", () => {
-      expect(() => filterListByWhere(testData, null as any)).toThrow(
-        "Expected where to be an array",
-      );
-      expect(() => filterListByWhere(testData, "string" as any)).toThrow(
-        "Expected where to be an array",
-      );
-    });
-  });
-
-  describe("equality operators", () => {
-    it("should filter with eq operator", () => {
-      const where: NormalizedWhere[] = [
-        { field: "name", operator: "eq", value: "Alice", connector: "AND", mode: "sensitive" },
-      ];
-      const result = filterListByWhere(testData, where);
-      expect(result).toEqual([
-        {
-          id: 1,
-          name: "Alice",
-          age: 25,
-          email: "alice@example.com",
-          active: true,
-        },
-      ]);
-    });
-
-    it("should filter with ne operator", () => {
-      const where: NormalizedWhere[] = [
-        { field: "name", operator: "ne", value: "Alice", connector: "AND", mode: "sensitive" },
-      ];
-      const result = filterListByWhere(testData, where);
-      expect(result).toHaveLength(4);
-      expect(result.every((item) => item.name !== "Alice")).toBe(true);
-    });
-
-    it("should handle null values correctly", () => {
-      const dataWithNull = [
-        { id: 1, name: "Alice", age: null },
-        { id: 2, name: "Bob", age: 30 },
-      ];
-      const where: NormalizedWhere[] = [
-        { field: "age", operator: "eq", value: null, connector: "AND", mode: "sensitive" },
-      ];
-      const result = filterListByWhere(dataWithNull, where);
-      expect(result).toEqual([{ id: 1, name: "Alice", age: null }]);
-    });
-
-    it("should filter with ne operator against null", () => {
-      const dataWithNull = [
-        { id: 1, name: "Alice", age: null },
-        { id: 2, name: "Bob", age: 30 },
-        { id: 3, name: "Charlie", age: 35 },
-        { id: 4, name: "David", age: undefined },
-      ];
-      const where: NormalizedWhere[] = [
-        { field: "age", operator: "ne", value: null, connector: "AND", mode: "sensitive" },
-      ];
-      const result = filterListByWhere(dataWithNull, where);
-      expect(result).toEqual([
-        { id: 2, name: "Bob", age: 30 },
-        { id: 3, name: "Charlie", age: 35 },
-      ]);
-    });
-  });
-
-  describe("comparison operators", () => {
-    it("should filter with lt operator", () => {
-      const where: NormalizedWhere[] = [
-        { field: "age", operator: "lt", value: 30, connector: "AND", mode: "sensitive" },
-      ];
-      const result = filterListByWhere(testData, where);
-      expect(result).toEqual([
-        {
-          id: 1,
-          name: "Alice",
-          age: 25,
-          email: "alice@example.com",
-          active: true,
-        },
-        {
-          id: 4,
-          name: "David",
-          age: 28,
-          email: "david@test.com",
-          active: true,
-        },
-        {
-          id: 5,
-          name: "Eve",
-          age: 22,
-          email: "eve@example.com",
-          active: false,
-        },
-      ]);
-    });
-
-    it("should filter with lte operator", () => {
-      const where: NormalizedWhere[] = [
-        { field: "age", operator: "lte", value: 30, connector: "AND", mode: "sensitive" },
-      ];
-      const result = filterListByWhere(testData, where);
-      expect(result).toEqual([
-        {
-          id: 1,
-          name: "Alice",
-          age: 25,
-          email: "alice@example.com",
-          active: true,
-        },
-        {
-          id: 2,
-          name: "Bob",
-          age: 30,
-          email: "bob@example.com",
-          active: false,
-        },
-        {
-          id: 4,
-          name: "David",
-          age: 28,
-          email: "david@test.com",
-          active: true,
-        },
-        {
-          id: 5,
-          name: "Eve",
-          age: 22,
-          email: "eve@example.com",
-          active: false,
-        },
-      ]);
-    });
-
-    it("should filter with gt operator", () => {
-      const where: NormalizedWhere[] = [
-        { field: "age", operator: "gt", value: 30, connector: "AND", mode: "sensitive" },
-      ];
-      const result = filterListByWhere(testData, where);
-      expect(result).toEqual([
-        {
-          id: 3,
-          name: "Charlie",
-          age: 35,
-          email: "charlie@example.com",
-          active: true,
-        },
-      ]);
-    });
-
-    it("should filter with gte operator", () => {
-      const where: NormalizedWhere[] = [
-        { field: "age", operator: "gte", value: 30, connector: "AND", mode: "sensitive" },
-      ];
-      const result = filterListByWhere(testData, where);
-      expect(result).toEqual([
-        {
-          id: 2,
-          name: "Bob",
-          age: 30,
-          email: "bob@example.com",
-          active: false,
-        },
-        {
-          id: 3,
-          name: "Charlie",
-          age: 35,
-          email: "charlie@example.com",
-          active: true,
-        },
-      ]);
-    });
-
-    it("should handle null values in comparison operators", () => {
-      const where: NormalizedWhere[] = [
-        { field: "age", operator: "lt", value: null, connector: "AND", mode: "sensitive" },
-      ];
-      const result = filterListByWhere(testData, where);
-      expect(result).toEqual([]);
-    });
-  });
-
-  describe("string operators", () => {
-    it("should filter with contains operator", () => {
-      const where: NormalizedWhere[] = [
-        {
-          field: "email",
-          operator: "contains",
-          value: "test",
-          connector: "AND",
-          mode: "sensitive",
-        },
-      ];
-      const result = filterListByWhere(testData, where);
-      expect(result).toEqual([
-        {
-          id: 4,
-          name: "David",
-          age: 28,
-          email: "david@test.com",
-          active: true,
-        },
-      ]);
-    });
-
-    it("should filter with starts_with operator", () => {
-      const where: NormalizedWhere[] = [
-        {
-          field: "name",
-          operator: "starts_with",
-          value: "A",
-          connector: "AND",
-          mode: "sensitive",
-        },
-      ];
-      const result = filterListByWhere(testData, where);
-      expect(result).toEqual([
-        {
-          id: 1,
-          name: "Alice",
-          age: 25,
-          email: "alice@example.com",
-          active: true,
-        },
-      ]);
-    });
-
-    it("should filter with ends_with operator", () => {
-      const where: NormalizedWhere[] = [
-        { field: "name", operator: "ends_with", value: "e", connector: "AND", mode: "sensitive" },
-      ];
-      const result = filterListByWhere(testData, where);
-      expect(result).toEqual([
-        {
-          id: 1,
-          name: "Alice",
-          age: 25,
-          email: "alice@example.com",
-          active: true,
-        },
-        {
-          id: 3,
-          name: "Charlie",
-          age: 35,
-          email: "charlie@example.com",
-          active: true,
-        },
-        {
-          id: 5,
-          name: "Eve",
-          age: 22,
-          email: "eve@example.com",
-          active: false,
-        },
-      ]);
-    });
-
-    it("should handle non-string values in string operators", () => {
-      const where: NormalizedWhere[] = [
-        { field: "age", operator: "contains", value: "test", connector: "AND", mode: "sensitive" },
-      ];
-      const result = filterListByWhere(testData, where);
-      expect(result).toEqual([]);
-    });
-  });
-
-  describe("in operator", () => {
-    it("should filter with in operator for strings", () => {
-      const where: NormalizedWhere[] = [
-        {
-          field: "name",
-          operator: "in",
-          value: ["Alice", "Bob"],
-          connector: "AND",
-          mode: "sensitive",
-        },
-      ];
-      const result = filterListByWhere(testData, where);
-      expect(result).toEqual([
-        {
-          id: 1,
-          name: "Alice",
-          age: 25,
-          email: "alice@example.com",
-          active: true,
-        },
-        {
-          id: 2,
-          name: "Bob",
-          age: 30,
-          email: "bob@example.com",
-          active: false,
-        },
-      ]);
-    });
-
-    it("should filter with in operator for numbers", () => {
-      const where: NormalizedWhere[] = [
-        { field: "age", operator: "in", value: [25, 30, 35], connector: "AND", mode: "sensitive" },
-      ];
-      const result = filterListByWhere(testData, where);
-      expect(result).toEqual([
-        {
-          id: 1,
-          name: "Alice",
-          age: 25,
-          email: "alice@example.com",
-          active: true,
-        },
-        {
-          id: 2,
-          name: "Bob",
-          age: 30,
-          email: "bob@example.com",
-          active: false,
-        },
-        {
-          id: 3,
-          name: "Charlie",
-          age: 35,
-          email: "charlie@example.com",
-          active: true,
-        },
-      ]);
-    });
-
-    it("should filter with in operator for booleans", () => {
-      const where: NormalizedWhere[] = [
-        {
-          field: "active",
-          operator: "in",
-          value: [true] as any,
-          connector: "AND",
-          mode: "sensitive",
-        },
-      ];
-      const result = filterListByWhere(testData, where);
-      expect(result).toEqual([
-        {
-          id: 1,
-          name: "Alice",
-          age: 25,
-          email: "alice@example.com",
-          active: true,
-        },
-        {
-          id: 3,
-          name: "Charlie",
-          age: 35,
-          email: "charlie@example.com",
-          active: true,
-        },
-        {
-          id: 4,
-          name: "David",
-          age: 28,
-          email: "david@test.com",
-          active: true,
-        },
-      ]);
-    });
-
-    it("should handle non-array values in in operator", () => {
-      const where: NormalizedWhere[] = [
-        {
-          field: "name",
-          operator: "in",
-          value: "Alice" as any,
-          connector: "AND",
-          mode: "sensitive",
-        },
-      ];
-      const result = filterListByWhere(testData, where);
-      expect(result).toEqual([]);
-    });
-  });
-
-  describe("connectors", () => {
-    it("should use explicit AND connector", () => {
-      const where: NormalizedWhere[] = [
-        { field: "age", operator: "gte", value: 25, connector: "AND", mode: "sensitive" },
-        { field: "active", operator: "eq", value: true, connector: "AND", mode: "sensitive" },
-      ];
-      const result = filterListByWhere(testData, where);
-      expect(result).toEqual([
-        {
-          id: 1,
-          name: "Alice",
-          age: 25,
-          email: "alice@example.com",
-          active: true,
-        },
-        {
-          id: 3,
-          name: "Charlie",
-          age: 35,
-          email: "charlie@example.com",
-          active: true,
-        },
-        {
-          id: 4,
-          name: "David",
-          age: 28,
-          email: "david@test.com",
-          active: true,
-        },
-      ]);
-    });
-
-    it("should use OR connector", () => {
-      const where: NormalizedWhere[] = [
-        { field: "age", operator: "lt", value: 25, connector: "OR", mode: "sensitive" },
-        { field: "active", operator: "eq", value: false, connector: "OR", mode: "sensitive" },
-      ];
-      const result = filterListByWhere(testData, where);
-      expect(result).toEqual([
-        {
-          id: 2,
-          name: "Bob",
-          age: 30,
-          email: "bob@example.com",
-          active: false,
-        },
-        {
-          id: 5,
-          name: "Eve",
-          age: 22,
-          email: "eve@example.com",
-          active: false,
-        },
-      ]);
-    });
-
-    it("should throw error for unsupported connector", () => {
-      const where: NormalizedWhere[] = [
-        { field: "name", operator: "eq", value: "Alice", connector: "AND", mode: "sensitive" },
-        { field: "age", operator: "eq", value: 25, connector: "XOR" as any, mode: "sensitive" },
-      ];
-      expect(() => filterListByWhere(testData, where)).toThrow("Unsupported connector: XOR");
-    });
-  });
-
-  describe("error handling", () => {
-    it("should throw error for unsupported operator", () => {
-      const where: NormalizedWhere[] = [
-        {
-          field: "name",
-          operator: "unsupported" as any,
-          value: "Alice",
-          connector: "AND",
-          mode: "sensitive",
-        },
-      ];
-      expect(() => filterListByWhere(testData, where)).toThrow("Unsupported operator: unsupported");
-    });
-  });
-});
-
-describe("filterListByWhere with id", () => {
-  const testData = [
-    { id: "a1", name: "Alice", age: 25, active: true },
-    { id: "b2", name: "Bob", age: 30, active: false },
-    { id: "c3", name: "Charlie", age: 35, active: true },
-  ] as any[];
-
-  it("should match by id when where field is 'id' (eq)", () => {
-    const where: NormalizedWhere[] = [
-      { field: "id", operator: "eq", value: "a1", connector: "AND", mode: "sensitive" },
-    ];
-    const result = filterListByWhere(testData, where);
-    expect(result).toEqual([{ id: "a1", name: "Alice", age: 25, active: true }]);
-  });
-
-  it("should return empty when no id matches", () => {
-    const where: NormalizedWhere[] = [
-      { field: "id", operator: "eq", value: "z9", connector: "AND", mode: "sensitive" },
-    ];
-    const result = filterListByWhere(testData, where);
-    expect(result).toEqual([]);
-  });
-});
-
-describe("sortListByField", () => {
-  const testData = [
-    { id: 3, name: "Charlie", age: 35, score: 85.5 },
-    { id: 1, name: "Alice", age: 25, score: 92.0 },
-    { id: 2, name: "Bob", age: 30, score: 78.3 },
-    { id: 4, name: "David", age: 28, score: 95.7 },
-  ];
-
-  describe("basic functionality", () => {
-    it("should return data unchanged when sort is undefined", () => {
-      const result = sortListByField(testData, undefined);
-      expect(result).toEqual(testData);
-    });
-
-    it("should sort numbers in ascending order", () => {
-      const result = sortListByField(testData, {
-        field: "age",
-        direction: "asc",
-      });
-      expect(result.map((item) => item.age)).toEqual([25, 28, 30, 35]);
-    });
-
-    it("should sort numbers in descending order", () => {
-      const result = sortListByField(testData, {
-        field: "age",
-        direction: "desc",
-      });
-      expect(result.map((item) => item.age)).toEqual([35, 30, 28, 25]);
-    });
-
-    it("should sort strings in ascending order", () => {
-      const result = sortListByField(testData, {
-        field: "name",
-        direction: "asc",
-      });
-      expect(result.map((item) => item.name)).toEqual(["Alice", "Bob", "Charlie", "David"]);
-    });
-
-    it("should sort strings in descending order", () => {
-      const result = sortListByField(testData, {
-        field: "name",
-        direction: "desc",
-      });
-      expect(result.map((item) => item.name)).toEqual(["David", "Charlie", "Bob", "Alice"]);
-    });
-
-    it("should sort floating point numbers correctly", () => {
-      const result = sortListByField(testData, {
-        field: "score",
-        direction: "asc",
-      });
-      expect(result.map((item) => item.score)).toEqual([78.3, 85.5, 92.0, 95.7]);
-    });
-  });
-
-  describe("edge cases", () => {
-    it("should handle empty array", () => {
-      const result = sortListByField([], { field: "name", direction: "asc" });
-      expect(result).toEqual([]);
-    });
-
-    it("should handle single item array", () => {
-      const singleItem = [{ id: 1, name: "Alice" }];
-      const result = sortListByField(singleItem, {
-        field: "name",
-        direction: "asc",
-      });
-      expect(result).toEqual(singleItem);
-    });
-
-    it("should handle mixed data types gracefully", () => {
-      const mixedData = [
-        { id: 1, value: "string" },
-        { id: 2, value: 42 },
-        { id: 3, value: "another" },
-      ];
-      const result = sortListByField(mixedData, {
-        field: "value",
-        direction: "asc",
-      });
-      // Should not throw error, but behavior may be unpredictable
-      expect(result).toHaveLength(3);
-    });
-
-    it("should handle undefined field values", () => {
-      const dataWithUndefined = [
-        { id: 1, name: "Alice", age: 25 },
-        { id: 2, name: "Bob", age: undefined },
-        { id: 3, name: "Charlie", age: 30 },
-      ];
-      const result = sortListByField(dataWithUndefined, {
-        field: "age",
-        direction: "asc",
-      });
-      expect(result).toHaveLength(3);
-    });
-
-    it("places nullish values first in ascending order while preserving their input order", () => {
-      const data = [
-        { id: "null-first", value: null },
-        { id: "high", value: 10 },
-        { id: "undefined-second", value: undefined },
-        { id: "negative", value: -2 },
-        { id: "low", value: 2 },
-        { id: "middle", value: 5 },
-      ];
-
-      const result = sortListByField(data, {
-        field: "value",
-        direction: "asc",
-      });
-
-      expect(result.map((item) => item.id)).toEqual([
-        "null-first",
-        "undefined-second",
-        "negative",
-        "low",
-        "middle",
-        "high",
-      ]);
-    });
-
-    it("places nullish values last in descending order and keeps pagination deterministic", () => {
-      const data = [
-        { id: "null-first", value: null },
-        { id: "high", value: 10 },
-        { id: "undefined-second", value: undefined },
-        { id: "negative", value: -2 },
-        { id: "low", value: 2 },
-        { id: "middle", value: 5 },
-      ];
-
-      const sorted = sortListByField(data, {
-        field: "value",
-        direction: "desc",
-      });
-
-      expect(sorted.map((item) => item.id)).toEqual([
-        "high",
-        "middle",
-        "low",
-        "negative",
-        "null-first",
-        "undefined-second",
-      ]);
-      expect(paginateList(sorted, 2, 4).map((item) => item.id)).toEqual([
-        "null-first",
-        "undefined-second",
-      ]);
-    });
   });
 });
 

@@ -1385,7 +1385,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.executeSubscription(handle, updates);
     await Promise.resolve();
 
-    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(5, 3, "server died")]));
+    // `malformed_frame` (2) is fatal even with `later` (3): retrying cannot
+    // help. (`internal` with `later` is a server shutting down, retried.)
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(2, 3, "server died")]));
     await Promise.resolve();
 
     expect(subscription.closed).toBe(true);
@@ -2693,106 +2695,6 @@ describe("NativeRuntimeAdapter server transport", () => {
       },
     ]);
     expect(preparedBytes).toEqual(queryWithPredicates("todos", [], { relation }));
-  });
-
-  it("carries a payload enum match relation filter in the Query envelope", () => {
-    let preparedBytes: Uint8Array | undefined;
-    const runtime = new NativeRuntimeAdapter(
-      {
-        openMemory: () =>
-          fakeDb({
-            subscribe: (query: Uint8Array) => {
-              preparedBytes = query;
-              return new ReadableStream();
-            },
-            tick: () => undefined,
-          }),
-        openBrowser: async () => {
-          throw new Error("not used");
-        },
-      } as never,
-      {
-        events: {
-          columns: [
-            {
-              name: "event",
-              column_type: {
-                type: "EnumPayload",
-                cases: [
-                  {
-                    name: "message",
-                    fields: [{ name: "level", column_type: { type: "Integer" }, nullable: false }],
-                  },
-                ],
-              },
-              nullable: false,
-            },
-          ],
-        },
-      },
-      new Uint8Array(16),
-      TEST_RUNTIME_AUTHOR,
-      1,
-      true,
-    );
-
-    const handle = runtime.createSubscription(
-      JSON.stringify({
-        table: "events",
-        relation_ir: {
-          Project: {
-            input: {
-              Filter: {
-                input: { TableScan: { table: "events" } },
-                predicate: {
-                  EnumMatch: {
-                    column: { column: "event", scope: "events" },
-                    case: "message",
-                    payload: {
-                      Cmp: {
-                        left: { column: "level" },
-                        op: "Eq",
-                        right: { Literal: { type: "Integer", value: 2 } },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-            columns: [{ alias: "event", expr: { Column: { column: "event", scope: "events" } } }],
-          },
-        },
-      }),
-    );
-
-    expect(handle).toBe(1);
-    expect(preparedBytes).toEqual(
-      queryWithPredicates("events", [], {
-        relation: {
-          Project: {
-            input: {
-              Filter: {
-                input: { TableScan: { table: "events" } },
-                predicate: {
-                  EnumMatch: {
-                    column: { column: "event", scope: "events" },
-                    case: "message",
-                    payload: {
-                      Cmp: {
-                        left: { column: "level" },
-                        op: "Eq",
-                        right: { Literal: { type: "Integer", value: 2 } },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-            columns: [{ alias: "event", expr: { Column: { column: "event", scope: "events" } } }],
-          },
-        },
-      }),
-    );
   });
 
   it.each(["stream", "native", "native-close-throws"] as const)(

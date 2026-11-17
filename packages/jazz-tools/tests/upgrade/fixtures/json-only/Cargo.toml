@@ -1,0 +1,7 @@
+[package]
+name = "upgrade-fixture-json-only"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+jazz-app-support = { path = "../jazz-app" }

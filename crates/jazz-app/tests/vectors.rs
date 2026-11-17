@@ -6,7 +6,7 @@
 mod bindings;
 
 use bindings::{Doc, DocUpdate, NewDoc};
-use jazz_app::{AppId, Config};
+use jazz_app_support::{AppId, Config};
 
 /// alice writes an embedding and reads back the same `f32` bits; the
 /// omitted `seed` takes its declared default; a vector of the wrong length
@@ -16,11 +16,7 @@ async fn vectors_round_trip_and_wrong_lengths_are_refused() {
     let jazz = bindings::open(Config::new(AppId::random())).await.unwrap();
     let embedding = vec![0.1f32, -0.0, 1e-45, f32::MAX];
     let doc = jazz
-        .insert(NewDoc {
-            title: "intro".into(),
-            embedding: embedding.clone(),
-            ..Default::default()
-        })
+        .insert(NewDoc::new("intro", embedding.clone()))
         .await
         .unwrap();
     let read: Doc = jazz.get(doc.id).await.unwrap().unwrap();
@@ -45,11 +41,7 @@ async fn vectors_round_trip_and_wrong_lengths_are_refused() {
         .await;
     assert!(refused.is_err(), "two floats in a vector(4)");
     let refused = jazz
-        .insert(NewDoc {
-            title: "nan".into(),
-            embedding: vec![f32::NAN, 0.0, 0.0, 0.0],
-            ..Default::default()
-        })
+        .insert(NewDoc::new("nan", vec![f32::NAN, 0.0, 0.0, 0.0]))
         .await;
     assert!(refused.is_err(), "NaN");
     let read: Doc = jazz.get(doc.id).await.unwrap().unwrap();

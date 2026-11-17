@@ -16,7 +16,6 @@ import { app as indexedApp } from "./apps/composite-indexes/jazz.generated.js";
 import { app as defaultedApp } from "./apps/defaulted-todos/jazz.generated.js";
 import { app as historyApp } from "./apps/history-table/jazz.generated.js";
 import { app as largeValueUpdateApp } from "./apps/large-values/jazz.generated.js";
-import { app as payloadEnumApp } from "./apps/payload-enum/jazz.generated.js";
 import { app as graphApp } from "./apps/team-graph/jazz.generated.js";
 import {
   app as transformedColumnApp,
@@ -56,11 +55,11 @@ describe("typed app prototype", () => {
     );
   });
 
-  it.each(["union", "wasmSchema", "schemaAst"])(
+  it.each(["union", "wasmSchema", "schemaAst", "_schema", "exists", "constructor", "toString"])(
     "rejects a table named %s instead of masking an app control",
     (tableName) => {
       expect(() => testApp({ tables: { [tableName]: { columns: { value: "string" } } } })).toThrow(
-        /reserved/i,
+        `Schema name "${tableName}" is reserved for Jazz schema controls.`,
       );
     },
   );
@@ -315,7 +314,7 @@ describe("typed app prototype", () => {
           union: {
             inputs: [
               {
-                label: "derived:d48cadaae9a566a710ffe64030c95b86598055df9c54c3170acefb10c448fa2f",
+                label: "",
                 input: {
                   table: "team_edges",
                   conditions: [{ column: "child_team", op: "eq", value: "team-a" }],
@@ -323,7 +322,7 @@ describe("typed app prototype", () => {
                 },
               },
               {
-                label: "derived:9ca5aebdc72dbdc2fb4a2b163d5ee572234fab051359a67ef4edbf8ced2ff4c8",
+                label: "",
                 input: {
                   table: "teams",
                   conditions: [],
@@ -451,8 +450,6 @@ describe("typed app prototype", () => {
     });
     // @ts-expect-error required scalar columns do not support isNull
     app.todos.where({ done: { isNull: true } });
-    // @ts-expect-error nullable payload enums keep their dedicated match operator
-    payloadEnumApp.events.where({ optionalEvent: { isNull: true } });
 
     // Membership is deliberately non-nullable. Express null handling with
     // isNull/isNotNull rather than SQL-style null membership semantics.
@@ -517,7 +514,9 @@ describe("typed app prototype", () => {
           },
         },
       }),
-    ).toThrow();
+    ).toThrow(
+      /^jazz\.app\.json: migrations: invalid schema [0-9a-f]{64}: \$\.todos\.owner: reference target table 'accounts' does not exist$/,
+    );
     // The same inside an array reference.
     expect(() =>
       testApp({
@@ -529,7 +528,9 @@ describe("typed app prototype", () => {
           },
         },
       }),
-    ).toThrow();
+    ).toThrow(
+      /^jazz\.app\.json: migrations: invalid schema [0-9a-f]{64}: \$\.groups\.members: reference target table 'accounts' does not exist$/,
+    );
   });
 
   it("infers fields with defaults as optional for init payloads", () => {
@@ -560,40 +561,6 @@ describe("typed app prototype", () => {
         done: null,
       };
       void invalidDefaultedNull;
-    }
-  });
-  it("preserves nullable and defaulted fields inside payload enum init values", () => {
-    type EventInsert = InsertOf<typeof payloadEnumApp.events>;
-    const omittedNullableAndDefaulted: EventInsert = {
-      event: {
-        type: "message",
-        requiredText: "required",
-      },
-    };
-    const explicitNullable: EventInsert = {
-      event: {
-        type: "message",
-        requiredText: "required",
-        nullableText: null,
-      },
-    };
-
-    expectTypeOf<EventInsert["event"]>().branded.toEqualTypeOf<{
-      type: "message";
-      requiredText: string;
-      nullableText?: string | null;
-      defaultedText?: string;
-    }>();
-    expectTypeOf(omittedNullableAndDefaulted.event.requiredText).toEqualTypeOf<string>();
-    expectTypeOf(explicitNullable.event.nullableText).toEqualTypeOf<string | null | undefined>();
-
-    if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
-      // @ts-expect-error required payload fields cannot be omitted
-      const missingRequired: EventInsert = { event: { type: "message" } };
-      // @ts-expect-error required payload fields cannot be null
-      const nullRequired: EventInsert = { event: { type: "message", requiredText: null } };
-      void missingRequired;
-      void nullRequired;
     }
   });
 

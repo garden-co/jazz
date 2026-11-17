@@ -1,6 +1,9 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "73bc36b77a477ddc5542c2221b26fd0d119a6840ffce2ee191f3ba65c89e14ee"
+  },
   "tables": {
     "albums": { "read": "true", "insert": "$createdBy.account = session.user" },
     "better_auth_account": {

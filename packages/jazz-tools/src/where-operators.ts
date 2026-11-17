@@ -51,10 +51,6 @@ function operatorsForColumn(
       case "Enum":
         operators.push("eq", "ne", "in", "notIn");
         break;
-      case "EnumPayload":
-        // Payload enums deliberately use their dedicated `match` operator rather
-        // than pretending that a whole discriminated record is comparable.
-        break;
       case "Array":
         operators.push("eq", "contains", "in", "notIn");
         break;

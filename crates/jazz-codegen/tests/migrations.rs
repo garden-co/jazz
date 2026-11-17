@@ -157,7 +157,9 @@ fn an_index_only_edit_needs_no_migration() {
     assert!(created.todos.is_empty());
     assert_eq!(
         created.note.as_deref(),
-        Some("only single-column indexes changed: no migration needed; run `jazz-tools generate`")
+        Some(
+            "only single-column indexes changed: no migration needed; run `npx jazz-tools generate`"
+        )
     );
     // A composite index changes the version: still a migration.
     let composite = App::load(
@@ -572,5 +574,92 @@ fn point_type_changes_are_refused_and_new_point_columns_migrate() {
     );
     assert!(created.changed);
     assert!(created.todos.is_empty(), "{:?}", created.todos);
+    App::load(created.app.as_bytes()).unwrap();
+}
+
+/// The decisions every language renders its stub from, as the JSON the TS
+/// CLI reads (jazz-napi `migrationDiff`): a table renamed, one created,
+/// one dropped; in a kept table, a column that may be renamed, one added
+/// without the value existing rows get, one dropped with its default, and
+/// an enum gaining a variant.
+#[test]
+fn the_diff_steps_are_what_every_stub_is_rendered_from() {
+    let schema = |tables: &str| {
+        App::load(file(tables).as_bytes())
+            .unwrap()
+            .compiled
+            .current_schema()
+            .clone()
+    };
+    let before = schema(
+        r#"{ "todos": { "columns": { "title": "string", "note": "string?", "status": { "enum": ["open"] } } },
+             "projects": { "columns": { "name": "string" } },
+             "legacy": { "columns": { "n": "int" } } }"#,
+    );
+    let after = schema(
+        r#"{ "todos": { "columns": { "name": "string", "rank": "int", "status": { "enum": ["open", "done"] } } },
+             "lists": { "columns": { "name": "string" } },
+             "tags": { "columns": { "label": "string" } } }"#,
+    );
+    let steps = jazz_codegen::migrations::diff_steps(&before, &after).unwrap();
+    assert_eq!(
+        serde_json::to_value(&steps).unwrap(),
+        serde_json::json!({
+            "createTables": ["tags"],
+            "dropTables": ["legacy"],
+            "renameTables": [{ "from": "projects", "to": "lists" }],
+            "migrate": [{
+                "table": "todos",
+                "steps": [
+                    { "step": "maybeRenamed", "column": "name", "candidates": ["title"] },
+                    { "step": "add", "column": "rank", "needsDefault": true },
+                    { "step": "drop", "column": "note", "needsBackwardsDefault": false },
+                    { "step": "maybeRenamedAway", "column": "title" },
+                ],
+                "addedVariants": [{ "column": "status", "variants": ["done"] }],
+                "unchangedRows": [],
+            }],
+        })
+    );
+}
+
+/// A row's branch columns decide which branch it belongs to, and a
+/// deployment refuses any migration that changes them: removing a column
+/// from `branchBy` or changing a branch column's default is refused here,
+/// before a stub no deploy accepts is written. Adding `branchBy` is not.
+#[test]
+fn branch_columns_are_kept_as_they_are() {
+    let notes = |branch_by: bool, default: &str| {
+        format!(
+            r#"{{ "notes": {{ "columns": {{ "title": "string", "branch": {{ "type": "string", "default": "{default}" }} }}{} }} }}"#,
+            if branch_by {
+                r#", "branchBy": ["branch"]"#
+            } else {
+                ""
+            }
+        )
+    };
+    let removed = refused(&notes(true, "main"), &notes(false, "main"));
+    assert!(
+        removed.contains("Removing `branch` from the branchBy of table `notes` is not supported"),
+        "{removed}"
+    );
+    let default = refused(&notes(true, "main"), &notes(true, "draft"));
+    assert!(
+        default.contains("Changing the default of branch column `notes.branch` is not supported"),
+        "{default}"
+    );
+    // Gaining branchBy is an empty migration, which deploys.
+    let added = migrate(&notes(false, "main"), &notes(true, "main"));
+    assert!(added.changed && added.todos.is_empty());
+    App::load(added.app.as_bytes()).unwrap();
+    // A default outside branchBy may change.
+    let created = migrate(
+        &notes(true, "main"),
+        &notes(true, "main").replace(
+            r#""title": "string""#,
+            r#""title": { "type": "string", "default": "x" }"#,
+        ),
+    );
     App::load(created.app.as_bytes()).unwrap();
 }

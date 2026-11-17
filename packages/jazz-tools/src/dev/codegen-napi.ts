@@ -38,6 +38,38 @@ interface CodegenNapi {
   loadAppArtifact(app: string, permissions: string): unknown;
   loadBackendApp(schema: string, permissions: string): unknown;
   compileApp(appJson: string): string;
+  writeAppFiles(
+    app: string,
+    permissions: string,
+    options?: { generated?: { by: string } },
+  ): { app: string; permissions: string };
+  verifyGenerated(text: string): "none" | "match" | "mismatch";
+  generateForDir?(dir: string, options?: DirOptions): DirOutcome;
+  migrationsCreateForDir?(dir: string, name: string, options?: DirOptions): DirOutcome;
+}
+
+/** How `generateForDir` / `migrationsCreateForDir` run. */
+export interface DirOptions {
+  /** Fail when the files or bindings are stale, and write nothing. */
+  check?: boolean;
+  /** The bindings' languages; by default each the directory's files say the app is written in. */
+  lang?: string[];
+  /** The language assumed when nothing in the directory names one and no other language's manifest is there. */
+  fallback?: string;
+}
+
+/** What `generateForDir` / `migrationsCreateForDir` did. */
+export interface DirOutcome {
+  notes: string[];
+  warnings: string[];
+  /** Bindings files written, relative to the directory. */
+  written: string[];
+  /** Bindings files already up to date, relative to the directory. */
+  current: string[];
+  /** `migrationsCreateForDir`: whether `jazz.app.json` changed. */
+  changed: boolean;
+  /** `migrationsCreateForDir`: JSON paths of the TODOs left to resolve. */
+  todos: string[];
 }
 
 let napi: Promise<CodegenNapi> | undefined;
@@ -103,7 +135,7 @@ export async function generateTs(appJson: string): Promise<string> {
   return (await codegen()).generate("ts", appJson);
 }
 
-/** `src/jazz_app.rs` (the `jazz-app` crate's bindings) for `appJson`. */
+/** `src/jazz_app.rs` (the `jazz-app-support` crate's bindings) for `appJson`. */
 export async function generateRust(appJson: string): Promise<string> {
   return (await codegen()).generate("rust", appJson);
 }
@@ -134,9 +166,69 @@ export async function migrationsCreate(
   return (await codegen()).migrationsCreate(appJson, bindings, name);
 }
 
+/**
+ * `jazz-tools generate [--check]` in `dir` (the directory of `jazz.app.json`),
+ * as the `jazz-tools` binary runs it: the same language detection, checks and
+ * bytes.
+ */
+export async function generateForDir(dir: string, options: DirOptions = {}): Promise<DirOutcome> {
+  const loaded = await codegen();
+  if (!loaded.generateForDir) {
+    throw new Error(
+      "This jazz-napi build can't generate bindings for a directory: update jazz-napi.",
+    );
+  }
+  return loaded.generateForDir(dir, options);
+}
+
+/** `jazz-tools migrations create --name <name>` in `dir`, as the `jazz-tools` binary runs it. */
+export async function migrationsCreateForDir(
+  dir: string,
+  name: string,
+  options: DirOptions = {},
+): Promise<DirOutcome> {
+  const loaded = await codegen();
+  if (!loaded.migrationsCreateForDir) {
+    throw new Error(
+      "This jazz-napi build can't create migrations for a directory: update jazz-napi.",
+    );
+  }
+  return loaded.migrationsCreateForDir(dir, name, options);
+}
+
 /** Read and check both files as a backend does; throws what a backend would refuse. */
 export async function loadAppFiles(app: string, permissions: string): Promise<unknown> {
   return (await codegen()).loadAppArtifact(app, permissions);
+}
+
+/** What `writeAppFiles` returns: both files' canonical text. */
+export interface WrittenAppFiles {
+  app: string;
+  permissions: string;
+}
+
+/**
+ * Check and print an app's two files from their readable input (what
+ * `jazz-tools generate` assembles from the app's TS): the Rust writer runs
+ * every check `load` runs and prints the canonical text, with a
+ * `$generated` marker when `options.generated` is given.
+ */
+export async function writeAppFiles(
+  app: string,
+  permissions: string,
+  options: { generated?: { by: string } } = {},
+): Promise<WrittenAppFiles> {
+  return (await codegen()).writeAppFiles(app, permissions, options);
+}
+
+/**
+ * Whether a file's `$generated` marker matches its contents: `"none"` when
+ * it has none (hand-written, or written before alpha.66), `"mismatch"` when
+ * it was edited by hand since it was generated. Reformatting (line endings,
+ * indentation) isn't an edit.
+ */
+export async function verifyGenerated(text: string): Promise<"none" | "match" | "mismatch"> {
+  return (await codegen()).verifyGenerated(text);
 }
 
 /** Check `jazz.permissions.json` against the bindings' compiled schema, as a deployed backend does. */
@@ -153,16 +245,19 @@ export async function compileApp(appJson: string): Promise<Record<string, unknow
   return JSON.parse((await codegen()).compileApp(appJson)) as Record<string, unknown>;
 }
 
-/** A `jazz.permissions.json`, as imported or written inline. */
-export type PermissionsFile = { readonly format: number } & Readonly<Record<string, unknown>>;
+/**
+ * A `jazz.permissions.json`, as imported or written inline: `$schema` names its
+ * version (`https://jazz.tools/schemas/jazz.permissions.v1.json`); a legacy
+ * (pre-alpha.66) file carries `format: 1` instead.
+ */
+export type PermissionsFile = ({ readonly $schema: string } | { readonly format: number }) &
+  Readonly<Record<string, unknown>>;
 
 /** Whether `permissions` is a `jazz.permissions.json` rather than the engine's policies. */
 export function isPermissionsFile(permissions: unknown): permissions is PermissionsFile {
-  return (
-    typeof permissions === "object" &&
-    permissions !== null &&
-    typeof (permissions as { format?: unknown }).format === "number"
-  );
+  if (typeof permissions !== "object" || permissions === null) return false;
+  const file = permissions as { $schema?: unknown; format?: unknown };
+  return typeof file.$schema === "string" || typeof file.format === "number";
 }
 
 /** Check `permissions` against `app`'s bindings with the Rust loader, as a deployed backend does. */

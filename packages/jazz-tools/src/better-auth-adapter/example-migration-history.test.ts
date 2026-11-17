@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { compileTestApp } from "../testing/test-app.js";
+import { compileTestApp, testApp } from "../testing/test-app.js";
 import type { ClientMigrations } from "../runtime/client-migrations.js";
 import type { WasmSchema } from "../drivers/types.js";
 import {
@@ -195,4 +195,99 @@ describe("shipped Better Auth issuer-removal histories", () => {
     delete file.history["8acd8a85eef5"].tables.better_auth_account.columns.issuer;
     expect(() => compiled(file)).toThrow(/history\.8acd8a85eef5 is the current schema/);
   });
+});
+
+// Each example's issuer-era snapshot as main shipped it before the examples
+// moved to files (09cd0d41: <example>/migrations/snapshots/<fromHash>.json),
+// copied byte for byte into fixtures/pre-files-snapshots, with the digest
+// that commit's version of this test pinned for it.
+const preFilesSnapshotDigests: Record<string, string> = {
+  "examples/auth-betterauth-chat":
+    "c00406b3b2a7e83583c0e779d407f5cdb883377f3fdaf86534eaf988ae9e0372",
+  "examples/band-book/apps/nextjs-betterauth":
+    "9a028955983b638d9905cfef17851df6f57fa97eff76a93199b56fb4f179e1b7",
+  "examples/band-chat/apps/nextjs-betterauth":
+    "8837f2aff350ecd2ac54d91fdf1c999a92060efd6a0f9b846f45d597eee3298c",
+  "examples/band-chat/apps/react-hono-betterauth":
+    "1d164397ee2e9ca640580849fdd28b4571600a6a67a78c5cd9fd375f160a21fc",
+  "examples/big-label": "a3550b418a8a7af3516b984d2d131085e92833fe9b712825fd144c93236d0d69",
+  "examples/jamazon-warehouse": "ee6ac1df64d1439ba2d2ce3052209386f423e5017b1da7eb0bc481aa18056419",
+  "examples/jamazon/apps/nextjs-betterauth":
+    "43719d926aaacbef65f858cba499684ab927e53c858dcf19c8322415f29d294a",
+  "examples/music-agent/apps/nextjs":
+    "27cdab18ad2880fe259a2ceb513be8c367ce5163583edbf53b364296d4a681f8",
+  "examples/music-agent/apps/ts-hono":
+    "27cdab18ad2880fe259a2ceb513be8c367ce5163583edbf53b364296d4a681f8",
+  "examples/poster-shop/apps/nextjs-betterauth":
+    "4598153be094094924fb224e6952c89ef0ade1b92d887ab85e6a0a177fb199f8",
+  "examples/record-player/apps/next-betterauth":
+    "c1628830a890ae295f1d7904eafc993498b7d05a061223ca953b7a529ca8724f",
+  "examples/stage-plan/apps/sveltekit-hybrid":
+    "a986478f2f45446637f37aca7f8210aa8e5c499ee9fc7daf8444baab6bb35d80",
+  "examples/stage-plan/apps/ts-effect-betterauth":
+    "a986478f2f45446637f37aca7f8210aa8e5c499ee9fc7daf8444baab6bb35d80",
+  "examples/wequencer/apps/next-betterauth":
+    "6e938c531dabae6716fa2e841f0ea583048e52870553c21e46e3cbc778e3d7a0",
+};
+
+const sha256 = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const sortedKeys = (value: unknown): unknown =>
+  Array.isArray(value)
+    ? value.map(sortedKeys)
+    : value && typeof value === "object"
+      ? Object.fromEntries(
+          Object.keys(value)
+            .sort()
+            .map((key) => [key, sortedKeys((value as Record<string, unknown>)[key])]),
+        )
+      : value;
+const withoutRelations = (schema: WasmSchema) =>
+  Object.fromEntries(
+    Object.entries(schema).map(([name, { relations: _, ...table }]) => [name, table]),
+  );
+/** The snapshots wrote `relations: {}` for a table without any; bindings omit it. */
+const withoutEmptyRelations = (schema: WasmSchema) =>
+  Object.fromEntries(
+    Object.entries(schema).map(([name, { relations, ...table }]) => [
+      name,
+      relations && Object.keys(relations).length > 0 ? { ...table, relations } : table,
+    ]),
+  );
+
+describe("Better Auth issuer-era histories carried over from before the files", () => {
+  it.each(examples)(
+    "%s keeps its pre-files snapshot, column for column and relation for relation",
+    (directory, fromHash, toHash, historyDigest) => {
+      const snapshot: WasmSchema = JSON.parse(
+        readFileSync(
+          new URL(`./fixtures/pre-files-snapshots/${fromHash.slice(0, 12)}.json`, import.meta.url),
+          "utf8",
+        ),
+      );
+      // The fixture is the file the old test pinned.
+      expect(sha256(snapshot)).toBe(preFilesSnapshotDigests[directory]);
+
+      const appFile = readFileSync(join(root, directory, "jazz.app.json"), "utf8");
+      const bundle = compiled(appFile);
+      // The history version is the snapshot exactly, without relations:
+      // history versions store tables, and relations are not hash inputs.
+      expect(versionOf(bundle, fromHash)).toEqual(withoutRelations(snapshot));
+      // So the old pin maps to the new one: same content, keys sorted.
+      expect(sha256(sortedKeys({ tables: withoutRelations(snapshot) }))).toBe(historyDigest);
+
+      // The shipped app is the snapshot minus the dropped issuer column, with
+      // every relation the snapshot recorded.
+      const { better_auth_account: account, ...unchanged } = snapshot;
+      expect(testApp(appFile).wasmSchema).toEqual(
+        withoutEmptyRelations({
+          ...unchanged,
+          better_auth_account: {
+            ...account!,
+            columns: account!.columns.filter((column) => column.name !== "issuer"),
+          },
+        }),
+      );
+      expect(bundle.current).toBe(toHash);
+    },
+  );
 });

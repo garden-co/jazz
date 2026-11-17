@@ -77,8 +77,7 @@ list will be indexed.
 
 ```json title="jazz.app.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "todos": {
       "columns": {
@@ -111,12 +110,14 @@ page is read straight from the index:
 
 ```json title="jazz.app.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "messages": {
       "$comment": "Serves app.messages.where({ roomId }).orderBy(\"$createdAt\", \"desc\").limit(50)",
-      "columns": { "roomId": "uuid", "text": "string" },
+      "columns": {
+        "roomId": "uuid",
+        "text": "string"
+      },
       "indexes": [["roomId", "$createdAt"]]
     }
   }
@@ -177,8 +178,7 @@ Use `"merge": "counter"` on an integer or bigint column to keep deltas additive 
 
 ```json title="jazz.app.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "votes": {
       "columns": {
@@ -225,8 +225,7 @@ to the union of every replica's elements:
 
 ```json title="jazz.app.json"
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "tables": {
     "documents": {
       "columns": {

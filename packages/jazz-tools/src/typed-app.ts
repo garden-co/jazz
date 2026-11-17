@@ -1,8 +1,6 @@
 import type { TxId } from "./runtime/client.js";
 import { historyTableName, resolveQueryTable } from "./runtime/history-relation.js";
 import { resolveQueryOutputTable } from "./runtime/query-output-table.js";
-import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex } from "@noble/hashes/utils.js";
 import type { ColumnType, WasmSchema } from "./drivers/types.js";
 import { magicColumnType, type ProvenanceMagicColumn, type RowAuthor } from "./magic-columns.js";
 import { assertSchemaNameAllowed } from "./schema-name.js";
@@ -184,9 +182,6 @@ type TimestampWhere<TOptional extends boolean> = WhereEqNe<
   } & Membership<Date | number>
 >;
 type UuidWhere<TOptional extends boolean> = WhereEqNe<string, TOptional, Membership<string>>;
-type PayloadEnumMatch<T> = T extends { type: infer Case extends string }
-  ? { type: Case; where?: Partial<Omit<T, "type">> }
-  : never;
 type ArrayElement<T> = T extends readonly (infer E)[] ? E : never;
 
 type WhereInputForColumn<C extends ColumnTypes> = C["kind"] extends "string"
@@ -206,9 +201,7 @@ type WhereInputForColumn<C extends ColumnTypes> = C["kind"] extends "string"
               : C["kind"] extends "json"
                 ? WhereEqNe<C["value"], C["nullable"], Membership<C["value"]>>
                 : C["kind"] extends "enum"
-                  ? [C["value"]] extends [string]
-                    ? WhereEqNe<C["value"], C["nullable"], Membership<C["value"]>>
-                    : { match?: PayloadEnumMatch<C["value"]> }
+                  ? WhereEqNe<C["value"], C["nullable"], Membership<C["value"]>>
                   : C["kind"] extends "array"
                     ? WhereEqNe<
                         C["value"],
@@ -1837,23 +1830,16 @@ function createAppForTables(
         | readonly RelationSeedQuery<TTable>[]
         | Readonly<Record<string, RelationSeedQuery<TTable>>>,
     ) {
+      // An unnamed arm goes out with an empty label: Rust labels it by what
+      // it reads (`jazz.union-arm-label.v2`) and refuses identical arms.
       const arms = Array.isArray(relations)
-        ? relations.map((relation) => ({
-            relation,
-            label: derivedUnionArmLabel(relation._serializeRelation()),
-          }))
-        : Object.entries(relations).map(([label, relation]) => ({ label, relation }));
+        ? relations.map((relation) => ({ relation, label: "" }))
+        : Object.entries(relations).map(([label, relation]) => {
+            if (!label) throw new Error("union(...) arm names must not be empty.");
+            return { label, relation };
+          });
       if (arms.length === 0) {
         throw new Error("union(...) requires at least one relation.");
-      }
-      const labels = new Set<string>();
-      for (const { label } of arms) {
-        if (!label || utf8ByteLength(label) > 4096 || label.includes("\0") || labels.has(label)) {
-          throw new Error(
-            "union(...) arm labels must be 1..=4096 bytes, NUL-free, and unique; use named arms for duplicate relations.",
-          );
-        }
-        labels.add(label);
       }
       const first = arms[0]!.relation;
       const builder = new TypedTableQueryBuilder(
@@ -1874,84 +1860,4 @@ function createAppForTables(
     },
     wasmSchema,
   } as unknown as App<SchemaLike>;
-}
-
-const utf8 = new TextEncoder();
-
-function utf8ByteLength(value: string): number {
-  return utf8.encode(value).byteLength;
-}
-
-function compareUtf8(left: string, right: string): number {
-  const leftBytes = utf8.encode(left);
-  const rightBytes = utf8.encode(right);
-  const sharedLength = Math.min(leftBytes.length, rightBytes.length);
-  for (let index = 0; index < sharedLength; index += 1) {
-    const difference = leftBytes[index]! - rightBytes[index]!;
-    if (difference !== 0) return difference;
-  }
-  return leftBytes.length - rightBytes.length;
-}
-
-function derivedUnionArmLabel(relation: BuiltRelation): string {
-  // Labels are public durable input and therefore have a fixed small bound.
-  // Hash the typed canonical relation instead of embedding JSON: Date, bigint
-  // and byte values have non-JSON semantics, and a large literal must not turn
-  // a valid array union into an overlong inferred label.
-  return `derived:${bytesToHex(sha256(utf8.encode(canonicalUnionRelation(relation))))}`;
-}
-
-function canonicalUnionRelation(relation: BuiltRelation): string {
-  // jazz.sdk.union-arm-output.v1 extends only seeds with output modifiers.
-  // Existing unmodified seeds retain their exact canonical bytes and labels.
-  const output = {
-    ...(relation.orderBy ? { orderBy: relation.orderBy } : {}),
-    ...(relation.limit !== undefined ? { limit: relation.limit } : {}),
-    ...(relation.offset !== undefined ? { offset: relation.offset } : {}),
-  };
-  const normalized = {
-    ...(relation.table ? { table: relation.table } : {}),
-    conditions: [...(relation.conditions ?? [])]
-      .map((condition) => canonicalJson(condition))
-      .sort(),
-    hops: relation.hops ?? [],
-    ...(Object.keys(output).length ? { output_v1: output } : {}),
-    ...(relation.gather ? { gather: relation.gather } : {}),
-    ...(relation.union
-      ? {
-          union: relation.union.inputs
-            .map((arm) => ({ label: arm.label, input: canonicalUnionRelation(arm.input) }))
-            .sort((left, right) => compareUtf8(left.label, right.label)),
-        }
-      : {}),
-  };
-  return canonicalJson(normalized);
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === null) return "null";
-  if (value === undefined) return "undefined";
-  if (typeof value === "string") return `string:${JSON.stringify(value)}`;
-  if (typeof value === "boolean") return `bool:${value}`;
-  if (typeof value === "bigint") return `bigint:${value}`;
-  if (typeof value === "number") {
-    return Number.isFinite(value) ? `number:${value}` : `number:${String(value)}`;
-  }
-  if (value instanceof Date) {
-    return Number.isNaN(value.getTime()) ? "date:invalid" : `date:${value.toISOString()}`;
-  }
-  if (value instanceof Uint8Array) return `bytes:${bytesToHex(value)}`;
-  if (value instanceof ArrayBuffer) return `bytes:${bytesToHex(new Uint8Array(value))}`;
-  if (ArrayBuffer.isView(value)) {
-    return `typed:${value.constructor.name}:${bytesToHex(new Uint8Array(value.buffer, value.byteOffset, value.byteLength))}`;
-  }
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    return `{${Object.keys(record)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
-      .join(",")}}`;
-  }
-  return `unknown:${String(value)}`;
 }
