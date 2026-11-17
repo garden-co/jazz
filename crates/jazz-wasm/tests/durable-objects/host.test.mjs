@@ -149,3 +149,83 @@ test("a Durable Object core serves its app's backend and refuses anyone else", a
     rmSync(persist, { recursive: true, force: true });
   }
 });
+
+test("a backend publishes its schema to a Durable Object core, which then serves it", async () => {
+  const persist = mkdtempSync(join(tmpdir(), "jazz-do-publish-"));
+  // As the docs deploy it: no JAZZ_SCHEMA; the backend publishes.
+  const open = () =>
+    new Miniflare({
+      modules: true,
+      scriptPath: join(here, "host-worker.mjs"),
+      modulesRoot: join(here, "../.."),
+      modulesRules: [
+        { type: "ESModule", include: ["**/*.js", "**/*.mjs"] },
+        { type: "CompiledWasm", include: ["**/*.wasm"] },
+      ],
+      compatibilityDate: "2026-04-01",
+      durableObjects: { JAZZ: { className: "JazzCore", useSQLite: true } },
+      durableObjectsPersist: persist,
+      bindings: { JAZZ_APP_ID: APP, JAZZ_CORE_SECRET: SECRET },
+    });
+  const admin = { "X-Jazz-Admin-Secret": SECRET };
+  const get = (mf, route) =>
+    mf.dispatchFetch(`http://core/apps/${APP}/${route}`, { headers: admin });
+  const publish = (mf, body) =>
+    mf.dispatchFetch(`http://core/apps/${APP}/admin/bundles`, {
+      method: "POST",
+      headers: { ...admin, "content-type": "application/json" },
+      body,
+    });
+  try {
+    let mf = open();
+    const empty = await get(mf, "admin/migrations/graph");
+    assert.equal(empty.status, 200);
+    assert.deepEqual((await (await get(mf, "admin/bundles")).json()).bundles, []);
+
+    const malformed = await publish(mf, "{");
+    assert.equal(malformed.status, 400);
+
+    const request = fixture.testDeployRequest(SCHEMA);
+    const first = await publish(mf, request);
+    assert.equal(first.status, 200);
+    const published = await first.json();
+    assert.equal(published.changed, true);
+    const again = await (await publish(mf, request)).json();
+    assert.equal(again.changed, false, "publishing the same bundle again changes nothing");
+    assert.equal(again.bundle, published.bundle);
+    const bundles = (await (await get(mf, "admin/bundles")).json()).bundles;
+    assert.deepEqual(
+      bundles.map((bundle) => bundle.bundle),
+      [published.bundle],
+    );
+    const graph = await (await get(mf, "admin/migrations/graph")).json();
+    assert.ok(JSON.stringify(graph).includes(bundles[0].schemaHash), JSON.stringify(graph));
+
+    const ours = await connect(mf, backend);
+    ours.send(prelude);
+    ours.send(fixture.testThinHello());
+    assert.deepEqual(await ours.next(), { hello: true });
+    ours.send(fixture.testThinSchema(1n, SCHEMA));
+    assert.deepEqual(await ours.next(), { id: 1, ok: true });
+    ours.send(fixture.testThinInsertNote(2n, "published"));
+    assert.deepEqual(await ours.next(), { id: 2, written: true });
+    ours.close();
+    await mf.dispose();
+
+    // The next instance opens on what was published.
+    mf = open();
+    assert.equal((await (await publish(mf, request)).json()).changed, false);
+    const later = await connect(mf, backend);
+    later.send(prelude);
+    later.send(fixture.testThinHello());
+    assert.deepEqual(await later.next(), { hello: true });
+    later.send(fixture.testThinSchema(1n, SCHEMA));
+    assert.deepEqual(await later.next(), { id: 1, ok: true });
+    later.send(fixture.testThinQueryNotes(2n));
+    assert.deepEqual(await later.next(), { id: 2, titles: ["published"] });
+    later.close();
+    await mf.dispose();
+  } finally {
+    rmSync(persist, { recursive: true, force: true });
+  }
+});
