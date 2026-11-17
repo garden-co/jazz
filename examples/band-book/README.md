@@ -14,9 +14,9 @@ It is the catalogue app for three Jazz patterns:
 - **Page-scoped roles.** A band has owners, band members (edit everything) and
   crew (read everything). On top of that, a grant on one page reaches every
   page and block below it, so a guest collaborator can edit one song and see
-  nothing else. All of it is enforced by row policies in `permissions.ts`,
-  never by hiding buttons; the UI asks Jazz's permission advice
-  (`db.canUpdate` and friends) which controls to show.
+  nothing else. All of it is enforced by row policies in
+  `jazz.permissions.json`, never by hiding buttons; the UI asks Jazz's
+  permission advice (`db.canUpdate` and friends) which controls to show.
 - **A database inside the document tool.** Issues are ordinary pages under an
   issues page, with a row of properties (status, assignee, priority, labels).
 
@@ -40,15 +40,15 @@ defaults are for local development only. A production build or server
 (`NODE_ENV=production`) never uses them: it refuses to start unless
 `NEXT_PUBLIC_APP_ORIGIN`, `JAZZ_APP_ID` and `BETTER_AUTH_SECRET`
 are all set. Jazz runs inside the Next app and keeps its data in `.jazz/`; to
-keep it on a sync server such as Jazz Cloud instead, set `JAZZ_SERVER_URL`
+keep it on a sync server such as Jazz Cloud (deprecated) instead, set `JAZZ_SERVER_URL`
 and `JAZZ_ADMIN_SECRET`.
 
 ## How it fits together
 
 | Piece                                                                                 | Where                                                     |
 | ------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| Schema: workspaces, members, pages, page grants, blocks, attachments, issues, invites | `apps/nextjs-betterauth/schema.ts`                        |
-| Every access rule                                                                     | `apps/nextjs-betterauth/permissions.ts`                   |
+| Schema: workspaces, members, pages, page grants, blocks, attachments, issues, invites | `apps/nextjs-betterauth/jazz.app.json`                    |
+| Every access rule                                                                     | `apps/nextjs-betterauth/jazz.permissions.json`            |
 | Demo band content                                                                     | `apps/nextjs-betterauth/src/lib/seed.ts`                  |
 | First-open bootstrap (server)                                                         | `src/lib/bootstrap.ts`, `app/api/bootstrap/route.ts`      |
 | Invite redemption (server)                                                            | `src/lib/invites.ts`, `app/api/invites/redeem/route.ts`   |
@@ -75,8 +75,9 @@ Rows get creation times a millisecond apart in tree order, which is what the
 sidebar's `$createdAt` ordering shows.
 
 **Inherited access.** A page is readable when you have a band role, a grant on
-the page, or read access to its parent (`allowedTo.read("parent")`, up to eight
-levels). Editing works the same way through `allowedTo.update("parent")`.
+the page, or read access to its parent (`allowedTo.read(parent, maxDepth: 8)`,
+up to eight levels). Editing works the same way through
+`allowedTo.update(parent, maxDepth: 8)`.
 Blocks, attachments and issues inherit from their page. Every child row also
 carries its `workspaceId`, and policies check it matches the parent's, so no
 write can graft a page, block or grant from one band onto another.

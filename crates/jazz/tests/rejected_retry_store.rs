@@ -457,3 +457,70 @@ fn a_failed_refusal_tick_publishes_no_notification() {
     assert!(client.take_upstream_rejections().is_empty());
     assert!(block_on(client.rejected_transactions()).unwrap().is_empty());
 }
+
+/// Alice writes a note of her own, which the authority accepts.
+fn own_note(client: &Db) -> u64 {
+    block_on(client.insert(
+        "notes",
+        BTreeMap::from([
+            ("owner".to_owned(), subject(alice())),
+            ("title".to_owned(), Value::String("mine".into())),
+        ]),
+        InsertOptions::default(),
+    ))
+    .unwrap()
+    .mergeable_tx_id()
+}
+
+/// ```text
+/// alice ──insert(in bob's name)──► core ──✗ refused   (verdict arrives)
+/// alice ──insert(her own)───────► core ──✓ accepted  (verdict arrives)
+/// alice: wait_for_pending_writes(Global) ──► the refusal, once (jazz#5728)
+/// ```
+///
+/// Both verdicts are in before the wait, so nothing is pending when it is
+/// called: the refusal must still be reported, as TS's `waitForSync`
+/// promises for every write committed before the call.
+#[test]
+fn a_sync_wait_reports_a_refusal_that_settled_before_it() {
+    use jazz::tx::DurabilityTier;
+    let server = authority();
+    let client = block_on(Db::open(DbConfig::new(schema(), identity(0xa1, alice())))).unwrap();
+    connect(&client, &server);
+    refused_note(&client, RowUuid::from_bytes([0x12; 16]));
+    own_note(&client);
+    pump(&client, &server);
+
+    // A wait for pending writes (graceful shutdown's) isn't told of it:
+    // it settled before the call.
+    block_on(client.wait_for_pending_writes(DurabilityTier::Global)).unwrap();
+
+    let waited = block_on(client.wait_for_sync(DurabilityTier::Global, None));
+    assert!(
+        waited.is_err(),
+        "the earlier refusal is reported: {waited:?}"
+    );
+    // Reported once: the next wait has nothing to report.
+    block_on(client.wait_for_sync(DurabilityTier::Global, None)).unwrap();
+
+    // Two refusals: each is reported, one per wait, earliest first.
+    refused_note(&client, RowUuid::from_bytes([0x14; 16]));
+    refused_note(&client, RowUuid::from_bytes([0x15; 16]));
+    pump(&client, &server);
+    assert!(block_on(client.wait_for_sync(DurabilityTier::Global, None)).is_err());
+    assert!(block_on(client.wait_for_sync(DurabilityTier::Global, None)).is_err());
+    block_on(client.wait_for_sync(DurabilityTier::Global, None)).unwrap();
+
+    // A refusal its own wait already reported isn't reported again.
+    let seq = refused_note(&client, RowUuid::from_bytes([0x13; 16]));
+    pump(&client, &server);
+    assert!(block_on(client.wait_for_transaction(seq, DurabilityTier::Global)).is_err());
+    block_on(client.wait_for_sync(DurabilityTier::Global, None)).unwrap();
+
+    // One a wait only observed (a host routing mutation errors) still is.
+    let seq = refused_note(&client, RowUuid::from_bytes([0x16; 16]));
+    pump(&client, &server);
+    assert!(block_on(client.observe_transaction(seq, DurabilityTier::Global)).is_err());
+    assert!(block_on(client.wait_for_sync(DurabilityTier::Global, None)).is_err());
+    block_on(client.wait_for_sync(DurabilityTier::Global, None)).unwrap();
+}

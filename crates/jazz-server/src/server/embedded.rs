@@ -156,6 +156,10 @@ impl EmbeddedServer {
         let (peer, socket) = socket_pair();
         self.runtime.spawn(super::routes::handle_ws_connection(
             socket, state, headers, guard, handshake,
+            // The host owns the raw socket and hands over whole messages, so
+            // here idleness is judged per message: a host whose clients
+            // upload slowly must keep its own socket's progress in view.
+            None,
         ));
         Ok(peer)
     }

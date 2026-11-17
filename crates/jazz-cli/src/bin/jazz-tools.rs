@@ -35,26 +35,6 @@ use jazz_server::profiling::DiagnosticsConfig;
 const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 const MAX_SHUTDOWN_TIMEOUT_SECS: u64 = 60 * 60;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NodeEnvMode {
-    Production,
-    DevelopmentLike,
-}
-
-fn resolve_node_env_mode() -> NodeEnvMode {
-    match std::env::var("NODE_ENV") {
-        Ok(value) if value.eq_ignore_ascii_case("production") => NodeEnvMode::Production,
-        _ => NodeEnvMode::DevelopmentLike,
-    }
-}
-
-fn resolve_dev_default_flag(mode: NodeEnvMode, enabled_in_production: bool) -> bool {
-    match mode {
-        NodeEnvMode::Production => enabled_in_production,
-        NodeEnvMode::DevelopmentLike => true,
-    }
-}
-
 fn parse_app_id(value: &str) -> Result<String, String> {
     jazz::tools::AppId::from_string(value).map_err(|_| {
         "Application ID must be a UUID, not an app name. Generate one with `jazz-tools create app` and reuse it for the server and client.".to_owned()
@@ -96,6 +76,33 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// With --check (for CI): check the committed jazz.app.json (and
+    /// jazz.permissions.json) and fail when the bindings are stale, changing
+    /// nothing. Writing them is `npx jazz-tools generate`'s, from schema.ts.
+    Generate {
+        /// The directory holding jazz.app.json.
+        #[arg(long, default_value = ".")]
+        dir: std::path::PathBuf,
+        /// The bindings' language (repeatable); by default each whose
+        /// marker (package.json, Cargo.toml, Package.swift, build.gradle(.kts), go.mod) sits beside jazz.app.json.
+        #[arg(long)]
+        lang: Vec<String>,
+        /// Fail when the files or bindings are stale; change nothing.
+        #[arg(long)]
+        check: bool,
+    },
+    /// Renamed to `generate`.
+    #[command(hide = true)]
+    Validate {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Migrations are written from schema.ts by `npx jazz-tools migrations
+    /// create`; this binary refuses.
+    Migrations {
+        #[command(subcommand)]
+        action: MigrationsAction,
+    },
     /// Create a new resource
     Create {
         #[command(subcommand)]
@@ -133,8 +140,10 @@ enum Commands {
         blobs_dir: Option<String>,
 
         /// Bucket for `--blobs s3` (defaults to S3_BUCKET_NAME). Credentials
-        /// come from AWS_ROLE_ARN with an OIDC token, or AWS_ACCESS_KEY_ID
-        /// and AWS_SECRET_ACCESS_KEY.
+        /// come, as in the AWS SDKs, from AWS_ACCESS_KEY_ID and
+        /// AWS_SECRET_ACCESS_KEY, AWS_ROLE_ARN with an OIDC token, the
+        /// container's role (ECS, Fargate, EKS Pod Identity), or the EC2
+        /// instance profile.
         #[arg(long)]
         s3_bucket: Option<String>,
 
@@ -178,12 +187,6 @@ enum Commands {
         /// is refused there (a `vercel()` core passes it).
         #[arg(long)]
         blobs_environment: Option<String>,
-
-        /// Enable local-first auth (Authorization: Bearer <self-signed Jazz JWT>).
-        ///
-        /// Required in NODE_ENV=production.
-        #[arg(long, env = "JAZZ_ALLOW_LOCAL_FIRST_AUTH")]
-        allow_local_first_auth: bool,
 
         /// Trust only this OIDC workload instead of shared secrets: every
         /// request and session must carry its token in
@@ -298,6 +301,156 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
+enum MigrationsAction {
+    /// Refused: run `npx jazz-tools migrations create --name <name>`, which
+    /// writes the migration from schema.ts.
+    Create {
+        /// The migration's name.
+        #[arg(long)]
+        name: String,
+        /// The directory holding jazz.app.json.
+        #[arg(long, default_value = ".")]
+        dir: std::path::PathBuf,
+        /// The bindings' language (repeatable); by default each whose
+        /// marker (package.json, Cargo.toml, Package.swift, build.gradle(.kts), go.mod) sits beside jazz.app.json.
+        #[arg(long)]
+        lang: Vec<String>,
+    },
+}
+
+/// Print a command's outcome and exit 0, or its refusal and exit 1.
+fn finish_app_files(result: Result<jazz_cli::app_files::Outcome, String>) -> ! {
+    let code = match result {
+        Ok(outcome) => {
+            for warning in outcome.warnings {
+                eprintln!("warning: {warning}");
+            }
+            for note in outcome.notes {
+                println!("{note}");
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            1
+        }
+    };
+    std::process::exit(code)
+}
+
+/// Where a TS app keeps its `schema.ts`, relative to the app's directory
+/// (jazz-tools' `SCHEMA_ROOTS`, `packages/jazz-tools/src/upgrade/project.ts`).
+const SCHEMA_ROOTS: &[&str] = &[".", "src", "src/lib"];
+
+/// The app's `schema.ts`, when it is authored in TypeScript.
+fn ts_schema(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    SCHEMA_ROOTS
+        .iter()
+        .map(|root| dir.join(root).join("schema.ts"))
+        .find(|path| path.is_file())
+}
+
+/// The refusal of `jazz.app.json`-only apps (alpha.66 makes TypeScript the
+/// only authoring source): shared with `npx jazz-tools`
+/// (`packages/jazz-tools/src/dev/ts-project.ts`).
+const JSON_ONLY_APP: &str = "TS is the source in alpha.66: this app has jazz.app.json but no \
+     schema.ts. Run `npx jazz-tools upgrade` to write schema.ts from it (it keeps the schema \
+     hashes and bundle id), then edit schema.ts beside your app's manifest (package.json, \
+     Cargo.toml, go.mod, Package.swift, build.gradle, …) and run `npx jazz-tools generate`.";
+
+/// Refuse to write an app's files: TypeScript is the only authoring source,
+/// so `jazz.app.json`, `jazz.permissions.json` and the bindings are written
+/// from `schema.ts` by `npx jazz-tools generate` (and migrations by `npx
+/// jazz-tools migrations create`), which this binary can't run. An app
+/// with `jazz.app.json` but no `schema.ts` is pointed at `npx jazz-tools
+/// upgrade`, which writes its `schema.ts`.
+fn refuse_writing(dir: &std::path::Path, command: &str) -> String {
+    if let Some(schema) = ts_schema(dir) {
+        return format!(
+            "{} exists: this app is authored in TypeScript, and its jazz.app.json and \
+             jazz.permissions.json are generated from it. Run `npx jazz-tools {command}` instead \
+             (the standalone binary can't read TypeScript)",
+            schema.display()
+        );
+    }
+    if dir
+        .join(jazz::tools::deployment::artifact::APP_FILE)
+        .is_file()
+    {
+        return JSON_ONLY_APP.to_owned();
+    }
+    format!(
+        "no schema.ts in {} (looked in {}): write the app's schema in schema.ts and run `npx \
+         jazz-tools {command}` (the standalone binary only checks committed files, with \
+         `generate --check`)",
+        dir.display(),
+        SCHEMA_ROOTS.join(", ")
+    )
+}
+
+/// `generate --check` in `dir`: checks the committed files (their validity
+/// and, when written from TypeScript, their `$generated` digests) and the
+/// bindings against them, but can't check that the files are fresh from
+/// the TypeScript. Without `--check` it refuses: see [`refuse_writing`].
+fn generate(
+    dir: &std::path::Path,
+    names: &[String],
+    check: bool,
+) -> Result<jazz_cli::app_files::Outcome, String> {
+    if !check {
+        return Err(refuse_writing(dir, "generate"));
+    }
+    let ts = ts_schema(dir);
+    if ts.is_some() {
+        check_generated_digests(dir)?;
+    }
+    let mut outcome = jazz_cli::app_files::generate(dir, &langs(dir, names)?, check)?;
+    if let Some(schema) = ts {
+        outcome.notes.push(format!(
+            "note: {} exists: checked the bindings against the committed jazz.app.json and \
+             jazz.permissions.json, not that those are fresh from the TypeScript; run `npx \
+             jazz-tools generate --check` for that",
+            schema.display()
+        ));
+    }
+    Ok(outcome)
+}
+
+/// Refuse a committed file whose `$generated` digest no longer matches: it
+/// was edited by hand since `npx jazz-tools generate` wrote it.
+fn check_generated_digests(dir: &std::path::Path) -> Result<(), String> {
+    use jazz::tools::deployment::artifact::{self, GeneratedCheck};
+    for file in [artifact::APP_FILE, artifact::PERMISSIONS_FILE] {
+        let path = dir.join(file);
+        let Ok(text) = std::fs::read(&path) else {
+            continue;
+        };
+        match artifact::verify_generated(&text).map_err(|error| format!("{file}: {error}"))? {
+            GeneratedCheck::Unmarked | GeneratedCheck::Matches(_) => {}
+            GeneratedCheck::Mismatch { .. } => {
+                return Err(format!(
+                    "{file} was edited since `npx jazz-tools generate` wrote it (its \
+                     `$generated` digest doesn't match): edit the TypeScript and run `npx \
+                     jazz-tools generate`"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn langs(
+    dir: &std::path::Path,
+    names: &[String],
+) -> Result<Vec<jazz_cli::app_files::Selected>, String> {
+    let given = names
+        .iter()
+        .map(|name| jazz_codegen::Lang::parse(name).map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    jazz_cli::app_files::languages(dir, &given)
+}
+
+#[derive(Subcommand)]
 enum CreateResource {
     /// Create a new application
     App {
@@ -336,6 +489,17 @@ async fn run() {
             shutdown_tracing();
             std::process::exit(code);
         }
+        Commands::Validate { .. } => finish_app_files(Err(
+            "`jazz-tools validate` is renamed to `jazz-tools generate`: run `npx jazz-tools generate` (`jazz-tools generate --check` for CI)".into(),
+        )),
+        Commands::Generate {
+            dir,
+            lang: name,
+            check,
+        } => finish_app_files(generate(&dir, &name, check)),
+        Commands::Migrations {
+            action: MigrationsAction::Create { dir, .. },
+        } => finish_app_files(Err(refuse_writing(&dir, "migrations create"))),
         Commands::Create { resource } => match resource {
             CreateResource::App { name } => {
                 let app_id = name.map_or_else(AppId::random, |name| AppId::from_name(&name));
@@ -358,7 +522,6 @@ async fn run() {
             vercel_blob_prefix,
             vercel_blob_token_from_workload,
             blobs_environment,
-            allow_local_first_auth,
             backend_secret,
             admin_secret,
             trusted_workload_issuer,
@@ -374,21 +537,7 @@ async fn run() {
             diagnostics_listen,
             diagnostics_token,
         } => {
-            let node_env_mode = resolve_node_env_mode();
-            let explicitly_allowed = allow_local_first_auth;
-            let allow_local_first_auth =
-                resolve_dev_default_flag(node_env_mode, allow_local_first_auth);
-            if allow_local_first_auth && !explicitly_allowed {
-                tracing::warn!(
-                    "Local-first auth is enabled automatically because NODE_ENV is not \
-                     set to \"production\". Any self-signed Jazz token will be accepted \
-                     with no additional configuration. Set NODE_ENV=production or pass \
-                     --allow-local-first-auth / JAZZ_ALLOW_LOCAL_FIRST_AUTH=true to \
-                     acknowledge this explicitly."
-                );
-            }
             let auth_config = AuthConfig {
-                allow_local_first_auth,
                 backend_secret,
                 admin_secret,
                 trusted_workload: trusted_workload_issuer.map(|issuer| {
@@ -493,7 +642,31 @@ fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
             .iter()
             .copied()
             .filter(|name| std::env::var_os(name).is_some()),
+    )?;
+    validate_local_first_auth_environment(
+        std::env::var("JAZZ_ALLOW_LOCAL_FIRST_AUTH").ok().as_deref(),
     )
+}
+
+/// A core no longer has its own switch for local-first (device) accounts:
+/// the app's backend decides which ones sync, and the core admits only the
+/// sockets its backend opens. Turning it on (as older servers needed) is
+/// harmless; turning it off can't be honoured, so it is refused.
+fn validate_local_first_auth_environment(value: Option<&str>) -> Result<(), String> {
+    match value {
+        None => Ok(()),
+        // The values clap read as "on" for the old flag.
+        Some(value)
+            if ["y", "yes", "t", "true", "on", "1"]
+                .iter()
+                .any(|on| value.trim().eq_ignore_ascii_case(on)) =>
+        {
+            Ok(())
+        }
+        Some(value) => Err(format!(
+            "JAZZ_ALLOW_LOCAL_FIRST_AUTH={value} is not supported: a core has no local-first switch of its own. The app's backend decides which device accounts sync (return acceptDeviceAccounts(request) from createJazz's authenticate only for those you admit)."
+        )),
+    }
 }
 
 fn validate_removed_user_auth_environment<'a>(
@@ -666,26 +839,6 @@ mod tests {
                     None => std::env::remove_var(self.key),
                 }
             }
-        }
-    }
-
-    #[test]
-    fn server_command_parses_allow_local_first_auth_flag() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
-        let cli = Cli::try_parse_from([
-            "jazz-tools",
-            "server",
-            "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
-            "--allow-local-first-auth",
-        ])
-        .expect("server command should parse");
-
-        match cli.command {
-            Commands::Server {
-                allow_local_first_auth,
-                ..
-            } => assert!(allow_local_first_auth),
-            _ => panic!("expected server command"),
         }
     }
 
@@ -896,16 +1049,29 @@ mod tests {
     }
 
     #[test]
-    fn dev_defaults_enable_local_first_auth() {
-        assert!(resolve_dev_default_flag(
-            NodeEnvMode::DevelopmentLike,
-            false
-        ));
-    }
-
-    #[test]
-    fn production_requires_explicit_local_first_opt_in() {
-        assert!(!resolve_dev_default_flag(NodeEnvMode::Production, false));
-        assert!(resolve_dev_default_flag(NodeEnvMode::Production, true));
+    fn local_first_auth_off_is_refused() {
+        // Old servers needed it on; it changes nothing now.
+        for on in ["true", "1", "TRUE", "yes"] {
+            assert!(validate_local_first_auth_environment(Some(on)).is_ok());
+        }
+        assert!(validate_local_first_auth_environment(None).is_ok());
+        for off in ["false", "0", "no", ""] {
+            let error = validate_local_first_auth_environment(Some(off)).unwrap_err();
+            assert!(
+                error.starts_with("JAZZ_ALLOW_LOCAL_FIRST_AUTH=")
+                    && error.contains("acceptDeviceAccounts"),
+                "{error}"
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "jazz-tools",
+                "server",
+                "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
+                "--allow-local-first-auth",
+            ])
+            .is_err(),
+            "the flag is gone"
+        );
     }
 }

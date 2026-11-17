@@ -1,0 +1,404 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "ee57aa162f4e576d9ebc995e16258c42c48125d2b2f8191a63cfe127fe08377a"
+  },
+  "tables": {
+    "attachments": {
+      "columns": {
+        "workspaceId": "uuid",
+        "pageId": "uuid",
+        "name": "string",
+        "mimeType": "string",
+        "byteLength": "int",
+        "bytes": "bytes"
+      },
+      "relations": {
+        "page": { "rel": "pages", "column": "pageId" },
+        "workspace": { "rel": "workspaces", "column": "workspaceId" }
+      },
+      "indexes": ["pageId"]
+    },
+    "better_auth_account": {
+      "columns": {
+        "accountId": "string",
+        "providerId": "string",
+        "userId": "uuid",
+        "password": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_jwks": {
+      "columns": {
+        "publicKey": "string",
+        "privateKey": "string",
+        "createdAt": "timestamp",
+        "expiresAt": "timestamp?",
+        "alg": "string?",
+        "crv": "string?"
+      }
+    },
+    "better_auth_session": {
+      "columns": {
+        "expiresAt": "timestamp",
+        "token": "string",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp",
+        "ipAddress": "string?",
+        "userAgent": "string?",
+        "userId": "uuid"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_user": {
+      "columns": {
+        "name": "string",
+        "email": "string",
+        "emailVerified": "boolean",
+        "image": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": {
+        "better_auth_accountViaUser": { "reverse": "better_auth_account", "relation": "user" },
+        "better_auth_sessionViaUser": { "reverse": "better_auth_session", "relation": "user" }
+      }
+    },
+    "better_auth_verification": {
+      "columns": {
+        "identifier": "string",
+        "value": "string",
+        "expiresAt": "timestamp",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      }
+    },
+    "blocks": {
+      "columns": {
+        "workspaceId": "uuid",
+        "pageId": "uuid",
+        "parentBlockId": "uuid?",
+        "position": "float",
+        "kind": {
+          "enum": ["paragraph", "heading", "todo", "bullet", "quote", "divider", "image", "file"]
+        },
+        "text": "string",
+        "checked": "boolean",
+        "attachmentId": "uuid?"
+      },
+      "relations": {
+        "attachment": { "rel": "attachments", "column": "attachmentId" },
+        "page": { "rel": "pages", "column": "pageId" },
+        "parentBlock": { "rel": "blocks", "column": "parentBlockId" },
+        "workspace": { "rel": "workspaces", "column": "workspaceId" }
+      },
+      "indexes": ["pageId", "position"]
+    },
+    "invites": {
+      "columns": {
+        "workspaceId": "uuid",
+        "pageId": "uuid?",
+        "role": { "enum": ["member", "viewer", "editor"] },
+        "token": "string",
+        "label": "string"
+      },
+      "relations": {
+        "page": { "rel": "pages", "column": "pageId" },
+        "workspace": { "rel": "workspaces", "column": "workspaceId" }
+      },
+      "indexes": ["token", "pageId", "workspaceId"]
+    },
+    "issues": {
+      "columns": {
+        "workspaceId": "uuid",
+        "pageId": "uuid",
+        "databaseId": "uuid",
+        "status": { "enum": ["backlog", "todo", "in_progress", "done"] },
+        "priority": { "enum": ["none", "low", "medium", "high", "urgent"] },
+        "assignee": "uuid?",
+        "labels": { "array": "string" }
+      },
+      "relations": {
+        "database": { "rel": "pages", "column": "databaseId" },
+        "page": { "rel": "pages", "column": "pageId" },
+        "workspace": { "rel": "workspaces", "column": "workspaceId" }
+      },
+      "indexes": ["databaseId", "status", "pageId"]
+    },
+    "members": {
+      "columns": {
+        "workspaceId": "uuid",
+        "account": "uuid",
+        "displayName": "string",
+        "role": { "enum": ["owner", "member", "viewer", "guest"] }
+      },
+      "relations": { "workspace": { "rel": "workspaces", "column": "workspaceId" } },
+      "indexes": ["workspaceId", "account"]
+    },
+    "pageGrants": {
+      "columns": {
+        "workspaceId": "uuid",
+        "pageId": "uuid",
+        "account": "uuid",
+        "role": { "enum": ["editor", "viewer"] }
+      },
+      "relations": {
+        "page": { "rel": "pages", "column": "pageId" },
+        "workspace": { "rel": "workspaces", "column": "workspaceId" }
+      },
+      "indexes": ["pageId", "account", "workspaceId"]
+    },
+    "pages": {
+      "columns": {
+        "workspaceId": "uuid",
+        "parentId": "uuid?",
+        "title": "string",
+        "kind": { "enum": ["doc", "issues", "issue", "song"] }
+      },
+      "relations": {
+        "blocksViaPage": { "reverse": "blocks", "relation": "page" },
+        "childrenViaParent": { "reverse": "pages", "relation": "parent" },
+        "grantsViaPage": { "reverse": "pageGrants", "relation": "page" },
+        "issuesViaPage": { "reverse": "issues", "relation": "page" },
+        "parent": { "rel": "pages", "column": "parentId" },
+        "sheetsViaPage": { "reverse": "songSheets", "relation": "page" },
+        "workspace": { "rel": "workspaces", "column": "workspaceId" }
+      },
+      "indexes": ["workspaceId", "parentId"]
+    },
+    "sheetComments": {
+      "columns": {
+        "workspaceId": "uuid",
+        "pageId": "uuid",
+        "author": "uuid",
+        "range": { "json": true },
+        "text": "string",
+        "resolved": "boolean"
+      },
+      "relations": {
+        "page": { "rel": "pages", "column": "pageId" },
+        "workspace": { "rel": "workspaces", "column": "workspaceId" }
+      },
+      "indexes": ["pageId"]
+    },
+    "sheetPresence": {
+      "columns": {
+        "workspaceId": "uuid",
+        "pageId": "uuid",
+        "account": "uuid",
+        "cursor": { "json": true },
+        "selection": { "json": true, "optional": true },
+        "seenAt": "float"
+      },
+      "relations": {
+        "page": { "rel": "pages", "column": "pageId" },
+        "workspace": { "rel": "workspaces", "column": "workspaceId" }
+      },
+      "indexes": ["pageId"],
+      "history": "latest"
+    },
+    "songSheets": {
+      "columns": {
+        "workspaceId": "uuid",
+        "pageId": "uuid",
+        "body": { "type": "string", "merge": "markdown" }
+      },
+      "relations": {
+        "page": { "rel": "pages", "column": "pageId" },
+        "workspace": { "rel": "workspaces", "column": "workspaceId" }
+      },
+      "indexes": ["pageId"]
+    },
+    "workspaces": {
+      "columns": { "name": "string" },
+      "relations": {
+        "membersViaWorkspace": { "reverse": "members", "relation": "workspace" },
+        "pagesViaWorkspace": { "reverse": "pages", "relation": "workspace" }
+      }
+    }
+  },
+  "history": {
+    "f9c2e1ab9391": {
+      "tables": {
+        "attachments": {
+          "columns": {
+            "workspaceId": { "type": "uuid", "references": "workspaces" },
+            "pageId": { "type": "uuid", "references": "pages" },
+            "name": "string",
+            "mimeType": "string",
+            "byteLength": "int",
+            "bytes": "bytes"
+          },
+          "indexes": ["pageId"]
+        },
+        "better_auth_account": {
+          "columns": {
+            "issuer": "string",
+            "accountId": "string",
+            "providerId": "string",
+            "userId": { "type": "uuid", "references": "better_auth_user" },
+            "password": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_jwks": {
+          "columns": {
+            "publicKey": "string",
+            "privateKey": "string",
+            "createdAt": "timestamp",
+            "expiresAt": "timestamp?",
+            "alg": "string?",
+            "crv": "string?"
+          }
+        },
+        "better_auth_session": {
+          "columns": {
+            "expiresAt": "timestamp",
+            "token": "string",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp",
+            "ipAddress": "string?",
+            "userAgent": "string?",
+            "userId": { "type": "uuid", "references": "better_auth_user" }
+          }
+        },
+        "better_auth_user": {
+          "columns": {
+            "name": "string",
+            "email": "string",
+            "emailVerified": "boolean",
+            "image": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_verification": {
+          "columns": {
+            "identifier": "string",
+            "value": "string",
+            "expiresAt": "timestamp",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "blocks": {
+          "columns": {
+            "workspaceId": { "type": "uuid", "references": "workspaces" },
+            "pageId": { "type": "uuid", "references": "pages" },
+            "parentBlockId": { "type": "uuid", "optional": true, "references": "blocks" },
+            "position": "float",
+            "kind": {
+              "enum": [
+                "paragraph",
+                "heading",
+                "todo",
+                "bullet",
+                "quote",
+                "divider",
+                "image",
+                "file"
+              ]
+            },
+            "text": "string",
+            "checked": "boolean",
+            "attachmentId": { "type": "uuid", "optional": true, "references": "attachments" }
+          },
+          "indexes": ["pageId", "position"]
+        },
+        "invites": {
+          "columns": {
+            "workspaceId": { "type": "uuid", "references": "workspaces" },
+            "pageId": { "type": "uuid", "optional": true, "references": "pages" },
+            "role": { "enum": ["member", "viewer", "editor"] },
+            "token": "string",
+            "label": "string"
+          },
+          "indexes": ["token", "pageId", "workspaceId"]
+        },
+        "issues": {
+          "columns": {
+            "workspaceId": { "type": "uuid", "references": "workspaces" },
+            "pageId": { "type": "uuid", "references": "pages" },
+            "databaseId": { "type": "uuid", "references": "pages" },
+            "status": { "enum": ["backlog", "todo", "in_progress", "done"] },
+            "priority": { "enum": ["none", "low", "medium", "high", "urgent"] },
+            "assignee": "uuid?",
+            "labels": { "array": "string" }
+          },
+          "indexes": ["databaseId", "status", "pageId"]
+        },
+        "members": {
+          "columns": {
+            "workspaceId": { "type": "uuid", "references": "workspaces" },
+            "account": "uuid",
+            "displayName": "string",
+            "role": { "enum": ["owner", "member", "viewer", "guest"] }
+          },
+          "indexes": ["workspaceId", "account"]
+        },
+        "pageGrants": {
+          "columns": {
+            "workspaceId": { "type": "uuid", "references": "workspaces" },
+            "pageId": { "type": "uuid", "references": "pages" },
+            "account": "uuid",
+            "role": { "enum": ["editor", "viewer"] }
+          },
+          "indexes": ["pageId", "account", "workspaceId"]
+        },
+        "pages": {
+          "columns": {
+            "workspaceId": { "type": "uuid", "references": "workspaces" },
+            "parentId": { "type": "uuid", "optional": true, "references": "pages" },
+            "title": "string",
+            "kind": { "enum": ["doc", "issues", "issue", "song"] }
+          },
+          "indexes": ["workspaceId", "parentId"]
+        },
+        "sheetComments": {
+          "columns": {
+            "workspaceId": { "type": "uuid", "references": "workspaces" },
+            "pageId": { "type": "uuid", "references": "pages" },
+            "author": "uuid",
+            "range": { "json": true },
+            "text": "string",
+            "resolved": "boolean"
+          },
+          "indexes": ["pageId"]
+        },
+        "sheetPresence": {
+          "columns": {
+            "workspaceId": { "type": "uuid", "references": "workspaces" },
+            "pageId": { "type": "uuid", "references": "pages" },
+            "account": "uuid",
+            "cursor": { "json": true },
+            "selection": { "json": true, "optional": true },
+            "seenAt": "float"
+          },
+          "indexes": ["pageId"],
+          "history": "latest"
+        },
+        "songSheets": {
+          "columns": {
+            "workspaceId": { "type": "uuid", "references": "workspaces" },
+            "pageId": { "type": "uuid", "references": "pages" },
+            "body": { "type": "string", "merge": "markdown" }
+          },
+          "indexes": ["pageId"]
+        },
+        "workspaces": { "columns": { "name": "string" } }
+      }
+    }
+  },
+  "migrations": [
+    {
+      "from": "f9c2e1ab9391",
+      "migrate": {
+        "better_auth_account": { "issuer": { "drop": "string", "backwardsDefault": "" } }
+      }
+    }
+  ]
+}

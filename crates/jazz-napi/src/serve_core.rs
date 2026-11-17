@@ -19,7 +19,6 @@ struct ServeCoreOptions {
     trusted_workload: Option<ServeCoreWorkload>,
     backend_secret: Option<String>,
     admin_secret: Option<String>,
-    allow_local_first_auth: Option<bool>,
     shutdown_timeout_secs: Option<u64>,
     max_connections: Option<usize>,
     memory_limit_bytes: Option<u64>,
@@ -149,7 +148,7 @@ impl ServedCore {
 /// budget, so a second call fails until the first core has stopped.
 #[napi(
     js_name = "serveCore",
-    ts_args_type = "options: { appId: string; port: number; dataDir: string; blobs: { kind: \"sqlite\" } | { kind: \"files\"; dir?: string } | { kind: \"s3\"; bucket?: string; region?: string; endpoint?: string; prefix?: string; roleFromWorkload?: boolean; environment?: string } | { kind: \"vercel-blob\"; storeId?: string; prefix?: string; tokenFromWorkload?: boolean; environment?: string }; trustedWorkload?: { issuer: string; audience: string; subject: string }; backendSecret?: string; adminSecret?: string; allowLocalFirstAuth?: boolean; shutdownTimeoutSecs?: number; maxConnections?: number; memoryLimitBytes?: number }"
+    ts_args_type = "options: { appId: string; port: number; dataDir: string; blobs: { kind: \"sqlite\" } | { kind: \"files\"; dir?: string } | { kind: \"s3\"; bucket?: string; region?: string; endpoint?: string; prefix?: string; roleFromWorkload?: boolean; environment?: string } | { kind: \"vercel-blob\"; storeId?: string; prefix?: string; tokenFromWorkload?: boolean; environment?: string }; trustedWorkload?: { issuer: string; audience: string; subject: string }; backendSecret?: string; adminSecret?: string; shutdownTimeoutSecs?: number; maxConnections?: number; memoryLimitBytes?: number }"
 )]
 pub fn serve_core(options: JsonValue) -> Result<ServedCore> {
     let options: ServeCoreOptions = serde_json::from_value(options)
@@ -175,7 +174,6 @@ pub fn serve_core(options: JsonValue) -> Result<ServedCore> {
         .map_err(Error::from_reason)?;
     let serving = ServingCore::claim()?;
     let auth_config = jazz_server::AuthConfig {
-        allow_local_first_auth: options.allow_local_first_auth.unwrap_or(false),
         backend_secret: options.backend_secret,
         admin_secret: options.admin_secret,
         trusted_workload,

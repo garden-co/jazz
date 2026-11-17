@@ -1,3 +1,5 @@
+import { isLargeValueSummary } from "jazz-tools/inspect";
+
 type PresentationSerializationOptions = {
   bigint?: "string" | "raw";
 };
@@ -44,11 +46,25 @@ function stringifyRawBigInts(value: unknown, space: number | undefined, level = 
     : `{${entries.join(",")}}`;
 }
 
+/** A size as a person reads it: 5.2 MB, 812 KB, 90 bytes. */
+function formatSize(size: number, unit: string): string {
+  if (unit !== "bytes") return `${size.toLocaleString("en-US")} ${unit}`;
+  if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  if (size >= 1024) return `${Math.round(size / 1024)} KB`;
+  return `${size} bytes`;
+}
+
 export function stringifyForPresentation(
   value: unknown,
   space?: number,
   options?: PresentationSerializationOptions,
 ): string {
+  // A value too large for the backend to list: say what it is.
+  if (isLargeValueSummary(value)) {
+    const { kind, size } = value.$large;
+    const unit = kind === "bytes" ? "bytes" : "characters";
+    return `‹large ${kind} value, ${formatSize(size, unit)}›`;
+  }
   if (options?.bigint === "raw") {
     return stringifyRawBigInts(value, space);
   }

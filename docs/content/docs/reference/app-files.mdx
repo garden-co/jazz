@@ -1,0 +1,138 @@
+---
+title: App files
+description: The format of jazz.app.json and jazz.permissions.json, an app's schema, history and permissions.
+---
+
+Two readable JSON files describe an app to every language:
+
+- **`jazz.app.json`**: your tables, the relations between them, computed fields and transforms,
+  and the schema history your app ships. Clients and backends read it.
+- **`jazz.permissions.json`**: your permissions. Only backends read it, so no client bundle
+  carries your policies.
+
+`npx jazz-tools generate` writes both from your `schema.ts` and `migrations/`, checks them with the
+loader every backend runs, and writes the typed bindings (`jazz.generated.ts` for TypeScript); see
+[Defining Tables](/docs/schemas/defining-tables) for how they fit together. You don't edit them:
+`generate` refuses to overwrite a file whose `$generated` checksum no longer matches, unless you pass
+`--force`. This page is the format reference, for reading what `generate` wrote.
+
+Both files are plain JSON: no comments, no trailing commas, no repeated keys, and unknown keys are
+refused. A `$comment` string is allowed in every object. Each file starts with a `$schema` naming its
+JSON Schema and so its version (`https://jazz.tools/schemas/jazz.app.v1.json`, resp.
+`https://jazz.tools/schemas/jazz.permissions.v1.json`); it also points your editor at the schema.
+Jazz refuses a file written by a newer version. Files written before alpha.66 carry `"format": 1`
+and an unversioned `…/jazz.app.schema.json` URL instead: they still load as version 1. `generate` writes both files in a canonical
+layout. The bindings record a hash of `jazz.app.json`'s text, so reformatting it makes them out of
+date until the next `generate`: add `jazz.app.json` to `.prettierignore` (or your formatter's
+ignore file) to keep the two in step.
+
+## `jazz.app.json`
+
+```json
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "tables": {
+    "chats": {
+      "columns": {
+        "name": "string?",
+        "isPublic": "boolean",
+        "joinCode": "string?"
+      },
+      "relations": {
+        "chatMembersViaChat": { "reverse": "chatMembers", "relation": "chat" }
+      }
+    },
+    "chatMembers": {
+      "columns": {
+        "chatId": "uuid",
+        "userId": "uuid"
+      },
+      "relations": {
+        "chat": { "rel": "chats", "column": "chatId" }
+      },
+      "indexes": [["chatId", "$createdAt"]]
+    }
+  }
+}
+```
+
+- **`$schema`**: `https://jazz.tools/schemas/jazz.app.v1.json`, required.
+- **Columns**, in declared order: `string`, `int`, `bigint`, `float`, `boolean`, `timestamp`,
+  `uuid`, `bytes`, with `?` for optional. Columns with options are objects:
+  `{ "enum": ["todo", "done"] }`, `{ "json": { …JSON Schema… } }`, `{ "array": "string" }`,
+  `{ "type": "int", "default": 0, "merge": "counter" }`, `"optional": true`, and
+  `"transform": "<name>"`. See [Column Types](/docs/schemas/column-types).
+- **Relations** are separate from columns: `{ "rel": "chats", "column": "chatId" }` follows this
+  table's `chatId` to a row of `chats`; `{ "reverse": "chatMembers", "relation": "chat" }` is
+  the rows of `chatMembers` whose `chat` relation points here. See
+  [Relationships](/docs/schemas/relationships).
+- **Table options**: `indexes` (a column name declares a single-column index, an array of names a
+  composite one; relation columns are always indexed), `branchBy` (column names), and
+  `"history": "latest"`.
+- **Computed fields**: a table's `computed`, `{ "<field>": { "type": <type>, "from": [<columns>] } }`,
+  implemented in code. See [Computed Columns](/docs/schemas/column-types#computed-columns).
+- **Transforms**: a top-level `transforms`, `{ "<name>": { "stored": <type>, "view": <type> } }`,
+  named by columns and implemented in code. Transforms are pure: they can't read other columns.
+- **History**: earlier versions your app ships (`history`, named by short schema hash, oldest
+  first, each `{ "tables": … }` without relations) and the migrations between them
+  (`migrations`, each `{ "name"?, "from", "to"?, "createTables"?, "dropTables"?, "renameTables"?, "migrate"? }`).
+  `jazz-tools migrations create` adds them; see [Migrations](/docs/schemas/migrations).
+- **`"TODO: …"` strings**, outside `$comment`, are refused by every loader: `migrations create`
+  writes them where only you can decide.
+
+## `jazz.permissions.json`
+
+```json
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "tables": {
+    "chats": {
+      "read": {
+        "anyOf": ["isPublic = true", "exists chatMembers(chatId = this.id, userId = session.user)"]
+      },
+      "insert": "$createdBy.account = session.user",
+      "update": {
+        "old": "exists chatMembers(chatId = this.id, userId = session.user)",
+        "new": "exists chats(id = this.id, isPublic = this.isPublic)"
+      }
+    },
+    "reactions": {
+      "read": "allowedTo.read(message)"
+    }
+  }
+}
+```
+
+Each table has `read`, `insert`, `update` and `delete`; a missing one is denied. `update` is one
+policy, or `{ "old": …, "new": … }` to check the row before and after the update. A policy is an expression
+string, `{ "anyOf": [...] }`, `{ "allOf": [...] }`, or `{ "$comment": "…", "where": … }`.
+alpha.66 removed `defs`, the named expressions of alpha.63–65: a file that has them is refused,
+with a hint to inline each one. In `schema.ts`, a repeated condition is a plain TypeScript helper,
+and `generate` writes it out wherever it's used. Policies can't refer to computed fields or transformed values. See
+[Declarative Permissions](/docs/schemas/policies) for how to write them.
+
+## Expressions
+
+Expressions read like SQL. String literals use single quotes.
+
+| You want                   | Write                                                                                    |
+| -------------------------- | ---------------------------------------------------------------------------------------- |
+| Compare a column           | `userId = session.user`, `status != 'archived'`, `count >= 3`                            |
+| Null checks                | `joinCode = null`, `joinCode != null`                                                    |
+| Membership                 | `role in ['admin', 'owner']`, `teamId in session.claims.teams`, `tags contains 'urgent'` |
+| A claim                    | `session.claims.role = 'admin'`                                                          |
+| Who wrote the row          | `$createdBy.account = session.user`                                                      |
+| Combine                    | `a and b`, `a or b`, `not a`, parentheses                                                |
+| Another row exists         | `exists chatMembers(chatId = this.id, userId = session.user)`                            |
+| Follow a relation          | `exists files(id = this.id).folder(ownerId = session.user)`                              |
+| Inherit from a related row | `allowedTo.read(chat)`, `allowedTo.update(folder, maxDepth: 8)`                          |
+| Always / never             | `true` / `false`                                                                         |
+
+- A bare name is a column of the table the policy is about; inside `exists t(…)` it is a column
+  of `t`. `this.col` always means the row being checked.
+- Conditions inside `exists t(…)` are separated by commas and all must hold.
+- A literal takes its column's type: `'2026-01-01T00:00:00Z'` for a timestamp, a UUID string for
+  a `uuid`.
+
+When an expression is wrong, `generate` and `createJazz` point at the exact spot, suggest the
+name you probably meant, and show a correct example.

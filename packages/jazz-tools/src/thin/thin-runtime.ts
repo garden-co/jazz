@@ -81,6 +81,7 @@ import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import {
   WebSocketCarrier,
   peerIdentityForWebSocketAuth,
+  classifyWireLinkFailure,
   isReauthenticateWireError,
   wireAuthFailureReason,
   type WebSocketConstructor,
@@ -123,6 +124,29 @@ export class ThinRemoteError extends Error {
   }
 }
 
+/**
+ * The backend serving this session's transactions could not learn whether a
+ * commit applied: the core didn't confirm it in time. It may have applied,
+ * or may still: don't retry it as if it failed. Read the rows it wrote to
+ * find out.
+ */
+export class ThinCommitOutcomeUnknownError extends ThinRemoteError {
+  constructor(message: string) {
+    super(COMMIT_OUTCOME_UNKNOWN, message);
+    this.name = "ThinCommitOutcomeUnknownError";
+  }
+}
+
+/** The code of a commit whose outcome is unknown (SPEC 8.14). */
+export const COMMIT_OUTCOME_UNKNOWN = "commit_outcome_unknown";
+
+/** The error a thin request's error answer is thrown as. */
+export function thinRemoteError(code: string, message: string): ThinRemoteError {
+  return code === COMMIT_OUTCOME_UNKNOWN
+    ? new ThinCommitOutcomeUnknownError(message)
+    : new ThinRemoteError(code, message);
+}
+
 /** The connection ended before the server answered. A write may or may not have committed. */
 export class ThinConnectionLostError extends Error {
   constructor(
@@ -162,6 +186,15 @@ export class ThinTransactionLostError extends Error {
 
 const DEFAULT_RECONNECT_DELAYS_MS = [250, 500, 1_000, 2_000, 5_000];
 
+/**
+ * How long after a keyed write was first sent it may still be sent again
+ * (SPEC 8 §8.14). The authority keeps a thin write's dedupe entry for an
+ * hour on its own clock, recorded no earlier than the first send, so every
+ * resend inside this window still finds it. Past it, a write whose answer
+ * was lost ends with its fate unknown.
+ */
+export const THIN_WRITE_RESEND_WINDOW_MS = 10 * 60_000;
+
 type OneShot = {
   op: ThinOp;
   resolve(body: ThinBody): void;
@@ -175,6 +208,11 @@ type OneShot = {
   resendable?: boolean;
   /** Sent once and waiting to go out again (see `resendable`). */
   resending?: boolean;
+  /** When it was first sent (`Date.now()`): it is sent again only within
+   * {@link THIN_WRITE_RESEND_WINDOW_MS} of this. */
+  firstSentAt?: number;
+  /** Ends it once the window passes while it waits to go out again. */
+  windowTimer?: ReturnType<typeof setTimeout>;
 };
 
 /** Standalone writes the server dedups by their `writeKey` (SPEC 8 §8.14). */
@@ -287,8 +325,9 @@ export class ThinRuntime implements Runtime {
   /** This runtime's writer node: with {@link nextWriteSeq}, each write's
    * `writeKey`. The server commits the write under a node it derives from
    * this one and the session's author, so one node serves every identity
-   * the runtime writes as. */
-  private readonly writerNode = bytesToHex(runtimeRandomBytes(16));
+   * the runtime writes as. It is marked as bounding its resends
+   * ({@link boundedWriterNode}). */
+  private readonly writerNode = bytesToHex(boundedWriterNode());
   private nextWriteSeq = 1;
   /** Writes the server has not answered yet. */
   private unanswered = 0;
@@ -501,7 +540,8 @@ export class ThinRuntime implements Runtime {
     this.lastLostMessage = error.message;
     // A planned swap that ends any other way is reported as that ending.
     this.reauthenticating = false;
-    if (isReauthenticateWireError(error) && wasBound) {
+    const kind = classifyWireLinkFailure(error, wasBound);
+    if (kind === "reauthenticate" && wasBound) {
       // The session reached the expiry the app's auth gave it: connect again
       // at once so `authenticate` decides with the current credential. The
       // app keeps seeing a connected link meanwhile; unanswered writes go
@@ -511,7 +551,11 @@ export class ThinRuntime implements Runtime {
       this.open();
       return;
     }
-    const authFailure = wireAuthFailureReason(error);
+    // The auth path follows the classification: an `auth_failed` with a retry
+    // this client does not know is a refusal it retries, not a refused
+    // credential (a reauthenticate before binding is still one).
+    const authFailure =
+      kind === "authRejected" || kind === "reauthenticate" ? wireAuthFailureReason(error) : null;
     if (authFailure) {
       // Refused before the drop publishes, so the link never reads
       // "connecting" in between.
@@ -525,9 +569,10 @@ export class ThinRuntime implements Runtime {
       this.authFailureCallback?.(authFailure);
       return;
     }
-    if (error.retry === "never") {
-      // Stopped for good, as `fatal`: only an explicit connect starts over,
-      // and requests waiting for a connection end now.
+    if (kind === "fatal") {
+      // Stopped for good: only an explicit connect starts over, and requests
+      // waiting for a connection end now. Decided by the code, so a
+      // malformed frame that says `later` does not loop.
       this.fatal(lostError);
       return;
     }
@@ -539,15 +584,19 @@ export class ThinRuntime implements Runtime {
     if (
       !this.stopped &&
       !this.outagePublished &&
-      ((!wasBound && error.code === "backpressure") ||
+      (kind === "refused" ||
         (this.failingSince !== undefined && Date.now() - this.failingSince >= this.outageReportMs))
     ) {
       this.outagePublished = true;
     }
     this.notifySyncStatus();
-    if (!this.wanted || this.closed || error.retry === "never") return;
+    if (!this.wanted || this.closed) return;
+    // The thin client keeps its own delays rather than the link's policy, but
+    // spreads them as the link does (equal jitter, within [d/2, d]), so
+    // clients dropped together do not reconnect together.
     const delays = this.reconnectDelaysMs;
-    const delay = delays[Math.min(this.attempt, delays.length - 1)] ?? 1_000;
+    const ceiling = delays[Math.min(this.attempt, delays.length - 1)] ?? 1_000;
+    const delay = ceiling / 2 + Math.random() * (ceiling / 2);
     this.attempt += 1;
     this.reconnectTimer = setTimeout(() => this.open(), delay);
   }
@@ -595,9 +644,15 @@ export class ThinRuntime implements Runtime {
       // Requests not sent yet wait for the next connection, and so does a
       // write sent once, unless this drop ends its resends.
       if (!oneShot.sent && !(oneShot.resending && !resend)) continue;
-      if (oneShot.sent && resend && oneShot.resendable) {
+      if (oneShot.sent && resend && oneShot.resendable && !resendWindowPassed(oneShot)) {
         oneShot.sent = false;
         oneShot.resending = true;
+        this.endAtResendWindow(id, oneShot);
+        continue;
+      }
+      if (oneShot.sent && resend && oneShot.resendable) {
+        this.oneShots.delete(id);
+        oneShot.reject(resendWindowEnded(error));
         continue;
       }
       this.oneShots.delete(id);
@@ -686,20 +741,48 @@ export class ThinRuntime implements Runtime {
       oneShot = { op, resolve, reject, sent: false };
       this.oneShots.set(id, oneShot);
       if (this.bound) this.transmit(id, oneShot);
-    }).then((body) => {
-      if (body.type === "error") throw new ThinRemoteError(body.code, body.message);
-      return body;
-    });
+    })
+      .finally(() => clearTimeout(oneShot?.windowTimer))
+      .then((body) => {
+        if (body.type === "error") throw thinRemoteError(body.code, body.message);
+        return body;
+      });
     return { answer, oneShot };
   }
 
   private transmit(id: number, oneShot: OneShot): void {
+    // Past its window, a resend could find its dedupe entry gone and be
+    // written again: it ends with its fate unknown instead.
+    if (oneShot.resending && resendWindowPassed(oneShot)) {
+      this.oneShots.delete(id);
+      oneShot.reject(resendWindowEnded());
+      return;
+    }
     const sent = this.sendFrame(this.carrier, encodeThinRequest(id, oneShot.op), (bytes) => {
       // Refused here: the server would refuse it.
       this.oneShots.delete(id);
       oneShot.reject(tooLarge(oneShot.op.type, bytes));
     });
-    if (sent) oneShot.sent = true;
+    if (sent) {
+      oneShot.sent = true;
+      oneShot.firstSentAt ??= Date.now();
+      clearTimeout(oneShot.windowTimer);
+    }
+  }
+
+  /** End `oneShot`, waiting to go out again, once its resend window passes
+   * (it may wait offline far longer). */
+  private endAtResendWindow(id: number, oneShot: OneShot): void {
+    clearTimeout(oneShot.windowTimer);
+    const left = (oneShot.firstSentAt ?? Date.now()) + THIN_WRITE_RESEND_WINDOW_MS - Date.now();
+    oneShot.windowTimer = setTimeout(
+      () => {
+        if (this.oneShots.get(id) !== oneShot || oneShot.sent) return;
+        this.oneShots.delete(id);
+        oneShot.reject(resendWindowEnded());
+      },
+      Math.max(0, left),
+    );
   }
 
   private receive(carrier: WebSocketCarrier, piece: Uint8Array): void {
@@ -781,7 +864,7 @@ export class ThinRuntime implements Runtime {
       operation,
       transaction: txIdFromContext(writeContext),
       branchView: branchViewFromWriteContext(writeContext),
-      updatedAtMs: effectiveUpdatedAtMs(writeContext) ?? Date.now(),
+      updatedAtMs: effectiveUpdatedAtMs(writeContext) ?? undefined,
     };
   }
 
@@ -1216,6 +1299,11 @@ export class ThinRuntime implements Runtime {
     return id;
   }
 
+  hasStagedTransactionWrites(id: OpenTransactionId): boolean | undefined {
+    const transaction = this.transactions.get(id);
+    return transaction ? transaction.staged : undefined;
+  }
+
   commitTransaction(id: OpenTransactionId): Promise<TxId> {
     const transaction = this.transactions.get(id);
     if (!transaction) {
@@ -1631,7 +1719,8 @@ type WriteTarget = {
   operation: string;
   transaction?: OpenTransactionId;
   branchView?: EncodedBranchView;
-  updatedAtMs: number;
+  /** An explicit `$updatedAt`; absent for an ordinary write, which the server stamps. */
+  updatedAtMs?: number;
 };
 
 /**
@@ -1657,6 +1746,22 @@ function viewOptions(context: WriteTarget): object {
     base: context.branchView?.base,
     updatedAtMs: context.updatedAtMs,
   };
+}
+
+/**
+ * A writer node marked as bounding its resends to
+ * {@link THIN_WRITE_RESEND_WINDOW_MS} (SPEC 8 §8.14): the tag `jzRB`, then
+ * random bits, as an RFC 9562 version-8 UUID. The authority drops the
+ * dedupe entries of only such a writer's writes; an unmarked node (an
+ * earlier client's, which may resend any time) keeps them.
+ */
+/** @internal Exported for its contract test. */
+export function boundedWriterNode(): Uint8Array {
+  const bytes = runtimeRandomBytes(16);
+  bytes.set([0x6a, 0x7a, 0x52, 0x42], 0);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x80;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  return bytes;
 }
 
 /** A UUIDv7: a millisecond timestamp, then random bits. */
@@ -1712,4 +1817,22 @@ function unknownOutcome(cause: Error): ThinConnectionLostError {
         `the connection ended before the server answered: ${cause.message}`,
         { cause },
       );
+}
+
+function resendWindowPassed(oneShot: OneShot): boolean {
+  return (
+    oneShot.firstSentAt !== undefined &&
+    Date.now() - oneShot.firstSentAt >= THIN_WRITE_RESEND_WINDOW_MS
+  );
+}
+
+/** A write whose answer was lost, past its resend window: it may have
+ * committed, so its fate is unknown. */
+function resendWindowEnded(cause?: Error): ThinConnectionLostError {
+  return new ThinConnectionLostError(
+    `the connection ended before the server answered, and the write was first sent more than ${
+      THIN_WRITE_RESEND_WINDOW_MS / 60_000
+    } minutes ago, so it is not sent again: it may or may not have been made`,
+    cause ? { cause } : undefined,
+  );
 }

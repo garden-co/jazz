@@ -932,6 +932,7 @@ impl Names {
         .await?;
         crate::values::tags_changing(conn, &tags);
         *tags.borrow_mut() = renumbered;
+        crate::values::tags_changed();
         if let Some(name) = stale_default {
             names.borrow().enum_defaults.borrow_mut().insert(key, name);
         }
@@ -1677,5 +1678,79 @@ mod tests {
             .query_row("SELECT name FROM _jazz_enum_tags", [], |r| r.get(0))
             .unwrap();
         assert_eq!(name, "retry");
+    }
+
+    /// Every way a store's enum tags change moves the tag epoch: a name
+    /// interned, the tags renumbered, a savepoint's tags rolled back, a
+    /// snapshot restored.
+    #[test]
+    fn every_change_of_enum_tags_moves_the_tag_epoch() {
+        use crate::values::{begin_savepoint, end_savepoint, tag_epoch};
+        let conn = DbConnection::new(rusqlite::Connection::open_in_memory().unwrap().into());
+        let names = std::cell::RefCell::new(
+            crate::options::block_on(Names::load(&mut conn.sql())).unwrap(),
+        );
+        let moved = |what: &str, change: &dyn Fn()| {
+            let before = tag_epoch();
+            change();
+            assert!(
+                tag_epoch() > before,
+                "{what} left the tag epoch at {before}"
+            );
+        };
+        moved("interning", &|| {
+            crate::options::block_on(Names::intern(&names, &conn, "t", "c", &["b", "a"])).unwrap();
+        });
+        moved("renumbering", &|| {
+            let changed = crate::options::block_on(Names::align(
+                &names,
+                &conn,
+                "t",
+                "c",
+                &["a".to_owned(), "b".to_owned()],
+            ))
+            .unwrap();
+            assert!(!changed.is_empty());
+        });
+        crate::options::block_on(begin_savepoint(&conn, "outer")).unwrap();
+        crate::options::block_on(Names::intern(&names, &conn, "t", "c", &["lost"])).unwrap();
+        moved("a rollback", &|| {
+            crate::options::block_on(end_savepoint(&conn, "outer", false)).unwrap();
+        });
+        let snapshot = std::cell::Cell::new(Some(names.borrow().tags().snapshot()));
+        crate::options::block_on(Names::intern(&names, &conn, "t", "c", &["later"])).unwrap();
+        moved("a restore", &|| {
+            names
+                .borrow()
+                .tags()
+                .restore(snapshot.take().expect("restored once"));
+        });
+    }
+
+    /// A store's tags live on its thread: interning on another thread
+    /// moves that thread's epoch and leaves this one's.
+    #[test]
+    fn tags_changed_on_another_thread_leave_this_threads_epoch() {
+        use crate::values::tag_epoch;
+        let before = tag_epoch();
+        std::thread::spawn(|| {
+            let conn = DbConnection::new(rusqlite::Connection::open_in_memory().unwrap().into());
+            let names = std::cell::RefCell::new(
+                crate::options::block_on(Names::load(&mut conn.sql())).unwrap(),
+            );
+            let start = tag_epoch();
+            crate::options::block_on(Names::intern(&names, &conn, "t", "c", &["a"])).unwrap();
+            assert!(
+                tag_epoch() > start,
+                "interning moved its own thread's epoch"
+            );
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            tag_epoch(),
+            before,
+            "another thread's interning moved this epoch"
+        );
     }
 }

@@ -43,7 +43,9 @@ export const INSPECT_HELP = `jazz-tools inspect: read and change an app's data t
                                 "orderBy":[["title","asc"]],"limit":20}
   explain '<json>' --as <user>  Why the user can or can't read each row the query
                                 matches: which read-policy clause allowed it
-  get <table> <id> [--as <user>]
+  get <table> <id> [--as <user>] [--column <c> [--from <n>] [--to <n>]]
+                                A row; a value too large to list shows as
+                                {"$large": ...}: --column answers it (or a part)
   history <table> <id>          The row's versions, with who made each
   insert <table> '<values>' [--id <id>] [--as <user>]
   update <table> <id> '<values>' [--as <user>]
@@ -79,6 +81,9 @@ const VALUE_FLAGS = new Set([
   "--id",
   "--table",
   "--row",
+  "--column",
+  "--from",
+  "--to",
 ]);
 const BOOLEAN_FLAGS = new Set(["--write", "--no-browser", "--help", "-h"]);
 
@@ -262,6 +267,11 @@ export async function runInspectCommand(args: string[], io: InspectCliIo): Promi
             op: "get",
             table: need(rest[0], "table"),
             id: need(rest[1], "id"),
+            ...(flag("--column") !== undefined ? { column: flag("--column") } : {}),
+            ...(flag("--from") !== undefined
+              ? { from: wholeNumber(flag("--from")!, "--from") }
+              : {}),
+            ...(flag("--to") !== undefined ? { to: wholeNumber(flag("--to")!, "--to") } : {}),
             ...asPart,
           }),
         );
@@ -362,6 +372,11 @@ function claimsObject(value: unknown): Record<string, unknown> {
     );
   }
   return value as Record<string, unknown>;
+}
+
+function wholeNumber(text: string, what: string): number {
+  if (!/^\d+$/.test(text)) throw new InspectError("bad_request", `${what} must be a whole number`);
+  return Number(text);
 }
 
 function need(value: string | undefined, what: string): string {

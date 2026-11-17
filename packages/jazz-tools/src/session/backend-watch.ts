@@ -641,7 +641,11 @@ function linkRefused(cause: unknown): boolean {
 }
 
 /** Focus, visibility and BroadcastChannel events for a browser page. */
-export function browserBackendWatchEvents(channelName: string): BackendWatchEvents {
+export function browserBackendWatchEvents(
+  channelName: string,
+  /** The lock its checks take, shared with the sync connection's renewals (`sessionRefreshLockName`). */
+  refreshLock = `${channelName}:probe`,
+): BackendWatchEvents {
   // The channel is open only while something listens: a session whose
   // startup failed before its watch started (or after it stopped) holds
   // none, so a provider retrying a failed createJazzClient leaks nothing.
@@ -693,7 +697,7 @@ export function browserBackendWatchEvents(channelName: string): BackendWatchEven
     },
     crossTab,
     isVisible: () => typeof document === "undefined" || document.visibilityState === "visible",
-    singleFlight: browserSingleFlight(`${channelName}:probe`),
+    singleFlight: browserSingleFlight(refreshLock),
   };
 }
 

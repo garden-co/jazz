@@ -82,6 +82,26 @@ pub(crate) const PENDING_DDL: &str = concat!(
      i INTEGER NOT NULL, id BLOB NOT NULL, node BLOB, t INTEGER NOT NULL, PRIMARY KEY (tx, n, i));",
 );
 
+/// A pending read through a branch view keeps its view here (jazz#5806); a
+/// read without a row went through the root view. Created only when a
+/// commit first needs it, not when a store opens: opening a store written
+/// before it must leave its file as it was. Its own trigger forgets a
+/// commit's views with the commit.
+const PENDING_READ_VIEWS_DDL: &str = concat!(
+    "CREATE TABLE IF NOT EXISTS _jazz_pending_read_views (tx INTEGER NOT NULL, n INTEGER NOT NULL, \
+     view TEXT NOT NULL, PRIMARY KEY (tx, n));",
+    "CREATE TRIGGER IF NOT EXISTS _jazz_pending_forget_read_views AFTER DELETE ON _jazz_pending \
+     BEGIN DELETE FROM _jazz_pending_read_views WHERE tx = OLD.tx; END;",
+);
+
+/// Whether this store holds pending reads' views at all.
+async fn has_read_views<S: jazz_sql::Sql>(conn: &mut S) -> Result<bool, Error>
+where
+    S::Error: std::fmt::Display,
+{
+    conn.query_one("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_jazz_pending_read_views')", &[], |row| row.get(0)).await.map_err(crate::values::provider_error)
+}
+
 /// The retry store's copy of a refused commit's ops, in the op tables'
 /// layout.
 pub(crate) const REJECTED_OPS_DDL: [&str; 3] = [
@@ -341,6 +361,18 @@ where
         )
         .await
         .map_err(crate::values::provider_error)?;
+        if read.view != ReadViewSourceSpec::Current {
+            conn.execute_script(PENDING_READ_VIEWS_DDL)
+                .await
+                .map_err(crate::values::provider_error)?;
+            let view = exact_json("a read's view", &read.view)?;
+            conn.execute(
+                "INSERT INTO _jazz_pending_read_views (tx, n, view) VALUES (?1, ?2, ?3)",
+                jazz_sql::params![tx, n, view],
+            )
+            .await
+            .map_err(crate::values::provider_error)?;
+        }
         for (i, (id, node, t)) in read.rows.iter().enumerate() {
             conn.execute(
                 "INSERT INTO _jazz_pending_read_rows (tx, n, i, id, node, t) \
@@ -548,6 +580,7 @@ where
         jazz_sql::params![tx], "has a malformed read",
         |r| Ok((r.get::<i64>(0)?, r.get::<Vec<u8>>(1)?, r.get::<String>(2)?, r.get::<String>(3)?, r.get::<bool>(4)?)),
     ).await?;
+    let viewed = has_read_views(sql).await?;
     let mut out = Vec::with_capacity(stored.len());
     for (n, version, query, binding, include_deleted) in stored {
         let stored_rows = read_rows(
@@ -574,12 +607,27 @@ where
                 ))
             })
             .collect::<Result<_, Error>>()?;
+        let view = if viewed {
+            sql.query_optional(
+                "SELECT view FROM _jazz_pending_read_views WHERE tx = ?1 AND n = ?2",
+                jazz_sql::params![tx, n],
+                |row| row.get::<String>(0),
+            )
+            .await
+            .map_err(crate::values::provider_error)?
+            .map(|view| from_json("read view", &view))
+            .transpose()?
+            .unwrap_or_default()
+        } else {
+            ReadViewSourceSpec::Current
+        };
         out.push(WireRead {
             version: blob("schema version", version)?,
             query: from_json("read query", &query)?,
             binding: from_json("read binding", &binding)?,
             include_deleted,
             rows,
+            view,
         });
     }
     Ok(out)
@@ -988,18 +1036,27 @@ mod tests {
     }
 
     fn serializable_commit() -> SyncMessage {
+        serializable_commit_reading(vec![ReadViewSourceSpec::Current])
+    }
+
+    /// A serializable commit with one read through each of `views`.
+    fn serializable_commit_reading(views: Vec<ReadViewSourceSpec>) -> SyncMessage {
         SyncMessage::Commit {
             id: tx_id([7; 16], 41),
             clock: crate::db::shard::hlc(1_800_000_000_000) + 3,
             kind: WireKind::Serializable {
                 snapshot: 99,
-                reads: vec![WireRead {
-                    version: [6; 16],
-                    query: crate::query::Query::from("notes"),
-                    binding: BTreeMap::from([("tenant".to_owned(), string("a"))]),
-                    include_deleted: true,
-                    rows: vec![([1; 16], None, 5), ([2; 16], Some([7; 16]), 40)],
-                }],
+                reads: views
+                    .into_iter()
+                    .map(|view| WireRead {
+                        version: [6; 16],
+                        query: crate::query::Query::from("notes"),
+                        binding: BTreeMap::from([("tenant".to_owned(), string("a"))]),
+                        include_deleted: true,
+                        rows: vec![([1; 16], None, 5), ([2; 16], Some([7; 16]), 40)],
+                        view,
+                    })
+                    .collect(),
                 own: vec![38, 39],
             },
             ops: every_op(),
@@ -1065,6 +1122,63 @@ mod tests {
                 "tx {tx}"
             );
         }
+    }
+
+    /// A read through a branch view keeps its view across a restart (in
+    /// `_jazz_pending_read_views`, beside the reads), and forgetting the
+    /// commit forgets it too (jazz#5806).
+    #[test]
+    fn a_pending_branch_read_keeps_its_view() {
+        crate::options::block_on(async {
+            let conn = store();
+            let mut sql = jazz_sql::native::Native(&conn);
+            let branch = |byte: u8| {
+                crate::protocol::BranchSelector::new([(
+                    "branch_id",
+                    Value::Uuid(uuid::Uuid::from_bytes([byte; 16])),
+                )])
+            };
+            let draft = ReadViewSourceSpec::BranchView {
+                head: branch(2),
+                base: Some(crate::protocol::BranchViewBase::current(branch(1))),
+            };
+            // Opening a store creates nothing new: a store written before views
+            // must keep its file as it was.
+            assert!(!has_read_views(&mut sql).await.unwrap());
+            write(&mut sql, 4, &serializable_commit(), &[])
+                .await
+                .unwrap();
+            assert!(!has_read_views(&mut sql).await.unwrap());
+            let commit =
+                serializable_commit_reading(vec![ReadViewSourceSpec::Current, draft.clone()]);
+            write(&mut sql, 5, &commit, &[]).await.unwrap();
+            assert!(has_read_views(&mut sql).await.unwrap());
+            let SyncMessage::Commit { kind, .. } = read(&mut sql, 5).await.unwrap() else {
+                panic!("not a commit");
+            };
+            let WireKind::Serializable { reads, .. } = &kind else {
+                panic!("not serializable");
+            };
+            assert_eq!(
+                reads
+                    .iter()
+                    .map(|read| read.view.clone())
+                    .collect::<Vec<_>>(),
+                [ReadViewSourceSpec::Current, draft]
+            );
+            assert_eq!(bytes(&read(&mut sql, 5).await.unwrap()), bytes(&commit));
+            conn.execute("DELETE FROM _jazz_pending WHERE tx = 5", [])
+                .unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT count(*) FROM _jazz_pending_read_views WHERE tx = 5",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+        });
     }
 
     /// The layout itself, written by hand: a store holding these rows must

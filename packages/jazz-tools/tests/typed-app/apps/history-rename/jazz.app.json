@@ -1,0 +1,22 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "notes": { "columns": { "heading": "string", "category": "string" } }
+  },
+  "history": {
+    "v1": { "tables": { "notes": { "columns": { "title": "string", "legacy": "string" } } } }
+  },
+  "migrations": [
+    {
+      "from": "v1",
+      "migrate": {
+        "notes": {
+          "heading": { "renameFrom": "title" },
+          "category": { "add": "string", "default": "uncategorized" },
+          "legacy": { "drop": "string", "backwardsDefault": "" }
+        }
+      }
+    }
+  ]
+}

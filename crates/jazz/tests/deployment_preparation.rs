@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use jazz::tools::deployment::{
     DeploymentCatalogue, DeploymentError, DeploymentRequest, prepare_deployment,
+    schemas_are_compatible,
 };
 use jazz::tools::{
     ColumnType, HistoryRetention, Lens, LensOp, LensTransform, PolicyExpr, Schema, SchemaBuilder,
@@ -508,6 +509,178 @@ fn rejects_invalid_lenses_and_policy_schema_pairs() {
         ),
         Err(DeploymentError::InvalidSchema { .. })
     ));
+}
+
+fn tasks(status: &[&str], labels: &[&str]) -> Schema {
+    let enumeration = |variants: &[&str]| ColumnType::Enum {
+        variants: variants.iter().map(|v| (*v).to_owned()).collect(),
+    };
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("tasks")
+                .column("title", ColumnType::Text)
+                .column("status", enumeration(status))
+                .column(
+                    "labels",
+                    ColumnType::Array {
+                        element: Box::new(enumeration(labels)),
+                    },
+                ),
+        )
+        .build()
+}
+
+/// A migration with no steps may add enum variants to a kept column, also
+/// an array of enums, at the end of its list: the rows it already holds
+/// pass unchanged and sort as before, so no store renumbers its tags. One
+/// that drops a variant (a removal, or a rename without a value mapping)
+/// is refused, naming the variant, and so is one that moves a variant
+/// (a reorder, or an addition before the end).
+///
+/// ```
+/// v1 status(todo, done) ──empty lens──► v2 status(todo, done, blocked)  ✓
+///    labels(bug)[]                         labels(bug, ui)[]
+/// v1 status(todo, done) ──empty lens──► status(todo, finished)         ✗ drops "done"
+/// v1 status(todo, done) ──empty lens──► status(blocked, todo, done)    ✗ reorders
+/// ```
+#[test]
+fn an_empty_migration_may_add_enum_variants_but_not_drop_them() {
+    let v1 = tasks(&["todo", "done"], &["bug"]);
+    for added in [
+        tasks(&["todo", "done", "blocked"], &["bug"]),
+        tasks(&["todo", "done"], &["bug", "ui"]),
+        tasks(&["todo", "done", "blocked", "archived"], &["bug", "ui"]),
+    ] {
+        let prepared = prepare_deployment(
+            &DeploymentCatalogue::default(),
+            request(
+                &added,
+                &[v1.clone(), added.clone()],
+                vec![migration(&v1, &added, vec![])],
+            ),
+        )
+        .expect("adding enum variants needs no migration steps");
+        assert_eq!(prepared.migrations().len(), 1);
+    }
+
+    for moved in [
+        tasks(&["blocked", "todo", "done"], &["bug"]),
+        tasks(&["todo", "blocked", "done"], &["bug"]),
+        tasks(&["done", "todo"], &["bug"]),
+        tasks(&["todo", "done"], &["ui", "bug"]),
+    ] {
+        let refused = prepare_deployment(
+            &DeploymentCatalogue::default(),
+            request(
+                &moved,
+                &[v1.clone(), moved.clone()],
+                vec![migration(&v1, &moved, vec![])],
+            ),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            refused.contains("reorders its enum variants; add new variants at the end"),
+            "{refused}"
+        );
+    }
+
+    for (dropped, variant) in [
+        (tasks(&["todo"], &["bug"]), "\"done\""),
+        (tasks(&["todo", "finished"], &["bug"]), "\"done\""),
+        (tasks(&["todo", "done"], &["ui"]), "\"bug\""),
+    ] {
+        let refused = prepare_deployment(
+            &DeploymentCatalogue::default(),
+            request(
+                &dropped,
+                &[v1.clone(), dropped.clone()],
+                vec![migration(&v1, &dropped, vec![])],
+            ),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            refused.contains(&format!("no longer declares enum variant {variant}"))
+                && refused.contains("renaming or removing them is not yet"),
+            "{refused}"
+        );
+    }
+}
+
+/// What `schemas_are_compatible` (and so `migrations create`) counts as a
+/// change: a deployment over a store on `v1` needs a migration to each of
+/// these, or `v1` is left disconnected. An empty one connects an enum
+/// gaining variants or a table gaining `branchBy`; a branch column's
+/// default changing or `branchBy` being removed is refused even with one,
+/// since the branch columns determine row identity.
+///
+/// ```
+/// v1 status(todo, done)            ──none──► status(todo, done, blocked)   ✗ disconnected
+///                                  ──empty─►                               ✓
+/// v1 notes                         ──none──► notes branched by `branch`    ✗ disconnected
+///                                  ──empty─►                               ✓
+/// v1 branched, branch default "a"  ──none──► branch default "b"            ✗ disconnected
+///                                  ──empty─►                               ✗ immutable
+/// v1 branched by `branch`          ──empty─► not branched                  ✗ cannot be removed
+/// ```
+#[test]
+fn enum_additions_and_branch_changes_need_a_migration() {
+    let branched = |branch_by: bool, default: &str| {
+        let mut table = TableSchema::builder("notes")
+            .column("title", ColumnType::Text)
+            .column_with_default("branch", ColumnType::Text, Value::Text(default.into()));
+        if branch_by {
+            table = table.branch_by("branch");
+        }
+        SchemaBuilder::new().table(table).build()
+    };
+    let deploy = |v1: &Schema, v2: &Schema, migrations: Vec<Lens>| {
+        let stored = DeploymentCatalogue {
+            schemas: vec![v1.clone()],
+            admitted_schema_hashes: vec![SchemaHash::compute(v1)],
+            ..Default::default()
+        };
+        prepare_deployment(&stored, request(v2, std::slice::from_ref(v2), migrations))
+    };
+    let cases = [
+        (
+            tasks(&["todo", "done"], &["bug"]),
+            tasks(&["todo", "done", "blocked"], &["bug"]),
+            None,
+        ),
+        (branched(false, "a"), branched(true, "a"), None),
+        (
+            branched(true, "a"),
+            branched(true, "b"),
+            Some("branch column type and migration default are immutable"),
+        ),
+        (
+            branched(true, "a"),
+            branched(false, "a"),
+            Some("table branch columns cannot be removed"),
+        ),
+    ];
+    for (v1, v2, refused) in cases {
+        assert!(!schemas_are_compatible(&v1, &v2));
+        assert!(matches!(
+            deploy(&v1, &v2, vec![]),
+            Err(DeploymentError::DisconnectedGraph { .. })
+        ));
+        let with_empty = deploy(&v1, &v2, vec![migration(&v1, &v2, vec![])]);
+        match refused {
+            None => {
+                with_empty.unwrap();
+            }
+            Some(reason) => {
+                let error = with_empty.unwrap_err().to_string();
+                assert!(error.contains(reason), "{error}");
+            }
+        }
+    }
+    // A default outside `branchBy` is not a change.
+    let (plain_a, plain_b) = (branched(false, "a"), branched(false, "b"));
+    assert!(schemas_are_compatible(&plain_a, &plain_b));
 }
 
 #[test]

@@ -1,0 +1,181 @@
+/**
+ * Parity between the TS DSL and the Rust writer's grammar: every policy of
+ * the writer's corpus (`crates/jazz/fixtures/app-artifact/policy-corpus.json`,
+ * written by `artifact_tests.rs`) and of every example app is printed as TS,
+ * compiled by the DSL to readable JSON, and must load to the same engine
+ * policies (and bundle id) as the original file.
+ */
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import type { AppJson, PermissionsJson, PolicyJson } from "./app-json.js";
+import { parseExpr, type Ast } from "./expr.js";
+import { readablePermissions } from "../permissions/dsl.js";
+import { readableSchema } from "../schema-dsl/define-schema.js";
+import { printSchemaTs } from "./index.js";
+
+const REPO = join(__dirname, "..", "..", "..", "..");
+const CORPUS = join(REPO, "crates", "jazz", "fixtures", "app-artifact", "policy-corpus.json");
+
+interface Case {
+  name: string;
+  app: string;
+  permissions: string;
+}
+
+/**
+ * The TS side: import the printed schema.ts (vitest resolves `jazz-tools` to
+ * this package's source) and take the readable trees the DSL builds.
+ */
+async function compile(dir: string): Promise<{ app: string; permissions: string }> {
+  const module = (await import(/* @vite-ignore */ join(dir, "schema.ts"))) as {
+    schema: unknown;
+    permissions: unknown;
+  };
+  const app = readableSchema(module.schema);
+  const permissions = readablePermissions(module.permissions);
+  if (!app) throw new Error("schema.ts's `schema` is not an `s.defineSchema(…)`");
+  if (!permissions) throw new Error("schema.ts's `permissions` is not a `definePermissions(…)`");
+  return { app: JSON.stringify({ format: 1, ...app }), permissions: JSON.stringify(permissions) };
+}
+
+function cases(): Case[] {
+  const out: Case[] = [];
+  if (existsSync(CORPUS)) {
+    const corpus = JSON.parse(readFileSync(CORPUS, "utf8")) as {
+      app: string;
+      cases: { name: string; permissions: PermissionsJson }[];
+    };
+    for (const c of corpus.cases) {
+      out.push({ name: c.name, app: corpus.app, permissions: JSON.stringify(c.permissions) });
+    }
+  }
+  const walk = (dir: string, depth: number) => {
+    const permissions = join(dir, "jazz.permissions.json");
+    if (existsSync(permissions)) {
+      out.push({
+        name: dir.slice(REPO.length + 1),
+        app: readFileSync(join(dir, "jazz.app.json"), "utf8"),
+        permissions: readFileSync(permissions, "utf8"),
+      });
+    }
+    if (depth >= 3) return;
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (e.isDirectory() && e.name !== "node_modules" && !e.name.startsWith(".")) {
+        walk(join(dir, e.name), depth + 1);
+      }
+    }
+  };
+  walk(join(REPO, "examples"), 0);
+  return out;
+}
+
+async function engine(app: string, permissions: string) {
+  const napi = (await import("jazz-napi")) as unknown as {
+    loadAppArtifact(
+      app: string,
+      permissions: string,
+    ): { bundle: string; current: string; deployment: { permissions: unknown } };
+  };
+  const loaded = napi.loadAppArtifact(app, permissions);
+  return {
+    bundle: loaded.bundle,
+    current: loaded.current,
+    permissions: loaded.deployment.permissions,
+  };
+}
+
+/** Every policy of a permissions file as parsed expressions, `anyOf`/`allOf` objects as `or`/`and`. */
+function parsedPolicies(text: string): unknown {
+  const policy = (p: PolicyJson): Ast => {
+    if (typeof p === "string") return parseExpr(p);
+    if ("anyOf" in p) return { kind: "or", items: p.anyOf.map(policy) };
+    if ("allOf" in p) return { kind: "and", items: p.allOf.map(policy) };
+    if ("where" in p) return policy(p.where);
+    return { kind: "and", items: [policy(p.using), policy(p.withCheck)] };
+  };
+  const file = JSON.parse(text) as PermissionsJson;
+  return Object.fromEntries(
+    Object.entries(file.tables).map(([table, rules]) => [
+      table,
+      Object.fromEntries(
+        Object.entries(rules).map(([op, rule]) => [
+          op,
+          typeof rule === "object" && "old" in rule
+            ? { old: policy(rule.old), new: policy(rule.new) }
+            : policy(rule as PolicyJson),
+        ]),
+      ),
+    ]),
+  );
+}
+
+const EMPTY_PERMISSIONS = (app: string) =>
+  JSON.stringify({
+    format: 1,
+    tables: Object.fromEntries(Object.keys(JSON.parse(app).tables).map((t) => [t, {}])),
+  });
+
+let scratch = 0;
+
+describe("printed TS compiles to the same engine policies", () => {
+  for (const c of cases()) {
+    it(c.name, async () => {
+      const printed = printSchemaTs(JSON.parse(c.app) as AppJson, JSON.parse(c.permissions));
+      expect(printed.unsupported, "forms the DSL can't express").toEqual([]);
+      // Inside the package, so `jazz-tools` resolves to this source.
+      const dir = join(__dirname, ".parity", String(scratch++));
+      mkdirSync(dir, { recursive: true });
+      try {
+        // The schema namespace alone: the package root needs the built runtime.
+        const namespace = join(__dirname, "..", "schema-namespace.ts");
+        writeFileSync(
+          join(dir, "schema.ts"),
+          printed.files["schema.ts"]!.replace(
+            'from "jazz-tools"',
+            `from ${JSON.stringify(namespace)}`,
+          ),
+        );
+        const loads = await engine(c.app, c.permissions).then(
+          () => true,
+          () => false,
+        );
+        if (!loads) {
+          // Grammar the writer prints but no deployment holds (unknown tables,
+          // relations the engine refuses): the same expressions, parsed. A
+          // table the app lacks can't be named in TS at all.
+          const tables = Object.keys(JSON.parse(c.app).tables);
+          const compiled = await compile(dir).catch((error: Error) => {
+            const unknown = /from\.(\w+) is not a function/.exec(error.message)?.[1];
+            if (unknown && !tables.includes(unknown)) return undefined;
+            throw error;
+          });
+          if (!compiled) return;
+          expect(parsedPolicies(compiled.permissions)).toEqual(parsedPolicies(c.permissions));
+          return;
+        }
+        const compiled = await compile(dir);
+        // The permissions, against the original app (whose history TS keeps elsewhere).
+        expect(await engine(c.app, compiled.permissions)).toEqual(
+          await engine(c.app, c.permissions),
+        );
+        // The tables: the same current schema.
+        const original = (await engine(c.app, c.permissions)).current;
+        expect((await engine(compiled.app, EMPTY_PERMISSIONS(compiled.app))).current).toBe(
+          original,
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+describe("the writer's corpus", () => {
+  it("prints without a form the DSL can't express", () => {
+    for (const c of cases()) {
+      const printed = printSchemaTs(JSON.parse(c.app) as AppJson, JSON.parse(c.permissions));
+      expect(printed.unsupported, c.name).toEqual([]);
+    }
+  });
+});

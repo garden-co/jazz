@@ -230,7 +230,9 @@ ABI 3 (alpha.60) adds their optional reason name; see §19.6 ("Coded operation
 errors"). ABI 4 (alpha.60) ends each subscription delta with its updated rows'
 splices (`updated_splices`, SPEC 18). ABI 5 (alpha.61) attaches the app's
 migrations beside its schema's tables (see "Trusted platform admission
-codec"). The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
+codec"). ABI 6 (alpha.62) ends a tick's upstream failure with the
+refusal's stable error code, when the relay's database refused its
+upstream. The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
 the current version.
 
 The ABI stays coarse and binary:
@@ -560,7 +562,8 @@ it is never length-wrapped as a byte vector at the native read boundary.
 Postcard enum ordinals follow the declared Rust order: relation
 expressions are `TableScan`, `Filter`, `Union`, `Join`, `Project`, `Gather`,
 `Distinct`, `OrderBy`, `Offset`, `Limit`; predicates are `Cmp`, `IsNull`,
-`IsNotNull`, `In`, `Contains`, `EnumMatch`, `And`, `Or`, `Not`, `True`, `False`;
+`IsNotNull`, `In`, `Contains`, a reserved ordinal 5 (payload-enum matches
+until 2.0.0-alpha.65; decoding it is refused), `And`, `Or`, `Not`, `True`, `False`;
 and value references are `Literal`, `Param`, `SessionRef`, `OuterColumn`,
 `FrontierColumn`, `RowId`. Struct fields use declaration order. Literal ordinals
 are `Null`, `Bool`, `I64`, `U64`, `F64(bits)`, `String`, `Array`, and `Object`.

@@ -128,7 +128,7 @@ async fn rebac_exists_clause_denies_non_matching_insert_inner() {
         .await
         .expect_err("the server must reject a non-admin insert under EXISTS");
     assert!(
-        error.to_string().ends_with("authorization_denied"),
+        error.to_string().contains("(permission_denied)"),
         "expected an authority policy rejection, got {error}"
     );
     wait_for_protected_row_absent(

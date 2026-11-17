@@ -20,29 +20,28 @@ pub(crate) enum NativeReader {}
 use NativeReader as HostReader;
 use jazz::host::ConnectionSql;
 use jazz::host::HostTables;
-#[cfg(test)]
 use jazz::host::{HostPair, HostTable};
 
 /// Errors are reported as text: callers wrap them in their own error types.
 pub(crate) type KvResult<T> = Result<T, String>;
 
-#[cfg(test)]
 pub(crate) struct HostKv {
     table: HostTable,
+    #[cfg(test)]
     reader: Option<Arc<HostReader>>,
     store: crate::runtime::HostSender,
 }
 
-#[cfg(test)]
 impl HostKv {
     pub(crate) fn new(
         table: HostTable,
-        reader: Option<Arc<HostReader>>,
+        _reader: Option<Arc<HostReader>>,
         store: crate::runtime::HostSender,
     ) -> Self {
         Self {
             table,
-            reader,
+            #[cfg(test)]
+            reader: _reader,
             store,
         }
     }
@@ -70,6 +69,7 @@ impl HostKv {
             .map_err(|_| "server store closed before answering".to_owned())?
     }
 
+    #[cfg(test)]
     pub(crate) fn get(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
         match &self.reader {
             #[cfg(feature = "sqlite")]
@@ -94,6 +94,7 @@ impl HostKv {
     }
 
     /// Every pair whose key starts with `prefix`, in key order.
+    #[cfg(test)]
     pub(crate) fn prefix(&self, prefix: &[u8]) -> KvResult<Vec<HostPair>> {
         match &self.reader {
             #[cfg(feature = "sqlite")]

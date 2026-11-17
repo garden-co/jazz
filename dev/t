@@ -12,7 +12,7 @@ usage() {
   cat >&2 <<'EOF'
 Usage: dev/t [-p PACKAGE] [--lib | --test TARGET] [--exact] FILTER [-- LIBTEST-OPTIONS...]
 
-Runs exactly one focused Jazz test with -p jazz --no-default-features --features
+Runs exactly one focused Jazz test with -p jazz-core --no-default-features --features
 testing,sqlite,transport-compression-zstd. The default target is --lib. Cargo's
 --list inventory is authoritative:
 the wrapper resolves a unique canonical module-path test name from FILTER, then
@@ -92,7 +92,7 @@ for required in cargo mktemp grep sed date; do
 done
 
 if [[ -z "$package" ]]; then
-  package="jazz"
+  package="jazz-core"
   if [[ "$target_kind" == "lib" ]]; then
     case "$filter" in
       db::*|binding_codec::*) package="jazz-db" ;;

@@ -6,7 +6,7 @@ import { Utf8Decoder } from "../utf8.js";
 import { parseSnapshotRef, UnsupportedSnapshotError, type SnapshotRef } from "../snapshot-ref.js";
 import { isAuthorityChangedError, upstreamRefusalError } from "../authority-changed-error.js";
 import { CoreTickFailedError, isCoreTickFailedError } from "../core-tick-failed-error.js";
-import { formatUuid, formatUuidAt } from "../hex.js";
+import { formatUuid, formatUuidAt, parseUuidBytes } from "../hex.js";
 
 export { formatUuid };
 import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
@@ -112,15 +112,15 @@ import {
   WebSocketCarrier,
   WIRE_PROTOCOL_VERSION,
   isReconnectLaterWireError,
-  isReauthenticateWireError,
+  isLocalProtocolWireError,
   isSocketDropWireError,
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
   policyClaimsForAdmittedWebSocket,
+  webSocketAuthNamesPrincipal,
   type WebSocketConstructor,
   type WebSocketNegotiation,
   type WireError,
-  wireAuthFailureReason,
 } from "./websocket.js";
 import { isRenewableAuthFailure, mapAuthReason } from "../auth-state.js";
 import {
@@ -251,10 +251,25 @@ type NativeRestoreOptions = NativeWriteOptions & {
 
 type NativeDb = {
   captureSnapshot?(): NativeReadResult | Promise<NativeReadResult>;
+  /** NAPI: a thin session's transaction request, as its backend's client serves it. */
+  serveThinTransaction?(request: Uint8Array): NativeReadResult;
+  /** NAPI: end the thin session's open transactions. */
+  releaseThinTransactions?(): NativeReadResult;
   /** WASM settles its promise-shaped wait early once `cancelled` settles. */
   waitForPendingWrites?(
     tier: string,
     cancelled?: Promise<void>,
+    /** WASM: wait as `waitForSync` (see `waitForSync` below). */
+    forSync?: boolean,
+  ): NativeReadResult | Promise<NativeReadResult | void>;
+  /**
+   * NAPI: `waitForSync` for `writer`'s writes (a trusted session's author,
+   * or none for the database's own), failing also with a rejection of
+   * theirs that settled before and no wait reported.
+   */
+  waitForSync?(
+    tier: string,
+    writer?: Uint8Array | null,
   ): NativeReadResult | Promise<NativeReadResult | void>;
   // Native runtime adapters may close synchronously or asynchronously and may
   // report whether they transitioned state. The adapter awaits either form and
@@ -272,6 +287,11 @@ type NativeDb = {
   /** How many local commits still wait for the server's verdict. */
   /** This store's uploads; see {@link UploadStatus}. */
   uploadStatus?(): UploadStatus;
+  /**
+   * A React Native foreground's scope store, deleted by its native relay
+   * (see `NativeForegroundDb.deleteNativeStore`), with the writes it dropped.
+   */
+  deleteNativeStore?(): { pendingUploads: number };
   nativeConnectionStatus?(): {
     configured: boolean;
     explicitlyOffline: boolean;
@@ -301,6 +321,8 @@ type NativeDb = {
   /** Native bindings answer synchronously; the browser binding resolves on the event loop. */
   foregroundTxTimeHighWater?(): bigint | Promise<bigint>;
   seedForegroundTxTimeHighWater?(highWater: bigint): void;
+  /** A pool whose single `drain()` reads every subscription that joined it. */
+  createSubscriptionPool?(): SubscriptionPool;
   subscribe?(
     query: Uint8Array,
     opts: unknown,
@@ -415,7 +437,7 @@ type NativeDb = {
    * recovered (`null`); ticks keep running.
    */
   onUpstreamFailure?(
-    callback: (failure: { reason: string; retrying: boolean } | null) => void,
+    callback: (failure: { reason: string; retrying: boolean; code?: string | null } | null) => void,
   ): void;
   setNonDurableClient?(): void;
   /** Exact wire features compiled into the native artifact backing this DB. */
@@ -492,7 +514,21 @@ type NativePermissionAdviceResult =
 type Subscription = {
   readAll(): unknown[] | PendingNativeSubscriptionBatch;
   drain?(): unknown[] | PendingNativeSubscriptionBatch;
+  /** Move this subscription into `pool`; returns the id its batches carry. */
+  joinPool?(pool: SubscriptionPool): number;
   close?(): boolean;
+};
+
+/** One pooled subscription's events from a `SubscriptionPool.drain()`. */
+type SubscriptionPoolBatch = {
+  id: number;
+  events: unknown[];
+  /** The subscription failed after `events`; it has left the pool. */
+  error?: { message: string; code: string } | null;
+};
+
+type SubscriptionPool = {
+  drain(): SubscriptionPoolBatch[];
 };
 
 type Write = {
@@ -584,10 +620,13 @@ type ServerConnectionAttempt = {
  * and the timer and steps the machine with one JSON document per input.
  */
 type NativeUpstreamLink = { handle(nowMs: number, input: string): string };
-type UpstreamLinkFailure = {
-  kind: "network" | "refused" | "serverNotReady" | "authRejected" | "fatal" | "reauthenticate";
-  message: string;
-};
+type UpstreamLinkFailure =
+  | {
+      kind: "network" | "refused" | "serverNotReady" | "authRejected" | "fatal" | "reauthenticate";
+      message: string;
+    }
+  /** A server's `WireError`, classified by the link. */
+  | { kind: "wire"; code: string; retry: string; message: string; admitted: boolean };
 type UpstreamLinkInput =
   | { type: "serverConfigured"; configured: boolean }
   | { type: "setOffline"; offline: boolean }
@@ -626,31 +665,20 @@ type UpstreamLinkStep = {
   status: UpstreamLinkStatus;
 };
 
-/** How the link machine should treat a server connection that ended with `error`. */
-function upstreamLinkFailure(error: WireError, negotiated: boolean): UpstreamLinkFailure {
-  const message = error.message;
-  // The server's session reached the expiry the app's auth gave it: a
-  // planned reconnect, so the app's auth decides again with this client's
-  // current credential (see `isReauthenticateWireError`).
-  if (isReauthenticateWireError(error)) return { kind: "reauthenticate", message };
-  if (wireAuthFailureReason(error)) return { kind: "authRejected", message };
-  // The server's bootstrap and overload signals. Before its hello, `not_ready`
-  // means the server is still starting; `backpressure` means it answered and
-  // refused this connection for now (such as the connection cap per user),
-  // which is retried like an outage but published at once with the server's
-  // reason. After its hello both end a link like an outage.
-  if (isReconnectLaterWireError(error)) {
-    if (negotiated) return { kind: "network", message };
-    return { kind: error.code === "backpressure" ? "refused" : "serverNotReady", message };
-  }
+/**
+ * How a server connection that ended with `error` is reported to the link.
+ * The carrier's own socket drops are a network outage; anything the server
+ * said goes to the link as it arrived, which classifies it in Rust
+ * (`LinkFailure::from_wire_error`) as it does for every host.
+ */
+function upstreamLinkFailure(error: WireError, admitted: boolean): UpstreamLinkFailure {
   // The network or the server dropped the socket. A local-first client must
   // survive an outage of any length, including one it was opened in.
-  if (isSocketDropWireError(error)) {
-    return { kind: "network", message };
-  }
-  // Anything else (a protocol error, an incompatible server) cannot succeed
-  // by retrying.
-  return { kind: "fatal", message };
+  if (isSocketDropWireError(error)) return { kind: "network", message: error.message };
+  // This client could not read what the server sent: a local protocol
+  // failure, not something the server said, so it stops as it always did.
+  if (isLocalProtocolWireError(error)) return { kind: "fatal", message: error.message };
+  return { kind: "wire", ...error, admitted };
 }
 
 function joinServerTransportRetirements(
@@ -705,6 +733,8 @@ function isPendingNativeOperation<T>(value: unknown): value is PendingNativeOper
 
 type SubscriptionState = {
   openingAbort?: AbortController;
+  /** Set once the subscription's native stream joined the runtime's pool. */
+  poolId?: number;
   terminalError?: Error;
   terminalErrorDelivered?: boolean;
   source?: SubscriptionSource;
@@ -726,6 +756,8 @@ type SubscriptionSourceRead =
   | { type: "closed" };
 
 type SubscriptionSource = {
+  /** Native pull sources can join a pool and be read in one drain. */
+  joinPool?(pool: SubscriptionPool): number;
   pull(
     ready: (read: SubscriptionSourceRead) => void,
     failed: (error: unknown) => void,
@@ -861,7 +893,21 @@ function openMemoryDb(
 export type SlowQueryLogOptions = {
   appId?: string;
   thresholdMs?: number;
+  /**
+   * What `console.warn` shows. `"full"` (the default, for servers' logs): the
+   * whole report line, with the query plan and SQL. `"summary"` (browsers,
+   * whose console end users see): the line without its plan and SQL, which
+   * go to `console.debug` (DevTools' "Verbose" level) instead.
+   */
+  consoleDetail?: "full" | "summary";
 };
+
+/** @internal Split a slow-query report line into its summary and its plan and SQL. */
+export function slowQuerySummary(line: string): string {
+  // `SlowQuery::line` ends every line with ". Plan: <plan>. SQL: <sql>".
+  const plan = line.indexOf(". Plan: ");
+  return plan === -1 ? line : line.slice(0, plan);
+}
 
 export class NativeRuntimeAdapter implements Runtime {
   private readonly auxiliaryReceiveDeadlines = new Map<Transport, AuxiliaryReceiveDeadline>();
@@ -871,6 +917,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly schemaBytes: Uint8Array;
   private readonly configBytes: Uint8Array;
   private readonly peerIdentity: Uint8Array;
+  /** The principal of the first admitted credential naming one; see `assertCredentialKeepsPrincipal`. */
+  private upstreamPrincipal: Uint8Array | null = null;
   private readonly selfSignedClientProof: NativeSelfSignedClientProof | undefined;
   private readonly scopeIsolatedRelay: boolean;
   private readonly schemaHash: string;
@@ -894,20 +942,18 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly ownerRuntime: NativeRuntimeAdapter;
   /** The app named in slow-query reports (owner runtime only). */
   private slowQueryApp: string | undefined;
+  private slowQueryConsoleDetail: SlowQueryLogOptions["consoleDetail"];
   get preparationOwner(): object {
     return this.ownerRuntime;
   }
 
-  readCanEstablishAbsence(sessionJson?: string, transaction?: OpenTransactionId): boolean {
-    if (this.closed || this.ownerRuntime.closed) return false;
-    const context = this.nativeReadContext(
-      readSession(sessionJson),
-      transaction ? this.pendingTxs.get(transaction) : undefined,
-    );
-    return context.kind !== "session-authority";
-  }
   private readonly readAuthorizationHost: ReadAuthorizationHost;
   private readonly subscriptions = new Map<number, SubscriptionState>();
+  /** Pooled native subscriptions, by pool id: one native call reads them all. */
+  private subscriptionPool: SubscriptionPool | null | undefined;
+  private readonly pooledSubscriptions = new Map<number, number>();
+  private drainingSubscriptionPool = false;
+  private subscriptionPoolDirty = false;
   private authFailureCallback: ((reason: string) => void) | null = null;
   private mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
   private serverTransportErrorCallback:
@@ -1143,6 +1189,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     if (opts?.owner) return;
     this.slowQueryApp = opts?.slowQueryLog?.appId;
+    this.slowQueryConsoleDetail = opts?.slowQueryLog?.consoleDetail;
     const threshold = opts?.slowQueryLog?.thresholdMs;
     if (threshold !== undefined) {
       if (!Number.isFinite(threshold) || threshold < 0) {
@@ -1173,8 +1220,13 @@ export class NativeRuntimeAdapter implements Runtime {
         this.nativeAuthRefusalRenewable = false;
         return this.clearRemoteServerTransportError();
       }
+      // A refusal keeps the core's code, as `Transport.upstreamRefusal` does
+      // on napi and wasm: a changed authority is an AuthorityChangedError.
+      const error = failure.code
+        ? upstreamRefusalError({ code: failure.code, message: failure.reason })!
+        : new Error(failure.reason);
       this.handleServerTransportError(
-        new Error(failure.reason),
+        error,
         this.serverConnectionGeneration,
         failure.retrying || this.nativeAuthRefusalRenewable,
       );
@@ -1555,7 +1607,10 @@ export class NativeRuntimeAdapter implements Runtime {
       // The relay reports a failure only once its link machine published
       // an outage, or stopped.
       if (this.serverTransportError) {
-        return this.serverTransportErrorRetrying ? offlineLink("network") : offlineLink("stopped");
+        if (this.serverTransportErrorRetrying) return offlineLink("network");
+        return isAuthorityChangedError(this.serverTransportError)
+          ? offlineLink("authority-changed", false)
+          : offlineLink("stopped");
       }
       return CONNECTING;
     }
@@ -1563,6 +1618,26 @@ export class NativeRuntimeAdapter implements Runtime {
       return offlineLink("authority-changed", false);
     }
     return linkStatusFromUpstream(this.linkStatus);
+  }
+
+  /**
+   * Delete this runtime's local store, where its native host can (React
+   * Native's relay): `deleteClientStorage()`. The runtime is closed with it;
+   * the account stays, and the next client opens a fresh store.
+   */
+  canClearClientStorage(): boolean {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.canClearClientStorage();
+    return typeof this.db?.deleteNativeStore === "function";
+  }
+
+  async clearClientStorage(): Promise<{ pendingUploads: number }> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.clearClientStorage();
+    if (!this.db?.deleteNativeStore) {
+      throw new Error("Runtime does not support client storage reset.");
+    }
+    const deleted = this.db.deleteNativeStore();
+    this.closed = true;
+    return deleted;
   }
 
   /** This client's uploads: pending, since when, and the server's refusals. */
@@ -2354,6 +2429,31 @@ export class NativeRuntimeAdapter implements Runtime {
     );
   }
 
+  /**
+   * @internal Serve one of a thin session's transaction requests (its wire
+   * frame) as the backend's client linked to the core as that session
+   * (SPEC 8.14); the answer is the response frame. A commit answers once the
+   * core accepted it. One request at a time.
+   */
+  serveThinTransaction(request: Uint8Array): Promise<Uint8Array> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.serveThinTransaction(request);
+    if (this.closed) return Promise.reject(new Error("the native runtime is closed"));
+    if (!this.db.serveThinTransaction)
+      return Promise.reject(new Error("this native binding serves no thin transactions"));
+    const served = this.db.serveThinTransaction(request);
+    this.scheduleCoreTick();
+    return this.awaitNativeRead(served);
+  }
+
+  /** @internal End the thin session's open transactions: nothing of them reached the core. */
+  async releaseThinTransactions(): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.releaseThinTransactions();
+    if (this.closed || !this.db.releaseThinTransactions) return;
+    const released = this.db.releaseThinTransactions();
+    this.scheduleCoreTick();
+    await this.awaitNativeRead(released);
+  }
+
   captureSnapshot(): Promise<SnapshotRef> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.captureSnapshot();
     if (this.closed)
@@ -2398,6 +2498,12 @@ export class NativeRuntimeAdapter implements Runtime {
       hasStagedMutations: false,
     });
     return id;
+  }
+
+  hasStagedTransactionWrites(openTransactionId: OpenTransactionId): boolean | undefined {
+    if (this !== this.ownerRuntime)
+      return this.ownerRuntime.hasStagedTransactionWrites(openTransactionId);
+    return this.pendingTxs.get(openTransactionId)?.hasStagedMutations;
   }
 
   commitTransaction(openTransactionId: OpenTransactionId): TxId {
@@ -2679,6 +2785,7 @@ export class NativeRuntimeAdapter implements Runtime {
       return;
     }
     const normalizedAuthJson = normalizeBackendWebSocketAuth(authJson);
+    this.assertCredentialKeepsPrincipal(normalizedAuthJson);
     // Validate synchronously before retiring the current transport. Callers
     // historically observe an incompatible native binding at connect() time.
     this.nativeWireFeatures();
@@ -3035,6 +3142,7 @@ export class NativeRuntimeAdapter implements Runtime {
         const firstPump = this.pumpServerTransport();
         firstPump.catch((error) => this.handleServerTransportError(error, generation));
         this.pumpSubscriptions();
+        this.pinUpstreamPrincipal(normalizedAuthJson);
         this.stepLink({ type: "admitted", attempt: id });
         // Waiters resume once the new link's first pump pass has run, or has
         // yielded to a core tick that other work holds.
@@ -3124,11 +3232,49 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this !== this.ownerRuntime) return this.ownerRuntime.updateAuth(authJson);
     this.nativeAuthRefusalRenewable = false;
     if (this.db?.rejectAuthUpdate) return this.db.rejectAuthUpdate();
+    const normalizedAuthJson = normalizeBackendWebSocketAuth(authJson);
+    this.assertCredentialKeepsPrincipal(normalizedAuthJson);
     if (!this.serverEndpointUrl) return;
-    this.serverAuthJson = normalizeBackendWebSocketAuth(authJson);
+    this.serverAuthJson = normalizedAuthJson;
     // A live link is replaced so the server sees the new credential; a link
     // waiting for one connects with it.
     this.stepLink({ type: "credentialUpdated" });
+  }
+
+  /**
+   * The upstream principal is fixed once the server admits a credential that
+   * names one. A later credential, from a refresh or a reconnect, that names
+   * another principal is refused (`identity_mismatch`): the store, and in a
+   * browser worker every tab it serves, syncs as that principal, so a
+   * credential for someone else would link its replica upstream as them
+   * (#4476). A renewed credential for the same principal passes, and so does
+   * one that names no principal (signing out to `{}`). A credential the
+   * server refuses pins nothing.
+   */
+  assertCredentialKeepsPrincipal(authJson: string): void {
+    if (this !== this.ownerRuntime)
+      return this.ownerRuntime.assertCredentialKeepsPrincipal(authJson);
+    if (!this.upstreamPrincipal) return;
+    const normalizedAuthJson = normalizeBackendWebSocketAuth(authJson);
+    if (!webSocketAuthNamesPrincipal(normalizedAuthJson)) return;
+    let identity: Uint8Array | null;
+    try {
+      identity = peerIdentityForWebSocketAuth(normalizedAuthJson, this.peerIdentity);
+    } catch {
+      // It refuses a credential for another user than the store's account.
+      identity = null;
+    }
+    if (!identity || !sameBytes(identity, this.upstreamPrincipal)) {
+      throw identityMismatchError(
+        "a credential refresh must keep the principal this store connects upstream as",
+      );
+    }
+  }
+
+  /** Pin the principal of a credential the server just admitted. */
+  private pinUpstreamPrincipal(normalizedAuthJson: string): void {
+    if (this.upstreamPrincipal || !webSocketAuthNamesPrincipal(normalizedAuthJson)) return;
+    this.upstreamPrincipal = peerIdentityForWebSocketAuth(normalizedAuthJson, this.peerIdentity);
   }
 
   onAuthFailure(callback: (reason: string) => void): void {
@@ -3168,6 +3314,17 @@ export class NativeRuntimeAdapter implements Runtime {
   onServerTransportError(callback: (error: Error, state: { retrying: boolean }) => void): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.onServerTransportError(callback);
     this.serverTransportErrorCallback = callback;
+  }
+
+  /**
+   * The upstream failure remote waits fail on now, and whether the client
+   * keeps reconnecting through it; null while there is none. A durable
+   * worker relays this as state to the tabs attached to it.
+   */
+  upstreamFailure(): { error: Error; retrying: boolean } | null {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.upstreamFailure();
+    const error = this.serverTransportError;
+    return error ? { error, retrying: this.serverTransportErrorRetrying } : null;
   }
 
   /**
@@ -3246,10 +3403,19 @@ export class NativeRuntimeAdapter implements Runtime {
    * reported outage fails the wait; `throughOutage` keeps it pending until a
    * terminal failure, as a write's own Global wait does (#3923). `signal`
    * ends the wait with its reason; the writes are unaffected.
+   *
+   * `sync` makes it `waitForSync`: it waits for the writes of the session
+   * `sync.writeContext` names (none: this runtime's own) and also fails with a rejection of theirs
+   * that settled before the call and nothing reported yet. Without it, as
+   * graceful shutdown waits, such earlier rejections are not this wait's.
    */
   async waitForPendingWrites(
     tier = "global",
-    options: { throughOutage?: boolean; signal?: AbortSignal } = {},
+    options: {
+      throughOutage?: boolean;
+      signal?: AbortSignal;
+      sync?: { writeContext?: string | null };
+    } = {},
   ): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.waitForPendingWrites(tier, options);
     if (!this.db.waitForPendingWrites)
@@ -3273,10 +3439,17 @@ export class NativeRuntimeAdapter implements Runtime {
     const forwardAbort = () => stop.abort(signal?.reason);
     signal?.addEventListener("abort", forwardAbort, { once: true });
     try {
+      const { sync } = options;
+      const native = !sync
+        ? this.db.waitForPendingWrites(tier, cancelled)
+        : this.db.waitForSync
+          ? this.db.waitForSync(
+              tier,
+              this.trustedWriteIdentity(sessionFromWriteContext(sync.writeContext)) ?? null,
+            )
+          : this.db.waitForPendingWrites(tier, cancelled, true);
       const wait = this.awaitNativeRead(
-        Promise.resolve(this.db.waitForPendingWrites(tier, cancelled)).then(
-          (result) => result ?? new Uint8Array(),
-        ),
+        Promise.resolve(native).then((result) => result ?? new Uint8Array()),
         undefined,
         stop.signal,
       );
@@ -3832,9 +4005,76 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private pumpSubscriptions(): void {
+    this.drainSubscriptionPool();
     for (const [handle, subscription] of this.subscriptions) {
+      if (subscription.poolId !== undefined) continue;
       this.startSubscriptionReader(handle, subscription);
     }
+  }
+
+  private nativeSubscriptionPool(): SubscriptionPool | null {
+    if (this.subscriptionPool === undefined) {
+      this.subscriptionPool = this.db.createSubscriptionPool?.() ?? null;
+    }
+    return this.subscriptionPool;
+  }
+
+  /**
+   * Read every pooled subscription in one native call. Events are applied in
+   * order per subscription; a drain requested while one is applying events
+   * (a callback that writes) runs after it, so no subscription sees a later
+   * batch before an earlier one finishes.
+   */
+  private drainSubscriptionPool(): void {
+    const pool = this.subscriptionPool;
+    if (!pool || this.pooledSubscriptions.size === 0) return;
+    if (this.drainingSubscriptionPool) {
+      this.subscriptionPoolDirty = true;
+      return;
+    }
+    this.drainingSubscriptionPool = true;
+    try {
+      do {
+        this.subscriptionPoolDirty = false;
+        for (const batch of pool.drain()) this.applyPooledBatch(batch);
+      } while (this.subscriptionPoolDirty && !this.closed);
+    } finally {
+      this.drainingSubscriptionPool = false;
+    }
+  }
+
+  private applyPooledBatch(batch: SubscriptionPoolBatch): void {
+    const handle = this.pooledSubscriptions.get(batch.id);
+    if (handle === undefined) return;
+    const subscription = this.subscriptions.get(handle);
+    const isActive = () =>
+      subscription !== undefined &&
+      !subscription.cancelled &&
+      this.subscriptions.get(handle) === subscription;
+    if (!subscription || !isActive()) {
+      this.pooledSubscriptions.delete(batch.id);
+      return;
+    }
+    for (const event of batch.events) {
+      if (!isActive()) break;
+      try {
+        this.applySubscriptionChunk(handle, subscription, event);
+      } catch (error) {
+        this.failSubscription(
+          subscription,
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
+    }
+    if (batch.error) {
+      this.pooledSubscriptions.delete(batch.id);
+      if (!this.closed && isActive()) {
+        const error = new Error(batch.error.message) as Error & { code?: string };
+        error.code = batch.error.code;
+        this.failSubscription(subscription, error);
+      }
+    }
+    if (!isActive()) this.pooledSubscriptions.delete(batch.id);
   }
 
   private withPermissionAdviceTimeout(
@@ -4009,11 +4249,23 @@ export class NativeRuntimeAdapter implements Runtime {
   /**
    * Write the slow-query report due now with `console.warn`: each line is a
    * query shape that held the database for at least the threshold, with its
-   * plan and the index that would likely make it fast.
+   * plan and the index that would likely make it fast. With the `"summary"`
+   * console detail, the plan and SQL go to `console.debug` instead.
    */
   private reportSlowQueries(): void {
-    for (const line of this.db.takeSlowQueryReport?.(this.ownerRuntime.slowQueryApp) ?? []) {
-      console.warn(`[jazz] ${line}`);
+    const owner = this.ownerRuntime;
+    for (const line of this.db.takeSlowQueryReport?.(owner.slowQueryApp) ?? []) {
+      if (owner.slowQueryConsoleDetail !== "summary") {
+        console.warn(`[jazz] ${line}`);
+        continue;
+      }
+      const summary = slowQuerySummary(line);
+      if (summary === line) {
+        console.warn(`[jazz] ${line}`);
+        continue;
+      }
+      console.warn(`[jazz] ${summary}. Plan and SQL are logged at the debug ("Verbose") level.`);
+      console.debug(`[jazz] ${line}`);
     }
   }
 
@@ -4069,6 +4321,20 @@ export class NativeRuntimeAdapter implements Runtime {
   private startSubscriptionReader(handle: number, subscription: SubscriptionState): void {
     const source = subscription.source;
     if (subscription.cancelled || subscription.reading || !subscription.callback || !source) return;
+    if (subscription.poolId !== undefined) {
+      this.drainSubscriptionPool();
+      return;
+    }
+    // A native subscription with a callback joins the pool: from then on
+    // one drain per pump reads it with every other pooled subscription.
+    const pool = source.joinPool ? this.nativeSubscriptionPool() : null;
+    if (pool && source.joinPool) {
+      const id = source.joinPool(pool);
+      subscription.poolId = id;
+      this.pooledSubscriptions.set(id, handle);
+      this.drainSubscriptionPool();
+      return;
+    }
     subscription.reading = true;
     this.readSubscription(handle, subscription, source);
   }
@@ -4559,6 +4825,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private retireSubscriptionResources(subscription: SubscriptionState): void {
     if (subscription.cancelled) return;
     subscription.cancelled = true;
+    if (subscription.poolId !== undefined) this.pooledSubscriptions.delete(subscription.poolId);
     subscription.openingAbort?.abort();
     const source = subscription.source;
     subscription.source = undefined;
@@ -4910,8 +5177,18 @@ function updatedAtMsFromWriteContext(writeContext?: string | null): number | und
   return parsed.updated_at;
 }
 
+/**
+ * The explicit `$updatedAt` a write names (a backfill or import), or
+ * `null` for an ordinary write. An ordinary write carries no time: the
+ * replica's clock stamps it while it is pending, and the authority's clock
+ * stamps it when it accepts it, so its `$updatedAt` is the acceptance
+ * time, not the device clock at authoring (an offline edit synced later is
+ * stamped when it syncs), and a device with a fast clock is not refused
+ * for writing in the future. `$acceptedAt` is always the acceptance time,
+ * read from the version's accepted position, whatever `$updatedAt` says.
+ */
 export function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
-  return updatedAtMsFromWriteContext(writeContext) ?? Date.now();
+  return updatedAtMsFromWriteContext(writeContext) ?? null;
 }
 
 function txStateMessage(
@@ -5614,11 +5891,13 @@ function errorMessage(error: unknown): string {
 }
 
 /** The refusal the engine gives a peer of another identity, with its reason. */
-function identityMismatchError(): Error {
-  return Object.assign(
-    new Error("a store configured as one user serves only its own identity's peers"),
-    { code: "protocol", reason: "identity_mismatch" satisfies NativeCoreErrorReason },
-  );
+function identityMismatchError(
+  message = "a store configured as one user serves only its own identity's peers",
+): Error {
+  return Object.assign(new Error(message), {
+    code: "protocol",
+    reason: "identity_mismatch" satisfies NativeCoreErrorReason,
+  });
 }
 
 function contextualError(context: string, error: unknown): Error {
@@ -5860,22 +6139,6 @@ function coerceQueryPredicate(
           : coerceQueryLiteral(table, filter.column, filter.value, schema),
     };
   }
-  if (filter.op === "EnumMatch") {
-    const columnType = resolveQueryTable(schema, table)?.columns.find(
-      (entry) => entry.name === filter.column,
-    )?.column_type;
-    if (columnType?.type !== "EnumPayload") {
-      throw new Error(`enum match requires payload enum column "${filter.column}"`);
-    }
-    const entry = columnType.cases.find((candidate) => candidate.name === filter.case);
-    if (!entry) {
-      throw new Error(`unknown payload enum case "${filter.case}"`);
-    }
-    return {
-      ...filter,
-      payload: coerceEnumPayloadPredicate(filter.payload, entry.fields),
-    };
-  }
   if (filter.op === "IsNull" || filter.op === "IsNotNull") return filter;
   if (isQueryPredicateCmp(filter)) {
     return {
@@ -5884,49 +6147,6 @@ function coerceQueryPredicate(
     };
   }
   throw new Error(`unsupported query predicate ${JSON.stringify(filter)}`);
-}
-
-function coerceEnumPayloadPredicate(
-  predicate: QueryPredicate,
-  fields: ColumnDescriptor[],
-): QueryPredicate {
-  if (predicate.op === "All" || predicate.op === "Any") {
-    return {
-      ...predicate,
-      predicates: predicate.predicates.map((child) => coerceEnumPayloadPredicate(child, fields)),
-    };
-  }
-  if (predicate.op === "Not") {
-    return {
-      ...predicate,
-      predicate: coerceEnumPayloadPredicate(predicate.predicate, fields),
-    };
-  }
-  if (predicate.op === "EnumMatch") {
-    throw new Error("payload enum matches cannot be nested");
-  }
-  if (!("column" in predicate)) {
-    throw new Error("payload enum predicate must target a payload field");
-  }
-  const field = fields.find((candidate) => candidate.name === predicate.column);
-  if (!field) {
-    throw new Error(`unknown payload enum field "${predicate.column}"`);
-  }
-  if (predicate.op === "In") {
-    return {
-      ...predicate,
-      values: predicate.values.map((value) =>
-        coerceLiteralForColumnType(value, field.column_type, field.nullable),
-      ),
-    };
-  }
-  if (predicate.op === "Contains" || isQueryPredicateCmp(predicate)) {
-    return {
-      ...predicate,
-      value: coerceLiteralForColumnType(predicate.value, field.column_type, field.nullable),
-    };
-  }
-  return predicate;
 }
 
 function isQueryPredicateCmp(
@@ -6400,19 +6620,6 @@ function predicateToFilters(predicate: unknown): QueryPredicate[] | null {
   if (record.Not) {
     const predicate = predicateToFilterTree(record.Not);
     return predicate ? [{ op: "Not", predicate }] : null;
-  }
-  const enumMatch = record.EnumMatch;
-  if (enumMatch && typeof enumMatch === "object") {
-    const match = enumMatch as {
-      column?: unknown;
-      case?: unknown;
-      payload?: unknown;
-    };
-    const column = readColumnRef(match.column);
-    const payload = predicateToFilterTree(match.payload);
-    return column && typeof match.case === "string" && payload
-      ? [{ column, op: "EnumMatch", case: match.case, payload }]
-      : null;
   }
   const isNull = record.IsNull;
   if (isNull && typeof isNull === "object") {
@@ -7007,8 +7214,6 @@ function decodeBytes(
     case "Enum":
       if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
       return { type: "Text", value: textDecoder.decode(bytes.subarray(1)) };
-    case "EnumPayload":
-      return decodePayloadEnumBytes(type, bytes, storageType, nestedRowCarrier);
     case "Uuid":
       return { type: "Uuid", value: formatUuid(bytes) };
     case "Bytea":
@@ -7039,49 +7244,6 @@ function decodeBytes(
       return value;
     }
   }
-}
-
-function decodePayloadEnumBytes(
-  type: Extract<ColumnType, { type: "EnumPayload" }>,
-  bytes: Uint8Array,
-  storageType: ValueType | undefined,
-  nestedRowCarrier: NestedRowCarrier,
-): Value {
-  if (bytes.byteLength < 4) throw new Error("invalid Enum payload value");
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const nameLength = view.getUint32(0, true);
-  if (bytes.byteLength < 4 + nameLength) throw new Error("invalid Enum payload case");
-  const caseName = textDecoder.decode(bytes.subarray(4, 4 + nameLength));
-  const entry = type.cases.find((candidate) => candidate.name === caseName);
-  if (!entry) throw new Error("unknown Enum payload case");
-  const enumStorage = nonNullableStorageType(storageType);
-  const payloadDescriptor =
-    enumStorage?.tag === 17
-      ? enumStorage.enumSchema?.cases?.find((candidate) => candidate.name === caseName)?.payload
-      : undefined;
-  if (!payloadDescriptor || payloadDescriptor.length !== entry.fields.length) {
-    throw new Error("Enum payload descriptor mismatch");
-  }
-  const raw = bytes.subarray(4 + nameLength);
-  const decodeRecord = createRecordValueDecoder(payloadDescriptor);
-  return {
-    type: "Enum",
-    value: {
-      case: caseName,
-      values: entry.fields.map((field, index) => {
-        const fieldBytes = decodeRecord(raw, index);
-        return fieldBytes == null
-          ? { type: "Null" }
-          : decodeBytes(
-              field.column_type,
-              fieldBytes,
-              field.name,
-              payloadDescriptor[index]?.valueType,
-              nestedRowCarrier,
-            );
-      }),
-    },
-  };
 }
 
 function nonNullableStorageType(storageType?: ValueType): ValueType | undefined {
@@ -7362,6 +7524,7 @@ function subscriptionSource(
   }
   const native = subscription as Subscription;
   return {
+    joinPool: native.joinPool ? (pool) => native.joinPool!(pool) : undefined,
     pull() {
       const batch = native.readAll();
       return Array.isArray(batch)
@@ -7407,19 +7570,6 @@ function runtimeSubscriptionValue(value: Value, type: ColumnType): Value {
       value: runtimeSubscriptionNestedRow(value.value, type.columns),
     };
   }
-  if (type.type === "EnumPayload" && value.type === "Enum") {
-    const payload = type.cases.find((entry) => entry.name === value.value.case)?.fields;
-    if (!payload) return value;
-    return {
-      type: "Enum",
-      value: {
-        case: value.value.case,
-        values: value.value.values.map((entry, index) =>
-          payload[index] ? runtimeSubscriptionValue(entry, payload[index]!.column_type) : entry,
-        ),
-      },
-    };
-  }
   return value;
 }
 
@@ -7460,12 +7610,8 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
 }
 
 export function parseUuid(value: string): Uint8Array {
-  const hex = value.replaceAll("-", "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid uuid ${value}`);
-  const bytes = new Uint8Array(16);
-  for (let i = 0; i < 16; i += 1) {
-    bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
+  const bytes = parseUuidBytes(value);
+  if (!bytes) throw new Error(`invalid uuid ${value}`);
   return bytes;
 }
 

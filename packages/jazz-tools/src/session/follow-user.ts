@@ -64,19 +64,39 @@ export function followUser(options: {
 const firstAnswers = new WeakMap<object, Promise<void>>();
 
 /**
+ * How long opening a session waits for the backend's first answer (see
+ * `firstBackendAnswer`) before it opens signed out anyway. Much shorter than
+ * the auth request deadline (30 s), so a cold-starting or hung backend costs
+ * an app at most this long on start. The check keeps running, and the
+ * session signs the user in when the answer arrives.
+ */
+export const FIRST_ANSWER_DEADLINE_MS = 5_000;
+
+/**
  * @internal For hosts, before they hand out a session `followUser`
  * decorated. A session with no account on this device (no user remembered
  * here yet: the backend names them) opens signed out until the backend has
  * answered who is signed in, and an app would show its sign-in screen to a
  * user who is signed in. So when it opened signed out, wait for that first
- * answer. An account already on this device (a guest, or a backend user it
- * remembers) opens at once (offline too), and
- * a failed or timed-out check (the auth request deadline) opens signed out as
- * before. Never rejects.
+ * answer, for at most `deadlineMs` (`FIRST_ANSWER_DEADLINE_MS`, 5 s). An
+ * account already on this device (a guest, or a backend user it remembers)
+ * opens at once (offline too). A failed check opens signed out as before, and
+ * so does one slower than the deadline: the request keeps running, and the
+ * session follows its answer (signs the user in) when it comes. Never rejects.
  */
-export async function firstBackendAnswer(session: SessionCore<unknown>): Promise<void> {
+export async function firstBackendAnswer(
+  session: SessionCore<unknown>,
+  deadlineMs = FIRST_ANSWER_DEADLINE_MS,
+): Promise<void> {
   if (session.getSnapshot().status !== "signed-out") return;
-  await firstAnswers.get(session);
+  const answered = firstAnswers.get(session);
+  if (!answered) return;
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    answered,
+    new Promise<void>((resolve) => (deadline = setTimeout(resolve, deadlineMs))),
+  ]);
+  clearTimeout(deadline);
 }
 
 /**

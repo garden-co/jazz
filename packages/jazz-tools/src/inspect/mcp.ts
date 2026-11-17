@@ -15,15 +15,30 @@ import {
   type InspectEnv,
   type PendingApproval,
 } from "./client.js";
-import { InspectError, type InspectRequest } from "./protocol.js";
+import {
+  DEFAULT_ROW_LIMIT,
+  InspectError,
+  MAX_ROW_LIMIT,
+  type InspectAs,
+  type InspectRequest,
+} from "./protocol.js";
+import { WHERE_OPERATORS } from "../where-operators.js";
 
 const SERVER_INFO = { name: "jazz-inspect", version: "1" };
 const LATEST_PROTOCOL = "2025-06-18";
 
 const AS = {
-  type: "string",
   description:
-    "Run under this user's permissions (the app's user id), to see what they see. Omit to use the backend's authority (every row).",
+    'Run under this user\'s permissions, to see what they see: the app\'s user id, or { "userId": …, "claims": {…} }. Omit to use the backend\'s authority (every row). Anything else is refused.',
+  oneOf: [
+    { type: "string", minLength: 1 },
+    {
+      type: "object",
+      properties: { userId: { type: "string", minLength: 1 }, claims: { type: "object" } },
+      required: ["userId"],
+      additionalProperties: false,
+    },
+  ],
 };
 const CLAIMS = {
   type: "object",
@@ -33,16 +48,89 @@ const CLAIMS = {
 const QUERY = {
   type: "object",
   description:
-    'A query: {"table":"todos","where":{"done":false,"title":{"contains":"milk"}},"orderBy":[["title","asc"]],"limit":20}. select defaults to every column; add provenance columns like "$createdBy" or "$updatedAt". Query history.<table> for row history.',
+    'A query: {"table":"todos","where":{"done":false,"title":{"contains":"milk"}},"orderBy":[["title","asc"]],"limit":20}. Query history.<table> for a row\'s versions.',
   properties: {
-    table: { type: "string" },
-    where: { type: "object" },
-    select: { type: "array", items: { type: "string" } },
-    orderBy: { type: "array", items: { type: "array" } },
-    limit: { type: "number" },
-    offset: { type: "number" },
+    table: {
+      type: "string",
+      description: 'A table from schema, or "history.<table>" for its row history.',
+    },
+    where: {
+      type: "object",
+      description: `Column → value (equals), or column → { operator: operand } with operators ${WHERE_OPERATORS.join(", ")} (which apply depends on the column's type; in/notIn take an array, isNull a boolean). Several columns must all match. Values are JSON: timestamps as ISO strings, 64-bit integers as strings, bytes as { "$bytes": "<base64>" }.`,
+      additionalProperties: true,
+    },
+    select: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        'Columns to answer with. Default: every column ("*"). Add provenance columns "$createdBy", "$createdAt", "$updatedBy" or "$updatedAt".',
+    },
+    orderBy: {
+      type: "array",
+      description: 'Sort keys, first one first: [["title","asc"], ["$createdAt","desc"]].',
+      items: {
+        type: "array",
+        prefixItems: [{ type: "string" }, { type: "string", enum: ["asc", "desc"] }],
+        minItems: 2,
+        maxItems: 2,
+      },
+    },
+    limit: {
+      type: "integer",
+      minimum: 1,
+      maximum: MAX_ROW_LIMIT,
+      description: `Rows to answer with: default ${DEFAULT_ROW_LIMIT}, at most ${MAX_ROW_LIMIT}. The answer says truncated when more matched.`,
+    },
+    offset: { type: "integer", minimum: 0, description: "Rows to skip, for paging." },
   },
   required: ["table"],
+  additionalProperties: false,
+};
+
+const VALUES = {
+  type: "object",
+  description:
+    'Column → value, as JSON (timestamps as ISO strings, 64-bit integers as strings, bytes as { "$bytes": "<base64>" }).',
+  additionalProperties: true,
+};
+const WRITE_OP = {
+  oneOf: [
+    {
+      type: "object",
+      description: "Insert a row; id is optional (a new one is made).",
+      properties: {
+        kind: { const: "insert" },
+        table: { type: "string" },
+        values: VALUES,
+        id: { type: "string" },
+      },
+      required: ["kind", "table", "values"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      description: "Change some columns of a row.",
+      properties: {
+        kind: { const: "update" },
+        table: { type: "string" },
+        id: { type: "string" },
+        values: VALUES,
+      },
+      required: ["kind", "table", "id", "values"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      description: "Delete a row.",
+      properties: {
+        kind: { const: "delete" },
+        table: { type: "string" },
+        id: { type: "string" },
+      },
+      required: ["kind", "table", "id"],
+      additionalProperties: false,
+    },
+  ],
 };
 
 interface Tool {
@@ -102,10 +190,23 @@ export const MCP_TOOLS: Tool[] = [
   },
   {
     name: "get",
-    description: "One row by id, with who created and last changed it.",
+    description:
+      'One row by id, with who created and last changed it. A value too large to list shows as {"$large": {kind, size, preview}}: pass column to get that value (from/to for part of a bytes or text value).',
     inputSchema: {
       type: "object",
-      properties: { table: { type: "string" }, id: { type: "string" }, as: AS, claims: CLAIMS },
+      properties: {
+        table: { type: "string" },
+        id: { type: "string" },
+        column: { type: "string", description: "Answer only this column's value, whole." },
+        from: {
+          type: "integer",
+          minimum: 0,
+          description: "With column: where to start (bytes for bytes, UTF-16 code units for text).",
+        },
+        to: { type: "integer", minimum: 0, description: "With column: where to stop (exclusive)." },
+        as: AS,
+        claims: CLAIMS,
+      },
       required: ["table", "id"],
     },
   },
@@ -128,8 +229,10 @@ export const MCP_TOOLS: Tool[] = [
         ops: {
           type: "array",
           description:
-            'e.g. [{"kind":"update","table":"todos","id":"…","values":{"done":true}}, {"kind":"insert","table":"todos","values":{…}}, {"kind":"delete","table":"todos","id":"…"}]',
-          items: { type: "object" },
+            'Between 1 and 1000 writes, each with kind insert, update or delete: [{"kind":"update","table":"todos","id":"…","values":{"done":true}}, {"kind":"insert","table":"todos","values":{…}}, {"kind":"delete","table":"todos","id":"…"}]',
+          items: WRITE_OP,
+          minItems: 1,
+          maxItems: 1000,
         },
         as: AS,
         claims: CLAIMS,
@@ -171,6 +274,54 @@ export const MCP_TOOLS: Tool[] = [
 
 type Json = Record<string, unknown>;
 
+/**
+ * A tool's `as` (and `claims`) as the API takes it. `as` is a user id, or
+ * `{ userId, claims? }` as the HTTP API spells it; anything else is refused.
+ * Never dropped: a call that names a user must not run with the backend's
+ * authority instead.
+ */
+export function asArgument(args: Json): { as?: InspectAs } {
+  const { as, claims } = args;
+  const refuse = (message: string) => new InspectError("bad_request", message);
+  if (as === undefined) {
+    if (claims !== undefined) throw refuse("claims goes with as (the user they belong to)");
+    return {};
+  }
+  if (typeof as === "string") {
+    if (!as.trim()) throw refuse("as must name a user id");
+    // Claims go to the backend as given: it refuses ones that aren't an object.
+    return {
+      as: claims === undefined ? as : { userId: as, claims: claims as Record<string, unknown> },
+    };
+  }
+  if (as && typeof as === "object" && !Array.isArray(as)) {
+    const { userId, claims: inner, ...rest } = as as Record<string, unknown>;
+    const unknown = Object.keys(rest);
+    if (unknown.length) {
+      throw refuse(
+        `as has unknown field(s) ${unknown.join(", ")}: give a user id, or { userId, claims }`,
+      );
+    }
+    if (typeof userId !== "string" || !userId.trim()) {
+      throw refuse("as.userId must name a user id");
+    }
+    if (inner !== undefined && claims !== undefined) {
+      throw refuse("give the claims once: in as, or next to it");
+    }
+    const given = inner ?? claims;
+    return {
+      as: given === undefined ? userId : { userId, claims: given as Record<string, unknown> },
+    };
+  }
+  throw refuse("as must be a user id, or { userId, claims }");
+}
+
+function requireAs(as: { as?: InspectAs }): InspectAs {
+  if (as.as === undefined)
+    throw new InspectError("bad_request", "explain needs as: the user to explain for");
+  return as.as;
+}
+
 /** Serve MCP on `input`/`output` (stdio by default) until `input` ends. */
 export async function runMcpServer(options: {
   app?: string;
@@ -193,19 +344,7 @@ export async function runMcpServer(options: {
     });
 
   async function callTool(name: string, args: Json): Promise<unknown> {
-    if (args.claims !== undefined && typeof args.as !== "string") {
-      throw new InspectError("bad_request", "claims goes with as (the user they belong to)");
-    }
-    // Claims go to the backend as given: it refuses ones that aren't an object.
-    const as =
-      typeof args.as === "string"
-        ? {
-            as:
-              args.claims === undefined
-                ? args.as
-                : { userId: args.as, claims: args.claims as Record<string, unknown> },
-          }
-        : {};
+    const as = asArgument(args);
     switch (name) {
       case "whoami":
         return call({ op: "whoami" });
@@ -236,6 +375,9 @@ export async function runMcpServer(options: {
           op: "get",
           table: String(args.table),
           id: String(args.id),
+          ...(typeof args.column === "string" ? { column: args.column } : {}),
+          ...(typeof args.from === "number" ? { from: args.from } : {}),
+          ...(typeof args.to === "number" ? { to: args.to } : {}),
           ...as,
         });
       case "history":
@@ -252,7 +394,7 @@ export async function runMcpServer(options: {
         return call({
           op: "explain",
           query: args.query as never,
-          as: as.as ?? String(args.as),
+          as: requireAs(as),
         });
       case "inspector_link":
         return call({

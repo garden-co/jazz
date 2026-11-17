@@ -1,3 +1,6 @@
+import { vitePrebundledBrokerWorkerUrl } from "../browser-worker-config.js";
+import { METRO_WORKER_START_HINT } from "../metro-setup-error.js";
+
 /**
  * The browser could not start Jazz's broker SharedWorker: its script failed
  * to load or evaluate, so no Jazz code ever ran in the worker realm.
@@ -11,14 +14,13 @@ export class BrowserWorkerScriptLoadError extends Error {
   override readonly name = "BrowserWorkerScriptLoadError";
 }
 
-/** Vite's dependency optimizer serves pre-bundled packages from `<cacheDir>/deps/`. */
-const VITE_PREBUNDLED_MODULE = /\/\.vite\/deps(?:_[^/]*)?\//;
-
 export interface BrokerWorkerLoadFailureContext {
   /** The worker script URL, when Jazz computed it rather than the bundler. */
   workerUrl?: string;
-  /** `import.meta.url` of the Jazz module that constructed the worker. */
-  moduleUrl: string;
+  /** `import.meta.url` of the Jazz module that constructed the worker (null under Expo's Metro). */
+  moduleUrl: string | null;
+  /** The page runs a Metro bundle (Expo web), where Jazz's worker is Metro's chunk. */
+  metro?: boolean;
   fetch?: typeof fetch;
 }
 
@@ -27,15 +29,17 @@ export interface BrokerWorkerLoadFailureContext {
  *
  * When Jazz knows the script URL (configured runtime sources), fetch it once
  * to say what the server answered: an HTML page is a single-page-app fallback
- * for a path that doesn't exist. When the bundler chose the URL, Jazz can't
- * see it; the one cause it can name for sure is Vite 6/7 pre-bundling
- * jazz-tools, which resolves the worker's `new URL(..., import.meta.url)`
- * against the pre-bundled chunk in `.vite/deps` instead of the package.
+ * for a path that doesn't exist. Under the Vite dev server's pre-bundle, Jazz
+ * resolves the worker through the dev server (see
+ * `vitePrebundledBrokerWorkerUrl`), so the remaining cause there is a
+ * jazz-tools the dev server can't resolve from the project. When a bundler
+ * chose the URL, Jazz can't see it.
  */
 export async function describeBrokerWorkerLoadFailure(
   context: BrokerWorkerLoadFailureContext,
 ): Promise<BrowserWorkerScriptLoadError> {
-  const prebundledByVite = VITE_PREBUNDLED_MODULE.test(safePathname(context.moduleUrl));
+  const prebundledByVite =
+    context.moduleUrl !== null && vitePrebundledBrokerWorkerUrl(context.moduleUrl) !== undefined;
   const answer = context.workerUrl
     ? await describeServerAnswer(context.workerUrl, context.fetch ?? globalThis.fetch)
     : null;
@@ -43,11 +47,13 @@ export async function describeBrokerWorkerLoadFailure(
   const what = context.workerUrl
     ? `Jazz's browser worker script ${context.workerUrl} did not load${answer ? `: ${answer}` : ""}.`
     : "Jazz's browser worker script did not load.";
-  const why = prebundledByVite
-    ? ' Vite pre-bundled jazz-tools, and Vite 6 and 7 point the worker URL of a pre-bundled package at a path that does not exist, which the dev server answers with index.html. Add "jazz-tools" to optimizeDeps.exclude in your Vite config, next to "jazz-wasm", or upgrade to Vite 8.'
-    : context.workerUrl
-      ? " Serve jazz-tools' dist/worker/jazz-broker-worker.js at that URL as JavaScript, or point runtimeSources.brokerWorkerUrl at where it is served."
-      : " Your bundler or server did not serve jazz-tools' dist/worker/jazz-broker-worker.js as JavaScript; a single-page-app fallback that answers unknown paths with index.html is a common cause. Point runtimeSources.brokerWorkerUrl at where the worker is served.";
+  const why = context.metro
+    ? METRO_WORKER_START_HINT
+    : prebundledByVite
+      ? ' Jazz runs from the Vite dev server\'s dependency pre-bundle, so it asks the dev server to resolve the worker from the jazz-tools package; that needs jazz-tools to be a dependency the dev server resolves from your project. Otherwise, add "jazz-tools" to optimizeDeps.exclude in your Vite config, next to "jazz-wasm".'
+      : context.workerUrl
+        ? " Serve jazz-tools' dist/worker/jazz-broker-worker.js at that URL as JavaScript, or point runtimeSources.brokerWorkerUrl at where it is served."
+        : " Your bundler or server did not serve jazz-tools' dist/worker/jazz-broker-worker.js as JavaScript; a single-page-app fallback that answers unknown paths with index.html is a common cause. Point runtimeSources.brokerWorkerUrl at where the worker is served.";
   return new BrowserWorkerScriptLoadError(
     `${what}${why} The local-first client cannot start without it.`,
   );
@@ -66,13 +72,5 @@ async function describeServerAnswer(url: string, fetchImpl?: typeof fetch): Prom
     return null;
   } catch {
     return null;
-  }
-}
-
-function safePathname(url: string): string {
-  try {
-    return new URL(url).pathname;
-  } catch {
-    return url;
   }
 }

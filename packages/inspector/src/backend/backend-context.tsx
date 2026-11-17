@@ -16,6 +16,8 @@ export interface BackendContextValue {
   setViewAs(next: ViewAs | null): void;
   /** The app's permissions read session claims, so viewing as a user needs theirs. */
   permissionsReadClaims: boolean;
+  /** The backend's warning about the rows shown (e.g. no claims given), or null. */
+  warning: string | null;
   /** What the link this page was opened with pointed at, if anything. */
   link: InspectorLinkTarget | null;
 }

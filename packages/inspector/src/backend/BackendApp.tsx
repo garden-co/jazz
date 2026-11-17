@@ -4,9 +4,10 @@
 // on whatever a deep link names: `#q=` (a query), `#table=`, `#row=`, `#as=`,
 // or `#grant=` (an agent's request for a token).
 
-import type { TablePolicies, WasmSchema } from "jazz-tools";
+import type { WasmSchema } from "jazz-tools";
 import {
   decodeGrant,
+  inspectorLink,
   parseInspectorLink,
   readsClaims,
   type InspectWhoami,
@@ -28,6 +29,9 @@ import {
   type BackendContextValue,
   type ViewAs,
 } from "./backend-context.js";
+
+// jazz-tools no longer exports TablePolicies from its root: a table's policies, as a schema carries them.
+type TablePolicies = NonNullable<WasmSchema[string]["policies"]>;
 
 interface SchemaAnswer {
   tables: Record<string, WasmSchema[string] & { redacted?: string[] }>;
@@ -55,6 +59,24 @@ export function initialRouteFor(link: InspectorLinkTarget, schema: WasmSchema): 
   return "/data-explorer";
 }
 
+/**
+ * Keep the address bar's fragment on whom the page views as (`#as=…&claims=…`),
+ * so a copied address opens the same view. replaceState: no reload, no new
+ * history entry.
+ */
+function keepViewAsInAddress(viewAs: ViewAs | null): void {
+  if (typeof window === "undefined") return;
+  const { grant: _grant, ...target } = parseInspectorLink(window.location.hash);
+  const base = window.location.href.split("#")[0]!;
+  const as = asForApi(viewAs);
+  const { as: _as, ...rest } = target;
+  window.history.replaceState(
+    null,
+    "",
+    inspectorLink(base, as === undefined ? rest : { ...rest, as }),
+  );
+}
+
 export function BackendApp({
   pageUrl = window.location.href,
   call: givenCall,
@@ -74,6 +96,7 @@ export function BackendApp({
   const [viewAs, setViewAsState] = useState<ViewAs | null>(
     typeof link.as === "string" ? { userId: link.as } : (link.as ?? null),
   );
+  const [warning, setWarning] = useState<string | null>(null);
   const viewAsRef = useRef(viewAs);
   viewAsRef.current = viewAs;
 
@@ -121,6 +144,7 @@ export function BackendApp({
             call,
             schema: boot.schema,
             as: () => asForApi(viewAsRef.current),
+            onWarning: setWarning,
           })
         : null,
     [boot, call],
@@ -193,8 +217,11 @@ export function BackendApp({
       if (JSON.stringify(next) === JSON.stringify(viewAsRef.current)) return;
       viewAsRef.current = next;
       setViewAsState(next);
+      setWarning(null);
+      keepViewAsInAddress(next);
       data!.refresh();
     },
+    warning,
     permissionsReadClaims: readsClaims(boot.permissions),
     link: link.query || link.table ? link : null,
   };

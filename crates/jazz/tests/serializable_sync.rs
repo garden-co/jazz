@@ -6,6 +6,7 @@
 //! non-serializable commit.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt as _;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -44,6 +45,13 @@ fn schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("audit")
                     .column("note", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("scores")
+                    .column("show", ColumnType::Text)
+                    .nullable_column("points", ColumnType::Integer)
+                    .nullable_column("weight", ColumnType::Double)
                     .policies(allow_all_policies()),
             )
             .table(
@@ -242,6 +250,53 @@ impl Net {
         .unwrap();
         // A change the replica already holds conflicts at once; otherwise
         // the authority decides.
+        let receipt = match self.drive(db.commit_serializable_handle(open)) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                assert_eq!(error.code, ErrorCode::TransactionConflict, "{error}");
+                return Redeem::Conflict;
+            }
+        };
+        match self.settle(i, receipt.0) {
+            Ok(_) => Redeem::Joined,
+            Err(error) => {
+                common::assert_serialization_conflict(&error);
+                Redeem::Conflict
+            }
+        }
+    }
+}
+
+impl Net {
+    fn join(&self, i: usize, c: &str) {
+        let write = block_on(self.db(i).insert("members", code(c), Default::default())).unwrap();
+        self.settle(i, write.mergeable_tx_id())
+            .expect("join settles");
+    }
+
+    /// Join `c` only if it has fewer than `capacity` members, counted
+    /// inside one serializable transaction (an aggregate read).
+    /// `between` runs after the count and before the commit.
+    fn book(&self, i: usize, c: &str, capacity: u64, between: impl FnOnce()) -> Redeem {
+        let db = self.db(i);
+        let open = OpenTransactionId::new();
+        block_on(db.begin_serializable(open)).unwrap();
+        let count = db.prepare_query(&members_query(c).count()).unwrap();
+        let rows = self.drive(db.tx_ref(open).all_prepared(&count)).unwrap();
+        let counted = match rows.first().and_then(|row| row.cell_at(0)) {
+            Some(Value::U64(n)) => n,
+            other => panic!("count {other:?}"),
+        };
+        if counted >= capacity {
+            db.abandon_transaction_handle(open).unwrap();
+            return Redeem::Invalid;
+        }
+        between();
+        self.drive(
+            db.tx_ref(open)
+                .insert("members", code(c), Default::default()),
+        )
+        .unwrap();
         let receipt = match self.drive(db.commit_serializable_handle(open)) {
             Ok(receipt) => receipt,
             Err(error) => {
@@ -1149,4 +1204,333 @@ fn an_offline_serializable_commit_keeps_its_reads_across_a_restart() {
             assert_eq!(net.members("abc"), 2);
         }
     }
+}
+
+/// An aggregate read is validated by its value (jazz#5520): another
+/// backend's booking between the count and the commit changes the count,
+/// so the commit conflicts instead of overbooking. Before, an aggregate's
+/// rows were recorded as their group at version 0 and always matched.
+#[test]
+fn a_count_that_changed_before_the_commit_conflicts() {
+    let net = Net::new(3);
+    net.join(OWNER, "show");
+    let outcome = net.book(BACKEND, "show", 2, || net.join(OTHER, "show"));
+    assert_eq!(outcome, Redeem::Conflict);
+    assert_eq!(net.members("show"), 2, "the show is not overbooked");
+}
+
+/// An unchanged count commits.
+#[test]
+fn an_unchanged_count_commits() {
+    let net = Net::new(3);
+    net.join(OWNER, "show");
+    net.unrelated_receipt(BACKEND);
+    assert_eq!(net.book(BACKEND, "show", 2, || {}), Redeem::Joined);
+    assert_eq!(net.members("show"), 2);
+    // Full now: the next booking sees it.
+    assert_eq!(net.book(OTHER, "show", 2, || {}), Redeem::Invalid);
+}
+
+/// Two backends race for the last place: exactly one books it.
+#[test]
+fn racing_bookings_of_the_last_place_admit_exactly_one() {
+    let net = Net::new(3);
+    net.join(OWNER, "show");
+    let other = std::cell::Cell::new(None);
+    let first = net.book(BACKEND, "show", 2, || {
+        other.set(Some(net.book(OTHER, "show", 2, || {})))
+    });
+    let outcomes = [first, other.take().unwrap()];
+    assert_eq!(
+        outcomes.iter().filter(|o| **o == Redeem::Joined).count(),
+        1,
+        "{outcomes:?}"
+    );
+    assert_eq!(net.members("show"), 2);
+}
+
+// ---- aggregate reads, validated by value (jazz#5520) ------------------------
+
+fn score(show: &str, points: Option<i32>, weight: Option<f64>) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("show".to_owned(), Value::String(show.to_owned())),
+        (
+            "points".to_owned(),
+            Value::Nullable(points.map(|p| Box::new(Value::I32(p)))),
+        ),
+        (
+            "weight".to_owned(),
+            Value::Nullable(weight.map(|w| Box::new(Value::F64(w)))),
+        ),
+    ])
+}
+
+fn scores(show: &str) -> Query {
+    Query::from("scores").filter(eq(col("show"), lit(Value::String(show.to_owned()))))
+}
+
+impl Net {
+    fn add_score(&self, i: usize, cells: BTreeMap<String, Value>) -> RowUuid {
+        let write = block_on(self.db(i).insert("scores", cells, Default::default())).unwrap();
+        self.settle(i, write.mergeable_tx_id())
+            .expect("score settles");
+        write.row_uuid()
+    }
+
+    fn set_points(&self, i: usize, row: RowUuid, points: i32) {
+        let write = block_on(self.db(i).update(
+            "scores",
+            row,
+            BTreeMap::from([(
+                "points".to_owned(),
+                Value::Nullable(Some(Box::new(Value::I32(points)))),
+            )]),
+            Default::default(),
+        ))
+        .unwrap();
+        self.settle(i, write.mergeable_tx_id())
+            .expect("update settles");
+    }
+
+    fn remove_score(&self, i: usize, row: RowUuid) {
+        let write = block_on(self.db(i).delete("scores", row, Default::default())).unwrap();
+        self.settle(i, write.mergeable_tx_id())
+            .expect("delete settles");
+    }
+
+    /// Read `query` in a serializable transaction, run `between`, write an
+    /// audit row and commit: whether the authority took the read as still
+    /// current.
+    fn read_then_commit(&self, i: usize, query: Query, between: impl FnOnce()) -> Redeem {
+        let db = self.db(i);
+        let open = OpenTransactionId::new();
+        block_on(db.begin_serializable(open)).unwrap();
+        let prepared = db.prepare_query(&query).unwrap();
+        self.drive(db.tx_ref(open).all_prepared(&prepared)).unwrap();
+        between();
+        self.drive(db.tx_ref(open).insert(
+            "audit",
+            BTreeMap::from([("note".to_owned(), Value::String("read".to_owned()))]),
+            Default::default(),
+        ))
+        .unwrap();
+        let receipt = match self.drive(db.commit_serializable_handle(open)) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                assert_eq!(error.code, ErrorCode::TransactionConflict, "{error}");
+                return Redeem::Conflict;
+            }
+        };
+        match self.settle(i, receipt.0) {
+            Ok(_) => Redeem::Joined,
+            Err(error) => {
+                common::assert_serialization_conflict(&error);
+                Redeem::Conflict
+            }
+        }
+    }
+}
+
+/// Each aggregate kind: read with nothing changing commits; read while
+/// another backend changes its value conflicts.
+#[test]
+fn every_aggregate_kind_conflicts_when_its_value_changed() {
+    let kinds: [(&str, fn(Query) -> Query); 6] = [
+        ("count", |q| q.count()),
+        ("sum int", |q| q.sum("points")),
+        ("sum float", |q| q.sum("weight")),
+        ("avg", |q| q.avg("points")),
+        ("min", |q| q.min("points")),
+        ("max", |q| q.max("points")),
+    ];
+    for (name, aggregate) in kinds {
+        let net = Net::new(3);
+        let a = net.add_score(OWNER, score("s", Some(3), Some(0.1)));
+        net.add_score(OWNER, score("s", Some(5), Some(0.2)));
+        net.unrelated_receipt(BACKEND);
+        assert_eq!(
+            net.read_then_commit(BACKEND, aggregate(scores("s")), || {}),
+            Redeem::Joined,
+            "{name}: unchanged"
+        );
+        // count changes with a new row; the others with a changed value
+        // that moves them all (3 -> 1: sum, avg, min; 3 -> 9: max).
+        let change = || match name {
+            "count" => {
+                net.add_score(OTHER, score("s", Some(4), Some(0.3)));
+            }
+            "max" => net.set_points(OWNER, a, 9),
+            "sum float" => {
+                net.add_score(OTHER, score("s", None, Some(0.4)));
+            }
+            _ => net.set_points(OWNER, a, 1),
+        };
+        assert_eq!(
+            net.read_then_commit(BACKEND, aggregate(scores("s")), change),
+            Redeem::Conflict,
+            "{name}: changed"
+        );
+    }
+}
+
+/// Float sums and averages over rows written by different clients, in
+/// different orders, read where every replica holds them in its own
+/// order: an unchanged value commits (the authority computes the same
+/// bits the reader did).
+#[test]
+fn float_sums_and_averages_commit_while_unchanged() {
+    let net = Net::new(3);
+    let weights = [0.1, 1e16, 0.7, -1e16, 0.2, 3.3, 1e-9, 0.3];
+    for (n, weight) in weights.iter().enumerate() {
+        let writer = if n % 2 == 0 { OWNER } else { OTHER };
+        net.add_score(writer, score("f", None, Some(*weight)));
+    }
+    for (n, weight) in weights.iter().rev().enumerate() {
+        let writer = if n % 2 == 0 { OTHER } else { OWNER };
+        net.add_score(writer, score("g", None, Some(*weight)));
+    }
+    net.unrelated_receipt(BACKEND);
+    for show in ["f", "g"] {
+        for (name, query) in [
+            ("sum", scores(show).sum("weight")),
+            ("avg", scores(show).avg("weight")),
+        ] {
+            assert_eq!(
+                net.read_then_commit(BACKEND, query, || {}),
+                Redeem::Joined,
+                "{name} over {show}"
+            );
+        }
+    }
+}
+
+/// A grouped aggregate conflicts when a group appears or disappears.
+#[test]
+fn a_group_that_appears_or_disappears_conflicts() {
+    let net = Net::new(3);
+    net.add_score(OWNER, score("a", Some(1), None));
+    let b = net.add_score(OWNER, score("b", Some(2), None));
+    net.unrelated_receipt(BACKEND);
+    let grouped = || Query::from("scores").count().group_by("show");
+    assert_eq!(
+        net.read_then_commit(BACKEND, grouped(), || {}),
+        Redeem::Joined
+    );
+    let appears = net.read_then_commit(BACKEND, grouped(), || {
+        net.add_score(OTHER, score("c", Some(3), None));
+    });
+    assert_eq!(appears, Redeem::Conflict, "a new group");
+    let disappears = net.read_then_commit(BACKEND, grouped(), || net.remove_score(OWNER, b));
+    assert_eq!(disappears, Redeem::Conflict, "a group gone");
+}
+
+/// Null results (a sum over no rows, a min over only NULLs) validate too:
+/// unchanged they commit, and a row that gives them a value conflicts.
+#[test]
+fn null_aggregates_validate_by_value() {
+    let net = Net::new(3);
+    net.add_score(OWNER, score("n", None, None));
+    net.unrelated_receipt(BACKEND);
+    assert_eq!(
+        net.read_then_commit(BACKEND, scores("empty").sum("points"), || {}),
+        Redeem::Joined,
+        "sum over no rows"
+    );
+    assert_eq!(
+        net.read_then_commit(BACKEND, scores("n").min("points"), || {}),
+        Redeem::Joined,
+        "min over NULLs"
+    );
+    let filled = net.read_then_commit(BACKEND, scores("empty").sum("points"), || {
+        net.add_score(OTHER, score("empty", Some(1), None));
+    });
+    assert_eq!(filled, Redeem::Conflict, "sum gains a value");
+    let valued = net.read_then_commit(BACKEND, scores("n").min("points"), || {
+        net.add_score(OTHER, score("n", Some(2), None));
+    });
+    assert_eq!(valued, Redeem::Conflict, "min gains a value");
+}
+
+/// Rewrites the aggregate reads of the serializable commits its client
+/// sends to name each row by its group alone, as a client before jazz#5520
+/// recorded them.
+struct GroupOnlyReads {
+    inner: Box<dyn jazz::db::Transport>,
+    groups: std::rc::Rc<std::cell::RefCell<Vec<RowUuid>>>,
+}
+
+impl jazz::db::Transport for GroupOnlyReads {
+    fn send(
+        &mut self,
+        mut message: jazz::db::SyncMessage,
+    ) -> Result<(), jazz::wire::TransportError> {
+        if let jazz::db::SyncMessage::Commit {
+            kind: jazz::db::WireKind::Serializable { reads, .. },
+            ..
+        } = &mut message
+        {
+            for read in reads
+                .iter_mut()
+                .filter(|read| read.query.aggregate.is_some())
+            {
+                let groups = self.groups.borrow();
+                assert_eq!(read.rows.len(), groups.len());
+                for (row, group) in read.rows.iter_mut().zip(groups.iter()) {
+                    row.0 = *group.0.as_bytes();
+                }
+            }
+        }
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<jazz::db::SyncMessage> {
+        self.inner.try_recv()
+    }
+}
+
+/// An aggregate read set that names its rows by group alone (a client
+/// from before value validation) is refused, even with nothing changed:
+/// the authority accepts only value-named aggregate reads, so an old
+/// client's aggregate-reading serializable transactions conflict until it
+/// upgrades, rather than committing unchecked.
+#[test]
+fn a_group_only_aggregate_read_set_is_refused() {
+    let mut net = Net::new(3);
+    net.add_score(OWNER, score("s", Some(3), None));
+    // The backend's link rewrites its commits' aggregate reads.
+    let groups = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let upstream = net.clients[BACKEND].1.take().expect("online");
+    assert!(net.clients[BACKEND].0.detach_connection(&upstream));
+    let (client_side, server_side) = duplex();
+    let rewriting = Box::new(GroupOnlyReads {
+        inner: client_side,
+        groups: groups.clone(),
+    });
+    let author = AuthorSubject::for_test_bytes([0x50 + BACKEND as u8; 16]);
+    let upstream = block_on(net.clients[BACKEND].0.connect_upstream(rewriting));
+    net.clients[BACKEND].1 = Some(upstream);
+    net.core.accept_subscriber(server_side, author).unwrap();
+    jazz::db::block_on(
+        net.clients[BACKEND]
+            .0
+            .set_remote_link_hint(RemoteLinkHint::Live),
+    );
+    net.unrelated_receipt(BACKEND);
+
+    let db = net.db(BACKEND);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_serializable(open)).unwrap();
+    let count = db.prepare_query(&scores("s").count()).unwrap();
+    let rows = net.drive(db.tx_ref(open).all_prepared(&count)).unwrap();
+    // The ids a read gives aggregate rows are their groups.
+    *groups.borrow_mut() = rows.iter().map(|row| row.row_uuid()).collect();
+    net.drive(db.tx_ref(open).insert(
+        "audit",
+        BTreeMap::from([("note".to_owned(), Value::String("old".to_owned()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let receipt = net.drive(db.commit_serializable_handle(open)).unwrap();
+    let error = net.settle(BACKEND, receipt.0).unwrap_err();
+    common::assert_serialization_conflict(&error);
 }

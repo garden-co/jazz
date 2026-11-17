@@ -8,7 +8,7 @@
     "dev:server": "tsx watch --env-file-if-exists=.env.development.local server/index.ts",
     "dev:vite": "wait-on --timeout 30000 http-get://127.0.0.1:3001/health && vite",
     "prebuild": "node scripts/check-config.mjs",
-    "build": "jazz-tools validate && vite build",
+    "build": "jazz-tools generate && vite build",
     "start": "NODE_ENV=production tsx server/index.ts",
     "typecheck": "tsc --noEmit",
     "test:e2e": "playwright test"
@@ -17,7 +17,7 @@
     "@astryxdesign/core": "0.6.3",
     "@garden-co/design": "github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2",
     "@hono/node-server": "^1.19.11",
-    "better-auth": "1.7.1",
+    "better-auth": "1.7.22",
     "hono": "^4.12.9",
     "jazz-napi": "workspace:*",
     "jazz-tools": "workspace:*",

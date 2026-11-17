@@ -196,6 +196,109 @@ bandChatBenchmarks.push({
   source,
 });
 
+const online =
+  "100 members and 100 chats; each member is in five chats, which overlap as group chats do (five members each). Every membership has a read mark, every chat an agent, a call (every other one ended) and 30 messages, every third a reply. Read policies check chat membership; users are readable when they are the reader or discoverable, unique names inherit from their user, drafts are their writer's.";
+const listShape =
+  "Each member's chat list is the adopter's: their memberships (not banned, not deleted) by pin then creation, each with its chat, the chat's roster with each user and their unique names, its open group call (limit 1), the latest read mark of someone else (limit 1) and its agents.";
+const fanoutExcludes = [
+  "Schema compilation, seeding, opening and hydrating every live result",
+  "Sync, network and rendering",
+];
+bandChatBenchmarks.push(
+  {
+    name: "band_chat_read_mark_chat_lists_open[100]",
+    title: "BandChat · a read mark while 100 chat lists are open",
+    description: `Every member has their chat list open. One member reads to the newest message of one of their chats: their read mark is updated in place, and the chat's four other members see it as the chat's latest mark. Read marks are reached only through the lists' relations, so correlation watches (#5333) wake only the five lists holding that chat; without them all 100 re-run. ${listShape}`,
+    fixture: `${online} All 100 chat lists are open and hydrated before timing.`,
+    storage: "In-memory Jazz database",
+    includes: [
+      "The read-mark update and its commit (about 0.5% of the time)",
+      "Dispatch, re-running the woken lists, and draining all 100",
+    ],
+    excludes: fanoutExcludes,
+    work: {
+      count: 1,
+      unit: "read marks/s",
+      explanation: "One read mark per iteration; the 100 open lists are load context.",
+    },
+    source,
+  },
+  {
+    name: "band_chat_membership_change_chat_lists_open[100]",
+    title: "BandChat · a member joins a chat while 100 chat lists are open",
+    description: `Every member has their chat list open. One member joins a chat they were not in: their list gains it and the chat's five members see them in its roster. Read policies check membership with \`chat_members.exists.where({ chatId, userId: session })\`, which evidence watches (#5341) key by the session's user, so about six lists wake; without them all 100 re-run. ${listShape}`,
+    fixture: `${online} All 100 chat lists are open and hydrated before timing; each sample's join is undone, untimed, before the next.`,
+    storage: "In-memory Jazz database",
+    includes: [
+      "The membership insert and its commit (about 0.3% of the time)",
+      "Dispatch, re-running the woken lists, and draining all 100",
+    ],
+    excludes: [...fanoutExcludes, "Leaving the chat again between samples"],
+    work: {
+      count: 1,
+      unit: "joins/s",
+      explanation: "One join per iteration; the 100 open lists are load context.",
+    },
+    source,
+  },
+  {
+    name: "band_chat_membership_change_relation_policy_chat_lists_open[100]",
+    title: "BandChat · a join under a relation-style membership policy",
+    description: `The same join, with the read policies' membership check written as a relation-style \`exists(...)\`: the chat's memberships joined to their \`users\` row, which must be the reader. It grants the same rows, but fan-out watches the tables such a policy reads whole, so every one of the 100 lists re-runs. This case tracks that gap: a fix shows up as a gain toward the \`exists.where\` case. ${listShape}`,
+    fixture: `${online} All 100 chat lists are open and hydrated before timing; each sample's join is undone, untimed, before the next.`,
+    storage: "In-memory Jazz database",
+    includes: [
+      "The membership insert and its commit (under 0.1% of the time)",
+      "Dispatch, re-running all 100 lists, and draining them",
+    ],
+    excludes: [...fanoutExcludes, "Leaving the chat again between samples"],
+    work: {
+      count: 1,
+      unit: "joins/s",
+      explanation: "One join per iteration; the 100 open lists are load context.",
+    },
+    source,
+  },
+  {
+    name: "band_chat_thread_reply_to_rooms_open[100]",
+    title: "BandChat · a reply while 100 rooms are open",
+    description:
+      "Every member keeps a different room open: its newest 25 messages, each with the message it replies to (a self-relation on messages). One member posts a reply in their room; that room shows it and drops its oldest shown message, and every other room stays quiet. The self-relation no longer drops the rooms' `chatId` key (#5333), so only that room wakes; without it all 100 rooms re-run.",
+    fixture: `${online} All 100 rooms are open and hydrated before timing.`,
+    storage: "In-memory Jazz database",
+    includes: [
+      "The message insert and its commit (about 4% of the time)",
+      "Dispatch, re-running the woken room, and draining all 100",
+    ],
+    excludes: fanoutExcludes,
+    work: {
+      count: 1,
+      unit: "messages delivered/s",
+      explanation: "One message per iteration; the 100 open rooms are load context.",
+    },
+    source,
+  },
+  {
+    name: "band_chat_typing_drafts_rooms_open[100]",
+    title: "BandChat · typing a message while 100 rooms are open",
+    description:
+      "Every member has their room and their composer (their own draft in it) open. One member types a short message: 13 draft upserts, one per keystroke, each a commit that reaches only their composer, then the message, which reaches their room. Measures fan-out per commit on one store, with 200 live results to check against each write. The server's per-tick pass over every connected session is not in it: that needs a server with 100 sessions.",
+    fixture: `${online} All 100 rooms and 100 composers are open and hydrated before timing.`,
+    storage: "In-memory Jazz database",
+    includes: [
+      "13 draft updates and one message insert, and their commits (about a quarter of the time)",
+      "Dispatching each commit, re-running the woken composer or room, and draining all 200 results",
+    ],
+    excludes: [...fanoutExcludes, "A server, its sessions and its per-tick session pass"],
+    work: {
+      count: 1,
+      unit: "messages typed/s",
+      explanation: "One typed message (14 commits) per iteration; the open rooms are load context.",
+    },
+    source,
+  },
+);
+
 const nightlySource = "examples/band-chat/benchmarks/benches/nightly.rs";
 const band =
   "200 members, 1,000 rooms: one room with 100,000 messages and 50 members, ten rooms of 10,000 and 989 rooms of 10–200 (303,695 messages). Every tenth message in the busy rooms has 1–3 reactions; every member has one read marker per room (a read-up-to row, updated in place). The reader is a member of 100 rooms. Declared indexes: messages (roomId, $createdAt) and readMarkers (roomId, lastReadAt). Membership read policies throughout; settled before timing.";

@@ -11,7 +11,7 @@ import {
   type InspectRowsAnswer,
   type InspectSessionInfo,
 } from "jazz-tools/inspect";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type KeyboardEvent } from "react";
 import { Link } from "react-router";
 import { useDevtoolsContext } from "../contexts/devtools-context.js";
 import { stringifyForPresentation } from "../utility/presentation-serialization.js";
@@ -38,6 +38,17 @@ function parseClaims(text: string): Record<string, unknown> | undefined | null {
   }
 }
 
+/** The backend's warning about the rows shown, e.g. that no claims were given for the user viewed as. */
+export function BackendWarning() {
+  const backend = useBackendContext();
+  if (!backend?.warning) return null;
+  return (
+    <p className={styles.error} role="status">
+      {backend.warning}
+    </p>
+  );
+}
+
 export function BackendIdentity() {
   const backend = useBackendContext();
   const [draft, setDraft] = useState(backend?.viewAs?.userId ?? "");
@@ -54,6 +65,12 @@ export function BackendIdentity() {
     if (!userId) return backend.setViewAs(null);
     if (claims === null) return;
     backend.setViewAs(claims === undefined ? { userId } : { userId, claims });
+  };
+  // With two fields and no submit button, Enter doesn't submit the form.
+  const applyOnEnter = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    apply();
   };
   const missingClaims =
     backend.permissionsReadClaims && backend.viewAs !== null && !backend.viewAs.claims;
@@ -73,6 +90,7 @@ export function BackendIdentity() {
           value={draft}
           placeholder="everything (backend)"
           onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={applyOnEnter}
           onBlur={apply}
         />
         {draft.trim() ? (
@@ -86,6 +104,7 @@ export function BackendIdentity() {
               aria-invalid={claims === null}
               title={claims === null ? "Claims must be a JSON object" : undefined}
               onChange={(event) => setClaimsDraft(event.target.value)}
+              onKeyDown={applyOnEnter}
               onBlur={apply}
             />
           </>
@@ -339,7 +358,10 @@ export function LinkedQuery() {
       </p>
       <pre className={styles.code}>{JSON.stringify(query, null, 2)}</pre>
       {error ? <p className={styles.error}>{error}</p> : null}
-      {answer?.warning ? <p className={styles.error}>{answer.warning}</p> : null}
+      {/* Not twice: the layout shows the grid's warning, which may be this one. */}
+      {answer?.warning && answer.warning !== backend.warning ? (
+        <p className={styles.error}>{answer.warning}</p>
+      ) : null}
       {as && !query.table.startsWith("history.") ? <ExplainRows query={query} as={as} /> : null}
       {answer ? (
         <>

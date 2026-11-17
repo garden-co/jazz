@@ -3,6 +3,8 @@
 use jazz::schema::JazzSchema;
 use jazz::tools::{PolicyExpr, Schema, TablePolicies};
 
+pub mod member_chat;
+
 pub fn compile_schema(source: &Schema) -> JazzSchema {
     jazz::schema::JazzSchema::new(source).expect("integration-test public schema compiles")
 }

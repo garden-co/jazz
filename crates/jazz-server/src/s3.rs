@@ -82,6 +82,133 @@ pub enum S3Credentials {
         role_arn: String,
         token: WebIdentityToken,
     },
+    /// The task or pod role, from the container credentials endpoint
+    /// that ECS, Fargate, EKS Pod Identity and Lambda point
+    /// `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` or
+    /// `AWS_CONTAINER_CREDENTIALS_FULL_URI` at.
+    Container {
+        /// The endpoint's full URL.
+        uri: String,
+        /// Sent as `Authorization` on each fetch
+        /// (`AWS_CONTAINER_AUTHORIZATION_TOKEN[_FILE]`).
+        authorization: Option<ContainerToken>,
+    },
+    /// The EC2 instance profile's role, from the instance metadata service
+    /// (IMDSv2: a session token first, then the role's keys).
+    InstanceMetadata {
+        /// `http://169.254.169.254`, or `AWS_EC2_METADATA_SERVICE_ENDPOINT`.
+        endpoint: String,
+    },
+}
+
+/// The token a container credentials endpoint wants as `Authorization`.
+#[derive(Clone)]
+pub enum ContainerToken {
+    /// Read afresh from this file on each fetch, since EKS Pod Identity
+    /// rotates it (`AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`).
+    File(PathBuf),
+    /// This value (`AWS_CONTAINER_AUTHORIZATION_TOKEN`).
+    Value(String),
+}
+
+impl std::fmt::Debug for ContainerToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::File(path) => write!(f, "File({})", path.display()),
+            Self::Value(_) => f.write_str("Value"),
+        }
+    }
+}
+
+impl ContainerToken {
+    fn read(&self) -> Result<String, String> {
+        match self {
+            Self::File(path) => std::fs::read_to_string(path)
+                .map(|token| token.trim().to_owned())
+                .map_err(|error| {
+                    format!(
+                        "s3 blobs: read container authorization token {}: {error}",
+                        path.display()
+                    )
+                }),
+            Self::Value(token) => Ok(token.clone()),
+        }
+    }
+}
+
+impl S3Credentials {
+    /// Keys that are fetched, and fetched again before they expire.
+    fn refreshed(&self) -> bool {
+        !matches!(self, Self::Static(_))
+    }
+
+    /// Credentials the host attaches (static keys, the container's role,
+    /// the instance's), there from the start: unlike an OIDC token a host
+    /// may hand over later, a store can check them at startup.
+    fn attached(&self) -> bool {
+        !matches!(self, Self::WebIdentity { .. })
+    }
+}
+
+/// Where the default chain looks, in order, for an error that found none.
+const SOURCES_TRIED: &str = "AWS_ACCESS_KEY_ID with AWS_SECRET_ACCESS_KEY; \
+     AWS_ROLE_ARN with AWS_WEB_IDENTITY_TOKEN_FILE; \
+     AWS_CONTAINER_CREDENTIALS_RELATIVE_URI or AWS_CONTAINER_CREDENTIALS_FULL_URI \
+     (ECS, Fargate, EKS Pod Identity)";
+
+/// The ECS / Fargate container credentials endpoint a relative URI is on.
+const CONTAINER_HOST: &str = "http://169.254.170.2";
+/// The EC2 instance metadata service.
+const IMDS_ENDPOINT: &str = "http://169.254.169.254";
+/// How long an instance metadata request may take. The service answers in
+/// well under a millisecond on EC2; elsewhere nothing answers at all, and
+/// this is only waited for when no other source was found.
+const IMDS_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long an IMDSv2 session token is asked to last. A new one is
+/// fetched with each set of keys, so it never needs to outlive them.
+const IMDS_TOKEN_TTL: &str = "21600";
+/// How often a metadata request (container endpoint or IMDS) is tried
+/// when it fails transiently, as in the AWS SDKs.
+const METADATA_ATTEMPTS: u32 = 3;
+/// The pause between such tries.
+const METADATA_RETRY_PAUSE: Duration = Duration::from_millis(100);
+/// A credentials reply is a few hundred bytes; a longer one is refused.
+const METADATA_BODY_LIMIT: usize = 64 * 1024;
+/// How long a container credentials request may take.
+const CONTAINER_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Whether a full container credentials URI may be sent the role's keys
+/// over plain HTTP: only to this machine, or to the link-local addresses
+/// of ECS and EKS Pod Identity, as the AWS SDKs allow.
+fn container_uri_allowed(uri: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(uri) else {
+        return false;
+    };
+    // `http://127.0.0.1@elsewhere/` is a request to `elsewhere`.
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    match url.scheme() {
+        "https" => true,
+        "http" if host.eq_ignore_ascii_case("localhost") => true,
+        // The parsed host is normalised: an IPv6 address is bracketed.
+        "http" => match host.trim_start_matches('[').trim_end_matches(']').parse() {
+            Ok(std::net::IpAddr::V4(ip)) => {
+                ip.is_loopback()
+                    || ip == std::net::Ipv4Addr::new(169, 254, 170, 2)
+                    || ip == std::net::Ipv4Addr::new(169, 254, 170, 23)
+            }
+            Ok(std::net::IpAddr::V6(ip)) => {
+                ip.is_loopback()
+                    || ip == std::net::Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x23)
+            }
+            Err(_) => false,
+        },
+        _ => false,
+    }
 }
 
 /// One set of AWS keys.
@@ -131,12 +258,93 @@ pub struct S3Options {
     pub environment: Option<String>,
 }
 
+impl S3Credentials {
+    /// Credentials from the environment, in the order of the AWS SDKs'
+    /// default chain (the parts of it that apply to a server):
+    ///
+    /// 1. `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (with
+    ///    `AWS_SESSION_TOKEN`): keys set on purpose win over anything
+    ///    the host attaches.
+    /// 2. `AWS_ROLE_ARN`, assumed with `AWS_WEB_IDENTITY_TOKEN_FILE` (EKS
+    ///    IRSA, any OIDC provider) or else `VERCEL_OIDC_TOKEN`.
+    /// 3. The container credentials endpoint
+    ///    (`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, else `_FULL_URI`, with
+    ///    `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` or `_TOKEN`).
+    /// 4. The EC2 instance profile through IMDSv2, unless
+    ///    `AWS_EC2_METADATA_DISABLED=true`. It is the only source that
+    ///    can't be seen in the environment, so it is the last fallback and
+    ///    is not contacted here: the store's startup check finds out
+    ///    whether anything answers, and fails naming every source tried
+    ///    when nothing does.
+    pub fn from_env() -> Result<Self, String> {
+        Self::from_vars(|name| std::env::var(name).ok())
+    }
+
+    /// [`Self::from_env`] with `var` as the environment.
+    fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let env = |name: &str| var(name).filter(|value| !value.is_empty());
+        if let Some(access_key_id) = env("AWS_ACCESS_KEY_ID") {
+            return Ok(Self::Static(Keys {
+                access_key_id,
+                secret_access_key: env("AWS_SECRET_ACCESS_KEY")
+                    .ok_or("s3 blobs: AWS_ACCESS_KEY_ID is set without AWS_SECRET_ACCESS_KEY")?,
+                session_token: env("AWS_SESSION_TOKEN"),
+            }));
+        }
+        if let Some(role_arn) = env("AWS_ROLE_ARN") {
+            return Ok(Self::WebIdentity {
+                role_arn,
+                token: match env("AWS_WEB_IDENTITY_TOKEN_FILE") {
+                    Some(file) => WebIdentityToken::File(file.into()),
+                    None => WebIdentityToken::Env("VERCEL_OIDC_TOKEN".to_owned()),
+                },
+            });
+        }
+        let uri = match (
+            env("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"),
+            env("AWS_CONTAINER_CREDENTIALS_FULL_URI"),
+        ) {
+            (Some(relative), _) => Some(format!(
+                "{CONTAINER_HOST}/{}",
+                relative.trim_start_matches('/')
+            )),
+            (None, Some(full)) if container_uri_allowed(&full) => Some(full),
+            (None, Some(_)) => {
+                return Err(
+                    "s3 blobs: AWS_CONTAINER_CREDENTIALS_FULL_URI must be https, \
+                     or http to this machine or to the ECS / EKS link-local address"
+                        .to_owned(),
+                );
+            }
+            (None, None) => None,
+        };
+        if let Some(uri) = uri {
+            let authorization = env("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE")
+                .map(|file| ContainerToken::File(file.into()))
+                .or_else(|| env("AWS_CONTAINER_AUTHORIZATION_TOKEN").map(ContainerToken::Value));
+            return Ok(Self::Container { uri, authorization });
+        }
+        if env("AWS_EC2_METADATA_DISABLED").is_some_and(|value| value.eq_ignore_ascii_case("true"))
+        {
+            return Err(format!(
+                "s3 blobs: no AWS credentials found; tried {SOURCES_TRIED}; \
+                 and EC2 instance metadata, which AWS_EC2_METADATA_DISABLED turns off"
+            ));
+        }
+        Ok(Self::InstanceMetadata {
+            endpoint: env("AWS_EC2_METADATA_SERVICE_ENDPOINT")
+                .unwrap_or_else(|| IMDS_ENDPOINT.to_owned())
+                .trim_end_matches('/')
+                .to_owned(),
+        })
+    }
+}
+
 impl S3Options {
     /// A bucket named by the environment, filling in what the arguments
-    /// leave out: `S3_BUCKET_NAME`, `AWS_REGION`, `AWS_ROLE_ARN` with
-    /// `AWS_WEB_IDENTITY_TOKEN_FILE` or `VERCEL_OIDC_TOKEN` (the Vercel
-    /// Marketplace's AWS integration), or else `AWS_ACCESS_KEY_ID` and
-    /// `AWS_SECRET_ACCESS_KEY`.
+    /// leave out: `S3_BUCKET_NAME`, `AWS_REGION`, and credentials found
+    /// the way the AWS SDKs' default chain finds them
+    /// ([`S3Credentials::from_env`]).
     pub fn from_env(
         bucket: Option<String>,
         region: Option<String>,
@@ -152,28 +360,7 @@ impl S3Options {
             .or_else(|| env("AWS_DEFAULT_REGION"))
             .or_else(|| endpoint.as_ref().map(|_| "auto".to_owned()))
             .ok_or("s3 blobs: no region (set AWS_REGION or pass one)")?;
-        let credentials = match (env("AWS_ROLE_ARN"), env("AWS_ACCESS_KEY_ID")) {
-            (Some(role_arn), _) => S3Credentials::WebIdentity {
-                role_arn,
-                token: match env("AWS_WEB_IDENTITY_TOKEN_FILE") {
-                    Some(file) => WebIdentityToken::File(file.into()),
-                    None => WebIdentityToken::Env("VERCEL_OIDC_TOKEN".to_owned()),
-                },
-            },
-            (None, Some(access_key_id)) => S3Credentials::Static(Keys {
-                access_key_id,
-                secret_access_key: env("AWS_SECRET_ACCESS_KEY")
-                    .ok_or("s3 blobs: AWS_ACCESS_KEY_ID is set without AWS_SECRET_ACCESS_KEY")?,
-                session_token: env("AWS_SESSION_TOKEN"),
-            }),
-            (None, None) => {
-                return Err(
-                    "s3 blobs: no credentials (set AWS_ROLE_ARN for an OIDC role, \
-                     or AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY)"
-                        .to_owned(),
-                );
-            }
-        };
+        let credentials = S3Credentials::from_env()?;
         Ok(Self {
             bucket,
             region,
@@ -195,6 +382,14 @@ impl S3Options {
 
 /// Assumed keys stay in use until this long before they expire.
 const REFRESH_EARLY: Duration = Duration::from_secs(5 * 60);
+/// Fetched keys handed out close to their expiry, or even past it, are
+/// still used this long before they are fetched again. During an outage
+/// IMDS and the container endpoint keep handing out the last keys they
+/// have, which may already be expired; fetching again on every request
+/// would only hammer an endpoint that cannot help. If the bucket refuses
+/// them as expired, [`Inner::failure`] drops them and the next request
+/// fetches again anyway.
+const MIN_KEY_USE: Duration = Duration::from_secs(30);
 /// How long assumed keys are asked to last.
 const ASSUMED_FOR: Duration = Duration::from_secs(60 * 60);
 /// An operation that takes longer fails, and is retried in a later batch.
@@ -230,6 +425,10 @@ pub struct S3ChunkStore {
 struct Inner {
     options: S3Options,
     http: reqwest::Client,
+    /// For the container credentials endpoint and instance metadata:
+    /// never through a proxy (`HTTP_PROXY` must not see the role's keys,
+    /// and could not reach a link-local address anyway), never redirected.
+    local_http: reqwest::Client,
     keys: tokio::sync::Mutex<KeyState>,
     /// The store id this prefix is claimed for, and whether the claim
     /// has been checked (once per process, before the first operation).
@@ -281,10 +480,15 @@ impl S3ChunkStore {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| format!("s3 blobs: http client: {error}"))?;
+        let local_http = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| format!("s3 blobs: http client: {error}"))?;
         let keys = KeyState {
             keys: match &options.credentials {
                 S3Credentials::Static(keys) => Some((keys.clone(), None)),
-                S3Credentials::WebIdentity { .. } => None,
+                _ => None,
             },
             failed: None,
         };
@@ -293,6 +497,7 @@ impl S3ChunkStore {
                 region: Mutex::new(options.region.clone()),
                 options,
                 http,
+                local_http,
                 keys: tokio::sync::Mutex::new(keys),
                 owner,
                 claimed: tokio::sync::OnceCell::new(),
@@ -331,14 +536,17 @@ impl S3ChunkStore {
         &self.inner.options
     }
 
-    /// At startup, with static keys: check the store's claims now and fail
-    /// if the bucket refused them for good (wrong keys, a policy that
-    /// forbids the prefix, a prefix another store owns), so a server never
+    /// At startup, with credentials the host attaches (static keys, the
+    /// container's or the instance's role): check the store's claims now
+    /// and fail if the bucket refused them for good (wrong keys, a policy
+    /// that forbids the prefix, a prefix another store owns) or no
+    /// credentials were found at all (nothing answered as instance
+    /// metadata, the chain's last fallback), so a server never
     /// runs with large values that can only stay on its own disk. A bucket
     /// that is unreachable, failing or slow (network, 5xx, over
-    /// [`STARTUP_CHECK_TIMEOUT`]) is only logged: the store retries.
+    /// `STARTUP_CHECK_TIMEOUT`) is only logged: the store retries.
     pub async fn check_at_startup(&self) -> Result<(), String> {
-        if !matches!(self.inner.options.credentials, S3Credentials::Static(_)) {
+        if !self.inner.options.credentials.attached() {
             return Ok(());
         }
         let inner = Arc::clone(&self.inner);
@@ -523,17 +731,22 @@ impl Inner {
         {
             return Err(error.clone());
         }
-        let S3Credentials::WebIdentity { role_arn, token } = &self.options.credentials else {
-            unreachable!("static keys never expire");
+        let fetched = match &self.options.credentials {
+            S3Credentials::Static(_) => unreachable!("static keys never expire"),
+            S3Credentials::WebIdentity { role_arn, token } => match token.read() {
+                Ok(token) => self.assume_role(role_arn, &token).await,
+                Err(error) => Err(format!("s3 blobs: {error}")),
+            },
+            S3Credentials::Container { uri, authorization } => {
+                self.container_keys(uri, authorization.as_ref()).await
+            }
+            S3Credentials::InstanceMetadata { endpoint } => self.instance_keys(endpoint).await,
         };
-        let assumed = match token.read() {
-            Ok(token) => self.assume_role(role_arn, &token).await,
-            Err(error) => Err(format!("s3 blobs: {error}")),
-        };
-        match assumed {
+        match fetched {
             Ok((keys, expires)) => {
-                let until = expires.unwrap_or_else(|| SystemTime::now() + ASSUMED_FOR);
-                state.keys = Some((keys.clone(), Some(until - REFRESH_EARLY)));
+                let now = SystemTime::now();
+                let until = expires.unwrap_or_else(|| now + ASSUMED_FOR);
+                state.keys = Some((keys.clone(), Some(refresh_at(now, until))));
                 state.failed = None;
                 Ok(keys)
             }
@@ -542,6 +755,132 @@ impl Inner {
                 Err(error)
             }
         }
+    }
+
+    /// The task or pod role's keys from the container credentials
+    /// endpoint, and when they expire.
+    async fn container_keys(
+        &self,
+        uri: &str,
+        authorization: Option<&ContainerToken>,
+    ) -> Result<(Keys, Option<SystemTime>), String> {
+        let at = endpoint_host(uri);
+        let failed = |why: String| format!("s3 blobs: container credentials at {at}: {why}");
+        let token = authorization.map(ContainerToken::read).transpose()?;
+        let mut attempt = 0;
+        let (status, body) = loop {
+            attempt += 1;
+            let mut request = self.local_http.get(uri).timeout(CONTAINER_TIMEOUT);
+            if let Some(token) = &token {
+                request = request.header("authorization", token);
+            }
+            match request.send().await {
+                Ok(response) if retried(response.status()) && attempt < METADATA_ATTEMPTS => {}
+                Ok(response) => {
+                    break (
+                        response.status(),
+                        metadata_body(response).await.map_err(failed)?,
+                    );
+                }
+                Err(_) if attempt < METADATA_ATTEMPTS => {}
+                Err(error) => return Err(failed(error.without_url().to_string())),
+            }
+            tokio::time::sleep(METADATA_RETRY_PAUSE).await;
+        };
+        if !status.is_success() {
+            return Err(failed(format!("{status} {}", json_message(&body))));
+        }
+        role_keys(&body).map_err(failed)
+    }
+
+    /// The instance profile role's keys through IMDSv2: a session token
+    /// (PUT), the role's name, then its keys, each request carrying the
+    /// token. Nothing answering the token request means this is no EC2
+    /// instance, and since instance metadata is the chain's last source,
+    /// that no credentials were found anywhere. That case is not retried,
+    /// so a host without instance metadata learns it within one
+    /// [`IMDS_TIMEOUT`]; a service that answers but fails (IMDS throttles
+    /// with 429 and 503) is asked again, as the AWS SDKs do.
+    async fn instance_keys(&self, endpoint: &str) -> Result<(Keys, Option<SystemTime>), String> {
+        let imds = |why: String| format!("s3 blobs: EC2 instance metadata at {endpoint}: {why}");
+        let mut attempt = 0;
+        let token = loop {
+            attempt += 1;
+            let response = self
+                .local_http
+                .put(format!("{endpoint}/latest/api/token"))
+                .header("x-aws-ec2-metadata-token-ttl-seconds", IMDS_TOKEN_TTL)
+                .timeout(IMDS_TIMEOUT)
+                .send()
+                .await;
+            match response {
+                Ok(response) if response.status().is_success() => {
+                    break metadata_body(response).await.map_err(imds)?;
+                }
+                Ok(response) if retried(response.status()) && attempt < METADATA_ATTEMPTS => {}
+                Ok(response) => return Err(imds(format!("token: {}", response.status()))),
+                Err(error) if error.is_connect() || error.is_timeout() => {
+                    self.refuse(
+                        "set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or AWS_ROLE_ARN, \
+                         or run where the host attaches a role (an ECS task role, an EC2 \
+                         instance profile; in a container on EC2, the instance's metadata \
+                         hop limit must be at least 2)",
+                    );
+                    return Err(format!(
+                        "s3 blobs: no AWS credentials found; tried {SOURCES_TRIED}; \
+                         and EC2 instance metadata at {endpoint}, which did not answer within {}s",
+                        IMDS_TIMEOUT.as_secs()
+                    ));
+                }
+                Err(_) if attempt < METADATA_ATTEMPTS => {}
+                Err(error) => return Err(imds(error.without_url().to_string())),
+            }
+            tokio::time::sleep(METADATA_RETRY_PAUSE).await;
+        };
+        let token = token.trim();
+        let get = async |path: &str, what: &str| -> Result<String, String> {
+            let mut attempt = 0;
+            loop {
+                attempt += 1;
+                let response = self
+                    .local_http
+                    .get(format!(
+                        "{endpoint}/latest/meta-data/iam/security-credentials/{path}"
+                    ))
+                    .header("x-aws-ec2-metadata-token", token)
+                    .timeout(IMDS_TIMEOUT)
+                    .send()
+                    .await;
+                match response {
+                    Ok(response) if response.status().is_success() => {
+                        return metadata_body(response).await.map_err(imds);
+                    }
+                    Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {
+                        return Err(imds(format!(
+                            "{what}: the instance has no instance profile (IAM role) attached"
+                        )));
+                    }
+                    Ok(response) if retried(response.status()) && attempt < METADATA_ATTEMPTS => {}
+                    Ok(response) => return Err(imds(format!("{what}: {}", response.status()))),
+                    Err(_) if attempt < METADATA_ATTEMPTS => {}
+                    Err(error) => {
+                        return Err(imds(format!("{what}: {}", error.without_url())));
+                    }
+                }
+                tokio::time::sleep(METADATA_RETRY_PAUSE).await;
+            }
+        };
+        let roles = get("", "role").await?;
+        let role = roles
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .ok_or_else(|| {
+                imds("role: the instance has no instance profile (IAM role) attached".to_owned())
+            })?
+            .to_owned();
+        let body = get(&uri_encode(&role, true), "keys").await?;
+        role_keys(&body).map_err(|why| imds(format!("keys for {role}: {why}")))
     }
 
     /// Short-lived keys for `role_arn` (STS `AssumeRoleWithWebIdentity`,
@@ -595,7 +934,7 @@ impl Inner {
 
     /// Forget assumed keys the bucket called expired or invalid.
     async fn drop_keys(&self) {
-        if matches!(self.options.credentials, S3Credentials::WebIdentity { .. }) {
+        if self.options.credentials.refreshed() {
             self.keys.lock().await.keys = None;
         }
     }
@@ -1064,6 +1403,104 @@ async fn read_bounded(
         body.extend_from_slice(&chunk);
     }
     Ok(body.freeze())
+}
+
+/// When keys valid `until` are replaced: [`REFRESH_EARLY`] before then,
+/// or for keys handed out closer to their expiry than that (the instance
+/// and container endpoints rotate their keys late), halfway there, and
+/// never sooner than [`MIN_KEY_USE`] from `now`.
+fn refresh_at(now: SystemTime, until: SystemTime) -> SystemTime {
+    let left = until.duration_since(now).unwrap_or_default();
+    let use_for = if left > REFRESH_EARLY * 2 {
+        left - REFRESH_EARLY
+    } else {
+        (left / 2).max(MIN_KEY_USE)
+    };
+    now + use_for
+}
+
+/// `scheme://host[:port]` of `uri`: what errors name of an endpoint,
+/// whose path may identify a task's credentials.
+fn endpoint_host(uri: &str) -> String {
+    match reqwest::Url::parse(uri) {
+        Ok(url) => match (url.host_str(), url.port()) {
+            (Some(host), Some(port)) => format!("{}://{host}:{port}", url.scheme()),
+            (Some(host), None) => format!("{}://{host}", url.scheme()),
+            (None, _) => "the endpoint".to_owned(),
+        },
+        Err(_) => "the endpoint".to_owned(),
+    }
+}
+
+/// Whether a metadata reply with `status` is worth asking again for.
+fn retried(status: reqwest::StatusCode) -> bool {
+    status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
+/// A metadata reply's body, of at most [`METADATA_BODY_LIMIT`] bytes.
+async fn metadata_body(mut response: reqwest::Response) -> Result<String, String> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("read reply: {}", error.without_url()))?
+    {
+        if body.len() + chunk.len() > METADATA_BODY_LIMIT {
+            return Err(format!("reply longer than {METADATA_BODY_LIMIT} bytes"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+/// The `Code` and `message` / `Message` of a JSON error reply, if any.
+fn json_message(body: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return String::new();
+    };
+    ["code", "Code", "message", "Message"]
+        .iter()
+        .filter_map(|field| value.get(field)?.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Keys from the JSON the container credentials endpoint and instance
+/// metadata answer with (`AccessKeyId`, `SecretAccessKey`, `Token`,
+/// `Expiration`; instance metadata adds `"Code": "Success"`).
+fn role_keys(body: &str) -> Result<(Keys, Option<SystemTime>), String> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct Reply {
+        code: Option<String>,
+        message: Option<String>,
+        access_key_id: Option<String>,
+        secret_access_key: Option<String>,
+        token: Option<String>,
+        expiration: Option<String>,
+    }
+    let reply: Reply =
+        serde_json::from_str(body).map_err(|_| "the reply is not credentials JSON".to_owned())?;
+    if let Some(code) = reply.code.filter(|code| code != "Success") {
+        return Err(format!("{code} {}", reply.message.unwrap_or_default()));
+    }
+    let (Some(access_key_id), Some(secret_access_key)) =
+        (reply.access_key_id, reply.secret_access_key)
+    else {
+        return Err("no AccessKeyId and SecretAccessKey".to_owned());
+    };
+    let expires = match reply.expiration {
+        Some(at) => Some(parse_iso8601(&at).ok_or_else(|| format!("unreadable Expiration {at}"))?),
+        None => None,
+    };
+    Ok((
+        Keys {
+            access_key_id,
+            secret_access_key,
+            session_token: reply.token.filter(|token| !token.is_empty()),
+        },
+        expires,
+    ))
 }
 
 /// `YYYY-MM-DDTHH:MM:SS[.fff]Z`, as STS writes `Expiration`.
@@ -1652,6 +2089,483 @@ mod tests {
         assert_eq!(host, "s3.us-east-1.amazonaws.com");
         assert!(path.starts_with("/jazz.app/blobs/"), "{path}");
     }
+
+    fn with(credentials: S3Credentials, bucket: &mock::MockS3) -> S3Options {
+        S3Options {
+            credentials,
+            ..bucket.options("app/")
+        }
+    }
+
+    fn container(
+        metadata: &mock::MockMetadata,
+        authorization: Option<ContainerToken>,
+    ) -> S3Credentials {
+        S3Credentials::Container {
+            uri: format!("{}/v2/credentials/task-guid", metadata.endpoint),
+            authorization,
+        }
+    }
+
+    /// Pretend the keys in use reached their refresh time.
+    fn age_keys(store: &S3ChunkStore) {
+        let mut state = store.inner.keys.try_lock().unwrap();
+        let (_, until) = state.keys.as_mut().expect("keys in use");
+        *until = Some(SystemTime::now() - Duration::from_secs(1));
+    }
+
+    /// The container endpoint's keys sign requests, are fetched once for
+    /// many operations, and again (with the token file read afresh, as EKS
+    /// Pod Identity rotates it) once they near their expiry.
+    #[test]
+    fn container_keys_carry_the_token_file_and_refresh_before_expiry() {
+        use std::sync::atomic::Ordering;
+        let bucket = mock::MockS3::start();
+        let metadata = mock::MockMetadata::start(&bucket);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("token");
+        std::fs::write(&file, "pod-token-1\n").unwrap();
+        *metadata.state.container_auth.lock().unwrap() = Some("pod-token-1".to_owned());
+        let store = S3ChunkStore::new(
+            with(
+                container(&metadata, Some(ContainerToken::File(file.clone()))),
+                &bucket,
+            ),
+            "me".to_owned(),
+        )
+        .unwrap();
+        let (key, bytes) = node(1);
+        block(store.put(&key, &bytes)).unwrap();
+        assert_eq!(block(store.get(&key)).unwrap().as_deref(), Some(&bytes[..]));
+        assert_eq!(metadata.state.container_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            metadata
+                .state
+                .container_auth_seen
+                .lock()
+                .unwrap()
+                .as_deref(),
+            Some("pod-token-1")
+        );
+
+        std::fs::write(&file, "pod-token-2").unwrap();
+        *metadata.state.container_auth.lock().unwrap() = Some("pod-token-2".to_owned());
+        age_keys(&store);
+        let (key, bytes) = node(2);
+        block(store.put(&key, &bytes)).unwrap();
+        assert_eq!(metadata.state.container_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            metadata
+                .state
+                .container_auth_seen
+                .lock()
+                .unwrap()
+                .as_deref(),
+            Some("pod-token-2")
+        );
+        // The new keys are the ones in use.
+        let keys = jazz::db::block_on(store.inner.keys()).unwrap();
+        assert_eq!(keys.access_key_id, "ASIAROLE2");
+        assert_eq!(keys.session_token.as_deref(), Some("rsession2"));
+    }
+
+    /// An authorization token from the environment is sent as is; a wrong
+    /// one fails naming the endpoint's host, never its path or the token.
+    #[test]
+    fn container_keys_carry_the_token_value() {
+        let bucket = mock::MockS3::start();
+        let metadata = mock::MockMetadata::start(&bucket);
+        *metadata.state.container_auth.lock().unwrap() = Some("ecs-token".to_owned());
+        let good = S3ChunkStore::new(
+            with(
+                container(
+                    &metadata,
+                    Some(ContainerToken::Value("ecs-token".to_owned())),
+                ),
+                &bucket,
+            ),
+            "me".to_owned(),
+        )
+        .unwrap();
+        let (key, bytes) = node(1);
+        block(good.put(&key, &bytes)).unwrap();
+        let wrong = S3ChunkStore::new(
+            with(
+                container(&metadata, Some(ContainerToken::Value("stale".to_owned()))),
+                &bucket,
+            ),
+            "other".to_owned(),
+        )
+        .unwrap();
+        let error = block(wrong.get(&key)).unwrap_err().message;
+        assert!(error.contains(&metadata.endpoint), "{error}");
+        assert!(
+            error.contains("403") && error.contains("AccessDenied"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("task-guid") && !error.contains("stale"),
+            "{error}"
+        );
+    }
+
+    /// IMDSv2: a session token is PUT for first, and every metadata
+    /// request carries it; the role is listed, then its keys fetched. A
+    /// refresh asks for a new token.
+    #[test]
+    fn instance_keys_come_through_an_imdsv2_session_token() {
+        use std::sync::atomic::Ordering;
+        let bucket = mock::MockS3::start();
+        let metadata = mock::MockMetadata::start(&bucket);
+        let store = S3ChunkStore::new(
+            with(
+                S3Credentials::InstanceMetadata {
+                    endpoint: metadata.endpoint.clone(),
+                },
+                &bucket,
+            ),
+            "me".to_owned(),
+        )
+        .unwrap();
+        jazz::db::block_on(store.check_at_startup()).unwrap();
+        let (key, bytes) = node(1);
+        block(store.put(&key, &bytes)).unwrap();
+        assert_eq!(block(store.get(&key)).unwrap().as_deref(), Some(&bytes[..]));
+        let state = &metadata.state;
+        assert_eq!(state.token_puts.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            *state.token_ttls.lock().unwrap(),
+            vec![IMDS_TOKEN_TTL.to_owned()]
+        );
+        assert_eq!(state.metadata_gets.load(Ordering::Relaxed), 2);
+        assert_eq!(state.metadata_refused.load(Ordering::Relaxed), 0);
+
+        age_keys(&store);
+        let (key, bytes) = node(2);
+        block(store.put(&key, &bytes)).unwrap();
+        assert_eq!(state.token_puts.load(Ordering::Relaxed), 2);
+        assert_eq!(state.metadata_gets.load(Ordering::Relaxed), 4);
+        assert_eq!(state.metadata_refused.load(Ordering::Relaxed), 0);
+    }
+
+    /// A throttling instance metadata service is asked again.
+    #[test]
+    fn a_throttling_instance_metadata_service_is_asked_again() {
+        use std::sync::atomic::Ordering;
+        let bucket = mock::MockS3::start();
+        let metadata = mock::MockMetadata::start(&bucket);
+        metadata.state.fail_next.store(2, Ordering::Relaxed);
+        let store = S3ChunkStore::new(
+            with(
+                S3Credentials::InstanceMetadata {
+                    endpoint: metadata.endpoint.clone(),
+                },
+                &bucket,
+            ),
+            "me".to_owned(),
+        )
+        .unwrap();
+        let (key, bytes) = node(1);
+        block(store.put(&key, &bytes)).unwrap();
+        assert_eq!(metadata.state.token_puts.load(Ordering::Relaxed), 1);
+        assert_eq!(metadata.state.fail_next.load(Ordering::Relaxed), 0);
+    }
+
+    /// An instance without a role says so.
+    #[test]
+    fn an_instance_without_a_role_says_so() {
+        use std::sync::atomic::Ordering;
+        let bucket = mock::MockS3::start();
+        let metadata = mock::MockMetadata::start(&bucket);
+        metadata.state.no_role.store(true, Ordering::Relaxed);
+        let store = S3ChunkStore::new(
+            with(
+                S3Credentials::InstanceMetadata {
+                    endpoint: metadata.endpoint.clone(),
+                },
+                &bucket,
+            ),
+            "me".to_owned(),
+        )
+        .unwrap();
+        let (key, _) = node(1);
+        let error = block(store.get(&key)).unwrap_err().message;
+        assert!(error.contains("no instance profile"), "{error}");
+    }
+
+    /// Where nothing answers as instance metadata (no EC2 instance), the
+    /// startup check fails within the metadata timeout, naming every
+    /// source the chain tried.
+    #[test]
+    fn no_instance_metadata_fails_at_startup_naming_every_source() {
+        let bucket = mock::MockS3::start();
+        // A port nothing listens on.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", closed.local_addr().unwrap());
+        drop(closed);
+        let store = S3ChunkStore::new(
+            with(S3Credentials::InstanceMetadata { endpoint }, &bucket),
+            "me".to_owned(),
+        )
+        .unwrap();
+        let started = Instant::now();
+        let error = jazz::db::block_on(store.check_at_startup()).unwrap_err();
+        assert!(
+            started.elapsed() < STARTUP_CHECK_TIMEOUT,
+            "{:?}",
+            started.elapsed()
+        );
+        for source in [
+            "AWS_ACCESS_KEY_ID",
+            "AWS_ROLE_ARN",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            "EC2 instance metadata",
+        ] {
+            assert!(error.contains(source), "{source} missing from {error}");
+        }
+        assert!(error.contains("hop limit"), "{error}");
+    }
+
+    /// A role endpoint that fails answers a whole batch with one fetch (of
+    /// [`METADATA_ATTEMPTS`] tries),
+    /// and every operation for [`ASSUME_FAILURE_HOLD`] after it.
+    #[test]
+    fn a_failing_role_endpoint_is_held_off() {
+        use std::sync::atomic::Ordering;
+        let bucket = mock::MockS3::start();
+        let metadata = mock::MockMetadata::start(&bucket);
+        metadata.state.failing.store(true, Ordering::Relaxed);
+        let store =
+            S3ChunkStore::new(with(container(&metadata, None), &bucket), "me".to_owned()).unwrap();
+        let nodes: Vec<_> = (0..8).map(node).collect();
+        let results = jazz::db::block_on(futures::future::join_all(
+            nodes.iter().map(|(key, bytes)| store.put(key, bytes)),
+        ));
+        for result in results {
+            let error = result.unwrap_err().message;
+            assert!(error.contains("500") && error.contains("Busy"), "{error}");
+        }
+        assert_eq!(
+            metadata.state.container_calls.load(Ordering::Relaxed),
+            METADATA_ATTEMPTS as u64
+        );
+        // Recovered, but still held off.
+        metadata.state.failing.store(false, Ordering::Relaxed);
+        let (key, bytes) = &nodes[0];
+        block(store.put(key, bytes)).unwrap_err();
+        assert_eq!(
+            metadata.state.container_calls.load(Ordering::Relaxed),
+            METADATA_ATTEMPTS as u64
+        );
+        // Once the hold is over, the endpoint is asked again.
+        store
+            .inner
+            .keys
+            .try_lock()
+            .unwrap()
+            .failed
+            .as_mut()
+            .unwrap()
+            .0 -= ASSUME_FAILURE_HOLD;
+        // (The prefix claim, which failed on the same keys, holds off too.)
+        if let Some((at, _)) = store.inner.claim_failed.lock().unwrap().as_mut() {
+            *at -= ASSUME_FAILURE_HOLD;
+        }
+        block(store.put(key, bytes)).unwrap();
+        assert_eq!(
+            metadata.state.container_calls.load(Ordering::Relaxed),
+            METADATA_ATTEMPTS as u64 + 1
+        );
+    }
+
+    /// Keys the bucket calls expired are fetched again from the role
+    /// endpoint, as assumed keys are.
+    #[test]
+    fn keys_the_bucket_calls_expired_are_fetched_again() {
+        use std::sync::atomic::Ordering;
+        let bucket = mock::MockS3::start();
+        let metadata = mock::MockMetadata::start(&bucket);
+        let store =
+            S3ChunkStore::new(with(container(&metadata, None), &bucket), "me".to_owned()).unwrap();
+        let (key, bytes) = node(1);
+        block(store.put(&key, &bytes)).unwrap();
+        // The bucket forgets the keys, as when the role's session ends.
+        bucket.state.issue("ASIAROLE1", "rsecret1", "revoked");
+        block(store.get(&key)).unwrap_err();
+        assert_eq!(block(store.get(&key)).unwrap().as_deref(), Some(&bytes[..]));
+        assert_eq!(metadata.state.container_calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn refreshes_early_or_halfway_for_keys_near_their_expiry() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let hour = Duration::from_secs(3600);
+        assert_eq!(refresh_at(now, now + hour), now + hour - REFRESH_EARLY);
+        let six_minutes = Duration::from_secs(360);
+        assert_eq!(refresh_at(now, now + six_minutes), now + six_minutes / 2);
+        assert_eq!(
+            refresh_at(now, now + Duration::from_secs(10)),
+            now + MIN_KEY_USE
+        );
+        assert_eq!(refresh_at(now, now - hour), now + MIN_KEY_USE);
+    }
+
+    #[test]
+    fn reads_role_keys_and_refuses_failures() {
+        let (keys, expires) = role_keys(
+            r#"{"Code":"Success","AccessKeyId":"ASIA1","SecretAccessKey":"s","Token":"t","Expiration":"2013-05-24T00:00:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(keys.access_key_id, "ASIA1");
+        assert_eq!(keys.session_token.as_deref(), Some("t"));
+        assert_eq!(
+            expires,
+            Some(UNIX_EPOCH + Duration::from_secs(1_369_353_600))
+        );
+        let error =
+            role_keys(r#"{"Code":"AssumeRoleUnauthorizedAccess","Message":"no"}"#).unwrap_err();
+        assert!(error.contains("AssumeRoleUnauthorizedAccess"), "{error}");
+        assert!(role_keys("<html>").is_err());
+        assert!(
+            role_keys(r#"{"AccessKeyId":"a","SecretAccessKey":"s","Expiration":"soon"}"#).is_err()
+        );
+    }
+
+    /// The default chain's order: keys, web identity, container, instance.
+    #[test]
+    fn finds_credentials_in_the_default_chain_order() {
+        let chain = |vars: &[(&str, &str)]| {
+            let vars: std::collections::BTreeMap<String, String> = vars
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect();
+            S3Credentials::from_vars(|name| vars.get(name).cloned())
+        };
+        let keys = [
+            ("AWS_ACCESS_KEY_ID", "AKIA"),
+            ("AWS_SECRET_ACCESS_KEY", "s"),
+        ];
+        let role = [
+            ("AWS_ROLE_ARN", "arn:aws:iam::1:role/r"),
+            ("AWS_WEB_IDENTITY_TOKEN_FILE", "/t"),
+        ];
+        let relative = (
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "/v2/credentials/x",
+        );
+        let full = (
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            "http://127.0.0.1:9/creds",
+        );
+        let all: Vec<_> = keys
+            .iter()
+            .chain(&role)
+            .chain([&relative, &full])
+            .copied()
+            .collect();
+        assert!(matches!(chain(&all), Ok(S3Credentials::Static(_))));
+        assert!(matches!(
+            chain(&all[2..]),
+            Ok(S3Credentials::WebIdentity {
+                token: WebIdentityToken::File(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            chain(&all[4..]),
+            Ok(S3Credentials::Container { uri, authorization: None })
+                if uri == "http://169.254.170.2/v2/credentials/x"
+        ));
+        let Ok(S3Credentials::Container {
+            uri,
+            authorization: Some(ContainerToken::File(file)),
+        }) = chain(&[
+            full,
+            ("AWS_CONTAINER_AUTHORIZATION_TOKEN", "v"),
+            ("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE", "/var/run/token"),
+        ])
+        else {
+            panic!("a full URI with a token file");
+        };
+        assert_eq!(uri, "http://127.0.0.1:9/creds");
+        assert_eq!(file, PathBuf::from("/var/run/token"));
+        assert!(matches!(
+            chain(&[full, ("AWS_CONTAINER_AUTHORIZATION_TOKEN", "v")]),
+            Ok(S3Credentials::Container {
+                authorization: Some(ContainerToken::Value(_)),
+                ..
+            })
+        ));
+        assert!(matches!(
+            chain(&[]),
+            Ok(S3Credentials::InstanceMetadata { endpoint }) if endpoint == IMDS_ENDPOINT
+        ));
+        assert!(matches!(
+            chain(&[("AWS_EC2_METADATA_SERVICE_ENDPOINT", "http://[fd00:ec2::254]/")]),
+            Ok(S3Credentials::InstanceMetadata { endpoint }) if endpoint == "http://[fd00:ec2::254]"
+        ));
+        let error = chain(&[("AWS_EC2_METADATA_DISABLED", "true")]).unwrap_err();
+        for source in [
+            "AWS_ACCESS_KEY_ID",
+            "AWS_ROLE_ARN",
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            "AWS_EC2_METADATA_DISABLED",
+        ] {
+            assert!(error.contains(source), "{source} missing from {error}");
+        }
+        assert!(
+            chain(&[(
+                "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+                "http://example.com/creds"
+            )])
+            .is_err()
+        );
+        // Empty values count as unset.
+        assert!(matches!(
+            chain(&[("AWS_ACCESS_KEY_ID", ""), relative]),
+            Ok(S3Credentials::Container { .. })
+        ));
+    }
+
+    #[test]
+    fn sends_container_keys_over_http_only_to_local_or_link_local_hosts() {
+        for allowed in [
+            "https://creds.example.com/x",
+            "http://127.0.0.1:8080/creds",
+            "http://127.1.2.3/creds",
+            "http://localhost/creds",
+            "http://[::1]:80/creds",
+            "http://169.254.170.2/v2/credentials/x",
+            "http://169.254.170.23/v1/credentials",
+            "http://[fd00:ec2::23]/v1/credentials",
+        ] {
+            assert!(container_uri_allowed(allowed), "{allowed}");
+        }
+        for refused in [
+            "http://example.com/creds",
+            "http://169.254.169.254/latest",
+            "http://10.0.0.1/creds",
+            "ftp://127.0.0.1/creds",
+            "http://127.0.0.1.example.com/creds",
+            "http://127.0.0.1:80@evil.example/creds",
+            "http://user:pass@127.0.0.1/creds",
+            "https://user@creds.example.com/x",
+            "not a url",
+        ] {
+            assert!(!container_uri_allowed(refused), "{refused}");
+        }
+        // Errors name the endpoint by scheme, host and port only.
+        assert_eq!(
+            endpoint_host("http://user:secret@127.0.0.1:9/v2/credentials/guid?x"),
+            "http://127.0.0.1:9"
+        );
+        assert_eq!(
+            endpoint_host("http://169.254.170.2/v2/credentials/guid"),
+            "http://169.254.170.2"
+        );
+    }
 }
 
 /// An S3 and STS stand-in over HTTP that checks what the real ones check:
@@ -1708,6 +2622,16 @@ pub(crate) mod mock {
         /// What STS was last asked to accept.
         pub sts_token: Mutex<Option<String>>,
         pub sts_query: Mutex<Option<String>>,
+    }
+
+    impl State {
+        /// Make `id` valid keys, as STS or a role endpoint issuing them.
+        pub(crate) fn issue(&self, id: &str, secret: &str, token: &str) {
+            self.issued
+                .lock()
+                .unwrap()
+                .insert(id.to_owned(), (secret.to_owned(), token.to_owned()));
+        }
     }
 
     pub(crate) struct MockS3 {
@@ -2038,5 +2962,174 @@ pub(crate) mod mock {
              </Credentials></AssumeRoleWithWebIdentityResult></AssumeRoleWithWebIdentityResponse>"
         );
         (StatusCode::OK, reply.into_bytes())
+    }
+
+    /// A container credentials endpoint and an IMDSv2 instance metadata
+    /// service in one, issuing keys `bucket` accepts.
+    pub(crate) struct MockMetadata {
+        pub state: Arc<MetadataState>,
+        pub endpoint: String,
+        _runtime: tokio::runtime::Runtime,
+    }
+
+    #[derive(Default)]
+    pub(crate) struct MetadataState {
+        bucket: Arc<State>,
+        /// The `Authorization` the container endpoint wants, if any.
+        pub container_auth: Mutex<Option<String>>,
+        /// The `Authorization` the container endpoint last got.
+        pub container_auth_seen: Mutex<Option<String>>,
+        pub container_calls: AtomicU64,
+        /// The container endpoint and instance metadata answer 500 while set.
+        pub failing: AtomicBool,
+        /// The next this many requests answer 503, as a throttling IMDS.
+        pub fail_next: AtomicU64,
+        /// Keys expire this many seconds from when they are issued.
+        pub expires_in: AtomicU64,
+        /// The instance has no role attached.
+        pub no_role: AtomicBool,
+        pub token_puts: AtomicU64,
+        /// The TTL each token PUT asked for.
+        pub token_ttls: Mutex<Vec<String>>,
+        /// Requests for role names or keys, and those of them refused for
+        /// carrying no valid session token.
+        pub metadata_gets: AtomicU64,
+        pub metadata_refused: AtomicU64,
+        tokens: Mutex<Vec<String>>,
+        issued: AtomicU64,
+    }
+
+    impl MockMetadata {
+        pub(crate) fn start(bucket: &MockS3) -> Self {
+            let state = Arc::new(MetadataState {
+                bucket: Arc::clone(&bucket.state),
+                expires_in: AtomicU64::new(6 * 3600),
+                ..MetadataState::default()
+            });
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let listener = runtime
+                .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+                .unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let served = Arc::clone(&state);
+            let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+                let state = Arc::clone(&served);
+                async move { metadata(&state, request) }
+            });
+            runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
+            Self {
+                state,
+                endpoint,
+                _runtime: runtime,
+            }
+        }
+    }
+
+    /// `YYYY-MM-DDTHH:MM:SSZ`, as the role endpoints write `Expiration`.
+    fn iso8601(at: SystemTime) -> String {
+        let d = amz_date(at);
+        format!(
+            "{}-{}-{}T{}:{}:{}Z",
+            &d[0..4],
+            &d[4..6],
+            &d[6..8],
+            &d[9..11],
+            &d[11..13],
+            &d[13..15]
+        )
+    }
+
+    fn keys_json(state: &MetadataState, imds: bool) -> String {
+        let n = state.issued.fetch_add(1, Ordering::Relaxed) + 1;
+        let (id, secret, token) = (
+            format!("ASIAROLE{n}"),
+            format!("rsecret{n}"),
+            format!("rsession{n}"),
+        );
+        state.bucket.issue(&id, &secret, &token);
+        let expires =
+            SystemTime::now() + Duration::from_secs(state.expires_in.load(Ordering::Relaxed));
+        let code = if imds {
+            r#""Code":"Success","Type":"AWS-HMAC","#
+        } else {
+            ""
+        };
+        format!(
+            r#"{{{code}"AccessKeyId":"{id}","SecretAccessKey":"{secret}","Token":"{token}","Expiration":"{}","RoleArn":"arn:aws:iam::1:role/task"}}"#,
+            iso8601(expires)
+        )
+    }
+
+    fn metadata(state: &MetadataState, request: axum::extract::Request) -> Reply {
+        use axum::http::{Method, StatusCode};
+        let header = |name: &str| {
+            request
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        let path = request.uri().path().to_owned();
+        let throttled = state
+            .fail_next
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .is_ok();
+        if throttled {
+            return (StatusCode::SERVICE_UNAVAILABLE, Vec::new());
+        }
+        if state.failing.load(Ordering::Relaxed) {
+            if path.starts_with("/v2/credentials/") {
+                state.container_calls.fetch_add(1, Ordering::Relaxed);
+            }
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                br#"{"code":"Busy","message":"try later"}"#.to_vec(),
+            );
+        }
+        if path == "/latest/api/token" {
+            if request.method() != Method::PUT {
+                return (StatusCode::METHOD_NOT_ALLOWED, Vec::new());
+            }
+            let Some(ttl) = header("x-aws-ec2-metadata-token-ttl-seconds") else {
+                return (StatusCode::BAD_REQUEST, Vec::new());
+            };
+            state.token_ttls.lock().unwrap().push(ttl);
+            let n = state.token_puts.fetch_add(1, Ordering::Relaxed) + 1;
+            let token = format!("imds-token-{n}");
+            state.tokens.lock().unwrap().push(token.clone());
+            return (StatusCode::OK, token.into_bytes());
+        }
+        if let Some(role) = path.strip_prefix("/latest/meta-data/iam/security-credentials/") {
+            state.metadata_gets.fetch_add(1, Ordering::Relaxed);
+            let token = header("x-aws-ec2-metadata-token");
+            if request.method() != Method::GET
+                || token.is_none_or(|token| !state.tokens.lock().unwrap().contains(&token))
+            {
+                state.metadata_refused.fetch_add(1, Ordering::Relaxed);
+                return (StatusCode::UNAUTHORIZED, Vec::new());
+            }
+            if state.no_role.load(Ordering::Relaxed) {
+                return (StatusCode::NOT_FOUND, Vec::new());
+            }
+            return match role {
+                "" => (StatusCode::OK, b"jazz-instance\n".to_vec()),
+                "jazz-instance" => (StatusCode::OK, keys_json(state, true).into_bytes()),
+                _ => (StatusCode::NOT_FOUND, Vec::new()),
+            };
+        }
+        if path.starts_with("/v2/credentials/") || path == "/get-credentials" {
+            state.container_calls.fetch_add(1, Ordering::Relaxed);
+            let auth = header("authorization");
+            *state.container_auth_seen.lock().unwrap() = auth.clone();
+            let wanted = state.container_auth.lock().unwrap().clone();
+            if wanted.is_some() && auth != wanted {
+                return (
+                    StatusCode::FORBIDDEN,
+                    br#"{"code":"AccessDenied","message":"bad token"}"#.to_vec(),
+                );
+            }
+            return (StatusCode::OK, keys_json(state, false).into_bytes());
+        }
+        (StatusCode::NOT_FOUND, Vec::new())
     }
 }

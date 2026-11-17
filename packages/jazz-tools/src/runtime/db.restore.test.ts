@@ -1,6 +1,5 @@
 import { expect, it } from "vitest";
-import { schema as s } from "../schema-namespace.js";
-import { definePermissions } from "../permissions/index.js";
+import { testApp } from "../testing/test-app.js";
 import { createDb } from "./default-create-db.js";
 import type { Db } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
@@ -9,17 +8,15 @@ import { startTestJazz } from "../testing/index.js";
 it.each(["standalone", "transaction"])(
   "can delete a restored plaintext row (%s)",
   async (mode) => {
-    const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
-    const permissions = definePermissions(app, ({ policy }) => {
-      policy.notes.allowRead.always();
-      policy.notes.allowInsert.always();
-      policy.notes.allowUpdate.always();
-      policy.notes.allowDelete.always();
-    });
+    const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
+    const permissions = {
+      format: 1,
+      tables: { notes: { read: "true", insert: "true", update: "true", delete: "true" } },
+    };
     const server = await startTestJazz({
-      app: app,
-      permissions: permissions,
-      coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+      app,
+      permissions,
+      coreOptions: { inMemory: true },
     });
     let db: Db | undefined;
     try {

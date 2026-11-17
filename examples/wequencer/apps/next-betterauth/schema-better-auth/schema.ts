@@ -3,7 +3,7 @@ import { schema as s } from "jazz-tools";
 // Better Auth's persistence is application infrastructure, not client data.
 // The root schema spreads these tables so the trusted server can use the Jazz
 // adapter while the deny-all policy keeps them out of the browser.
-export const schema = {
+export const tables = {
   better_auth_user: s.table(
     {
       name: s.string(),
@@ -32,7 +32,6 @@ export const schema = {
   ),
   better_auth_account: s.table(
     {
-      issuer: s.string(),
       accountId: s.string(),
       providerId: s.string(),
       userId: s.uuid(),
@@ -65,20 +64,10 @@ export const schema = {
   ),
 };
 
-type BetterAuthSchema = s.Schema<typeof schema>;
-export const app: s.App<BetterAuthSchema> = s.defineApp(schema, { migrations: "none" });
-
-export const permissions = s.definePermissions(app, ({ policy }) => {
-  for (const table of [
-    policy.better_auth_user,
-    policy.better_auth_session,
-    policy.better_auth_account,
-    policy.better_auth_verification,
-    policy.better_auth_jwks,
-  ]) {
-    table.allowRead.never();
-    table.allowInsert.never();
-    table.allowUpdate.never();
-    table.allowDelete.never();
-  }
-});
+export const permissions = {
+  better_auth_user: { read: false, insert: false, update: false, delete: false },
+  better_auth_session: { read: false, insert: false, update: false, delete: false },
+  better_auth_account: { read: false, insert: false, update: false, delete: false },
+  better_auth_verification: { read: false, insert: false, update: false, delete: false },
+  better_auth_jwks: { read: false, insert: false, update: false, delete: false },
+};

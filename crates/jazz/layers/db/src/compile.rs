@@ -19,8 +19,8 @@ use crate::records::{Value, ValueType};
 use crate::tools::{CmpOp, Operation, PolicyExpr, PolicyValue};
 
 use crate::values::{
-    STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT, Schema, Sql, Table, query_error, quote, to_sql,
-    unsupported,
+    STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT, Schema, Sql, Table, claim_as, claims_as,
+    query_error, quote, to_sql, unsupported, unwrap_nullable_type,
 };
 
 mod history;
@@ -315,6 +315,27 @@ pub struct View {
     pub base_cut: Option<Cut>,
 }
 
+/// How to read one cell of one row ([`Ctx::compile_cell`]).
+#[derive(Clone, Debug)]
+pub struct CellRead {
+    pub sql: String,
+    pub params: Vec<Sql>,
+    /// The parameter holding the row's id.
+    pub id_param: usize,
+    pub ty: ValueType,
+    pub tags: Option<crate::values::ColumnTags>,
+}
+
+/// The most columns a batched relation statement returns: Durable Object
+/// SQLite's `SQLITE_LIMIT_COLUMN` (see `durable_object_limits.rs`).
+pub(crate) const BATCH_COLUMNS_MAX: usize = 100;
+
+/// Whose children [`Ctx::children`] reads: one parent's, or a batch's.
+enum Parents<'p> {
+    One(&'p Value),
+    Batch { parents: Sql, blobs: bool },
+}
+
 /// A compiled root query.
 #[derive(Clone)]
 pub struct Compiled {
@@ -543,6 +564,12 @@ impl<'a> Ctx<'a> {
         )
     }
 
+    /// Whether [`Ctx::source`] reads `table`'s stored table itself, not
+    /// a branch view or a cut over it.
+    fn reads_table_directly(&self, table: &Table) -> bool {
+        self.cut.is_none() && (self.view.is_none() || table.branch_by.is_empty())
+    }
+
     /// The SQL source a table is read from. Under a branch view a branched
     /// table is its effective rows: head rows (tombstones included, so they
     /// mask), then base rows the head does not override. Filters, policies,
@@ -629,6 +656,23 @@ impl<'a> Ctx<'a> {
             None => Ok(Term::Missing),
             Some(value) => self.value_term(&value),
         }
+    }
+
+    /// `session.<path>` compared with a value of type `ty`: a provider claim
+    /// converts as [`claim_as`] says (one rule for every policy form and
+    /// query); the session's own parts keep their types.
+    fn claim_term(
+        &mut self,
+        session: &Session,
+        path: &[String],
+        ty: Option<&ValueType>,
+    ) -> Result<Term, Error> {
+        let value = session.resolve(path);
+        let value = match ty {
+            Some(ty) if is_claim(path) => value.and_then(|value| claim_as(ty, value)),
+            _ => value,
+        };
+        self.present(value)
     }
 
     /// A table by this schema's name for it; its stored name joins the
@@ -1190,9 +1234,6 @@ impl<'a> Ctx<'a> {
             let mut conjuncts = Vec::new();
             flatten_all(filter, &mut conjuncts);
             for conjunct in conjuncts {
-                if matches!(conjunct, Predicate::EnumMatch { .. }) {
-                    return Err(unsupported("enum-match filters in flat joins"));
-                }
                 let mut predicate = conjunct.clone();
                 let mut reads = BTreeSet::new();
                 let mut failed = None;
@@ -1454,28 +1495,99 @@ impl<'a> Ctx<'a> {
     }
 
     /// One array relation for one parent row.
+    /// The rows `array` relates to `parent`, with the index of the bound
+    /// parameter that carries `parent` (`None` when it is not bound: NaN
+    /// reads as SQL `NULL`). Only that parameter depends on `parent`, so
+    /// another parent of the same shape (scalar, or an array of references)
+    /// reuses the SQL with it rebound.
     pub fn compile_children(
-        mut self,
+        self,
         array: &ArraySubquery,
         parent: &Value,
-    ) -> Result<Compiled, Error> {
-        let child = self.table(&array.table)?;
-        let projection = projection(child, array.select.as_deref())?;
-        let alias = "t";
+    ) -> Result<(Compiled, Option<usize>), Error> {
         let elements = match parent {
             Value::Nullable(Some(inner)) => matches!(**inner, Value::Array(_)),
             value => matches!(value, Value::Array(_)),
         };
-        let parent = match self.value_term(parent)? {
-            Term::Bound(sql, _) => sql,
-            _ => "NULL".to_owned(),
+        self.children(array, elements, Parents::One(parent))
+    }
+
+    /// One array relation for many parents at once: the rows `array`
+    /// relates to each value of `parents`, a JSON array bound as one
+    /// parameter (see [`json_list`]; `blobs` when its items are hex
+    /// blobs). Each row carries, after its writer, the index in `parents`
+    /// of the parent it belongs to. Rows come grouped by parent in that
+    /// order, and each parent's rows are exactly, and in the same order,
+    /// what [`Ctx::compile_children`] reads for it: the same filters,
+    /// policy, order (ties broken by id) and, per parent, offset and limit.
+    /// `elements`: every parent is an array of references. Returns the
+    /// index of the parameter holding `parents`, the only one that depends
+    /// on them.
+    ///
+    /// `None` when the batched statement would return more columns than
+    /// [`BATCH_COLUMNS_MAX`] where the per-parent one fits: it adds the
+    /// parent's index, and a page of an array of references its row
+    /// number. `None` too for a page of a reverse relation read through a
+    /// branch view or a cut: the per-parent statement reaches each
+    /// parent's page through the view, where the batched one would read
+    /// the view whole for every parent.
+    pub fn compile_children_batch(
+        self,
+        array: &ArraySubquery,
+        elements: bool,
+        parents: Sql,
+        blobs: bool,
+    ) -> Result<Option<(Compiled, usize)>, Error> {
+        let child = self.schema.table(&array.table)?;
+        let paged = array.limit.is_some() || array.offset > 0;
+        if paged && !elements && !self.reads_table_directly(child) {
+            return Ok(None);
+        }
+        // id, _clock, _state, the projection, _writer, the parent's index
+        // and, for a page of an array of references, the row number.
+        let width =
+            projection(child, array.select.as_deref())?.len() + 5 + usize::from(paged && elements);
+        if width > BATCH_COLUMNS_MAX {
+            return Ok(None);
+        }
+        let (compiled, at) = self.children(array, elements, Parents::Batch { parents, blobs })?;
+        Ok(Some((compiled, at.expect("a batch binds its parents"))))
+    }
+
+    fn children(
+        mut self,
+        array: &ArraySubquery,
+        elements: bool,
+        parents: Parents<'_>,
+    ) -> Result<(Compiled, Option<usize>), Error> {
+        let child = self.table(&array.table)?;
+        let projection = projection(child, array.select.as_deref())?;
+        let alias = "t";
+        let parent_param = self.params.len();
+        // `parent`: the SQL a child row is correlated with. A batch reads
+        // its parents from `json_each` (`_p`), one row per parent, keyed by
+        // its index.
+        let (parent, parent_param, batch) = match parents {
+            Parents::One(value) => match self.value_term(value)? {
+                Term::Bound(sql, _) => (sql, Some(parent_param), None),
+                _ => ("NULL".to_owned(), None, None),
+            },
+            Parents::Batch { parents, blobs } => {
+                let mark = self.bind(parents);
+                let value = if blobs && !elements {
+                    "unhex(_p.value)"
+                } else {
+                    "_p.value"
+                };
+                (value.to_owned(), Some(parent_param), Some(mark))
+            }
         };
         // A forward array relation reads one child per array element, in
         // the array's order and with its duplicates.
-        let (from, correlated) = if elements {
-            ("JOIN", array_element_id("r"))
+        let correlated = if elements {
+            array_element_id("r")
         } else {
-            ("", parent.clone())
+            parent.clone()
         };
         let mut wheres = vec![
             format!("({alias}._state & {STATE_DELETED}) = 0"),
@@ -1491,31 +1603,111 @@ impl<'a> Ctx<'a> {
         let order = self.order_sql(child, alias, &array.order_by)?;
         let columns = projection
             .iter()
-            .map(|(name, ..)| Ok(format!(", {}", column_sql(child, alias, name)?)))
-            .collect::<Result<String, Error>>()?;
-        let limit = self.bind(Sql::Integer(array.limit.map_or(-1, |l| l as i64)));
-        let offset = self.bind(Sql::Integer(array.offset as i64));
-        let source = self.source(child)?;
-        let source = if elements {
-            format!("json_each({parent}) AS r {from} {source}")
-        } else {
-            source
-        };
+            .map(|(name, ..)| column_sql(child, alias, name))
+            .collect::<Result<Vec<String>, Error>>()?;
         let order = if elements && array.order_by.is_empty() {
             "r.key".to_owned()
         } else {
             order
         };
-        let statement = |order: &str| {
-            format!(
-                "SELECT {alias}.id, {alias}._clock, {alias}._state{columns}, {alias}._writer FROM {source} \
-                 AS {alias} WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
-                and(&wheres),
-            )
+        let sql = match batch {
+            None => {
+                let limit = self.bind(Sql::Integer(array.limit.map_or(-1, |l| l as i64)));
+                let offset = self.bind(Sql::Integer(array.offset as i64));
+                let source = self.source(child)?;
+                let source = if elements {
+                    format!("json_each({parent}) AS r JOIN {source}")
+                } else {
+                    source
+                };
+                let columns: String = columns.iter().map(|c| format!(", {c}")).collect();
+                format!(
+                    "SELECT {alias}.id, {alias}._clock, {alias}._state{columns}, {alias}._writer FROM {source} \
+                     AS {alias} WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
+                    and(&wheres),
+                )
+            }
+            Some(mark) => {
+                let paged = array.limit.is_some() || array.offset > 0;
+                let source = self.source(child)?;
+                let source = if elements {
+                    format!("json_each({mark}) AS _p JOIN json_each(_p.value) AS r JOIN {source}")
+                } else {
+                    format!("json_each({mark}) AS _p JOIN {source}")
+                };
+                let mut cells = vec![
+                    format!("{alias}.id"),
+                    format!("{alias}._clock"),
+                    format!("{alias}._state"),
+                ];
+                cells.extend(columns);
+                cells.push(format!("{alias}._writer"));
+                cells.push("_p.key".to_owned());
+                if paged && !elements {
+                    // Each parent's own page, read as its own statement
+                    // reads it: ordered and cut by a correlated subquery,
+                    // so SQLite walks the relation's index from each
+                    // parent and stops at the page's end. Numbering every
+                    // child in a window instead reads all of each parent's
+                    // children (a room's whole history for its newest
+                    // message). The source is the stored table (see
+                    // `compile_children_batch`), one row per (id, branch),
+                    // so the outer read seeks the page back by those.
+                    let limit = self.bind(Sql::Integer(array.limit.map_or(-1, |l| l as i64)));
+                    let offset = self.bind(Sql::Integer(array.offset as i64));
+                    let page_source = self.source(child)?;
+                    format!(
+                        "SELECT {} FROM {source} AS {alias} WHERE ({alias}.id, {alias}._branch) IN \
+                         (SELECT {alias}.id, {alias}._branch FROM {page_source} AS {alias} WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}) \
+                         ORDER BY _p.key, {order}",
+                        cells.join(", "),
+                        and(&wheres),
+                    )
+                } else if paged {
+                    // A forward array relation's page: its elements
+                    // numbered in the relation's order (the array bounds
+                    // them), with duplicates, the page kept.
+                    let mut keep = Vec::new();
+                    if array.offset > 0 {
+                        keep.push(format!(
+                            "_n > {}",
+                            self.bind(Sql::Integer(array.offset as i64))
+                        ));
+                    }
+                    if let Some(limit) = array.limit {
+                        let last = (array.offset as i64).saturating_add(limit as i64);
+                        keep.push(format!("_n <= {}", self.bind(Sql::Integer(last))));
+                    }
+                    let named = cells
+                        .iter()
+                        .enumerate()
+                        .map(|(i, cell)| format!("{cell} AS _c{i}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let outer = (0..cells.len())
+                        .map(|i| format!("_c{i}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let key = format!("_c{}", cells.len() - 1);
+                    format!(
+                        "SELECT {outer} FROM (SELECT {named}, ROW_NUMBER() OVER (PARTITION BY _p.key \
+                         ORDER BY {order}) AS _n FROM {source} AS {alias} WHERE {}) WHERE {} \
+                         ORDER BY {key}, _n",
+                        and(&wheres),
+                        keep.join(" AND "),
+                    )
+                } else {
+                    format!(
+                        "SELECT {} FROM {source} AS {alias} WHERE {} ORDER BY _p.key, {order}",
+                        cells.join(", "),
+                        and(&wheres),
+                    )
+                }
+            }
         };
         let schema = self.schema;
         let mut compiled = Compiled {
-            sql: statement(&order),
+            sql,
             params: self.params,
             projection,
             tables: self.tables,
@@ -1529,37 +1721,70 @@ impl<'a> Ctx<'a> {
         if !array.partial.is_empty() {
             compiled.partial = partial_projection(schema, &array.table, &array.partial, &compiled)?;
         }
-        Ok(compiled)
+        Ok((compiled, parent_param))
+    }
+
+    /// The cell `column` of each row of `table` whose id is in `ids` (a
+    /// JSON array of hex ids, [`json_ids`]), read as [`Ctx::compile_cell`]
+    /// reads one: through the same view and cut, with no policy or
+    /// deletion filter. Each row is (id, cell). Returns the index of the
+    /// parameter holding `ids`, the only one that depends on them.
+    pub fn compile_cells(
+        mut self,
+        table: &str,
+        column: &str,
+        ids: Sql,
+    ) -> Result<(CellRead, usize), Error> {
+        let table = self.table(table)?;
+        let column = table
+            .column(column)
+            .ok_or_else(|| unsupported("unknown correlation column"))?;
+        let at = self.params.len();
+        let ids = self.bind(ids);
+        let source = self.source(table)?;
+        let sql = format!(
+            "SELECT t.id, t.{} FROM {source} AS t WHERE t.id IN (SELECT unhex(value) FROM json_each({ids}))",
+            quote(&column.stored)
+        );
+        Ok((
+            CellRead {
+                sql,
+                params: self.params,
+                id_param: at,
+                ty: column.ty.clone(),
+                tags: column.tags.clone(),
+            },
+            at,
+        ))
     }
 
     /// One cell of row `id` of `table`, read through the same view and cut
-    /// as the rows it came from: a relation's parent value. The SQL, its
-    /// params and the cell's type.
+    /// as the rows it came from: a relation's parent value. Only the bound
+    /// `id` (at [`CellRead::id_param`]) depends on the row.
     pub fn compile_cell(
         mut self,
         table: &str,
         column: &str,
         id: RowUuid,
-    ) -> Result<
-        (
-            String,
-            Vec<Sql>,
-            ValueType,
-            Option<crate::values::ColumnTags>,
-        ),
-        Error,
-    > {
+    ) -> Result<CellRead, Error> {
         let table = self.table(table)?;
         let column = table
             .column(column)
             .ok_or_else(|| unsupported("unknown correlation column"))?;
         let source = self.source(table)?;
+        let id_param = self.params.len();
         let id = self.bind(Sql::Blob(id.0.as_bytes().to_vec()));
         let sql = format!(
             "SELECT t.{} FROM {source} AS t WHERE t.id = {id}",
             quote(&column.stored)
         );
-        Ok((sql, self.params, column.ty.clone(), column.tags.clone()))
+        Ok(CellRead {
+            sql,
+            params: self.params,
+            id_param,
+            ty: column.ty.clone(),
+            tags: column.tags.clone(),
+        })
     }
 
     /// A junction traversal from the row of `table` at `alias`: some live
@@ -1818,10 +2043,14 @@ impl<'a> Ctx<'a> {
                         check_candidate(table, column, option)?;
                     }
                 }
+                let ty = match left {
+                    Operand::Column(column) => table.column_type(column).cloned(),
+                    _ => None,
+                };
                 let left = self.operand(left, table, alias)?;
                 let options = options
                     .iter()
-                    .map(|option| self.operand(option, table, alias))
+                    .map(|option| self.operand_as(option, ty.as_ref(), table, alias))
                     .collect::<Result<Vec<_>, _>>()?;
                 let sql = self.in_list(left, options)?;
                 if id {
@@ -1848,9 +2077,7 @@ impl<'a> Ctx<'a> {
                 Term::NaN => "0".to_owned(),
                 term => format!("({} IS NULL)", term.sql().expect("present")),
             },
-            Predicate::EnumMatch { .. } => {
-                return Err(unsupported("enum payload predicates"));
-            }
+            Predicate::Removed(removed) => match *removed {},
         })
     }
 
@@ -1862,9 +2089,39 @@ impl<'a> Ctx<'a> {
         table: &Table,
         alias: &str,
     ) -> Result<String, Error> {
-        let left = self.operand(left, table, alias)?;
-        let right = self.operand(right, table, alias)?;
+        let (left, right) = match (left, right) {
+            (Operand::Column(column), other) => (
+                self.operand(left, table, alias)?,
+                self.operand_as(other, table.column_type(column), table, alias)?,
+            ),
+            (other, Operand::Column(column)) => (
+                self.operand_as(other, table.column_type(column), table, alias)?,
+                self.operand(right, table, alias)?,
+            ),
+            _ => (
+                self.operand(left, table, alias)?,
+                self.operand(right, table, alias)?,
+            ),
+        };
         self.cmp(op, left, right)
+    }
+
+    /// [`Self::operand`] compared with a column of type `ty`: a provider
+    /// claim converts as [`claim_as`] says, as it does in a policy.
+    fn operand_as(
+        &mut self,
+        operand: &Operand,
+        ty: Option<&ValueType>,
+        table: &Table,
+        alias: &str,
+    ) -> Result<Term, Error> {
+        match (operand, ty) {
+            (Operand::Claim(key), Some(ty)) if is_provider_claim_key(key) => {
+                let value = self.claims.claim(key).and_then(|value| claim_as(ty, value));
+                self.present(value)
+            }
+            _ => self.operand(operand, table, alias),
+        }
     }
 
     // ---- policies -------------------------------------------------------
@@ -2004,17 +2261,9 @@ impl<'a> Ctx<'a> {
                 column,
                 op,
                 value: PolicyValue::SessionRef(path),
-            } if is_uuid(table, column)
-                && path.first().map(String::as_str) != Some("__jazz_outer_row") =>
-            {
-                // A claim is JSON, so a UUID claim arrives as its string:
-                // compare it with a UUID column as the UUID it spells.
-                let value = match session.resolve(path) {
-                    Some(Value::String(text)) => text.parse().map(Value::Uuid).ok(),
-                    value => value,
-                };
+            } if is_claim(path) => {
                 let left = self.column_term(table, alias, column)?;
-                let right = self.present(value)?;
+                let right = self.claim_term(session, path, table.column_type(column))?;
                 self.cmp(op.clone(), left, right)?
             }
             PolicyExpr::Cmp { column, op, value } => {
@@ -2023,9 +2272,9 @@ impl<'a> Ctx<'a> {
                 self.cmp(op.clone(), left, right)?
             }
             PolicyExpr::SessionCmp { path, op, value } => {
-                let left = session.resolve(path);
-                let left = self.present(left)?;
-                let right = self.value_term(&public_value(value)?)?;
+                let right = public_value(value)?;
+                let left = self.claim_term(session, path, literal_type(&right).as_ref())?;
+                let right = self.value_term(&right)?;
                 self.cmp(op.clone(), left, right)?
             }
             PolicyExpr::IsNull { column } => {
@@ -2038,7 +2287,19 @@ impl<'a> Ctx<'a> {
             PolicyExpr::SessionIsNotNull { path } => bool_sql(session.is_not_null(path)),
             PolicyExpr::Contains { column, value } => {
                 let left = self.column_term(table, alias, column)?;
-                let right = self.policy_value(value, outer, session)?;
+                let right = match value {
+                    // An array column holds elements of its element type; a
+                    // text column contains text.
+                    PolicyValue::SessionRef(path) if is_claim(path) => {
+                        let ty = match table.column_type(column).map(unwrap_nullable_type) {
+                            Some(ValueType::Array(element)) => Some(element.as_ref().clone()),
+                            Some(_) => Some(ValueType::String),
+                            None => None,
+                        };
+                        self.claim_term(session, path, ty.as_ref())?
+                    }
+                    value => self.policy_value(value, outer, session)?,
+                };
                 if is_array(table, column) {
                     self.array_contains(left, right)
                 } else {
@@ -2050,47 +2311,81 @@ impl<'a> Ctx<'a> {
                 session_path,
             } => {
                 let left = self.column_term(table, alias, column)?;
-                let options = match session.resolve(session_path) {
-                    Some(Value::Array(values)) => values
-                        .iter()
-                        .map(|value| self.value_term(value))
-                        .collect::<Result<Vec<_>, _>>()?,
-                    Some(value) => vec![self.value_term(&value)?],
-                    None => Vec::new(),
+                let values = match (session.resolve(session_path), table.column_type(column)) {
+                    (Some(claim), Some(ty)) if is_claim(session_path) => claims_as(ty, claim),
+                    (Some(Value::Array(values)), _) => values,
+                    (Some(value), _) => vec![value],
+                    (None, _) => Vec::new(),
                 };
+                let options = values
+                    .iter()
+                    .map(|value| self.value_term(value))
+                    .collect::<Result<Vec<_>, _>>()?;
                 self.in_list(left, options)?
             }
             PolicyExpr::InList { column, values } => {
                 let left = self.column_term(table, alias, column)?;
+                let ty = table.column_type(column);
                 let options = values
                     .iter()
-                    .map(|value| self.policy_value(value, outer, session))
+                    .map(|value| match value {
+                        PolicyValue::SessionRef(path) if is_claim(path) => {
+                            self.claim_term(session, path, ty)
+                        }
+                        value => self.policy_value(value, outer, session),
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 self.in_list(left, options)?
             }
             PolicyExpr::SessionInList { path, values } => {
-                let left = session.resolve(path);
-                let left = self.present(left)?;
-                let options = values
+                let values = values
                     .iter()
-                    .map(|value| self.value_term(&public_value(value)?))
+                    .map(public_value)
                     .collect::<Result<Vec<_>, _>>()?;
-                self.in_list(left, options)?
+                // A claim compares with each literal as that literal's type:
+                // one IN per type, OR-ed. A literal without one compares
+                // with the claim as it is.
+                let mut groups: Vec<(Option<ValueType>, Vec<&Value>)> = Vec::new();
+                for value in &values {
+                    let ty = literal_type(value);
+                    match groups.iter_mut().find(|(group, _)| *group == ty) {
+                        Some((_, members)) => members.push(value),
+                        None => groups.push((ty, vec![value])),
+                    }
+                }
+                let mut parts = Vec::with_capacity(groups.len());
+                for (ty, members) in groups {
+                    let left = self.claim_term(session, path, ty.as_ref())?;
+                    let options = members
+                        .into_iter()
+                        .map(|value| self.value_term(value))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    parts.push(self.in_list(left, options)?);
+                }
+                or(&parts)
             }
             // Both sides are known at compile time: an array claim holds the
             // value, or a text claim contains it.
             PolicyExpr::SessionContains { path, value } => {
                 let needle = public_value(value)?;
-                let same = |a: &Value, b: &Value| match (a, b) {
-                    (Value::Uuid(u), Value::String(s)) | (Value::String(s), Value::Uuid(u)) => {
-                        u.to_string() == *s
+                // A claim element compares as the literal's type, as
+                // everywhere else ([`claim_as`]); the session's own values
+                // as they are.
+                let ty = literal_type(&needle).filter(|_| is_claim(path));
+                let holds = |item: &Value| match (&ty, unwrap_nullable(item.clone())) {
+                    (_, None) => false,
+                    (Some(ty), Some(item)) => {
+                        claim_as(ty, item).is_some_and(|item| same_sql(&item, &needle))
                     }
-                    (a, b) => a == b,
+                    (None, Some(item)) => match (&item, &needle) {
+                        (Value::Uuid(u), Value::String(s)) | (Value::String(s), Value::Uuid(u)) => {
+                            u.to_string() == *s
+                        }
+                        (a, b) => a == b,
+                    },
                 };
                 bool_sql(match session.resolve(path) {
-                    Some(Value::Array(items)) => items.iter().any(|item| {
-                        unwrap_nullable(item.clone()).is_some_and(|i| same(&i, &needle))
-                    }),
+                    Some(Value::Array(items)) => items.iter().any(holds),
                     Some(Value::String(text)) => match &needle {
                         Value::String(part) => text.contains(part.as_str()),
                         _ => false,
@@ -2504,6 +2799,53 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// [`Self::rel_value`] compared with a value of type `ty`: a claim
+    /// converts as [`claim_as`] says, as it does in a plain policy.
+    fn rel_value_as(
+        &mut self,
+        value: &RelationValueRef,
+        ty: Option<&ValueType>,
+        rel: &Rel,
+        scope: &RelScope<'_>,
+    ) -> Result<Term, Error> {
+        match value {
+            RelationValueRef::SessionRef(path) if is_claim(path) => {
+                self.claim_term(scope.session, path, ty)
+            }
+            // A bare string reads as the column's type, as the schema compile
+            // reads it (`coerce_literal_for_column_type`): UUID-shaped text
+            // compared with a text column stays text, and a UUID column's
+            // literal is a UUID in any spelling. `json_value` alone decides by
+            // shape, so a mismatch would never be equal and `!=` would admit
+            // every row.
+            RelationValueRef::Literal(serde_json::Value::String(text)) if ty.is_some() => {
+                let value = match ty {
+                    // Any spelling `Uuid::parse_str` reads (hyphenated,
+                    // simple, braced, urn), as the compile accepts it.
+                    Some(ValueType::Uuid) => uuid::Uuid::parse_str(text)
+                        .map(Value::Uuid)
+                        .unwrap_or_else(|_| Value::String(text.clone())),
+                    _ => Value::String(text.clone()),
+                };
+                self.value_term(&value)
+            }
+            value => self.rel_value(value, rel, scope),
+        }
+    }
+
+    /// The type of relation column `column` (nullability removed), when it
+    /// resolves to a table's column.
+    fn rel_column_type(&self, rel: &Rel, column: &RelationColumnRef) -> Option<ValueType> {
+        let sql = self.resolve(rel, column).ok()?;
+        rel.from.iter().find_map(|src| {
+            let table = &self.schema.tables[src.table.as_ref()?];
+            (sql.starts_with(&format!("{}.", src.alias)) && table.has_column(&column.column))
+                .then(|| table.column_type(&column.column))
+                .flatten()
+                .map(|ty| unwrap_nullable_type(ty).clone())
+        })
+    }
+
     fn rel_predicate(
         &mut self,
         predicate: &RelationPredicate,
@@ -2572,8 +2914,9 @@ impl<'a> Ctx<'a> {
                 self.author_cmp(table, &alias, &left.column, &op, path, scope.session)?
             }
             RelationPredicate::Cmp { left, op, right } => {
+                let ty = self.rel_column_type(rel, left);
+                let right = self.rel_value_as(right, ty.as_ref(), rel, scope)?;
                 let left = self.resolve_term(rel, left)?;
-                let right = self.rel_value(right, rel, scope)?;
                 let op = match op {
                     RelationCmpOp::Eq => CmpOp::Eq,
                     RelationCmpOp::Ne => CmpOp::Ne,
@@ -2591,21 +2934,25 @@ impl<'a> Ctx<'a> {
                 format!("({} IS NOT NULL)", self.resolve(rel, column)?)
             }
             RelationPredicate::In { left, values } => {
+                let ty = self.rel_column_type(rel, left);
                 let left = self.resolve_term(rel, left)?;
                 let options = values
                     .iter()
-                    .map(|value| self.rel_value(value, rel, scope))
+                    .map(|value| self.rel_value_as(value, ty.as_ref(), rel, scope))
                     .collect::<Result<Vec<_>, _>>()?;
                 self.in_list(left, options)?
             }
             RelationPredicate::Contains { left, right } => {
+                let ty = match self.rel_column_type(rel, left) {
+                    Some(ValueType::Array(element)) => Some(*element),
+                    Some(_) => Some(ValueType::String),
+                    None => None,
+                };
                 let left = self.resolve_term(rel, left)?;
-                let right = self.rel_value(right, rel, scope)?;
+                let right = self.rel_value_as(right, ty.as_ref(), rel, scope)?;
                 self.contains(left, right)
             }
-            RelationPredicate::EnumMatch { .. } => {
-                return Err(unsupported("enum payload relation predicates"));
-            }
+            RelationPredicate::Removed(removed) => match *removed {},
         })
     }
 }
@@ -2671,9 +3018,8 @@ fn outer_key_only(rel: &RelationExpr) -> bool {
                 refs(right)
             }
             RelationPredicate::In { values, .. } => values.iter().map(refs).sum(),
-            RelationPredicate::EnumMatch { payload, .. } | RelationPredicate::Not(payload) => {
-                predicate_refs(payload)
-            }
+            RelationPredicate::Not(payload) => predicate_refs(payload),
+            RelationPredicate::Removed(removed) => match *removed {},
             RelationPredicate::And(parts) | RelationPredicate::Or(parts) => {
                 parts.iter().map(predicate_refs).sum()
             }
@@ -2924,11 +3270,35 @@ fn check_haystack(table: &Table, column: &str) -> Result<(), Error> {
     }
 }
 
-/// Whether `column` is a UUID column (nullable or not).
-fn is_uuid(table: &Table, column: &str) -> bool {
-    table.column(column).is_some_and(|column| match &column.ty {
-        ValueType::Nullable(inner) => matches!(**inner, ValueType::Uuid),
-        ty => matches!(ty, ValueType::Uuid),
+/// Whether `path` names a provider claim (`session.claims.*`), whose type
+/// is known only from what it is compared with ([`claim_as`]).
+pub(crate) fn is_claim(path: &[String]) -> bool {
+    path.len() >= 2 && path[0] == "claims"
+}
+
+/// Whether two values are the same SQLite value (so `I32(5)` and `U64(5)`
+/// are).
+fn same_sql(a: &Value, b: &Value) -> bool {
+    matches!((to_sql(a), to_sql(b)), (Ok(Some(a)), Ok(Some(b))) if a == b)
+}
+
+/// Whether an [`Operand::Claim`] key names a provider claim
+/// (`session.claims.*`) rather than a part of the session itself.
+fn is_provider_claim_key(key: &str) -> bool {
+    key.starts_with('\0')
+}
+
+/// The type a policy literal compares a claim as.
+fn literal_type(value: &Value) -> Option<ValueType> {
+    Some(match value {
+        Value::Uuid(_) => ValueType::Uuid,
+        Value::String(_) => ValueType::String,
+        Value::I32(_) | Value::I64(_) => ValueType::I64,
+        // Timestamps and other unsigned values compare as they are.
+        Value::U8(_) | Value::U16(_) | Value::U32(_) | Value::U48(_) | Value::U64(_) => {
+            ValueType::U64
+        }
+        _ => return None,
     })
 }
 
@@ -3231,7 +3601,7 @@ pub(crate) fn json_ids<'a>(ids: impl IntoIterator<Item = &'a [u8]>) -> Sql {
     Sql::Text(serde_json::Value::Array(items).to_string().into_bytes())
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {

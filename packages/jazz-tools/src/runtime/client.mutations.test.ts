@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/test-app.js";
 import { beginDbTransactionAfter, Db, type DbConfig, runInTransaction, Transaction } from "./db.js";
 import { RuntimeSource } from "./runtime-source.js";
 import { ownerPreparation } from "./write-preparation.js";
@@ -308,10 +308,7 @@ describe("JazzClient write attribution", () => {
           return "prepared-transaction" as TxId;
         },
       });
-      const app = s.defineApp(
-        { todos: s.table({ title: s.string() }, {}) },
-        { migrations: "none" },
-      );
+      const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
       const tx = new Transaction(kind, () => client, null, client);
       client.prepareTransaction(tx.openTransactionId(), async () => {
         await ready;
@@ -371,10 +368,7 @@ describe("JazzClient write attribution", () => {
           await id;
         },
       });
-      const app = s.defineApp(
-        { todos: s.table({ title: s.string() }, {}) },
-        { migrations: "none" },
-      );
+      const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
       const tx = new Transaction(kind, () => client, null, client);
       const first = tx.all(app.todos, { tier: "local-first" });
       const second = tx.all(app.todos, { tier: "local-first" });
@@ -405,10 +399,7 @@ describe("JazzClient write attribution", () => {
         complete = resolve;
       });
       const { client } = makeClient({ commitTransaction: () => pending });
-      const app = s.defineApp(
-        { todos: s.table({ title: s.string() }, {}) },
-        { migrations: "none" },
-      );
+      const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
       const tx = new Transaction(kind, () => client, null, client);
       const committed = tx.commit();
       try {
@@ -598,6 +589,38 @@ describe("JazzClient write attribution", () => {
     expect(insertCalls).toEqual([["todos", insertValues, attributedContext, undefined]]);
     expect(updateCalls).toEqual([["todos", "row-1", updates, attributedContext]]);
     expect(deleteCalls).toEqual([["todos", "row-1", attributedContext]]);
+  });
+
+  it("reports each committed write with the session and attribution it was made with (#4784)", async () => {
+    const { client } = makeClient();
+    const observed: Array<[TxId, Session | undefined, string | undefined]> = [];
+    client.observeCommittedWrites((txId, session, attribution) =>
+      observed.push([txId, session, attribution]),
+    );
+    const session: Session = {
+      user_id: "bob",
+      claims: {},
+      issuer: "https://issuer.example",
+      authMode: "external",
+    };
+    const values = { title: { type: "Text" as const, value: "Draft" } };
+
+    client.insert("todos", values, undefined, session);
+    client.restore("todos", "row-1", values, undefined, session);
+    client.update("todos", "row-1", values, undefined, undefined, "alice");
+    client.upsert("todos", "row-1", values, undefined, session, "alice");
+    client.delete("todos", "row-1", undefined, session);
+    const tx = client.beginTransaction("mergeable", session, "alice");
+    await client.commitTransaction(tx).txId;
+
+    expect(observed).toEqual([
+      ["insert-transaction-id", session, undefined],
+      ["restore-transaction-id", session, undefined],
+      ["update-transaction-id", undefined, "alice"],
+      ["upsert-transaction-id", session, "alice"],
+      ["delete-transaction-id", session, undefined],
+      ["committed-batch", session, "alice"],
+    ]);
   });
 
   it("encodes session and attribution together when both are provided", () => {

@@ -3,6 +3,7 @@ import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import {
   attachSessionCoreConsumer,
   createJazzSessionOwner,
+  SESSION_VIEW_ACKNOWLEDGE_TIMEOUT_MS,
   replaceJazzSessionClient,
   switchJazzSessionUser,
 } from "./state.js";
@@ -142,6 +143,46 @@ describe("Jazz session lifecycle", () => {
     expect(previous.client?.account.id).toBe("old");
     lease.release();
     await session.close();
+  });
+  it("moves on without a view that never acknowledges, names it, and stops waiting for it", async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { session, clients, enrollment, next } = await setup();
+      // A view suspended behind Suspense: attached, but it never acknowledges.
+      const lease = attachSessionCoreConsumer(session, "React <JazzProvider>");
+      const command = session.loginWithBackend();
+      await vi.advanceTimersByTimeAsync(SESSION_VIEW_ACKNOWLEDGE_TIMEOUT_MS - 1);
+      expect(session.getSnapshot().status).toBe("transitioning");
+      expect(clients[0]!.shutdown).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await command;
+      expect(enrollment.loginWithBackend).toHaveBeenCalledOnce();
+      expect(session.getSnapshot()).toMatchObject({ status: "ready", account: next });
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn.mock.calls[0]![0]).toContain("Jazz moved on without React <JazzProvider>");
+      // Stale: the next transition doesn't wait for it again.
+      const logout = session.logout();
+      await vi.advanceTimersByTimeAsync(0);
+      await logout;
+      expect(session.getSnapshot().status).toBe("signed-out");
+      expect(warn).toHaveBeenCalledOnce();
+      // Once it renders the session again, transitions wait for it again.
+      lease.acknowledge(session.getSnapshot());
+      const signIn = session.loginWithBackend();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.getSnapshot().status).toBe("transitioning");
+      lease.acknowledge(session.getSnapshot());
+      await signIn;
+      expect(session.getSnapshot().status).toBe("ready");
+      expect(warn).toHaveBeenCalledOnce();
+      lease.release();
+      await session.close();
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
   });
   it("sync failure retains usable old client and prevents enrollment", async () => {
     const { session, clients, enrollment, old } = await setup();

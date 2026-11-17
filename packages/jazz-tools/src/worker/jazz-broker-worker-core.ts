@@ -28,7 +28,10 @@ import {
   type BrowserSharedWorkerConnectRequest,
   type BrowserSharedWorkerConnectResponse,
   type BrowserSharedWorkerBootstrapCancelRequest,
+  type BrowserDeleteStoreRequest,
+  type BrowserDeleteStoreResponse,
   type BrowserWorkerInitOptions,
+  type BrowserWorkerLinkFate,
   BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN,
 } from "../runtime/native-runtime/browser-worker-protocol.js";
 // Worker failures cross a MessagePort boundary, so retain enough WASM frames to
@@ -42,8 +45,7 @@ import {
 import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import { deliverMutationErrorToAttachedPeers } from "./mutation-error-delivery.js";
 import { toError } from "../runtime/util.js";
-import type { RemoteLinkState } from "../runtime/remote-link-state.js";
-import { sameLinkStatus, type LinkStatus } from "../runtime/sync-status.js";
+import { sameLinkStatus } from "../runtime/sync-status.js";
 import { compareRuntimeAdmission } from "./runtime-admission.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
@@ -129,6 +131,16 @@ type RuntimeContext = {
   transportStateEpoch: number;
   transportStateWaiters: Set<() => void>;
   authFailureEpoch: number;
+  /**
+   * Why the server refused the worker's credential, until it accepts one
+   * (a successful auth update, or the upstream connecting again).
+   */
+  authFailure: string | null;
+  /**
+   * The link fate last sent to this context's tabs, and the runtime error
+   * its `failure` was serialized from. Each tab gets it when it attaches.
+   */
+  linkFate: { fate: BrowserWorkerLinkFate; error: Error | null } | null;
   /** Why writing the store to IndexedDB fails now, or null while it works. */
   storageFailure: string | null;
 };
@@ -480,6 +492,7 @@ function attachBootstrapPort(
       | BrowserForegroundNodeLeaseProbeRequest
       | BrowserForegroundNodeLeaseAcquireRequest
       | BrowserForegroundNodeLeaseCancelRequest
+      | BrowserDeleteStoreRequest
     >,
   ) {
     const message = messageEvent.data;
@@ -516,6 +529,12 @@ function attachBootstrapPort(
       // the bootstrap reservation created in `onconnect`.
       if (message?.type === "connect-runtime") {
         post(port, { type: "worker-closing" } satisfies BrowserSharedWorkerConnectResponse);
+      } else if (message?.type === "delete-store") {
+        // The closing realm may still own the store: delete nothing now.
+        post(port, {
+          type: "delete-store-result",
+          outcome: "held",
+        } satisfies BrowserDeleteStoreResponse);
       } else if (
         message?.type === "probe-foreground-node-lease-worker" ||
         message?.type === "acquire-foreground-node-lease"
@@ -539,6 +558,30 @@ function attachBootstrapPort(
     }
     if (message?.type === "cancel-foreground-node-lease") {
       closeBootstrapPort();
+      return;
+    }
+    if (message?.type === "delete-store") {
+      if (scope) {
+        closeBootstrapPort();
+        return;
+      }
+      operationStarted = true;
+      clearTimeout(idleTimer);
+      recordWorkerLifecycle("delete-store", message.dbName, null);
+      void deleteStoreWithoutTabs(message.dbName, message.runtimeSources)
+        .then(
+          (outcome) =>
+            post(port, {
+              type: "delete-store-result",
+              outcome,
+            } satisfies BrowserDeleteStoreResponse),
+          (error: unknown) =>
+            post(port, {
+              type: "delete-store-error",
+              error: serializeBrowserRelayError(toError(error)),
+            } satisfies BrowserDeleteStoreResponse),
+        )
+        .finally(closeBootstrapPort);
       return;
     }
     if (message?.type !== "connect-runtime" && message?.type !== "acquire-foreground-node-lease") {
@@ -587,6 +630,61 @@ function attachBootstrapPort(
     parentLifetime.abort();
     if (!operationStarted) closeBootstrapPort();
   };
+}
+
+/**
+ * Delete `dbName`'s store, which no tab has open (`delete-store`, #5250): the
+ * page store, the SQLite VFS beside it and the lease pool inside it. `held`,
+ * deleting nothing, while a tab of this realm has it attached or is joining
+ * it (an admission or a lease in flight), or another realm (another deploy's
+ * worker) owns it: the physical database lock is the fence, as for any owner.
+ * An idle context, owner or lease pool this realm kept is released first.
+ */
+async function deleteStoreWithoutTabs(
+  dbName: string,
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+): Promise<"deleted" | "held"> {
+  for (const context of [...contexts.values()]) {
+    if (context.options.dbName !== dbName) continue;
+    if (context.peers.size !== 0 || context.pendingAdmissionTasks !== 0) return "held";
+    await releaseIdleContext(context);
+  }
+  const leaseOwner = foregroundLeaseOwners.get(dbName);
+  if (
+    [...contexts.values()].some((context) => context.options.dbName === dbName) ||
+    physicalDatabaseOwnerAdmissions.has(dbName) ||
+    (leaseOwner &&
+      (leaseOwner.pendingLeaseAllocations > 0 || leaseOwner.pendingLeaseFinalizations > 0))
+  )
+    return "held";
+  // Active leases without an attached runtime are a gone tab's: nothing
+  // notices a crashed tab's lease port. The page asks only under its
+  // exclusive per-account lock, which every browser session tab with a
+  // local-first client holds before it opens the store (with clearOnSignOut
+  // or without), so no tab is joining. The delete takes the lease pool with it.
+  pendingRuntimeOwnerRetirements.delete(dbName);
+  // Its durable epoch record goes with the store; the lock is released either way.
+  await releasePhysicalDatabaseOwner(dbName).catch(() => undefined);
+  if (leaseOwner) {
+    foregroundLeaseOwners.delete(dbName);
+    leaseOwner.pageStore.close();
+  }
+  let epoch: BrowserPhysicalDatabaseEpoch;
+  try {
+    epoch = await acquireBrowserPhysicalDatabaseEpoch(dbName);
+  } catch (error) {
+    if (error instanceof BrowserPhysicalDatabaseBusyError) return "held";
+    throw error;
+  }
+  try {
+    await IndexedDbPageStore.destroy(dbName);
+    // The SQLite file lives in its VFS's own IndexedDB store.
+    const wasmModule = await loadWorkerWasmModule(runtimeSources);
+    await wasmModule.WasmDb.destroyBrowserStorage(undefined, dbName);
+  } finally {
+    await epoch.release();
+  }
+  return "deleted";
 }
 
 async function acquireForegroundNodeLease(
@@ -1083,6 +1181,8 @@ function createContext(
     transportStateEpoch: 0,
     transportStateWaiters: new Set(),
     authFailureEpoch: 0,
+    authFailure: null,
+    linkFate: null,
     storageFailure: null,
     initialize: Promise.resolve(),
     closing: null,
@@ -1156,14 +1256,24 @@ async function initialize(context: RuntimeContext): Promise<void> {
       {
         selfSignedClientProof: proof,
         scopeIsolatedRelay: true,
-        slowQueryLog: { appId: options.appId, thresholdMs: options.slowQueryThresholdMs },
+        slowQueryLog: {
+          appId: options.appId,
+          thresholdMs: options.slowQueryThresholdMs,
+          // End users see a browser's console: plan and SQL go to debug.
+          consoleDetail: "summary",
+        },
       },
     );
     context.runtime = runtime;
+    // A new runtime starts a new link: a refusal of the old one's credential
+    // is its own to report again.
+    context.linkFate = null;
+    context.authFailure = null;
     unownedDb = null;
     context.runtime.onAuthFailure((reason) => {
       context.authFailureEpoch += 1;
-      broadcast(context, { type: "auth-failure", reason });
+      context.authFailure = reason;
+      publishLinkFate(context);
     });
     context.runtime.onStorageFailure((message) => {
       // Tabs reject their writes' local waits while it lasts: the worker
@@ -1180,32 +1290,16 @@ async function initialize(context: RuntimeContext): Promise<void> {
         post(peer.port, { type: "mutation-error", event: received }),
       );
     });
-    let announced: { state: RemoteLinkState; link: LinkStatus } | null = null;
-    const announceLink = () => {
+    // The link's state, its failure and the auth refusal are one latched
+    // value per context (#4808): a tab attaching later must learn what one
+    // attached all along did, so none of it travels as a one-off event.
+    const publish = () => {
       // Only the current runtime speaks for this namespace's upstream.
-      if (context.runtime !== runtime) return;
-      const state = runtime.remoteLinkState();
-      const link = runtime.upstreamLinkStatus();
-      // Both sources can report one transition; attaching peers get their own copy.
-      if (announced?.state === state && sameLinkStatus(announced.link, link)) return;
-      announced = { state, link };
-      broadcast(context, { type: "remote-link", state, link });
+      if (context.runtime === runtime) publishLinkFate(context);
     };
-    runtime.onRemoteLinkStateChange(announceLink, new AbortController().signal);
-    runtime.onUpstreamLinkStatusChange(announceLink, new AbortController().signal);
-    context.runtime.onServerTransportError((error, { retrying }) => {
-      // Transport failures are foreground events, not authority fates or
-      // durable notifications. Only peers that have completed admission own a
-      // tab runtime capable of rejecting an active remote wait.
-      for (const peer of context.peers.values()) {
-        if (!peer.subscriber || !peer.pump) continue;
-        post(peer.port, {
-          type: "transport-error",
-          error: serializeBrowserRelayError(error),
-          retrying,
-        });
-      }
-    });
+    runtime.onRemoteLinkStateChange(publish, new AbortController().signal);
+    runtime.onUpstreamLinkStatusChange(publish, new AbortController().signal);
+    runtime.onServerTransportError(publish);
     if (options.logLevel === "trace") {
       context.disposeAuxiliaryTrace = context.runtime.onAuxiliaryTrace((entries) => {
         broadcast(context, {
@@ -1327,6 +1421,7 @@ async function configureServer(
     // same account's upstream connection, which already carries this tab's
     // local writes for that account.
     if (!carriesCredential(options.authJson) && carriesCredential(context.serverAuthJson)) return;
+    context.runtime?.assertCredentialKeepsPrincipal(options.authJson);
     context.serverAuthJson = options.authJson;
     if (context.serverConnectionStarted) await requireRuntime(context).updateAuth(options.authJson);
     return;
@@ -1592,6 +1687,16 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     result(peer, message.id);
     return;
   }
+  if (message.type === "store-pending-uploads") {
+    let pendingUploads: number | undefined;
+    try {
+      pendingUploads = peer.context.runtime?.uploadStatus().pending;
+    } catch {
+      pendingUploads = undefined;
+    }
+    result(peer, message.id, undefined, { pendingUploads });
+    return;
+  }
   if (message.type === "prepare-storage-reset") {
     peer.context.intentionalStorageReset = true;
     // What the reset loses: every write of the store the server hasn't
@@ -1776,11 +1881,10 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
           if (peer.context.storageFailure !== null) {
             post(peer.port, { type: "storage-failure", message: peer.context.storageFailure });
           }
-          post(peer.port, {
-            type: "remote-link",
-            state: activeRuntime.remoteLinkState(),
-            link: activeRuntime.upstreamLinkStatus(),
-          });
+          // The tab's runtime takes the link's fate before its first reply:
+          // a refusal the worker already holds fails its Global waits too.
+          const latched = publishLinkFate(peer.context);
+          if (latched && !latched.sent) post(peer.port, { type: "link-fate", fate: latched.fate });
           result(peer, message.id, undefined, {
             peerAuthority,
             workerRealmId,
@@ -1800,6 +1904,9 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       if (!peer.subscriber) throw new Error("Browser tab is not initialized");
       let authenticationRejected = false;
       await enqueueTransportTransition(peer.context, async () => {
+        // Refuse another principal's credential before storing it or
+        // publishing its claims, even while explicitly disconnected (#4476).
+        activeRuntime.assertCredentialKeepsPrincipal(message.authJson);
         const authFailureEpoch = peer.context.authFailureEpoch;
         try {
           if (!peer.context.explicitlyDisconnected) {
@@ -1826,7 +1933,10 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         peer.context.serverAuthJson = message.authJson;
         await publishWorkerSessionClaims(peer.context, message.sessionClaims);
       });
-      if (!authenticationRejected) broadcast(peer.context, { type: "auth-restored" });
+      if (!authenticationRejected) {
+        peer.context.authFailure = null;
+        publishLinkFate(peer.context);
+      }
       return;
     }
     if (message.type === "disconnect") {
@@ -1886,10 +1996,14 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         const own =
           carriesCredential(message.authJson) || !carriesCredential(peer.context.serverAuthJson);
         const authJson = own ? message.authJson : peer.context.serverAuthJson;
+        activeRuntime.assertCredentialKeepsPrincipal(authJson);
         const dial = carriesCredential(authJson);
         if (dial) {
           activeRuntime.connect(serverUrl, authJson);
           await activeRuntime.waitForUpstreamServerConnection();
+          // The server admitted this credential.
+          peer.context.authFailure = null;
+          publishLinkFate(peer.context);
         }
         peer.context.serverAuthJson = authJson;
         if (own) await publishWorkerSessionClaims(peer.context, message.sessionClaims);
@@ -2092,6 +2206,56 @@ function detachPeerRuntime(peer: TabPeer): void {
   // visible peer lifetime, so its registered finalizer owns physical release.
   peer.subscriber = null;
   peer.pendingFrames.length = 0;
+}
+
+/**
+ * Recompute the link fate this context's tabs should hold, from its runtime's
+ * link and upstream failure and the worker's auth refusal, and send it to
+ * every admitted tab if it changed (`sent`). A tab being admitted is sent
+ * the returned fate itself when it was not.
+ */
+function publishLinkFate(
+  context: RuntimeContext,
+): { fate: BrowserWorkerLinkFate; sent: boolean } | null {
+  const runtime = context.runtime;
+  if (!runtime) return null;
+  const previous = context.linkFate;
+  const state = runtime.remoteLinkState();
+  // An upstream that admits the worker again has accepted its credential.
+  if (state === "connected" && previous && previous.fate.state !== "connected")
+    context.authFailure = null;
+  const failure = runtime.upstreamFailure();
+  const error = failure?.error ?? null;
+  const fate: BrowserWorkerLinkFate = {
+    state,
+    link: runtime.upstreamLinkStatus(),
+    // The same failure keeps its serialized form, so it compares equal.
+    failure:
+      failure && previous?.error === error && previous.fate.failure?.retrying === failure.retrying
+        ? previous.fate.failure
+        : failure && {
+            error: serializeBrowserRelayError(failure.error),
+            retrying: failure.retrying,
+          },
+    authFailure: context.authFailure,
+  };
+  if (previous && sameLinkFate(previous.fate, fate)) return { fate: previous.fate, sent: false };
+  context.linkFate = { fate, error };
+  for (const peer of context.peers.values()) {
+    if (!peer.subscriber || !peer.pump) continue;
+    post(peer.port, { type: "link-fate", fate });
+  }
+  return { fate, sent: true };
+}
+
+function sameLinkFate(a: BrowserWorkerLinkFate, b: BrowserWorkerLinkFate): boolean {
+  return (
+    a.state === b.state &&
+    sameLinkStatus(a.link, b.link) &&
+    a.authFailure === b.authFailure &&
+    a.failure?.retrying === b.failure?.retrying &&
+    a.failure?.error === b.failure?.error
+  );
 }
 
 function broadcast(context: RuntimeContext, event: BrowserFollowerPortEvent): void {
@@ -2384,7 +2548,8 @@ function post(
     | BrowserFollowerPortEvent
     | BrowserSharedWorkerConnectResponse
     | BrowserForegroundNodeLeaseAcquireResponse
-    | BrowserForegroundNodeLeasePortEvent,
+    | BrowserForegroundNodeLeasePortEvent
+    | BrowserDeleteStoreResponse,
 ): void {
   port.postMessage(event);
 }

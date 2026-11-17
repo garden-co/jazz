@@ -1,10 +1,5 @@
-import { afterEach, expect, it } from "vitest";
-import {
-  ensureWindowJazz,
-  registerPageDb,
-  WindowJazzConflictError,
-  type PageDb,
-} from "./page-handle.js";
+import { afterEach, expect, it, vi } from "vitest";
+import { ensureWindowJazz, registerPageDb, type PageDb } from "./page-handle.js";
 import {
   syncStatus,
   CONNECTED,
@@ -98,20 +93,35 @@ it("lists nothing outside a browser page", () => {
   expect((globalThis as { window?: Window }).window).toBeUndefined();
 });
 
-it("refuses a window.__jazz the app set, by name, instead of extending it", () => {
+it("leaves a window.__jazz the app set alone, warns once, and doesn't fail", () => {
   // Before: `TypeError: Cannot add property clearStorage, object is not
-  // extensible` at the upgrade to local-first, for a sealed one; an
-  // extensible one had Jazz's members written over its own.
-  for (const own of [Object.seal({ debug: true }), { status: "mine" }, "app", null]) {
-    const window = page();
-    (window as { __jazz?: unknown }).__jazz = own;
-    const db = fakeDb(syncStatus(CONNECTED, uploadStatusFromCount(0)));
-    expect(() => registerPageDb(db, "app-1")).toThrow(WindowJazzConflictError);
-    expect(() => ensureWindowJazz(window)).toThrow(
-      /^window\.__jazz is reserved for Jazz \(its page handle: .*\), and this page already has a window\.__jazz that Jazz didn't set \((object|string|null)\)\. Rename your app's global/,
-    );
-    // Left as the app set it.
-    expect((window as { __jazz?: unknown }).__jazz).toBe(own);
+  // extensible` at the upgrade to local-first, for a sealed one (rc.1), then
+  // a thrown "window.__jazz is reserved for Jazz" (rc.2) that failed
+  // `linkDeviceAccount()` (#5262).
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    for (const own of [Object.seal({ debug: true }), { status: "mine" }, "app", null]) {
+      warn.mockClear();
+      const window = page();
+      (window as { __jazz?: unknown }).__jazz = own;
+      const db = fakeDb(syncStatus(CONNECTED, uploadStatusFromCount(0)));
+      const unlist = registerPageDb(db, "app-1");
+      // The handle still works for whoever holds it, just not from the page.
+      expect(ensureWindowJazz(window).status()).toEqual(db.getSyncStatus());
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]![0])).toMatch(
+        /^window\.__jazz is Jazz's page handle \(.*\), but this page already has a window\.__jazz that Jazz didn't set \((object|string|null)\)\. Jazz leaves it as it is/,
+      );
+      // Left as the app set it.
+      expect((window as { __jazz?: unknown }).__jazz).toBe(own);
+      if (own && typeof own === "object") {
+        expect(Object.getOwnPropertySymbols(own)).toEqual([]);
+        expect(Object.keys(own)).toHaveLength(1);
+      }
+      unlist();
+    }
+  } finally {
+    warn.mockRestore();
   }
 });
 
@@ -136,6 +146,14 @@ it("extends a window.__jazz an older Jazz copy set before the ownership mark exi
   expect(older[Symbol.for("jazz-tools.window-jazz") as never]).toBe(true);
   unlist();
   // An object that only looks a little like it is still the app's.
-  (window as { __jazz?: unknown }).__jazz = { version: 1 };
-  expect(() => ensureWindowJazz(window)).toThrow(WindowJazzConflictError);
+  const own = { version: 1 };
+  (window as { __jazz?: unknown }).__jazz = own;
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    ensureWindowJazz(window);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(own).toEqual({ version: 1 });
+  } finally {
+    warn.mockRestore();
+  }
 });

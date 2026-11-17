@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/index.js";
 import {
   createJazz,
   memory,
@@ -25,20 +25,20 @@ import { requestApproval, tokenStore } from "../inspect/client.js";
 import { runInspectCommand } from "../inspect/cli.js";
 import { runMcpServer } from "../inspect/mcp.js";
 
-const app = s.defineApp(
-  {
-    todos: s.table({ title: s.string(), owner: s.uuid(), secretNote: s.string().optional() }, {}),
-    notes: s.table({ body: s.string() }, {}),
+const app = testApp({
+  tables: {
+    todos: { columns: { title: "string", owner: "uuid", secretNote: "string?" } },
+    notes: { columns: { body: "string" } },
   },
-  { migrations: "none" },
-);
-const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user });
-  policy.todos.allowInsert.where({ owner: session.user });
-  policy.todos.allowUpdate.never();
-  policy.todos.allowDelete.never();
-  policy.notes.allowRead.never();
 });
+// Todos can't be updated or deleted; nobody may read notes.
+const permissions = {
+  format: 1,
+  tables: {
+    todos: { read: "owner = session.user", insert: "owner = session.user" },
+    notes: { read: "false" },
+  },
+};
 
 const cleanups: Array<() => Promise<unknown>> = [];
 const savedNodeEnv = process.env.NODE_ENV;
@@ -1223,18 +1223,14 @@ describe("jazz-tools inspect and mcp", () => {
 
 describe("Viewing as a user whose permissions read claims", () => {
   // Managers (a claim) see every expense; others see their own.
-  const claimsApp = s.defineApp(
-    { expenses: s.table({ title: s.string(), owner: s.uuid() }, {}) },
-    { migrations: "none" },
-  );
-  const claimsPermissions = s.definePermissions(claimsApp, ({ policy, anyOf, session }) => {
-    policy.expenses.allowRead.where(
-      anyOf([{ owner: session.user }, session.where({ "claims.role": "manager" })]),
-    );
-    policy.expenses.allowInsert.where(
-      anyOf([{ owner: session.user }, session.where({ "claims.role": "manager" })]),
-    );
+  const claimsApp = testApp({
+    tables: { expenses: { columns: { title: "string", owner: "uuid" } } },
   });
+  const ownOrManager = { anyOf: ["owner = session.user", "session.claims.role = 'manager'"] };
+  const claimsPermissions = {
+    format: 1,
+    tables: { expenses: { read: ownOrManager, insert: ownOrManager } },
+  };
 
   async function startWithClaims() {
     const jazz = await createJazz({
@@ -1329,5 +1325,61 @@ describe("Viewing as a user whose permissions read claims", () => {
       api(jazz, { op: "query", query: { table: "todos" }, as: "alice" }, STAFF),
     );
     expect(asAlice.warning).toBeUndefined();
+  });
+});
+
+describe("Large values through the Inspector (#5202)", () => {
+  const filesApp = testApp({ tables: { files: { columns: { name: "string", data: "bytes" } } } });
+  const filesPermissions = { format: 1, tables: { files: { read: "true" } } };
+
+  it("lists a row with a large value, and reads parts of it from the store", async () => {
+    const jazz = await createJazz({
+      app: filesApp,
+      permissions: filesPermissions,
+      store: memory(),
+      authenticate,
+      inspect: staffOnly,
+    });
+    cleanups.push(() => jazz.close());
+    const data = new Uint8Array(600 * 1024).map((_, index) => index % 251);
+    const { id } = await jazz.db
+      .insert(filesApp.files, { name: "photo.jpg", data })
+      .wait({ tier: "global" });
+
+    const listed = await ok(api(jazz, { op: "query", query: { table: "files" } }, STAFF));
+    expect(listed.rows).toHaveLength(1);
+    expect(listed.rows[0].data.$large).toMatchObject({ kind: "bytes", size: data.length });
+
+    const part = await ok(
+      api(jazz, { op: "get", table: "files", id, column: "data", from: 1000, to: 1010 }, STAFF),
+    );
+    expect(part.value).toEqual({
+      $bytes: Buffer.from(data.subarray(1000, 1010)).toString("base64"),
+    });
+
+    // Larger than one part: refused, not read whole.
+    expect(
+      await refused(api(jazz, { op: "get", table: "files", id, column: "data" }, STAFF)),
+    ).toMatchObject({ status: 400, message: expect.stringMatching(/ask for it in parts/) });
+    // Past the end: the store's refusal, as the caller's mistake.
+    expect(
+      await refused(
+        api(
+          jazz,
+          {
+            op: "get",
+            table: "files",
+            id,
+            column: "data",
+            from: data.length - 5,
+            to: data.length + 5,
+          },
+          STAFF,
+        ),
+      ),
+    ).toMatchObject({ status: 400, message: expect.stringMatching(/past the end of data/) });
+    expect(
+      (await ok(api(jazz, { op: "get", table: "files", id, column: "name" }, STAFF))).value,
+    ).toBe("photo.jpg");
   });
 });

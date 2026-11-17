@@ -22,9 +22,67 @@ The document is one Markdown merge column. Comments and presence are ordinary ro
 they point into the text with **anchors** and **ranges** (the text before, the text itself, the
 text after) instead of character offsets, so they survive edits that move the text around.
 
-<include cwd lang="ts" meta='title="schema.ts"'>
-  ../examples/band-book/apps/nextjs-betterauth/schema.ts#rich-text-schema
-</include>
+This is an excerpt of
+[BandBook](https://github.com/garden-co/jazz/tree/main/examples/band-book/apps/nextjs-betterauth)'s
+`schema.ts`, with just these three tables; `workspaces` and `pages` are defined elsewhere in the file.
+
+```ts title="schema.ts"
+export const schema = s.defineSchema({
+  // workspaces, pages, ...
+
+  // A song sheet page is one rich-text document: lyrics, chords and notes as Markdown. The server
+  // merges concurrent edits to it, so two people rewriting different lines, online or offline,
+  // keep both.
+  songSheets: s
+    .table(
+      { workspaceId: s.uuid(), pageId: s.uuid(), body: s.string().merge("markdown") },
+      {
+        workspace: s.rel("workspaces", "workspaceId"),
+        page: s.rel("pages", "pageId"),
+      },
+    )
+    .indexOnly(["pageId"]),
+  // Comments sit over a song sheet's text without being part of it: each one stores the text it
+  // covers and the text around it (a jazz-tools text range), and every reader finds it again in
+  // the sheet's current body.
+  sheetComments: s
+    .table(
+      {
+        workspaceId: s.uuid(),
+        pageId: s.uuid(),
+        author: s.uuid(),
+        range: s.json(),
+        text: s.string(),
+        resolved: s.boolean(),
+      },
+      {
+        workspace: s.rel("workspaces", "workspaceId"),
+        page: s.rel("pages", "pageId"),
+      },
+    )
+    .indexOnly(["pageId"]),
+  // Who has a song sheet open and where their cursor is: one row per open editor, overwritten a
+  // few times a second and refreshed while it stays open. Readers ignore rows whose seenAt is old.
+  // Latest-only: a cursor's past positions are worth nothing, so nodes keep no history of them.
+  sheetPresence: s
+    .table(
+      {
+        workspaceId: s.uuid(),
+        pageId: s.uuid(),
+        account: s.uuid(),
+        cursor: s.json(),
+        selection: s.json().optional(),
+        seenAt: s.float(),
+      },
+      {
+        workspace: s.rel("workspaces", "workspaceId"),
+        page: s.rel("pages", "pageId"),
+      },
+    )
+    .indexOnly(["pageId"])
+    .history("latest"),
+});
+```
 
 ## Reading Markdown into the editor
 
@@ -114,5 +172,6 @@ Comments and presence carry their own `pageId`, so they can follow the page's pe
 having rules of their own: anyone who can read the page may comment and be seen. A comment is
 edited, resolved or removed by its author or by the page's editors, and only its owner moves a
 cursor. See the `songSheets`, `sheetComments`
-and `sheetPresence` policies in BandBook's
-[permissions.ts](https://github.com/garden-co/jazz/blob/main/examples/band-book/apps/nextjs-betterauth/permissions.ts).
+and `sheetPresence` policies in
+[BandBook](https://github.com/garden-co/jazz/tree/main/examples/band-book/apps/nextjs-betterauth)'s
+`schema.ts`.

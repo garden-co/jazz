@@ -37,7 +37,7 @@ after the first load:
       ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-localfirst-ts
     </include>
 
-    The background upgrade to the local-first client keeps the same `Db`: its live queries, listeners and writes carry on. `db.isLocalFirst()` tells whether it has happened yet, and `await db.upgradeToLocalFirst(loader)` waits for it. If the app took the `Db` offline with `disconnect()`, it stays offline. In the browser, a local-first `Db` is offline for every tab of the app, so at the upgrade that also takes the app's other local-first tabs offline. Signing in, signing out and switching accounts do give the session a new `Db`. The old one then ends its live queries with a `DbReplacedError` (from `"jazz-tools"`) and throws it on writes. Follow the session to pick up the new one, and read `session.db` again for each write (it throws while no one is signed in):
+    The background upgrade to the local-first client keeps the same `Db`: its live queries, listeners and writes carry on. `db.isLocalFirst()` tells whether it has happened yet, the session snapshot's `localFirst` field says the same and changes when the upgrade happens (to show "offline support ready", or notice the app is still thin), and `await db.upgradeToLocalFirst(loader)` waits for it. If the app took the `Db` offline with `disconnect()`, it stays offline. In the browser, a local-first `Db` is offline for every tab of the app, so at the upgrade that also takes the app's other local-first tabs offline. Signing in, signing out and switching accounts do give the session a new `Db`. The old one then ends its live queries with a `DbReplacedError` (from `"jazz-tools"`) and throws it on writes. Follow the session to pick up the new one, and read `session.db` again for each write (it throws while no one is signed in):
 
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/main.ts#follow-session-ts
@@ -148,14 +148,14 @@ its data when the visitor signs up later.
 
 ### Bundler config
 
-There is no Jazz plugin to add. In development, run your app as usual: `createJazz` in your
+There is no Jazz plugin to add for Vite or Next.js. In development, run your app as usual: `createJazz` in your
 [main backend](/docs/how-jazz-works#how-a-backend-talks-to-jazz) is the dev server, and it publishes your schema, permissions
 and migrations every time it starts.
 
 The local-first client loads Jazz's Wasm in the browser, and your backend loads Jazz's native module
 (`jazz-napi`) on the server. If your bundler touches either, tell it to leave them alone:
 
-<Tabs groupId="jazz-bundler" items={["Vite", "Next.js"]} persist updateAnchor>
+<Tabs groupId="jazz-bundler" items={["Vite", "Next.js", "Expo"]} persist updateAnchor>
   <Tab value="Vite">
     ```ts title="vite.config.ts"
     import { defineConfig } from "vite";
@@ -163,17 +163,13 @@ The local-first client loads Jazz's Wasm in the browser, and your backend loads 
     export default defineConfig({
       // plugins: your framework's plugin (React, Vue, Svelte, Solid, SvelteKit) ...
       // Load the Wasm as a real module instead of pre-bundling it.
-      // On Vite 6 or 7: exclude: ["jazz-wasm", "jazz-tools"] (see below).
       optimizeDeps: { exclude: ["jazz-wasm"] },
     });
     ```
 
-    On Vite 6 or 7, also exclude `jazz-tools`; otherwise `vite dev` can't load Jazz's worker and the
-    client stays thin. Those versions pre-bundle `jazz-tools` without rewriting the URL of its worker,
-    so the dev server answers it with your `index.html`, and after about 10 seconds the upgrade gives
-    up ("Shared browser runtime did not issue a foreground node lease"). Vite 8 rewrites the URL, so
-    `jazz-wasm` alone is enough there; that includes SvelteKit 3, while SvelteKit 2 runs on Vite 7.
-    Production builds aren't affected.
+    `jazz-wasm` is the only package to exclude. Vite still pre-bundles `jazz-tools` under `vite dev`,
+    and Jazz then has the dev server load its worker from the `jazz-tools` package. Before alpha.62,
+    Vite 6 and 7 also needed `jazz-tools` excluded; keeping that exclude does no harm.
 
     It needs Vite 6 or later: Vite 5 answers the local-first chunk with a 500, "Vite is unable to
     parse the worker options as the value is not static". This is the same for React, Vue, Svelte,
@@ -198,9 +194,24 @@ The local-first client loads Jazz's Wasm in the browser, and your backend loads 
     ```
 
   </Tab>
+  <Tab value="Expo">
+    ```js title="metro.config.js"
+    const { getDefaultConfig } = require("expo/metro-config");
+    const { withJazz } = require("jazz-tools/expo/metro");
+
+    // Metro doesn't find Jazz's Wasm and worker on its own.
+    module.exports = withJazz(getDefaultConfig(__dirname));
+    ```
+
+    This is for the web target of an Expo app. After adding it, start Metro with
+    `npx expo start --clear`. Don't set `runtimeSources.brokerWorkerUrl` there:
+    the worker is the chunk Metro builds.
+
+  </Tab>
 </Tabs>
 
-The [thin client](/docs/setup/web-client/thin-client) has no Wasm, so it needs no Vite line. A
+The [thin client](/docs/setup/web-client/thin-client) has no Wasm, so it needs no Vite line or
+Metro config. A
 Next.js app that imports `jazz-tools/backend` still needs `serverExternalPackages`.
 
 ### Wasm loading
@@ -229,9 +240,10 @@ Use `baseUrl` when both assets live together under one public directory. Use exp
 
 For browser URL overrides, also set `wasmVersion` to an immutable value that changes whenever
 either the Wasm or broker-worker build changes (for example, your deployment's asset manifest
-version). Jazz adds that value to both asset URLs, so a rolling deployment cannot reuse a
-long-lived SharedWorker with bytes fetched from an older build at the same URL. Your asset host
-must serve these URLs with query strings intact.
+version). Jazz adds that value to the asset URLs you configure and to the SharedWorker's name, so
+a rolling deployment cannot reuse a long-lived SharedWorker with bytes fetched from an older build
+at the same URL. Without a bundler, also set `brokerWorkerUrl` or `baseUrl`, so the worker script URL
+is versioned too. Your asset host must serve these URLs with query strings intact.
 
 ### Worker failures
 

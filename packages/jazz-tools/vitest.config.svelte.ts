@@ -10,7 +10,12 @@ export default defineConfig({
   plugins: [svelte()],
   resolve: {
     conditions: ["browser"],
-    alias: sealedWasmPackage ? { "jazz-wasm": resolve(sealedWasmPackage, "jazz_wasm.js") } : {},
+    alias: [
+      { find: /^jazz-tools$/, replacement: resolve(__dirname, "src/index.ts") },
+      ...(sealedWasmPackage
+        ? [{ find: "jazz-wasm", replacement: resolve(sealedWasmPackage, "jazz_wasm.js") }]
+        : []),
+    ],
   },
   test: {
     environment: "jsdom",

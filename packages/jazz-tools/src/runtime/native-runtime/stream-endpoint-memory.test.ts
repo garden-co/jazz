@@ -180,6 +180,135 @@ describe("endpoints remembered across page loads", () => {
   });
 });
 
+/** A page: a document, and Web Storage kept in memory (`refused`: storage
+ * refused altogether; `full`: reads work, writes throw QuotaExceededError). */
+function onAPage(options: { refused?: boolean; full?: boolean } = {}): Map<string, string> {
+  const items = new Map<string, string>();
+  vi.stubGlobal("document", {});
+  vi.stubGlobal("localStorage", {
+    getItem(key: string) {
+      if (options.refused) throw new Error("SecurityError");
+      return items.get(key) ?? null;
+    },
+    setItem(key: string, value: string) {
+      if (options.refused) throw new Error("SecurityError");
+      if (options.full) throw new Error("QuotaExceededError");
+      items.set(key, value);
+    },
+    removeItem(key: string) {
+      items.delete(key);
+    },
+  });
+  return items;
+}
+
+describe("a page's copy of the memory", () => {
+  it("asks IndexedDB once per endpoint, then opens the socket at once without asking", async () => {
+    const items = onAPage();
+    const url = "ws://app.test/jazz/apps/b1/ws";
+    let page = await newPage();
+    new (page.httpStreamFallbackWebSocket(failingNative))(url);
+    // Nothing kept yet: the first page asks IndexedDB, and keeps its answer.
+    expect(opened).toEqual([]);
+    await vi.waitFor(() => expect(opened).toEqual([url]));
+    expect(items.get(`jazz-stream-endpoint:${url}`)).toMatch(/^none:\d+$/);
+
+    const lookups = vi.spyOn(globalThis.indexedDB, "open");
+    page = await newPage();
+    new (page.httpStreamFallbackWebSocket(failingNative))(url);
+    // In the constructor already, not after a lookup.
+    expect(opened).toEqual([url, url]);
+    expect(lookups).not.toHaveBeenCalled();
+  });
+
+  it("goes straight to the stream on a new page once the backend said it serves one, also from the copy alone", async () => {
+    const items = onAPage();
+    const url = "ws://app.test/jazz/apps/b2/ws";
+    let page = await newPage();
+    backendServingTheStream(url, page);
+    const first = new (page.httpStreamFallbackWebSocket(failingNative))(url);
+    expect(await outcome(first)).toBe("open");
+    first.close();
+    expect(opened).toEqual([url]);
+    await vi.waitFor(() => expect(items.get(`jazz-stream-endpoint:${url}`)).toMatch(/^stream:/));
+
+    // IndexedDB emptied meanwhile: the page's copy still says so.
+    vi.stubGlobal("indexedDB", new IDBFactory());
+    page = await newPage();
+    backendServingTheStream(url, page);
+    const next = new (page.httpStreamFallbackWebSocket(failingNative))(url);
+    expect(await outcome(next)).toBe("open");
+    next.close();
+    expect(opened).toEqual([url]);
+  });
+
+  it("goes to the stream when only IndexedDB knows the endpoint, as after an upgrade or a worker learning it", async () => {
+    const memory = await import("./stream-endpoint-memory.js");
+    const url = "ws://app.test/jazz/apps/b5/ws";
+    // Learned where there is no page copy (a worker, or before the copy existed).
+    await memory.rememberStreamEndpoint(url);
+    onAPage();
+    const page = await newPage();
+    backendServingTheStream(url, page);
+    const socket = new (page.httpStreamFallbackWebSocket(failingNative))(url);
+    expect(await outcome(socket)).toBe("open");
+    socket.close();
+    expect(opened).toEqual([]);
+    expect(memory.recallStreamEndpointNow(url)).toBe(true);
+  });
+
+  it("asks IndexedDB on every page while storage is full, and fails no socket for it", async () => {
+    onAPage({ full: true });
+    const memory = await import("./stream-endpoint-memory.js");
+    const url = "ws://app.test/jazz/apps/b6/ws";
+    for (let load = 0; load < 2; load++) {
+      const page = await newPage();
+      backendServingTheStream(url, page);
+      const socket = new (page.httpStreamFallbackWebSocket(failingNative))(url);
+      expect(await outcome(socket)).toBe("open");
+      socket.close();
+      expect(memory.recallStreamEndpointNow(url)).toBeUndefined();
+    }
+    // The first page learned it the hard way, once; the second asked IndexedDB.
+    expect(opened).toEqual([url]);
+  });
+
+  it("forgets the stream when it is refused, and removes what expired", async () => {
+    const items = onAPage();
+    const memory = await import("./stream-endpoint-memory.js");
+    const url = "ws://app.test/jazz/apps/b3/ws";
+    const now = Date.now();
+    await memory.rememberStreamEndpoint(url, now);
+    expect(memory.recallStreamEndpointNow(url, now + 1)).toBe(true);
+    // Expired: no answer, and nothing left behind.
+    expect(
+      memory.recallStreamEndpointNow(url, now + memory.STREAM_ENDPOINT_MEMORY_MS + 1),
+    ).toBeUndefined();
+    expect(items.size).toBe(0);
+
+    await memory.rememberStreamEndpoint(url);
+    const page = await newPage();
+    backendServingTheStream(url, page, { streamStatus: 404 });
+    const refused = new (page.httpStreamFallbackWebSocket(failingNative))(url);
+    expect(await outcome(refused)).toBe("closed");
+    await vi.waitFor(() => expect(memory.recallStreamEndpointNow(url)).toBe(false));
+  });
+
+  it("asks IndexedDB, as a worker does, where the page's storage is refused", async () => {
+    onAPage({ refused: true });
+    const memory = await import("./stream-endpoint-memory.js");
+    const url = "ws://app.test/jazz/apps/b4/ws";
+    expect(memory.recallStreamEndpointNow(url)).toBeUndefined();
+    await memory.rememberStreamEndpoint(url);
+    const page = await newPage();
+    backendServingTheStream(url, page);
+    const socket = new (page.httpStreamFallbackWebSocket(failingNative))(url);
+    expect(await outcome(socket)).toBe("open");
+    socket.close();
+    expect(opened).toEqual([]);
+  });
+});
+
 describe("closing a stream session", () => {
   it("ends it on the backend before letting the response go", async () => {
     // Aborted first, the response would end the session on its own, and

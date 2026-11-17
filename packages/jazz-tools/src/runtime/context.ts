@@ -20,7 +20,11 @@ export interface RuntimeSourcesConfig {
   /** Explicit URL for the WASM binary. Overrides `baseUrl`. */
   wasmUrl?: string;
 
-  /** Explicit URL for the browser broker SharedWorker entry script. Overrides `baseUrl`. */
+  /**
+   * Explicit URL for the browser broker SharedWorker entry script, started as
+   * a module script. Overrides `baseUrl`. Leave it unset on Expo web, where
+   * the worker is the classic-script chunk Metro builds through `withJazz`.
+   */
   brokerWorkerUrl?: string;
 
   /**

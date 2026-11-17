@@ -22,7 +22,9 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
+use jazz::tools::{
+    ColumnType, OpenTransactionId, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder,
+};
 use jazz::tx::DurabilityTier;
 
 use common::{allow_all_policies, compile_schema, exists, outer_eq, session_eq};
@@ -199,6 +201,49 @@ fn with_check_compares_the_new_row_with_the_old_one() {
     .err()
     .expect("visibility may not change");
     assert!(error.message.contains("WITH CHECK"), "{}", error.message);
+}
+
+/// The same check inside one transaction: "the old row" is the row as the
+/// transaction left it (its staged version), as `updateTo`'s `old` columns
+/// compile to `exists chats(id = this.id, col = this.col)`.
+#[test]
+fn with_check_compares_with_the_row_as_the_transaction_left_it() {
+    let db = open(0);
+    seed(
+        &db,
+        "chats",
+        id(1, 2),
+        &[("name", text("general")), ("is_public", Value::Bool(false))],
+    );
+    let alice = user(&db, 1, "alice");
+    let open = OpenTransactionId::new();
+    block_on(db.begin_mergeable(open)).unwrap();
+    block_on(db.tx_ref(open).update(
+        "chats",
+        id(1, 2),
+        BTreeMap::from([("name".to_owned(), text("project"))]),
+        as_session(alice),
+    ))
+    .expect("the name may change");
+    block_on(db.tx_ref(open).update(
+        "chats",
+        id(1, 2),
+        BTreeMap::from([("name".to_owned(), text("launch"))]),
+        as_session(alice),
+    ))
+    .expect("the staged row keeps its visibility, so the name may change again");
+    let error = block_on(db.tx_ref(open).update(
+        "chats",
+        id(1, 2),
+        BTreeMap::from([("is_public".to_owned(), Value::Bool(true))]),
+        as_session(alice),
+    ))
+    .err()
+    .expect("visibility may not change, staged or not");
+    assert!(error.message.contains("WITH CHECK"), "{}", error.message);
+    block_on(db.commit_mergeable_handle(open)).expect("the allowed writes commit");
+    assert_eq!(cell(&db, "chats", "name"), text("launch"));
+    assert_eq!(cell(&db, "chats", "is_public"), Value::Bool(false));
 }
 
 /// A policy set is closed: an operation without a declared policy denies

@@ -1,72 +1,5 @@
-import { schema as s } from "jazz-tools";
-import { useAll, useDb, useSession } from "jazz-tools/react";
-
-// #region shared-schema
-const schema = {
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-    },
-    { shares: s.reverse("todoShares", "todo") },
-  ),
-  todoShares: s.table(
-    {
-      todoId: s.uuid(),
-      user_id: s.uuid(),
-      can_edit: s.boolean(),
-    },
-    { todo: s.rel("todos", "todoId") },
-  ),
-};
-
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
-// #endregion shared-schema
-
-// #region shared-permissions
-s.definePermissions(app, ({ policy, anyOf, session }) => {
-  policy.todos.allowRead.where((todo) =>
-    anyOf([
-      { $createdBy: session.user },
-      policy.todoShares.exists.where({
-        todoId: todo.id,
-        user_id: session.user,
-      }),
-    ]),
-  );
-
-  policy.todos.allowInsert.always();
-
-  policy.todos.allowUpdate.where((todo) =>
-    anyOf([
-      { $createdBy: session.user },
-      policy.todoShares.exists.where({
-        todoId: todo.id,
-        user_id: session.user,
-        can_edit: true,
-      }),
-    ]),
-  );
-
-  policy.todos.allowDelete.where({ $createdBy: session.user });
-
-  // Only the todo creator can manage shares
-  policy.todoShares.allowInsert.where((share) =>
-    policy.todos.exists.where({
-      id: share.todoId,
-      $createdBy: session.user,
-    }),
-  );
-  policy.todoShares.allowRead.where({ user_id: session.user });
-  policy.todoShares.allowDelete.where((share) =>
-    policy.todos.exists.where({
-      id: share.todoId,
-      $createdBy: session.user,
-    }),
-  );
-});
-// #endregion shared-permissions
+import { useAll, useDb, useJazzSession } from "jazz-tools/react";
+import { app } from "./recipes/shared-access/jazz.generated.js";
 
 // #region shared-grant
 export function shareTodo(
@@ -84,14 +17,14 @@ export function shareTodo(
 
 // #region shared-query
 export function SharedWithMe() {
-  const session = useSession();
+  const session = useJazzSession();
   const {
     data: shares,
     isLoading,
     error,
   } = useAll(
-    session?.user
-      ? app.todoShares.where({ user_id: session.user }).include({ todo: true })
+    session.user?.accountId
+      ? app.todoShares.where({ user_id: session.user.accountId }).include({ todo: true })
       : undefined,
   );
 
@@ -112,6 +45,24 @@ export function SharedWithMe() {
   );
 }
 // #endregion shared-query
+
+// #region shared-list
+export function SharedWith({ todoId }: { todoId: string }) {
+  const { data: shares = [], db } = useAll(app.todoShares.where({ todoId }));
+
+  return (
+    <ul>
+      {shares.map((share) => (
+        <li key={share.id}>
+          {share.user_id}
+          {share.can_edit ? " (can edit)" : " (read-only)"}
+          <button onClick={() => unshareTodo(db, share.id)}>Remove</button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+// #endregion shared-list
 
 // #region shared-revoke
 export function unshareTodo(db: ReturnType<typeof useDb>, shareId: string) {

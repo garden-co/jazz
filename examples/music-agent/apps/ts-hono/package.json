@@ -7,7 +7,7 @@
     "dev": "concurrently --kill-others-on-fail --names server,vite \"pnpm dev:server\" \"pnpm dev:vite\"",
     "dev:server": "tsx watch server/index.ts",
     "dev:vite": "wait-on --timeout 30000 http-get://127.0.0.1:3001/health && vite",
-    "build": "jazz-tools validate && vite build",
+    "build": "jazz-tools generate && vite build",
     "start": "NODE_ENV=production tsx server/index.ts",
     "typecheck": "tsc --noEmit",
     "test:e2e": "playwright test"
@@ -16,7 +16,7 @@
     "@anthropic-ai/sdk": "^0.129.0",
     "@garden-co/design": "github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2",
     "@hono/node-server": "^1.19.11",
-    "better-auth": "1.7.1",
+    "better-auth": "1.7.22",
     "hono": "^4.12.9",
     "jazz-napi": "workspace:*",
     "jazz-tools": "workspace:*",

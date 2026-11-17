@@ -121,6 +121,8 @@ impl crate::Sql for Native<'_> {
             let mut statement = self.0.prepare_cached(sql)?;
             statement.reset_status(StatementStatus::FullscanStep);
             statement.reset_status(StatementStatus::Sort);
+            #[cfg(feature = "testing")]
+            statement.reset_status(StatementStatus::VmStep);
             let mut rows = statement.query(rusqlite::params_from_iter(
                 params.iter().copied().map(NativeParam),
             ))?;
@@ -133,6 +135,16 @@ impl crate::Sql for Native<'_> {
             Ok(crate::QueryStats {
                 fullscan_steps: Some(statement.reset_status(StatementStatus::FullscanStep) as u64),
                 sorted: Some(statement.reset_status(StatementStatus::Sort) > 0),
+                vm_steps: {
+                    #[cfg(feature = "testing")]
+                    {
+                        Some(statement.reset_status(StatementStatus::VmStep) as u64)
+                    }
+                    #[cfg(not(feature = "testing"))]
+                    {
+                        None
+                    }
+                },
             })
         })())
     }

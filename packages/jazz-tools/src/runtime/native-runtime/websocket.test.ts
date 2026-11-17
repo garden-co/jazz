@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
-import type { BrowserWebSocket } from "./websocket.js";
+import type { BrowserWebSocket, WireError } from "./websocket.js";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   CLIENT_WIRE_FEATURES,
@@ -9,6 +9,7 @@ import {
   isReauthenticateWireError,
   FEATURE_HEARTBEAT,
   FEATURE_PAYLOAD_ZSTD,
+  HANDSHAKE_TIMEOUT_MS,
   HEARTBEAT_SILENCE_MS,
   MAX_WIRE_PROTOCOL_VERSION,
   MIN_WIRE_PROTOCOL_VERSION,
@@ -961,13 +962,22 @@ describe("websocket frame carrier", () => {
     expect(isWireError(nonminimalTag)).toBe(false);
     expect(() => decodeWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
 
+    // A code or retry from a newer server is still the server's error: it is
+    // read, and the link retries it as a refusal (#5927 R10), instead of throwing.
     const unknownCode = encodeWireError(7, 3, "future code");
-    expect(() => isWireError(unknownCode)).toThrow("unknown WireErrorCode discriminant 7");
-    expect(() => decodeWireError(unknownCode)).toThrow("unknown WireErrorCode discriminant 7");
+    expect(isWireError(unknownCode)).toBe(true);
+    expect(decodeWireError(unknownCode)).toEqual({
+      code: "unknown:7",
+      retry: "later",
+      message: "future code",
+    });
 
     const unknownRetry = encodeWireError(6, 4, "future retry");
-    expect(() => isWireError(unknownRetry)).toThrow("unknown WireRetry discriminant 4");
-    expect(() => decodeWireError(unknownRetry)).toThrow("unknown WireRetry discriminant 4");
+    expect(decodeWireError(unknownRetry)).toEqual({
+      code: "not_ready",
+      retry: "unknown:4",
+      message: "future retry",
+    });
   });
 
   describe("heartbeat", () => {
@@ -1079,6 +1089,53 @@ describe("websocket frame carrier", () => {
         await vi.advanceTimersByTimeAsync(HEARTBEAT_SILENCE_MS);
         socket.emitMessage(heartbeat);
         await vi.advanceTimersByTimeAsync(1_000);
+        expect(terminals).toEqual([]);
+        expect(socket.closed).toBe(false);
+        carrier.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    // #5225: an attempt nobody answers (a proxy holding the upgrade for a
+    // backend that is down) used to hang forever, so the link never failed
+    // an attempt and never published the outage.
+    it("gives up an attempt whose server never says hello, as a network drop", async () => {
+      vi.useFakeTimers();
+      try {
+        const { carrier, socket, terminals } = heartbeatCarrier();
+        const ready = carrier.ready().catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(HANDSHAKE_TIMEOUT_MS);
+        expect(terminals).toEqual([]);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(terminals).toEqual([
+          expect.objectContaining({ code: "websocket_silent", retry: "later" }),
+        ]);
+        expect(isSocketDropWireError(terminals[0] as WireError)).toBe(true);
+        expect(socket.closed).toBe(true);
+        await expect(ready).resolves.toMatchObject({
+          message: "the server did not answer the connection within 10 s",
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps an attempt whose hello arrives within the handshake window", async () => {
+      vi.useFakeTimers();
+      try {
+        const { carrier, socket, terminals } = heartbeatCarrier();
+        await vi.advanceTimersByTimeAsync(HANDSHAKE_TIMEOUT_MS - 1_000);
+        socket.emitMessage(
+          encodeWebSocketFrameBatch([
+            encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+              features: CLIENT_WIRE_FEATURES | FEATURE_HEARTBEAT,
+            }),
+          ]),
+        );
+        await expect(carrier.ready()).resolves.toBeDefined();
+        await vi.advanceTimersByTimeAsync(HANDSHAKE_TIMEOUT_MS * 2);
         expect(terminals).toEqual([]);
         expect(socket.closed).toBe(false);
         carrier.close();

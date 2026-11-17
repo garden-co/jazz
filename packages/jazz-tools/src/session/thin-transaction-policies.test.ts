@@ -1,8 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { afterEach, expect, it } from "vitest";
-import { schema as s } from "../schema-namespace.js";
-import { definePermissions } from "../permissions/index.js";
 import type { AccountStore } from "../accounts/persistence.js";
-import { startTestJazz, type TestJazz } from "../testing/index.js";
+import { startTestJazz, testApp, type TestJazz } from "../testing/index.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
 import {
   openBrowserSessionCore as createJazzClient,
@@ -11,31 +10,35 @@ import {
 
 // A board and its owner's membership, written together: the membership's
 // insert policy needs the board, which only the same transaction holds.
-const app = s.defineApp(
-  {
-    boards: s.table({ name: s.string() }, {}),
-    members: s.table(
-      { boardId: s.uuid(), userId: s.uuid(), role: s.string() },
-      { board: s.rel("boards", "boardId") },
-    ),
+const app = testApp({
+  tables: {
+    boards: { columns: { name: "string" } },
+    members: {
+      columns: { boardId: "uuid", userId: "uuid", role: "string" },
+      relations: { board: { rel: "boards", column: "boardId" } },
+    },
   },
-  { migrations: "none" },
-);
-const permissions = definePermissions(app, ({ policy, session, allOf }) => {
-  // Boards are readable only by their members, so the board alone does not
-  // show up for its creator until the membership lands with it.
-  policy.boards.allowRead.where((b) =>
-    policy.members.exists.where({ boardId: b.id, userId: session.user }),
-  );
-  policy.boards.allowInsert.always();
-  policy.members.allowRead.always();
-  policy.members.allowInsert.where((m) =>
-    allOf([
-      { userId: session.user, role: "owner" },
-      policy.boards.exists.where({ id: m.boardId, $createdBy: session.user }),
-    ]),
-  );
 });
+const permissions = {
+  format: 1,
+  tables: {
+    // Boards are readable only by their members, so the board alone does not
+    // show up for its creator until the membership lands with it.
+    boards: {
+      read: "exists members(boardId = this.id, userId = session.user)",
+      insert: "true",
+    },
+    members: {
+      read: "true",
+      insert: {
+        allOf: [
+          "userId = session.user and role = 'owner'",
+          "exists boards(id = this.boardId, $createdBy = session.user)",
+        ],
+      },
+    },
+  },
+};
 
 let server: TestJazz | undefined;
 const sessions: BrowserJazzSession[] = [];
@@ -61,7 +64,7 @@ it("lets a thin client's transaction satisfy exists with a row it inserted itsel
   server = await startTestJazz({
     app,
     permissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   const session = await createJazzClient({
     scope: server.appId,
@@ -86,31 +89,62 @@ it("lets a thin client's transaction satisfy exists with a row it inserted itsel
   expect((await db.all(app.boards)).map((b) => b.name)).toEqual(["Retro"]);
 }, 60_000);
 
+it("checks a thin client's transaction as a whole, so the order of its writes doesn't matter", async () => {
+  server = await startTestJazz({
+    app,
+    permissions,
+    coreOptions: { inMemory: true },
+  });
+  const session = await createJazzClient({
+    scope: server.appId,
+    serverUrl: server.url,
+    store: memoryStore(),
+    initial: "device",
+    driver: { type: "memory" },
+  });
+  sessions.push(session);
+  const client = session.getSnapshot().client!;
+  const db = client.db;
+  expect(isThinDb(db)).toBe(true);
+  const me = client.session!.user!;
+
+  // The membership first: alone, its policy would refuse it, since the
+  // board it needs is staged after it. The backend serves the transaction
+  // and the core checks it once it is finished, in the state it leaves.
+  const boardId = randomUUID();
+  const result = await db.transaction(async (tx) => {
+    tx.insert(app.members, { boardId, userId: me, role: "owner" });
+    tx.insert(app.boards, { name: "Planning" }, { id: boardId });
+  });
+  await result.wait({ tier: "global" });
+  expect((await db.all(app.members.where({ boardId }))).map((m) => m.role)).toEqual(["owner"]);
+  expect((await db.all(app.boards)).map((b) => b.name)).toEqual(["Planning"]);
+}, 60_000);
+
 // A note may be added where its author may update the branch: the branch
 // the same transaction creates counts.
-const branches = s.defineApp(
-  {
-    branches: s.table({ name: s.string() }, {}),
-    notes: s.table(
-      { branchId: s.uuid(), title: s.string() },
-      { branch: s.rel("branches", "branchId") },
-    ),
+const branches = testApp({
+  tables: {
+    branches: { columns: { name: "string" } },
+    notes: {
+      columns: { branchId: "uuid", title: "string" },
+      relations: { branch: { rel: "branches", column: "branchId" } },
+    },
   },
-  { migrations: "none" },
-);
-const branchPermissions = definePermissions(branches, ({ policy, allowedTo }) => {
-  policy.branches.allowRead.always();
-  policy.branches.allowInsert.always();
-  policy.branches.allowUpdate.always();
-  policy.notes.allowRead.where(allowedTo.read("branch"));
-  policy.notes.allowInsert.where(allowedTo.update("branch"));
 });
+const branchPermissions = {
+  format: 1,
+  tables: {
+    branches: { read: "true", insert: "true", update: "true" },
+    notes: { read: "allowedTo.read(branch)", insert: "allowedTo.update(branch)" },
+  },
+};
 
 it("lets a thin client's transaction satisfy allowedTo.update with a parent it inserted itself", async () => {
   server = await startTestJazz({
     app: branches,
     permissions: branchPermissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   const session = await createJazzClient({
     scope: server.appId,

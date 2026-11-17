@@ -680,6 +680,28 @@ fn a_resent_commit_whose_entry_was_dropped_is_not_applied_again() {
     assert_eq!(transactions_of(&server_path, 1), 1);
 }
 
+/// Every new commit to latest-only tables asks whether the store has ever
+/// dropped a dedupe entry (the table that records it exists). The store is
+/// asked once, not once per commit; a refused commit's rollback makes it
+/// ask again, once.
+#[test]
+fn whether_entries_were_ever_dropped_is_asked_of_the_store_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = authority_at(&dir.path().join("server.sqlite"));
+    let alice = open_at(1, &dir.path().join("alice.sqlite"));
+    let _link = link(&alice, &server);
+    insert(&alice, "presence", row(1), "a", "0");
+    pump(&server, &[&alice]);
+    let before = jazz::pruned_txs_lookups_for_test();
+    for step in 1..=20 {
+        update(&alice, "presence", row(1), "a", &step.to_string());
+        pump(&server, &[&alice]);
+    }
+    let lookups = jazz::pruned_txs_lookups_for_test() - before;
+    assert_eq!(read(&server, "presence", None), [("a".into(), "20".into())]);
+    assert!(lookups <= 1, "{lookups} lookups for 20 commits");
+}
+
 /// A chunked value names the version it extends or proves access through,
 /// which a latest-only table drops, so a value over the inline threshold
 /// is refused there with a typed error; the same value fits a full table.

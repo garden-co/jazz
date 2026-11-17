@@ -12,7 +12,7 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { WebSocket as UndiciWebSocket } from "undici";
 import { startTestJwtIssuer, type TestJwtIssuerHandle } from "jazz-tools/testing";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 import {
   createServer,
   startServer,

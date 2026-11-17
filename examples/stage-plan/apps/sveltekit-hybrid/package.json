@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev",
-    "build": "jazz-tools validate && vite build",
+    "build": "jazz-tools generate && vite build",
     "start": "node server.js",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@garden-co/design": "github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2",
-    "better-auth": "1.7.1",
+    "better-auth": "1.7.22",
     "jazz-napi": "workspace:*",
     "jazz-tools": "workspace:*",
     "svelte": "^5.0.0"

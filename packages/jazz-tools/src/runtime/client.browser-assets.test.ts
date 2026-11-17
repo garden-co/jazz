@@ -17,6 +17,21 @@ vi.mock("jazz-wasm", async () => {
   };
 });
 
+// The URL a bundler names for the binary; null for bundlers that leave it to
+// wasm-bindgen (browser-worker-assets.ts), set for Metro (its .metro.ts).
+const bundler = vi.hoisted(() => ({ wasmUrl: null as string | null, moduleUrlReads: 0 }));
+vi.mock("./browser-worker-assets.js", async (importOriginal) => {
+  const assets = await importOriginal<typeof import("./browser-worker-assets.js")>();
+  return {
+    ...assets,
+    bundledWasmUrl: () => bundler.wasmUrl,
+    browserRuntimeModuleUrl: () => {
+      bundler.moduleUrlReads++;
+      return assets.browserRuntimeModuleUrl();
+    },
+  };
+});
+
 import { loadWasmModule } from "./wasm-loader.js";
 
 const originalProcess = globalThis.process;
@@ -32,6 +47,9 @@ function setBrowserLikeProcess(): void {
 afterEach(() => {
   wasmDefaultInit.mockClear();
   wasmInitSync.mockClear();
+  bundler.wasmUrl = null;
+  bundler.moduleUrlReads = 0;
+  delete (globalThis as Record<string, unknown>).__METRO_GLOBAL_PREFIX__;
 
   if (originalProcess === undefined) {
     delete (globalThis as Record<string, unknown>).process;
@@ -169,5 +187,64 @@ describe("loadWasmModule runtimeSources bootstrap", () => {
 
     expect(wasmDefaultInit).toHaveBeenCalledTimes(1);
     expect(wasmDefaultInit).toHaveBeenCalledWith();
+  });
+
+  it("loads the binary from the URL a bundler names for it", async () => {
+    // Metro with withJazz: the binary is a Metro asset, and wasm-bindgen's
+    // own URL for it would be a 404.
+    setBrowserLikeProcess();
+    (globalThis as Record<string, unknown>).location = { href: "http://localhost:8081/" };
+    bundler.wasmUrl = "http://localhost:8081/assets/jazz_wasm_bg.0f1e.wasm";
+    serveWasm();
+
+    await loadWasmModule();
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "http://localhost:8081/assets/jazz_wasm_bg.0f1e.wasm",
+    );
+    expect(wasmDefaultInit).toHaveBeenCalledWith({
+      module_or_path: expect.any(WebAssembly.Module),
+    });
+  });
+
+  it("prefers the app's own runtimeSources over the bundler's URL", async () => {
+    setBrowserLikeProcess();
+    (globalThis as Record<string, unknown>).location = { href: "http://localhost:8081/" };
+    bundler.wasmUrl = "http://localhost:8081/assets/jazz_wasm_bg.0f1e.wasm";
+    serveWasm();
+
+    await loadWasmModule({ wasmUrl: "/own/jazz_wasm_bg.wasm", wasmVersion: "deploy-42" });
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "http://localhost:8081/own/jazz_wasm_bg.wasm?jazz-runtime-version=deploy-42",
+    );
+  });
+
+  it("does not ask where its own module is when it was handed the binary's URL", async () => {
+    // The broker worker on Expo web: Expo compiles `import.meta` to a registry
+    // that worker chunks do not have, so reading `import.meta.url` there throws.
+    setBrowserLikeProcess();
+    (globalThis as Record<string, unknown>).location = { href: "http://localhost:8081/" };
+    serveWasm();
+
+    await loadWasmModule({ wasmUrl: "http://localhost:8081/assets/jazz_wasm_bg.0f1e.wasm" });
+    expect(bundler.moduleUrlReads).toBe(0);
+
+    // Left to find the binary itself, it does need its module's URL.
+    await loadWasmModule();
+    expect(bundler.moduleUrlReads).toBe(1);
+  });
+
+  it("names the Metro setup instead of requesting a binary Metro did not bundle", async () => {
+    // Metro without withJazz: wasm-bindgen would ask for the binary beside
+    // the bundle, where nothing serves it.
+    setBrowserLikeProcess();
+    (globalThis as Record<string, unknown>).location = { href: "http://localhost:8081/" };
+    (globalThis as Record<string, unknown>).__METRO_GLOBAL_PREFIX__ = "";
+
+    await expect(loadWasmModule()).rejects.toThrow(
+      "wrap your Metro config in withJazz from jazz-tools/expo/metro",
+    );
+    expect(wasmDefaultInit).not.toHaveBeenCalled();
   });
 });

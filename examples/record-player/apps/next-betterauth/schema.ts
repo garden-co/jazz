@@ -1,9 +1,8 @@
 import { schema as s } from "jazz-tools";
-import { betterAuthSchema } from "./auth-schema";
-import { migrations } from "./migrations";
+import { tables as betterAuthTables, permissions as betterAuthPermissions } from "./auth-schema";
 
-const schema = {
-  ...betterAuthSchema,
+export const schema = s.defineSchema({
+  ...betterAuthTables,
   albums: s
     .table(
       {
@@ -75,7 +74,91 @@ const schema = {
     },
     { playlist: s.rel("playlists", "playlist_id"), track: s.rel("tracks", "track_id") },
   ),
-};
+});
 
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+const { definePermissions, exists, allowedTo, session, anyOf, allOf } = schema;
+
+const createdByMe = { "$createdBy.account": session.user };
+
+const hasEditorInvitation = (playlist_id: s.Uuid) =>
+  exists.invitations({ playlist_id, subject: session.user, role: "editor", status: "accepted" });
+
+const canReadPlaylist = (playlist_id: s.Uuid) =>
+  anyOf(
+    createdByMe,
+    exists.invitations({
+      playlist_id,
+      // This column carries Jazz's issuer-scoped canonical session user, not a
+      // provider-local Better Auth user id. It stays stable across tokens
+      // and avoids conflating external account storage with row authorship.
+      subject: session.user,
+      status: "accepted",
+    }),
+  );
+
+const canEditPlaylist = (playlist_id: s.Uuid) =>
+  anyOf(createdByMe, hasEditorInvitation(playlist_id));
+
+const ownsPlaylist = (invitation: s.Row<typeof schema, "invitations">) =>
+  invitation.playlist.where(createdByMe);
+
+export const permissions = definePermissions({
+  ...betterAuthPermissions,
+  // RecordPlayer deliberately models a shared public catalogue: every
+  // authenticated listener can publish album metadata and audio tracks, and
+  // everyone can browse them. A production catalog would ordinarily replace
+  // the album and track insert rules with a label/artist membership relation.
+  albums: {
+    read: true,
+    insert: createdByMe,
+  },
+  invitations: {
+    read: (invitation) => anyOf({ subject: session.user }, ownsPlaylist(invitation)),
+    insert: ownsPlaylist,
+    // Recipients may perform the one-way pending -> accepted transition; every
+    // other invitation change (including revoke) remains owner-controlled.
+    // Keep both alternatives in one rule: separate update rules would silently
+    // form an old/new cross product. The recipient's persisted pending row and
+    // accepted new row are both required.
+    updateIf: (invitation) =>
+      anyOf(ownsPlaylist(invitation), { subject: session.user, status: "pending" }),
+    updateTo: (invitation) =>
+      anyOf(
+        ownsPlaylist(invitation),
+        allOf(
+          exists.invitations({
+            id: invitation.id,
+            playlist_id: invitation.playlist_id,
+            subject: invitation.subject,
+            role: invitation.role,
+            status: "pending",
+          }),
+          { subject: session.user, status: "accepted" },
+        ),
+      ),
+    delete: ownsPlaylist,
+  },
+  playback_positions: {
+    read: createdByMe,
+    insert: true,
+    update: createdByMe,
+    delete: createdByMe,
+  },
+  playlist_entries: {
+    read: (entry) => allowedTo.read(entry.playlist),
+    insert: (entry) =>
+      anyOf(allowedTo.update(entry.playlist), hasEditorInvitation(entry.playlist_id)),
+    update: (entry) => canEditPlaylist(entry.playlist_id),
+    delete: (entry) => canEditPlaylist(entry.playlist_id),
+  },
+  playlists: {
+    read: (playlist) => canReadPlaylist(playlist.id),
+    insert: true,
+    update: createdByMe,
+  },
+  // Shared public catalogue, like albums.
+  tracks: {
+    read: true,
+    insert: createdByMe,
+  },
+});

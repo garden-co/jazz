@@ -36,9 +36,26 @@ function matchingBrace(source, opening) {
   return -1;
 }
 
+/**
+ * The `import0` literal in glue whose identifiers a minifier renamed (the
+ * published broker worker). Its keys survive minification, and wasm-bindgen
+ * opens it with `__proto__: null` followed by its first import.
+ */
+function minifiedImportObjects(glueSource) {
+  const objects = [];
+  for (const match of glueSource.matchAll(/\{\s*__proto__\s*:\s*null\s*,\s*(?=__wbg)/g)) {
+    const closing = matchingBrace(glueSource, match.index);
+    if (closing !== -1) objects.push(glueSource.slice(match.index + 1, closing));
+  }
+  return objects;
+}
+
 function generatedImportObject(glueSource) {
   const functionStart = glueSource.indexOf("function __wbg_get_imports()");
-  if (functionStart === -1) return null;
+  if (functionStart === -1) {
+    const objects = minifiedImportObjects(glueSource);
+    return objects.length === 1 ? objects[0] : null;
+  }
   const functionOpening = glueSource.indexOf("{", functionStart);
   const functionEnd = matchingBrace(glueSource, functionOpening);
   if (functionEnd === -1) return null;

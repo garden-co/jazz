@@ -91,9 +91,9 @@ This is useful when iterating on your schema during development. `window.__jazz`
 every browser client, production builds included: it resets this browser's own storage and
 closes this page's own clients, nothing more.
 
-`window.__jazz` is reserved for Jazz, as is `window.__jazzWindowStorageContexts__`. If your app
-(or another library) sets `window.__jazz` itself, the Jazz session refuses to start and says so:
-rename your own global.
+`window.__jazz` is Jazz's name, as is `window.__jazzWindowStorageContexts__`. If your app (or
+another library) sets `window.__jazz` itself, Jazz leaves it alone, warns once on the console and
+works without the helper: rename your own global to get `window.__jazz.clearStorage()` back.
 
 </Accordion>
 

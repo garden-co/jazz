@@ -21,6 +21,13 @@
 #include <unordered_map>
 #endif
 
+#if JAZZ_RELAY_ARTIFACT_AVAILABLE && defined(JAZZ_NATIVE_RELAY_NETWORK_WIFI)
+#import <Network/Network.h>
+#define JAZZ_RELAY_NETWORK_PATH_MONITOR 1
+#else
+#define JAZZ_RELAY_NETWORK_PATH_MONITOR 0
+#endif
+
 @interface JazzRelay ()
 @property(nonatomic, assign) uint64_t foregroundRuntimeToken;
 @end
@@ -82,8 +89,43 @@ static NSURL *JazzRelayStorageRoot(void) {
 }
 #endif
 
+#if JAZZ_RELAY_NETWORK_PATH_MONITOR
+// The relay's socket worker cannot tell a dead route from a quiet one: when
+// Wi-Fi goes away the socket hears nothing at all. The operating system knows
+// at once, so every path update goes to the relay, which drops a link the path
+// can no longer carry and retries at once when a usable path comes back.
+// One monitor for the process, started with the first module and never
+// stopped: the path is a property of the device, not of a runtime.
+static void StartNetworkPathMonitor(void) {
+  static nw_path_monitor_t monitor = nil;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    monitor = nw_path_monitor_create();
+    nw_path_monitor_set_queue(
+        monitor, dispatch_queue_create("jazz.relay.network-path", DISPATCH_QUEUE_SERIAL));
+    nw_path_monitor_set_update_handler(monitor, ^(nw_path_t path) {
+      uint32_t interfaces = 0;
+      if (nw_path_uses_interface_type(path, nw_interface_type_wifi))
+        interfaces |= JAZZ_NATIVE_RELAY_NETWORK_WIFI;
+      if (nw_path_uses_interface_type(path, nw_interface_type_cellular))
+        interfaces |= JAZZ_NATIVE_RELAY_NETWORK_CELLULAR;
+      if (nw_path_uses_interface_type(path, nw_interface_type_wired))
+        interfaces |= JAZZ_NATIVE_RELAY_NETWORK_WIRED;
+      if (nw_path_uses_interface_type(path, nw_interface_type_other))
+        interfaces |= JAZZ_NATIVE_RELAY_NETWORK_OTHER;
+      jazz_native_relay_network_path_changed(
+          nw_path_get_status(path) == nw_path_status_satisfied, interfaces);
+    });
+    nw_path_monitor_start(monitor);
+  });
+}
+#endif
+
 - (instancetype)init {
   self = [super init];
+#if JAZZ_RELAY_NETWORK_PATH_MONITOR
+  StartNetworkPathMonitor();
+#endif
 #if JAZZ_RELAY_ARTIFACT_AVAILABLE
   if (self != nil) {
     @synchronized([JazzRelay class]) {

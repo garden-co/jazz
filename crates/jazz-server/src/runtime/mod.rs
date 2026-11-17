@@ -28,7 +28,6 @@ use std::sync::{Arc, Mutex, Weak, mpsc as std_mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
 use crate::kv::HostKv;
 use crate::kv::HostSql;
 use crate::kv::NativeReader as HostReader;
@@ -788,7 +787,6 @@ impl AppStore {
     }
 
     /// Key-value access to one host table.
-    #[cfg(test)]
     pub(crate) fn kv(&self, table: HostTable) -> Result<HostKv, String> {
         Ok(HostKv::new(
             table,
@@ -1229,7 +1227,9 @@ impl StoreLoop {
                 block_on(job(HostAccess::Unavailable(error)))
             })),
             State::Running(owner) => catch_unwind(AssertUnwindSafe(|| {
-                block_on(job(HostAccess::Db(&owner.db)))
+                block_on(job(HostAccess::Db(&owner.db)));
+                #[cfg(test)]
+                owner.assert_holds_nothing("host work");
             })),
         };
         if let Err(panic) = ran {
@@ -1342,7 +1342,11 @@ impl StoreLoop {
         let State::Running(owner) = &mut self.state else {
             return;
         };
-        if let Err(panic) = catch_unwind(AssertUnwindSafe(|| f(owner))) {
+        if let Err(panic) = catch_unwind(AssertUnwindSafe(|| {
+            f(owner);
+            #[cfg(test)]
+            owner.assert_holds_nothing("runtime work");
+        })) {
             self.fault(format!(
                 "server runtime panicked: {}",
                 panic_message(&*panic)
@@ -1774,7 +1778,7 @@ impl ServerRuntimeHandle {
     /// Wait for room for a thin request `bytes` long on the wire, before
     /// reading or joining it: in `session`'s budget (the most one request
     /// takes, [`jazz::thin::MAX_THIN_MESSAGE_BYTES`]) and, for a request
-    /// `split` into parts, the server's ([`THIN_INGRESS_SERVER_BUDGET`]).
+    /// `split` into parts, the server's (`THIN_INGRESS_SERVER_BUDGET`).
     /// While it waits, its reader reads nothing more, so the client's
     /// socket backs up instead of the session ending; the room frees as the
     /// owner runs queued requests.
@@ -2601,6 +2605,35 @@ fn with_permissions(
         table.policies = permissions.get(name).cloned().unwrap_or_default();
     }
     JazzSchema::new(&source).map_err(|error| format!("invalid schema permissions: {error}"))
+}
+
+impl Owner {
+    /// Tests: the core holds nothing open between the pieces of work it
+    /// serves, so that it also runs where storage cannot keep a
+    /// transaction open across calls (Durable Objects' `transactionSync`).
+    /// Thin-client transactions are the one exception while the core still
+    /// runs them: their handles, and the overlay of the last one staged.
+    /// A violation aborts the test process: the store loop catches panics
+    /// and restarts the runtime, which a test could miss.
+    #[cfg(test)]
+    fn assert_holds_nothing(&self, after: &str) {
+        let held = self.db.held_for_test();
+        let thin = self.open_thin_transactions();
+        let allowed = held.open_batches == thin
+            && !held.callback_transaction
+            && (thin > 0 || (!held.overlay && !held.sqlite_transaction));
+        if !allowed {
+            // Straight to stderr: the test harness captures `eprintln!`,
+            // and an abort loses what it captured.
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "the core holds {held:?} after {after}, with {thin} thin-client \
+                 transactions open: it must hold nothing between calls"
+            );
+            std::process::abort();
+        }
+    }
 }
 
 impl Owner {

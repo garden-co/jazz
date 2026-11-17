@@ -215,6 +215,8 @@ pub trait Row {
 pub struct QueryStats {
     pub fullscan_steps: Option<u64>,
     pub sorted: Option<bool>,
+    /// VM steps, collected only by instrumented providers.
+    pub vm_steps: Option<u64>,
 }
 
 /// Connection facts required by Jazz in addition to statement execution.

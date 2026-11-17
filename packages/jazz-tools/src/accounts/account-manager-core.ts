@@ -2,6 +2,7 @@ import { accountRegistryUrl } from "./context.js";
 import { accountAppId } from "./local-first.js";
 import { clientScope, DEFAULT_SERVER_URL } from "../runtime/client-scope.js";
 import { prepareAccountManager, readableSelection, type AccountStore } from "./persistence.js";
+import { markProcessOnly, processAccountStore } from "./process-store.js";
 import type { AccountManagerConfig } from "./create-account-manager.js";
 
 /** Signs a local-first account's token for `audience` (see `prepareAccountManager`). */
@@ -27,7 +28,7 @@ export async function createAccountManagerWithMinter(
     // entry sends the bearer on the native sync connection.
     if ((globalThis as { navigator?: { product?: string } }).navigator?.product === "ReactNative")
       throw new Error(
-        "bearer from jazz-tools/client is not supported on React Native: use createAccountManager from jazz-tools/react-native or jazz-tools/expo, whose bearer the native sync connection sends.",
+        "bearer from jazz-tools/client is not supported on React Native: use createJazzClient from jazz-tools/react-native or jazz-tools/expo, whose bearer the native sync connection sends.",
       );
     if (config.serverUrl === null)
       throw new Error("bearer signs in through the app's backend: a device-only client has none");
@@ -37,13 +38,20 @@ export async function createAccountManagerWithMinter(
     ...config,
     serverUrl: resolvedServerUrl(config),
   });
+  // A browser page or worker keeps the selection in localStorage. Any other
+  // host (Node, Deno, Bun, a CLI) without a store of its own keeps it for
+  // this process only: enough for a user the backend names (by bearer), not
+  // for a device account, whose key would be lost on exit.
+  const browserStorage = keepsBrowserStorage();
   const store =
     config.store ??
-    browserAccountStore(
-      registry,
-      config.env ?? "dev",
-      config.scope?.trim() ? accountAppId(config.scope.trim()) : undefined,
-    );
+    (browserStorage
+      ? browserAccountStore(
+          registry,
+          config.env ?? "dev",
+          config.scope?.trim() ? accountAppId(config.scope.trim()) : undefined,
+        )
+      : processAccountStore());
   const manager = await prepareAccountManager({
     appId: scope,
     registry,
@@ -58,7 +66,11 @@ export async function createAccountManagerWithMinter(
     bearer: config.bearer,
     rememberBackendUser: options.rememberBackendUser,
   });
-  if (!config.store) browserSelectionKeys.set(manager, selectionKey(registry, config.env ?? "dev"));
+  if (!config.store) {
+    if (browserStorage)
+      browserSelectionKeys.set(manager, selectionKey(registry, config.env ?? "dev"));
+    else markProcessOnly(manager);
+  }
   return manager;
 }
 
@@ -130,13 +142,35 @@ function sendsCookies(): boolean {
 }
 
 /**
+ * Whether the default account store is the browser's (localStorage, with Web
+ * Locks for atomic updates): on a browser page or worker, which refuses
+ * precisely when either is missing, and on any host that has both. Elsewhere
+ * (Node, Bun, Deno without Web Locks) the default keeps the selection in
+ * memory (`processAccountStore`).
+ */
+function keepsBrowserStorage(): boolean {
+  if (sendsCookies()) return true;
+  try {
+    return (
+      typeof localStorage !== "undefined" &&
+      localStorage !== null &&
+      typeof navigator !== "undefined" &&
+      !!(navigator as { locks?: unknown }).locks
+    );
+  } catch {
+    // A host whose localStorage getter throws.
+    return false;
+  }
+}
+
+/**
  * @internal What sign-in requests of a host without cookies get (Node, Deno,
  * Bun, a CLI) without a bearer: a clear refusal, naming `bearer`.
  */
 export const cookielessFetch: typeof fetch = () =>
   Promise.reject(
     new Error(
-      "loginWithBackend and linkWithBackend need a browser: the app's backend names the signed-in user by the cookie a browser sends on Jazz's sync connection, and this host sends none. Pass the app's token as bearer instead (on createJazzClient or createAccountManager; from jazz-tools/react-native or jazz-tools/expo on React Native). A server acts for its users through jazz-tools/backend (jazz.forReqUser).",
+      "loginWithBackend and linkWithBackend need a browser: the app's backend names the signed-in user by the cookie a browser sends on Jazz's sync connection, and this host sends none. Pass the app's token as bearer instead (on createJazzClient, from jazz-tools/react-native or jazz-tools/expo on React Native). A server acts for its users through jazz-tools/backend (jazz.forReqUser).",
     ),
   );
 
@@ -219,10 +253,14 @@ function selectionKey(registry: string, env: string): string {
 
 function browserAccountStore(registry: string, env: string, scope?: string): AccountStore {
   if (typeof localStorage === "undefined") {
-    throw new Error("createAccountManager requires an AccountStore outside the browser");
+    throw new Error(
+      "This browser has no localStorage to keep Jazz's account selection in: pass createJazzClient a `store` (an AccountStore: { read, update })",
+    );
   }
   if (typeof navigator === "undefined" || !navigator.locks) {
-    throw new Error("The browser account store requires Web Locks; supply an atomic AccountStore");
+    throw new Error(
+      "This browser has no Web Locks, which Jazz's default account store needs: pass createJazzClient a `store` (an atomic AccountStore: { read, update })",
+    );
   }
   const key = selectionKey(registry, env);
   const earlierKey = () => (scope === undefined ? null : earlierSelectionKey(scope, env));

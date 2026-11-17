@@ -6,9 +6,11 @@
 //! row and the tree it names still commit together.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt as _;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -34,6 +36,22 @@ fn config(node: u8, author: AuthorSubject) -> DbConfig {
     let docs = TableSchemaBuilder::new("docs")
         .column("body", ColumnType::Text)
         .column("blob", ColumnType::Bytea)
+        .policies(allow_all_policies());
+    DbConfig::new(
+        compile_schema(&SchemaBuilder::new().table(docs).build()),
+        DbIdentity {
+            node: NodeUuid::from_bytes([node; 16]),
+            author,
+        },
+    )
+}
+
+/// [`config`] with a JSON column `doc` beside them, all three nullable.
+fn json_config(node: u8, author: AuthorSubject) -> DbConfig {
+    let docs = TableSchemaBuilder::new("docs")
+        .nullable_column("body", ColumnType::Text)
+        .nullable_column("blob", ColumnType::Bytea)
+        .nullable_column("doc", ColumnType::Json { schema: None })
         .policies(allow_all_policies());
     DbConfig::new(
         compile_schema(&SchemaBuilder::new().table(docs).build()),
@@ -547,7 +565,11 @@ struct Subscriber {
 
 /// A replica connected to `server` that reads nothing yet.
 fn connect_to(server: &Db) -> Subscriber {
-    let alice = block_on(Db::open(config(1, user(1)))).unwrap();
+    connect_replica(server, block_on(Db::open(config(1, user(1)))).unwrap())
+}
+
+/// `alice` connected to `server` as user 1, reading nothing yet.
+fn connect_replica(server: &Db, alice: Db) -> Subscriber {
     let up = Rc::new(RefCell::new(VecDeque::new()));
     let down = Rc::new(RefCell::new(VecDeque::new()));
     let _ = block_on(alice.connect_upstream(Box::new(Pipe {
@@ -1333,4 +1355,1280 @@ fn reads_are_fetched_beside_a_batch_that_is_out() {
         "served with the uploads still out"
     );
     jazz::db::block_on(server.finish_chunk_io(run_elsewhere(uploads, store.clone()))).unwrap();
+}
+
+/// How a one-shot read by a replica ended within a hard limit: `None` if
+/// it did not, else its rows' cells as text or its error.
+type Ended = Option<Result<Vec<Vec<String>>, jazz::db::Error>>;
+
+/// Run a replica's one-shot read (the bindings' path) against `server`,
+/// ticking both, until it ends or a hard limit passes: 400 rounds, then a
+/// tick every 10 ms up to 2 s of wall-clock, so a time-based give-up
+/// would show too.
+fn read_until_it_ends(server: &Db, alice: &Db, query: &Query, tier: ReadTier) -> Ended {
+    read_through(&[server], alice, query, tier)
+}
+
+/// [`read_until_it_ends`] by `alice`, ticking `upstream` (nearest first)
+/// after her.
+fn read_through(upstream: &[&Db], alice: &Db, query: &Query, tier: ReadTier) -> Ended {
+    read_watching(upstream, alice, query, tier, |_| {})
+}
+
+/// [`read_through`], calling `watch` after each round's upstream ticks,
+/// before `alice` takes what they sent.
+fn read_watching(
+    upstream: &[&Db],
+    alice: &Db,
+    query: &Query,
+    tier: ReadTier,
+    mut watch: impl FnMut(usize),
+) -> Ended {
+    use std::pin::pin;
+    use std::task::{Context, Waker};
+    let bytes = postcard::to_allocvec(query).unwrap();
+    let opts = ReadOpts {
+        tier,
+        ..ReadOpts::default()
+    };
+    let started = std::time::Instant::now();
+    let mut read = pin!(alice.all_serialized_query(&bytes, opts, None, None, None));
+    let mut context = Context::from_waker(Waker::noop());
+    for round in 0.. {
+        if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+            return Some(result.map(|result| {
+                match result {
+                    jazz::db::SerializedReadResult::Rows(rows) => rows
+                        .iter()
+                        .map(|row| {
+                            row.cells()
+                                .map(|(name, value)| format!("{name}={value:?}"))
+                                .collect()
+                        })
+                        .collect(),
+                    other => panic!("{other:?}"),
+                }
+            }));
+        }
+        if round >= 400 {
+            if started.elapsed() > std::time::Duration::from_secs(2) {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        block_on(alice.tick()).unwrap();
+        for db in upstream {
+            block_on(db.tick()).unwrap();
+        }
+        watch(round);
+    }
+    unreachable!()
+}
+
+/// A replica that holds a row whose value's leaves its authority's
+/// directory store has lost, or holds corrupt, and reads the value: the
+/// authority cannot answer the pull with those leaves, and says so, so
+/// the read ends with an error instead of waiting for chunks that are not
+/// coming. The row reached the replica through a read that did not need
+/// the value (it selected another column), so the authority never decoded
+/// it. Whole value and part, each fault.
+#[test]
+fn a_readers_one_shot_read_of_a_value_whose_leaves_its_authority_lost_ends() {
+    use jazz::query::Part;
+    let mut outcomes = Vec::new();
+    for fault in ["lost", "corrupt"] {
+        for part in [false, true] {
+            let (_dir, path) = scratch();
+            let directory = tempfile::tempdir().unwrap();
+            let store: Arc<dyn ChunkStore> =
+                Arc::new(FileChunkStore::new(directory.path().to_path_buf()).unwrap());
+            {
+                let server = open(&path, Some(store.clone())).unwrap();
+                block_on(server.insert(
+                    "docs",
+                    BTreeMap::from([
+                        ("body".to_owned(), Value::String(text(79, LARGE))),
+                        ("blob".to_owned(), Value::Bytes(vec![1, 2, 3])),
+                    ]),
+                    InsertOptions {
+                        row_id: Some(row(1)),
+                        ..Default::default()
+                    },
+                ))
+                .unwrap();
+                block_on(server.tick()).unwrap();
+            }
+            let leaves = walk(directory.path());
+            assert!(leaves.len() > 1, "{leaves:?}");
+            for leaf in &leaves {
+                if fault == "lost" {
+                    std::fs::remove_file(leaf).unwrap();
+                } else {
+                    let flipped: Vec<u8> = std::fs::read(leaf)
+                        .unwrap()
+                        .iter()
+                        .map(|b| b ^ 0x5a)
+                        .collect();
+                    std::fs::write(leaf, flipped).unwrap();
+                }
+            }
+            let server = open(&path, Some(store)).unwrap();
+            let sub = connect_to(&server);
+            // The row, through a read of its other column only.
+            let listed = read_until_it_ends(
+                &server,
+                &sub.alice,
+                &Query::from("docs").select(["blob"]),
+                ReadTier::Remote,
+            );
+            assert!(
+                matches!(&listed, Some(Ok(rows)) if rows.len() == 1),
+                "{fault}: {listed:?}"
+            );
+            let mut query = Query::from("docs").select(["body"]);
+            if part {
+                query = query.select_part(
+                    "body",
+                    Part::TextUtf8 {
+                        from: 1000,
+                        to: 1010,
+                    },
+                );
+            }
+            let read = read_until_it_ends(&server, &sub.alice, &query, ReadTier::LocalOnly);
+            // Nothing is on its way: the waits that ask `awaiting_chunks`
+            // (the bindings' reads, the client's) end too, and a read that
+            // does not wait reports the same.
+            assert!(!sub.alice.awaiting_chunks(), "{fault} part {part}");
+            if !part {
+                let now = cell(&sub.alice, 1, "body").map(|_| ());
+                let ended = read.as_ref().and_then(|read| read.as_ref().err());
+                let text = |error: Option<&jazz::db::Error>| {
+                    error
+                        .map(|error| (error.code, error.is_missing_chunks(), error.message.clone()))
+                };
+                assert_eq!(text(now.err().as_ref()), text(ended), "{fault}");
+            }
+            outcomes.push((fault, part, read));
+        }
+    }
+    let hung: Vec<_> = outcomes
+        .iter()
+        .filter(|(_, _, read)| read.is_none())
+        .map(|(fault, part, _)| format!("{fault}, {}", if *part { "part" } else { "whole" }))
+        .collect();
+    assert!(hung.is_empty(), "reads that never ended: {hung:?}");
+    for (fault, part, read) in &outcomes {
+        let Some(Err(error)) = read else {
+            panic!("{fault} part {part}: {read:?}");
+        };
+        assert!(error.is_missing_chunks(), "{fault} part {part}: {error:?}");
+        assert!(
+            !error.message.contains("retry after the next sync tick"),
+            "{fault} part {part}: {}",
+            error.message
+        );
+    }
+}
+
+/// A value its authority could not supply is asked for again on a new
+/// link: once the authority holds its leaves again (a restored
+/// directory), a replica that reconnects reads it.
+#[test]
+fn a_value_its_authority_could_not_supply_is_asked_for_again_on_a_new_link() {
+    let (_dir, path) = scratch();
+    let directory = tempfile::tempdir().unwrap();
+    let store: Arc<dyn ChunkStore> =
+        Arc::new(FileChunkStore::new(directory.path().to_path_buf()).unwrap());
+    let value = text(80, LARGE);
+    {
+        let server = open(&path, Some(store.clone())).unwrap();
+        block_on(server.insert(
+            "docs",
+            BTreeMap::from([
+                ("body".to_owned(), Value::String(value.clone())),
+                ("blob".to_owned(), Value::Bytes(vec![1, 2, 3])),
+            ]),
+            InsertOptions {
+                row_id: Some(row(1)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    let saved: Vec<(PathBuf, Vec<u8>)> = walk(directory.path())
+        .into_iter()
+        .map(|leaf| {
+            let bytes = std::fs::read(&leaf).unwrap();
+            (leaf, bytes)
+        })
+        .collect();
+    for (leaf, _) in &saved {
+        std::fs::remove_file(leaf).unwrap();
+    }
+    let server = open(&path, Some(store)).unwrap();
+    let sub = connect_to(&server);
+    let listed = read_until_it_ends(
+        &server,
+        &sub.alice,
+        &Query::from("docs").select(["blob"]),
+        ReadTier::Remote,
+    );
+    assert!(
+        matches!(&listed, Some(Ok(rows)) if rows.len() == 1),
+        "{listed:?}"
+    );
+    let body = Query::from("docs").select(["body"]);
+    let refused = read_until_it_ends(&server, &sub.alice, &body, ReadTier::LocalOnly);
+    assert!(
+        matches!(&refused, Some(Err(error)) if error.is_missing_chunks()),
+        "{refused:?}"
+    );
+    for (leaf, bytes) in &saved {
+        std::fs::write(leaf, bytes).unwrap();
+    }
+    // The same link remembers the refusal.
+    let again = read_until_it_ends(&server, &sub.alice, &body, ReadTier::LocalOnly);
+    assert!(matches!(&again, Some(Err(_))), "{again:?}");
+    // A new link asks again.
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let _ = block_on(sub.alice.connect_upstream(Box::new(Pipe {
+        out: up.clone(),
+        inbound: down.clone(),
+    })));
+    server
+        .accept_subscriber(
+            Box::new(Pipe {
+                out: down,
+                inbound: up,
+            }),
+            user(1),
+        )
+        .unwrap();
+    let read = read_until_it_ends(&server, &sub.alice, &body, ReadTier::LocalOnly);
+    let expected = format!("body={:?}", Some(Value::String(value)));
+    assert!(
+        matches!(&read, Some(Ok(rows)) if rows.len() == 1 && rows[0] == [expected.clone()]),
+        "{:?}",
+        read.map(|read| read.map(|rows| rows.len()))
+    );
+}
+
+/// Through a relay: the authority answers the relay's pull of a lost leaf
+/// as one it cannot supply, and the relay answers its own session's pull
+/// so too, so the session's read ends rather than waiting on the relay.
+#[test]
+fn a_read_through_a_relay_of_a_value_whose_leaves_its_authority_lost_ends() {
+    let (_dir, path) = scratch();
+    let directory = tempfile::tempdir().unwrap();
+    let store: Arc<dyn ChunkStore> =
+        Arc::new(FileChunkStore::new(directory.path().to_path_buf()).unwrap());
+    {
+        let server = open(&path, Some(store.clone())).unwrap();
+        block_on(server.insert(
+            "docs",
+            BTreeMap::from([
+                ("body".to_owned(), Value::String(text(81, LARGE))),
+                ("blob".to_owned(), Value::Bytes(vec![1, 2, 3])),
+            ]),
+            InsertOptions {
+                row_id: Some(row(1)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    for leaf in walk(directory.path()) {
+        std::fs::remove_file(leaf).unwrap();
+    }
+    let server = open(&path, Some(store)).unwrap();
+    let relay = connect_to(&server);
+    let tab = block_on(Db::open(config(2, user(1)))).unwrap();
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let _ = block_on(tab.connect_upstream(Box::new(Pipe {
+        out: up.clone(),
+        inbound: down.clone(),
+    })));
+    relay
+        .alice
+        .accept_subscriber(
+            Box::new(Pipe {
+                out: down,
+                inbound: up,
+            }),
+            user(1),
+        )
+        .unwrap();
+    let chain = [&relay.alice, &server];
+    let listed = read_through(
+        &chain,
+        &tab,
+        &Query::from("docs").select(["blob"]),
+        ReadTier::Remote,
+    );
+    assert!(
+        matches!(&listed, Some(Ok(rows)) if rows.len() == 1),
+        "{listed:?}"
+    );
+    let read = read_through(
+        &chain,
+        &tab,
+        &Query::from("docs").select(["body"]),
+        ReadTier::LocalOnly,
+    );
+    let Some(Err(error)) = &read else {
+        panic!("{read:?}");
+    };
+    assert!(error.is_missing_chunks(), "{error:?}");
+    assert!(!tab.awaiting_chunks());
+}
+
+/// A directory store that fails its reads while `failing`, and counts
+/// the reads asked of it. It says it always answers at once only if
+/// `promises`.
+struct Faulty {
+    files: FileChunkStore,
+    failing: std::sync::atomic::AtomicBool,
+    reads: std::sync::atomic::AtomicUsize,
+    promises: bool,
+}
+
+impl Faulty {
+    fn new(dir: &Path, promises: bool) -> Self {
+        Self {
+            files: FileChunkStore::new(dir.to_path_buf()).unwrap(),
+            failing: false.into(),
+            reads: 0.into(),
+            promises,
+        }
+    }
+
+    fn fail(&self, failing: bool) {
+        self.failing
+            .store(failing, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn reads(&self) -> usize {
+        self.reads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl ChunkStore for Faulty {
+    fn put<'a>(&'a self, node: &'a NodeKey, bytes: &'a [u8]) -> StoreFuture<'a, ()> {
+        self.files.put(node, bytes)
+    }
+
+    fn get<'a>(&'a self, node: &'a NodeKey) -> StoreFuture<'a, Option<Bytes>> {
+        self.files.get(node)
+    }
+
+    fn delete<'a>(&'a self, node: &'a NodeKey) -> StoreFuture<'a, ()> {
+        self.files.delete(node)
+    }
+
+    fn get_now(&self, node: &NodeKey) -> Option<Result<Option<Bytes>, jazz::db::Error>> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Some(Err(jazz::db::Error::new(
+                ErrorCode::Storage,
+                "disk unreadable",
+            )));
+        }
+        self.files.get_now(node)
+    }
+
+    fn always_answers_now(&self) -> bool {
+        self.promises
+    }
+}
+
+/// Rows `1..=rows` on a store at `path`, each with a large body of its
+/// own (`text(80 + n, LARGE)`) moved to `store` and a small blob.
+fn offloaded_rows(path: &Path, store: &Arc<dyn ChunkStore>, rows: u8) {
+    let server = open(path, Some(store.clone())).unwrap();
+    for n in 1..=rows {
+        block_on(server.insert(
+            "docs",
+            BTreeMap::from([
+                (
+                    "body".to_owned(),
+                    Value::String(text(80 + u64::from(n), LARGE)),
+                ),
+                ("blob".to_owned(), Value::Bytes(vec![n])),
+            ]),
+            InsertOptions {
+                row_id: Some(row(n)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    block_on(server.tick()).unwrap();
+}
+
+/// Row `n`'s body, read from what the replica holds and its upstream's
+/// answers to the pulls for the rest.
+fn body_of(n: u8) -> Vec<u8> {
+    postcard::to_allocvec(
+        &Query::from("docs")
+            .filter(eq(col("id"), lit(Value::Uuid(row(n).0))))
+            .select(["body"]),
+    )
+    .unwrap()
+}
+
+fn local() -> ReadOpts {
+    ReadOpts {
+        tier: ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    }
+}
+
+/// Poll `read` and tick both sides for 20 rounds: whether it ended.
+fn rounds<F: Future>(read: &mut std::pin::Pin<&mut F>, sub: &Subscriber, server: &Db) -> bool {
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    for _ in 0..20 {
+        if read.as_mut().poll(&mut context).is_ready() {
+            return true;
+        }
+        block_on(sub.alice.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    false
+}
+
+/// Wall-clock Unix ms: where a test starts the clock it then sets.
+fn wall_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+/// A leaf the directory store fails to read (here: no permission to read
+/// its file) is not data loss: the pull is not answered missing, and the
+/// replica's read waits. The store is asked again after a wait, so once
+/// it reads again the same pull is answered on the same link and the read
+/// ends with the value: no reconnect, no new version.
+#[cfg(unix)]
+#[test]
+fn a_leaf_the_directory_store_fails_to_read_is_served_once_it_reads_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, path) = scratch();
+    let directory = tempfile::tempdir().unwrap();
+    let store: Arc<dyn ChunkStore> =
+        Arc::new(FileChunkStore::new(directory.path().to_path_buf()).unwrap());
+    offloaded_rows(&path, &store, 1);
+    let leaves = walk(directory.path());
+    let mode = |mode: u32| {
+        for leaf in &leaves {
+            std::fs::set_permissions(leaf, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+    };
+    mode(0o000);
+    if std::fs::read(&leaves[0]).is_ok() {
+        // Permissions do not bind this process (root): nothing to test.
+        mode(0o644);
+        return;
+    }
+    let server = open(&path, Some(store)).unwrap();
+    let started = wall_ms();
+    server.set_clock_for_test(Some(started));
+    let sub = connect_to(&server);
+    let listed = read_until_it_ends(
+        &server,
+        &sub.alice,
+        &Query::from("docs").select(["blob"]),
+        ReadTier::Remote,
+    );
+    assert!(
+        matches!(&listed, Some(Ok(rows)) if rows.len() == 1),
+        "{listed:?}"
+    );
+    let bytes = body_of(1);
+    let mut read =
+        std::pin::pin!(
+            sub.alice
+                .all_serialized_query(&bytes, local(), None, None, None)
+        );
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    let from = sub.down.borrow().len();
+    for _ in 0..40 {
+        assert!(
+            read.as_mut().poll(&mut context).is_pending(),
+            "the read ended"
+        );
+        block_on(sub.alice.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    let missing_sent = sub.down.borrow().iter().skip(from).any(
+        |message| matches!(message, SyncMessage::Chunks { missing, .. } if !missing.is_empty()),
+    );
+    assert!(
+        !missing_sent,
+        "a store that failed to read is not data loss"
+    );
+
+    // The store reads again, and the wait after its failure is over.
+    mode(0o644);
+    server.set_clock_for_test(Some(started + 1_000));
+    let mut ended = None;
+    for _ in 0..200 {
+        if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+            ended = Some(result);
+            break;
+        }
+        block_on(sub.alice.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    match ended {
+        Some(Ok(jazz::db::SerializedReadResult::Rows(rows))) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].cell("body"), Some(Value::String(text(81, LARGE))));
+        }
+        other => panic!(
+            "the read did not end with the value on the same link: {:?}",
+            other.map(|result| result.map(|_| ()))
+        ),
+    }
+}
+
+/// A store with no chunk store has no batch that fetches either: a pull
+/// that failed with a storage error there is answered again after the
+/// same wait, so the replica's read ends on the same link. The failure is
+/// injected: such a store has no failure a test can switch on and off.
+#[test]
+fn a_pull_that_failed_on_a_store_without_a_chunk_store_is_answered_after_the_wait() {
+    let (_dir, path) = scratch();
+    let value = text(91, LARGE);
+    let server = open(&path, None).unwrap();
+    insert(&server, 1, &value);
+    let started = wall_ms();
+    server.set_clock_for_test(Some(started));
+    let sub = connect_to(&server);
+    let listed = read_until_it_ends(
+        &server,
+        &sub.alice,
+        &Query::from("docs").select(["blob"]),
+        ReadTier::Remote,
+    );
+    assert!(
+        matches!(&listed, Some(Ok(rows)) if rows.len() == 1),
+        "{listed:?}"
+    );
+    server.fail_next_pulls_for_test(1);
+    let bytes = body_of(1);
+    let mut read =
+        std::pin::pin!(
+            sub.alice
+                .all_serialized_query(&bytes, local(), None, None, None)
+        );
+    let from = sub.down.borrow().len();
+    assert!(!rounds(&mut read, &sub, &server), "the read ended");
+    assert!(!rounds(&mut read, &sub, &server), "the read ended");
+    let missing_sent = sub.down.borrow().iter().skip(from).any(
+        |message| matches!(message, SyncMessage::Chunks { missing, .. } if !missing.is_empty()),
+    );
+    assert!(!missing_sent, "a storage error is not data loss");
+    server.set_clock_for_test(Some(started + 1_000));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    let mut ended = None;
+    for _ in 0..20 {
+        if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+            ended = Some(result);
+            break;
+        }
+        block_on(sub.alice.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    match ended {
+        Some(Ok(jazz::db::SerializedReadResult::Rows(rows))) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].cell("body"), Some(Value::String(value)));
+        }
+        other => panic!(
+            "the read did not end with the value on the same link: {:?}",
+            other.map(|result| result.map(|_| ()))
+        ),
+    }
+}
+
+/// A store that keeps failing its reads is not asked on every tick: the
+/// pull it failed is asked of it again after a second, then after waits
+/// that double up to a minute, one read a time. Once it has answered, a
+/// later failure waits a second again.
+#[test]
+fn a_failing_directory_store_is_asked_again_after_waits_that_double_to_a_minute() {
+    let (_dir, path) = scratch();
+    let directory = tempfile::tempdir().unwrap();
+    let faulty = Arc::new(Faulty::new(directory.path(), true));
+    let store: Arc<dyn ChunkStore> = faulty.clone();
+    offloaded_rows(&path, &store, 2);
+    let server = open(&path, Some(store)).unwrap();
+    let mut now = wall_ms();
+    server.set_clock_for_test(Some(now));
+    let sub = connect_to(&server);
+    let listed = read_until_it_ends(
+        &server,
+        &sub.alice,
+        &Query::from("docs").select(["blob"]),
+        ReadTier::Remote,
+    );
+    assert!(
+        matches!(&listed, Some(Ok(rows)) if rows.len() == 2),
+        "{listed:?}"
+    );
+
+    faulty.fail(true);
+    let before = faulty.reads();
+    let bytes = body_of(1);
+    let mut read =
+        std::pin::pin!(
+            sub.alice
+                .all_serialized_query(&bytes, local(), None, None, None)
+        );
+    assert!(!rounds(&mut read, &sub, &server));
+    let mut asked = faulty.reads();
+    assert_eq!(
+        asked,
+        before + 1,
+        "the pull's first node is read, and fails"
+    );
+    assert!(!rounds(&mut read, &sub, &server));
+    assert_eq!(faulty.reads(), asked, "not asked again on every tick");
+    for wait in [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000] {
+        now += wait - 1;
+        server.set_clock_for_test(Some(now));
+        assert!(!rounds(&mut read, &sub, &server));
+        assert_eq!(
+            faulty.reads(),
+            asked,
+            "asked before its {wait} ms wait was over"
+        );
+        now += 1;
+        server.set_clock_for_test(Some(now));
+        assert!(!rounds(&mut read, &sub, &server));
+        assert_eq!(
+            faulty.reads(),
+            asked + 1,
+            "asked once after its {wait} ms wait"
+        );
+        asked += 1;
+    }
+
+    // It answers again: the pull is served when its wait is over.
+    faulty.fail(false);
+    now += 60_000;
+    server.set_clock_for_test(Some(now));
+    assert!(rounds(&mut read, &sub, &server), "served on the same link");
+
+    // A failure after that starts from the shortest wait.
+    faulty.fail(true);
+    let bytes = body_of(2);
+    let mut read =
+        std::pin::pin!(
+            sub.alice
+                .all_serialized_query(&bytes, local(), None, None, None)
+        );
+    assert!(!rounds(&mut read, &sub, &server));
+    let asked = faulty.reads();
+    now += 999;
+    server.set_clock_for_test(Some(now));
+    assert!(!rounds(&mut read, &sub, &server));
+    assert_eq!(faulty.reads(), asked);
+    now += 1;
+    server.set_clock_for_test(Some(now));
+    assert!(!rounds(&mut read, &sub, &server));
+    assert_eq!(faulty.reads(), asked + 1, "the wait started over");
+}
+
+/// The wait and its retries are only for a store that says it always
+/// answers at once. A store that does not say so is asked again by its
+/// batches (a failed fetch), as before: a pull it failed to answer while
+/// answering at once is not asked of it again by the tick, however long
+/// the clock runs, so a store with batches sees no answers beyond theirs.
+#[test]
+fn a_store_that_does_not_always_answer_at_once_is_not_asked_again_by_the_tick() {
+    let (_dir, path) = scratch();
+    let directory = tempfile::tempdir().unwrap();
+    let faulty = Arc::new(Faulty::new(directory.path(), false));
+    let store: Arc<dyn ChunkStore> = faulty.clone();
+    offloaded_rows(&path, &store, 1);
+    let server = open(&path, Some(store)).unwrap();
+    let mut now = wall_ms();
+    server.set_clock_for_test(Some(now));
+    let sub = connect_to(&server);
+    let listed = read_until_it_ends(
+        &server,
+        &sub.alice,
+        &Query::from("docs").select(["blob"]),
+        ReadTier::Remote,
+    );
+    assert!(
+        matches!(&listed, Some(Ok(rows)) if rows.len() == 1),
+        "{listed:?}"
+    );
+    faulty.fail(true);
+    let before = faulty.reads();
+    let bytes = body_of(1);
+    let mut read =
+        std::pin::pin!(
+            sub.alice
+                .all_serialized_query(&bytes, local(), None, None, None)
+        );
+    assert!(!rounds(&mut read, &sub, &server));
+    let asked = faulty.reads();
+    assert_eq!(
+        asked,
+        before + 1,
+        "the pull's first node is read, and fails"
+    );
+    for _ in 0..10 {
+        now += 120_000;
+        server.set_clock_for_test(Some(now));
+        assert!(!rounds(&mut read, &sub, &server));
+    }
+    assert_eq!(faulty.reads(), asked, "not asked again by the tick");
+}
+
+/// On the store itself a leaf its directory store lost, or holds
+/// corrupt, still fails the read with a storage error: data loss, not
+/// demand. Only a replica's pull of it is answered missing.
+#[test]
+fn a_leaf_its_directory_store_lost_fails_the_stores_own_read_as_data_loss() {
+    for fault in ["lost", "corrupt"] {
+        let (_dir, path) = scratch();
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn ChunkStore> =
+            Arc::new(FileChunkStore::new(directory.path().to_path_buf()).unwrap());
+        moved_to(&path, &store, &text(83, LARGE));
+        for leaf in walk(directory.path()) {
+            if fault == "lost" {
+                std::fs::remove_file(&leaf).unwrap();
+            } else {
+                let flipped: Vec<u8> = std::fs::read(&leaf)
+                    .unwrap()
+                    .iter()
+                    .map(|b| b ^ 0x5a)
+                    .collect();
+                std::fs::write(&leaf, flipped).unwrap();
+            }
+        }
+        let db = open(&path, Some(store)).unwrap();
+        let error = cell(&db, 1, "body").unwrap_err();
+        assert_eq!(error.code, ErrorCode::Storage, "{fault}: {error:?}");
+        assert!(!error.is_missing_chunks(), "{fault}");
+    }
+}
+
+/// An authority answers a session's one-shot read of a part without
+/// decoding the rows' cells when its leaves are at hand (a directory store
+/// answers at once), and decodes them when its store answers only later:
+/// there the missing leaf is what holds the read until it is fetched.
+#[test]
+fn a_session_read_is_decoded_only_where_its_leaves_may_have_to_be_fetched() {
+    use jazz::db::ReadSpan;
+    use jazz::protocol::ReadViewSourceSpec;
+    use jazz::query::Part;
+    let value = text(77, LARGE);
+    let directory = tempfile::tempdir().unwrap();
+    let stores: [(bool, Arc<dyn ChunkStore>); 2] = [
+        (
+            false,
+            Arc::new(FileChunkStore::new(directory.path().to_path_buf()).unwrap()),
+        ),
+        (true, Arc::new(Remote::default())),
+    ];
+    for (waits, store) in stores {
+        let (_dir, path) = scratch();
+        moved_to(&path, &store, &value);
+        let server = open(&path, Some(store)).unwrap();
+        let sub = connect_to(&server);
+        let from = sub.down.borrow().len();
+        sub.up.borrow_mut().push_back(SyncMessage::Read {
+            id: 91,
+            query: Box::new(Query::from("docs").select(["body"]).select_part(
+                "body",
+                Part::TextUtf8 {
+                    from: 1000,
+                    to: 1010,
+                },
+            )),
+            binding: BTreeMap::new(),
+            include_deleted: false,
+            tier: ReadTier::Remote,
+            wait: None,
+            view: Box::new(ReadViewSourceSpec::Current),
+            since: None,
+            span: ReadSpan::Once { at: None },
+        });
+        let before = jazz::cell_ranges_for_test();
+        let mut settled = false;
+        for _ in 0..16 {
+            block_on(server.tick()).unwrap();
+            settled = sub
+                .down
+                .borrow()
+                .iter()
+                .skip(from)
+                .any(|m| matches!(m, SyncMessage::Settled { id: 91, .. }));
+            if settled {
+                break;
+            }
+        }
+        let ranges = jazz::cell_ranges_for_test() - before;
+        assert!(settled, "waits {waits}: the read was answered");
+        assert_eq!(
+            ranges > 0,
+            waits,
+            "waits {waits}: {ranges} cell ranges read"
+        );
+    }
+}
+
+/// The other thing the cells decided: a value that cannot be rebuilt. With
+/// a leaf lost from a directory store (which answers "not there" at once;
+/// nothing is fetched), an authority that decoded the cells refused a
+/// read of the whole column; it now answers with the row, and the loss
+/// shows where the value is read.
+#[test]
+fn a_session_read_of_a_value_with_a_lost_leaf_is_answered_with_its_row() {
+    use jazz::db::ReadSpan;
+    use jazz::protocol::ReadViewSourceSpec;
+    for decode in [true, false] {
+        jazz::decode_session_read_cells_for_test(decode);
+        let (_dir, path) = scratch();
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn ChunkStore> =
+            Arc::new(FileChunkStore::new(directory.path().to_path_buf()).unwrap());
+        moved_to(&path, &store, &text(78, LARGE));
+        let leaves = walk(directory.path());
+        assert!(leaves.len() > 1, "{leaves:?}");
+        std::fs::remove_file(&leaves[0]).unwrap();
+        let server = open(&path, Some(store)).unwrap();
+        let sub = connect_to(&server);
+        let from = sub.down.borrow().len();
+        sub.up.borrow_mut().push_back(SyncMessage::Read {
+            id: 92,
+            query: Box::new(Query::from("docs")),
+            binding: BTreeMap::new(),
+            include_deleted: false,
+            tier: ReadTier::Remote,
+            wait: None,
+            view: Box::new(ReadViewSourceSpec::Current),
+            since: None,
+            span: ReadSpan::Once { at: None },
+        });
+        for _ in 0..8 {
+            block_on(server.tick()).unwrap();
+        }
+        let sent = sub.down.borrow();
+        let refused = sent
+            .iter()
+            .skip(from)
+            .any(|m| matches!(m, SyncMessage::Refused { id: 92, .. }));
+        let settled = sent
+            .iter()
+            .skip(from)
+            .any(|m| matches!(m, SyncMessage::Settled { id: 92, .. }));
+        assert_eq!(
+            (refused, settled),
+            (decode, !decode),
+            "decode {decode}: {:?}",
+            sent.iter()
+                .skip(from)
+                .map(|m| format!("{m:?}").chars().take(120).collect::<String>())
+                .collect::<Vec<_>>()
+        );
+    }
+    jazz::decode_session_read_cells_for_test(false);
+}
+
+/// What only a chunked value's content decides is the one kind of
+/// selection error the cells still decided: a UTF-8 range that splits a
+/// code point, a UTF-16 range that splits a surrogate pair, a JSON pointer
+/// that is not there. An authority that decoded the cells refused the
+/// read with it. It now answers with the row, and the reader's own
+/// one-shot read fails with the same code and message, pinned for each. A UTF-16 range
+/// past the value's end but within its byte length is refused by the
+/// authority either way: the descriptor's lengths decide it.
+#[test]
+fn a_part_a_chunked_values_content_refuses_is_reported_by_the_readers_own_read() {
+    use jazz::query::Part;
+    // Two-byte `é`s for UTF-8, and `😀`s (a surrogate pair in UTF-16).
+    let value: String = text(5, LARGE)
+        .chars()
+        .enumerate()
+        .map(|(n, c)| match n % 15 {
+            1 | 4 | 7 => 'é',
+            2 => '😀',
+            _ => c,
+        })
+        .collect();
+    // Inside the two bytes of an `é`.
+    let split = value.char_indices().nth(301).map(|(at, _)| at).unwrap() as u64 + 1;
+    assert!(!value.is_char_boundary(split as usize));
+    // Between the two units of a `😀`.
+    let mut units = 0u64;
+    let mut pairs = 0;
+    let mut surrogate = None;
+    for c in value.chars() {
+        if c == '😀' {
+            pairs += 1;
+            if pairs == 301 {
+                surrogate = Some(units + 1);
+                break;
+            }
+        }
+        units += c.len_utf16() as u64;
+    }
+    let surrogate = surrogate.unwrap();
+    let past = value.encode_utf16().count() as u64 + 1;
+    assert!(past < value.len() as u64);
+    let part = |part: Part| {
+        Query::from("docs")
+            .select(["body"])
+            .select_part("body", part)
+    };
+    // A JSON document of the same size, and a pointer it does not hold.
+    let doc = serde_json::json!(
+        (0..6_000)
+            .map(|n| serde_json::json!({ "n": n, "text": text(n, 40) }))
+            .collect::<Vec<_>>()
+    )
+    .to_string();
+    assert!(doc.len() > 64 * 1024);
+    for decode in [true, false] {
+        jazz::decode_session_read_cells_for_test(decode);
+        let (_dir, path) = scratch();
+        let directory = tempfile::tempdir().unwrap();
+        let store: Arc<dyn ChunkStore> =
+            Arc::new(FileChunkStore::new(directory.path().to_path_buf()).unwrap());
+        {
+            let server = block_on(Db::open_at(
+                json_config(0, AuthorSubject::SYSTEM).with_chunk_store(store.clone()),
+                &path,
+                FileOptions::default(),
+            ))
+            .unwrap();
+            for (n, column, cell) in [(1, "body", &value), (2, "doc", &doc)] {
+                block_on(server.insert(
+                    "docs",
+                    BTreeMap::from([(column.to_owned(), Value::String(cell.clone()))]),
+                    InsertOptions {
+                        row_id: Some(row(n)),
+                        ..Default::default()
+                    },
+                ))
+                .unwrap();
+            }
+            block_on(server.tick()).unwrap();
+        }
+        assert!(walk(directory.path()).len() > 2, "both values moved out");
+        let server = block_on(Db::open_at(
+            json_config(0, AuthorSubject::SYSTEM).with_chunk_store(store),
+            &path,
+            FileOptions::default(),
+        ))
+        .unwrap();
+        let sub = connect_replica(
+            &server,
+            block_on(Db::open(json_config(1, user(1)))).unwrap(),
+        );
+        // What the authority sends, seen before the replica takes it.
+        let sent = RefCell::new((false, false));
+        let watch = |_: usize| {
+            let down = sub.down.borrow();
+            let mut sent = sent.borrow_mut();
+            sent.0 |= down
+                .iter()
+                .any(|m| matches!(m, SyncMessage::Refused { .. }));
+            sent.1 |= down
+                .iter()
+                .any(|m| matches!(m, SyncMessage::Settled { .. }));
+        };
+        let body = |from: u64, to: u64| part(Part::TextUtf8 { from, to });
+        for (label, query, message, refused_by_authority) in [
+            (
+                "utf-8 split",
+                body(split, split + 40),
+                Some((ErrorCode::Query, "UTF-8 range splits a code point")),
+                decode,
+            ),
+            // A chunked value reports this one as a malformed scalar, a
+            // storage error, where an inline one says "UTF-16 range splits
+            // a surrogate pair": what is pinned is that the reader reports
+            // what the authority did.
+            (
+                "utf-16 split",
+                part(Part::TextUtf16 {
+                    from: surrogate,
+                    to: surrogate + 40,
+                }),
+                Some((
+                    ErrorCode::Storage,
+                    "large value: malformed physical scalar encoding",
+                )),
+                decode,
+            ),
+            (
+                "json pointer not there",
+                Query::from("docs")
+                    .select(["doc"])
+                    .select_part("doc", Part::JsonPointer("/6000/text".into())),
+                Some((ErrorCode::Query, "JSON pointer path does not exist")),
+                decode,
+            ),
+        ] {
+            *sent.borrow_mut() = (false, false);
+            let read = read_watching(&[&server], &sub.alice, &query, ReadTier::Remote, watch);
+            let Some(Err(error)) = &read else {
+                panic!("decode {decode}, {label}: {read:?}");
+            };
+            match message {
+                Some((code, message)) => assert_eq!(
+                    (error.code, error.message.as_str()),
+                    (code, message),
+                    "decode {decode}, {label}"
+                ),
+                None => assert_eq!(error.code, ErrorCode::Query, "decode {decode}, {label}"),
+            }
+            assert_eq!(
+                *sent.borrow(),
+                (refused_by_authority, !refused_by_authority),
+                "decode {decode}, {label}: refused by the authority, settled"
+            );
+        }
+        // Ranges and a pointer that split nothing read, and so does a
+        // range past the end: a query's part is clamped to its value
+        // (#5502).
+        for (label, query) in [
+            (
+                "utf-16 past the end",
+                part(Part::TextUtf16 { from: 0, to: past }),
+            ),
+            ("utf-8", body(split + 1, split + 41)),
+            (
+                "utf-16",
+                part(Part::TextUtf16 {
+                    from: surrogate - 1,
+                    to: surrogate + 39,
+                }),
+            ),
+            (
+                "json pointer",
+                Query::from("docs")
+                    .select(["doc"])
+                    .select_part("doc", Part::JsonPointer("/5999/text".into())),
+            ),
+        ] {
+            let fine = read_until_it_ends(&server, &sub.alice, &query, ReadTier::Remote);
+            assert!(
+                matches!(&fine, Some(Ok(rows)) if rows.len() == 2),
+                "decode {decode}, {label}: {fine:?}"
+            );
+        }
+    }
+    jazz::decode_session_read_cells_for_test(false);
+}
+
+/// A session's one-shot read of a value whose leaves its authority's
+/// directory store lost, or holds corrupt, ends at the reader. Decoding
+/// its cells, the authority refuses it with its storage error. Not
+/// decoding them, it answers with the row, and the reader's pull of the
+/// leaves is answered as one it cannot supply: the read fails as missing
+/// chunks the upstream cannot supply, not with the authority's own error.
+#[test]
+fn a_session_read_of_a_value_whose_leaves_its_authority_lost_ends_at_the_reader() {
+    use jazz::query::Part;
+    let mut outcomes = Vec::new();
+    for decode in [true, false] {
+        jazz::decode_session_read_cells_for_test(decode);
+        for fault in ["lost", "corrupt"] {
+            for part in [false, true] {
+                let (_dir, path) = scratch();
+                let directory = tempfile::tempdir().unwrap();
+                let store: Arc<dyn ChunkStore> =
+                    Arc::new(FileChunkStore::new(directory.path().to_path_buf()).unwrap());
+                moved_to(&path, &store, &text(78, LARGE));
+                for leaf in walk(directory.path()) {
+                    if fault == "lost" {
+                        std::fs::remove_file(&leaf).unwrap();
+                    } else {
+                        let flipped: Vec<u8> = std::fs::read(&leaf)
+                            .unwrap()
+                            .iter()
+                            .map(|b| b ^ 0x5a)
+                            .collect();
+                        std::fs::write(&leaf, flipped).unwrap();
+                    }
+                }
+                let server = open(&path, Some(store)).unwrap();
+                let sub = connect_to(&server);
+                let mut query = Query::from("docs").select(["body"]);
+                if part {
+                    query = query.select_part(
+                        "body",
+                        Part::TextUtf8 {
+                            from: 1000,
+                            to: 1010,
+                        },
+                    );
+                }
+                let read = read_until_it_ends(&server, &sub.alice, &query, ReadTier::Remote);
+                outcomes.push((decode, fault, part, read));
+            }
+        }
+    }
+    jazz::decode_session_read_cells_for_test(false);
+    let hung: Vec<_> = outcomes
+        .iter()
+        .filter(|(.., read)| read.is_none())
+        .map(|(decode, fault, part, _)| format!("decode {decode}, {fault}, part {part}"))
+        .collect();
+    assert!(hung.is_empty(), "reads that never ended: {hung:?}");
+    for (decode, fault, part, read) in &outcomes {
+        let Some(Err(error)) = read else {
+            panic!("decode {decode}, {fault}, part {part}: {read:?}");
+        };
+        if *decode {
+            assert_eq!(
+                error.code,
+                ErrorCode::Storage,
+                "{fault} part {part}: {error:?}"
+            );
+            assert!(!error.is_missing_chunks(), "{fault} part {part}");
+        } else {
+            assert!(error.is_missing_chunks(), "{fault} part {part}: {error:?}");
+            assert!(
+                !error.message.contains("retry after the next sync tick"),
+                "{fault} part {part}: {}",
+                error.message
+            );
+        }
+    }
+}
+
+/// A session's one-shot read of a value its authority's store fails to
+/// read (an error, not "not there") ends at the reader once the store
+/// reads again, on the same link. Not decoding its cells, the authority
+/// answers with the row; the reader's pull of the leaves is parked, not
+/// answered missing, and answered after the wait (19.10). Decoding them,
+/// the authority refused the read with the store's error at once. Two
+/// stores: a directory store whose leaf files cannot be read, and a store
+/// with no chunk store whose pull fails once.
+#[cfg(unix)]
+#[test]
+fn a_session_read_of_a_value_its_authoritys_store_fails_to_read_ends_once_it_reads_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let set = |leaves: &[PathBuf], mode: u32| {
+        for leaf in leaves {
+            std::fs::set_permissions(leaf, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+    };
+    for decode in [true, false] {
+        for directory_store in [true, false] {
+            jazz::decode_session_read_cells_for_test(decode);
+            let (_dir, path) = scratch();
+            let directory = tempfile::tempdir().unwrap();
+            let store: Option<Arc<dyn ChunkStore>> = directory_store.then(|| {
+                Arc::new(FileChunkStore::new(directory.path().to_path_buf()).unwrap())
+                    as Arc<dyn ChunkStore>
+            });
+            let value = text(81, LARGE);
+            match &store {
+                Some(store) => offloaded_rows(&path, store, 1),
+                None => {
+                    let server = open(&path, None).unwrap();
+                    block_on(server.insert(
+                        "docs",
+                        BTreeMap::from([
+                            ("body".to_owned(), Value::String(value.clone())),
+                            ("blob".to_owned(), Value::Bytes(vec![1])),
+                        ]),
+                        InsertOptions {
+                            row_id: Some(row(1)),
+                            ..Default::default()
+                        },
+                    ))
+                    .unwrap();
+                }
+            }
+            let leaves = walk(directory.path());
+            assert_eq!(directory_store, !leaves.is_empty());
+            set(&leaves, 0o000);
+            if directory_store && std::fs::read(&leaves[0]).is_ok() {
+                // Permissions do not bind this process (root): nothing to test.
+                set(&leaves, 0o644);
+                jazz::decode_session_read_cells_for_test(false);
+                return;
+            }
+            let server = open(&path, store).unwrap();
+            let started = wall_ms();
+            server.set_clock_for_test(Some(started));
+            let sub = connect_to(&server);
+            if !directory_store {
+                server.fail_next_pulls_for_test(1);
+            }
+            let label = format!("decode {decode}, directory store {directory_store}");
+            let bytes = body_of(1);
+            let opts = ReadOpts {
+                tier: ReadTier::Remote,
+                ..ReadOpts::default()
+            };
+            let mut read = std::pin::pin!(
+                sub.alice
+                    .all_serialized_query(&bytes, opts, None, None, None)
+            );
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            let mut poll = |rounds: usize| {
+                for _ in 0..rounds {
+                    if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+                        return Some(result);
+                    }
+                    block_on(sub.alice.tick()).unwrap();
+                    block_on(server.tick()).unwrap();
+                }
+                None
+            };
+            let early = poll(40);
+            if decode && directory_store {
+                // The authority read the leaves itself and was refused.
+                match early {
+                    Some(Err(error)) => {
+                        assert_eq!(error.code, ErrorCode::Storage, "{label}: {error:?}")
+                    }
+                    other => panic!("{label}: {:?}", other.map(|result| result.map(|_| ()))),
+                }
+                set(&leaves, 0o644);
+                continue;
+            }
+            assert!(
+                early.is_none(),
+                "{label}: the read ended while the store failed"
+            );
+            let missing_sent = sub.down.borrow().iter().any(|message| {
+                matches!(message, SyncMessage::Chunks { missing, .. } if !missing.is_empty())
+            });
+            assert!(!missing_sent, "{label}: a storage error is not data loss");
+            // The store reads again, and the wait after its failure is over.
+            set(&leaves, 0o644);
+            server.set_clock_for_test(Some(started + 1_000));
+            match poll(40) {
+                Some(Ok(jazz::db::SerializedReadResult::Rows(rows))) => {
+                    assert_eq!(rows.len(), 1, "{label}");
+                    assert_eq!(rows[0].cell("body"), Some(Value::String(value)), "{label}");
+                }
+                other => panic!(
+                    "{label}: the read did not end with the value on the same link: {:?}",
+                    other.map(|result| result.map(|_| ()))
+                ),
+            }
+        }
+    }
+    jazz::decode_session_read_cells_for_test(false);
 }

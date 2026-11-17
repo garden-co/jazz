@@ -1,15 +1,16 @@
 //! HTTP and WebSocket routes for the Jazz server.
 //!
 //! Split into submodules so each piece is independently navigable:
-//! - [`websocket`] — engine wire-frame WebSocket boundary
-//! - [`http`] — HTTP endpoint handlers and their request/response types
-//! - [`utils`] — parser/validator helpers used by both
+//! - `websocket` — engine wire-frame WebSocket boundary
+//! - `http` — HTTP endpoint handlers and their request/response types
+//! - `utils` — parser/validator helpers used by both
 //!
 //! The router builder [`create_router`] re-exports unchanged from this module
 //! so existing callers (`server::routes::create_router`) continue to resolve.
 
 mod accounts;
 pub(crate) mod http;
+mod metered_socket;
 mod utils;
 mod websocket;
 
@@ -102,6 +103,10 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
             post(accounts::found_local_first_for_admin),
         )
         .route("/accounts/revoke", post(accounts::revoke_for_admin))
+        .route(
+            "/accounts/revoke-sessions",
+            post(accounts::revoke_sessions_for_admin),
+        )
         .route("/migrations/graph", get(migration_graph_handler))
         .route(
             "/introspection/subscriptions",
@@ -219,7 +224,6 @@ mod tests {
         AuthConfig {
             backend_secret: None,
             admin_secret: Some("admin-secret".to_string()),
-            allow_local_first_auth: true,
             ..Default::default()
         }
     }
@@ -231,7 +235,6 @@ mod tests {
         let auth_config = AuthConfig {
             backend_secret: Some(backend_secret.to_string()),
             admin_secret: None,
-            allow_local_first_auth: false,
             ..Default::default()
         };
 
@@ -366,7 +369,6 @@ mod tests {
     async fn internal_shutdown_requires_configured_admin_secret() {
         let auth_config = AuthConfig {
             admin_secret: None,
-            allow_local_first_auth: true,
             ..Default::default()
         };
         let state = ServerBuilder::new(AppId::from_name("test-app"))
@@ -540,7 +542,6 @@ mod tests {
             .with_auth_config(AuthConfig {
                 backend_secret: None,
                 admin_secret: Some("admin-secret".to_string()),
-                allow_local_first_auth: false,
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)

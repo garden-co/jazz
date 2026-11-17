@@ -1,5 +1,4 @@
 import {
-  createContext,
   createEffect,
   createSignal,
   onCleanup,
@@ -14,6 +13,8 @@ import {
 import type { JazzClient } from "../web/create-jazz-client.js";
 import {
   attachJazzSessionConsumer,
+  clientOnlySessionActions,
+  clientOnlySnapshot,
   jazzSessionActions,
   ownJazzSession,
   startJazzSession,
@@ -23,19 +24,14 @@ import {
 import { openBrowserSessionCore, type JazzClientConfig } from "../session/create-jazz-session.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import { createSolidJazzClientStore } from "./solid-jazz-client-store.js";
-import { JazzClientProvider } from "./provider.js";
+import { JazzClientContext } from "./provider.js";
+import { SessionContext } from "./session-context.js";
 import { assertNoClassicProviderProps } from "../classic-api.js";
 import {
   refuseAutoAttachDevTools,
   type NoAutoAttachDevTools,
 } from "../runtime/removed-provider-props.js";
 import type { SolidJazzClient } from "./create-solid-jazz-client.js";
-
-type ProvidedSession = {
-  session: JazzSession<JazzClient>;
-  snapshot: Accessor<JazzSessionSnapshot<JazzClient>>;
-};
-const SessionContext = createContext<ProvidedSession>();
 
 /** `useJazzSession()`: the session's state as an accessor, and its operations. */
 export type UseJazzSession = Omit<JazzSession<JazzClient>, "getSnapshot" | "subscribe" | "db"> & {
@@ -54,7 +50,16 @@ export function useJazzSession(session?: JazzSession<JazzClient>): UseJazzSessio
   // provider lives, even in a view that has since been disposed.
   const provided = session ? undefined : useContext(SessionContext);
   if (provided) return withActions(provided.session, provided.snapshot);
-  if (!session) throw new Error("useJazzSession requires <JazzProvider> or a session argument");
+  if (!session) {
+    // A client opened outside a session (`<JazzClientProvider client>`): its
+    // user, always ready, with operations that reject naming why.
+    const client = useContext(JazzClientContext);
+    if (!client)
+      throw new Error(
+        "useJazzSession requires <JazzProvider>, <JazzClientProvider> or a session argument",
+      );
+    return { ...clientOnlySessionActions(), snapshot: () => clientOnlySnapshot(client) };
+  }
   const own = session;
   const [snapshot, setSnapshot] = createSignal(own.getSnapshot());
   onCleanup(own.subscribe(() => setSnapshot(own.getSnapshot())));
@@ -114,7 +119,8 @@ export function ActiveClient(props: { client: JazzClient; children: JSX.Element 
     },
     getSubscriptionStore(client),
   );
-  return <JazzClientProvider client={adapted}>{props.children}</JazzClientProvider>;
+  // The session's own client: its children still read the session.
+  return <JazzClientContext.Provider value={adapted}>{props.children}</JazzClientContext.Provider>;
 }
 /**
  * Jazz for a Solid app: owns a session (`config`) or shows yours (`session`),
@@ -137,7 +143,7 @@ export function JazzProvider(props: JazzProviderProps) {
   const session =
     props.session ?? ownJazzSession({ ...props.config! }, openBrowserSessionCore, { start: false });
   const [snapshot, setSnapshot] = createSignal(session.getSnapshot());
-  const lease = attachJazzSessionConsumer(session);
+  const lease = attachJazzSessionConsumer(session, "Solid <JazzProvider>");
   const stop = session.subscribe(() => setSnapshot(session.getSnapshot()));
   onMount(() => {
     if (owned) void startJazzSession(session as JazzSession<unknown>).catch(() => {});

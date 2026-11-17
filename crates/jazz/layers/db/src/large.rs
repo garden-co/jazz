@@ -41,6 +41,15 @@ use crate::values::{Column, Sql, Table, quote};
 #[cfg(feature = "testing")]
 thread_local! {
     static FULL_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static CELL_RANGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many ranges of chunked or inline cells this thread has read for a
+/// partial selection (a read's `select_part`), so tests can tell whether a
+/// read decoded its cells at all.
+#[cfg(feature = "testing")]
+pub fn cell_ranges_for_test() -> usize {
+    CELL_RANGES.with(std::cell::Cell::get)
 }
 
 /// How many chunked values have been rebuilt whole on this thread, so tests
@@ -516,6 +525,17 @@ pub(crate) fn missing() -> Error {
     Error::with_reason(ErrorCode::NotObserved, Reason::MissingChunks, MISSING)
 }
 
+const REFUSED: &str = "large-value chunks are not available: the upstream cannot supply them \
+     (it answered that it does not hold them, or no version this replica received holds them); \
+     they are asked for again after a reconnect, or once a version of the row that may hold \
+     them arrives";
+
+/// Chunks the upstream cannot supply ([`Chunks::refuse`]): still missing,
+/// but not on their way.
+fn refused() -> Error {
+    Error::with_reason(ErrorCode::NotObserved, Reason::MissingChunks, REFUSED)
+}
+
 /// An offloaded node its chunk store does not hold: data loss, not demand.
 fn lost() -> Error {
     Error::new(
@@ -566,6 +586,12 @@ struct State {
     clock: u64,
     /// Chunks a statement needed and nothing local holds.
     demand: BTreeSet<ChunkRequest>,
+    /// Chunks the upstream cannot supply (the replica's unavailable nodes,
+    /// which it keeps in step): a read that needs one fails with why
+    /// ([`refused`]) rather than as plain demand, until they are asked for
+    /// again ([`Chunks::clear_refused`]). Consulted only by reads, for
+    /// nodes nothing local holds; answering a pull never consults it.
+    refused: BTreeSet<ChunkRequest>,
     /// The base-tree byte ranges reads of a value (by root) waited on:
     /// the next pull asks for each range whole (SPEC 19.8).
     spans: HashMap<[u8; 32], std::ops::Range<u64>>,
@@ -598,6 +624,12 @@ enum Local {
     Absent,
     /// The chunk store holds it, and answers only asynchronously.
     Fetching,
+    /// This store holds it, but its bytes are gone (the chunk store it
+    /// moved them to answered it does not hold them) or do not match
+    /// their hash: data loss, which asking again does not cure. A failure
+    /// to read the bytes (the chunk store's or the file's) is an error
+    /// instead.
+    Damaged(Error),
 }
 
 /// One epoch row.
@@ -640,6 +672,7 @@ impl Chunks {
                 budget: durable.then_some(CACHE_BYTES),
                 clock: 0,
                 demand: BTreeSet::new(),
+                refused: BTreeSet::new(),
                 spans: HashMap::new(),
                 fetch: BTreeSet::new(),
                 in_flight: BTreeSet::new(),
@@ -782,6 +815,25 @@ impl Chunks {
         }
     }
 
+    /// The upstream cannot supply `request`: reads that need it fail with
+    /// that until [`Self::clear_refused`].
+    pub(crate) fn refuse(&self, request: &ChunkRequest) {
+        let mut state = self.state.lock().expect("chunk cache");
+        state.refused.insert(request.clone());
+    }
+
+    fn is_refused(&self, request: &ChunkRequest) -> bool {
+        let state = self.state.lock().expect("chunk cache");
+        state.refused.contains(request)
+    }
+
+    /// Refused chunks may be supplied now (a new session, or a version
+    /// that may hold them): reads of them ask again.
+    pub(crate) fn clear_refused(&self) {
+        let mut state = self.state.lock().expect("chunk cache");
+        state.refused.clear();
+    }
+
     /// Forget the last batch's failed fetches, so reads of them ask again;
     /// whether there were any.
     pub(crate) fn clear_failed(&self) -> bool {
@@ -792,6 +844,15 @@ impl Chunks {
             state.answered += 1;
         }
         any
+    }
+
+    /// Whether no batch ever fetches for this store: it has no chunk
+    /// store, or one that always answers at once
+    /// ([`ChunkStore::always_answers_now`]).
+    pub(crate) fn never_fetches(&self) -> bool {
+        self.store
+            .as_ref()
+            .is_none_or(|store| store.always_answers_now())
     }
 
     /// Refuse reads of `request` with `error` until the next batch starts:
@@ -962,7 +1023,7 @@ impl Chunks {
         }
         let bytes = Bytes::from(bytes);
         if lv::object_hash(&bytes).0 != request.object_hash {
-            return Err(corrupt(lv::Error::ObjectHashMismatch));
+            return Ok(Local::Damaged(corrupt(lv::Error::ObjectHashMismatch)));
         }
         let mut state = self.state.lock().expect("chunk cache");
         state.clock += 1;
@@ -1012,12 +1073,12 @@ impl Chunks {
         };
         let bytes = match store.get_now(&NodeKey::from(request)) {
             None => return Ok(Local::Fetching),
-            Some(Ok(None)) => return Err(lost()),
+            Some(Ok(None)) => return Ok(Local::Damaged(lost())),
             Some(Err(error)) => return Err(error),
             Some(Ok(Some(bytes))) => bytes,
         };
         if lv::object_hash(&bytes).0 != request.object_hash {
-            return Err(corrupt(lv::Error::ObjectHashMismatch));
+            return Ok(Local::Damaged(corrupt(lv::Error::ObjectHashMismatch)));
         }
         state.bytes += bytes.len();
         state.nodes.insert(
@@ -1631,19 +1692,45 @@ pub(crate) async fn stored_bytes<S: jazz_sql::Sql>(
 where
     S::Error: std::fmt::Display,
 {
+    match held_bytes(conn, chunks, request).await? {
+        Held::Bytes(bytes) => Ok(Some(bytes)),
+        Held::Absent => Ok(None),
+        Held::Damaged(error) => Err(error),
+    }
+}
+
+/// What [`held_bytes`] finds of a node.
+enum Held {
+    Bytes(Vec<u8>),
+    Absent,
+    /// See [`Local::Damaged`].
+    Damaged(Error),
+}
+
+/// [`stored_bytes`], with a node whose bytes are lost or do not match
+/// their hash told apart from a failure to read them.
+async fn held_bytes<S: jazz_sql::Sql>(
+    conn: &mut S,
+    chunks: &Chunks,
+    request: &ChunkRequest,
+) -> Result<Held, Error>
+where
+    S::Error: std::fmt::Display,
+{
     let Some(bytes) = node(conn, &request.object_hash).await? else {
-        return Ok(None);
+        return Ok(Held::Absent);
     };
     if !bytes.is_empty() {
-        return Ok(Some(bytes));
+        return Ok(Held::Bytes(bytes));
     }
     match chunks.offloaded(request)? {
-        Local::Found(bytes) => Ok(Some(bytes.to_vec())),
-        Local::Absent => Ok(None),
+        Local::Found(bytes) => Ok(Held::Bytes(bytes.to_vec())),
+        Local::Absent => Ok(Held::Absent),
         Local::Fetching => {
             chunks.want(request);
             Err(missing())
         }
+        Local::Damaged(error) => Ok(Held::Damaged(error)),
     }
 }
 
@@ -1888,6 +1975,7 @@ where
                 Err(AttemptError::LargeValue(error)) => return Err(corrupt(error)),
                 Err(AttemptError::Blocked) => {
                     let mut absent = Vec::new();
+                    let mut any_refused = false;
                     let mut fetching = Vec::new();
                     for request in inputs.take_missing_chunks() {
                         let mut conn = self.conn.lock().await;
@@ -1896,11 +1984,13 @@ where
                                 read(bytes.len());
                                 inputs.install_verified_chunk(request, bytes);
                             }
+                            Local::Absent if self.chunks.is_refused(&request) => any_refused = true,
                             Local::Absent => absent.push(request),
                             Local::Fetching => fetching.push(request),
+                            Local::Damaged(error) => return Err(error),
                         }
                     }
-                    if !absent.is_empty() || !fetching.is_empty() {
+                    if any_refused || !absent.is_empty() || !fetching.is_empty() {
                         let span =
                             span.filter(|_| !absent.is_empty())
                                 .and_then(|(value, range)| {
@@ -1913,7 +2003,7 @@ where
                         if let Some((root, span)) = span {
                             state.note_span(root, span);
                         }
-                        return Err(missing());
+                        return Err(if any_refused { refused() } else { missing() });
                     }
                 }
             }
@@ -1965,7 +2055,14 @@ where
             visited.map_err(|e| rejected(format!("large value: {e}")))?;
             let mut validator =
                 lv::LogicalValueValidator::new(&base).map_err(|e| rejected(e.to_string()))?;
-            let mut offset = 0;
+            // A bytes value has no content rule beyond its tree, which the
+            // walk above proved node by node (object hash, logical hash,
+            // metrics); reading it back again would feed nothing.
+            let mut offset = if validator.reads_bytes() {
+                0
+            } else {
+                base.byte_length
+            };
             while offset < base.byte_length {
                 let end = (offset + WINDOW).min(base.byte_length);
                 let window = stored
@@ -2233,13 +2330,16 @@ where
 }
 
 /// What a pull is answered with: the nodes found, the wanted nodes not
-/// under the cited tree, the wanted nodes under it this store lacks, and
-/// the wanted nodes left for a later answer once `budget` ran out.
+/// under the cited tree, the wanted nodes under it this store lacks, the
+/// wanted nodes left for a later answer once `budget` ran out, and the
+/// nodes it would send whose bytes this store has lost or holds damaged
+/// (see [`Local::Damaged`]), with why.
 pub(crate) type Pulled = (
     Vec<([u8; 32], Vec<u8>)>,
     Vec<[u8; 32]>,
     Vec<[u8; 32]>,
     Vec<[u8; 32]>,
+    Vec<([u8; 32], Error)>,
 );
 
 /// Answer a pull of `root`'s tree (a version the reader may read): the
@@ -2249,7 +2349,8 @@ pub(crate) type Pulled = (
 /// in this answer) are not sent again; at least one wanted node is
 /// answered whatever the budget, so a pull always progresses. A node the
 /// chunk store answers only asynchronously fails the pull as missing; it
-/// is answered again once fetched.
+/// is answered again once fetched. A node whose bytes are lost or damaged
+/// is not sent, and neither is what lies beneath it.
 pub(crate) async fn pulled<S: jazz_sql::Sql>(
     conn: &mut S,
     chunks: &Chunks,
@@ -2264,6 +2365,7 @@ where
 {
     let wanted_set: BTreeSet<[u8; 32]> = wanted.iter().copied().collect();
     let mut out = Vec::new();
+    let mut damaged = Vec::new();
     let mut size = 0;
     if let Some(span) = span.filter(|span| !span.is_empty()) {
         // Walk down through the bytes the read needs, sending what lies
@@ -2277,20 +2379,32 @@ where
                 continue;
             };
             let bytes = if send {
-                let Some(bytes) =
-                    stored_bytes(conn, chunks, &ChunkRequest { object_hash: hash }).await?
-                else {
-                    continue;
-                };
-                bytes
+                match held_bytes(conn, chunks, &ChunkRequest { object_hash: hash }).await? {
+                    Held::Bytes(bytes) => bytes,
+                    Held::Absent => continue,
+                    Held::Damaged(error) => {
+                        damaged.push((hash, error));
+                        continue;
+                    }
+                }
             } else {
                 raw
             };
             // An offloaded leaf's bytes are elsewhere: it has no children.
-            if !bytes.is_empty()
-                && let ChunkNode::Branch { children, .. } =
-                    lv::decode_node_untyped_verified(&bytes).map_err(corrupt)?
-            {
+            let node = if bytes.is_empty() {
+                None
+            } else {
+                match lv::decode_node_untyped_verified(&bytes) {
+                    Ok(node) => Some(node),
+                    Err(error) => {
+                        if send {
+                            damaged.push((hash, corrupt(error)));
+                        }
+                        continue;
+                    }
+                }
+            };
+            if let Some(ChunkNode::Branch { children, .. }) = node {
                 let mut at = offset;
                 let mut next = Vec::new();
                 for child in children {
@@ -2325,16 +2439,20 @@ where
             foreign.push(*hash);
             continue;
         }
-        match stored_bytes(conn, chunks, &ChunkRequest { object_hash: *hash }).await? {
-            Some(bytes) => {
+        if damaged.iter().any(|(node, _)| node == hash) {
+            continue;
+        }
+        match held_bytes(conn, chunks, &ChunkRequest { object_hash: *hash }).await? {
+            Held::Bytes(bytes) => {
                 sent.insert(*hash);
                 size += bytes.len();
                 out.push((*hash, bytes));
             }
-            None => absent.push(*hash),
+            Held::Absent => absent.push(*hash),
+            Held::Damaged(error) => damaged.push((*hash, error)),
         }
     }
-    Ok((out, foreign, absent, rest))
+    Ok((out, foreign, absent, rest, damaged))
 }
 
 /// Whether a parent this store holds names `hash`: a node a range pull
@@ -2652,7 +2770,7 @@ mod tests {
             assert!(!possessed(&mut sql, &chunks, value, &mallory).await.unwrap());
             let root = value.root.object_hash.0;
             let foreign_hash = [0xff; 32];
-            let (found, foreign, absent, rest) = pulled(
+            let (found, foreign, absent, damaged, rest) = pulled(
                 &mut sql,
                 &chunks,
                 &root,
@@ -2663,6 +2781,7 @@ mod tests {
             )
             .await
             .unwrap();
+            assert!(damaged.is_empty());
             assert_eq!(found.len(), 1);
             assert_eq!(found[0].0, root);
             assert_eq!(foreign, vec![foreign_hash]);

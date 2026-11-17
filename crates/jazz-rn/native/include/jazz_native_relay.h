@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 /* The relay ABI this header describes (Rust `NATIVE_RELAY_ABI_V1`). */
-#define JAZZ_NATIVE_RELAY_ABI_VERSION 5
+#define JAZZ_NATIVE_RELAY_ABI_VERSION 6
 
 /*
  * Return the shared native relay ABI version embedded in this artifact.
@@ -22,6 +22,21 @@ uint16_t jazz_native_relay_abi_version(void);
 
 /* Optional foreground capture support, a feature query outside the command layout. */
 bool jazz_native_relay_supports_snapshot_capture(void);
+
+/* Interface kinds of a network path, for jazz_native_relay_network_path_changed. */
+#define JAZZ_NATIVE_RELAY_NETWORK_WIFI (1u << 0)
+#define JAZZ_NATIVE_RELAY_NETWORK_CELLULAR (1u << 1)
+#define JAZZ_NATIVE_RELAY_NETWORK_WIRED (1u << 2)
+#define JAZZ_NATIVE_RELAY_NETWORK_OTHER (1u << 3)
+
+/*
+ * Report the device's network path from the platform's monitor (on iOS, each
+ * NWPathMonitor update). A lost path drops the live upstream at once instead of
+ * waiting out the transport's silence deadline; a path that comes back retries
+ * at once instead of waiting out the backoff. Safe from any thread at any time;
+ * a feature outside the command layout.
+ */
+void jazz_native_relay_network_path_changed(bool satisfied, uint32_t interfaces);
 
 typedef struct jazz_native_relay_bytes {
   uint8_t *data;

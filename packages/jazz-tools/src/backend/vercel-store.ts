@@ -29,17 +29,50 @@ import type {
   WebSocketConstructor,
 } from "../runtime/native-runtime/websocket.js";
 import { optionalPeerImportError } from "./optional-peer.js";
+import { logStoreOpened } from "./store-log.js";
 
 export const VERCEL_CORE_PORT = 1625;
 
+/** What a `vercel()` namespace function is called with, for each deployment. */
+export interface VercelNamespaceContext {
+  /**
+   * The deployment's Vercel environment: `"production"`, `"preview"` or a
+   * custom environment's slug (`VERCEL_TARGET_ENV`, else `VERCEL_ENV`).
+   */
+  environment: string;
+  /** The deployment's Git branch (`VERCEL_GIT_COMMIT_REF`); `undefined` without one. */
+  branch: string | undefined;
+}
+
+/**
+ * A core's name within its Vercel project: its Sandbox is
+ * `jazz-<project>-<namespace>`. A string names one core; a function picks
+ * one per deployment.
+ */
+export type VercelNamespace = string | ((context: VercelNamespaceContext) => string | undefined);
+
 export interface VercelStoreOptions {
   /**
-   * Sandbox name. Defaults to `jazz-<VERCEL_PROJECT_ID>-production` for
-   * production and `jazz-<VERCEL_PROJECT_ID>-preview-<branch>-<hash>` for
-   * each Git branch's previews. Required for a preview deployment without
-   * a Git branch (from the CLI outside a Git checkout, or through the API).
+   * Which core this deployment runs: its Sandbox is
+   * `jazz-<VERCEL_PROJECT_ID>-<namespace>` (lowercase, characters other than
+   * `a-z`, `0-9` and `-` become `-`). Required. The usual choices:
+   *
+   * - `({ environment }) => environment`: one core per environment
+   *   (production, preview, each custom environment).
+   * - `({ environment, branch }) => environment === "production" ? "production" : perBranch(branch)`:
+   *   production's core, and one per preview branch, so a branch's schema
+   *   and permissions never apply to another branch's data. These are the
+   *   names earlier versions gave cores by default.
+   *
+   * A deployment only reaches cores of its own environment: a core trusts
+   * the environment whose deployment started it first. So a plain string,
+   * one core for every environment, serves only the environment that
+   * deploys first, and the others are refused: give each environment a
+   * namespace of its own, as the functions above do.
    */
-  name?: string;
+  namespace: VercelNamespace;
+  /** Replaced by `namespace`; passing it throws, saying how to migrate. */
+  name?: never;
   /**
    * Not an option: the core generates its app id on its Drive at first
    * start and keeps it there.
@@ -133,7 +166,12 @@ export interface VercelCore {
     headers: string[][],
     onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
     access?: "admin" | "backend" | "session",
-  ): { send(data: Uint8Array): boolean; close(): void };
+  ): {
+    send(data: Uint8Array): boolean;
+    close(): void;
+    /** Resolves once the session reaches the core (see `CoreSocket.opened`). */
+    readonly opened?: Promise<void>;
+  };
   close(): Promise<void>;
 }
 
@@ -169,6 +207,12 @@ const ENSURE_FRESH_MS = 10_000;
  */
 const ROUTER_ERROR_HEADER = "x-vercel-error";
 const KEEPALIVE_MS = 30_000;
+// A session that answers `/health` while connections to its core keep
+// ending without opening (none opening in between), for this long and this
+// many times, is stopped, so the next wake starts a fresh one. A core that
+// is restarting opens connections again well within this.
+const UNREACHED_RECYCLE_MS = 20_000;
+const UNREACHED_RECYCLE_COUNT = 2;
 
 // After a start that can't succeed, requests fail fast for this long
 // instead of each waking the Sandbox into the same failure.
@@ -178,6 +222,22 @@ const START_FAILURE_HOLD_MS = 30_000;
 class CoreStartError extends Error {}
 
 const isWakeConflict = (error: unknown) => /\b409\b|already attached|conflict/i.test(String(error));
+
+/**
+ * Whether `Sandbox.create` failed because a Sandbox of that name exists:
+ * another instance won the race to create it. `@vercel/sandbox` throws an
+ * `APIError` whose `response` is the API's answer and whose message carries
+ * the API's own ("Status code 4xx is not ok: A sandbox with the name '…'
+ * already exists for this project"); the status may be 409 or a 4xx the
+ * API uses for invalid requests, so the API's message decides.
+ */
+const isNameTaken = (error: unknown) => {
+  const e = error as { response?: { status?: unknown }; json?: { error?: { message?: unknown } } };
+  const status = typeof e?.response?.status === "number" ? e.response.status : undefined;
+  if (status !== undefined && (status < 400 || status >= 500)) return false;
+  const said = [String(error), String(e?.json?.error?.message ?? "")].join(" ");
+  return /already exists/i.test(said);
+};
 
 async function healthy(base: string, timeoutMs: number, diag: Record<string, number>) {
   const deadline = performance.now() + timeoutMs;
@@ -202,30 +262,51 @@ async function healthy(base: string, timeoutMs: number, diag: Record<string, num
   return false;
 }
 
-/** Whether semver `a` is newer than `b` (prereleases sort before their release). */
+/**
+ * Whether version `a` is newer than `b`. A `-` starts a prerelease of what
+ * precedes it, at any depth, so `2.0.0-alpha.64-rc.1` is a candidate for
+ * `2.0.0-alpha.64` and sorts before it, as `2.0.0-alpha.64` does before
+ * `2.0.0`. Dot-separated parts compare numerically when both are numbers;
+ * a number sorts before a word. The start script's `newer` orders the same
+ * way (GNU `sort -V` with every `-` as `~`).
+ */
 export function newerVersion(a: string, b: string): boolean {
-  const split = (v: string) => {
-    const [main = "", pre] = v.split(/-(.*)/s, 2);
-    return { main: main.split(".").map(Number), pre: pre?.split(".") };
-  };
-  const x = split(a);
-  const y = split(b);
-  for (let i = 0; i < 3; i++) {
-    if ((x.main[i] ?? 0) !== (y.main[i] ?? 0)) return (x.main[i] ?? 0) > (y.main[i] ?? 0);
-  }
-  if (!x.pre || !y.pre) return !x.pre && !!y.pre;
-  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
-    const p = x.pre[i];
-    const q = y.pre[i];
+  return compareVersions(a, b) > 0;
+}
+
+const PRERELEASE = Symbol("prerelease");
+type VersionPart = number | string | typeof PRERELEASE;
+
+function versionParts(version: string): VersionPart[] {
+  const parts: VersionPart[] = [];
+  version.split("-").forEach((segment, i) => {
+    if (i > 0) parts.push(PRERELEASE);
+    for (const part of segment.split(".")) {
+      parts.push(/^\d+$/.test(part) ? Number(part) : part);
+    }
+  });
+  return parts;
+}
+
+function compareVersions(a: string, b: string): number {
+  const x = versionParts(a);
+  const y = versionParts(b);
+  for (let i = 0; ; i++) {
+    const p = x[i];
+    const q = y[i];
+    if (p === undefined && q === undefined) return 0;
+    // One ended: a prerelease marker on the other sorts before the end
+    // (`alpha.64-rc.1` < `alpha.64`); any other part sorts after it.
+    if (p === undefined) return q === PRERELEASE ? 1 : -1;
+    if (q === undefined) return p === PRERELEASE ? -1 : 1;
     if (p === q) continue;
-    if (p === undefined) return false;
-    if (q === undefined) return true;
-    const numeric = /^\d+$/;
-    if (numeric.test(p) && numeric.test(q)) return Number(p) > Number(q);
-    if (numeric.test(p) !== numeric.test(q)) return !numeric.test(p);
-    return p > q;
+    if (p === PRERELEASE) return -1;
+    if (q === PRERELEASE) return 1;
+    if (typeof p === "number" && typeof q === "number") return p > q ? 1 : -1;
+    if (typeof p === "number") return -1;
+    if (typeof q === "number") return 1;
+    return p > q ? 1 : -1;
   }
-  return false;
 }
 
 /**
@@ -290,9 +371,11 @@ run=${q(`${root}/tmp`)}
 # Starts are serialized; the server itself runs without the lock.
 exec 9>"$run/jazz.lock"
 flock 9
-# Semver order: GNU sort -V with "~" sorts a prerelease before its release.
+# Version order: GNU sort -V with every "-" as "~" sorts a prerelease
+# before what it is a prerelease of, at any depth (alpha.64-rc.1 before
+# alpha.64 before the release), as newerVersion does in TypeScript.
 newer() {
-  [ "$1" != "$2" ] && [ "$(printf '%s\\n%s\\n' "\${1/-/\\~}" "\${2/-/\\~}" | sort -V | tail -1)" = "\${1/-/\\~}" ]
+  [ "$1" != "$2" ] && [ "$(printf '%s\\n%s\\n' "\${1//-/\\~}" "\${2//-/\\~}" | sort -V | tail -1)" = "\${1//-/\\~}" ]
 }
 version=${q(version)}
 trust=${q(trustLine)}
@@ -426,11 +509,6 @@ function coreOptions(
             ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
           },
     trustedWorkload: { issuer: trust.issuer, audience: trust.audience, subject: trust.subject },
-    // Local-first guests (`initial: "device"`) sync with their own key.
-    // `serveCore` refuses them unless asked; here the backend decides, with
-    // `acceptDeviceAccounts`, which guests' sockets it opens, and the core
-    // admits no socket the workload didn't open.
-    allowLocalFirstAuth: true,
   };
 }
 
@@ -586,36 +664,188 @@ export function onVercelHost(env: Record<string, string | undefined> = process.e
   return !!env.VERCEL && env.VERCEL_ENV !== "development";
 }
 
-/**
- * The core for this deployment: one for production, and one per Git branch
- * for previews, so a branch's schema and permissions never apply to
- * another branch's data. This keeps honest branches apart; it is not a
- * security boundary: every preview deployment's OIDC token names the same
- * workload (`…:environment:preview`), so any preview function can reach any
- * branch's core. Production is its own workload.
- */
-export function defaultCoreName(project: string, env: Record<string, string | undefined>): string {
-  const target = env.VERCEL_ENV ?? "development";
-  // Project ids are mixed case with an underscore; names stay [a-z0-9-].
-  const safe = (part: string) => part.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-  if (target !== "preview") return `jazz-${safe(project)}-${safe(target)}`;
-  // Deploys from the CLI outside a Git checkout, or through the API, have an
-  // empty branch. They'd all share one core, so ask for a name instead.
-  const branch = env.VERCEL_GIT_COMMIT_REF;
-  if (!branch) {
-    throw new Error(
-      "vercel(): this preview deployment has no Git branch (VERCEL_GIT_COMMIT_REF is empty, " +
-        "as for deploys from the CLI outside a Git checkout or through the API); " +
-        "pass vercel({ name }) to choose its core",
-    );
+/** Vercel's limit on a Sandbox name. */
+export const SANDBOX_NAME_MAX = 128;
+/** Vercel's limit on a Drive name. */
+export const DRIVE_NAME_MAX = 64;
+
+// Project ids are mixed case with an underscore; names stay [a-z0-9-].
+const safeProject = (project: string) => project.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+// Runs of other characters become one "-"; a "-" stays as it is, so
+// `perBranch`'s names pass through unchanged.
+const safeNamespace = (namespace: string) => namespace.toLowerCase().replace(/[^a-z0-9-]+/g, "-");
+/** A project id as Vercel issues them (`prj_` and 28 characters), when the real one isn't known yet. */
+const TYPICAL_PROJECT_ID = `prj_${"x".repeat(28)}`;
+
+const PER_BRANCH_RECIPE =
+  'namespace: ({ environment, branch }) => environment === "production" ? "production" : perBranch(branch)';
+
+/** Why `vercel()` needs a namespace, with the usual choices to copy. */
+export function missingNamespaceError(): Error {
+  return new Error(
+    "vercel(): pass `namespace`, which names this deployment's core (its Sandbox is jazz-<project>-<namespace>). The usual choices:\n" +
+      "  vercel({ namespace: ({ environment }) => environment }) // one core per Vercel environment\n" +
+      `  vercel({ ${PER_BRANCH_RECIPE} }) // production's core and one per preview branch, the cores earlier versions created (perBranch is exported by jazz-tools/backend)`,
+  );
+}
+
+/** `name` became `namespace`; refused with the migration rather than ignored. */
+/** What happens to a core no namespace reaches, and where to ask for it back. */
+const UNREACHABLE =
+  "Its data stays on that Sandbox and its Drive, but this version opens another core: if you need it, open an issue at https://github.com/garden-co/jazz/issues/new and we'll add a way to reach it, or rename it for you.";
+
+export function refuseVercelName(options: {
+  name?: unknown;
+  credentials?: { projectId?: string };
+}): void {
+  if (!("name" in options)) return;
+  const defaults =
+    "To keep the cores earlier versions created by default (production's and one per preview branch), pass " +
+    `vercel({ ${PER_BRANCH_RECIPE} }) with perBranch from jazz-tools/backend.`;
+  const project = options.credentials?.projectId ?? process.env.VERCEL_PROJECT_ID;
+  const name = options.name;
+  // The Sandbox a namespace names: "jazz-", the project id lowercased with
+  // each run of other characters as "-", "-", and the namespace.
+  const rule =
+    "A core is now always the Sandbox jazz-<project>-<namespace>, where <project> is the project id lowercased with each run of characters other than a-z and 0-9 as one `-` (prj_AbC1 is prj-abc1).";
+  let keep: string;
+  if (typeof name !== "string") {
+    keep = `${rule} A Sandbox you named \`jazz-<project>-<rest>\` is \`namespace: "<rest>"\`.`;
+  } else if (!project) {
+    keep = `${rule} If ${JSON.stringify(name)} is jazz-<project>-<rest> for this project, pass \`namespace: "<rest>"\`; a name of any other form can't be reached by a namespace any more. ${UNREACHABLE}`;
+  } else {
+    const prefix = `jazz-${safeProject(project)}-`;
+    const rest = name.startsWith(prefix) ? name.slice(prefix.length) : undefined;
+    keep =
+      rest && safeNamespace(rest) === rest && /[a-z0-9]/.test(rest)
+        ? `To keep the core ${name}, pass \`namespace: ${JSON.stringify(rest)}\`.`
+        : `${rule} The core ${name} is not of that form (for this project it would start with ${prefix}), so no namespace reaches it any more. ${UNREACHABLE}`;
   }
+  throw new Error(`vercel(): \`name\` is now \`namespace\`. ${keep} ${defaults}`);
+}
+
+/**
+ * The namespace earlier versions gave a preview branch's core by default:
+ * `preview-<slug>-<hash>`, the branch's first 24 safe characters and a hash
+ * of its full name, so `feat/a` and `feat-a` get cores of their own. For a
+ * deployment without a branch (from the CLI outside a Git checkout, or
+ * through the API) it is `""`, which `vercel()` refuses: those deployments
+ * would all share one core, so give them a namespace of their own.
+ */
+export function perBranch(branch: string | undefined): string {
+  if (!branch) return "";
   const slug = branch
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "")
     .slice(0, 24);
   const hash = createHash("sha256").update(branch).digest("hex").slice(0, 8);
-  return `jazz-${safe(project)}-preview-${slug}-${hash}`;
+  return `preview-${slug}-${hash}`;
+}
+
+/** The context a namespace function gets for the deployment `env` describes. */
+export function namespaceContext(env: Record<string, string | undefined>): VercelNamespaceContext {
+  return {
+    environment: env.VERCEL_TARGET_ENV || env.VERCEL_ENV || "development",
+    branch: env.VERCEL_GIT_COMMIT_REF || undefined,
+  };
+}
+
+/**
+ * Check a namespace that is already a string (`vercel({ namespace })` at
+ * call time, or a function's result): what it becomes in the Sandbox's
+ * name, refused when empty or too long for `project`.
+ */
+export function checkNamespace(
+  namespace: unknown,
+  project: string,
+  context?: VercelNamespaceContext,
+): string {
+  if (namespace !== undefined && namespace !== null && typeof namespace !== "string") {
+    throw new Error(
+      `vercel(): namespace must be a string, or a function returning one; got ${typeof namespace}`,
+    );
+  }
+  if (!namespace) {
+    // Deploys from the CLI outside a Git checkout, or through the API, have
+    // an empty branch: `perBranch` gives them no namespace, since they'd
+    // all share one core.
+    if (context && context.environment !== "production" && context.branch === undefined) {
+      throw new Error(
+        `vercel(): this ${context.environment} deployment has no Git branch (VERCEL_GIT_COMMIT_REF is empty, ` +
+          "as for deploys from the CLI outside a Git checkout or through the API), and its namespace function returned none; " +
+          'return a namespace for it, e.g. `perBranch(branch) || "cli-previews"`',
+      );
+    }
+    throw new Error(
+      context
+        ? `vercel(): the namespace function returned no namespace for this ${context.environment} deployment (branch ${context.branch})`
+        : "vercel(): namespace is empty",
+    );
+  }
+  const safe = safeNamespace(namespace);
+  if (!/[a-z0-9]/.test(safe)) {
+    throw new Error(`vercel(): namespace ${JSON.stringify(namespace)} has no letters or digits`);
+  }
+  const prefix = `jazz-${safeProject(project)}-`;
+  const max = SANDBOX_NAME_MAX - prefix.length;
+  if (safe.length > max) {
+    throw new Error(
+      `vercel(): namespace ${JSON.stringify(namespace)} is ${safe.length} characters; with this project's prefix ${prefix} it may have at most ${max} (Vercel's Sandbox names have at most ${SANDBOX_NAME_MAX})`,
+    );
+  }
+  return safe;
+}
+
+/**
+ * Check a string namespace when `vercel()` is called, so `next dev` reports
+ * it too: against the project's id when it's known, else a typical one.
+ */
+export function checkNamespaceOption(options: {
+  namespace?: unknown;
+  credentials?: { projectId: string };
+}): void {
+  if (options.namespace === undefined) throw missingNamespaceError();
+  if (typeof options.namespace === "function") return;
+  checkNamespace(
+    options.namespace,
+    options.credentials?.projectId ?? process.env.VERCEL_PROJECT_ID ?? TYPICAL_PROJECT_ID,
+  );
+}
+
+/**
+ * This deployment's core: `jazz-<project>-<namespace>`, with the namespace
+ * the option names for it. Cores are kept apart by name, not secured from
+ * each other: every preview deployment's OIDC token names the same
+ * workload (`…:environment:preview`), so any preview function can reach
+ * any preview core. Production is its own workload.
+ */
+export function coreName(
+  project: string,
+  namespace: VercelNamespace | undefined,
+  env: Record<string, string | undefined>,
+): { name: string; namespace: string } {
+  if (namespace === undefined) throw missingNamespaceError();
+  const context = namespaceContext(env);
+  const chosen = typeof namespace === "function" ? namespace(context) : namespace;
+  const safe = checkNamespace(
+    chosen,
+    project,
+    typeof namespace === "function" ? context : undefined,
+  );
+  return { name: `jazz-${safeProject(project)}-${safe}`, namespace: safe };
+}
+
+/**
+ * The Drive a core keeps its data on: `<name>-data`, or, for a name too
+ * long for Vercel's Drive names, its first part and a hash of the whole.
+ */
+export function driveName(name: string): string {
+  const drive = `${name}-data`;
+  if (drive.length <= DRIVE_NAME_MAX) return drive;
+  const hash = createHash("sha256").update(name).digest("hex").slice(0, 8);
+  const head = name.slice(0, DRIVE_NAME_MAX - "-data".length - hash.length - 1);
+  return `${head}-${hash}-data`;
 }
 
 /**
@@ -680,12 +910,15 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   const version = params.version ?? (await installedVersion());
   const tarballUrl = options.coreTarballUrl ?? defaultCoreTarballUrl(version);
   const project = options.credentials?.projectId ?? env.VERCEL_PROJECT_ID;
-  if (!options.name && !project) {
+  refuseVercelName(options);
+  if (options.namespace === undefined) throw missingNamespaceError();
+  if (!project) {
     throw new Error(
-      "vercel(): VERCEL_PROJECT_ID is not set; enable system environment variables or pass a name",
+      "vercel(): VERCEL_PROJECT_ID is not set; enable system environment variables, or pass credentials with its projectId",
     );
   }
-  const name = options.name ?? defaultCoreName(project!, env);
+  const { name, namespace } = coreName(project, options.namespace, env);
+  const drive = driveName(name);
   const creds = options.credentials ?? {};
   const idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
   const backendCredential = options.backendCredential ?? functionOidcToken;
@@ -790,9 +1023,14 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     return sbx;
   };
 
-  const provision = async () => {
+  /**
+   * Create the Sandbox and start its core, or `null` when another instance
+   * created it first (concurrent first requests on a cold deploy): the
+   * caller then waits for that one, like any other wake.
+   */
+  const provision = async (): Promise<SandboxHandle | null> => {
     await sdk.Drive.getOrCreate({
-      name: `${name}-data`,
+      name: drive,
       region: options.region ?? "iad1",
       maxSize: options.maxDriveBytes ?? 10 * 1024 ** 3,
       ...creds,
@@ -806,10 +1044,13 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       timeout: idleMs,
       persistent: true,
       keepLastSnapshots: { count: 1 },
-      mounts: { "/data": { drive: `${name}-data`, mode: "read-write" } },
+      mounts: { "/data": { drive, mode: "read-write" } },
       ...creds,
+    }).catch((error: unknown) => {
+      if (isNameTaken(error)) return null;
+      throw error;
     });
-    await startServer(sbx);
+    if (sbx) await startServer(sbx);
     return sbx;
   };
 
@@ -822,6 +1063,19 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
         `vercel(): core ${name} trusts ${pinned.split(" ").at(-1)}, not this deployment (${trust.subject}). ` +
           "After a team or project rename, or a change of OIDC issuer mode, delete /data/trust in the Sandbox to re-pin it.",
       );
+    }
+  };
+
+  /**
+   * Stop the session `sbx` belongs to, so the next wake starts a fresh one.
+   * Other instances may be watching the same session; only the session this
+   * one saw fail is stopped, never a newer one.
+   */
+  const stopSession = async (sbx: SandboxHandle) => {
+    const watched = sbx.currentSession().startedAt.getTime();
+    const now = await getRunning();
+    if (now && now.currentSession().startedAt.getTime() === watched) {
+      await now.stop().catch(() => {});
     }
   };
 
@@ -851,6 +1105,17 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
                 onResume: startServer,
               })
             : await provision();
+          if (!sbx) {
+            // Another instance is creating it: wait for that Sandbox,
+            // resuming it if it isn't running yet.
+            if (performance.now() > deadline) {
+              throw new Error(
+                `vercel(): core ${name} was being created by another instance and did not come up in ${since(t0)} ms`,
+              );
+            }
+            await sleep(250);
+            sbx = await getRunning();
+          }
         } catch (error) {
           if (!isWakeConflict(error) || performance.now() > deadline) throw error;
           await sleep(500);
@@ -879,13 +1144,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           performance.now() - healthT0 > NOT_LISTENING_RECYCLE_MS
         ) {
           recycled = true;
-          // Other instances may be watching the same session; only the
-          // session this one saw fail is stopped, never a newer one.
-          const watched = sbx.currentSession().startedAt.getTime();
-          const now = await getRunning();
-          if (now && now.currentSession().startedAt.getTime() === watched) {
-            await now.stop().catch(() => {});
-          }
+          await stopSession(sbx);
           sbx = null;
           break;
         }
@@ -953,6 +1212,28 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   const distrust = () => {
     suspect = true;
   };
+  /**
+   * Since when connections to the core have ended without ever opening,
+   * with none opening since, and how many. A core can answer `/health` and
+   * still be out of reach for connections (Vercel's router stopped passing
+   * them to its session): waking it then finds it healthy at the same
+   * address, so only a fresh session gets connections through again.
+   */
+  let unreached: { since: number; count: number } | undefined;
+  const connectionUnreached = () => {
+    distrust();
+    unreached = unreached
+      ? { since: unreached.since, count: unreached.count + 1 }
+      : { since: Date.now(), count: 1 };
+  };
+  const connectionReached = () => {
+    unreached = undefined;
+  };
+  /** Whether the session `live` names keeps refusing connections it answers `/health` for. */
+  const unreachable = () =>
+    unreached !== undefined &&
+    unreached.count >= UNREACHED_RECYCLE_COUNT &&
+    Date.now() - unreached.since >= UNREACHED_RECYCLE_MS;
 
   const ensure = (): Promise<NonNullable<typeof live>> => {
     lastActivity = Date.now();
@@ -965,6 +1246,11 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
         if (live && !suspect && (await getRunning())) {
           live.checkedAt = Date.now();
           return live;
+        }
+        if (live && unreachable()) {
+          // Its `/health` would pass again: start a fresh session instead.
+          unreached = undefined;
+          await stopSession(live.sbx);
         }
         const { sbx, base } = await wake();
         suspect = false;
@@ -1007,6 +1293,9 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   const keepalive = setInterval(() => {
     if (!live) return;
     if (sockets === 0 && Date.now() - lastActivity > idleMs) return;
+    // Attempts that never reach the core aren't use: a session no
+    // connection gets through to is left to time out, not kept awake.
+    if (unreached) return;
     void sdk.Sandbox.get({ name, resume: false, ...creds })
       .then((sbx) => {
         if (sbx.status !== "running") return;
@@ -1028,6 +1317,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     void ensured.then(({ core }) => core.close()).catch(() => {});
     throw error;
   }
+  logStoreOpened(`jazz: store vercel namespace ${JSON.stringify(namespace)} (core ${name})`);
   // Clients in this process (the backend's own session) reach the core through
   // an in-process origin, so each of their requests and reconnects wakes it;
   // they go on through the current remote core's own in-process origin, which
@@ -1053,7 +1343,11 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       void response.body?.cancel().catch(() => {});
       return send(again);
     },
-    WebSocket: wakingWebSocket(async () => (await ensure()).core.serverUrl, distrust),
+    WebSocket: wakingWebSocket(async () => (await ensure()).core.serverUrl, {
+      dropped: distrust,
+      unreached: connectionUnreached,
+      reached: connectionReached,
+    }),
   });
 
   return {
@@ -1083,17 +1377,24 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
         ({ core }) => {
           if (closed) return;
           try {
+            let reached = false;
             inner = core.openSocket(
               headers,
               (error, event) => {
                 if (error || event.kind === "close") done();
-                // A dropped connection to the core: the client reconnects,
-                // and its next session finds the core awake again.
-                if (event.kind === "close" && event.code === 1006) distrust();
+                // A connection that never reached the core counts toward
+                // recycling its session; a dropped one only wakes it: the
+                // client reconnects, and its next session finds it awake.
+                if (event.kind === "close" && inner?.opened && !reached) connectionUnreached();
+                else if (event.kind === "close" && event.code === 1006) distrust();
                 onEvent(error, event);
               },
               access,
             );
+            void inner.opened?.then(() => {
+              reached = true;
+              connectionReached();
+            });
           } catch (error) {
             done();
             onEvent(error instanceof Error ? error : new Error(String(error)), {
@@ -1151,35 +1452,65 @@ function resendable(request: Request, given?: unknown): boolean {
   return Number.isFinite(size) && size <= RESEND_MAX_BYTES;
 }
 
-/** A WebSocket that wakes the core, then connects to wherever it now runs. */
+/**
+ * A WebSocket that wakes the core, then connects to wherever it now runs.
+ *
+ * A connection to the core that fails before it opens (the core is stopping,
+ * restarting, or Vercel's router refuses the upgrade) is tried again once the
+ * core is awake, until the wake deadline: the client hears of it only as a
+ * slower open. Nothing is replayed, since a client sends nothing before
+ * `open`. A connection that opened and then dropped is reported as it is:
+ * the client's own reconnect, and the query machinery above it, take over.
+ *
+ * `hooks` hears how each connection went: `dropped` for a connection to the
+ * core that closed abnormally (the core may be down), `unreached` once a
+ * connection ends without ever having opened (retries spent, or the client
+ * gave up waiting), and `reached` once one opens.
+ */
 function wakingWebSocket(
   resolveOrigin: () => Promise<string>,
-  onDropped: () => void,
+  hooks: { dropped: () => void; unreached: () => void; reached: () => void },
 ): WebSocketConstructor {
   return class WakingSocket implements BrowserWebSocket {
     binaryType: "arraybuffer" | "blob" = "arraybuffer";
     readyState = 0;
     private socket: WebSocket | undefined;
     private readonly listeners = new Map<string, Array<(event?: any) => void>>();
+    private readonly path: string;
+    private readonly deadline = performance.now() + WAKE_DEADLINE_MS;
+    private pause = 100;
 
     constructor(url: string) {
-      const path = new URL(url).pathname + new URL(url).search;
+      this.path = new URL(url).pathname + new URL(url).search;
+      this.connect();
+    }
+
+    private connect(): void {
       resolveOrigin().then(
         (origin) => {
           if (this.readyState >= 2) return;
           const Socket = inProcessWebSocketFor(origin) ?? globalThis.WebSocket;
-          const socket = new Socket(`${origin.replace(/^http/, "ws")}${path}`) as WebSocket;
+          const socket = new Socket(`${origin.replace(/^http/, "ws")}${this.path}`) as WebSocket;
           socket.binaryType = "arraybuffer";
           this.socket = socket;
           socket.addEventListener("open", () => {
+            if (this.socket !== socket || this.readyState !== 0) return;
             this.readyState = 1;
+            hooks.reached();
             this.emit("open");
           });
-          socket.addEventListener("message", (event) => this.emit("message", { data: event.data }));
-          socket.addEventListener("error", (event) => this.emit("error", event));
+          socket.addEventListener("message", (event) => {
+            if (this.socket === socket) this.emit("message", { data: event.data });
+          });
+          socket.addEventListener("error", (event) => {
+            // A connection that never opened is retried, or reports its close.
+            if (this.socket === socket && this.readyState === 1) this.emit("error", event);
+          });
           socket.addEventListener("close", (event) => {
-            if (event.code === 1006) onDropped();
-            this.finish(event.code, event.reason);
+            if (this.socket !== socket) return;
+            if (event.code === 1006) hooks.dropped();
+            if (this.readyState === 0 && event.code === 1006 && this.retry()) return;
+            this.finish(event.code, event.reason, this.readyState === 0);
           });
         },
         (error: unknown) => {
@@ -1187,6 +1518,17 @@ function wakingWebSocket(
           this.finish(1011, "core unavailable");
         },
       );
+    }
+
+    /** Connect again after a connection that never opened, if there is time left. */
+    private retry(): boolean {
+      if (performance.now() + this.pause > this.deadline) return false;
+      this.socket = undefined;
+      setTimeout(() => {
+        if (this.readyState === 0) this.connect();
+      }, this.pause);
+      this.pause = Math.min(this.pause * 2, 1_000);
+      return true;
     }
 
     addEventListener(type: string, listener: (event?: any) => void): void {
@@ -1203,16 +1545,20 @@ function wakingWebSocket(
     close(): void {
       if (this.readyState >= 2) return;
       this.socket?.close();
-      this.finish(1000, "client closed");
+      // A client gives up on a connection that doesn't open in time (its
+      // handshake timeout): that one never reached the core either.
+      this.finish(1000, "client closed", this.readyState === 0);
     }
 
     private emit(type: string, event?: unknown): void {
       for (const listener of this.listeners.get(type) ?? []) listener(event);
     }
 
-    private finish(code: number, reason: string): void {
+    /** End this socket; `unreached` if it ends without having reached the core. */
+    private finish(code: number, reason: string, unreached = false): void {
       if (this.readyState >= 3) return;
       this.readyState = 3;
+      if (unreached) hooks.unreached();
       this.emit("close", { code, reason });
     }
   };

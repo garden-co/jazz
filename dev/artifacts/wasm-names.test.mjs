@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { stripSymbolHashes } from "./wasm-names.mjs";
+import {
+  assertNoOmittedSqliteExtensions,
+  functionNames,
+  stripSymbolHashes,
+} from "./wasm-names.mjs";
 
 const encoder = new TextEncoder();
 const u32 = (value) => {
@@ -99,4 +103,31 @@ test("rejects a function name longer than its subsection", () => {
   const functionNames = [...u32(1), ...u32(0), 0x7f, ...encoder.encode("f::h0123456789abcdef")];
   const module = moduleWithNameSection(section(1, functionNames));
   assert.throws(() => stripSymbolHashes(module), /truncated function name/);
+});
+
+test("reads function names from the name section", () => {
+  assert.deepEqual(functionNames(moduleWithNames(["a", "b::c"])), ["a", "b::c"]);
+});
+
+test("accepts a module whose SQLite has no omitted extensions", () => {
+  const module = moduleWithNames(["sqlite3_open_v2", "sqlite3VdbeExec", "statInit"]);
+  assert.doesNotThrow(() => assertNoOmittedSqliteExtensions(module));
+});
+
+test("rejects a module that still links FTS5, R-Tree, session, dbstat or sqlite_stmt code", () => {
+  for (const name of [
+    "sqlite3Fts5Init",
+    "fts5WriteInit",
+    "rtreeInit",
+    "sqlite3session_create",
+    "statConnect",
+    "stmtBestIndex",
+  ]) {
+    const module = moduleWithNames(["sqlite3_open_v2", name]);
+    assert.throws(() => assertNoOmittedSqliteExtensions(module), /omitted SQLite extensions/);
+  }
+});
+
+test("refuses to vouch for a module without function names", () => {
+  assert.throws(() => assertNoOmittedSqliteExtensions(moduleWithNames([])), /no function names/);
 });

@@ -1089,8 +1089,34 @@ those bytes are refused with it at once until the fetch backoff ends.
   nothing, and the next commit does not inherit its id. A write whose key
   the store already knows for the same author is not made again: it answers
   `Written` with seq 0, or the first one's refusal as uploaded through a
-  replica. In .60 the authority keeps these dedupe entries and never prunes them;
-  a bounded resend window is planned for .61 (#4961). The authority does not record its own refusal: a resend of a
+  replica. A client resends a write for at most 10 minutes after its first
+  send (the TypeScript thin client's `THIN_WRITE_RESEND_WINDOW_MS`); after
+  that the write ends with its outcome unknown. Such a client says so by
+  naming a node tagged `jzRB` (an RFC 9562 version-8 UUID), from which
+  every server derives a writer tagged `jzTB` instead of `jzTW`; an earlier
+  client names a random node, may resend any time, and its entries are
+  kept. The authority drops the
+  dedupe entry of a `jzTB` writer's commit one hour after it recorded it, on its own
+  clock (`ORIGIN_ENTRY_RETENTION_MS`), if the commit was refused or wrote
+  only latest-only tables (SPEC 4 §4.9), and the writer node's interned
+  row once the node has no entry left. Any other accepted commit's entry is
+  also its history's record (history reads name its versions by it, and
+  later writes build on it), so it is kept, as every writer's is. Entries
+  are dropped oldest first, a bounded batch per thin-writer entry the
+  authority records, so pruning costs what it drops; a store that takes no
+  more thin writes keeps what it holds. An entry is recorded no earlier
+  than the write's first send, so every resend inside the client's window
+  finds it. Known limit: a replica that holds an origin commit's upload for
+  more than an hour while the client resends the write through another
+  server could apply a latest-only write twice. Entries recorded before
+  the authority ran a build that records their ages are never dropped.
+  The window is measured on the client's wall clock and the hour on the
+  authority's: a client clock set back lengthens the window, and an
+  authority clock set forward drops entries early.
+  During a rolling upgrade, a server from before the `jzTB` writer derives
+  `jzTW` for a marked client where a newer one derives `jzTB`, so a resend
+  that crosses server versions is not deduped against the first send.
+  The authority does not record its own refusal: a resend of a
   write it refused runs again, against current state. On a replica, seq 0
   can answer a write still pending upstream. An insert with a key names its
   `rowId`; a staged write names no key. So a client resends a keyed write
@@ -1103,11 +1129,59 @@ those bytes are refused with it at once until the fetch backoff ends.
   unknown.
 - `Begin` opens a mergeable or serializable transaction under a
   client-chosen open-transaction id, owned by that session. A write naming it
-  is staged and answered `Staged`; a refusal while staging is kept and
-  reported by `Commit`, as the bindings report it. A `Query` naming it reads
-  the transaction's own staged writes. `Commit` answers `Written` with the
-  commit's seq; `Rollback` abandons it. A connection that closes abandons its
-  open transactions.
+  is staged and answered `Staged`; a refusal decided by the row's state, or a
+  serializable conflict, is kept and reported by `Commit`, as the bindings
+  report it. A `Query` naming it reads the transaction's own staged writes.
+  `Commit` answers `Written` with the commit's seq; `Rollback` abandons it. A
+  connection that closes abandons its open transactions.
+- The app's backend (`createJazz`, the Rust endpoint) serves a thin
+  connection's transaction requests itself, so the core never holds a
+  transaction open between calls: `Begin`, `Commit`, `Rollback`, every
+  request naming an open transaction, and the chunks, finish and abort of a
+  stream begun in one. It splits the connection's frames
+  (`jazz::thin_transactions::ThinRouter`) and passes the rest to the core
+  unchanged, keeping the client's order: a request for the backend waits
+  until the core answered every earlier one it answers (a live query and
+  its closing excepted), and frames for the core wait until the backend
+  answered every earlier request for it. The transaction requests are
+  served (`ThinTransactions`) by a client of the session's own, in memory,
+  started on its first transaction request and ended with the connection,
+  linked to the core with the admission the backend gave the connection
+  (the same vouched session, a device account's own token, or, for a
+  trusted backend client, the backend's link) and acting with its identity.
+  So the core reads and checks for it exactly as for the session, and only
+  accepts the finished transaction, as an upload (§8.2):
+  - A mergeable transaction's read fetches from the core first, then reads
+    in the transaction, so it sees the core's current rows with the
+    transaction's staged writes; a serializable one's read hydrates at the
+    transaction's snapshot, as on any replica.
+  - A write to an existing row loads the row from the core first. A staged
+    write the backend refuses outright (invalid values, a row that does not
+    exist) is answered with its refusal, and the transaction's commit fails
+    with it.
+  - The core checks the transaction as a whole when it is committed, in the
+    state it leaves behind (SPEC 7): the order of its writes does not
+    matter.
+  - `Commit` answers once the core accepted the upload, or with the core's
+    refusal; a serializable refusal is answered `transaction_conflict`. A
+    commit the core does not confirm within 30 s is answered
+    `commit_outcome_unknown`: it may have applied. Any other request waiting
+    on the core that long is answered `not_observed`.
+  - A connection whose requests wait 60 s past the last answer for one that
+    does not come is closed (1011), and the client reconnects.
+  - A backend serves at most so many sessions' transactions at once (256 by
+    default); past that, a session's transaction requests are refused with
+    `backpressure`.
+  - The session's client opens on the schema version the connection bound
+    (`ThinOp::Schema`), which the core serves pinned to it, as for an older
+    replica (§8.9): a client built against an earlier version of the app
+    is served as before.
+
+  This holds for a thin connection through the app's backend. The core
+  still serves thin transactions itself for one that reaches it otherwise
+  (or through a backend from before this), staging each write in order,
+  until such connections are gone.
+
 - `CaptureSnapshot` answers `Snapshot` with the persisted snapshot reference
   of the authority's current frontier, for frozen branch bases.
 - `BeginStream` starts a large-value insert, update or upsert of one

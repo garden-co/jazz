@@ -326,8 +326,11 @@ each. Values up to the threshold, the common case, have none of these limits.
 These are limits, not a design commitment. A column flag that consolidates
 every write to a tail-free tree (making equality on that column exact, at the
 cost of cheap edits) is the planned escape hatch; content `contains` would
-need a write-time index (SQLite FTS5 with the trigram tokenizer runs on every
-target, Durable Objects included).
+need a write-time index. SQLite FTS5 with the trigram tokenizer is available
+on the native builds (server, NAPI, React Native) and on Durable Objects, but
+not in the browser: its WASM SQLite is built without FTS5 (#5516). An FTS5
+index therefore can't be the browser's answer; that target needs FTS5 back in
+its build or an index made of ordinary tables.
 
 The only Rust-side query work on chunked values is reading them: whole
 projections, partial selections (19.12), splices and deltas. Every query,
@@ -457,20 +460,29 @@ that the receiver holds, named by its seq.
   version, and nodes only beneath roots its readable versions reach. A reader
   allowed to see one version but not a later one never receives the later
   version's edits. Losing read access takes effect at once. A version is
-  readable when the reader may read the row as it stands, and an earlier
-  version only if, as history, it is also readable as of its own position
-  (INV-RLS-13 governs earlier versions). The current version is the row
-  itself, so a reader granted access after the row's last write (a share
-  made later) reads its content. A relay judges "current" by its own store,
-  which may lag its upstream: a version superseded upstream but not yet at
-  the relay is current there, and the upstream judges again when the relay
-  forwards the pull.
-- **Known gap.** A writer granted access after the row's last write bases
-  its deltas and access proofs on the version it holds. If that version is
-  superseded before the commit arrives, the base is an earlier version the
-  writer could not read as of its position, and the commit is rejected
-  (`WriteRejected`) rather than rebased. Pulls recover on the next version;
-  such writes do not.
+  readable when the reader may read the row as it stands and, as history,
+  the version as of some cut at which it was the row's version (INV-RLS-13
+  at that cut). The authority checks the ends of the span the version was
+  current over, from its own store alone: its own position, the last
+  position before the version that superseded it, and, while it is
+  current, the row as it stands. A grant that came and went within the
+  span is not seen. So a reader granted access after the row's last write
+  (a share made later) reads the current version's content, and still may
+  once a later write supersedes it; a version superseded before the grant
+  stays unreadable. A relay judges "current" by its own store, which may
+  lag its upstream: a version superseded upstream but not yet at the relay
+  is current there, and the upstream judges again when the relay forwards
+  the pull.
+- **Concurrent writes over a version read later.** The same rule governs a
+  writer's delta bases and access proofs. A writer granted access after the
+  row's last write bases its edit on the version it holds; when another
+  write supersedes that version before the commit arrives, the base was
+  readable to the writer while it was current, so the delta resolves over
+  it and the commit lands over the new version like any concurrent edit.
+  The commit's content says nothing about when it was staged: the authority
+  trusts only its own history of the base and the grants, so naming a
+  version superseded before the grant is refused (`WriteRejected`) as
+  before.
 - **No existence oracle.** The server never tells a client it already holds a
   node the client cannot read: an unreadable pull is answered as absent, and
   uploads are never skipped on the server's word. Deduplication is silent.
@@ -505,7 +517,29 @@ cancels the deletion. Branches and epochs never leave the file.
 
 Every byte a chunk store returns is verified against its hash. A leaf the
 chunk store does not hold is data loss and fails the read with a storage
-error. A read of a leaf only an asynchronous chunk store holds is demand: the
+error. A replica's pull of a node this store holds damaged (a leaf a chunk
+store that answers at once does not hold, or bytes that do not match their
+hash) is answered with the node in `missing`, since asking again would not
+cure it, and the store logs the damage. The replica's read then fails as
+missing chunks that the upstream cannot supply, and the replica asks for
+them again only on a new link or once a version of the row that may hold
+them arrives, even after the store holds the leaf again; a read on the store
+itself is served as soon as it does. A pull that failed with a storage
+error (the chunk store failed to answer, rather than answering that it
+does not hold the leaf) is neither missing nor refused: it waits, on the
+same link, and is answered again once the store is asked again. A store
+whose batches fetch is asked by its next batch of chunk I/O. A store with
+no chunk store, or one that always answers at once
+(`ChunkStore::always_answers_now`), has no batch that fetches: the server
+answers the pull again on the first tick after a wait, and once the
+session's outbox has drained. The wait is a second, doubling up to a
+minute while the failures go on, so each waiting pull is answered again
+once a wait, not once a tick, until it is answered or its session ends.
+The wait rides the server's tick: a host that does not tick while idle
+asks again only on its next tick. A storage error
+that never heals is asked again once a minute, and the replica's read of
+it ends only when its link does. A read
+of a leaf only an asynchronous chunk store holds is demand: the
 read fails as missing chunks, the leaf is fetched, and the read runs again.
 One-shot reads and writes on `Db` await the fetch; subscriptions refresh after
 the tick that fetched; a server holds a session's messages that need such
@@ -563,7 +597,17 @@ app.things.where({ id: thingId }).select({
 Ranges are half-open `[from, to)`. Byte ranges apply only to bytes; `{from,to}`
 on text is in UTF-16 code units; `{fromUtf8,toUtf8}` opts into UTF-8 bytes.
 `{at}` applies only to JSON and is an RFC 6901 JSON Pointer. Results are an
-ordinary `Uint8Array`, `string`, or decoded JSON subtree. Selecting a field by
+ordinary `Uint8Array`, `string`, or decoded JSON subtree.
+
+A range is clamped to the value it reads, in one-shot reads and
+subscriptions alike: `[min(from, end), end)` with `end = min(to, len)`, so a
+range that starts past the end reads as empty and one that runs past it
+reads what the value covers. A subscribed range thus outlives the value
+shrinking below it and follows it as it grows back. Clamping never rounds:
+an inverted range (`from > to`) fails, and so do clamped bounds that split a
+UTF-8 code point or a UTF-16 surrogate pair. The direct native range read
+(`Db::read_value_range`) names exact bytes and fails past the end, and so do
+`applyDiffs` pages (below). Selecting a field by
 name (or omitting `select`) materializes the complete value. Object-form
 partial selections apply to the root query only; in an include builder they
 fail explicitly rather than returning the complete value.
@@ -583,6 +627,32 @@ Two subscriptions over the same rows in different parts are distinct shapes.
 Partial selections in aggregate, union or joined queries fail explicitly. A
 column that a computed column or transform also depends on is read whole and
 its selection is taken from the whole value.
+
+Who reports a selection's error. An authority answering a session's
+one-shot read ships stored rows, not values. On a store that never has to
+fetch a leaf (no chunk store, or one whose lookups always answer at once,
+including that a leaf is not there) it does not decode the cells of the
+rows it ships. Errors of a partial selection's shape and bounds are
+decided from the cell and its descriptor's lengths, and the authority
+refuses the read with them: any error of a partial selection on an
+inline value. A range past the value's end is clamped, not refused, on
+either path. An error that only a chunked
+value's content decides (a UTF-8 or UTF-16 range that splits a
+character, a JSON pointer that is not there) is reported by the reader:
+the authority sends the row and settles the read, and the reader's own
+read of the value fails with the same code and message. The authority
+also answers with the row where a leaf its chunk store should hold is not
+there or does not match its hash: its answer to the reader's pull lists
+that chunk as one it cannot supply (19.8), and the reader's read fails as
+missing chunks, not with the authority's own storage error. Where the
+store fails to read a leaf (a storage error, not "not there"), the
+reader's pull waits and is answered again after a wait (19.10), and the
+reader's read ends once the store reads again. A
+node that does not match its hash while still in the authority's SQLite
+file, and a cell, of any column, that does not decode as its type, are
+answered with the row as well; what the reader's read then reports is
+not specified here. A relay, and an authority whose chunk store answers
+only later, decode the cells and report all of these themselves.
 
 `Db.update` accepts ordinary replacements and an `applyDiffs` option. Both are
 one atomic mutation, but the same column must not appear in both inputs:
@@ -701,6 +771,7 @@ not expose epochs, cells, node hashes, tree nodes, leases or retry state.
 - Store-local leaf patches (a new leaf kept as its base leaf plus edits until
   it is offloaded), as a storage optimization outside the format.
 - Exact equality, ranges and `contains` on values over 64 KiB (19.5): a
-  consolidating column flag, and a write-time FTS5 trigram index.
+  consolidating column flag, and a write-time trigram index (FTS5 where
+  the target's SQLite has it; not the browser WASM, see 19.5).
 - Retention and history thinning: removal of old versions must be ordinary
   refcounted row deletions, never direct node deletion.
