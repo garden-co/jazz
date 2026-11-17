@@ -46,12 +46,12 @@ Invariant digest:
 - `INV-IX-5`: shadow tables store only built-in SQLite values in named,
   versioned encodings; a change to an encoding or analyzer is a new version
   and rebuilds the index, never a silent reinterpretation (20.2).
+- `INV-IX-6`: a live query using an index updates exactly as the same query
+  re-run would, rechecking only changed rows (20.8).
 - `INV-IX-7`: index maintenance is total: no value of an indexed column makes
   draining fail. A value a kind cannot index (null, a zero vector under
   `cosine`, a point out of range) leaves the row unindexed, so it never
   matches; it never fails the write or a synced version (20.3).
-- `INV-IX-6`: a live query using an index updates exactly as the same query
-  re-run would, rechecking only changed rows (20.8).
 
 ## 20.1 Declaration
 
@@ -184,6 +184,26 @@ CREATE TABLE _jazz_ix (
 its stored name, so a column rename that keeps the stored column keeps the
 index.
 
+**`jazz-ix-decl/1`**, byte by byte. A string is a `u64` big-endian byte
+length then its UTF-8 bytes; a byte is one byte.
+
+1. the string `"jazz-ix-decl/1"`;
+2. the index name;
+3. the kind byte: text 0, vector 1, geo 2;
+4. the kind's body:
+   - text: the field count (`u64` big-endian); per field, in byte order of
+     the column names: the column name, the weight byte (1–15), the
+     reference length (`u16` big-endian, 1–4096; a bare weight is 32); then
+     the analyzer string; then the prefix byte (0 or 1);
+   - vector: the column name; the metric byte (cosine 0, l2 1, dot 2); the
+     `ann` byte (exact 0);
+   - geo: the point column name;
+5. the `serverOnly` byte (0 or 1).
+
+A search names a declaration by the SHA-256 of these bytes in logical column
+names (20.4). `SPEC/fixtures/ix/decl-v1.json` pins the bytes and hashes of
+one declaration of each kind.
+
 `encoding` names every byte-level choice the shadow rows depend on: the
 kind's row layout and, for text, the analyzer. A store opening with a
 declaration whose canonical bytes or encoding differ from the recorded ones
@@ -191,7 +211,12 @@ drops and rebuilds that index. Shadow tables are rowid tables with secondary
 indexes (no `WITHOUT ROWID`), so they run on every target, the Turso engine
 included.
 
-Shadow rows reference indexed rows by the current table's `rid`. Per kind:
+Shadow rows reference indexed rows by the current table's `rid`, which
+names one `(id, _branch)` row. Shadow tables are exempt from `INV-BVIEW-6`
+(every table a branch view reads is keyed by branch): a shadow row belongs
+to exactly the branch of the `rid` it names, and branch filtering happens on
+the join to `t`, where the view's branch conditions apply as for any read.
+Per kind:
 
 | kind   | tables                                                                                                                                |
 | ------ | ------------------------------------------------------------------------------------------------------------------------------------- |
@@ -243,13 +268,20 @@ error on the authority.
 
 ## 20.4 Queries and the wire
 
-A search is one new predicate, appended last to `Predicate` so every
+A search is one new predicate, postcard tag 15, after every existing
+predicate (12 is `IsNull`; 13 and 14 are jazz#5983's `StartsWith` and
+`EndsWith`, held as uninhabited placeholders until it lands), so every
 existing predicate keeps its encoding:
 
 ```rust
-pub enum Predicate { /* … existing variants … */ Search(IndexSearch) }
+pub enum Predicate { /* … existing variants, 13 and 14 … */ Search(IndexSearch) }
 
-pub struct IndexSearch { pub index: String, pub op: IndexOp }
+pub struct IndexSearch {
+    pub index: String,
+    pub op: IndexOp,
+    /// SHA-256 of the index's `jazz-ix-decl/1` bytes, as the querying node declares it.
+    pub decl: Option<[u8; 32]>,
+}
 
 pub enum IndexOp {
     /// Rows whose analyzed fields contain any or all query terms.
@@ -272,6 +304,18 @@ ranks by the summed impacts of the terms it holds (20.6), so under `Any` a
 row holding more of the terms ranks higher. `MatchMode` encodes as one byte
 after the text (`Any` 0, `All` 1); other values are refused on decode.
 
+**Declarations.** Nodes on different schema versions can declare one index
+differently (another field weight, another metric). A search names the
+declaration it was written against: `decl`, filled in when the query is
+prepared, from the preparing node's schema. The node answering compares it
+(or, when it is absent, the reading schema's declaration) with the
+declaration of the index it maintains, and on a mismatch refuses with
+`IndexDeclarationMismatch` ("the index changed; upgrade the app"); it never
+scores a search under another declaration. A client on an older schema
+still searches its own replica under its own declaration. A search through
+an index the answering node's schema does not declare (dropped since the
+client's version) is `UnknownIndex`.
+
 `Predicate::Search` is valid only as a top-level element of a query's
 `filters`, at most once per query, and never in a policy, a join, an include
 or under `Any`/`Not`. It combines by AND with the other filters, joins,
@@ -284,7 +328,8 @@ orders by `$score`. Ties are broken by `id`, as for every order. `Query` and
 
 **Wire.** `Query` travels in `SyncMessage`, so a peer that does not know
 `Predicate::Search` cannot decode a query using it. Support is the wire
-feature `FEATURE_INDEX_SEARCH`, not a protocol version: the wire version stays 6 and queries without a search are
+feature `FEATURE_SPECIALISED_INDEXES` ("understands SPEC 20 schemas and
+search"), not a protocol version: the wire version stays 6 and queries without a search are
 byte-identical. A node sends a query with a search upstream only if the
 upstream offered the feature; otherwise that query is answered from the
 replica alone and, at `Remote` tier, refused with "the server does not
@@ -292,16 +337,36 @@ support index search". A transport reports what its link negotiated; one
 that cannot say (an in-process link aside) offers no optional feature. The
 new predicate's JSON and postcard bytes are pinned per op.
 
-`FEATURE_INDEX_SEARCH` is bit 15 (`1 << 15`). Its neighbours: bit 12 is
+The same bit gates schemas. An older peer cannot decode a schema version
+holding a `vector` or `point` column (its catalogue message would fail to
+decode, and the link with it) or would drop its index objects unseen, so the
+authority and relays send a version that uses either, or declares a
+specialised index, only over a link that negotiated the bit. A peer without
+it keeps syncing the versions it knows. (Independently, a peer decodes each
+catalogue version on its own and skips one it cannot read with
+`SchemaVersionUnsupported`, 8.10.)
+
+`FEATURE_SPECIALISED_INDEXES` is bit 15 (`1 << 15`). Its neighbours: bit 12 is
 `FEATURE_SERIALIZABLE_BRANCH_READS`, bit 13 `FEATURE_TEXT_AFFIX_PREDICATES`
 (jazz#5983) and bit 14 is taken by jazz#5991. TS clients declare it in
 `CLIENT_WIRE_FEATURES`.
 
 Validation refuses, with typed errors: an unknown index; an op not of the
-index's kind; an empty text after analysis; a vector of the wrong
-dimension or with non-finite values; `k` outside 1–1000; coordinates out of
-range; a radius over 1000 km; `search` on a history read, an as-of cut or a
-branch view with a base (not supported yet).
+index's kind; an empty text after analysis, a query text over 1 KiB or 32
+terms (`SearchQueryTooLong`); a vector of the wrong dimension or with
+non-finite values, and a zero vector under `cosine`; `k` outside 1–1000;
+coordinates out of range; a radius over 1000 km; `search` on a history read
+or a branch view with a base (not supported yet).
+
+**Cuts.** An index holds shadow rows for the current rows only, so a search
+reads the current rows. A search under an explicit cut, a snapshot, a read
+as of a position, or a `Remote` read of settled rows (`settled_only`), is
+refused: "index search at Remote tier or as of a cut is not supported yet"
+(cut-consistent search: jazz#6037). A replica may also cut a live read back
+to what its upstream has settled for it, while another writer's versions
+are in flight (8.4). That cut is the replica's own, not the reader's: a
+search drops it and reads the current rows, its own pending writes
+included, exactly as a LocalFirst read would.
 
 ## 20.5 Compilation
 
@@ -316,14 +381,26 @@ last word is one slot matching its whole-word term or every term in its
 range (`term = ?exact OR (term >= ?lo AND term < ?hi)`, 20.10.1).
 
 ```sql
-WITH q(tid, slot) AS (SELECT ... FROM json_each(?)),
+WITH q(tid, slot) AS (SELECT ... FROM json_each(?) UNION ALL <prefix slot>),
 ix(rid, score) AS (
-  SELECT p.rid, sum(p.impact) FROM q JOIN post p ON p.tid = q.tid
-  GROUP BY p.rid HAVING count(DISTINCT q.slot) >= ?needed)
+  SELECT rid, -sum(impact) FROM
+    (SELECT DISTINCT p.rid, p.tid, p.impact FROM q JOIN post p ON p.tid = q.tid)
+  GROUP BY rid)
+-- under All, also: rid IN (SELECT p.rid FROM q JOIN post p ON p.tid = q.tid
+--                           GROUP BY p.rid HAVING count(DISTINCT q.slot) = ?nslots)
 ```
 
-`?needed` is 1 under `Any` and the number of slots under `All`; nothing else
-differs between the modes.
+A posting that serves several slots (a word both whole and the prefix, as in
+`run run`, or a prefix range that contains another query term) counts once
+in the score; `count(DISTINCT q.slot)` still requires every slot under
+`All`, so the prefix slot alone cannot stand in for the whole term (`running
+run` does not match a row holding only `runway`). Under `Any` every row
+holding a slot matches.
+
+Before it runs, a text search is admitted against its caps (20.12), each
+read at most one row past it: its prefix may stand for at most 1 000
+indexed terms, and the search may read at most 200 000 postings; beyond
+either it is refused with `SearchTooBroad`.
 
 **Geo** is pure SQL. Rust covers the query region with at most 16 ranges of
 cells (20.10.3) and computes a chord threshold; SQL reads those ranges and
@@ -346,18 +423,23 @@ in two phases:
    the best `k` by `(score, id)`, `id` being the row's object id (a `rid` is
    local to a node). Scoring the whole replica and filtering afterwards
    would keep fewer than `k` rows whenever the other clauses drop some of
-   the nearest, and so differ from the authority. On the authority the
-   clauses must also narrow the table, as decided from the statement's
-   `EXPLAIN QUERY PLAN`: its root table must be read by
-   `SEARCH … USING INDEX`, not `SCAN`.
+   the nearest, and so differ from the authority. A node answering for
+   others (the authority, and every relay or server serving subscribers)
+   also requires the clauses to **narrow** the table. That is decided from
+   the schema alone, so every node decides it alike: some top-level filter,
+   or a conjunct of the read policy that pins a column, is `Eq`, `In` or a
+   range on `id` or on the leading column of a declared B-tree index (a
+   declared column, a reference, or a composite index's first column). The
+   cap stays the backstop. A node answering only its own queries is exempt:
+   its replica is the bounded set.
 2. **Rows.** The `k` pairs `(rid, score key)` are bound as one JSON array,
    and the statement runs with `ix` as `json_each` over it, so filters,
    policy, includes and order apply as above. The score key is the score's
    order-preserving `i64` (the `f64` bits, negatives' magnitude flipped), so
    SQL compares it exactly.
 
-On the authority, a vector search whose other clauses do not narrow the
-table through an index is refused: "unfiltered vector search on the server
+On a node answering for others, a vector search whose other clauses do not
+narrow the table is refused: "unfiltered vector search on the server
 needs an ANN index (`ann: \"ivf\"`), not supported yet". This keeps
 `INV-IX-4` until an ANN kind exists.
 
@@ -385,11 +467,12 @@ ascending is best first: text binds the negated sum.
   correctly rounded on every target). Smaller is better. Chord distance is
   monotonic in great-circle distance.
 - **vector:** computed in Rust in index order: each f32 element is widened
-  to f64, then multiplied (for `l2`, subtracted and then squared), and the
-  products are summed in f64 sequentially, never fused (no FMA) and never
-  reassociated (SIMD
-  implementations must reproduce the sequential result exactly or not be
-  used). `cosine` and `dot` are larger-better similarities stored negated
+  exactly to f64, then multiplied (for `l2`, subtracted and then squared),
+  and the products are summed in f64 sequentially, never fused (no FMA) and
+  never reassociated (SIMD implementations must reproduce the sequential
+  result exactly or not be used). A `cosine` query vector is normalized
+  exactly as a stored one (its L2 norm in f64, each element divided and
+  rounded to f32); a zero query vector is refused with a typed error. `cosine` and `dot` are larger-better similarities stored negated
   so that every vector score is smaller-better; `l2` is the squared distance.
 
 Score values are not part of query results in this version; they only order
@@ -407,7 +490,13 @@ rows, nothing about unreadable rows may reach a reader:
 - Vector candidates on the authority are chosen by the same filters and
   policy as the final rows (filter-first), and the policy is applied again in
   phase 2.
-- Typed errors name the query's shape, never whether rows exist.
+- Typed errors name the query's shape, never whether rows exist, with one
+  bounded exception (under review): `SearchTooBroad` counts the postings
+  and prefix terms of all rows, readable or not. Refusal therefore says
+  that more than 200 000 postings hold the query's terms, or more than
+  1 000 indexed terms start with its prefix, across every row the node
+  holds. That is a coarse signal at a high threshold: it never names a
+  row, a count below the threshold, or which rows hold a term.
 - An empty result and a result of hidden rows are indistinguishable.
 
 A client indexes only rows the server let it hold, and eviction removes their
@@ -424,9 +513,13 @@ spliced into the window by `(score, id)`. Because scores depend on the row
 alone, unchanged rows keep their scores and positions (`INV-IX-6`).
 
 A live search's sort keys read each row's score through the search's own
-candidate relation. A vector subscription re-runs whole instead: `Nearest`
-keeps only its `k` best, so a changed row can push out a row the recheck
-never read. A full page whose last row is removed refetches, as today.
+candidate relation, planned over just the rows they key. A vector
+subscription rechecks the same way, with `k` as its window's limit: a
+changed row is scored alone; if it now beats the window's last row it is
+spliced in and the `k`-th leaves; if a window member gets worse or leaves a
+full window, the search re-runs (a row the window never read may take its
+place). Re-runs are coalesced per fan-out tick, one per subscription. A
+full page whose last row is removed refetches, as today.
 
 ## 20.9 Replicas and tiers
 
@@ -436,7 +529,8 @@ A query using an index runs at its requested tier:
 - `LocalFirst` searches the replica at once and the authority in parallel;
   rows the authority sends are indexed on arrival and appear in the local
   result by their score, which equals the authority's.
-- `Remote` searches settled rows on the authority only.
+- `Remote`, which would read settled rows, is refused for searches for now
+  (20.4, cuts).
 
 **Server-only indexes** are not supported yet: a declaration with
 `"serverOnly": true` is refused (20.1). A client re-evaluates every query
@@ -631,15 +725,27 @@ All are typed, name the table and index, and carry no data about rows:
 - `IndexServerOnly` (20.9): reserved; unreachable while server-only
   indexes are refused at declaration;
 - `IndexSearchUnsupportedUpstream`: a `Remote` search to an upstream without
-  `FEATURE_INDEX_SEARCH` (20.4);
+  `FEATURE_SPECIALISED_INDEXES` (20.4);
 - `IndexBuilding` (retryable, authority only) (20.3);
-- `VectorSearchUnbounded`: unfiltered vector search on the authority (20.5);
-- `VectorCandidatesOverCap`: more than `VECTOR_EXACT_MAX` candidates (20.5).
+- `VectorSearchUnbounded`: a vector search whose clauses do not narrow the
+  table, on a node answering for others (20.5);
+- `VectorCandidatesOverCap`: more than `VECTOR_EXACT_MAX` readable candidates
+  (20.5);
+- `IndexDeclarationMismatch`: a search written against another declaration
+  of the index than the answering node maintains (20.4);
+- `SearchQueryTooLong`: a text query over 1 KiB or 32 terms (the analyzer's
+  caps, 20.10.1);
+- `SearchTooBroad`: a text prefix standing for more than 1 000 indexed terms,
+  or a search that would read more than 200 000 postings (20.5, 20.7).
 
-The last five are `Reason`s (`index_server_only`,
+These are `Reason`s (`index_server_only`,
 `index_search_unsupported_upstream`, `index_building`,
-`vector_search_unbounded`, `vector_candidates_over_cap`) on codes `query`,
-except `index_building`, which is `backpressure` (retry later).
+`vector_search_unbounded`, `vector_candidates_over_cap`,
+`index_declaration_mismatch`, `search_query_too_long`, `search_too_broad`)
+on code `query`, except `index_building`, which is `backpressure` (retry
+later). An unknown index (`UnknownIndex`), a misplaced search and the other
+validation errors are query errors naming the table and index. A search at
+`Remote` tier or as of a cut is refused as not supported yet (20.4).
 
 ## 20.12 Costs
 
@@ -650,15 +756,25 @@ except `index_building`, which is `backpressure` (retry later).
 - **Storage:** text roughly 1.5 times the analyzed text (about three times
   FTS5's compressed postings); vector `4n` bytes per row; geo about 40 bytes
   per row.
-- **Query:** text, the postings of the query terms; geo, the cells of the
-  cover; vector, the candidates read and scored (at most `VECTOR_EXACT_MAX`).
+- **Query:** text, the postings of the query terms, capped: a query text of
+  at most 1 KiB and 32 terms (the analyzer), a prefix of at least 2
+  characters standing for at most 1 000 indexed terms, and at most 200 000
+  postings read (`SearchTooBroad`, 20.7 for what refusing reveals); each
+  cap is checked by reading at most one row past it. Geo, the cells of the
+  cover; vector, the candidates read and scored (at most
+  `VECTOR_EXACT_MAX`).
   Scoring is latency-bound by the sequential `f64` sum (about 1.5 ns per
   element on a 2.9 GHz x86 core, natively and in V8's wasm32 alike), so a
   full `VECTOR_EXACT_MAX` scan of 384 dimensions costs about 30 ms in Rust,
   plus reading the 77 MB of shadow rows (about 60 ms warm natively; more in
   a browser's OPFS-backed SQLite), and 1536 dimensions about four times that.
+- **Live:** a changed row is rechecked alone: for text and geo, its own
+  postings or cell; for vector, its own vector scored once. A vector window
+  member that gets worse re-runs the search: phase 1 again, at most once per
+  subscription per fan-out tick.
 - **Bundle:** each kind is a cargo feature of `jazz-index`, on by default in
-  every build, so each one's size is measured and can be dropped.
+  every build, so each one's size is measured and can be dropped. The text
+  kind adds 11.2 KB gzipped to the browser WASM.
 
 ## Open questions
 
