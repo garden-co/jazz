@@ -412,7 +412,8 @@ fn fold_letter(n: u16) -> Option<&'static str> {
 
 /// Marks that fold away: the combining diacritical mark blocks (so
 /// decomposed and precomposed spellings meet), Hebrew points and
-/// cantillation, Arabic harakat, and variation selectors. Nobody types
+/// cantillation, Arabic harakat, Quranic marks and the tatweel, and
+/// variation selectors. Nobody types
 /// vowel points into a search box, so pointed and unpointed spellings meet.
 fn dropped_mark(n: u32) -> bool {
     matches!(n,
@@ -421,7 +422,12 @@ fn dropped_mark(n: u32) -> bool {
         // Hebrew points and cantillation marks.
         | 0x0591..=0x05BD | 0x05BF | 0x05C1..=0x05C2 | 0x05C4..=0x05C5 | 0x05C7
         // Arabic harakat and the superscript alef.
-        | 0x064B..=0x065F | 0x0670)
+        | 0x064B..=0x065F | 0x0670
+        // Arabic tatweel (a letter that only stretches the line).
+        | 0x0640
+        // Quranic annotation marks.
+        | 0x0610..=0x061A | 0x06D6..=0x06DC | 0x06DF..=0x06E4 | 0x06E7..=0x06E8
+        | 0x06EA..=0x06ED | 0x08CA..=0x08FF)
 }
 
 /// Unicode 16.0.0 simple case folding.

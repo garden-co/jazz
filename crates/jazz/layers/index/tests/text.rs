@@ -485,6 +485,12 @@ fn hebrew_points_and_arabic_harakat_fold_away() {
     assert_eq!(terms(simple(), "בְּרֵאשִׁ֖ית"), ["בראשית"]);
     assert_eq!(terms(simple(), "مَرْحَبًا"), terms(simple(), "مرحبا"));
     assert_eq!(terms(simple(), "رَحْمٰن"), ["رحمن"]);
+    // The tatweel only stretches a word, and Quranic marks annotate it.
+    assert_eq!(terms(simple(), "مـرحبا"), ["مرحبا"]);
+    assert_eq!(terms(simple(), "ٱلرَّحْمَـٰنِ"), ["ٱلرحمن"]);
+    assert_eq!(terms(simple(), "الرحمن\u{06DA}"), ["الرحمن"]);
+    // Alef forms are not normalised: alef wasla stays its own letter.
+    assert_ne!(terms(simple(), "ٱلرحمن"), terms(simple(), "الرحمن"));
     // Hebrew punctuation is not a point: maqaf (U+05BE) still separates.
     assert_eq!(terms(simple(), "בית־ספר"), ["בית", "ספר"]);
 }
@@ -514,6 +520,7 @@ const TERM_CASES: &[&str] = &[
     "col·lecció צה״ל צה\"ל ג׳ירפה a· say \"hi\"",
     "3·4 Home·About COL·LECCIÓ צהָ״ל",
     "שָׁלוֹם בְּרֵאשִׁ֖ית مَرْحَبًا رَحْمٰن בית־ספר",
+    "مـرحبا ٱلرَّحْمَـٰنِ الرحمن\u{06DA} أحمد",
 ];
 
 const IMPACT_CASES: &[&[(u8, u16, &str)]] = &[

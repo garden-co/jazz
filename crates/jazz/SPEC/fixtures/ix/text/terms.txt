@@ -171,6 +171,13 @@ term d8b1d8add985d986  # "رحمن"
 term d791d799d7aa  # "בית"
 term d7a1d7a4d7a8  # "ספר"
 
+analyzer jazz-text/1:en
+text d985d980d8b1d8add8a8d8a720d9b1d984d8b1d98ed991d8add992d985d98ed980d9b0d986d99020d8a7d984d8b1d8add985d986db9a20d8a3d8add985d8af  # "مـرحبا ٱلر\u{64e}\u{651}ح\u{652}م\u{64e}ـ\u{670}ن\u{650} الرحمن\u{6da} أحمد"
+term d985d8b1d8add8a8d8a7  # "مرحبا"
+term d9b1d984d8b1d8add985d986  # "ٱلرحمن"
+term d8a7d984d8b1d8add985d986  # "الرحمن"
+term d8a3d8add985d8af  # "أحمد"
+
 analyzer jazz-text/1:simple
 text   # ""
 
@@ -340,3 +347,10 @@ term d985d8b1d8add8a8d8a7  # "مرحبا"
 term d8b1d8add985d986  # "رحمن"
 term d791d799d7aa  # "בית"
 term d7a1d7a4d7a8  # "ספר"
+
+analyzer jazz-text/1:simple
+text d985d980d8b1d8add8a8d8a720d9b1d984d8b1d98ed991d8add992d985d98ed980d9b0d986d99020d8a7d984d8b1d8add985d986db9a20d8a3d8add985d8af  # "مـرحبا ٱلر\u{64e}\u{651}ح\u{652}م\u{64e}ـ\u{670}ن\u{650} الرحمن\u{6da} أحمد"
+term d985d8b1d8add8a8d8a7  # "مرحبا"
+term d9b1d984d8b1d8add985d986  # "ٱلرحمن"
+term d8a7d984d8b1d8add985d986  # "الرحمن"
+term d8a3d8add985d8af  # "أحمد"
