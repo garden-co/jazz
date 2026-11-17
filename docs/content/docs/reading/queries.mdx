@@ -10,7 +10,7 @@ import DurabilityTiersTable from "../../partials/durability-tiers-table.mdx";
 
 A one-shot query runs once against the database without subscribing to changes.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-oneshot-ts
@@ -27,20 +27,66 @@ A one-shot query runs once against the database without subscribing to changes.
     </include>
 
   </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#reading-oneshot-swift
+    </include>
+
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#reading-oneshot-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#reading-oneshot-go
+    </include>
+
+  </Tab>
 </Tabs>
 
 To read a single row, use `db.one`. It runs the query with a limit of one and resolves to the
 first matching row, or `null` if no row matches or you aren't allowed to read it.
 
-<include cwd lang="ts">
-  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-one-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-one-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-one-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#reading-one-swift
+    </include>
+
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#reading-one-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#reading-one-go
+    </include>
+
+  </Tab>
+</Tabs>
 
 ## Subscriptions
 
 Subscribe to a query to receive updates whenever the underlying data changes.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-subscriptions-ts
@@ -54,6 +100,24 @@ Subscribe to a query to receive updates whenever the underlying data changes.
   <Tab value="Rust">
     <include cwd lang="rust">
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-subscriptions-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#reading-subscriptions-swift
+    </include>
+
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#reading-subscriptions-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#reading-subscriptions-go
     </include>
 
   </Tab>
@@ -96,7 +160,7 @@ behavior and how subscriptions change between offline and online operation.
 These are the only read tiers. Write waits use the separate durability tiers `"local"` and
 `"global"`.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-durability-tier-ts
@@ -110,6 +174,23 @@ These are the only read tiers. Write waits use the separate durability tiers `"l
   <Tab value="Rust">
     <include cwd lang="rust">
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-durability-tier-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#reading-durability-tier-swift
+    </include>
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#reading-durability-tier-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#reading-durability-tier-go
     </include>
 
   </Tab>

@@ -6,7 +6,7 @@ import { Utf8Decoder } from "../utf8.js";
 import { parseSnapshotRef, UnsupportedSnapshotError, type SnapshotRef } from "../snapshot-ref.js";
 import { isAuthorityChangedError, upstreamRefusalError } from "../authority-changed-error.js";
 import { CoreTickFailedError, isCoreTickFailedError } from "../core-tick-failed-error.js";
-import { formatUuid, formatUuidAt } from "../hex.js";
+import { formatUuid, formatUuidAt, parseUuidBytes } from "../hex.js";
 
 export { formatUuid };
 import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
@@ -672,9 +672,12 @@ function upstreamLinkFailure(error: WireError, negotiated: boolean): UpstreamLin
   // refused this connection for now (such as the connection cap per user),
   // which is retried like an outage but published at once with the server's
   // reason. After its hello both end a link like an outage.
-  if (isReconnectLaterWireError(error)) {
+  // `internal` with `later` is a server that cannot serve this session right
+  // now (its runtime shutting down in a rolling deploy): retried like
+  // overload, as `LinkFailure::from_wire_error` does.
+  if (isReconnectLaterWireError(error) || (error.code === "internal" && error.retry === "later")) {
     if (negotiated) return { kind: "network", message };
-    return { kind: error.code === "backpressure" ? "refused" : "serverNotReady", message };
+    return { kind: error.code === "not_ready" ? "serverNotReady" : "refused", message };
   }
   // The network or the server dropped the socket. A local-first client must
   // survive an outage of any length, including one it was opened in.
@@ -7579,12 +7582,8 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
 }
 
 export function parseUuid(value: string): Uint8Array {
-  const hex = value.replaceAll("-", "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid uuid ${value}`);
-  const bytes = new Uint8Array(16);
-  for (let i = 0; i < 16; i += 1) {
-    bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
+  const bytes = parseUuidBytes(value);
+  if (!bytes) throw new Error(`invalid uuid ${value}`);
   return bytes;
 }
 

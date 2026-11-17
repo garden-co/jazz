@@ -512,6 +512,15 @@ export interface ExplainedReadRow {
  */
 export declare function generate(lang: string, appJson: string): string
 
+/** The `$generated` marker to write: `{ by }`, what wrote the files. */
+export interface GeneratedBy {
+  /**
+   * E.g. "jazz-tools generate from schema.ts — edit the TypeScript, not
+   * this file".
+   */
+  by: string
+}
+
 /**
  * `jazz-tools generate [--check]` in `dir`, the directory of the app's
  * `jazz.app.json`: the same languages, checks and bytes as the
@@ -569,6 +578,16 @@ export declare function loadAppArtifact(app: string, permissions: string): JsonV
 export declare function loadBackendApp(schema: string, permissions: string): JsonValue
 
 /**
+ * What the migration between two schemas in the engine's JSON form
+ * (`{ "tables": … }`) does, as `migrations create` decides it, as JSON:
+ * `{ createTables, dropTables, renameTables: [{ from, to }], migrate:
+ * [{ table, steps, addedVariants, unchangedRows }] }`, each step
+ * `{ step: "add" | "drop" | "maybeRenamed" | "maybeRenamedAway", column, … }`.
+ * Throws, with the reason, for a change no migration step does.
+ */
+export declare function migrationDiff(fromJson: string, toJson: string): string
+
+/**
  * Write the migration from the version the committed bindings
  * (`bindings`, `jazz.generated.ts`'s text, or null when there are none) were
  * generated from to `appJson`'s edited `tables`, named `name`.
@@ -605,6 +624,15 @@ export interface RestoreOptions {
  * [`schema_source_hash`], which hashes the `jazz.app.json` file.
  */
 export declare function schemaHash(engineSchemaJson: string): string
+
+/**
+ * Whether rows pass unchanged between two schemas in the engine's JSON form
+ * (`{ "tables": … }`), so a deployment connects them without a migration:
+ * the rule `migrations create` follows to decide whether to write one.
+ * Indexes, history retention, merge strategies, column order and defaults
+ * of columns outside `branchBy` don't count; everything else does.
+ */
+export declare function schemasAreCompatible(leftJson: string, rightJson: string): boolean
 
 /**
  * `"sha256:<hex>"` of a `jazz.app.json` text, CRLF read as LF: the
@@ -716,6 +744,14 @@ export declare function validateBindings(appJson: string, bindings?: string | un
 /** Validate a schema and its embedded permissions without opening a database. */
 export declare function validateSchema(schema: Uint8Array): void
 
+/**
+ * Whether a `jazz.app.json` or `jazz.permissions.json` text is as the tool
+ * its `$generated` marker names wrote it: `"none"` (no marker), `"match"`
+ * or `"mismatch"` (edited since; formatting alone doesn't count). Throws
+ * when the text isn't a JSON object or the marker is malformed.
+ */
+export declare function verifyGenerated(text: string): "none" | "match" | "mismatch"
+
 export declare function verifyLocalFirstIdentityProof(token: string | undefined | null, expectedAudience: string): VerifyTokenResult
 
 export interface VerifyTokenResult {
@@ -725,12 +761,38 @@ export interface VerifyTokenResult {
 }
 
 /**
+ * A schema in the engine's JSON form (`{ "tables": … }`) as the readable
+ * `tables` of a `jazz.app.json` `history` version (no relations, computed
+ * fields or transforms), as JSON text.
+ */
+export declare function versionTables(engineSchemaJson: string): string
+
+/**
  * Build the `jazz.app.json` and `jazz.permissions.json` texts from what
  * `jazz-tools validate` compiled (an
  * [`ArtifactInput`](jazz::tools::deployment::artifact::ArtifactInput) as
- * JSON): the files' only writer, which refuses what a reader would.
+ * JSON): the files' only writer, which refuses what a reader would. With
+ * `options.generated`, each file carries a `$generated` marker.
  */
-export declare function writeAppArtifact(input: string): WrittenAppFiles
+export declare function writeAppArtifact(input: string, options?: WriteAppFilesOptions | undefined | null): WrittenAppFiles
+
+/**
+ * Check an app's readable `jazz.app.json` (`app`) and
+ * `jazz.permissions.json` (`permissions`) as a backend does and render
+ * them canonically through the writer, which reads its output back to
+ * exactly the same app. With `options.generated`, each file carries a
+ * `$generated` marker. Idempotent.
+ */
+export declare function writeAppFiles(app: string, permissions: string, options?: WriteAppFilesOptions | undefined | null): WrittenAppFiles
+
+/** How [`write_app_artifact`] and [`write_app_files`] write the files. */
+export interface WriteAppFilesOptions {
+  /**
+   * Mark each file `"$generated": { "by", "sha256" }`, first after
+   * `$schema`.
+   */
+  generated?: GeneratedBy
+}
 
 /** An app's two files, as [`write_app_artifact`] renders them. */
 export interface WrittenAppFiles {

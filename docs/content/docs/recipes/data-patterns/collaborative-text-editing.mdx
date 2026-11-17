@@ -15,23 +15,19 @@ in the row's history, but it disappears from the text.
 
 ## Declare a text merge column
 
-A text merge column (`{ "type": "string", "merge": "text" }`, or `"markdown"` / `"html"`) keeps storing a plain
+A text merge column (`s.string().merge("text")`, or `"markdown"` / `"html"`) keeps storing a plain
 string, and the server merges concurrent edits inside it. Concurrent edits to different words all
 survive; where two people replaced the same words, the later edit wins that part.
 
-```json title="jazz.app.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
-  "tables": {
-    "notes": {
-      "columns": {
-        "title": "string",
-        "body": { "type": "string", "merge": "markdown", "default": "" }
-      }
-    }
-  }
-}
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  notes: s.table({
+    title: s.string(),
+    body: s.string().default("").merge("markdown"),
+  }),
+});
 ```
 
 Pick the format that matches what the column holds: `"text"` for prose, `"markdown"` for Markdown
@@ -42,7 +38,7 @@ pieces a merge keeps whole, such as Markdown markers or HTML tags; see
 A text merge column can be optional. Two people adding text to a `null` column at the same time
 both keep their text, while clearing it to `null` against someone else's edit goes to whichever
 write reaches the server later. If you don't need to tell "no text yet" from empty text, a required
-column with `"default": ""` is simpler; see
+column with `.default("")` is simpler; see
 [mergeable text columns](/docs/schemas/column-types#mergeable-text-columns).
 
 ## Write and read it like any string

@@ -15,7 +15,7 @@
 //! time (the write's own commit included). A local phase, not an
 //! end-to-end claim: compare same-base CodSpeed runs for that.
 //!
-//! `USERS=100 ROOMS_PER_USER=5 OPS=40 cargo bench -p jazz --bench fanout_policy_tables`
+//! `USERS=100 ROOMS_PER_USER=5 OPS=40 cargo bench -p jazz-core --bench fanout_policy_tables`
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};

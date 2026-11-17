@@ -1,79 +1,65 @@
 ---
 title: Relationships
-description: "Learn how to model references between tables with UUID columns and relations in jazz.app.json."
+description: "Learn how to model references between tables with UUID columns, s.rel and s.reverse."
 ---
 
 A relationship is a UUID column that holds another row's `id`, plus a name for following it.
 
 ## Forward relations
 
-Store the other row's id in a UUID column, then name the relation under the table's `relations`
-with `{ "rel": "<target table>", "column": "<column>" }`:
+Store the other row's id in a UUID column, then name the relation with `s.rel(targetTable, column)`
+in the table's second argument:
 
-```json title="jazz.app.json"
-{
-  "format": 1,
-  "tables": {
-    "posts": {
-      "columns": {
-        "authorId": "uuid",
-        "title": "string"
-      },
-      "relations": {
-        "author": { "rel": "users", "column": "authorId" }
-      }
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  posts: s.table(
+    { authorId: s.uuid(), title: s.string() },
+    {
+      author: s.rel("users", "authorId"),
     },
-    "users": {
-      "columns": {
-        "name": "string"
-      }
-    }
-  }
-}
+  ),
+  users: s.table({
+    name: s.string(),
+  }),
+});
 ```
 
-A UUID column without a `rel` stays an ordinary UUID column: queries can't include through it
+A UUID column without an `s.rel` stays an ordinary UUID column: queries can't include through it
 and policies can't follow it. In particular, the correlation that links the two rows of an `exists` rule must follow a
-relation; a plain `uuid` column there fails validation with `JoinNotRefCompatible` (see
+relation; a plain `s.uuid()` column there fails validation with `JoinNotRefCompatible` (see
 [Share-based access](/docs/schemas/policies#share-based-access)).
 
 ## Optional and many
 
-The column decides optionality and cardinality, and `rel` points at it the same way:
+The column decides optionality and cardinality, and `s.rel` points at it the same way:
 
-- `"uuid"`: exactly one related row.
-- `"uuid?"`: zero or one.
-- `{ "array": "uuid" }`: any number.
+- `s.uuid()`: exactly one related row.
+- `s.uuid().optional()`: zero or one.
+- `s.array(s.uuid())`: any number.
 
 ## Reverse relations
 
 Jazz doesn't generate the inverse of a relation. Declare it on the target table with
-`{ "reverse": "<source table>", "relation": "<forward relation>" }`. `relation` is the forward
-relation's name, not the column:
+`s.reverse(sourceTable, forwardRelationName)`. The second argument is the forward relation's name,
+not the column:
 
-```json title="jazz.app.json"
-{
-  "format": 1,
-  "tables": {
-    "posts": {
-      "columns": {
-        "authorId": "uuid",
-        "title": "string"
-      },
-      "relations": {
-        "author": { "rel": "users", "column": "authorId" }
-      }
+```ts title="schema.ts"
+export const schema = s.defineSchema({
+  posts: s.table(
+    { authorId: s.uuid(), title: s.string() },
+    {
+      author: s.rel("users", "authorId"),
     },
-    "users": {
-      "columns": {
-        "name": "string"
-      },
-      "relations": {
-        "authoredPosts": { "reverse": "posts", "relation": "author" }
-      }
-    }
-  }
-}
+  ),
+  users: s.table(
+    { name: s.string() },
+    {
+      authoredPosts: s.reverse("posts", "author"),
+    },
+  ),
+});
 ```
 
 A reverse relation returns the matching source rows as an array.
@@ -82,8 +68,8 @@ A reverse relation returns the matching source rows as an array.
 
 - **One-to-many:** a forward relation on the "many" side (each post has one `author`) and,
   if you want to read it from the other side, a reverse relation on the "one" side.
-- **Many-to-many:** either an array column (`"tagIds": { "array": "uuid" }` with
-  `"tags": { "rel": "tags", "column": "tagIds" }`), or a join table with two forward relations, such as
+- **Many-to-many:** either an array column (`tagIds: s.array(s.uuid())` with
+  `tags: s.rel("tags", "tagIds")`), or a join table with two forward relations, such as
   `memberships` with `member` and `team`. Use a join table when the link has its own columns
   (a role, a date) or its own permissions.
 
@@ -98,12 +84,12 @@ have been deleted, or permissions may hide it. See
 
 ## Permissions that follow relations
 
-Relation names are what policies use to follow references: `allowedTo.read(author)` and the
-other `allowedTo.*` forms, relation hops such as `exists posts(id = this.id).author(…)`, and
-correlated `exists` rules. See
+Relation names are what policies use to follow references: `allowedTo.read(post.author)` and the
+other `allowedTo.*` helpers, `post.author.where({ … })`, relation hops such as
+`exists.posts({ … }).hop("author", { … })`, and correlated `exists` rules. See
 [Inherited access](/docs/schemas/policies#inherited-access-allowedto) in Declarative Permissions.
 
 ## Adding a relation later
 
-Declaring a `rel` on a UUID column that already exists is a schema change: follow the
+Declaring `s.rel` on a UUID column that already exists is a schema change: follow the
 [migration workflow](/docs/schemas/migrations). Existing values stay unchanged.

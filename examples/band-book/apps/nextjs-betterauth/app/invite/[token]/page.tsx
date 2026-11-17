@@ -4,7 +4,7 @@ import { use, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@astryxdesign/core";
 import { StatusScreen } from "@/components/status-screen";
-import { useSession } from "jazz-tools/react";
+import { useJazzSession } from "jazz-tools/react";
 import { redeemInviteLink } from "@/src/lib/server-calls";
 
 /**
@@ -13,8 +13,8 @@ import { redeemInviteLink } from "@/src/lib/server-calls";
  */
 export default function InvitePage({ params }: { params: Promise<{ token: string }> }) {
   const { token } = use(params);
-  const session = useSession();
-  const account = session?.user;
+  const session = useJazzSession();
+  const account = session.user?.accountId;
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   // Redeem once per token, even when StrictMode runs the effect twice.

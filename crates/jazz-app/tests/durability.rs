@@ -6,7 +6,7 @@
 mod bindings;
 
 use bindings::{NewNote, notes};
-use jazz_app::{AppId, Backend, Config, DurabilityTier, Jazz, ObjectId};
+use jazz_app_support::{AppId, Backend, Config, DurabilityTier, Jazz, ObjectId};
 use jazz_server::JazzServer;
 use std::path::Path;
 use std::time::Duration;
@@ -40,16 +40,16 @@ async fn durable_writes_wait_for_the_servers_verdict() {
     let mine = durable.insert(NewNote::new(me, "mine")).await.unwrap();
     assert_eq!(mine.owner, me);
 
-    // Refused: the durable write fails with the server's verdict.
+    // Refused: the durable write fails with the server's verdict, coded
+    // as TS's.
     let refused = durable.insert(NewNote::new(someone_else, "not mine")).await;
-    assert!(refused.is_err(), "{refused:?}");
+    assert_permission_denied(refused.map(drop));
 
     // A plain write returns at once; wait_for_sync reports its refusal.
     jazz.insert(NewNote::new(someone_else, "also not mine"))
         .await
         .unwrap();
-    let synced = jazz.wait_for_sync().await;
-    assert!(synced.is_err(), "{synced:?}");
+    assert_permission_denied(jazz.wait_for_sync().await);
 
     // A durable transaction fails the same way, and leaves nothing behind.
     let refused = durable
@@ -58,11 +58,11 @@ async fn durable_writes_wait_for_the_servers_verdict() {
             Ok(())
         })
         .await;
-    assert!(refused.is_err(), "{refused:?}");
+    assert_permission_denied(refused);
 
     // What the server accepted is all that stays.
     let remote = jazz
-        .all_with(notes::query(), jazz_app::ReadTier::Remote)
+        .all_with(notes::query(), jazz_app_support::ReadTier::Remote)
         .await
         .unwrap();
     assert_eq!(remote, vec![mine]);
@@ -71,7 +71,17 @@ async fn durable_writes_wait_for_the_servers_verdict() {
     server.shutdown().await;
 }
 
-/// A transaction body that panics rolls back and reports it.
+/// A write the server's permissions refused, with TS's code and reason.
+fn assert_permission_denied(result: jazz_app_support::Result<()>) {
+    match result {
+        Err(jazz_app_support::Error::WriteRejected { code, reason, .. }) => {
+            assert_eq!(code, "permission_denied");
+            assert_eq!(reason, "Write rejected by server authorization");
+        }
+        other => panic!("expected a permission_denied rejection, got {other:?}"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wait_for_sync_reports_a_refusal_that_settled_before_it() {
     let app_id = AppId::random();
@@ -93,11 +103,8 @@ async fn wait_for_sync_reports_a_refusal_that_settled_before_it() {
         .insert(NewNote::new(me, "accepted after"))
         .await
         .unwrap();
-    let synced = jazz.wait_for_sync().await;
-    assert!(
-        synced.is_err(),
-        "the earlier refusal is reported: {synced:?}"
-    );
+    // The earlier refusal is reported.
+    assert_permission_denied(jazz.wait_for_sync().await);
     // Reported once.
     jazz.wait_for_sync().await.unwrap();
 
@@ -120,7 +127,7 @@ async fn a_panicking_transaction_rolls_back() {
         })
         .await;
     assert!(
-        matches!(&panicked, Err(jazz_app::Error::Panicked(message)) if message == "boom"),
+        matches!(&panicked, Err(jazz_app_support::Error::Panicked(message)) if message == "boom"),
         "{panicked:?}"
     );
     assert!(jazz.all(notes::query()).await.unwrap().is_empty());
@@ -143,7 +150,7 @@ async fn an_unreachable_tier_writes_nothing() {
         .insert(NewNote::new(ObjectId::new(), "nowhere"))
         .await;
     assert!(
-        matches!(refused, Err(jazz_app::Error::Config(_))),
+        matches!(refused, Err(jazz_app_support::Error::Config(_))),
         "{refused:?}"
     );
     assert!(jazz.all(notes::query()).await.unwrap().is_empty());
@@ -152,7 +159,7 @@ async fn an_unreachable_tier_writes_nothing() {
 /// Permission advice asks the server, without writing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn permission_advice() {
-    use jazz_app::Advice;
+    use jazz_app_support::Advice;
     let app_id = AppId::random();
     let server = JazzServer::builder()
         .with_app_id(app_id)
@@ -216,14 +223,16 @@ fn open_dir(server: &JazzServer, app_id: AppId, dir: &Path) -> Config {
     let permissions = include_bytes!("fixtures/guarded/jazz.permissions.json");
     Config::new(app_id)
         .server(server.base_url())
-        .storage(jazz_app::Storage::Dir(dir.to_path_buf()))
+        .storage(jazz_app_support::Storage::Dir(dir.to_path_buf()))
         .backend(
             Backend::new(server.backend_secret(), server.admin_secret(), "alice")
                 .permissions(permissions.as_slice()),
         )
 }
 
-async fn next_error(errors: &mut jazz_app::MutationErrors) -> jazz_app::MutationError {
+async fn next_error(
+    errors: &mut jazz_app_support::MutationErrors,
+) -> jazz_app_support::MutationError {
     use futures::StreamExt;
     tokio::time::timeout(Duration::from_secs(5), errors.next())
         .await
@@ -278,9 +287,18 @@ async fn mutation_errors_report_unwaited_refusals() {
         serde_json::json!({
             "transaction": first.transaction.to_string(),
             "message": first.message,
+            "code": "permission_denied",
+            "reason": "Write rejected by server authorization",
             "denied": true,
             "serializable": false,
         })
+    );
+    assert_eq!(
+        (first.code.as_str(), first.reason.as_str()),
+        (
+            "permission_denied",
+            "Write rejected by server authorization"
+        )
     );
     // A later one, live.
     jazz.insert(NewNote::new(someone_else, "late"))
@@ -327,14 +345,18 @@ async fn disconnect_stops_sync_until_reconnect() {
         .insert(NewNote::new(me, "written offline"))
         .await
         .unwrap();
+    // Disconnected, it reads its own write locally (a backend's default
+    // read would wait for the server it was told not to use).
     assert_eq!(
-        jazz.all(notes::query()).await.unwrap(),
+        jazz.all_with(notes::query(), jazz_app_support::ReadTier::LocalFirst)
+            .await
+            .unwrap(),
         vec![offline.clone()]
     );
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
         observer
-            .all_with(notes::query(), jazz_app::ReadTier::Remote)
+            .all_with(notes::query(), jazz_app_support::ReadTier::Remote)
             .await
             .unwrap()
             .is_empty(),
@@ -345,7 +367,7 @@ async fn disconnect_stops_sync_until_reconnect() {
     jazz.wait_for_sync().await.unwrap();
     assert_eq!(
         observer
-            .all_with(notes::query(), jazz_app::ReadTier::Remote)
+            .all_with(notes::query(), jazz_app_support::ReadTier::Remote)
             .await
             .unwrap(),
         vec![offline]
@@ -403,15 +425,25 @@ async fn delete_client_storage_removes_every_file() {
         assert!(data.path().join(file).exists(), "{file} before deleting");
     }
 
+    assert!(data.path().join("jazz.lock").exists());
     jazz.delete_client_storage().await.unwrap();
-    for file in files {
+    // The lock file goes too, except on Windows, where it stays.
+    let lock = cfg!(unix).then_some("jazz.lock");
+    for file in files.into_iter().chain(lock) {
         assert!(!data.path().join(file).exists(), "{file} left behind");
     }
+    // Like TS's deleteClientStorage, nothing is left behind.
+    #[cfg(unix)]
+    assert_eq!(std::fs::read_dir(data.path()).unwrap().count(), 0);
     let reopened = bindings::open(open_dir(&server, app_id, data.path()))
         .await
         .unwrap();
     assert!(
-        reopened.all(notes::query()).await.unwrap().is_empty(),
+        reopened
+            .all_with(notes::query(), jazz_app_support::ReadTier::LocalOnly)
+            .await
+            .unwrap()
+            .is_empty(),
         "the local store starts empty"
     );
     reopened.shutdown().await.unwrap();
@@ -424,13 +456,13 @@ async fn delete_client_storage_removes_every_file() {
 async fn delete_client_storage_refuses_a_held_store() {
     let app_id = AppId::random();
     let data = tempfile::TempDir::new().unwrap();
-    let config = || Config::new(app_id).storage(jazz_app::Storage::Dir(data.path().into()));
+    let config = || Config::new(app_id).storage(jazz_app_support::Storage::Dir(data.path().into()));
     let a = bindings::open(config()).await.unwrap();
     let b = bindings::open(config()).await.unwrap();
 
     let refused = a.delete_client_storage().await;
     assert!(
-        matches!(refused, Err(jazz_app::Error::StoreHeld(_))),
+        matches!(refused, Err(jazz_app_support::Error::StoreHeld(_))),
         "{refused:?}"
     );
     // Both run on, on the same store.
@@ -450,19 +482,32 @@ async fn delete_client_storage_refuses_a_held_store() {
     other.lock_shared().unwrap();
     let refused = reopened.delete_client_storage().await;
     assert!(
-        matches!(refused, Err(jazz_app::Error::StoreHeld(_))),
+        matches!(refused, Err(jazz_app_support::Error::StoreHeld(_))),
         "{refused:?}"
     );
     assert!(data.path().join("jazz.sqlite").exists());
     drop(other);
     reopened.delete_client_storage().await.unwrap();
     assert!(!data.path().join("jazz.sqlite").exists());
+    #[cfg(unix)]
+    assert!(!data.path().join("jazz.lock").exists());
+    // A later open of the directory locks it afresh, and is guarded again.
+    let again = bindings::open(config()).await.unwrap();
+    let second = bindings::open(config()).await.unwrap();
+    assert!(matches!(
+        again.delete_client_storage().await,
+        Err(jazz_app_support::Error::StoreHeld(_))
+    ));
+    second.shutdown().await.unwrap();
+    again.delete_client_storage().await.unwrap();
+    #[cfg(unix)]
+    assert_eq!(std::fs::read_dir(data.path()).unwrap().count(), 0);
 }
 
 /// Text anchors find a position again after edits around it.
 #[test]
 fn text_anchors() {
-    use jazz_app::text::{Anchor, Side};
+    use jazz_app_support::text::{Anchor, Side};
     let anchor = Anchor::capture("hello world", None, 6, Side::Before);
     let resolved = anchor.resolve("well, hello world", None);
     assert_eq!(resolved.position, 12);

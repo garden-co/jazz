@@ -3623,6 +3623,293 @@ fn a_subscriber_joining_a_result_that_awaits_chunks_opens_on_current_rows() {
     );
 }
 
+// ---- session reads at the authority --------------------------------------------
+
+/// A one-shot session read pushed straight onto the wire up to the server.
+fn session_read(up: &Wire, id: u64, query: Query) {
+    up.borrow_mut().push_back(SyncMessage::Read {
+        id,
+        query: Box::new(query),
+        binding: BTreeMap::new(),
+        include_deleted: false,
+        tier: ReadTier::Remote,
+        wait: None,
+        view: Box::new(ReadViewSourceSpec::Current),
+        since: None,
+        span: ReadSpan::Once { at: None },
+    });
+}
+
+/// What the server sent down after `from`, up to and including its
+/// `Settled` for `id`; `None` if it did not settle.
+fn answer(down: &Wire, from: usize, id: u64) -> Option<Vec<String>> {
+    let messages = down.borrow();
+    let mut out = Vec::new();
+    for message in messages.iter().skip(from) {
+        out.push(format!("{message:?}"));
+        if matches!(message, SyncMessage::Settled { id: settled, .. } if *settled == id) {
+            return Some(out);
+        }
+    }
+    None
+}
+
+/// The authority answers a session's read with stored images: it never
+/// decodes the rows' cells, so a partial selection of a large value reads
+/// none of it there.
+#[test]
+fn an_authority_answers_a_session_read_without_reading_its_cells() {
+    use jazz::query::Part;
+    let core = open(0, AuthorSubject::SYSTEM);
+    let tab = open(6, user(5));
+    let (_, up, down) = connect_wires(&core, &tab, user(5));
+    pump(&core, &[&tab]);
+    let blob: Vec<u8> = (0..LARGE * 4).map(|n| (n * 5 % 251) as u8).collect();
+    insert(
+        &core,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(text(3, LARGE))),
+            ("blob", Value::Bytes(blob)),
+        ],
+    );
+    let query = Query::from("docs")
+        .select(["body", "blob"])
+        .select_part(
+            "blob",
+            Part::Bytes {
+                from: 1000,
+                to: 1100,
+            },
+        )
+        .select_part("body", Part::TextUtf8 { from: 10, to: 20 });
+    let from = down.borrow().len();
+    session_read(&up, 77, query.clone());
+    let before = jazz::cell_ranges_for_test();
+    for _ in 0..3 {
+        block_on(core.tick()).unwrap();
+    }
+    let ranges = jazz::cell_ranges_for_test() - before;
+    let answer = answer(&down, from, 77).expect("the read settled");
+    assert!(
+        answer.iter().any(|message| message.starts_with("Rows")),
+        "{answer:?}"
+    );
+    assert_eq!(ranges, 0, "the authority read {ranges} cell ranges");
+
+    // A read of the whole columns rebuilds neither value.
+    let from = down.borrow().len();
+    session_read(&up, 78, Query::from("docs"));
+    let before = jazz::full_materializations_for_test();
+    for _ in 0..3 {
+        block_on(core.tick()).unwrap();
+    }
+    let rebuilt = jazz::full_materializations_for_test() - before;
+    assert!(self::answer(&down, from, 78).is_some());
+    assert_eq!(rebuilt, 0, "the authority rebuilt {rebuilt} values whole");
+
+    // Decoding them is what read them: the same two reads, decoded.
+    jazz::decode_session_read_cells_for_test(true);
+    let (ranges, rebuilt) = (
+        jazz::cell_ranges_for_test(),
+        jazz::full_materializations_for_test(),
+    );
+    session_read(&up, 79, query.clone());
+    session_read(&up, 80, Query::from("docs"));
+    for _ in 0..3 {
+        block_on(core.tick()).unwrap();
+    }
+    jazz::decode_session_read_cells_for_test(false);
+    assert_eq!(jazz::cell_ranges_for_test() - ranges, 2);
+    assert_eq!(jazz::full_materializations_for_test() - rebuilt, 2);
+}
+
+/// A session read's answer is the same whether or not the authority
+/// decodes the rows' cells: every part of it comes from row identities,
+/// versions, joined rows and stored images. Two sessions of one identity
+/// make the same reads in the same order, one with cells decoded and one
+/// without (an answer depends on what its session already holds).
+#[test]
+fn a_session_reads_answer_does_not_depend_on_its_cells() {
+    use jazz::query::{ArraySubquery, Part};
+    let core = open(0, AuthorSubject::SYSTEM);
+    let decoding = open(6, user(5));
+    let skipping = open(7, user(5));
+    let (_, up_decoding, down_decoding) = connect_wires(&core, &decoding, user(5));
+    let (_, up_skipping, down_skipping) = connect_wires(&core, &skipping, user(5));
+    pump(&core, &[&decoding, &skipping]);
+    let blob: Vec<u8> = (0..LARGE * 2).map(|n| (n * 3 % 251) as u8).collect();
+    for n in 1..=3u8 {
+        insert(
+            &core,
+            "docs",
+            n,
+            vec![
+                ("body", Value::String(text(u64::from(n), LARGE / 4))),
+                ("blob", Value::Bytes(blob.clone())),
+            ],
+        );
+        insert(&core, "links", 10 + n, vec![("doc", Value::Uuid(row(n).0))]);
+    }
+    insert(
+        &core,
+        "notes",
+        20,
+        vec![("text", Value::String("note".into()))],
+    );
+    insert(
+        &core,
+        "comments",
+        21,
+        vec![("note", Value::Uuid(row(20).0))],
+    );
+    insert(
+        &core,
+        "photos",
+        30,
+        vec![
+            ("caption", Value::String("seen".into())),
+            ("image", Value::Bytes(blob.clone())),
+        ],
+    );
+    insert(
+        &core,
+        "photos",
+        31,
+        vec![
+            ("caption", Value::String("unseen".into())),
+            ("image", Value::Bytes(Vec::new())),
+        ],
+    );
+    insert(
+        &core,
+        "grants",
+        32,
+        vec![
+            ("photo", Value::Uuid(row(30).0)),
+            ("reader", Value::String(user(5).principal_parts().1)),
+        ],
+    );
+    let queries = vec![
+        Query::from("docs"),
+        Query::from("docs")
+            .order_by("body", OrderDirection::Desc)
+            .limit(2),
+        Query::from("docs")
+            .select(["blob"])
+            .select_part("blob", Part::Bytes { from: 7, to: 77 }),
+        Query::from("docs")
+            .select(["body"])
+            .select_part("body", Part::TextUtf16 { from: 3, to: 9 }),
+        Query::from("links").array_subquery(
+            ArraySubquery::new("doc", "docs", "id", "doc")
+                .select(["blob"])
+                .select_part("blob", Part::Bytes { from: 0, to: 9 }),
+        ),
+        Query::from("comments"),
+        Query::from("photos"),
+        Query::from("photos").filter(eq(col("caption"), lit(Value::String("seen".into())))),
+        // Parts past the end of their values, chunked and inline: clamped
+        // to the value (#5502), decoded or not.
+        Query::from("docs").select(["blob"]).select_part(
+            "blob",
+            Part::Bytes {
+                from: 0,
+                to: (LARGE * 2 + 1) as u64,
+            },
+        ),
+        Query::from("docs").select(["body"]).select_part(
+            "body",
+            Part::TextUtf16 {
+                from: 10,
+                to: LARGE as u64,
+            },
+        ),
+        Query::from("photos")
+            .select(["caption"])
+            .select_part("caption", Part::TextUtf8 { from: 2, to: 99 }),
+    ];
+    let sent = |down: &Wire, from: usize| -> Vec<String> {
+        down.borrow()
+            .iter()
+            .skip(from)
+            .map(|message| format!("{message:?}"))
+            .collect()
+    };
+    for (n, query) in queries.into_iter().enumerate() {
+        let mut answers = Vec::new();
+        for (decode, up, down) in [
+            (true, &up_decoding, &down_decoding),
+            (false, &up_skipping, &down_skipping),
+        ] {
+            jazz::decode_session_read_cells_for_test(decode);
+            let from = down.borrow().len();
+            session_read(up, 500 + n as u64, query.clone());
+            for _ in 0..3 {
+                block_on(core.tick()).unwrap();
+            }
+            answers.push(sent(down, from));
+        }
+        jazz::decode_session_read_cells_for_test(false);
+        assert!(!answers[0].is_empty(), "query {n} was answered");
+        assert_eq!(answers[0], answers[1], "query {n}");
+        let refused = answers[0].iter().any(|m| m.starts_with("Refused"));
+        assert!(!refused, "query {n}: {:?}", answers[0]);
+    }
+}
+
+/// A relay decodes a session read's cells: the chunks it lacks are what
+/// make it fetch them upstream, so it holds the part's path by the time it
+/// answers.
+#[test]
+fn a_relay_holds_the_part_it_answers_a_session_read_with() {
+    use jazz::query::Part;
+    let core = open(0, AuthorSubject::SYSTEM);
+    let relay = open(5, user(5));
+    let tab = open(6, user(5));
+    connect(&core, &relay, user(5));
+    let (_, up, down) = connect_wires(&relay, &tab, user(5));
+    let blob: Vec<u8> = (0..LARGE * 4).map(|n| (n * 7 % 251) as u8).collect();
+    insert(
+        &core,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String("small".into())),
+            ("blob", Value::Bytes(blob)),
+        ],
+    );
+    for _ in 0..6 {
+        block_on(relay.tick()).unwrap();
+        block_on(core.tick()).unwrap();
+    }
+    assert_eq!(relay.large_value_nodes_for_test().unwrap().0, 0);
+    let from = down.borrow().len();
+    session_read(
+        &up,
+        77,
+        Query::from("docs").select(["blob"]).select_part(
+            "blob",
+            Part::Bytes {
+                from: 500_000,
+                to: 500_100,
+            },
+        ),
+    );
+    let mut held = None;
+    for _ in 0..24 {
+        block_on(relay.tick()).unwrap();
+        if answer(&down, from, 77).is_some() {
+            held = Some(relay.large_value_nodes_for_test().unwrap().0);
+            break;
+        }
+        block_on(core.tick()).unwrap();
+    }
+    let held = held.expect("the relay answered the read");
+    assert!(held > 0, "the relay answered without the part's chunks");
+}
+
 // ---- ranges past the end (#5502) ---------------------------------------------
 
 /// The values `column` took in `stream`'s events since it was last read,
@@ -3902,4 +4189,200 @@ fn a_direct_range_read_past_the_end_still_fails_explicitly() {
         format!("{error:?}").contains("ends before it starts"),
         "{error:?}"
     );
+}
+
+/// Admitting an uploaded bytes value proves its tree once: the walk that
+/// authenticates every node (object hash, logical hash, metrics) is the
+/// whole check, because the logical-value validator reads nothing of a
+/// bytes value. Reading the value back a second time proves nothing more.
+/// Text keeps its read-back: UTF-8, its UTF-16 length and JSON are checked
+/// on the bytes themselves.
+#[test]
+fn an_uploaded_bytes_value_is_read_once_on_admission() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    connect(&server, &alice, user(1));
+    let blob: Vec<u8> = (0..LARGE * 4).map(|n| (n * 13 % 251) as u8).collect();
+    let before = jazz::large_values::finalize_validation_bytes_for_test();
+    insert(
+        &alice,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String("small".into())),
+            ("blob", Value::Bytes(blob.clone())),
+        ],
+    );
+    pump(&server, &[&alice]);
+    let read = jazz::large_values::finalize_validation_bytes_for_test() - before;
+    assert_eq!(
+        local_cell(&server, "docs", 1, "blob").unwrap(),
+        Some(Value::Bytes(blob.clone()))
+    );
+    assert!(
+        read >= blob.len() as u64 && read < blob.len() as u64 * 3 / 2,
+        "admission read {read} bytes of a {}-byte value",
+        blob.len()
+    );
+
+    // A text value of the same size is still read back to check its text.
+    let body = text(7, LARGE * 4);
+    let before = jazz::large_values::finalize_validation_bytes_for_test();
+    insert(
+        &alice,
+        "docs",
+        2,
+        vec![
+            ("body", Value::String(body.clone())),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    pump(&server, &[&alice]);
+    let read = jazz::large_values::finalize_validation_bytes_for_test() - before;
+    assert_eq!(
+        local_cell(&server, "docs", 2, "body").unwrap(),
+        Some(Value::String(body.clone()))
+    );
+    assert!(
+        read >= 2 * body.len() as u64,
+        "text admission read {read} bytes of a {}-byte value",
+        body.len()
+    );
+}
+
+/// With the read-back skipped for bytes, the tree walk alone still refuses
+/// an upload that does not prove its value: a descriptor whose length or
+/// logical hash disagrees with the pushed tree, a tree missing a leaf, and
+/// a leaf whose bytes do not match the hash it is pushed under.
+#[test]
+fn an_uploaded_bytes_value_that_does_not_prove_its_tree_is_refused() {
+    use jazz::large_values::{ChunkNode, LargeValueKind, StagedChunk, decode_node};
+
+    let server = open(0, AuthorSubject::SYSTEM);
+    let mallory = open(9, user(9));
+    let (_, up, down) = connect_wires(&server, &mallory, user(9));
+    pump(&server, &[&mallory]);
+    let blob = |seed: u64| -> Vec<u8> {
+        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        (0..LARGE * 2)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect()
+    };
+    let prepared = |seed| jazz::large_values::prepare(LargeValueKind::Bytes, &blob(seed)).unwrap();
+    let is_leaf = |chunk: &StagedChunk| {
+        matches!(
+            decode_node(
+                LargeValueKind::Bytes,
+                chunk.node_ref.object_hash,
+                &chunk.encoded
+            ),
+            Ok(ChunkNode::Leaf { .. })
+        )
+    };
+    let push = |chunks: Vec<StagedChunk>| {
+        up.borrow_mut().push_back(SyncMessage::PushChunks {
+            nodes: chunks
+                .into_iter()
+                .map(|chunk| WireChunk {
+                    hash: chunk.node_ref.object_hash.0,
+                    bytes: chunk.encoded,
+                })
+                .collect(),
+        });
+    };
+    let id = |tx: u64| TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16]));
+    let commit = |tx: u64, n: u8, value: jazz::large_values::LargeValueRef| {
+        up.borrow_mut().push_back(SyncMessage::Commit {
+            clock: 0,
+            id: id(tx),
+            kind: WireKind::Mergeable,
+            ops: vec![
+                WireWrite::Insert {
+                    table: "docs".to_owned(),
+                    row: *row(n).0.as_bytes(),
+                    cells: [
+                        (
+                            common::stored(&server, "docs", "body"),
+                            Value::String("small".into()),
+                        ),
+                        (
+                            common::stored(&server, "docs", "blob"),
+                            Value::Large(Box::new(value)),
+                        ),
+                    ]
+                    .into(),
+                    target: WireTarget::Root,
+                    at: None,
+                }
+                .into(),
+            ],
+            acting: Acting::Own,
+        });
+    };
+    let accepted = |tx: u64| -> Option<bool> {
+        down.borrow().iter().find_map(|message| match message {
+            SyncMessage::Fate {
+                id: fate, outcome, ..
+            } if *fate == id(tx) => Some(outcome.result().is_ok()),
+            _ => None,
+        })
+    };
+    let settle = || {
+        for _ in 0..4 {
+            block_on(server.tick()).unwrap();
+        }
+    };
+
+    // The harness: an honest upload is accepted.
+    let honest = prepared(1);
+    push(honest.staged_chunks.clone());
+    commit(1, 1, honest.value_ref.clone());
+    settle();
+    assert_eq!(accepted(1), Some(true), "an honest upload is admitted");
+
+    // A descriptor one byte longer than its tree.
+    let long = prepared(2);
+    push(long.staged_chunks.clone());
+    let mut value = long.value_ref.clone();
+    value.byte_length += 1;
+    commit(2, 2, value);
+    // A descriptor naming another logical hash.
+    let mut value = long.value_ref.clone();
+    value.logical_hash.0[0] ^= 1;
+    commit(3, 3, value);
+    // A tree missing one leaf.
+    let holed = prepared(3);
+    let leaf = holed
+        .staged_chunks
+        .iter()
+        .position(is_leaf)
+        .expect("a multi-leaf tree");
+    let mut chunks = holed.staged_chunks.clone();
+    chunks.remove(leaf);
+    push(chunks);
+    commit(4, 4, holed.value_ref.clone());
+    // A leaf pushed under its hash with other bytes.
+    let flipped = prepared(4);
+    let mut chunks = flipped.staged_chunks.clone();
+    let leaf = chunks.iter().position(is_leaf).expect("a multi-leaf tree");
+    let last = chunks[leaf].encoded.len() - 1;
+    chunks[leaf].encoded[last] ^= 1;
+    push(chunks);
+    commit(5, 5, flipped.value_ref.clone());
+    settle();
+
+    for tx in 2..=5 {
+        assert_ne!(accepted(tx), Some(true), "tx {tx} was admitted");
+        let n = tx as u8;
+        assert_eq!(
+            local_cell(&server, "docs", n, "blob").ok().flatten(),
+            None,
+            "row {n} is on the server"
+        );
+    }
 }

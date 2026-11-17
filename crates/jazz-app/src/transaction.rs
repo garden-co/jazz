@@ -34,6 +34,19 @@ impl Transaction {
         &self.client
     }
 
+    /// This transaction, writing through `client` (the same transaction,
+    /// scoped to a branch, say).
+    pub(crate) fn with_client(&self, client: JazzClient) -> Transaction {
+        Transaction {
+            client,
+            ..self.clone()
+        }
+    }
+
+    pub(crate) fn implementations(&self) -> &Implementations {
+        &self.implementations
+    }
+
     /// Marks the transaction as having written, so it commits.
     pub(crate) fn wrote(&self) {
         self.wrote.set(true);
@@ -88,7 +101,7 @@ impl Transaction {
         self.read_back(id).await
     }
 
-    async fn read_back<T: Table>(&self, id: ObjectId) -> Result<T> {
+    pub(crate) async fn read_back<T: Table>(&self, id: ObjectId) -> Result<T> {
         self.get::<T>(id)
             .await?
             .ok_or_else(|| crate::Error::Decode {
@@ -249,7 +262,7 @@ pub(crate) fn roll_back_parked() {
 /// awaits, and driven call by call. Commit it with
 /// [`OpenTransaction::commit`]; dropping it uncommitted rolls it back.
 pub struct OpenTransaction {
-    jazz: Jazz,
+    pub(crate) jazz: Jazz,
     key: u64,
     settle: crate::writes::Settler,
     finished: bool,
@@ -320,7 +333,7 @@ fn parked(key: u64) -> Result<Transaction> {
 }
 
 impl OpenTransaction {
-    async fn on<F, Fut, R>(&self, call: F) -> Result<R>
+    pub(crate) async fn on<F, Fut, R>(&self, call: F) -> Result<R>
     where
         F: FnOnce(Transaction) -> Fut + Send + 'static,
         Fut: Future<Output = Result<R>> + 'static,
@@ -385,7 +398,8 @@ impl OpenTransaction {
             .await
     }
 
-    /// [`Jazz::splice`] staged in the transaction.
+    /// [`Jazz::splice`] staged in the transaction, in the same units (UTF-8
+    /// bytes on a text column).
     pub async fn splice<T: Table, V: crate::LargeColumn>(
         &self,
         id: ObjectId,

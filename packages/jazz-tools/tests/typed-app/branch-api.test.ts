@@ -125,6 +125,92 @@ describe("branch API", () => {
     expect(await db.one(app.documents, { branch: "main" })).toMatchObject({ title: "Uncommitted" });
   });
 
+  it("reads through a branch view inside a mergeable transaction, over its staged writes (jazz#5806)", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("branch-api-tx-read-mergeable")),
+      driver: { type: "memory" },
+    });
+    const original = db.insert(
+      app.documents,
+      { branch: "main", title: "Intro" },
+      { branch: "main" },
+    ).value;
+
+    const tx = db.beginTransaction();
+    expect(await tx.all(app.documents, { branch: "draft", base: "main" })).toEqual([
+      { ...original, branch: "draft" },
+    ]);
+    tx.update(app.documents, original.id, { title: "Draft" }, { branch: "draft", base: "main" });
+    expect(await tx.one(app.documents, { branch: "draft", base: "main" })).toMatchObject({
+      branch: "draft",
+      title: "Draft",
+    });
+    expect(await tx.one(app.documents, { branch: "main" })).toMatchObject({
+      branch: "main",
+      title: "Intro",
+    });
+    await tx.commit().wait({ tier: "local" });
+    expect(await db.one(app.documents, { branch: "draft", base: "main" })).toMatchObject({
+      title: "Draft",
+    });
+  });
+
+  it("reads through a frozen base inside a mergeable transaction (jazz#5806)", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("branch-api-tx-read-frozen-base")),
+      driver: { type: "memory" },
+    });
+    const original = db.insert(
+      app.documents,
+      { branch: "main", title: "Intro" },
+      { branch: "main" },
+    ).value;
+    const snapshot = await db.captureSnapshot();
+    db.update(app.documents, original.id, { title: "Changed" }, { branch: "main" });
+    const frozen = { branch: "draft", base: ["main", snapshot] } as const;
+
+    const tx = db.beginTransaction();
+    // Main as it was at the snapshot, not as it is now.
+    expect(await tx.all(app.documents, frozen)).toEqual([{ ...original, branch: "draft" }]);
+    tx.update(app.documents, original.id, { title: "Draft" }, frozen);
+    // The staged write shows through the frozen view; main keeps moving.
+    expect(await tx.one(app.documents, frozen)).toMatchObject({ branch: "draft", title: "Draft" });
+    expect(await tx.one(app.documents, { branch: "main" })).toMatchObject({ title: "Changed" });
+    await tx.commit().wait({ tier: "local" });
+    expect(await db.one(app.documents, frozen)).toMatchObject({ title: "Draft" });
+  });
+
+  it("reads through a branch view inside a serializable transaction (jazz#5806)", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("branch-api-tx-read-serializable")),
+      driver: { type: "memory" },
+    });
+    const original = db.insert(
+      app.documents,
+      { branch: "main", title: "Intro" },
+      { branch: "main" },
+    ).value;
+    // Also warms up the client, which serializable transactions need.
+    expect(await db.all(app.documents, { branch: "main" })).toEqual([original]);
+
+    const tx = db.beginSerializableTransaction();
+    expect(await tx.all(app.documents, { branch: "draft", base: "main" })).toEqual([
+      { ...original, branch: "draft" },
+    ]);
+    tx.update(app.documents, original.id, { title: "Draft" }, { branch: "draft", base: "main" });
+    expect(await tx.one(app.documents, { branch: "draft", base: "main" })).toMatchObject({
+      branch: "draft",
+      title: "Draft",
+    });
+    // This Db has no server: the commit applies locally after the local
+    // precheck through the view, and is validated upstream once a link that
+    // negotiated it comes up (db.serializable-branch-read.test.ts).
+    await tx.commit().wait();
+    expect(await db.one(app.documents, { branch: "draft", base: "main" })).toMatchObject({
+      title: "Draft",
+    });
+  });
+
   it("reports unavailable history when restoring onto an empty store", async () => {
     db = await createDb({
       ...(await localAccountConfig("branch-api-capture-origin")),

@@ -6,9 +6,10 @@
 //! any JSON; bytes → base64 string; array → JSON array; optional → null.
 
 use base64::Engine as _;
-use jazz_app::jazz::query::{self as q, OrderDirection, Predicate};
-use jazz_app::jazz::records::Value as CoreValue;
-use jazz_app::jazz::tools::{
+use jazz_app_support::jazz::query::where_condition::{WhereValueRole, decode_where_condition};
+use jazz_app_support::jazz::query::{self as q, OrderDirection, Predicate};
+use jazz_app_support::jazz::records::Value as CoreValue;
+use jazz_app_support::jazz::tools::{
     ColumnType, ObjectId, OrderedRowDelta, QueryResultField, Schema, TableName, TableSchema, Value,
 };
 use serde_json::{Map, Number, Value as Json, json};
@@ -124,6 +125,12 @@ pub(crate) fn to_value(
         ColumnType::TransactionId | ColumnType::Row { .. } => {
             return Err(unsupported(format!(
                 "writing a column of type {column_type:?} ({path})"
+            )));
+        }
+        // Only an earlier schema version can declare one; it holds no values.
+        ColumnType::LegacyEnumPayload { .. } => {
+            return Err(refused(format!(
+                "{path} is an enum whose cases carry fields, which Jazz no longer supports"
             )));
         }
     })
@@ -327,7 +334,7 @@ impl Relations {
         Self(relations)
     }
 
-    fn get(&self, table: &str, name: &str) -> Option<&Relation> {
+    pub(crate) fn get(&self, table: &str, name: &str) -> Option<&Relation> {
         self.0
             .get(table)?
             .iter()
@@ -397,6 +404,7 @@ pub(crate) fn query(
     query.offset = parts.offset;
     query.select = parts.select;
     query.array_subqueries = parts.includes;
+    query.partial = parts.partial;
     Ok((table_name.to_owned(), query, shape))
 }
 
@@ -409,6 +417,7 @@ struct Parts {
     offset: usize,
     select: Option<Vec<String>>,
     includes: Vec<q::ArraySubquery>,
+    partial: Vec<q::PartialSelect>,
 }
 
 fn level(
@@ -501,34 +510,103 @@ fn level(
     }
 
     // `select`: these columns (and `id`, always) instead of all of them.
-    // `"*"` among them selects every column, as no `select` does.
-    let every = object
-        .get("select")
-        .and_then(Json::as_array)
-        .is_some_and(|names| names.iter().any(|n| n == "*"));
-    if let Some(select) = object.get("select").filter(|s| !s.is_null() && !every) {
+    // `"*"` among them selects every column, as no `select` does. An object
+    // reads part of a large value: `{ "column", "from", "to", "units":
+    // "bytes"|"utf8"|"utf16" }` or `{ "column", "at": "<JSON pointer>" }`.
+    if let Some(select) = object.get("select").filter(|s| !s.is_null()) {
         let select = select
             .as_array()
             .ok_or_else(|| refused(format!("{path}\"select\" must be an array of column names")))?;
-        let mut chosen = Vec::new();
-        for (at, name) in select.iter().enumerate() {
-            let name = name
-                .as_str()
-                .ok_or_else(|| refused(format!("{path}select[{at}] must be a column name")))?;
+        let every = select.iter().any(|n| n == "*");
+        let mut chosen: Vec<String> = Vec::new();
+        for (at, entry) in select.iter().enumerate() {
+            let at = format!("{path}select[{at}]");
+            let name = match entry {
+                Json::String(name) if name == "*" => continue,
+                Json::String(name) => name.as_str(),
+                Json::Object(spec) => {
+                    if !root {
+                        return Err(unsupported(format!(
+                            "reading part of a value in an include ({at})"
+                        )));
+                    }
+                    let name = spec
+                        .get("column")
+                        .and_then(Json::as_str)
+                        .ok_or_else(|| refused(format!("{at} needs a \"column\"")))?;
+                    let info = column(table, table_name, name)?;
+                    let range = |key: &str| -> Result<u64> {
+                        spec.get(key).and_then(Json::as_u64).ok_or_else(|| {
+                            refused(format!("{at}.{key} must be a non-negative integer"))
+                        })
+                    };
+                    let part = match (spec.get("at"), spec.get("units").and_then(Json::as_str)) {
+                        (Some(pointer), _) => {
+                            if !matches!(info.column_type.as_ref(), ColumnType::Json { .. }) {
+                                return Err(refused(format!(
+                                    "{at}: \"at\" reads a json column; {name} isn't one"
+                                )));
+                            }
+                            q::Part::JsonPointer(
+                                pointer
+                                    .as_str()
+                                    .ok_or_else(|| {
+                                        refused(format!("{at}.at must be a JSON pointer"))
+                                    })?
+                                    .to_owned(),
+                            )
+                        }
+                        (None, Some("bytes")) => q::Part::Bytes {
+                            from: range("from")?,
+                            to: range("to")?,
+                        },
+                        (None, Some("utf16")) => q::Part::TextUtf16 {
+                            from: range("from")?,
+                            to: range("to")?,
+                        },
+                        (None, Some("utf8") | None) => q::Part::TextUtf8 {
+                            from: range("from")?,
+                            to: range("to")?,
+                        },
+                        (None, Some(other)) => {
+                            return Err(refused(format!(
+                                "{at}.units must be \"bytes\", \"utf8\" or \"utf16\", not {other:?}"
+                            )));
+                        }
+                    };
+                    parts.partial.push(q::PartialSelect {
+                        column: name.to_owned(),
+                        part,
+                    });
+                    name
+                }
+                _ => return Err(refused(format!("{at} must be a column name or a part"))),
+            };
             if name == "id" {
                 continue;
             }
-            let info = column(table, table_name, name)?;
+            column(table, table_name, name)?;
             if name.starts_with('$') {
-                return Err(unsupported(format!(
-                    "selecting {name} ({path}select[{at}])"
-                )));
+                return Err(unsupported(format!("selecting {name} ({at})")));
             }
-            if !chosen.iter().any(|(n, _): &(String, ColumnType)| n == name) {
-                chosen.push((name.to_owned(), info.column_type.into_owned()));
+            if !chosen.iter().any(|n| n == name) {
+                chosen.push(name.to_owned());
             }
         }
-        parts.select = Some(chosen.into_iter().map(|(n, _)| n).collect());
+        // A column read in part and also whole is ambiguous: refused.
+        if let Some(both) = parts.partial.iter().find(|part| {
+            select
+                .iter()
+                .any(|entry| entry.as_str() == Some(part.column.as_str()))
+        }) {
+            return Err(refused(format!(
+                "{path}select names {} both whole and in part",
+                both.column
+            )));
+        }
+        if !every {
+            parts.select = Some(chosen);
+        }
     }
 
     let mut shape = Shape::of(table.clone());
@@ -680,76 +758,29 @@ fn child_shape_columns(
     Ok(columns)
 }
 
-fn predicate(
+pub(crate) fn predicate(
     table: &TableSchema,
     table_name: &str,
     condition: &Json,
     path: &str,
 ) -> Result<Predicate> {
-    let name = condition
-        .get("column")
-        .and_then(Json::as_str)
-        .ok_or_else(|| refused(format!("{path} needs a \"column\"")))?;
-    let op = condition
-        .get("op")
-        .and_then(Json::as_str)
-        .ok_or_else(|| refused(format!("{path} needs an \"op\"")))?;
-    let column = column(table, table_name, name)?;
-    let value = condition.get("value");
+    let decoded =
+        decode_where_condition(condition).map_err(|error| refused(format!("{path}: {error}")))?;
+    let column = column(table, table_name, decoded.column)?;
     let path = format!("{path}.value");
-    let literal = || -> Result<q::Operand> {
-        let value = value.ok_or_else(|| refused(format!("{path} is missing")))?;
-        if value.is_null() {
-            return Err(refused(format!(
-                "{path} is null: use \"isNull\" or \"isNotNull\""
-            )));
-        }
-        Ok(lit(to_value(value, &column.column_type, false, &path)?))
-    };
-    let compare = |compare: fn(q::Operand, q::Operand) -> Predicate| -> Result<Predicate> {
-        Ok(compare(q::col(column.name), literal()?))
-    };
-    Ok(match op {
-        "eq" => compare(q::eq)?,
-        "ne" => compare(q::ne)?,
-        "lt" => compare(q::lt)?,
-        "lte" => compare(q::lte)?,
-        "gt" => compare(q::gt)?,
-        "gte" => compare(q::gte)?,
-        "in" => {
-            let values = value
-                .and_then(Json::as_array)
-                .ok_or_else(|| refused(format!("{path} must be an array for \"in\"")))?;
-            let operands = values
-                .iter()
-                .enumerate()
-                .map(|(at, value)| {
-                    Ok(lit(to_value(
-                        value,
-                        &column.column_type,
-                        false,
-                        &format!("{path}[{at}]"),
-                    )?))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            q::in_list(q::col(column.name), operands)
-        }
-        "contains" => {
-            let value = value.ok_or_else(|| refused(format!("{path} is missing")))?;
-            let part = match column.column_type.as_ref() {
-                ColumnType::Text => to_value(value, &ColumnType::Text, false, &path)?,
-                ColumnType::Array { element } => to_value(value, element, false, &path)?,
-                _ => {
-                    return Err(refused(format!(
-                        "\"contains\" needs a string or array column; {name} is neither"
-                    )));
-                }
-            };
-            q::contains(q::col(column.name), lit(part))
-        }
-        "isNull" => q::is_null(q::col(column.name)),
-        "isNotNull" => q::not(q::is_null(q::col(column.name))),
-        other => return Err(refused(format!("{path}: unknown op {other:?}"))),
+    decoded.to_predicate(q::col(column.name), |value, role| {
+        let column_type = match (role, column.column_type.as_ref()) {
+            (WhereValueRole::Whole, column_type) => column_type,
+            (WhereValueRole::ContainsPart, ColumnType::Text) => &ColumnType::Text,
+            (WhereValueRole::ContainsPart, ColumnType::Array { element }) => element,
+            (WhereValueRole::ContainsPart, _) => {
+                return Err(refused(format!(
+                    "\"contains\" needs a string or array column; {} is neither",
+                    column.name
+                )));
+            }
+        };
+        Ok(lit(to_value(value, column_type, false, &path)?))
     })
 }
 
@@ -757,7 +788,7 @@ fn lit(value: Value) -> q::Operand {
     q::lit(core(value))
 }
 
-/// As jazz-app turns column values into query literals.
+/// As jazz-app-support turns column values into query literals.
 fn core(value: Value) -> CoreValue {
     match value {
         Value::Boolean(value) => CoreValue::Bool(value),
@@ -777,29 +808,62 @@ fn core(value: Value) -> CoreValue {
 /// An engine delta as delta JSON. `reset` marks the first delta (the full
 /// result). Rows that only moved carry no new value and are left out: the
 /// contract's deltas carry no positions.
-pub(crate) fn delta_json(table: &Shape, delta: OrderedRowDelta, reset: bool) -> Result<String> {
-    let id = |key: &jazz_app::jazz::tools::ResultKey| {
+/// A result's key as opaque text: base64 of jazz's versioned `ResultKey`
+/// encoding. Each result occurrence has its own (a history read's
+/// versions, a union's arms), where they share the row's id.
+pub(crate) fn result_key(key: &jazz_app_support::jazz::tools::ResultKey) -> Result<String> {
+    let bytes: Vec<u8> = match serde_json::to_value(key) {
+        Ok(Json::Array(bytes)) => bytes
+            .iter()
+            .map(|byte| byte.as_u64().and_then(|b| u8::try_from(b).ok()))
+            .collect::<Option<_>>()
+            .ok_or_else(|| FfiError::Io("a result key is not bytes".into()))?,
+        _ => return Err(FfiError::Io("a result key is not bytes".into())),
+    };
+    Ok(BASE64.encode(bytes))
+}
+
+/// A subscription's delta as JSON. Each added and updated row carries
+/// `$key`, its result's key, and `removedKeys` runs beside `removed`: a
+/// host holding results that share an id (history, union) applies by key.
+pub(crate) fn delta_json(
+    table: &Shape,
+    history: bool,
+    delta: OrderedRowDelta,
+    reset: bool,
+) -> Result<String> {
+    let id = |key: &jazz_app_support::jazz::tools::ResultKey| {
         key.row_id()
             .ok_or_else(|| FfiError::Io("a joined result is not a row".into()))
     };
+    let keyed = |key: &jazz_app_support::jazz::tools::ResultKey, fields| -> Result<Json> {
+        let mut row = crate::relational::row_of(table, history, id(key)?, fields);
+        if let Json::Object(object) = &mut row {
+            object.insert("$key".into(), Json::String(result_key(key)?));
+        }
+        Ok(row)
+    };
     let mut added = Vec::with_capacity(delta.added.len());
     for entry in delta.added {
-        added.push(row_json(table, id(&entry.id)?, entry.row.fields));
+        added.push(keyed(&entry.id, entry.row.fields)?);
     }
     let mut updated = Vec::new();
     for entry in delta.updated {
         if let Some(row) = entry.row {
-            updated.push(row_json(table, id(&entry.id)?, row.fields));
+            updated.push(keyed(&entry.id, row.fields)?);
         }
     }
     let mut removed = Vec::with_capacity(delta.removed.len());
+    let mut removed_keys = Vec::with_capacity(delta.removed.len());
     for entry in delta.removed {
         removed.push(Json::String(id(&entry.id)?.to_string()));
+        removed_keys.push(Json::String(result_key(&entry.id)?));
     }
     Ok(json!({
         "added": added,
         "updated": updated,
         "removed": removed,
+        "removedKeys": removed_keys,
         "reset": reset,
         // Becomes true for a reset that replaces a backlog the reader fell
         // behind on, once the engine coalesces backlogs.
@@ -822,8 +886,8 @@ pub(crate) fn edits(
     table: &TableSchema,
     table_name: &str,
     edits: &Json,
-) -> Result<Vec<jazz_app::jazz::db::LargeValueUpdate>> {
-    use jazz_app::jazz::db::{
+) -> Result<Vec<jazz_app_support::jazz::db::LargeValueUpdate>> {
+    use jazz_app_support::jazz::db::{
         JsonSetEdit, LargeValueUpdate, LargeValueUpdatePage, LargeValueUpdateSplice,
     };
     let edits = edits

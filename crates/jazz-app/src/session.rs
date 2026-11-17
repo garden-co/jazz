@@ -111,6 +111,8 @@ pub enum UserKind {
     Device,
     /// A user the app's backend signed in ([`crate::Auth::Bearer`]).
     Backend,
+    /// The system: a trusted backend client ([`crate::Config::credential`]).
+    System,
 }
 
 /// How the client syncs, as TypeScript's `SyncStatus` (serialized the same
@@ -165,9 +167,8 @@ pub enum Link {
     },
 }
 
-/// Why the link is offline, as TypeScript's `OfflineReason`. This client
-/// does not report TypeScript's `authority-changed` (its link has no such
-/// phase yet) nor the browser's `held-by-another-tab`.
+/// Why the link is offline, as TypeScript's `OfflineReason` (but the
+/// browser's `held-by-another-tab`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Offline {
@@ -179,6 +180,14 @@ pub enum Offline {
     Stopped,
     /// The application took the client offline.
     Disconnected,
+    /// The server serves another history than this client's local store
+    /// (its store was recreated, or it is another app's server), so nothing
+    /// syncs with it. Local reads and writes go on, and unsynced writes are
+    /// kept; nothing is reset automatically. To sync with the new server,
+    /// delete the local store ([`crate::Jazz::delete_client_storage`]) and
+    /// open the client again; if the server was replaced by mistake, bring
+    /// the old one back and reconnect.
+    AuthorityChanged,
 }
 
 /// What went wrong with sync, as TypeScript's `SyncError`.
@@ -206,6 +215,10 @@ pub enum SyncError {
         message: String,
         at: u64,
     },
+    AuthorityChanged {
+        message: String,
+        at: u64,
+    },
 }
 
 impl SyncError {
@@ -214,13 +227,14 @@ impl SyncError {
             Self::Rejected { at, .. }
             | Self::Network { at, .. }
             | Self::Auth { at, .. }
-            | Self::Stopped { at, .. } => *at,
+            | Self::Stopped { at, .. }
+            | Self::AuthorityChanged { at, .. } => *at,
         }
     }
 }
 
 /// The app-facing link, as TypeScript's `linkStatusFromUpstream`.
-fn link_of(status: Option<&LinkStatus>) -> Link {
+fn link_of(status: Option<&LinkStatus>, authority_changed: bool) -> Link {
     let offline = |reason, auth| Link::Offline {
         reason,
         retrying: reason == Offline::Network,
@@ -238,6 +252,9 @@ fn link_of(status: Option<&LinkStatus>) -> Link {
         }
         LinkPhase::Connecting | LinkPhase::Backoff => Link::Connecting,
         LinkPhase::AwaitingCredential(reason) => offline(Offline::Auth, Some((*reason).into())),
+        // Stopped because the database refused a server serving another
+        // history, as TypeScript reports it.
+        LinkPhase::Stopped if authority_changed => offline(Offline::AuthorityChanged, None),
         LinkPhase::Stopped => offline(Offline::Stopped, None),
     }
 }
@@ -262,14 +279,21 @@ struct SyncTracker {
 impl SyncTracker {
     fn status(&mut self, client: &JazzClient) -> SyncStatus {
         let upstream = client.upstream_status();
-        let link = link_of(upstream.as_ref());
+        let refusal = client.upstream_refusal();
+        let authority_changed = refusal
+            .as_ref()
+            .is_some_and(|refusal| refusal.code == jazz::db::ErrorCode::AuthorityChanged);
+        let link = link_of(upstream.as_ref(), authority_changed);
         let failing = match &link {
             Link::Offline { reason, .. } => Some(*reason),
             _ => None,
         };
         if failing != self.failing_as {
             self.failing_as = failing;
-            let message = upstream.as_ref().and_then(|status| status.reason.clone());
+            let message = refusal
+                .map(|refusal| refusal.to_string())
+                .filter(|_| authority_changed)
+                .or_else(|| upstream.as_ref().and_then(|status| status.reason.clone()));
             if let Some(failure) = failing.and_then(|reason| link_failure(reason, message)) {
                 self.link_failure = Some(failure);
             }
@@ -320,6 +344,10 @@ fn link_failure(reason: Offline, message: Option<String>) -> Option<SyncError> {
         }),
         Offline::Stopped => Some(SyncError::Stopped {
             message: said("The link stopped for good; only reopening the client tries again."),
+            at,
+        }),
+        Offline::AuthorityChanged => Some(SyncError::AuthorityChanged {
+            message: said("The server serves another history than this client's local store."),
             at,
         }),
     }
@@ -385,6 +413,9 @@ struct Linking {
     endpoint: String,
     app: AppId,
     key: DeviceKey,
+    /// The client's runtime: the link's requests run there, whatever the
+    /// caller's executor.
+    runtime: tokio::runtime::Handle,
 }
 
 /// An end user's session with the app: `Send + Clone`, from
@@ -448,12 +479,21 @@ impl Session {
             Error::Config("only a device account's session links (Auth::Device)".into())
         })?;
         let device = linking.key.account(linking.app);
-        let linked =
-            crate::backend::link(&linking.endpoint, linking.app, bearer, &linking.key).await?;
+        let request = {
+            let (linking, bearer) = (linking.clone(), bearer.to_owned());
+            async move {
+                crate::backend::link(&linking.endpoint, linking.app, &bearer, &linking.key).await
+            }
+        };
+        let linked = linking
+            .runtime
+            .spawn(request)
+            .await
+            .map_err(|_| Error::Stopped)??;
         if linked.account != device {
             // The backend has linked the user by now: say so, as the
             // session stays the device's.
-            return Err(Error::Server(format!(
+            return Err(Error::Refused(format!(
                 "the backend linked its user to account {}, not this device's {}; \
                  the link stands on the backend, and this session stays the device's",
                 linked.account.0, device.0
@@ -518,6 +558,7 @@ pub(crate) fn start(
             endpoint: endpoint.to_owned(),
             app: *app,
             key: key.clone(),
+            runtime: tokio::runtime::Handle::current(),
         })),
         Credential::Bearer { .. } => None,
     };

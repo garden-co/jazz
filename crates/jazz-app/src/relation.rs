@@ -142,8 +142,11 @@ impl<T: Table> Query<T> {
     /// todos::query().filter(todos::done().eq(false)).hop_to(todos::project_relation())
     /// ```
     ///
-    /// Order and window the rows it reaches, not the rows it starts from:
-    /// `order_by`, `limit` or `offset` before a hop is not supported.
+    /// As in TypeScript, a query has one order and window, applied to the
+    /// rows it ends on: `limit`, `offset` and `order_by` before a hop
+    /// window and order the rows it reaches. An order before a hop names a
+    /// column of the table it reaches by name, so order after the hop, with
+    /// that table's columns, where you can.
     pub fn hop_to<H: Hop<T>>(self, relation: H) -> Query<H::To> {
         Query::wrap(self.inner.hop_to(relation.into_untyped()))
     }
@@ -165,7 +168,9 @@ impl<T: Table> Query<T> {
 
     /// The rows of each query, one after another: a row several match comes
     /// once for each. Like TypeScript's `union`, it takes `order_by`,
-    /// `limit` and `offset`, and nothing else.
+    /// `limit` and `offset`, and nothing else. Each arm is labelled by what
+    /// it reads, as every client labels it; two identical arms are refused
+    /// (use [`Query::union_named`] to read the same query twice).
     ///
     /// ```ignore
     /// Query::union([
@@ -174,12 +179,10 @@ impl<T: Table> Query<T> {
     /// ])
     /// ```
     pub fn union(queries: impl IntoIterator<Item = Self>) -> Self {
-        Self::union_named(
-            queries
-                .into_iter()
-                .enumerate()
-                .map(|(at, query)| (at.to_string(), query)),
-        )
+        Self::wrap(untyped::Query::union_unnamed(
+            table::<T>(),
+            queries.into_iter().map(|query| query.inner),
+        ))
     }
 
     /// [`Query::union`] with a label of each query's own: 1 to 4096 bytes,

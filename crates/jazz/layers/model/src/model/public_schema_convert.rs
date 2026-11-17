@@ -10,7 +10,9 @@ use crate::schema::{
     TableSchema as CoreTableSchema, WritePolicies,
 };
 use jazz_types::column_schema::ColumnType as StorageColumnType;
-use jazz_types::records::{ScalarEnumSchema, Value as RecordValue};
+use jazz_types::records::{
+    EnumCase, EnumSchema, RecordDescriptor, ScalarEnumSchema, Value as RecordValue,
+};
 
 use crate::model::public_api::policy::{CmpOp, PolicyValue};
 use crate::model::public_schema::{
@@ -112,6 +114,23 @@ pub fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConver
     ))
 }
 
+/// Refuse declared JSON Schemas that use a feature the browser runtime
+/// cannot evaluate, so every runtime enforces a deployed schema alike (see
+/// `json_schema_support`). Deployments (and the `validateSchema` binding) run
+/// it next to [`check_deployable_policies`]; opening a store does not.
+pub fn check_deployable_json_schemas(schema: &Schema) -> Result<(), SchemaConversionError> {
+    for (name, table) in schema {
+        for column in &table.columns.columns {
+            crate::model::public_schema::check_supported_json_schemas(
+                &column.column_type,
+                column.name.as_str(),
+            )
+            .map_err(|message| column_err(name, column.name.as_str(), message))?;
+        }
+    }
+    Ok(())
+}
+
 /// Refuse what a deployment may not introduce, beyond what
 /// [`convert_public_schema`] checks. Deployments and `jazz-tools validate`
 /// run it; opening a store does not, so a catalogue that already holds such
@@ -122,6 +141,10 @@ pub fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConver
 /// names (the SQL compiler reads the enclosing `exists`'s row, validation
 /// and sync the row under check), so the form is not supported until that
 /// is settled.
+///
+/// A relation policy's unsupported shapes (output steps, query parameters,
+/// malformed union labels) are the schema compile's to refuse, which
+/// `jazz-tools validate`, the dev server and a deployment all run.
 pub fn check_deployable_policies(schema: &Schema) -> Result<(), SchemaConversionError> {
     for (name, table) in schema {
         let slots = [
@@ -777,7 +800,10 @@ fn convert_table(
             if table.columns.column(column_name).is_some_and(|descriptor| {
                 matches!(
                     descriptor.column_type,
-                    ColumnType::Bytea | ColumnType::Array { .. } | ColumnType::Row { .. }
+                    ColumnType::Bytea
+                        | ColumnType::Array { .. }
+                        | ColumnType::Row { .. }
+                        | ColumnType::LegacyEnumPayload { .. }
                 )
             }) {
                 return Err(err(
@@ -979,6 +1005,32 @@ fn convert_column_type(
         ColumnType::ScalarEnum { name, variants } => {
             jazz_types::records::ScalarEnumSchema::new(name.clone(), variants.iter().cloned())
                 .map(StorageColumnType::EnumTag)
+                .map_err(|error| column_err(table, column, error.to_string()))
+        }
+        // As 2.0.0-alpha.64 compiled it, so a store's physical mapping of
+        // a version that declared one still matches.
+        ColumnType::LegacyEnumPayload { cases } => {
+            let mut converted_cases = Vec::with_capacity(cases.len());
+            for case in cases {
+                if case.name.is_empty() {
+                    return Err(column_err(table, column, "enum case names cannot be empty"));
+                }
+                let mut fields = Vec::with_capacity(case.fields.len());
+                for field in &case.fields {
+                    let mut value_type =
+                        convert_column_type(table, field.name.as_str(), &field.column_type)?;
+                    if field.nullable {
+                        value_type = value_type.nullable();
+                    }
+                    fields.push((field.name.as_str().to_owned(), value_type));
+                }
+                converted_cases.push(EnumCase::new(
+                    case.name.clone(),
+                    RecordDescriptor::new(fields),
+                ));
+            }
+            EnumSchema::new(format!("{}_{}", table.as_str(), column), converted_cases)
+                .map(|schema| StorageColumnType::Enum(Box::new(schema)))
                 .map_err(|error| column_err(table, column, error.to_string()))
         }
         ColumnType::Array { element } => {

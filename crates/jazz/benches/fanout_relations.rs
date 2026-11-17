@@ -10,7 +10,7 @@
 //! own commit included). A local phase, not an end-to-end claim: compare
 //! same-base CodSpeed runs for that.
 //!
-//! `USERS=100 CHATS_PER_USER=5 MESSAGES=20 OPS=40 cargo bench -p jazz --bench fanout_relations`
+//! `USERS=100 CHATS_PER_USER=5 MESSAGES=20 OPS=40 cargo bench -p jazz-core --bench fanout_relations`
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};

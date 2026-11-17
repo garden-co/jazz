@@ -1,9 +1,9 @@
 //! HTTP and WebSocket routes for the Jazz server.
 //!
 //! Split into submodules so each piece is independently navigable:
-//! - [`websocket`] — engine wire-frame WebSocket boundary
-//! - [`http`] — HTTP endpoint handlers and their request/response types
-//! - [`utils`] — parser/validator helpers used by both
+//! - `websocket` — engine wire-frame WebSocket boundary
+//! - `http` — HTTP endpoint handlers and their request/response types
+//! - `utils` — parser/validator helpers used by both
 //!
 //! The router builder [`create_router`] re-exports unchanged from this module
 //! so existing callers (`server::routes::create_router`) continue to resolve.

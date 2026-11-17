@@ -1,15 +1,17 @@
-//! `jazz-tools generate` picks an app's languages from the files beside its
-//! `jazz.app.json`, as `npx jazz-tools generate` does: both run
+//! `jazz-tools generate --check` picks an app's languages from the files
+//! beside its `jazz.app.json`, as `npx jazz-tools generate` does: both run
 //! jazz-codegen's `project` (jazz-tools' `src/dev/project.languages.test.ts`
-//! drives the npm CLI on the same directories).
+//! drives the npm CLI on the same directories). Writing is refused: from
+//! alpha.66 TypeScript is the only authoring source, so `npx jazz-tools
+//! generate` writes the files and bindings from `schema.ts`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 mod support;
 
-const APP: &str = r#"{ "format": 1, "tables": { "todos": { "columns": { "title": "string" } } } }"#;
-const PERMISSIONS: &str = r#"{ "format": 1, "tables": { "todos": { "read": "true" } } }"#;
+const APP: &str = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json", "tables": { "todos": { "columns": { "title": "string" } } } }"#;
+const PERMISSIONS: &str = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json", "tables": { "todos": { "read": "true" } } }"#;
 
 fn app_dir(name: &str) -> PathBuf {
     let root =
@@ -24,9 +26,9 @@ fn app_dir(name: &str) -> PathBuf {
     dir
 }
 
-fn generate(dir: &Path) -> std::process::Output {
+fn check(dir: &Path) -> std::process::Output {
     Command::new(support::cargo_binary("jazz-tools"))
-        .args(["generate", "--dir"])
+        .args(["generate", "--check", "--dir"])
         .arg(dir)
         .output()
         .unwrap()
@@ -41,7 +43,7 @@ fn an_app_with_only_another_language_s_manifest_gets_no_ts_bindings() {
     ] {
         let dir = app_dir(&marker.replace('.', "-"));
         std::fs::write(dir.join(marker), text).unwrap();
-        let output = generate(&dir);
+        let output = check(&dir);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success(), "{marker}: {stderr}");
         assert!(
@@ -55,19 +57,143 @@ fn an_app_with_only_another_language_s_manifest_gets_no_ts_bindings() {
 }
 
 #[test]
-fn a_ts_app_gets_exactly_the_bytes_the_shared_code_writes() {
+fn a_ts_app_s_bindings_are_checked_against_exactly_the_bytes_the_shared_code_writes() {
     let dir = app_dir("ts");
     std::fs::write(dir.join("package.json"), "{}").unwrap();
     std::fs::write(dir.join("Package.swift"), "// swift-tools-version:5.9\n").unwrap();
-    let output = generate(&dir);
+    // No bindings yet: the check fails and writes nothing.
+    let output = check(&dir);
+    assert!(!output.status.success(), "missing bindings passed");
+    assert!(!dir.join("jazz.generated.ts").exists());
+
+    std::fs::write(
+        dir.join("jazz.generated.ts"),
+        jazz_codegen::generate(jazz_codegen::Lang::TypeScript, APP.as_bytes()).unwrap(),
+    )
+    .unwrap();
+    let output = check(&dir);
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let written = std::fs::read_to_string(dir.join("jazz.generated.ts")).unwrap();
-    assert_eq!(
-        written,
-        jazz_codegen::generate(jazz_codegen::Lang::TypeScript, APP.as_bytes()).unwrap()
+}
+
+#[test]
+fn a_json_only_app_is_pointed_at_npx_jazz_tools_upgrade() {
+    let dir = app_dir("json-only");
+    std::fs::write(dir.join("package.json"), "{}").unwrap();
+    for args in [
+        &["generate"][..],
+        &["migrations", "create", "--name", "x"][..],
+    ] {
+        let output = run(&dir, args);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains(
+                "TS is the source in alpha.66: this app has jazz.app.json but no schema.ts. \
+                 Run `npx jazz-tools upgrade` to write schema.ts from it"
+            ),
+            "{args:?}: {stderr}"
+        );
+        assert!(!dir.join("jazz.generated.ts").exists(), "{args:?}");
+        assert!(!dir.join("migrations").exists(), "{args:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("jazz.app.json")).unwrap(),
+            APP
+        );
+    }
+}
+
+fn run(dir: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(support::cargo_binary("jazz-tools"))
+        .args(args)
+        .arg("--dir")
+        .arg(dir)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn a_ts_authored_app_is_left_to_npx_jazz_tools() {
+    for root in [".", "src", "src/lib"] {
+        let dir = app_dir(&format!("ts-authored-{}", root.replace(['.', '/'], "_")));
+        std::fs::write(dir.join("package.json"), "{}").unwrap();
+        std::fs::create_dir_all(dir.join(root)).unwrap();
+        std::fs::write(dir.join(root).join("schema.ts"), "export {};\n").unwrap();
+        for args in [
+            &["generate"][..],
+            &["migrations", "create", "--name", "x"][..],
+        ] {
+            let output = run(&dir, args);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!output.status.success(), "{root} {args:?}: {stderr}");
+            assert!(
+                stderr.contains("schema.ts exists") && stderr.contains("npx jazz-tools"),
+                "{root} {args:?}: {stderr}"
+            );
+            assert!(!dir.join("jazz.generated.ts").exists(), "{root}");
+        }
+    }
+}
+
+#[test]
+fn a_ts_authored_app_s_bindings_are_checked_against_its_committed_files() {
+    let dir = app_dir("ts-authored-check");
+    std::fs::write(dir.join("package.json"), "{}").unwrap();
+    // Committed files as `npx jazz-tools generate` writes them, and their bindings.
+    for (file, text) in [
+        ("jazz.app.json", APP),
+        ("jazz.permissions.json", PERMISSIONS),
+    ] {
+        let marked = jazz::tools::deployment::artifact::mark_generated(
+            text.as_bytes(),
+            jazz::tools::deployment::artifact::GENERATED_BY_TS,
+        )
+        .unwrap();
+        std::fs::write(dir.join(file), marked).unwrap();
+    }
+    let app = std::fs::read_to_string(dir.join("jazz.app.json")).unwrap();
+    std::fs::write(
+        dir.join("jazz.generated.ts"),
+        jazz_codegen::generate(jazz_codegen::Lang::TypeScript, app.as_bytes()).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(dir.join("schema.ts"), "export {};\n").unwrap();
+
+    let output = run(&dir, &["generate", "--check"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    assert!(
+        stdout.contains("npx jazz-tools generate --check"),
+        "{stdout}"
+    );
+
+    // Stale bindings fail the check.
+    std::fs::write(dir.join("jazz.generated.ts"), "// stale\n").unwrap();
+    let output = run(&dir, &["generate", "--check"]);
+    assert!(!output.status.success(), "stale bindings passed");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("jazz.generated.ts")).unwrap(),
+        "// stale\n"
+    );
+
+    // So does a committed file edited by hand.
+    std::fs::write(
+        dir.join("jazz.generated.ts"),
+        jazz_codegen::generate(jazz_codegen::Lang::TypeScript, app.as_bytes()).unwrap(),
+    )
+    .unwrap();
+    let edited = app.replace("\"title\": \"string\"", "\"title\": \"string?\"");
+    assert_ne!(edited, app);
+    std::fs::write(dir.join("jazz.app.json"), edited).unwrap();
+    let output = run(&dir, &["generate", "--check"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "a hand edit passed");
+    assert!(stderr.contains("was edited since"), "{stderr}");
 }
