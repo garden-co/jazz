@@ -56,7 +56,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("clients of a Durable Object core
     const jazz = await createJazz({
       app,
       permissions: permissionsFile,
-      store: durableObjects({ url: core.url, appId: core.appId, secret: core.secret }),
+      store: durableObjects({ url: core.url, secret: core.secret }),
       authenticate: authenticate as (request: Request) => JazzUser | null,
     }).ready();
     const server = createServer((req, res) =>
