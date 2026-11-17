@@ -108,6 +108,11 @@ pub(crate) trait Kind {
         rid: i64,
         cells: Option<&[Cell]>,
     ) -> Result<(), Error>;
+    /// Refuse `op` before it runs if it would cost more than the kind's
+    /// caps allow (SPEC 20.12): a typed error, never a long scan.
+    fn admit(&self, _conn: &Connection, _prefix: &str, _op: &IndexOp) -> Result<(), Error> {
+        Ok(())
+    }
     /// Plan `op` (already checked against the declaration by query
     /// validation): its candidate relation. `bind` binds a parameter and
     /// returns its placeholder.
@@ -218,6 +223,14 @@ pub(crate) fn vector_unbounded(table: &str, index: &str) -> Error {
              not supported yet (index `{table}.{index}`: filter the query by an indexed column)"
         ),
     )
+}
+
+pub(crate) fn too_broad(detail: String) -> Error {
+    typed(ErrorCode::Query, Reason::SearchTooBroad, detail)
+}
+
+pub(crate) fn query_too_long(detail: String) -> Error {
+    typed(ErrorCode::Query, Reason::SearchQueryTooLong, detail)
 }
 
 pub(crate) fn candidates_over_cap(table: &str, index: &str) -> Error {

@@ -81,7 +81,9 @@ export type NativeCoreErrorReason =
   | "index_building"
   | "vector_search_unbounded"
   | "vector_candidates_over_cap"
-  | "index_declaration_mismatch";
+  | "index_declaration_mismatch"
+  | "search_query_too_long"
+  | "search_too_broad";
 
 /** Every reason this build knows; a test checks it against the engine's `Reason::ALL`. */
 export const NATIVE_CORE_ERROR_REASONS: ReadonlySet<string> = new Set<NativeCoreErrorReason>([
@@ -103,6 +105,8 @@ export const NATIVE_CORE_ERROR_REASONS: ReadonlySet<string> = new Set<NativeCore
   "vector_search_unbounded",
   "vector_candidates_over_cap",
   "index_declaration_mismatch",
+  "search_query_too_long",
+  "search_too_broad",
 ]);
 
 /** The core `Reason` a thrown value carries, or `undefined` when it has none this build knows. */

@@ -81,6 +81,8 @@ fn pinned_reason(reason: Reason) -> &'static str {
         Reason::VectorSearchUnbounded => "vector_search_unbounded",
         Reason::VectorCandidatesOverCap => "vector_candidates_over_cap",
         Reason::IndexDeclarationMismatch => "index_declaration_mismatch",
+        Reason::SearchQueryTooLong => "search_query_too_long",
+        Reason::SearchTooBroad => "search_too_broad",
     }
 }
 

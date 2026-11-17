@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use jazz_index::text::{Analyzer, QueryError};
+use jazz_index::text::{Analyzer, PrefixTerm, QueryError, QueryTerms};
 use rusqlite::Connection;
 
 use super::{Candidates, Cell, Kind, shadow};
@@ -135,70 +135,170 @@ impl Kind for Text {
         Ok(())
     }
 
+    fn admit(&self, conn: &Connection, prefix: &str, op: &IndexOp) -> Result<(), Error> {
+        let query = self.query(op)?;
+        let terms = quote(&shadow(prefix, "terms"));
+        let post = quote(&shadow(prefix, "post"));
+        // Each cap reads at most one row past it, so checking costs no more
+        // than the cap (SPEC 20.12).
+        if let Some(last) = &query.prefix {
+            let (range, params) = prefix_range("term", last);
+            let sql = format!(
+                "SELECT count(*) FROM (SELECT 1 FROM {terms} WHERE {range} LIMIT {})",
+                PREFIX_TERMS_MAX + 1
+            );
+            let expanded: i64 = conn
+                .prepare_cached(&sql)
+                .and_then(|mut s| {
+                    s.query_row(rusqlite::params_from_iter(params.iter()), |r| r.get(0))
+                })
+                .map_err(storage)?;
+            if expanded as usize > PREFIX_TERMS_MAX {
+                return Err(super::too_broad(format!(
+                    "the prefix `{}` matches more than {PREFIX_TERMS_MAX} indexed terms; type more of it",
+                    last.lo
+                )));
+            }
+        }
+        let mut params = Vec::new();
+        let sources = sources(&terms, &query, &mut |value| {
+            params.push(value);
+            format!("?{}", params.len())
+        });
+        let sql = format!(
+            "SELECT count(*) FROM (SELECT 1 FROM (SELECT DISTINCT tid FROM ({sources})) AS q \
+             JOIN {post} AS p ON p.tid = q.tid LIMIT {})",
+            POSTINGS_MAX + 1
+        );
+        let postings: i64 = conn
+            .prepare(&sql)
+            .and_then(|mut s| s.query_row(rusqlite::params_from_iter(params.iter()), |r| r.get(0)))
+            .map_err(storage)?;
+        if postings as usize > POSTINGS_MAX {
+            return Err(super::too_broad(format!(
+                "the search would read more than {POSTINGS_MAX} postings; use rarer words"
+            )));
+        }
+        Ok(())
+    }
+
     fn plan(
         &self,
         prefix: &str,
         op: &IndexOp,
         bind: &mut dyn FnMut(Sql) -> String,
     ) -> Result<Candidates, Error> {
-        let IndexOp::Match { text, mode } = op else {
+        let IndexOp::Match { mode, .. } = op else {
             return Err(Error::new(
                 ErrorCode::Query,
                 "a text index answers `match` only",
             ));
         };
-        let query = self
-            .analyzer
-            .query(text, self.prefix)
-            .map_err(|QueryError::Empty| {
-                Error::new(
-                    ErrorCode::Query,
-                    "the search text has no terms after analysis",
-                )
-            })?;
+        let query = self.query(op)?;
         let terms = quote(&shadow(prefix, "terms"));
         let post = quote(&shadow(prefix, "post"));
         let slots = query.terms.len() + usize::from(query.prefix.is_some());
-        let mut sources = Vec::new();
-        if !query.terms.is_empty() {
-            let json = bind(Sql::Text(
-                serde_json::to_string(&query.terms)
-                    .expect("strings serialize")
-                    .into_bytes(),
-            ));
-            sources.push(format!(
-                "SELECT t.tid AS tid, j.key AS slot FROM json_each({json}) AS j \
-                 JOIN {terms} AS t ON t.term = j.value"
-            ));
-        }
-        if let Some(last) = &query.prefix {
-            let slot = bind(Sql::Integer(query.terms.len() as i64));
-            let exact = bind(Sql::Text(last.exact.clone().into_bytes()));
-            let lo = bind(Sql::Text(last.lo.clone().into_bytes()));
-            let range = match &last.hi {
-                Some(hi) => {
-                    let hi = bind(Sql::Text(hi.clone().into_bytes()));
-                    format!("(t.term >= {lo} AND t.term < {hi})")
-                }
-                None => format!("t.term >= {lo}"),
-            };
-            sources.push(format!(
-                "SELECT t.tid AS tid, {slot} AS slot FROM {terms} AS t \
-                 WHERE t.term = {exact} OR {range}"
-            ));
-        }
-        // `Any` needs one slot, `All` every slot (SPEC 20.5).
-        let needed = match mode {
-            crate::query::MatchMode::Any => 1,
-            crate::query::MatchMode::All => slots,
-        };
-        let n = bind(Sql::Integer(needed as i64));
-        // Larger impacts are better: the score is their negated sum, so
-        // every kind's score is smaller-better.
-        Ok(Candidates::Sql(format!(
-            "SELECT p.rid AS rid, -sum(p.impact) AS score FROM ({}) AS q \
-             JOIN {post} AS p ON p.tid = q.tid GROUP BY p.rid HAVING count(DISTINCT q.slot) >= {n}",
-            sources.join(" UNION ALL ")
-        )))
+        // A row's score sums the impacts of the distinct terms it holds, each
+        // once, whichever slots it serves (a word that is both a whole term
+        // and the prefix counts once, SPEC 20.10.1). Larger impacts are
+        // better: the score is their negated sum, so every kind's score is
+        // smaller-better.
+        let scored = sources(&terms, &query, bind);
+        let score = format!(
+            "SELECT m.rid AS rid, -sum(m.impact) AS score FROM (SELECT DISTINCT p.rid AS rid, \
+             p.tid AS tid, p.impact AS impact FROM ({scored}) AS q JOIN {post} AS p ON p.tid = q.tid) \
+             AS m GROUP BY m.rid"
+        );
+        // `Any` needs one slot, which every scored row has; `All` every slot.
+        Ok(Candidates::Sql(match mode {
+            crate::query::MatchMode::Any => score,
+            crate::query::MatchMode::All => {
+                let matched = sources(&terms, &query, bind);
+                let n = bind(Sql::Integer(slots as i64));
+                format!(
+                    "SELECT s.rid AS rid, s.score AS score FROM ({score}) AS s WHERE s.rid IN \
+                     (SELECT p.rid FROM ({matched}) AS q JOIN {post} AS p ON p.tid = q.tid \
+                     GROUP BY p.rid HAVING count(DISTINCT q.slot) >= {n})"
+                )
+            }
+        }))
     }
+}
+
+/// Most indexed terms a prefix may stand for (SPEC 20.12).
+pub(super) const PREFIX_TERMS_MAX: usize = 1_000;
+/// Most postings a search may read (SPEC 20.12).
+pub(super) const POSTINGS_MAX: usize = 200_000;
+
+impl Text {
+    fn query(&self, op: &IndexOp) -> Result<QueryTerms, Error> {
+        let IndexOp::Match { text, .. } = op else {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "a text index answers `match` only",
+            ));
+        };
+        self.analyzer
+            .query(text, self.prefix)
+            .map_err(|error| match error {
+                QueryError::Empty => Error::new(
+                    ErrorCode::Query,
+                    "the search text has no terms after analysis",
+                ),
+                QueryError::TooLong { .. } | QueryError::TooManyTerms => {
+                    super::query_too_long(error.to_string())
+                }
+            })
+    }
+}
+
+/// The prefix slot's condition on column `column`: the whole-word term or
+/// any term in the folded word's range, and its parameters in order.
+fn prefix_range(column: &str, last: &PrefixTerm) -> (String, Vec<Sql>) {
+    let mut params = vec![
+        Sql::Text(last.exact.clone().into_bytes()),
+        Sql::Text(last.lo.clone().into_bytes()),
+    ];
+    let range = match &last.hi {
+        Some(hi) => {
+            params.push(Sql::Text(hi.clone().into_bytes()));
+            format!("({column} = ?1 OR ({column} >= ?2 AND {column} < ?3))")
+        }
+        None => format!("({column} = ?1 OR {column} >= ?2)"),
+    };
+    (range, params)
+}
+
+/// `(tid, slot)` of every indexed term a query slot matches: its whole
+/// terms by the JSON array of them, then the prefix slot.
+fn sources(terms: &str, query: &QueryTerms, bind: &mut dyn FnMut(Sql) -> String) -> String {
+    let mut sources = Vec::new();
+    if !query.terms.is_empty() {
+        let json = bind(Sql::Text(
+            serde_json::to_string(&query.terms)
+                .expect("strings serialize")
+                .into_bytes(),
+        ));
+        sources.push(format!(
+            "SELECT t.tid AS tid, j.key AS slot FROM json_each({json}) AS j \
+             JOIN {terms} AS t ON t.term = j.value"
+        ));
+    }
+    if let Some(last) = &query.prefix {
+        let slot = bind(Sql::Integer(query.terms.len() as i64));
+        let exact = bind(Sql::Text(last.exact.clone().into_bytes()));
+        let lo = bind(Sql::Text(last.lo.clone().into_bytes()));
+        let range = match &last.hi {
+            Some(hi) => {
+                let hi = bind(Sql::Text(hi.clone().into_bytes()));
+                format!("(t.term >= {lo} AND t.term < {hi})")
+            }
+            None => format!("t.term >= {lo}"),
+        };
+        sources.push(format!(
+            "SELECT t.tid AS tid, {slot} AS slot FROM {terms} AS t \
+             WHERE t.term = {exact} OR {range}"
+        ));
+    }
+    sources.join(" UNION ALL ")
 }

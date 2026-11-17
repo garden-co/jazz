@@ -516,11 +516,15 @@ pub enum Reason {
     VectorCandidatesOverCap,
     /// A search written against another declaration of the index than the one the node maintains (code `Query`, SPEC 20.4).
     IndexDeclarationMismatch,
+    /// A text search whose query is over 1 KiB or 32 terms (code `Query`, SPEC 20.12).
+    SearchQueryTooLong,
+    /// A text search whose prefix stands for more than 1 000 terms or that would read more than 200 000 postings (code `Query`, SPEC 20.12).
+    SearchTooBroad,
 }
 
 impl Reason {
     /// Every reason, in declaration order.
-    pub const ALL: [Reason; 18] = [
+    pub const ALL: [Reason; 20] = [
         Reason::AuthorizationDenied,
         Reason::ClientClockTooFarAhead,
         Reason::SerializationConflict,
@@ -539,6 +543,8 @@ impl Reason {
         Reason::VectorSearchUnbounded,
         Reason::VectorCandidatesOverCap,
         Reason::IndexDeclarationMismatch,
+        Reason::SearchQueryTooLong,
+        Reason::SearchTooBroad,
     ];
 
     /// The stable, snake_case name of this reason.
@@ -567,6 +573,8 @@ impl Reason {
             Reason::VectorSearchUnbounded => "vector_search_unbounded",
             Reason::VectorCandidatesOverCap => "vector_candidates_over_cap",
             Reason::IndexDeclarationMismatch => "index_declaration_mismatch",
+            Reason::SearchQueryTooLong => "search_query_too_long",
+            Reason::SearchTooBroad => "search_too_broad",
         }
     }
 
