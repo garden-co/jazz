@@ -47,6 +47,16 @@ pub fn sign(secret_key: &[u8; SECRET_KEY_BYTES], message: &[u8]) -> Result<[u8; 
     Ok(signing.sign(message).to_bytes())
 }
 
+/// Whether `public_key` encodes a curve point canonically, as libsodium
+/// requires: it decompresses, and the point re-encodes to the same bytes. An
+/// encoding of `y + p` (possible for `y < 19`) names the same point as `y`
+/// but is refused.
+pub fn is_canonical_public_key(public_key: &[u8; PUBLIC_KEY_BYTES]) -> bool {
+    CompressedEdwardsY(*public_key)
+        .decompress()
+        .is_some_and(|point| point.compress().as_bytes() == public_key)
+}
+
 /// `crypto_sign_verify_detached`. Malformed keys or signatures are `false`.
 pub fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
     let (Ok(public_key), Ok(signature)) = (
@@ -55,12 +65,7 @@ pub fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
     ) else {
         return false;
     };
-    // libsodium rejects a non-canonical public-key encoding; a point that
-    // re-encodes to different bytes is one.
-    let Some(point) = CompressedEdwardsY(*public_key).decompress() else {
-        return false;
-    };
-    if point.compress().as_bytes() != public_key {
+    if !is_canonical_public_key(public_key) {
         return false;
     }
     let Ok(verifying) = VerifyingKey::from_bytes(public_key) else {
