@@ -196,7 +196,7 @@ def main():
         "chord_thresholds": thresholds,
     }
     path = Path(__file__).with_name("points-v1.json")
-    path.write_text(json.dumps(out, indent=1) + "\n")
+    path.write_text(json.dumps(out, indent=2) + "\n")
     print(f"{len(cases)} points, {killed}")
 
 
