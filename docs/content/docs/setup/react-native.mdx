@@ -171,6 +171,27 @@ To reach a development backend over plain `http://` on Android, allow cleartext 
 example with `expo-build-properties` (`android.usesCleartextTraffic: true`) in a development build
 only.
 
+## Developing on a physical device
+
+On a device, Jazz syncs over plaintext (`http://`, `ws://`) only with the machine it runs on:
+`localhost`, a loopback address, or an Android emulator's host (`10.0.2.2`, `10.0.3.2`). Any other
+host, a LAN address like `http://192.168.1.20:4200` or a `.local` name included, needs `https://`:
+otherwise the session's token would travel unencrypted on your network. Jazz refuses such a URL with
+an error whose `code` is `remote_plaintext_endpoint`.
+
+To reach the backend on your development machine from a physical device:
+
+- **Android over USB:** forward the port, then use `localhost` as on an emulator:
+  `adb reverse tcp:4200 tcp:4200` (with your backend's port), and
+  `serverUrl: "http://localhost:4200/jazz"`.
+- **iOS, or Android without USB:** put the backend behind a TLS tunnel with a publicly trusted
+  certificate, such as `cloudflared tunnel --url http://localhost:4200` or `tailscale serve`, and
+  use its `https://` URL.
+
+A certificate from your own development CA (for example mkcert) doesn't work for Jazz's sync
+connection yet, even when the device trusts the CA: on iOS and Android, Jazz's native connection
+trusts only the standard public certificate authorities. Use a tunnel instead.
+
 ## Testing without a device
 
 Test your schema, permissions and backend logic in Node against your app's backend, as in
