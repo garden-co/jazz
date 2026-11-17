@@ -17,7 +17,17 @@ export type E2eeSodiumStream = E2EeSodiumStream
 
 export declare class JazzCore {
   /** Open the core's storage and serve it in this process. */
-  static open(options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: "files" | "s3" | "sqlite"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; telemetryCollectorUrl?: string }): Promise<JazzCore>
+  static open(options: { appId?: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: "files" | "s3" | "sqlite"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; telemetryCollectorUrl?: string }): Promise<JazzCore>
+  /**
+   * The app this core serves: the one its store keeps, or the one it was
+   * opened with in memory.
+   */
+  get appId(): string
+  /**
+   * The secret a backend signs agent tokens with, kept in
+   * `<dataDir>/inspect-token-secret` (`null` in memory).
+   */
+  get tokenSecret(): string | null
   /**
    * Route one HTTP request. `url` is the path and query, as the core's
    * router sees them (`/apps/<appId>/...` or `/health`).
@@ -484,6 +494,16 @@ export interface DeleteOptions {
   updatedAtMs?: number
 }
 
+/**
+ * Make the stopped store in `dataDir` a store of its own: it forgets its
+ * store id and where its large values live, so its next start claims a
+ * chunk directory or bucket prefix of its own instead of the original's,
+ * and its agent-token secret, so the original's tokens don't open it. For
+ * a copy of a store (a staging copy of a backup) opened next to the
+ * original. It keeps the app id: the copy serves the same app.
+ */
+export declare function detachStore(dataDir: string): void
+
 /** Options of [`generate_for_dir`] and [`migrations_create_for_dir`]. */
 export interface DirOptions {
   /** Fail when the files or bindings are stale, and write nothing. */
@@ -705,6 +725,13 @@ export declare function schemaSourceHash(appJson: string): string
  * budget, so a second call fails until the first core has stopped.
  */
 export declare function serveCore(options: { appId: string; port: number; dataDir: string; blobs: { kind: "sqlite" } | { kind: "files"; dir?: string } | { kind: "s3"; bucket?: string; region?: string; endpoint?: string; prefix?: string; roleFromWorkload?: boolean; environment?: string } | { kind: "vercel-blob"; storeId?: string; prefix?: string; tokenFromWorkload?: boolean; environment?: string }; trustedWorkload?: { issuer: string; audience: string; subject: string }; backendSecret?: string; adminSecret?: string; shutdownTimeoutSecs?: number; maxConnections?: number; memoryLimitBytes?: number }): ServedCore
+
+/**
+ * Make the stopped store in `dataDir` serve `appId` from its next start. A
+ * store refuses any app but the one it was first opened for; this is the
+ * way to change it (a wrong first `--app-id`, or a renamed app).
+ */
+export declare function setStoreAppId(dataDir: string, appId: string): void
 
 /** Owned libsodium device encryption keys. */
 export interface SodiumDeviceKeyPair {
