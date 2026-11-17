@@ -210,6 +210,17 @@ server then requires one binary message that decodes to exactly one
 `WireFrame::Hello`. The prelude and that Hello each have the two-second
 handshake read deadline. Only the first message is a prelude.
 
+A client may send more binary messages right behind its `Hello`, without
+waiting for the server's. The server reads none of them until it has
+admitted the connection and sent its own `Hello`. Then it reads them in the
+order sent, as on any open connection. A connection refused before the
+server's `Hello` (a `WireFrame::Error`, then close) never reads them, so
+nothing sent ahead takes effect, and the client sends it again on its next
+connection. The prelude and the `Hello` stay messages of their own, and the
+`Hello`'s message holds the `Hello` alone. The `createJazz` relay and the
+HTTP stream transport keep this order: they pass a session's messages on one
+at a time, behind the prelude's admission.
+
 The prelude object has these server-owned fields:
 
 - `peer_identity`: required canonical `AuthorSubject` JSON string.
@@ -1058,7 +1069,12 @@ those bytes are refused with it at once until the fetch backoff ends.
   declare it. Every later request is resolved against that admitted version,
   governed by the current schema's policies, as a sync session's declared
   version is (§8.9). A version the store has not admitted is refused with
-  `SchemaNotDeployed`; nothing else is served before a version.
+  `SchemaNotDeployed`; nothing else is served before a version. The server
+  runs a session's requests in order, so a client may send its schema and
+  first requests together, right behind its `Hello` (§8.1.2), and each
+  resolves against the schema declared before it. The TypeScript thin client
+  sends its schema and live queries this way, and other requests once the
+  schema is bound.
 - Request options are the JSON the native bindings take for the same call:
   read options (`tier`, `include_deleted`, `read_view` with branch head and
   frozen base, ...) on `Query` and `Subscribe`, and write options (`rowId`,
