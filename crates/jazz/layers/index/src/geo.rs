@@ -108,8 +108,8 @@ fn check_meters(meters: f64) -> Result<f64, GeoError> {
 /// a range of degrees never lands outside that range's steps.
 ///
 /// `value - origin` is split exactly into `x + e` (TwoSum); a candidate
-/// `q` from rounded division is then corrected by the sign of the exact
-/// remainder `(x + e)·2³¹ − q·span`, whose parts are each exact (`x·2³¹`
+/// `q` from rounded division can only be one too high; it is corrected by
+/// the sign of the exact remainder `(x + e)·2³¹ − q·span`, whose parts are each exact (`x·2³¹`
 /// and `e·2³¹` scale by a power of two; `q·span < 2⁴⁰` is an integer;
 /// `x·2³¹ − q·span` is exact by Sterbenz as `q` is within one of the
 /// quotient), and the sign of a sum of two doubles survives rounding.
@@ -122,9 +122,12 @@ fn step(value: f64, origin: f64, span: f64) -> u32 {
     let r = t - q * span;
     if r + et < 0.0 {
         q -= 1.0;
-    } else if (r - span) + et >= 0.0 {
-        q += 1.0;
     }
+    // Never too low: if the exact quotient reached `q + 1`, then
+    // `t ≥ (q + 1)·span` (as `|et| ≤ ulp(t)/2` cannot carry `t` past the
+    // representable `(q + 1)·span`), so the rounded `t / span` would already
+    // be at least `q + 1`, rounding being monotonic.
+    debug_assert!((r - span) + et < 0.0, "step quotient too low for {value}");
     if q >= MAX_STEP as f64 {
         MAX_STEP
     } else if q <= 0.0 {
