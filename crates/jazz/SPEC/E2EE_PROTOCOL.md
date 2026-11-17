@@ -1768,16 +1768,22 @@ keyEpochId}`, once per delivery and device. Nothing is written: holders
   cannot reach (another generation, which it skips). A key that opens and
   passes its own marker but fails a history link further back is not
   reported against the sender: the fault is in the chain, not in the
-  delivery. Once a device holds a version, it opens no further deliveries
+  delivery. The device instead emits a `broken-history` encryption event
+  `{space, keyEpochId, author}` naming the successor whose `history` failed
+  and its author. No key at or after that version can be authenticated
+  through it, for any member; the remedy is a recovery rotation (§3.5). Once a device holds a version, it opens no further deliveries
   of it, so later bad deliveries of that version are not reported. A member
   is trusted with the key anyway (it could disclose it); the remedy for a member that
   delivers badly is to remove it and rotate (§8).
 - **A member this client cannot evaluate.** When a member's account history
-  needs a capability this client lacks, or is missing from the read, the
-  client skips that member, delivers to the others, and reports it as
-  unsupported, never as invalid (§7). For the needs-rotation mark (§3.5) it
-  counts such a member as needing rotation, the safe direction. One such
-  member never stops deliveries or rotations for the rest of the space.
+  needs a capability this client lacks, the client skips that member,
+  delivers to the others, and reports it as unsupported, never as invalid
+  (§7). It does not count such a member towards the needs-rotation mark
+  (§3.5): clients that can evaluate the member still do, and counting it
+  would make an older client rotate on every write. One such member never
+  stops deliveries or rotations for the rest of the space. A member whose
+  account rows are missing from the read is a caller error
+  (inconsistent evidence), not unsupported.
 - **Not a member.** A device whose account has no member row for the space
   (its own member rows are readable to it, R12) reports what it cannot
   decrypt `key-unavailable`: nobody will deliver to it.
@@ -1898,13 +1904,15 @@ Required tests: a member refused a rotation makes no new automatic attempt
 after a further removal; an explicit `rotate` after a refusal attempts.
 
 **Recovery rotation.** When no online member holds the current version (for
-example the only holder lost its device right after rotating), an updater
+example the only holder lost its device right after rotating), or a
+successor's `history` is broken (`broken-history`, §3.4), an updater
 may call `db.encryption.recoverRotation(space)`. It is never part of
 routine rotation, and the SDK never calls it on its own: the application
 calls it explicitly, typically after asking a person. It writes a successor
 whose `predecessor` is the current version (so it extends the chain) and
-whose `historyEpochId` is the newest version the rotator holds, whose key
-its `history` wraps, with deliveries to members as for any rotation. The
+whose `historyEpochId` is the newest version the rotator holds (for a
+broken history, a version before the broken successor), whose key its
+`history` wraps, with deliveries to members as for any rotation. The
 versions after that one, up to and including the predecessor, are
 **skipped**: the chain gives no key for them (§3.3). A device that already
 holds a skipped version keeps it, and delivers it to members that lack it
@@ -2458,7 +2466,7 @@ flattened into a bare `refused`. The data-error codes are exactly
 `key-unavailable`, `key-pending`, `space-pending`, `unsupported-format`,
 `invalid-ciphertext`, `empty-cell`, `superseded`, `stale-space` and
 `encryption-failed`. The encryption status events (not data errors) are
-`account-reset` (§2.11), `invalid-delivery` (§3.4) and `space-over-member-limit` (§3.8). Account roots that do not count are reported with
+`account-reset` (§2.11), `invalid-delivery` (§3.4), `broken-history` (§3.4) and `space-over-member-limit` (§3.8). Account roots that do not count are reported with
 `root-malformed`, `root-foreign-account`, `root-key-mismatch`,
 `root-device-keys-missing`, `root-signature-invalid`, `root-kind-mismatch`
 or `root-unchained` (§2.4 step 1); they never fail replay.
