@@ -68,6 +68,7 @@ import { BACKEND_USER_ISSUER } from "./backend-issuer.js";
 import { earlyDb, type EarlyDb } from "./early-db.js";
 import {
   checkNamespaceOption,
+  checkRegionOption,
   coreName,
   onVercelDeployment,
   onVercelHost,
@@ -248,7 +249,9 @@ export function remote(
  * `local`, by default `sqlite({ path: ".jazz/local" })`.
  *
  * Deployed, it runs a core in a persistent Vercel Sandbox in your own Vercel
- * project, with its data on a Drive. `namespace` (required) says which: the
+ * project, with its data on a Drive, in `region` (required, e.g. `"iad1"`,
+ * where earlier versions created every core; fixed at creation, and a
+ * different region for an existing core throws). `namespace` (required) says which: the
  * Sandbox is `jazz-<project>-<namespace>`, e.g. one core per environment
  * with `namespace: ({ environment }) => environment`, or production's core
  * and one per preview branch with
@@ -280,6 +283,7 @@ export function vercel(
   refuseVercelAppId(options ?? {});
   refuseVercelName(options ?? {});
   checkNamespaceOption(options ?? {});
+  checkRegionOption(options ?? {});
   const { local, ...rest } = options;
   return { kind: "vercel", options: rest, local: local ?? sqlite({ path: ".jazz/local" }) };
 }
