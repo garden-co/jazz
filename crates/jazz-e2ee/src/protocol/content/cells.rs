@@ -15,7 +15,7 @@
 //! reported `stale-space`. A provider failure is always an error, never an
 //! unreadable cell, and no other candidate key is tried after it.
 
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::agility::{StreamReader, StreamWriter};
 use crate::envelope;
@@ -47,8 +47,9 @@ pub fn min_cell_record_len() -> usize {
 }
 
 /// A logical value as an equality index encodes it, owned, for values the
-/// caller decodes from plaintext ([`PlaintextValues`]).
-#[derive(Debug, Clone, PartialEq)]
+/// caller decodes from plaintext ([`PlaintextValues`]). Cleared on drop and
+/// never printed.
+#[derive(Clone, PartialEq)]
 pub enum EqualityValueBuf {
     Null,
     Bool(bool),
@@ -59,6 +60,37 @@ pub enum EqualityValueBuf {
     Bytes(Vec<u8>),
     Uuid([u8; 16]),
     Enum(String),
+}
+
+impl core::fmt::Debug for EqualityValueBuf {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Null => "Null",
+            Self::Bool(_) => "Bool(..)",
+            Self::Int(_) => "Int(..)",
+            Self::Timestamp(_) => "Timestamp(..)",
+            Self::Float(_) => "Float(..)",
+            Self::Text(_) => "Text(..)",
+            Self::Bytes(_) => "Bytes(..)",
+            Self::Uuid(_) => "Uuid(..)",
+            Self::Enum(_) => "Enum(..)",
+        })
+    }
+}
+
+impl Drop for EqualityValueBuf {
+    fn drop(&mut self) {
+        match self {
+            Self::Null => {}
+            Self::Bool(value) => value.zeroize(),
+            Self::Int(value) => value.zeroize(),
+            Self::Timestamp(value) => value.zeroize(),
+            Self::Float(value) => value.zeroize(),
+            Self::Text(value) | Self::Enum(value) => value.zeroize(),
+            Self::Bytes(value) => value.zeroize(),
+            Self::Uuid(value) => value.zeroize(),
+        }
+    }
 }
 
 impl EqualityValueBuf {
@@ -127,12 +159,22 @@ pub(crate) fn decrypted_equality_value(
 
 /// One encrypted cell of a write: its column, Jazz's native encoding of
 /// the value, and, for an equality-indexed column, the logical value its
-/// token hashes.
-#[derive(Debug, Clone, Copy)]
+/// token hashes. The value and the equality value are never printed.
+#[derive(Clone, Copy)]
 pub struct CellInput<'a> {
     pub column: EncryptedColumn<'a>,
     pub value: &'a [u8],
     pub equality: Option<EqualityValue<'a>>,
+}
+
+impl core::fmt::Debug for CellInput<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CellInput")
+            .field("column", &self.column)
+            .field("value", &"..")
+            .field("equality", &self.equality.map(|_| ".."))
+            .finish()
+    }
 }
 
 /// A sealed cell: the stored cell record and, for an equality-indexed
@@ -224,7 +266,8 @@ pub fn seal_cells(
 }
 
 /// What opening one stored value gives (§4.1–§4.3; migrations §3.2, §3.9).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A decrypted value is never printed.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Opened {
     /// Jazz's native encoding of the value, cleared on drop.
     Value(Zeroizing<Vec<u8>>),
@@ -247,6 +290,26 @@ pub enum Opened {
     /// Unreadable: `invalid-ciphertext`, `unsupported-format` or
     /// `superseded`.
     Unreadable(DataError),
+}
+
+impl core::fmt::Debug for Opened {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Value(_) => f.write_str("Value(..)"),
+            Self::StaleSpace { space, .. } => f
+                .debug_struct("StaleSpace")
+                .field("value", &"..")
+                .field("space", space)
+                .finish(),
+            Self::Empty => f.write_str("Empty"),
+            Self::Cleared => f.write_str("Cleared"),
+            Self::Missing { epoch_id } => f
+                .debug_struct("Missing")
+                .field("epoch_id", epoch_id)
+                .finish(),
+            Self::Unreadable(code) => f.debug_tuple("Unreadable").field(code).finish(),
+        }
+    }
 }
 
 impl Opened {
@@ -553,8 +616,8 @@ impl core::fmt::Debug for StreamValueReader<'_> {
     }
 }
 
-/// What starting to read a stored stream gives.
-#[derive(Debug)]
+/// What starting to read a stored stream gives. Plaintext is never
+/// printed.
 pub enum StreamOpen<'r> {
     /// The reader, and the plaintext of any records that completed inside
     /// `prefix` after its routing (empty when `prefix` was only the
@@ -566,6 +629,19 @@ pub enum StreamOpen<'r> {
     /// Not readable with the keys held: [`Opened::Missing`] or
     /// [`Opened::Unreadable`].
     Unreadable(Opened),
+}
+
+impl core::fmt::Debug for StreamOpen<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Reader { reader, .. } => f
+                .debug_struct("Reader")
+                .field("reader", reader)
+                .field("initial", &"..")
+                .finish(),
+            Self::Unreadable(opened) => f.debug_tuple("Unreadable").field(opened).finish(),
+        }
+    }
 }
 
 impl<'r> StreamValueReader<'r> {

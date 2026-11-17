@@ -287,12 +287,23 @@ pub fn move_row(
 /// space (the old space for a re-home), and the source values whose tokens
 /// cover every source that converts to the searched value: the searched
 /// value itself for an identity conversion (a re-home, or a re-encrypt
-/// without `convert`), or the list a declared `reverse` returns.
-#[derive(Debug, Clone, Copy)]
+/// without `convert`), or the list a declared `reverse` returns. The values
+/// are never printed.
+#[derive(Clone, Copy)]
 pub struct SourceIndex<'a> {
     pub table: TableTarget<'a>,
     pub column: EncryptedColumn<'a>,
     pub values: &'a [EqualityValue<'a>],
+}
+
+impl core::fmt::Debug for SourceIndex<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SourceIndex")
+            .field("table", &self.table)
+            .field("column", &self.column)
+            .field("values", &self.values.len())
+            .finish()
+    }
 }
 
 /// The two tag predicates of an equality query on a converting column:

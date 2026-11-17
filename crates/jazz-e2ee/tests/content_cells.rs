@@ -16,12 +16,13 @@ use jazz_e2ee::envelope::{self, Mechanism};
 use jazz_e2ee::mechanisms::{cell, equality};
 use jazz_e2ee::protocol::ProtocolError;
 use jazz_e2ee::protocol::content::cells::{
-    CellInput, Opened, StreamOpen, StreamResealer, StreamValueReader, begin_stream,
-    min_cell_record_len, open_cell, seal_cells, stream_routing,
+    CellInput, EqualityValueBuf, Opened, StreamOpen, StreamResealer, StreamValueReader,
+    begin_stream, min_cell_record_len, open_cell, seal_cells, stream_routing,
 };
+use jazz_e2ee::protocol::content::convert::SourceIndex;
 use jazz_e2ee::protocol::content::{
     CLEARED_MARKER, ContentError, CreationFate, DataError, HeldKeys, HeldSpace, KeyMark,
-    MissingKey, RowTarget, WriteChoice, WriteKey,
+    MissingKey, RowTarget, TableTarget, WriteChoice, WriteKey,
 };
 use jazz_e2ee::protocol::domain::{AppDomain, SharedDomain};
 use jazz_e2ee::protocol::records::space::SpaceAddress;
@@ -1233,4 +1234,67 @@ fn another_spaces_key_of_the_same_epoch_never_decides_a_stream() {
         read_stream(registry, &reader, &target, &stored, 10_000).err(),
         Some(ContentError::Missing { epoch_id: missing })
     );
+}
+
+/// Fails if `debug` shows `secret` as text, as a byte list or as hex.
+fn assert_redacted(debug: &str, secret: &[u8]) {
+    let text = String::from_utf8_lossy(secret);
+    let list = format!("{secret:?}");
+    let list = &list[1..list.len() - 1];
+    let hex: String = secret.iter().map(|byte| format!("{byte:02x}")).collect();
+    for shown in [&text[..], list, &hex] {
+        assert!(!debug.contains(shown), "{debug} shows {shown}");
+    }
+}
+
+/// Decrypted values, plaintext about to be sealed and equality values are
+/// never printed, wherever they are carried.
+#[test]
+fn plaintext_and_equality_values_never_print() {
+    let world = world(24);
+    let held = held_of(&world, ALICE, ROW);
+    let domain = shared(&world);
+    let address = space(ROW);
+    let target = row(&domain, &address, ROW_1);
+    let registry = &world.shared.registry;
+    let secret = b"very secret plaintext";
+    let text = core::str::from_utf8(secret).unwrap();
+    let opened = Opened::Value(Zeroizing::new(secret.to_vec()));
+    let stale = Opened::StaleSpace {
+        value: Zeroizing::new(secret.to_vec()),
+        space: space(OTHER_ROW),
+    };
+    let input = CellInput {
+        column: title(),
+        value: secret,
+        equality: Some(EqualityValue::Text(text)),
+    };
+    let stored = seal_stream(&world, &write_key(&held, &address), &target, secret, 64);
+    let stream = StreamValueReader::open(registry, &held, &target, &blob(), &stored).unwrap();
+    let StreamOpen::Reader { initial, .. } = &stream else {
+        panic!("a reader");
+    };
+    assert_eq!(&initial[..], secret, "the whole value opened");
+    let values = [EqualityValue::Text(text)];
+    let index = SourceIndex {
+        table: TableTarget {
+            domain: &domain,
+            space: &address,
+            table_id: TABLE,
+        },
+        column: title(),
+        values: &values,
+    };
+    for debug in [
+        format!("{opened:?}"),
+        format!("{stale:?}"),
+        format!("{input:?}"),
+        format!("{stream:?}"),
+        format!("{index:?}"),
+        format!("{:?}", EqualityValueBuf::Text(text.to_owned())),
+        format!("{:?}", EqualityValueBuf::Bytes(secret.to_vec())),
+        format!("{:?}", EqualityValueBuf::Enum(text.to_owned())),
+    ] {
+        assert_redacted(&debug, secret);
+    }
 }
