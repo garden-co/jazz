@@ -1,6 +1,9 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "facd0cf15e004443c0e966e82336fa37461783495c50c9375631705c4af96c5e"
+  },
   "tables": {
     "bandInvites": {
       "columns": { "bandId": "uuid", "code": "string" },

@@ -71,6 +71,8 @@ pub struct Range {
 )]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResolvedRange {
+    /// UTF-16 code units from the value's start, or UTF-8 bytes from
+    /// [`Range::resolve_utf8`].
     pub start: usize,
     pub end: usize,
     pub confidence: f64,
@@ -96,7 +98,34 @@ impl Range {
         }
     }
 
-    /// Where this range lands in `text`, the value at `version`.
+    /// The range of the UTF-8 byte offsets `range` (`str` indices, ordered)
+    /// of `text`, the value at `version`. Offsets inside a code point or
+    /// past the end are refused. The range is the same as
+    /// [`Range::capture`]'s: its `start` and `end` hints still count UTF-16
+    /// code units, so hosts that count those resolve it too.
+    pub fn capture_utf8(
+        text: &str,
+        version: Option<u64>,
+        range: std::ops::Range<usize>,
+    ) -> Result<Self, crate::NotCharBoundary> {
+        let start = crate::utf8_to_utf16(text, range.start)?;
+        let end = crate::utf8_to_utf16(text, range.end)?;
+        Ok(Self::capture(text, version, start, end))
+    }
+
+    /// Where this range lands in `text`, as [`Range::resolve`], with `start`
+    /// and `end` in UTF-8 bytes (`str` indices, always on char boundaries).
+    pub fn resolve_utf8(&self, text: &str, version: Option<u64>) -> ResolvedRange {
+        let resolved = self.resolve(text, version);
+        ResolvedRange {
+            start: crate::utf16_to_utf8(text, resolved.start),
+            end: crate::utf16_to_utf8(text, resolved.end),
+            ..resolved
+        }
+    }
+
+    /// Where this range lands in `text`, the value at `version`, in UTF-16
+    /// code units ([`Range::resolve_utf8`] gives UTF-8 bytes).
     pub fn resolve(&self, text: &str, version: Option<u64>) -> ResolvedRange {
         let text: Vec<u16> = text.encode_utf16().collect();
         let hint = self.start.map(|start| {

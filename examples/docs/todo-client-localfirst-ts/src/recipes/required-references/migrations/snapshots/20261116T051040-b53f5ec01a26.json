@@ -1,0 +1,39 @@
+{
+  "customers": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "name",
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "orders": {
+        "kind": "reverse",
+        "table": "orders",
+        "relation": "customer"
+      }
+    }
+  },
+  "orders": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "customerId",
+        "nullable": false,
+        "references": "customers"
+      }
+    ],
+    "relations": {
+      "customer": {
+        "kind": "forward",
+        "table": "customers",
+        "column": "customerId"
+      }
+    }
+  }
+}

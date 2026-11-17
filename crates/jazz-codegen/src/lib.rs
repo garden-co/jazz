@@ -3,6 +3,9 @@
 //!
 //! - [`model`]: the language-neutral [`App`] every back end reads.
 //! - [`ts`]: the TypeScript back end (`jazz.generated.ts`).
+//! - [`rust`]: the Rust back end (`src/jazz_app.rs`).
+//! - [`swift`]: the Swift back end (`JazzApp.swift`).
+//! - [`go`]: the Go back end (`jazzapp/jazz_app.go`).
 //! - [`migrations`]: `migrations create`, the schema diff and stub writer.
 //! - [`bindings`]: what committed bindings record, for staleness checks.
 //!
@@ -10,16 +13,25 @@
 //! and a [`Lang`] variant. Plain string writers, no templates.
 
 pub mod bindings;
+pub mod go;
 mod json_schema;
+pub mod kotlin;
 pub mod migrations;
 pub mod model;
 pub mod names;
+pub mod project;
 pub mod rust;
+pub mod swift;
 pub mod ts;
 
 use jazz::tools::deployment::artifact::{ArtifactError, json};
 
 pub use model::App;
+
+/// What every language's bindings tell their reader on their second line:
+/// an app's one source is its `schema.ts`, from which `generate` writes
+/// `jazz.app.json` and every language's bindings.
+pub(crate) const EDIT_NOTE: &str = "Edit schema.ts and run `npx jazz-tools generate`.";
 
 /// Why generating was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +87,9 @@ impl CodegenError {
 pub enum Lang {
     TypeScript,
     Rust,
+    Swift,
+    Go,
+    Kotlin,
 }
 
 impl Lang {
@@ -83,14 +98,23 @@ impl Lang {
         match name {
             "ts" | "typescript" => Ok(Lang::TypeScript),
             "rust" | "rs" => Ok(Lang::Rust),
+            "swift" => Ok(Lang::Swift),
+            "kotlin" | "kt" => Ok(Lang::Kotlin),
+            "go" | "golang" => Ok(Lang::Go),
             other => Err(CodegenError::unsupported(format!(
-                "generating bindings in `{other}` is not supported yet; supported: ts, rust"
+                "generating bindings in `{other}` is not supported yet; supported: ts, rust, swift, kotlin, go"
             ))),
         }
     }
 
-    /// Every language, in the order `jazz-tools generate` handles them.
-    pub const ALL: &'static [Lang] = &[Lang::TypeScript, Lang::Rust];
+    /// Every language `jazz-tools generate` handles, in that order.
+    pub const ALL: &'static [Lang] = &[
+        Lang::TypeScript,
+        Lang::Rust,
+        Lang::Swift,
+        Lang::Kotlin,
+        Lang::Go,
+    ];
 
     /// The file whose presence beside `jazz.app.json` says the app is
     /// written in this language, so `validate` writes its bindings.
@@ -98,20 +122,46 @@ impl Lang {
         match self {
             Lang::TypeScript => "package.json",
             Lang::Rust => "Cargo.toml",
+            Lang::Swift => "Package.swift",
+            Lang::Go => "go.mod",
+            Lang::Kotlin => kotlin::MARKER,
         }
     }
 
     /// Whether the app in `dir` (the directory of its `jazz.app.json`) is
     /// written in this language: a TS app has a `package.json`; a Rust app
-    /// a `Cargo.toml` with a `[package]` that depends on `jazz-app` (a
+    /// a `Cargo.toml` with a `[package]` that depends on `jazz-app-support` (a
     /// workspace root or another crate beside a TS app's files is not
-    /// one). Committed bindings say so too; the caller checks those.
+    /// one); a Go app a `go.mod` that requires the Go runtime module.
+    /// Committed bindings say so too; the caller checks those.
     pub fn detected_in(self, dir: &std::path::Path) -> bool {
         let marker = dir.join(self.marker());
         match self {
-            Lang::TypeScript => marker.exists(),
+            // The files may sit in `src/` or `src/lib/` of the package, as
+            // the npm CLI finds them.
+            Lang::TypeScript => {
+                marker.exists()
+                    || (dir.ends_with("src")
+                        && dir.parent().is_some_and(|p| p.join(self.marker()).exists()))
+                    || (dir.ends_with("src/lib")
+                        && dir
+                            .parent()
+                            .and_then(|p| p.parent())
+                            .is_some_and(|p| p.join(self.marker()).exists()))
+            }
+            // Either build script, Kotlin DSL or Groovy.
+            Lang::Kotlin => [marker, dir.join(kotlin::GROOVY_MARKER)]
+                .iter()
+                .any(|script| {
+                    std::fs::read_to_string(script).is_ok_and(|build| kotlin::is_app_build(&build))
+                }),
             Lang::Rust => std::fs::read_to_string(marker)
                 .is_ok_and(|manifest| rust::is_app_manifest(&manifest)),
+            Lang::Swift => std::fs::read_to_string(marker)
+                .is_ok_and(|manifest| swift::is_app_manifest(&manifest)),
+            Lang::Go => {
+                std::fs::read_to_string(marker).is_ok_and(|go_mod| go::is_app_module(&go_mod))
+            }
         }
     }
 
@@ -120,6 +170,9 @@ impl Lang {
         match self {
             Lang::TypeScript => ts::FORMAT,
             Lang::Rust => rust::FORMAT,
+            Lang::Swift => swift::FORMAT,
+            Lang::Go => go::FORMAT,
+            Lang::Kotlin => kotlin::FORMAT,
         }
     }
 
@@ -128,6 +181,9 @@ impl Lang {
         match self {
             Lang::TypeScript => ts::FILE,
             Lang::Rust => rust::FILE,
+            Lang::Swift => swift::FILE,
+            Lang::Go => go::FILE,
+            Lang::Kotlin => kotlin::FILE,
         }
     }
 }
@@ -144,6 +200,9 @@ pub fn generate_app(lang: Lang, app: &App) -> Result<String, CodegenError> {
     match lang {
         Lang::TypeScript => ts::generate(app),
         Lang::Rust => rust::generate(app),
+        Lang::Swift => swift::generate(app),
+        Lang::Go => go::generate(app),
+        Lang::Kotlin => kotlin::generate(app),
     }
 }
 
@@ -160,5 +219,16 @@ fn refuse_stranded(app: &App) -> Result<(), CodegenError> {
     match app.stranded.as_slice() {
         [] => Ok(()),
         stranded => Err(CodegenError::new(stranded.join("\n"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swift_is_available_from_the_cli() {
+        assert_eq!(Lang::parse("swift").unwrap(), Lang::Swift);
+        assert!(Lang::ALL.contains(&Lang::Swift));
     }
 }

@@ -3,11 +3,12 @@ import { type InferPageType, loader } from "fumadocs-core/source";
 import { lucideIconsPlugin } from "fumadocs-core/source/lucide-icons";
 import { toFumadocsSource } from "fumadocs-mdx/runtime/server";
 import { stripTodoComments } from "./llm-text";
+import { withoutDisabledLanguages } from "./languages/source";
 
 // See https://fumadocs.dev/docs/headless/source-api for more info
 export const source = loader({
   baseUrl: "/docs",
-  source: docs.toFumadocsSource(),
+  source: withoutDisabledLanguages(docs.toFumadocsSource()),
   plugins: [lucideIconsPlugin()],
 });
 

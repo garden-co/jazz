@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createAuthStateStore, type AuthState } from "./auth-state.js";
+import { createAuthStateStore, mapAuthReason, type AuthState } from "./auth-state.js";
 
 function toBase64Url(value: unknown): string {
   const encoded = Buffer.from(JSON.stringify(value), "utf8").toString("base64");
@@ -181,5 +181,24 @@ describe("AuthState — flattened shape", () => {
   it("exposes external authMode from generic JWTs at construction", () => {
     const store = createAuthStateStore({ appId: "a", jwtToken: validJwt });
     expect(store.getState().authMode).toBe("external");
+  });
+});
+
+describe("mapAuthReason", () => {
+  // The native relay forwards Rust's classification; it is used as is.
+  it.each(["expired", "missing", "invalid", "disabled", "revoked"] as const)(
+    "takes a classified reason %s as is",
+    (reason) => {
+      expect(mapAuthReason(reason)).toBe(reason);
+    },
+  );
+
+  // An older native build, or a server's WireError, sends only the message.
+  it("classifies a server message by its wording when no reason came with it", () => {
+    expect(mapAuthReason("native relay socket connect failed: AuthFailed: token expired")).toBe(
+      "expired",
+    );
+    expect(mapAuthReason("identity revoked")).toBe("revoked");
+    expect(mapAuthReason("bad signature")).toBe("invalid");
   });
 });

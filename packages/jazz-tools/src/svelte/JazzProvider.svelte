@@ -95,7 +95,7 @@
 {/snippet}
 {#if client}
   {#key client}
-    <JazzSvelteClientProvider {client}>
+    <JazzSvelteClientProvider {client} inSession>
       {#snippet children()}{@render children()}{/snippet}
       {#snippet fallback()}{@render pending()}{/snippet}
     </JazzSvelteClientProvider>

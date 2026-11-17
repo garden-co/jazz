@@ -1,5 +1,8 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "aaac9bdddf2f0afdf24a95327c75d072978351fc386847d8e13c3dacc2e55f50"
+  },
   "tables": { "todos": { "columns": { "title": "string", "done": "boolean", "owner_id": "uuid" } } }
 }

@@ -1,10 +1,14 @@
 #!/usr/bin/env node
 /**
- * Every example app's committed bindings are what `jazz-tools generate`
- * writes from its jazz.app.json: `generate --check` in each directory that
- * commits a jazz.app.json (apps, the docs' recipe apps beside them, and
- * Rust crates, whose src/jazz_app.rs it checks too).
- * A stale or missing jazz.generated.ts otherwise only shows when a backend
+ * Every example app's committed jazz.app.json, jazz.permissions.json and
+ * bindings are what `jazz-tools generate` writes from its TS (schema.ts):
+ * `generate --check` in each directory that commits a jazz.app.json (apps,
+ * the docs' recipe apps beside them, Rust crates (src/jazz_app.rs), Go
+ * modules, Swift packages (JazzApp.swift) and Gradle projects (JazzApp.kt),
+ * whose language the directory names). StagePlan's go-cli, rust-cli,
+ * swift-cli and kotlin-cli re-export react-localfirst's TS, so this also keeps
+ * their JSON StagePlan's (and examples/docs/todo-client-kotlin's the docs
+ * todo app's). A stale file otherwise only shows when a backend
  * starts. Runs against the jazz-tools CLI the TypeScript partition built.
  */
 import { spawnSync } from "node:child_process";

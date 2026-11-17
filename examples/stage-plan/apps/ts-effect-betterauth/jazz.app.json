@@ -1,6 +1,9 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "2ce75f9ae7ddb876ef6adaa4cdbe3e7c93aec8a0e7324140a32af6a9c1b8d4ed"
+  },
   "tables": {
     "activity": {
       "columns": {

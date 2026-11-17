@@ -324,6 +324,98 @@ describe("createJazz", () => {
     expect(probe.headers.get("x-jazz-stream")).toBeNull();
   }, 60_000);
 
+  // The backend reads a socket's credentials from its prelude's `auth`, and
+  // forwards exactly those: a credential stated only beside an empty `auth`
+  // is no credential.
+  it("reads a socket's credentials only from its prelude's auth", async () => {
+    // Record every prelude the backend forwards to the core.
+    const forwarded: Array<Record<string, unknown>> = [];
+    const realOpenSocket = JazzCore.prototype.openSocket;
+    JazzCore.prototype.openSocket = function (this: unknown, ...args: unknown[]) {
+      const sock = (
+        realOpenSocket as (...a: unknown[]) => { send(data: Uint8Array): boolean }
+      ).apply(this, args);
+      let first = true;
+      const realSend = sock.send.bind(sock);
+      sock.send = (data: Uint8Array) => {
+        if (first) {
+          first = false;
+          try {
+            forwarded.push(JSON.parse(new TextDecoder().decode(data)) as Record<string, unknown>);
+          } catch {
+            // Not a prelude.
+          }
+        }
+        return realSend(data);
+      };
+      return sock;
+    } as never;
+    cleanups.push(async () => {
+      JazzCore.prototype.openSocket = realOpenSocket;
+    });
+
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    const appId = jazz.appId;
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const wsUrl = `${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`;
+
+    // Alice signs in; her forwarded prelude carries her identity.
+    const alice = await userSession(appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "alice private", owner: alice.session!.user! })
+      .wait({ tier: "global" });
+    const aliceAuth = forwarded.find(
+      (p) =>
+        (p.auth as { backend_session?: { user_id?: string } })?.backend_session?.user_id ===
+        "alice",
+    );
+    const aliceIdentity = aliceAuth?.peer_identity as string | undefined;
+    expect(typeof aliceIdentity).toBe("string");
+
+    // A prelude whose credential is outside `auth`.
+    forwarded.length = 0;
+    const deviceToken = signToken(generateSecret(), { audience: appId });
+    const socket = new NodeWebSocket(wsUrl);
+    socket.addEventListener("open", () =>
+      socket.send(
+        JSON.stringify({ peer_identity: aliceIdentity, jwt_token: deviceToken, auth: {} }),
+      ),
+    );
+    // A refused prelude is answered with a close; an admitted one keeps the
+    // socket open and relays the core's frames, so a short wait with no close
+    // means admitted. (The close is preceded by a "not signed in" message, so
+    // the close code, not the first frame, is the signal.)
+    const outcome = await new Promise<string>((resolve) => {
+      const open = setTimeout(() => resolve("admitted (socket open)"), 3000);
+      socket.addEventListener("close", (event) => {
+        clearTimeout(open);
+        resolve(`closed ${event.code}`);
+      });
+    });
+    socket.close();
+
+    // The prelude is refused outright: never relayed to the core.
+    expect(outcome).toBe("closed 1008");
+    // Nothing is forwarded unless a credential is present in `auth`.
+    const forwardedBare = forwarded.find((p) => {
+      const auth = p.auth as Record<string, unknown> | undefined;
+      return (
+        p.peer_identity === aliceIdentity &&
+        auth?.backend_secret != null &&
+        auth?.jwt_token == null &&
+        auth?.backend_session == null
+      );
+    });
+    expect(forwardedBare).toBeUndefined();
+
+    // Positive control: alice's own prelude (above) still reached the core
+    // vouched — its `auth` carried her session alongside the backend secret,
+    // exactly one identity credential, as a genuine vouched prelude does.
+    expect((aliceAuth?.auth as { backend_secret?: unknown })?.backend_secret).toBeTruthy();
+    expect((aliceAuth?.auth as { jwt_token?: unknown })?.jwt_token).toBeFalsy();
+  }, 60_000);
+
   for (const sockets of [true, false]) {
     it(`lets go of its clients' ${sockets ? "sockets" : "HTTP streams"} when it closes, so its server can`, async () => {
       const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
@@ -1141,6 +1233,118 @@ describe("createJazz", () => {
       .poll(() => alice.db.getSyncStatus().link, { timeout: 5_000, interval: 20 })
       .toMatchObject({ state: "offline", reason: "auth" });
     await expect(jazz.revokeUser("")).rejects.toThrow(/pass the user's id/);
+  }, 30_000);
+
+  it("ends a user's sessions on other instances on revokeUser (serverless)", async () => {
+    // Three instances of one app on one core, as on a serverless host: one
+    // holds Alice's socket (and Bob's), one her HTTP stream, and the sign-out
+    // handler runs on the third.
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const signedOut = new Set<string>();
+    const instance = async () => {
+      const jazz = await createJazz({
+        app,
+        permissions,
+        store: remote({ url: core.url, appId, secret: core.adminSecret }),
+        authenticate: (request) => {
+          const userId = request.headers.get("x-test-user");
+          return userId && !signedOut.has(userId) ? { userId, expiresAt: inAnHour() } : null;
+        },
+      }).ready();
+      cleanups.push(() => jazz.close());
+      return jazz;
+    };
+    const [socketHost, streamHost, signOutHandler] = await Promise.all([
+      instance(),
+      instance(),
+      instance(),
+    ]);
+    const socketOrigin = await serve(socketHost, { sockets: true });
+    const streamOrigin = await serve(streamHost, { sockets: false });
+    // The page is on the stream host's origin, so its client syncs over the
+    // HTTP stream there.
+    const previous = (globalThis as { location?: unknown }).location;
+    (globalThis as { location?: unknown }).location = {
+      host: new URL(streamOrigin).host,
+      href: `${streamOrigin}/`,
+    };
+    cleanups.push(async () => {
+      (globalThis as { location?: unknown }).location = previous;
+    });
+    const viaStream = await userSession(appId, streamOrigin, "alice");
+    const viaSocket = await userSession(appId, socketOrigin, "alice");
+    for (const client of [viaStream, viaSocket])
+      await client.db
+        .insert(app.todos, { title: "signed in", owner: client.session!.user! })
+        .wait({ tier: "global" });
+    expect(requestPaths.some((path) => path.endsWith(`/apps/${appId}/stream`))).toBe(true);
+
+    signedOut.add("alice");
+    // None of Alice's sessions is on this instance.
+    expect(await signOutHandler.revokeUser("alice")).toBe(0);
+    await expect
+      .poll(() => viaSocket.db.getSyncStatus().link, { timeout: 5_000, interval: 20 })
+      .toMatchObject({ state: "offline", reason: "auth" });
+    // The stream host ended Alice's stream session as revoked, and refuses
+    // her new ones. (Its client then keeps reopening streams instead of
+    // going offline, as after a revokeUser on the same instance.)
+    const streamsBefore = requestPaths.filter((path) => path.endsWith(`/apps/${appId}/stream`));
+    await expect
+      .poll(
+        () =>
+          requestPaths.filter((path) => path.endsWith(`/apps/${appId}/stream`)).length >
+          streamsBefore.length,
+        { timeout: 5_000, interval: 20 },
+      )
+      .toBe(true);
+    expect(viaStream.db.getSyncStatus().link.state).not.toBe("connected");
+    const late = viaStream.db.insert(app.todos, {
+      title: "after revocation",
+      owner: viaStream.session!.user!,
+    });
+    await expect(late.wait({ tier: "global", timeoutMs: 1_000 })).rejects.toThrow();
+
+    // Signing in again afterwards works, on any instance, and so does another
+    // user on the instance that held Alice's socket.
+    signedOut.delete("alice");
+    const bob = await userSession(appId, socketOrigin, "bob");
+    await bob.db
+      .insert(app.todos, { title: "unaffected", owner: bob.session!.user! })
+      .wait({ tier: "global" });
+  }, 60_000);
+
+  it("never takes row data for the core's revocation", async () => {
+    // Everyone reads every todo, so Bob's text reaches Alice's session.
+    const shared = {
+      format: 1,
+      tables: { todos: { read: "true", insert: "owner = session.user" } },
+    };
+    const jazz = await createJazz({
+      app,
+      permissions: shared,
+      store: memory(),
+      authenticate,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const alice = await userSession(jazz.appId, await serve(jazz, { sockets: true }), "alice");
+    const bob = await userSession(jazz.appId, await serve(jazz, { sockets: true }), "bob");
+    // Exactly the core's message for a revoked session, as a row value.
+    const forged = "session revoked: jazz.revokeUser ended this user's sessions";
+    await bob.db
+      .insert(app.todos, { title: forged, owner: bob.session!.user! })
+      .wait({ tier: "global" });
+    await expect
+      .poll(async () => (await alice.db.all(app.todos, { tier: "remote" })).map((t) => t.title), {
+        timeout: 5_000,
+        interval: 50,
+      })
+      .toContain(forged);
+    await alice.db
+      .insert(app.todos, { title: "still signed in", owner: alice.session!.user! })
+      .wait({ tier: "global" });
+    expect(alice.db.getSyncStatus().link).toMatchObject({ state: "connected" });
   }, 30_000);
 
   it("picks up a user's changed claims when the session re-authenticates", async () => {
