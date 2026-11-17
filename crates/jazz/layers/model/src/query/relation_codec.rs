@@ -1126,6 +1126,14 @@ fn validate_wire(value: &WireRelationQuery) -> WireResult<()> {
                     let mut labels = BTreeSet::new();
                     for arm in inputs {
                         self.text(&arm.label)?;
+                        // An unnamed arm (empty label) is a client's request
+                        // for its derived label; only the client-query entry
+                        // points accept it, and fill it before anything else
+                        // sees the query (`decode_client_query_postcard`).
+                        if arm.label.is_empty() && accepts_unnamed_union_arms() {
+                            self.expr(&arm.input, depth + 1)?;
+                            continue;
+                        }
                         if arm.label.is_empty()
                             || arm.label.len() > 4096
                             || arm.label.contains('\0')

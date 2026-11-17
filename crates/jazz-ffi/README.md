@@ -289,7 +289,9 @@ row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
     table to itself, up to `maxDepth` (default 10).
   - `{"union": [Q, …], "orderBy"?, "limit"?, "offset"?}`: every arm's rows,
     as TS's union: a row matched by two arms comes twice, and `limit` /
-    `offset` count every occurrence; arms read one table, with `where` only.
+    `offset` count every occurrence; arms read one table, with `where` and
+    an optional `"label"` only. An arm without a label is labelled by what
+    it reads, as every client labels it, so two identical arms need labels.
     Subscribing to a union whose arms overlap can mis-apply removals (deltas
     name rows by id), as in jazz-app-support.
   - `{"table", "history": true, "where"?, "orderBy"?, "limit"?}`: the

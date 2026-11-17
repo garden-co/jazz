@@ -1501,7 +1501,7 @@ impl Binding {
         let opts = read_opts(opts)?;
         let explicit = author.is_some();
         let author = self.read_author(author)?;
-        let query: Query = postcard::from_bytes(query)
+        let query: Query = jazz_model::query::decode_client_query_postcard(query)
             .map_err(|error| HostError::Argument(format!("undecodable query: {error}")))?;
         let mut prepared = self.db.prepare_query(&query)?;
         let stream = match author {
