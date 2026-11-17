@@ -1251,6 +1251,13 @@ impl WireKind {
         matches!(self, WireKind::Serializable { reads, .. }
             if reads.iter().any(|read| read.view != ReadViewSourceSpec::Current))
     }
+
+    /// It holds a read with a text prefix/suffix predicate, so it needs a
+    /// link that negotiated [`crate::wire::FEATURE_TEXT_AFFIX_PREDICATES`].
+    pub fn reads_text_affix(&self) -> bool {
+        matches!(self, WireKind::Serializable { reads, .. }
+            if reads.iter().any(|read| read.query.uses_text_affix()))
+    }
 }
 
 /// [`WireKind`]'s encoding. Variants are only ever appended.
@@ -2235,13 +2242,177 @@ pub(crate) struct Echoable {
     pub(crate) op: u32,
 }
 
+/// What one upstream connection did with a live read. Each connection
+/// starts every read at `Unsent` ([`LinkRead::reset_for`]), and only that
+/// connection's messages move it on.
+#[derive(Clone, Debug)]
+enum Phase {
+    /// Not asked on this connection yet: the link is down, or its `Read`
+    /// still waits in the outbox.
+    Unsent,
+    /// Asked, not yet answered.
+    Sent,
+    /// Answered (a `Settled`): `global`, by the global authority.
+    Answered { global: bool },
+    /// Refused: by the upstream (`Refused`), or by this store, which
+    /// refused the link itself (see [`Inner::refuse_upstream`]).
+    Refused { error: Error },
+}
+
+/// A live read's state on one upstream connection, tagged with that
+/// connection's number (`None` while no link is up). What the read keeps
+/// across connections (its resume point, holds, released rows, visible
+/// position, last answer) lives beside it in [`LiveRead`].
+#[derive(Clone, Debug)]
+struct LinkRead {
+    connection: Option<u64>,
+    phase: Phase,
+    /// Whether this connection told the read what it holds yet (its first
+    /// `Holds`). Apart from `phase`: the server sends a read's first
+    /// `Holds` ahead of its `Settled`, and a read refused for a link this
+    /// store refused may be told before the refusal lifts.
+    told: bool,
+}
+
+impl LinkRead {
+    fn new(connection: Option<u64>) -> Self {
+        LinkRead {
+            connection,
+            phase: Phase::Unsent,
+            told: false,
+        }
+    }
+
+    /// The one reset: the read starts over on `connection`, a new link, or
+    /// none once the link dropped. Nothing the last connection said about
+    /// it stands.
+    fn reset_for(&mut self, connection: Option<u64>) {
+        *self = LinkRead::new(connection);
+    }
+
+    /// Whether a message from `connection` speaks for this state: one
+    /// from an older connection, or from a link that dropped, does not.
+    fn current(&self, connection: u64) -> bool {
+        self.connection == Some(connection)
+    }
+
+    /// Its `Read` went out on `connection`.
+    fn sent(&mut self, connection: u64) {
+        if self.current(connection) && matches!(self.phase, Phase::Unsent) {
+            self.phase = Phase::Sent;
+        }
+    }
+
+    /// `connection` answered it. An answer lifts a refusal: a read attached
+    /// before the link's `Welcome` took the last link's (see
+    /// `Client::uncatalogued`), which no longer applies.
+    fn answered(&mut self, connection: u64, global: bool) -> bool {
+        if !self.current(connection) {
+            return false;
+        }
+        self.phase = Phase::Answered { global };
+        true
+    }
+
+    /// `connection` refused it.
+    fn refused(&mut self, connection: u64, error: Error) -> bool {
+        if !self.current(connection) {
+            return false;
+        }
+        self.phase = Phase::Refused { error };
+        true
+    }
+
+    /// This store refused the link (it dropped it, see
+    /// [`Inner::refuse_upstream`]), or refuses every link: nothing answers
+    /// the read until the next connection does.
+    fn refuse_link(&mut self, error: Error) {
+        self.phase = Phase::Refused { error };
+    }
+
+    /// A refusal on `connection` lifted before any answer (the catalogue
+    /// it refused under was mirrored): the read waits for its answer.
+    fn unrefused(&mut self, connection: u64) {
+        if self.current(connection) && matches!(self.phase, Phase::Refused { .. }) {
+            self.phase = Phase::Sent;
+        }
+    }
+
+    /// `connection` told it what it holds: whether this is its first
+    /// `Holds` on that connection (`None`: another connection's).
+    fn told(&mut self, connection: u64) -> Option<bool> {
+        if !self.current(connection) {
+            return None;
+        }
+        Some(!std::mem::replace(&mut self.told, true))
+    }
+
+    /// The answer on this connection, if any: whether it is global.
+    fn answer(&self) -> Option<bool> {
+        match self.phase {
+            Phase::Answered { global } => Some(global),
+            _ => None,
+        }
+    }
+
+    fn refusal(&self) -> Option<&Error> {
+        match &self.phase {
+            Phase::Refused { error } => Some(error),
+            _ => None,
+        }
+    }
+}
+
+/// What a live read's subscribers observe of it, shared with them (a
+/// subscription's gate and deltas, a relay's session reads). Written only
+/// by [`LiveRead::publish`], from the read's state: nothing else sets it.
+#[derive(Debug, Default)]
+pub(crate) struct ReadSignal {
+    /// Answered on the current connection, and whether globally: what a
+    /// first load waits for, and what a relay passes on to its sessions.
+    answered: StdCell<Option<bool>>,
+    /// Confirmed by an upstream, on this connection or the last one to
+    /// answer, and whether globally: what its deltas report. An outage
+    /// leaves it as it was (the last known); a client tells a current
+    /// result as confirmed while its link is up.
+    confirmed: StdCell<Option<bool>>,
+    /// Why the current connection refused it, if it did.
+    refused: RefCell<Option<Error>>,
+}
+
+impl ReadSignal {
+    pub(crate) fn answered(&self) -> bool {
+        self.answered.get().is_some()
+    }
+
+    pub(crate) fn answered_globally(&self) -> bool {
+        self.answered.get() == Some(true)
+    }
+
+    pub(crate) fn confirmed(&self) -> bool {
+        self.confirmed.get().is_some()
+    }
+
+    pub(crate) fn confirmed_globally(&self) -> bool {
+        self.confirmed.get() == Some(true)
+    }
+
+    pub(crate) fn refusal(&self) -> Option<Error> {
+        self.refused.borrow().clone()
+    }
+}
+
 /// Subscription-only state attached to an active read.
 struct LiveRead {
     refs: usize,
     reach: RemoteReach,
-    answered: Rc<StdCell<bool>>,
-    global: Rc<StdCell<bool>>,
-    refused: Rc<RefCell<Option<Error>>>,
+    /// Its state on the current (or last) upstream connection.
+    link: LinkRead,
+    /// The last answer any connection gave it, and whether it was global:
+    /// kept across outages and reconnects until a new answer replaces it.
+    confirmed: Option<bool>,
+    /// What its subscribers see of `link` and `confirmed`.
+    signal: Rc<ReadSignal>,
     /// The highest position the upstream settled this read through: its
     /// results read as of it (or the connection's, when that is further),
     /// see `Inner::visible_read`. Kept across reconnects.
@@ -2250,12 +2421,15 @@ struct LiveRead {
     /// supporting rows ([`SyncMessage::Holds`]): no other read's listing
     /// drops them. Kept across reconnects until the read's first `Holds`
     /// on the new connection replaces them, so a resumed read the server
-    /// answers from what the replica held finds them still there.
+    /// answers from what the replica held finds them still there. A row
+    /// that replacement drops and no live read holds is judged again by the
+    /// server (see `Db::client_apply`): shipped whole if still readable,
+    /// else evicted.
     ///
-    /// Two cases over-retain, by design: a row held only under the holds a
-    /// replacing `Holds` dropped is not judged again until a later listing
-    /// leaves it out, and a read the server never answers again (its
-    /// upstream gone for good) keeps its holds until it closes.
+    /// Two cases over-retain, by design: a row only a closed read's kept
+    /// holds named (see `Client::closed_holds`) stays as cold cache, as any
+    /// closed read's rows do, and a read the server never answers again
+    /// (its upstream gone for good) keeps its holds until it closes.
     holds: HashMap<String, HashSet<[u8; 16]>>,
     /// Rows its holds dropped since its resume point last moved: that
     /// point may still count them as held (a support row released with
@@ -2265,13 +2439,58 @@ struct LiveRead {
     /// from the store (a reload, or the read reopened) may count rows its
     /// holds here never named, so it is never kept until it settles again.
     settled_here: bool,
-    /// Whether this connection told the read what it holds yet.
-    told: bool,
+}
+
+impl LiveRead {
+    /// Tell its subscribers what its state now is.
+    fn publish(&self) {
+        self.signal.answered.set(self.link.answer());
+        self.signal.confirmed.set(self.confirmed);
+        *self.signal.refused.borrow_mut() = self.link.refusal().cloned();
+    }
+
+    /// Its `Read` goes out again on `connection`, or the link it was on
+    /// dropped (`None`): its per-connection state starts over. What it
+    /// holds, its resume point and the last answer it had stand.
+    fn reset_for(&mut self, connection: Option<u64>) {
+        self.link.reset_for(connection);
+        self.publish();
+    }
+
+    fn answered(&mut self, connection: u64, global: bool) -> bool {
+        if !self.link.answered(connection, global) {
+            return false;
+        }
+        self.confirmed = Some(global);
+        self.publish();
+        true
+    }
+
+    fn refused(&mut self, connection: u64, error: Error) {
+        if self.link.refused(connection, error) {
+            self.publish();
+        }
+    }
+
+    fn refuse_link(&mut self, error: Error) {
+        self.link.refuse_link(error);
+        self.publish();
+    }
+
+    fn unrefused(&mut self, connection: u64) {
+        self.link.unrefused(connection);
+        self.publish();
+    }
+
+    /// Whether the current connection told it what it holds.
+    fn told(&self) -> bool {
+        self.link.told
+    }
 }
 
 enum ReadLifetime {
     Once { historical: bool },
-    Live(LiveRead),
+    Live(Box<LiveRead>),
 }
 
 /// Query identity and settlement metadata shared by every active upstream read.
@@ -2643,9 +2862,9 @@ pub(crate) fn may_wait(link: Link) -> bool {
 
 /// When a gated opening is released.
 pub(crate) struct Gate {
-    pub(crate) answered: Rc<StdCell<bool>>,
-    /// Whether the answer is the global authority's.
-    pub(crate) global: Rc<StdCell<bool>>,
+    /// The read it waits for: released once the current connection
+    /// answers it.
+    pub(crate) signal: Rc<ReadSignal>,
     pub(crate) hint: Rc<StdCell<Link>>,
     /// Held on a live link: leaving it (even for a new attempt) releases.
     pub(crate) live: bool,
@@ -2672,7 +2891,7 @@ impl Gate {
     }
 
     pub(crate) fn open(&self) -> bool {
-        if self.answered.get() {
+        if self.signal.answered() {
             return true;
         }
         let link = self.hint.get();
@@ -2696,9 +2915,13 @@ pub(crate) enum SettledBy {
     /// By this store: `true` when it is the global authority.
     Always(bool),
     Never,
-    /// By the upstream's answer, and whether that answer is the global
-    /// authority's.
-    Remote(Rc<StdCell<bool>>, Rc<StdCell<bool>>),
+    /// By the upstream's last answer, and whether that answer is the
+    /// global authority's: an outage leaves it standing (a client tells
+    /// a current result by it and its link being up).
+    Remote(Rc<ReadSignal>),
+    /// By the current connection's answer: a relay's session read, which
+    /// the relay settles only as far as its upstream does now.
+    Link(Rc<ReadSignal>),
 }
 
 impl SettledBy {
@@ -2706,7 +2929,8 @@ impl SettledBy {
         match self {
             SettledBy::Always(_) => true,
             SettledBy::Never => false,
-            SettledBy::Remote(answered, _) => answered.get(),
+            SettledBy::Remote(signal) => signal.confirmed(),
+            SettledBy::Link(signal) => signal.answered(),
         }
     }
 
@@ -2715,7 +2939,8 @@ impl SettledBy {
         let global = match self {
             SettledBy::Always(authority) => *authority,
             SettledBy::Never => false,
-            SettledBy::Remote(answered, global) => answered.get() && global.get(),
+            SettledBy::Remote(signal) => signal.confirmed_globally(),
+            SettledBy::Link(signal) => signal.answered_globally(),
         };
         if global {
             DurabilityTier::Global
@@ -4550,7 +4775,8 @@ impl Inner {
             .iter()
         {
             let row = RowUuid::from_bytes(found.id);
-            let can = readable(
+            // Just read, nothing written since: an existing row.
+            let can = readable_existing(
                 self,
                 &follow.policies,
                 table,
@@ -6471,7 +6697,7 @@ impl Inner {
                             .is_some_and(|held| rows.iter().any(|row| held.contains(row)))
                     };
                     live.settled_here
-                        && live.told
+                        && live.told()
                         && !counts(&live.holds)
                         && !counts(&live.released)
                 });
@@ -7918,7 +8144,7 @@ impl Client {
                 reads
                     .get(id)
                     .and_then(ActiveRead::live)
-                    .is_some_and(|live| !live.told)
+                    .is_some_and(|live| !live.told())
             });
             !waiting.is_empty()
         });
@@ -7969,14 +8195,24 @@ impl Client {
         self.pending.iter().find(|p| p.id == *id).map(|p| p.tx)
     }
 
-    /// Whether the upstream live read under `key` was answered by the
-    /// global authority.
+    /// Whether the current connection answered the upstream live read
+    /// under `key` as the global authority.
     fn settled_globally(&self, key: &str) -> bool {
         self.live_reads
             .get(key)
             .and_then(|id| self.reads.get(id))
             .and_then(ActiveRead::live)
-            .is_some_and(|live| live.global.get())
+            .is_some_and(|live| live.link.answer() == Some(true))
+    }
+
+    /// The one reset of every live read's per-connection state: on a
+    /// detach (no link: `None`) and on each new connection (its number).
+    /// What a read keeps across connections (its holds, resume point,
+    /// visible position and last answer) stands.
+    fn reset_reads(&mut self, connection: Option<u64>) {
+        for live in self.reads.values_mut().filter_map(ActiveRead::live_mut) {
+            live.reset_for(connection);
+        }
     }
 
     /// How far the live read `key` is settled: its own settle, or the
@@ -8129,14 +8365,11 @@ impl Db {
         client.hint.set(link);
         // A new server session knows nothing: attach every remote query
         // again and resend unsettled commits (the server dedupes by node
-        // and transaction).
-        // What the old session refused, the new one answers afresh, and
-        // what it said each read holds stands only until the new one says
-        // (a transport swapped without a detach included).
-        for remote in client.reads.values_mut().filter_map(ActiveRead::live_mut) {
-            remote.refused.borrow_mut().take();
-            remote.told = false;
-        }
+        // and transaction). The new link has its own number: each read
+        // starts over on it (a transport swapped without a detach
+        // included), and nothing an older link sends moves it on.
+        client.connection += 1;
+        client.reset_reads(Some(client.connection));
         let resubscribe: Vec<SyncMessage> = client
             .reads
             .iter()
@@ -8242,7 +8475,6 @@ impl Db {
         client.unadmitted = false;
         client.catalogued = false;
         client.context = None;
-        client.connection += 1;
         let connection = client.connection;
         if client.stranded {
             inner.refuse_upstream(stranded());
@@ -8502,16 +8734,9 @@ impl Db {
                 .map(|op| inner.stored_op(op, &schema))
                 .collect::<Result<Vec<_>, _>>()?;
             if inner.tx.is_some() {
-                // The claims a session write is staged with travel with it.
-                if inner.capture_claims.is_none()
-                    && let Some(author) = ops
-                        .iter()
-                        .find(|op| op.is_session())
-                        .and_then(StagedOp::author)
-                {
-                    inner.capture_claims =
-                        Some(inner.claims.get(&author).cloned().unwrap_or_default());
-                }
+                // As in `record_upload_under_stored_view`: no session write
+                // joins a callback transaction.
+                debug_assert!(!ops.iter().any(StagedOp::is_session));
                 inner.capture.extend(ops);
                 return Ok(());
             }
@@ -8555,6 +8780,13 @@ impl Db {
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.tx.is_some() {
+            // No local write joins a callback transaction as a session:
+            // `Db::write_op` refuses a write as another identity, and a
+            // transaction handle's commit is refused while it is open. So
+            // no session claims travel with `capture`. (A relay's apply of a
+            // downstream upload during `tick` can still land here:
+            // jazz#6038.)
+            debug_assert!(!ops.iter().any(StagedOp::is_session) && claims.is_none());
             inner.capture.extend(ops);
             return Ok(());
         }
@@ -8813,22 +9045,15 @@ impl Db {
         Ok(())
     }
 
-    /// Attach a remote query (refcounted per query and binding): whether
-    /// the server answered it, and why it refused it.
+    /// Attach a remote query (refcounted per query and binding): its key,
+    /// and what its subscribers see of it.
     pub(crate) fn attach_remote(
         &self,
         prepared: &PreparedQuery,
         include_deleted: bool,
         view: &ReadViewSourceSpec,
         reach: RemoteReach,
-    ) -> Option<(
-        String,
-        (
-            Rc<StdCell<bool>>,
-            Rc<RefCell<Option<Error>>>,
-            Rc<StdCell<bool>>,
-        ),
-    )> {
+    ) -> Option<(String, Rc<ReadSignal>)> {
         let mut inner = self.inner.borrow_mut();
         inner.client.as_ref()?;
         let (query, include_deleted, view) = upstream_read(&prepared.query, include_deleted, view);
@@ -8862,8 +9087,7 @@ impl Db {
 
 impl Inner {
     /// Attach one upstream live read (refcounted by its key): its key, and
-    /// whether the server answered it, why it refused it, and whether the
-    /// answer was the global authority's.
+    /// what its subscribers see of it (see [`ReadSignal`]).
     fn attach_upstream_read(
         &mut self,
         query: Query,
@@ -8871,14 +9095,7 @@ impl Inner {
         include_deleted: bool,
         view: ReadViewSourceSpec,
         reach: RemoteReach,
-    ) -> (
-        String,
-        (
-            Rc<StdCell<bool>>,
-            Rc<RefCell<Option<Error>>>,
-            Rc<StdCell<bool>>,
-        ),
-    ) {
+    ) -> (String, Rc<ReadSignal>) {
         let key = remote_key(&query, binding, include_deleted, &view, reach);
         let client = self.client.as_mut().expect("client");
         if let Some(id) = client.live_reads.get(&key) {
@@ -8888,40 +9105,40 @@ impl Inner {
                 .and_then(ActiveRead::live_mut)
                 .expect("live read");
             remote.refs += 1;
-            let flags = (
-                remote.answered.clone(),
-                remote.refused.clone(),
-                remote.global.clone(),
-            );
-            return (key, flags);
+            return (key, remote.signal.clone());
         }
         let id = client.next_id;
         client.next_id += 1;
-        let answered = Rc::new(StdCell::new(false));
-        let refused = Rc::new(RefCell::new(
-            client
-                .stranded
-                .then(stranded)
-                .or_else(|| client.uncatalogued.clone()),
-        ));
-        let global = Rc::new(StdCell::new(false));
+        // A store that refuses every upstream (stranded), or whose last
+        // link sent a catalogue it could not mirror, fails the read at
+        // once: the next connection to answer it lifts that.
+        let mut link = LinkRead::new(client.transport.is_some().then_some(client.connection));
+        if let Some(error) = client
+            .stranded
+            .then(stranded)
+            .or_else(|| client.uncatalogued.clone())
+        {
+            link.refuse_link(error);
+        }
+        let live = LiveRead {
+            refs: 1,
+            reach,
+            link,
+            confirmed: None,
+            signal: Rc::new(ReadSignal::default()),
+            visible: None,
+            holds: HashMap::new(),
+            released: HashMap::new(),
+            settled_here: false,
+        };
+        live.publish();
+        let signal = live.signal.clone();
         let read = self.active_read(
             query,
             binding.clone(),
             include_deleted,
             view,
-            ReadLifetime::Live(LiveRead {
-                refs: 1,
-                reach,
-                answered: answered.clone(),
-                refused: refused.clone(),
-                global: global.clone(),
-                visible: None,
-                holds: HashMap::new(),
-                released: HashMap::new(),
-                settled_here: false,
-                told: false,
-            }),
+            ReadLifetime::Live(Box::new(live)),
         );
         let client = self.client.as_mut().expect("client");
         client.outbox.push(SyncMessage::Read {
@@ -8937,7 +9154,7 @@ impl Inner {
         });
         client.reads.insert(id, read);
         client.live_reads.insert(key.clone(), id);
-        (key, (answered, refused, global))
+        (key, signal)
     }
 
     /// Drop one reference to an upstream read by its key; the last one
@@ -8962,7 +9179,7 @@ impl Inner {
             let untold: Vec<u64> = client
                 .reads
                 .iter()
-                .filter(|(_, read)| read.live().is_some_and(|live| !live.told))
+                .filter(|(_, read)| read.live().is_some_and(|live| !live.told()))
                 .map(|(id, _)| *id)
                 .collect();
             if let Some(live) = closed.as_ref().and_then(ActiveRead::live)
@@ -9647,6 +9864,9 @@ impl Db {
         let mut rebase = false;
         let mut changed: Option<HashSet<RowKey>> = Some(HashSet::new());
         let mut answered_remotes = Vec::new();
+        // Rows a live read held on an earlier connection and its first
+        // `Holds` on this one leaves out (see `Db::client_apply`).
+        let mut unheld: Vec<(u64, String, [u8; 16])> = Vec::new();
         {
             let mut inner = self.inner.borrow_mut();
             let Some(client) = inner.client.as_mut() else {
@@ -9666,6 +9886,11 @@ impl Db {
                 failed = transport.take_failure().is_some();
             }
             inbound.append(&mut client.refused);
+            // What arrived came over this connection: a read's state moves
+            // only on messages of the connection it is on, so a link that
+            // drops below (or that this store refuses as it applies them)
+            // moves none.
+            let connection = client.connection;
             // An upstream that sent what this client cannot decode is
             // dropped like a lost link; what arrived before it applies.
             if failed {
@@ -9866,9 +10091,11 @@ impl Db {
                                 // the last link's refusal are no longer
                                 // refused, before their answers come.
                                 if client.uncatalogued.take().is_some() {
-                                    for remote in client.reads.values().filter_map(ActiveRead::live)
+                                    let connection = client.connection;
+                                    for remote in
+                                        client.reads.values_mut().filter_map(ActiveRead::live_mut)
                                     {
-                                        remote.refused.borrow_mut().take();
+                                        remote.unrefused(connection);
                                     }
                                 }
                             }
@@ -9906,15 +10133,17 @@ impl Db {
                                     )
                                 }
                                 ReadLifetime::Live(live) => {
-                                    live.answered.set(true);
-                                    live.global.set(global);
                                     // Answered, it is no longer refused: a
                                     // read attached before the link's
                                     // `Welcome` took the last link's
                                     // refusal (`uncatalogued`), which no
                                     // longer applies. A stream not yet
-                                    // polled is not told it.
-                                    live.refused.borrow_mut().take();
+                                    // polled is not told it. An answer
+                                    // from an older connection is no
+                                    // answer at all.
+                                    if !live.answered(connection, global) {
+                                        continue;
+                                    }
                                     if live.visible.is_none_or(|v| v.n != at.n || v.seq < at.seq) {
                                         live.visible = Some(at);
                                         client.visibility_moved = true;
@@ -9987,9 +10216,9 @@ impl Db {
                         if let Some(slot) = client.answers.get_mut(&id) {
                             *slot = Some(Err(error));
                         } else if let Some(remote) =
-                            client.reads.get(&id).and_then(ActiveRead::live)
+                            client.reads.get_mut(&id).and_then(ActiveRead::live_mut)
                         {
-                            *remote.refused.borrow_mut() = Some(error);
+                            remote.refused(connection, error);
                         }
                     }
                     SyncMessage::Stored { id } => {
@@ -10229,11 +10458,27 @@ impl Db {
                                     ReadLifetime::Once { .. } => None,
                                 })
                         {
-                            if !std::mem::replace(&mut live.told, true) {
-                                for (table, rows) in live.holds.drain() {
-                                    live.released.entry(table).or_default().extend(rows);
+                            // From an older connection: what it held then
+                            // is not what it holds now.
+                            let Some(first) = live.link.told(connection) else {
+                                continue;
+                            };
+                            // Its first `Holds` on this connection lists
+                            // all it holds: what it held on the last one
+                            // and no longer does is judged again once this
+                            // batch applied (see `Db::client_apply`).
+                            let before = if first {
+                                let before = std::mem::take(&mut live.holds);
+                                for (table, rows) in &before {
+                                    live.released
+                                        .entry(table.clone())
+                                        .or_default()
+                                        .extend(rows.iter().copied());
                                 }
-                            }
+                                Some(before)
+                            } else {
+                                None
+                            };
                             for (table, row) in removed {
                                 if let Some(rows) = live.holds.get_mut(&table) {
                                     rows.remove(&row);
@@ -10245,6 +10490,14 @@ impl Db {
                             }
                             for (table, row) in added {
                                 live.holds.entry(table).or_default().insert(row);
+                            }
+                            for (table, rows) in before.into_iter().flatten() {
+                                let now = live.holds.get(&table);
+                                for row in rows {
+                                    if now.is_none_or(|now| !now.contains(&row)) {
+                                        unheld.push((id, table.clone(), row));
+                                    }
+                                }
                             }
                         }
                         client.prune_closed_holds();
@@ -10288,7 +10541,50 @@ impl Db {
                 }
             }
         }
+        // A row a live read stopped holding across the reconnect, which
+        // no live read holds now, is no longer kept current for this
+        // reader: the server judges it again, shipping it whole if the
+        // reader may still read it, else its eviction (jazz#5097). A
+        // read that left the result while the replica was away takes
+        // the support it rested on with it; nothing else would say so. A
+        // row the listings above evicted is gone already, and not asked for.
         let mut inner = self.inner.borrow_mut();
+        // Only support: the read's own result rows are the server's resume
+        // to reconcile (what left the result ships as it is now, or its
+        // eviction, and its listing judges the rest), while a supporting row
+        // leaves the replica only through an `AccessLost` for a read that
+        // still holds it, which a read that no longer does never gets.
+        let client = inner.client.as_ref().expect("client");
+        let mut unheld: Vec<(String, [u8; 16])> = unheld
+            .into_iter()
+            .filter(|(id, table, _)| {
+                let root = client.reads.get(id).and_then(|read| {
+                    inner
+                        .schema
+                        .table(&read.query.table)
+                        .ok()
+                        .map(|root| root.stored.clone())
+                });
+                root.is_some_and(|root| root != *table)
+            })
+            .map(|(_, table, row)| (table, row))
+            .filter(|(table, row)| !client.holds_row(table, row))
+            .collect();
+        unheld.sort();
+        unheld.dedup();
+        for (table, row) in unheld {
+            if !inner.physical.tables.contains_key(&table) {
+                continue;
+            }
+            let id = row.to_vec();
+            // A deletion the replica holds is already the server's word on
+            // the row.
+            for image in inner.images_where(&table, false, "id = ?1", &[&id])? {
+                if image.at.accepted() && !image.deleted {
+                    inner.ask_whole((table.clone(), row, image.key), 0)?;
+                }
+            }
+        }
         let client = inner.client.as_mut().expect("client");
         let known = client.known;
         if known == client.persisted_known {
@@ -10315,7 +10611,7 @@ impl Db {
             .iter()
             .position(|m| matches!(m, SyncMessage::Read { .. }))
             .unwrap_or(out.len());
-        let reads = out.split_off(first_read);
+        let mut reads = out.split_off(first_read);
         let wanted: Vec<ChunkRequest> = std::mem::take(&mut client.wanted)
             .into_iter()
             .filter(|r| !client.requested.contains(r) && !client.unavailable.contains(r))
@@ -10430,6 +10726,45 @@ impl Db {
             }
             (commits, pushes) = kept.into_iter().unzip();
         }
+        // A read or commit with a text prefix/suffix predicate is sent
+        // only to an upstream that negotiated it: an older server cannot
+        // decode it and would drop the whole link. Otherwise it is refused
+        // here, for good, as one read's error or a rejected fate.
+        if features & crate::wire::FEATURE_TEXT_AFFIX_PREDICATES == 0 {
+            const UNSUPPORTED: &str =
+                "a starts/ends-with predicate: not supported yet by this server";
+            reads.retain(|message| match message {
+                SyncMessage::Read { id, query, .. } if query.uses_text_affix() => {
+                    client.refused.push(SyncMessage::Refused {
+                        id: *id,
+                        code: ErrorCode::Query,
+                        message: UNSUPPORTED.to_owned(),
+                    });
+                    false
+                }
+                _ => true,
+            });
+            let mut kept = Vec::with_capacity(commits.len());
+            for (commit, push) in commits.into_iter().zip(pushes) {
+                match &commit {
+                    SyncMessage::Commit { id, kind, .. } if kind.reads_text_affix() => {
+                        client.refused.push(SyncMessage::Fate {
+                            id: *id,
+                            outcome: Outcome::Refused {
+                                through: client.known,
+                                error: WireError::Rejected {
+                                    reason: None,
+                                    message: UNSUPPORTED.to_owned(),
+                                },
+                            },
+                            global: false,
+                        });
+                    }
+                    _ => kept.push((commit, push)),
+                }
+            }
+            (commits, pushes) = kept.into_iter().unzip();
+        }
         for commit in &commits {
             client.sent.record(commit);
         }
@@ -10456,10 +10791,22 @@ impl Db {
         // A full outbound queue keeps the rest, in order, for the flush its
         // drain wakes.
         let transport = client.transport.as_mut().expect("transport");
+        let connection = client.connection;
         let mut out = out.into_iter();
         while let Some(message) = out.next() {
             match transport.send(message.clone()) {
-                Ok(()) => log_message("client→upstream", &message),
+                Ok(()) => {
+                    log_message("client→upstream", &message);
+                    if let SyncMessage::Read {
+                        id,
+                        span: ReadSpan::Live,
+                        ..
+                    } = &message
+                        && let Some(live) = client.reads.get_mut(id).and_then(ActiveRead::live_mut)
+                    {
+                        live.link.sent(connection);
+                    }
+                }
                 Err(TransportError::Backpressure) => {
                     let mut held: Vec<SyncMessage> = std::iter::once(message).chain(out).collect();
                     held.append(&mut client.outbox);
@@ -10659,9 +11006,10 @@ impl Inner {
     fn refuse_upstream(&mut self, error: Error) {
         self.detach_upstream();
         if let Some(client) = self.client.as_mut() {
-            client.refusal = Some((client.connection, error.clone()));
-            for remote in client.reads.values().filter_map(ActiveRead::live) {
-                *remote.refused.borrow_mut() = Some(error.clone());
+            let connection = client.connection;
+            client.refusal = Some((connection, error.clone()));
+            for remote in client.reads.values_mut().filter_map(ActiveRead::live_mut) {
+                remote.refuse_link(error.clone());
             }
         }
     }
@@ -10711,19 +11059,12 @@ impl Inner {
         let mut link = client.hint.get();
         link.detached = true;
         client.hint.set(link);
-        // Nothing settles at the server's tier while detached: a
-        // subscription (or one opened meanwhile) is held until the next
-        // upstream answers it again.
-        for read in client.reads.values_mut() {
-            if let ReadLifetime::Live(remote) = &mut read.lifetime {
-                remote.answered.set(false);
-                // Whose answer it is, the next upstream says: a relink to
-                // a non-global upstream must not report the last one's.
-                remote.global.set(false);
-                // What it holds stands until the next upstream says.
-                remote.told = false;
-            }
-        }
+        // Nothing is answered on a link that is gone: a first load (one
+        // opened meanwhile included) waits for the next upstream's answer,
+        // and whose answer that is (global or not), the next upstream says.
+        // What each read holds stands until it says, and what subscribers
+        // were last confirmed stands meanwhile (the last known).
+        client.reset_reads(None);
     }
 
     /// Session `index` closed: what this relay owed it is dropped, so a
@@ -10897,7 +11238,7 @@ impl Inner {
                 .get(&settle.key)
                 .and_then(|read| client.reads.get(read))
                 .and_then(ActiveRead::live)
-                .and_then(|live| live.refused.borrow().clone());
+                .and_then(|live| live.link.refusal().cloned());
             match refusal {
                 Some(error) if !settle.refused => {
                     settle.refused = true;
@@ -13542,9 +13883,8 @@ impl Db {
                         ..viewed
                     },
                     match relayed {
-                        Some((_, (answered, _, global))) => {
-                            SettledBy::Remote(answered.clone(), global.clone())
-                        }
+                        // Settled as far as its upstream read is now.
+                        Some((_, signal)) => SettledBy::Link(signal.clone()),
                         None => SettledBy::Always(authority),
                     },
                 );
@@ -15341,6 +15681,22 @@ fn readable(
     inner.check_in(policies, table, row, key, author, Operation::Select)
 }
 
+/// [`readable`] for a row the caller just read from this store, at `key`.
+fn readable_existing(
+    inner: &Inner,
+    policies: &Schema,
+    table: &str,
+    row: RowUuid,
+    key: &[u8],
+    identity: Option<AuthorSubject>,
+) -> Result<bool, Error> {
+    let Some(author) = identity else {
+        return Ok(true);
+    };
+    let table = owned_table(policies, table)?;
+    inner.check_in_existing(policies, table, row, key, author, Operation::Select)
+}
+
 /// The current schema's table stored as `stored`.
 fn owned_table<'a>(schema: &'a Schema, stored: &str) -> Result<&'a Table, Error> {
     schema
@@ -16311,5 +16667,124 @@ mod tests {
         let mut joiner = FrameJoiner::with_ceiling(bytes.len() - 1);
         assert!(joiner.push(&parts[0]).unwrap().is_none());
         assert!(joiner.push(&parts[1]).is_err());
+    }
+
+    fn refusal() -> Error {
+        Error::new(ErrorCode::Query, "refused")
+    }
+
+    /// A live read's per-connection state moves only on messages of the
+    /// connection it is on. White-box: each connection owns its transport,
+    /// so no public path delivers an older connection's message to compare
+    /// against; the rule is checked on the state itself.
+    #[test]
+    fn a_link_read_moves_only_on_its_own_connection() {
+        let mut link = LinkRead::new(Some(2));
+        assert!(matches!(link.phase, Phase::Unsent));
+        link.sent(1);
+        assert!(
+            matches!(link.phase, Phase::Unsent),
+            "an older link sent nothing"
+        );
+        link.sent(2);
+        assert!(matches!(link.phase, Phase::Sent));
+        // An older connection's messages are ignored.
+        assert_eq!(link.told(1), None);
+        assert!(!link.answered(1, true));
+        assert!(!link.refused(1, refusal()));
+        assert!(matches!(link.phase, Phase::Sent) && !link.told);
+        // The current one's move it on: told, then answered.
+        assert_eq!(link.told(2), Some(true));
+        assert_eq!(
+            link.told(2),
+            Some(false),
+            "only the first Holds is the first"
+        );
+        assert!(link.answered(2, false));
+        assert_eq!(link.answer(), Some(false));
+        assert!(link.refusal().is_none());
+    }
+
+    /// The one reset (a dropped link, or a new one) forgets everything the
+    /// last connection said. White-box for the same reason as above: the
+    /// dropped link's messages have no public way back in.
+    #[test]
+    fn a_link_read_starts_over_on_each_reset() {
+        let mut link = LinkRead::new(Some(1));
+        link.told(1);
+        link.answered(1, true);
+        // The link dropped: nothing it sends moves the read any more.
+        link.reset_for(None);
+        assert!(matches!(link.phase, Phase::Unsent) && !link.told);
+        assert!(!link.answered(1, true));
+        assert_eq!(link.told(1), None);
+        // A new link starts it over.
+        link.reset_for(Some(2));
+        assert!(link.refused(2, refusal()));
+        assert!(link.refusal().is_some());
+        assert!(link.answer().is_none());
+        // An answer on the same connection lifts the refusal (one it took
+        // from the last link's catalogue, say).
+        assert!(link.answered(2, true));
+        assert!(link.refusal().is_none());
+        assert_eq!(link.answer(), Some(true));
+    }
+
+    /// A refusal this store makes of its own link stands with no link up,
+    /// and lifts only on the connection whose catalogue it mirrors.
+    /// White-box: the window between a new link and its `Welcome` is not
+    /// observable through the public API.
+    #[test]
+    fn a_link_refused_by_this_store_lifts_on_its_catalogue() {
+        let mut link = LinkRead::new(None);
+        link.refuse_link(refusal());
+        assert!(link.refusal().is_some(), "refused with no link up");
+        link.unrefused(1);
+        assert!(link.refusal().is_some(), "no link lifts it");
+        link.reset_for(Some(3));
+        link.refuse_link(refusal());
+        link.unrefused(3);
+        assert!(matches!(link.phase, Phase::Sent));
+    }
+
+    /// What subscribers see: the current connection's answer (first loads,
+    /// relays) resets with each connection; the last confirmed answer, and
+    /// its tier, stands until another answer replaces it. White-box: it
+    /// pins `ReadSignal` as `LiveRead::publish` writes it, which the
+    /// integration tests in `sync_read_state` observe only through events.
+    #[test]
+    fn a_live_read_keeps_its_last_confirmed_answer_across_resets() {
+        let mut live = LiveRead {
+            refs: 1,
+            reach: RemoteReach::REMOTE,
+            link: LinkRead::new(Some(1)),
+            confirmed: None,
+            signal: Rc::new(ReadSignal::default()),
+            visible: None,
+            holds: HashMap::new(),
+            released: HashMap::new(),
+            settled_here: false,
+        };
+        live.publish();
+        assert!(!live.signal.confirmed() && !live.signal.answered());
+        assert!(live.answered(1, true));
+        assert!(live.signal.answered_globally() && live.signal.confirmed_globally());
+        // An outage: no answer on any link, the last one still confirmed.
+        live.reset_for(None);
+        assert!(!live.signal.answered());
+        assert!(live.signal.confirmed_globally());
+        // A refusal on the next link is reported, and the last answer stands.
+        live.reset_for(Some(2));
+        live.refused(2, refusal());
+        assert!(live.signal.refusal().is_some());
+        assert!(live.signal.confirmed_globally());
+        // The next answer replaces it: here, a non-global upstream's.
+        live.reset_for(Some(3));
+        assert!(live.signal.refusal().is_none());
+        assert!(live.answered(3, false));
+        assert!(live.signal.confirmed() && !live.signal.confirmed_globally());
+        // An older link's answer changes nothing.
+        assert!(!live.answered(2, true));
+        assert!(!live.signal.confirmed_globally());
     }
 }

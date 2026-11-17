@@ -208,6 +208,12 @@ pub fn serve_core(options: JsonValue) -> Result<ServedCore> {
                     .or_else(jazz_server::resources::detect_memory_limit_bytes),
                 stored_arrangements: true,
                 query_cache_budget_bytes: None,
+                session_backlog_bytes: None,
+                session_backlog_max_bytes: None,
+                egress_budget_bytes: None,
+                slow_reader_timeout_secs: None,
+                egress_stall_grace_secs: None,
+                slow_reader_min_bytes_per_sec: None,
             },
             jazz_server::ShutdownSignal::External(stop_requested),
         )

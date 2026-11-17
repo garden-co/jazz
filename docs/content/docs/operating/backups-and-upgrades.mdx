@@ -87,6 +87,14 @@ once the new deployment has woken it, promoting the old deployment again doesn't
 To try an upgrade first, deploy it to a preview branch: with the per-branch setup, that preview gets
 a core of its own, separate from production's (a dry run with its own data, not a copy).
 
+## Upgrading from alpha.66
+
+- **`vercel()` takes a required `region`**, the Vercel region its cores run and keep their data
+  in. Earlier versions created every core in `iad1`: add `region: "iad1"` and the same cores open
+  with their data. A `region` that doesn't match an existing core now throws instead of being
+  ignored, since moving a core isn't supported yet. See
+  [Region](/docs/setup/deployment/vercel#region).
+
 {/* Older jazz-tools link the section by its previous anchor. */}
 
 <a id="upgrading-from-alpha64" />
