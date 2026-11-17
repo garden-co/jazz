@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import { disabledSetupPages, filterLanguageTabs, type Language, LANGUAGES } from "./index";
+import {
+  disabledSetupPages,
+  filterLanguageTabs,
+  type Language,
+  LANGUAGES,
+  markExperimental,
+} from "./index";
 import { expandBindingsExcerpts, extractSymbol, extractSymbols } from "./excerpt";
 
 const langs: Language[] = [
@@ -78,6 +84,25 @@ describe("filterLanguageTabs", () => {
   it("keeps main-backend pages TypeScript-only", () => {
     const main = `---\ntitle: X\nlanguageTabs: main-backend\n---\n\n<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]}>\n  <Tab value="TypeScript">t</Tab>\n  <Tab value="Rust">r</Tab>\n</Tabs>\n`;
     expect(() => filterLanguageTabs(main, langs)).toThrow(/main-backend page .* Rust/);
+  });
+
+  it("labels experimental languages' tabs and setup pages", () => {
+    const exp: Language[] = [
+      { label: "TypeScript", backend: true, mainBackend: true, enabled: true },
+      { label: "Rust", setupPage: "setup/rust", backend: true, experimental: true, enabled: true },
+    ];
+    const tabs = `<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]}>\n  <Tab value="TypeScript">\n    t\n  </Tab>\n  <Tab value="Rust">\n    r\n  </Tab>\n</Tabs>\n`;
+    const out = markExperimental(tabs, "reading/queries", exp);
+    expect(out).toContain('<Tab value="Rust">\n    <ExperimentalBadge language="Rust" />\n');
+    expect(out).not.toContain('language="TypeScript"');
+    const setup = markExperimental("---\ntitle: Rust\n---\n\nBody\n", "setup/rust", exp);
+    expect(setup).toBe(
+      '---\ntitle: Rust\n---\n\n<ExperimentalBadge language="Rust" />\n\n\nBody\n',
+    );
+    expect(markExperimental("Body\n", "setup/rust", exp)).toBe(
+      '\n<ExperimentalBadge language="Rust" />\n\nBody\n',
+    );
+    expect(markExperimental(tabs, "reference/language-support", exp)).toBe(tabs);
   });
 
   it("lists switched-off setup pages", () => {

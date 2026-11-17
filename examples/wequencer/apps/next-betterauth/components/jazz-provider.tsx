@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import { JazzProvider as Jazz, useJazzSession, useSession } from "jazz-tools/react";
+import { JazzProvider as Jazz, useJazzSession } from "jazz-tools/react";
 import { authClient } from "@/lib/auth-client";
 import { ErrorScreen, LoadingScreen } from "@/components/status-screen";
 
@@ -53,7 +53,7 @@ function ensureProfileOnce(accountId: string, displayName: string) {
 
 /** The profile only labels presence avatars: create it in the background. */
 function ProfileSetup() {
-  const account = useSession()?.user;
+  const account = useJazzSession().user?.accountId;
   const { data } = authClient.useSession();
   const displayName = data?.user.name;
   useEffect(() => {

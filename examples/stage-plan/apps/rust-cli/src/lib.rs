@@ -1,23 +1,26 @@
 //! StagePlan from Rust: a slice of the app over the bindings `jazz-tools
 //! generate` writes from `jazz.app.json` (`src/jazz_app.rs`).
 //!
-//! The service is the app's backend and acts as one signed-in user (the
-//! `session.user` of `jazz.permissions.json`): it creates that user's show,
-//! lists the show's tasks by rank, adds tasks and moves them between stages.
+//! The CLI is a backend client of the app's TypeScript main backend: it
+//! signs in with a machine credential the main backend trusts as one user
+//! (the `session.user` of `jazz.permissions.json`), creates that user's
+//! show, lists the show's tasks by rank, adds tasks and moves them between
+//! stages.
 
 // The generated bindings, committed. `jazz-tools generate --check` (and the
 // `bindings_are_current` test) refuse a stale copy.
 pub mod jazz_app;
 
-use ::jazz_app::{Jazz, ObjectId, Order};
-
-use crate::jazz_app::{NewShow, NewTask, Show, Task, TaskStatus, TaskUpdate, shows, tasks};
+use crate::jazz_app::{
+    Jazz, NewShow, NewTask, ObjectId, Order, ReadTier, Show, Task, TaskStatus, TaskUpdate, shows,
+    tasks,
+};
 
 /// Errors of the slice: the client's, or a request it can't carry out.
 #[derive(Debug)]
 pub enum Error {
-    Jazz(::jazz_app::Error),
-    /// The app was opened without a user (not as a backend).
+    Jazz(jazz_app::Error),
+    /// The client acts as no user (a trusted client outside `for_user`).
     NoUser,
     NotFound(&'static str, ObjectId),
 }
@@ -26,7 +29,7 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Jazz(error) => write!(f, "{error}"),
-            Error::NoUser => f.write_str("open the app as a backend, acting as a user"),
+            Error::NoUser => f.write_str("the client acts as no user"),
             Error::NotFound(what, id) => write!(f, "no {what} {}", id.uuid()),
         }
     }
@@ -34,8 +37,8 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-impl From<::jazz_app::Error> for Error {
-    fn from(error: ::jazz_app::Error) -> Self {
+impl From<jazz_app::Error> for Error {
+    fn from(error: jazz_app::Error) -> Self {
         Error::Jazz(error)
     }
 }
@@ -81,12 +84,19 @@ pub async fn ensure_show(jazz: &Jazz, details: ShowDetails) -> Result<Show> {
 
 /// A show's tasks, ordered by rank.
 pub async fn tasks_of(jazz: &Jazz, show: ObjectId) -> Result<Vec<Task>> {
+    tasks_of_with(jazz, show, ReadTier::LocalFirst).await
+}
+
+/// A show's tasks, ordered by rank, read at `tier` (`ReadTier::Remote`: as
+/// the server has them).
+pub async fn tasks_of_with(jazz: &Jazz, show: ObjectId, tier: ReadTier) -> Result<Vec<Task>> {
     Ok(jazz
-        .all(
+        .all_with(
             shows::tasks()
                 .of(show)
                 .order_by(tasks::rank(), Order::Asc)
                 .order_by(tasks::id(), Order::Asc),
+            tier,
         )
         .await?)
 }

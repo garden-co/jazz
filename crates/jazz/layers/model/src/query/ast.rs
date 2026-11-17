@@ -2,7 +2,7 @@
 /// the variants after it keep their positional (postcard) tags. It has no
 /// values: nothing can build one, and decoding one is refused.
 ///
-/// Predicates held payload-enum matches here until 2.0.0-alpha.65, when
+/// Predicates held payload-enum matches here until 2.0.0-alpha.66, when
 /// enums with payloads were removed (jazz#5758).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RemovedVariant {}
@@ -16,7 +16,7 @@ impl serde::Serialize for RemovedVariant {
 impl<'de> serde::Deserialize<'de> for RemovedVariant {
     fn deserialize<D: serde::Deserializer<'de>>(_: D) -> Result<Self, D::Error> {
         Err(serde::de::Error::custom(
-            "this variant was removed (payload-enum matches, removed in 2.0.0-alpha.65)",
+            "this variant was removed (payload-enum matches, removed in 2.0.0-alpha.66)",
         ))
     }
 }
@@ -116,6 +116,26 @@ pub enum Part {
     },
     /// The subtree at an RFC 6901 pointer of a JSON column.
     JsonPointer(String),
+}
+
+impl Part {
+    /// The UTF-8 byte range `range` of a text column ([`Part::TextUtf8`]):
+    /// offsets are `str` indices, and a range that splits a code point is
+    /// refused.
+    pub fn text(range: std::ops::Range<usize>) -> Self {
+        Self::TextUtf8 {
+            from: range.start as u64,
+            to: range.end as u64,
+        }
+    }
+
+    /// The byte range `range` of a bytes column ([`Part::Bytes`]).
+    pub fn bytes(range: std::ops::Range<usize>) -> Self {
+        Self::Bytes {
+            from: range.start as u64,
+            to: range.end as u64,
+        }
+    }
 }
 
 /// Human-readable query JSON retains the relation tree. Non-human serializers

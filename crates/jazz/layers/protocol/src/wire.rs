@@ -31,7 +31,7 @@ pub const WIRE_PROTOCOL_VERSION: u16 = 6;
 /// rejection cases, through this module's production decoders. This is
 /// test-only input, not a second wire format.
 pub const WIRE_FRAME_ARTIFACT_CORPUS: &str =
-    include_str!("../../../fixtures/wire_frame_artifact_corpus_v6.json");
+    include_str!("../fixtures/wire_frame_artifact_corpus_v6.json");
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
@@ -54,6 +54,11 @@ pub const FEATURE_THIN_RESULTS: WireFeatures = 1 << 10;
 /// advertised this, so a client whose platform hides WebSocket pings (a
 /// browser) can tell a link that went silently dead from a quiet one.
 pub const FEATURE_HEARTBEAT: WireFeatures = 1 << 11;
+/// The peer validates (an authority) or forwards (a relay) serializable
+/// commits whose reads went through a branch view: a client sends a commit
+/// whose reads name their views (`WireKind::SerializableViews` in the sync
+/// layer) only over a link that negotiated this (jazz#5806).
+pub const FEATURE_SERIALIZABLE_BRANCH_READS: WireFeatures = 1 << 12;
 
 /// Bitset of optional protocol features advertised by one peer.
 pub type WireFeatures = u64;
@@ -505,6 +510,13 @@ pub fn is_channel_credit_frame(bytes: &[u8]) -> bool {
     bytes.first() == Some(&3)
 }
 
+/// Whether encoded frame bytes are a [`WireFrame::Error`], judged by its
+/// pinned postcard-v1 enum tag (1) alone. Lets a receiver tell a server's
+/// refusal it cannot decode (a code it does not know) from other bytes.
+pub fn is_wire_error_frame(bytes: &[u8]) -> bool {
+    bytes.first() == Some(&1)
+}
+
 /// Decode a thin frame joined from [`crate::thin::ThinPart`]s, which may be
 /// over a wire frame but not over [`crate::thin::MAX_THIN_MESSAGE_BYTES`].
 pub fn decode_postcard_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
@@ -827,6 +839,7 @@ fn default_transport_compression_features() -> WireFeatures {
 pub fn current_wire_features() -> WireFeatures {
     FEATURE_AUTHORIZATION_SCOPE_VIEWS
         | FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
+        | FEATURE_SERIALIZABLE_BRANCH_READS
         | runtime_transport_compression_features()
 }
 
@@ -862,6 +875,11 @@ pub trait WireTransport {
     fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError>;
     /// Pull the next encoded [`WireFrame`] staged by the binding, if any.
     fn try_recv_frame(&mut self) -> Option<Vec<u8>>;
+    /// The optional features this link negotiated in its `Hello`, once the
+    /// binding knows them. None by default.
+    fn features(&self) -> WireFeatures {
+        FEATURE_NONE
+    }
 }
 
 impl WireTransport for Box<dyn WireTransport + Send> {
@@ -871,6 +889,10 @@ impl WireTransport for Box<dyn WireTransport + Send> {
 
     fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
         (**self).try_recv_frame()
+    }
+
+    fn features(&self) -> WireFeatures {
+        (**self).features()
     }
 }
 

@@ -19,27 +19,24 @@ or `"draft"`. When an app needs richer semantics, the column can instead referen
 
 <Callout type="info">
   Branch views are part of the new Jazz core API. Framework-specific branch conveniences are still
-  being filled in; the examples below use the current app files, read, and mutation APIs.
+  being filled in; the examples below use the current schema, read, and mutation APIs.
 </Callout>
 
 ## Start with a string column
 
-The smallest useful model adds a normal string column to the table and lists it in `branchBy`:
+The smallest useful model adds a normal string column to the table and passes it to `.branchBy()`:
 
-```json title="jazz.app.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
-  "tables": {
-    "documents": {
-      "columns": {
-        "branch": "string",
-        "title": "string"
-      },
-      "branchBy": ["branch"]
-    }
-  }
-}
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  documents: s
+    .table({
+      branch: s.string(),
+      title: s.string(),
+    })
+    .branchBy("branch"),
+});
 ```
 
 `branch` is still an ordinary application column. `branchBy` additionally tells Jazz to keep each
@@ -72,37 +69,28 @@ the base, so application code sees one consistent effective branch.
 A string is enough when branch names and relationships live elsewhere in the application. When a
 branch needs queryable metadata, model it as an ordinary row and make the branch column a reference.
 
-```json title="jazz.app.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
-  "tables": {
-    "branches": {
-      "columns": {
-        "workspace_id": "uuid",
-        "name": "string",
-        "base_branch_id": "uuid?",
-        "base_snapshot_ref": "string?",
-        "status": { "enum": ["open", "approved", "archived"] }
-      },
-      "relations": {
-        "baseBranch": { "rel": "branches", "column": "base_branch_id" },
-        "derivedBranches": { "reverse": "branches", "relation": "baseBranch" },
-        "documents": { "reverse": "documents", "relation": "branch" }
-      }
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  branches: s.table(
+    {
+      workspace_id: s.uuid(),
+      name: s.string(),
+      base_branch_id: s.uuid().optional(),
+      base_snapshot_ref: s.string().optional(),
+      status: s.enum("open", "approved", "archived"),
     },
-    "documents": {
-      "columns": {
-        "branch_id": "uuid",
-        "title": "string"
-      },
-      "relations": {
-        "branch": { "rel": "branches", "column": "branch_id" }
-      },
-      "branchBy": ["branch_id"]
-    }
-  }
-}
+    {
+      baseBranch: s.rel("branches", "base_branch_id"),
+      derivedBranches: s.reverse("branches", "baseBranch"),
+      documents: s.reverse("documents", "branch"),
+    },
+  ),
+  documents: s
+    .table({ branch_id: s.uuid(), title: s.string() }, { branch: s.rel("branches", "branch_id") })
+    .branchBy("branch_id"),
+});
 ```
 
 Jazz does not assign meaning to the branch row's `base_branch_id`, `base_snapshot_ref`, or `status`.
@@ -142,25 +130,21 @@ atomic fate: if one write is invalid or unauthorized, the whole transaction is r
 
 Most apps need only one branch column. When a branch is qualified by multiple dimensions, list
 them all in `branchBy`. This excerpt shows only the `documents` table; `workspaces` and `branches`
-are defined elsewhere in the file:
+are defined elsewhere in `schema.ts`:
 
-```json title="jazz.app.json"
-{
-  "tables": {
-    "documents": {
-      "columns": {
-        "workspace_id": "uuid",
-        "branch_id": "uuid",
-        "title": "string"
+```ts title="schema.ts"
+export const schema = s.defineSchema({
+  // workspaces, branches, ...
+  documents: s
+    .table(
+      { workspace_id: s.uuid(), branch_id: s.uuid(), title: s.string() },
+      {
+        workspace: s.rel("workspaces", "workspace_id"),
+        branch: s.rel("branches", "branch_id"),
       },
-      "relations": {
-        "workspace": { "rel": "workspaces", "column": "workspace_id" },
-        "branch": { "rel": "branches", "column": "branch_id" }
-      },
-      "branchBy": ["workspace_id", "branch_id"]
-    }
-  }
-}
+    )
+    .branchBy(["workspace_id", "branch_id"]),
+});
 ```
 
 Compound selectors name every dimension explicitly:

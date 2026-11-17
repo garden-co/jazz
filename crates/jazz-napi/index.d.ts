@@ -17,7 +17,17 @@ export type E2eeSodiumStream = E2EeSodiumStream
 
 export declare class JazzCore {
   /** Open the core's storage and serve it in this process. */
-  static open(options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: "files" | "s3" | "sqlite"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; telemetryCollectorUrl?: string }): Promise<JazzCore>
+  static open(options: { appId?: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: "files" | "s3" | "sqlite"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; telemetryCollectorUrl?: string }): Promise<JazzCore>
+  /**
+   * The app this core serves: the one its store keeps, or the one it was
+   * opened with in memory.
+   */
+  get appId(): string
+  /**
+   * The secret a backend signs agent tokens with, kept in
+   * `<dataDir>/inspect-token-secret` (`null` in memory).
+   */
+  get tokenSecret(): string | null
   /**
    * Route one HTTP request. `url` is the path and query, as the core's
    * router sees them (`/apps/<appId>/...` or `/health`).
@@ -226,6 +236,18 @@ export declare class NapiDb {
    * or below `high_water` is reused.
    */
   seedForegroundTxTimeHighWater(highWater: bigint): void
+  /**
+   * Serve one of a thin session's transaction requests (SPEC 8.14), as
+   * the backend's client linked to the core as that session: `request`
+   * is the request's wire frame, the answer the response's. A commit
+   * answers once the core accepted it. One request at a time.
+   */
+  serveThinTransaction(request: Uint8Array): Uint8Array | PendingNativeRead
+  /**
+   * End the thin session's open transactions and uploads: nothing of
+   * them reached the core.
+   */
+  releaseThinTransactions(): Uint8Array | PendingNativeRead
   /** Capture a snapshot reference, as its persisted string's bytes. */
   captureSnapshot(): Uint8Array | PendingNativeRead
   /**
@@ -241,6 +263,52 @@ export declare class NapiDb {
    */
   waitForSync(tier: string, writer?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
   close(): Promise<undefined>
+}
+
+/**
+ * One thin connection's frames split between the core and the session's
+ * backend, in the client's order (SPEC 8.14; `jazz::thin_transactions::
+ * ThinRouter`). Messages are WebSocket messages (frame batches).
+ */
+export declare class NapiThinRouter {
+  constructor()
+  /**
+   * Take one client message. Throws when it does not decode: the
+   * connection is broken.
+   */
+  fromClient(message: Uint8Array): void
+  /**
+   * Note one message the core sent the client: whether it answered a
+   * request sent to the core.
+   */
+  fromCore(message: Uint8Array): boolean
+  /**
+   * Note the backend's answer (a response frame, as
+   * `serveThinTransaction` gives it), and return the messages that carry
+   * it to the client.
+   */
+  answer(answer: Uint8Array): Array<Uint8Array>
+  /**
+   * Answer backend request `id` with an error the backend gave in its
+   * place (`code`, `message`): a request it stopped waiting for, or one
+   * it could not serve. Returns the messages that carry it to the client.
+   */
+  refuse(id: number, code: string, message: string): Array<Uint8Array>
+  /**
+   * Whether a client's Hello (its first message after the prelude) asks
+   * for thin results: a thin client, whose transactions its backend
+   * serves.
+   */
+  static asksThinResults(message: Uint8Array): boolean
+  /** What may go now, in order. */
+  ready(): Array<ThinStep>
+  /**
+   * The public schema JSON the client bound the connection to, once it
+   * did.
+   */
+  schema(): Uint8Array | null
+  /** Whether something routed waits on an answer that has not come. */
+  isWaiting(): boolean
 }
 
 /**
@@ -426,6 +494,16 @@ export interface DeleteOptions {
   updatedAtMs?: number
 }
 
+/**
+ * Make the stopped store in `dataDir` a store of its own: it forgets its
+ * store id and where its large values live, so its next start claims a
+ * chunk directory or bucket prefix of its own instead of the original's,
+ * and its agent-token secret, so the original's tokens don't open it. For
+ * a copy of a store (a staging copy of a backup) opened next to the
+ * original. It keeps the app id: the copy serves the same app.
+ */
+export declare function detachStore(dataDir: string): void
+
 /** Options of [`generate_for_dir`] and [`migrations_create_for_dir`]. */
 export interface DirOptions {
   /** Fail when the files or bindings are stale, and write nothing. */
@@ -512,6 +590,15 @@ export interface ExplainedReadRow {
  */
 export declare function generate(lang: string, appJson: string): string
 
+/** The `$generated` marker to write: `{ by }`, what wrote the files. */
+export interface GeneratedBy {
+  /**
+   * E.g. "jazz-tools generate from schema.ts — edit the TypeScript, not
+   * this file".
+   */
+  by: string
+}
+
 /**
  * `jazz-tools generate [--check]` in `dir`, the directory of the app's
  * `jazz.app.json`: the same languages, checks and bytes as the
@@ -569,6 +656,16 @@ export declare function loadAppArtifact(app: string, permissions: string): JsonV
 export declare function loadBackendApp(schema: string, permissions: string): JsonValue
 
 /**
+ * What the migration between two schemas in the engine's JSON form
+ * (`{ "tables": … }`) does, as `migrations create` decides it, as JSON:
+ * `{ createTables, dropTables, renameTables: [{ from, to }], migrate:
+ * [{ table, steps, addedVariants, unchangedRows }] }`, each step
+ * `{ step: "add" | "drop" | "maybeRenamed" | "maybeRenamedAway", column, … }`.
+ * Throws, with the reason, for a change no migration step does.
+ */
+export declare function migrationDiff(fromJson: string, toJson: string): string
+
+/**
  * Write the migration from the version the committed bindings
  * (`bindings`, `jazz.generated.ts`'s text, or null when there are none) were
  * generated from to `appJson`'s edited `tables`, named `name`.
@@ -607,6 +704,15 @@ export interface RestoreOptions {
 export declare function schemaHash(engineSchemaJson: string): string
 
 /**
+ * Whether rows pass unchanged between two schemas in the engine's JSON form
+ * (`{ "tables": … }`), so a deployment connects them without a migration:
+ * the rule `migrations create` follows to decide whether to write one.
+ * Indexes, history retention, merge strategies, column order and defaults
+ * of columns outside `branchBy` don't count; everything else does.
+ */
+export declare function schemasAreCompatible(leftJson: string, rightJson: string): boolean
+
+/**
  * `"sha256:<hex>"` of a `jazz.app.json` text, CRLF read as LF: the
  * `source` generated bindings record.
  */
@@ -619,6 +725,13 @@ export declare function schemaSourceHash(appJson: string): string
  * budget, so a second call fails until the first core has stopped.
  */
 export declare function serveCore(options: { appId: string; port: number; dataDir: string; blobs: { kind: "sqlite" } | { kind: "files"; dir?: string } | { kind: "s3"; bucket?: string; region?: string; endpoint?: string; prefix?: string; roleFromWorkload?: boolean; environment?: string } | { kind: "vercel-blob"; storeId?: string; prefix?: string; tokenFromWorkload?: boolean; environment?: string }; trustedWorkload?: { issuer: string; audience: string; subject: string }; backendSecret?: string; adminSecret?: string; shutdownTimeoutSecs?: number; maxConnections?: number; memoryLimitBytes?: number }): ServedCore
+
+/**
+ * Make the stopped store in `dataDir` serve `appId` from its next start. A
+ * store refuses any app but the one it was first opened for; this is the
+ * way to change it (a wrong first `--app-id`, or a renamed app).
+ */
+export declare function setStoreAppId(dataDir: string, appId: string): void
 
 /** Owned libsodium device encryption keys. */
 export interface SodiumDeviceKeyPair {
@@ -679,6 +792,19 @@ export interface SubscriptionServerFailureReason {
   errorCode: string
 }
 
+/**
+ * One step a [`NapiThinRouter`] releases: a message for the core, or a
+ * request frame for the backend's client (`serveThinTransaction`).
+ */
+export interface ThinStep {
+  core?: Uint8Array
+  backend?: Uint8Array
+  /** The backend request's id. */
+  id?: number
+  /** Whether the backend request is a commit. */
+  commit?: boolean
+}
+
 export interface UpdateOptions {
   author?: Uint8Array
   attribution?: Uint8Array
@@ -716,6 +842,14 @@ export declare function validateBindings(appJson: string, bindings?: string | un
 /** Validate a schema and its embedded permissions without opening a database. */
 export declare function validateSchema(schema: Uint8Array): void
 
+/**
+ * Whether a `jazz.app.json` or `jazz.permissions.json` text is as the tool
+ * its `$generated` marker names wrote it: `"none"` (no marker), `"match"`
+ * or `"mismatch"` (edited since; formatting alone doesn't count). Throws
+ * when the text isn't a JSON object or the marker is malformed.
+ */
+export declare function verifyGenerated(text: string): "none" | "match" | "mismatch"
+
 export declare function verifyLocalFirstIdentityProof(token: string | undefined | null, expectedAudience: string): VerifyTokenResult
 
 export interface VerifyTokenResult {
@@ -725,12 +859,38 @@ export interface VerifyTokenResult {
 }
 
 /**
+ * A schema in the engine's JSON form (`{ "tables": … }`) as the readable
+ * `tables` of a `jazz.app.json` `history` version (no relations, computed
+ * fields or transforms), as JSON text.
+ */
+export declare function versionTables(engineSchemaJson: string): string
+
+/**
  * Build the `jazz.app.json` and `jazz.permissions.json` texts from what
  * `jazz-tools validate` compiled (an
  * [`ArtifactInput`](jazz::tools::deployment::artifact::ArtifactInput) as
- * JSON): the files' only writer, which refuses what a reader would.
+ * JSON): the files' only writer, which refuses what a reader would. With
+ * `options.generated`, each file carries a `$generated` marker.
  */
-export declare function writeAppArtifact(input: string): WrittenAppFiles
+export declare function writeAppArtifact(input: string, options?: WriteAppFilesOptions | undefined | null): WrittenAppFiles
+
+/**
+ * Check an app's readable `jazz.app.json` (`app`) and
+ * `jazz.permissions.json` (`permissions`) as a backend does and render
+ * them canonically through the writer, which reads its output back to
+ * exactly the same app. With `options.generated`, each file carries a
+ * `$generated` marker. Idempotent.
+ */
+export declare function writeAppFiles(app: string, permissions: string, options?: WriteAppFilesOptions | undefined | null): WrittenAppFiles
+
+/** How [`write_app_artifact`] and [`write_app_files`] write the files. */
+export interface WriteAppFilesOptions {
+  /**
+   * Mark each file `"$generated": { "by", "sha256" }`, first after
+   * `$schema`.
+   */
+  generated?: GeneratedBy
+}
 
 /** An app's two files, as [`write_app_artifact`] renders them. */
 export interface WrittenAppFiles {

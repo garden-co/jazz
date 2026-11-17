@@ -1,5 +1,5 @@
 //! jazz-ffi v2: end users — a device account or the app's bearer, syncing
-//! through the app's Jazz endpoint (jazz-app's `relay/` stand-in for
+//! through the app's Jazz endpoint (jazz-app-support's `relay/` stand-in for
 //! `createJazz`), with session and sync states.
 
 mod common;
@@ -55,19 +55,19 @@ impl StateListener for States {
 /// ```
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn end_users_sign_in_and_sync_through_the_app() {
-    let app_id = jazz_app::AppId::random();
+    let app_id = jazz_app_support::AppId::random();
     let server = jazz_server::JazzServer::builder()
         .with_app_id(app_id)
         .start()
         .await
         .unwrap();
-    let files = jazz_app::AppFiles::new(STAGE_PLAN_APP.as_bytes().to_vec(), None)
+    let files = jazz_app_support::AppFiles::new(STAGE_PLAN_APP.as_bytes().to_vec(), None)
         .with_permissions(STAGE_PLAN_PERMISSIONS.as_bytes().to_vec());
-    let backend = jazz_app::Jazz::open(
+    let backend = jazz_app_support::Jazz::open(
         files,
-        jazz_app::Config::new(app_id)
+        jazz_app_support::Config::new(app_id)
             .server(server.base_url())
-            .backend(jazz_app::Backend::new(
+            .backend(jazz_app_support::Backend::new(
                 server.backend_secret(),
                 server.admin_secret(),
                 "stage-plan",
@@ -102,7 +102,21 @@ async fn end_users_sign_in_and_sync_through_the_app() {
         let account = state["user"]["account"].as_str().unwrap().to_owned();
         carol.insert("shows".into(), show(&account)).unwrap();
         carol.wait_for_sync("global".into()).unwrap();
-        assert!(parse(&carol.sync_status().unwrap()).get("link").is_some());
+        let status = parse(&carol.sync_status().unwrap());
+        assert!(status.get("link").is_some(), "{status}");
+        assert!(status.get("pendingUploads").is_some(), "{status}");
+
+        // carol links her device account to her account with the app's
+        // sign-in: the session becomes that user's, on her device account.
+        // From a plain thread with no tokio runtime, as Swift or Go call it.
+        let user = std::thread::scope(|scope| {
+            scope.spawn(|| carol.link("token-carol".into())).join().unwrap()
+        });
+        let user = parse(&user.unwrap());
+        assert_eq!(user["kind"], "backend", "{user}");
+        assert_eq!(user["account"], account);
+        let state = parse(&carol.session_state().unwrap().unwrap());
+        assert_eq!(state["user"]["subject"], "carol", "{state}");
 
         let asked = Arc::new(Tokens(Mutex::new(Vec::new()), "alice"));
         let alice_config = alice.clone();

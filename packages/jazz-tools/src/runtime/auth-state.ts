@@ -18,7 +18,23 @@ export function isRenewableAuthFailure(reason: AuthFailureReason): boolean {
   return reason !== "disabled" && reason !== "revoked";
 }
 
+const AUTH_FAILURE_REASONS: ReadonlySet<string> = new Set<AuthFailureReason>([
+  "expired",
+  "missing",
+  "invalid",
+  "disabled",
+  "revoked",
+]);
+
+/**
+ * The refusal's reason. A host that already classified it (the native relay
+ * forwards Rust's `AuthFailureReason::as_str`) sends the reason itself, used
+ * as is. Otherwise, from an older native build or a server's `WireError`,
+ * the message is all there is, and its wording is matched as Rust's
+ * `AuthFailureReason::from_message` does.
+ */
 export function mapAuthReason(reason: string): AuthFailureReason {
+  if (AUTH_FAILURE_REASONS.has(reason)) return reason as AuthFailureReason;
   const lower = reason.toLowerCase();
   if (lower.includes("expired")) return "expired";
   if (lower.includes("missing")) return "missing";

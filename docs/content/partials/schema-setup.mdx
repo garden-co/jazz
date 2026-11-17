@@ -1,19 +1,20 @@
-Check your app files and regenerate the bindings:
+Check your schema and permissions and regenerate the app files:
 
 `npx jazz-tools generate`
 
-This checks `jazz.app.json` and `jazz.permissions.json` with the same loader your backend runs,
-then writes `jazz.generated.ts`. Errors name the file, the JSON path and, inside an expression, the
-exact spot, with a suggestion. In CI, `npx jazz-tools generate --check` writes nothing and fails
-when `jazz.generated.ts` is missing or out of date.
+This loads `schema.ts` (and `permissions.ts`, if your permissions live there) and writes
+`jazz.app.json`, `jazz.permissions.json` and the typed bindings in `jazz.generated.ts`. The two JSON
+files are generated: edit the TypeScript, not them. `generate` refuses to overwrite a hand-edited
+one unless you pass `--force`. Commit all of them. In CI, `npx jazz-tools generate --check` writes
+nothing and fails when a generated file is missing or out of date.
 
-When you change `tables` after the bindings were generated, `generate` refuses until the change has
-a migration:
+When you change the tables in `schema.ts` after the files were generated, `generate` refuses until
+the change has a migration:
 
 ```text
 the schema changed since the last version: run `jazz-tools migrations create --name <name>`
 ```
 
-Run it as it says, review the migration it writes into `jazz.app.json`, and see
+Run it as it says, review the migration file it writes into `migrations/`, and see
 [Migrations](/docs/schemas/migrations). Then restart your main backend (locally) or deploy it as
 usual: on start, `createJazz` publishes the new schema, permissions and migrations.

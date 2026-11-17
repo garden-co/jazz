@@ -127,25 +127,25 @@ unsafe extern "C" fn watch_cb(ctx: *mut c_void, kind: *const c_char, json: *cons
 
 struct App {
     server: jazz_server::JazzServer,
-    backend: jazz_app::Jazz,
+    backend: jazz_app_support::Jazz,
     _relay: relay::Relay,
     config: Box<dyn Fn(Value) -> String + Send + Sync>,
 }
 
 async fn app() -> App {
-    let app_id = jazz_app::AppId::random();
+    let app_id = jazz_app_support::AppId::random();
     let server = jazz_server::JazzServer::builder()
         .with_app_id(app_id)
         .start()
         .await
         .unwrap();
-    let files = jazz_app::AppFiles::new(STAGE_PLAN_APP.as_bytes().to_vec(), None)
+    let files = jazz_app_support::AppFiles::new(STAGE_PLAN_APP.as_bytes().to_vec(), None)
         .with_permissions(STAGE_PLAN_PERMISSIONS.as_bytes().to_vec());
-    let backend = jazz_app::Jazz::open(
+    let backend = jazz_app_support::Jazz::open(
         files,
-        jazz_app::Config::new(app_id)
+        jazz_app_support::Config::new(app_id)
             .server(server.base_url())
-            .backend(jazz_app::Backend::new(
+            .backend(jazz_app_support::Backend::new(
                 server.backend_secret(),
                 server.admin_secret(),
                 "stage-plan",
@@ -309,6 +309,49 @@ async fn no_token_callback_runs_after_sign_out() {
     result.unwrap();
 }
 
+/// `deleteClientStorage` ends the app too: when it returns the token
+/// callback is not running (a slow fetch was in flight), and it is never
+/// called again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_token_callback_runs_after_deleting_the_store() {
+    let app = app().await;
+    let bearer = (app.config)(json!({ "bearer": true }));
+    let result = tokio::task::spawn_blocking(move || unsafe {
+        let host = Host::new(Some("offline"), Duration::from_millis(800));
+        let mut err = ptr::null_mut();
+        let alice = jazz_open_user(
+            c(&bearer).as_ptr(),
+            Some(token_cb),
+            &*host as *const Host as *mut c_void,
+            &mut err,
+        );
+        assert!(!alice.is_null());
+        let _ = call(alice, "refresh", json!({}));
+        let asked = host.calls.load(Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !(host.calls.load(Ordering::SeqCst) > asked && host.running.load(Ordering::SeqCst)) {
+            assert!(std::time::Instant::now() < deadline, "no retry came");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        call(alice, "deleteClientStorage", json!({})).unwrap();
+        assert!(
+            !host.running.load(Ordering::SeqCst),
+            "deleting returned while the callback ran"
+        );
+        host.closed.store(true, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(
+            !host.after_close.load(Ordering::SeqCst),
+            "the callback ran after the store was deleted"
+        );
+        jazz_close(alice);
+        drop(host);
+    })
+    .await;
+    app.stop().await;
+    result.unwrap();
+}
+
 /// When `jazz_close` returns, the token callback is not running and is never
 /// called again: a host may free its ctx (Go: delete its cgo.Handle) then.
 /// Here a slow fetch is in progress when close is called.
@@ -355,6 +398,63 @@ async fn no_token_callback_runs_after_close() {
         drop(host);
     })
     .await;
+    app.stop().await;
+    result.unwrap();
+}
+
+/// Through the C ABI: a device account links to the app's sign-in (the
+/// session becomes that user's), a bearer the backend rejects is a refusal
+/// (not I/O) and leaves the session as it was, and a backend's `bundle`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn c_hosts_link_and_read_a_backends_bundle() {
+    let app = app().await;
+    let device = (app.config)(json!({ "deviceKey": "PLACEHOLDER" }));
+    let bundle = app.backend.bundle().unwrap().to_owned();
+    let result = tokio::task::spawn_blocking(move || unsafe {
+        let mut err = ptr::null_mut();
+        let key = jazz_generate_device_key(&mut err);
+        let key_text = CStr::from_ptr(key).to_str().unwrap().to_owned();
+        jazz_string_free(key);
+        let carol = jazz_open(
+            c(&device.replace("PLACEHOLDER", &key_text)).as_ptr(),
+            &mut err,
+        );
+        assert!(!carol.is_null());
+        let rejected = call(carol, "link", json!({ "bearer": "not-a-token" })).unwrap_err();
+        assert_eq!(rejected["kind"], "refused", "{rejected}");
+        assert_eq!(
+            call(carol, "session", json!({})).unwrap()["user"]["kind"],
+            "device"
+        );
+        let user = call(carol, "link", json!({ "bearer": "token-carol" })).unwrap();
+        assert_eq!(user["kind"], "backend", "{user}");
+        assert_eq!(
+            call(carol, "session", json!({})).unwrap()["user"]["subject"],
+            "carol"
+        );
+        assert_eq!(call(carol, "bundle", json!({})).unwrap(), Value::Null);
+        jazz_close(carol);
+
+        // Another device linking the same (already linked) user: the backend
+        // refuses it, a refusal (not I/O).
+        let key = jazz_generate_device_key(&mut err);
+        let other_key = CStr::from_ptr(key).to_str().unwrap().to_owned();
+        jazz_string_free(key);
+        let other = jazz_open(
+            c(&device.replace("PLACEHOLDER", &other_key)).as_ptr(),
+            &mut err,
+        );
+        assert!(!other.is_null());
+        let conflict = call(other, "link", json!({ "bearer": "token-carol" })).unwrap_err();
+        assert_eq!(conflict["kind"], "refused", "{conflict}");
+        assert_eq!(
+            call(other, "session", json!({})).unwrap()["user"]["kind"],
+            "device"
+        );
+        jazz_close(other);
+    })
+    .await;
+    let _ = bundle;
     app.stop().await;
     result.unwrap();
 }

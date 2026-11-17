@@ -247,33 +247,27 @@ issued), call `jazz.linkIdentity({ from, to })`.
 
 For an app with this `todos` table:
 
-```json title="jazz.app.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
-  "tables": {
-    "todos": {
-      "columns": {
-        "title": "string",
-        "owner_id": "uuid"
-      }
-    }
-  }
-}
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  todos: s.table({
+    title: s.string(),
+    owner_id: s.uuid(),
+  }),
+});
 ```
 
 a user reads their own todos, and a user whose `role` claim is `manager` reads all of them:
 
-```json title="jazz.permissions.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
-  "tables": {
-    "todos": {
-      "read": { "anyOf": ["owner_id = session.user", "session.claims.role = 'manager'"] }
-    }
-  }
-}
+```ts title="schema.ts"
+const { definePermissions, session, anyOf, eq } = schema;
+
+export const permissions = definePermissions({
+  todos: {
+    read: anyOf({ owner_id: session.user }, eq(session.claims.role, "manager")),
+  },
+});
 ```
 
 See [Declarative Permissions](/docs/schemas/policies) for more on claims.
@@ -291,7 +285,7 @@ returned. Author columns (`$createdBy`, `$updatedBy`) hold both:
 }
 ```
 
-Compare `session.user` for account-owned data, such as `$createdBy.account = session.user`. Two linked
+Compare `session.user` for account-owned data, such as `{ $createdBy: session.user }`. Two linked
 identities (a guest and the user it became) share account ownership while keeping distinct
 authorship.
 
@@ -300,7 +294,7 @@ authorship.
 Apps on alpha.59 signed users in with JWTs, so their accounts belong to identities like
 `{ issuer: "https://idp.example.com", subject: "user_01" }`. `createJazz` names users
 `{ issuer: "jazz:backend", subject: userId }` instead. The alpha.59 import
-(`jazz-alpha59-alpha60-import import`, a binary on the release's GitHub page) links each user's `jazz:backend` identity to their existing account. Its
+(`jazz-alpha59-alpha60-import import`, a binary on the [v2.0.0-alpha.65 release](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.65); see [Self-hosted alpha.59 servers](/docs/operating/backups-and-upgrades#self-hosted-alpha59-servers)) links each user's `jazz:backend` identity to their existing account. Its
 `--app-id` must be exactly the app ID your alpha.59 app used, which is the `appId` you pass to
 `remote()` on Jazz Cloud (deprecated). With `sqlite()` the import writes it into the data directory, so your
 code doesn't pass it. If your

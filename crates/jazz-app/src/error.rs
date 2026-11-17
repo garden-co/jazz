@@ -14,6 +14,12 @@ pub enum Error {
     #[error("configuration: {0}")]
     Config(String),
 
+    /// A text splice offset is not on a char boundary of the value: Rust
+    /// text offsets are UTF-8 bytes (`str` indices), and one inside a code
+    /// point is refused rather than rounded.
+    #[error("text offset: {0}")]
+    TextOffset(String),
+
     /// The sync server refused or failed a request made while opening.
     #[error("server: {0}")]
     Server(String),
@@ -33,6 +39,16 @@ pub enum Error {
     #[error("subscription rejected: {0}")]
     Rejected(String),
 
+    /// The server rejected a write: a [`durable`](crate::Jazz::durable)
+    /// write's, a transaction's or [`wait_for_sync`](crate::Jazz::wait_for_sync)'s.
+    /// `code` and `reason` are TS's (`PersistedWriteRejectedError`): `code`
+    /// is `permission_denied`, `serialization_conflict`,
+    /// `transaction_conflict`, `client_clock_too_far_ahead` or
+    /// `write_rejected`; `reason` says why, readably.
+    #[error("write rejected ({code}): {reason}")]
+    #[non_exhaustive]
+    WriteRejected { code: String, reason: String },
+
     /// The app's backend refused the request for good: retrying it as it is
     /// will not help (e.g. linking a device account to a user who already
     /// has another account).
@@ -48,6 +64,34 @@ pub enum Error {
     /// from a client, or with `Endpoint::create_account_for` (feature `unstable-endpoint`).
     #[error("user {0:?} has no Jazz account yet")]
     NoAccount(String),
+
+    /// Closing left writes the server never got, and the store kept them
+    /// only in memory: they are lost.
+    #[error("closed with {pending} write(s) the server never got, lost with the memory store")]
+    Unsynced { pending: usize },
+
+    /// A [`crate::JazzSession`] has no usable client now: it is `status`
+    /// (starting, signed out, switching users, failed or closed).
+    #[error("no signed-in user: the session is {status}")]
+    NoUser {
+        status: crate::jazz_session::SessionStatus,
+    },
+
+    /// This [`crate::Jazz`] was replaced: its [`crate::JazzSession`]'s
+    /// user signed out or changed (TS's `DbReplacedError`). Fetch the
+    /// current one with [`crate::JazzSession::jazz`].
+    #[error("this client was replaced: the session's user signed out or changed")]
+    Replaced,
+
+    /// A trusted backend client's permissions are not the ones its main
+    /// backend serves, so it acts for no user ([`crate::Jazz::for_user`]):
+    /// it would evaluate their reads by the wrong policies. Open it with
+    /// the app's published `jazz.permissions.json`. TS's `bundle_mismatch`.
+    #[error(
+        "this client's permissions (bundle {own}) are not the ones the main backend serves \
+         (bundle {served}); open it with the app's published jazz.permissions.json"
+    )]
+    BundleMismatch { own: String, served: String },
 
     /// Something this crate does not support yet.
     #[error("not supported yet: {0}")]
@@ -72,7 +116,19 @@ pub enum Error {
 
     /// The client reported an error.
     #[error(transparent)]
-    Jazz(#[from] JazzError),
+    Jazz(JazzError),
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+impl From<JazzError> for Error {
+    fn from(error: JazzError) -> Self {
+        match error {
+            JazzError::WriteRejected { code, reason, .. } => Error::WriteRejected { code, reason },
+            error => Error::Jazz(error),
+        }
+    }
+}
+
+/// A result whose error is this crate's [`Error`] unless named. The default
+/// keeps std's two-parameter form working where the crate (or the generated
+/// bindings, which re-export it) is glob-imported: `Result<(), String>`.
+pub type Result<T, E = Error> = std::result::Result<T, E>;

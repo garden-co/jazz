@@ -5,7 +5,9 @@ edition = "2024"
 publish = false
 
 [dependencies]
-jazz-app = { path = "../../../crates/jazz-app" }
+jazz-app-support = { path = "../../../crates/jazz-app" }
 # The todo app's generated bindings.
 todo-server-docs = { path = "../todo-server-rs" }
+futures-util = "0.3"
+serde_json = "1"
 tokio = { version = "1", features = ["full"] }

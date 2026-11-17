@@ -1,6 +1,9 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "7fb8f69225343e8b833999e3667a1f42bec763dd716662db26bd6c433ef0c5e0"
+  },
   "tables": {
     "comments": {
       "columns": { "body": "string", "taskId": "uuid" },

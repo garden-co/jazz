@@ -17,6 +17,7 @@ import { endpointScope } from "../runtime/client-scope.js";
 import { PostcardWriter } from "../runtime/native-runtime/native-codec.js";
 import {
   decodeWebSocketFrameBatch,
+  decodeWireError,
   encodeWebSocketFrameBatch,
   REAUTHENTICATE_WIRE_MESSAGE_PREFIX,
 } from "../runtime/native-runtime/websocket.js";
@@ -41,6 +42,7 @@ import {
 import { resolveSchemaSource } from "../schema-source.js";
 import { checkRunningBindings } from "../dev/app-files.js";
 import { loadBackendApp, provideCodegenNapi, type LoadedBackendApp } from "../dev/codegen-napi.js";
+import { BUNDLE_HEADER } from "./admission.js";
 import { boundApp } from "../typed-app.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import { publishLoadedDeployment } from "../dev/catalogue.js";
@@ -55,6 +57,8 @@ import {
   type JazzClient,
 } from "./create-jazz-session.js";
 import type { BackendSchemaInput } from "./create-jazz-context.js";
+import { openThinSessionClient } from "./thin-session-client.js";
+import { asksThinResults, ThinRelay, type ThinTransactionClient } from "./thin-relay.js";
 import {
   BackendClientsUnavailable,
   backendClientVerifier,
@@ -143,8 +147,10 @@ export type JazzStore =
 
 /**
  * A SQLite core in this process, kept in the directory `path`. It generates
- * its app id on first start and keeps it beside its data, in `<path>/app-id`
- * (`jazz-alpha59-alpha60-import` writes an alpha.59 app's id there). Large
+ * its app id on first start and keeps it in its own file, `<path>/jazz.sqlite`,
+ * with the rest of its identity, so a copy of that file is the same store
+ * (`jazz-alpha59-alpha60-import` records an alpha.59 app's id there). To
+ * open a copy beside the original, detach it first: `jazz-tools store detach`. Large
  * values' bytes go to `blobs`, by default `files()` in `<path>/blobs`.
  *
  * Only one process can open `path` at a time (it holds `<path>/jazz.lock`
@@ -444,7 +450,8 @@ export interface AuthenticatedUser extends JazzUser {
  * (`import permissions from "./jazz.permissions.json" with { type: "json" }`).
  * Jazz's Rust loader reads and checks it against the app's bindings.
  */
-export type AppPermissionsFile = { readonly format: number } & Readonly<Record<string, unknown>>;
+export type AppPermissionsFile = ({ readonly $schema: string } | { readonly format: number }) &
+  Readonly<Record<string, unknown>>;
 
 export interface CreateJazzOptions {
   /** The app, as `jazz.generated.ts` exports it. */
@@ -770,19 +777,23 @@ export interface Jazz {
    */
   createAccountFor(userId: string): Promise<string>;
   /**
-   * End `userId`'s open sync sessions on this backend instance now, as
+   * End `userId`'s open sync sessions now, on every backend instance, as
    * refused: each client asks your backend who is signed in, and signs out
    * if `authenticate` no longer names that user (or reconnects if it still
    * does). Call it from your sign-out handler or your auth provider's
    * session-revoked webhook, so a sign-out reaches open sessions before
-   * their `expiresAt`. A session still signing in when you call it (its
-   * `authenticate` may have read the cookie you just ended) is refused too
-   * if it signs in as `userId`. Sessions served by other instances end at
-   * their `expiresAt`; an HTTP stream session there also asks
-   * `authenticate` again on a send at least every `streamAuthReuseSeconds`
-   * (a minute by default), so it ends within that long if `authenticate` no
-   * longer names the user. Returns how
-   * many open sessions it ended.
+   * their `expiresAt`. On serverless hosts the call usually runs on another
+   * instance than the user's sessions: it records the revocation at the
+   * core, which ends the sessions any instance serves, and refuses those an
+   * instance admits afterwards on an `authenticate` answer from before the
+   * call (a sign-in still running, or an HTTP stream's reused answer). A
+   * sign-in that starts after the call is admitted as usual. Times are
+   * compared on your backend instances' clocks.
+   *
+   * Resolves with how many open sessions it ended on this instance (it
+   * can't count the others), once the core has recorded the revocation.
+   * Against a core older than this (no session revocation), it ends this
+   * instance's sessions only, and warns once: upgrade the core.
    */
   revokeUser(userId: string): Promise<number>;
   /**
@@ -866,6 +877,41 @@ const LOCAL_FIRST_AUTH_DISABLED = "local_first_auth_disabled";
  * `LOCAL_FIRST_AUTH_DISABLED_MESSAGE` before 2.0.0-alpha.62).
  */
 const CORE_REFUSES_GUESTS = "Local-first auth is not enabled";
+// The core's refusal of a user session `jazz.revokeUser` ended: an
+// `auth_failed` / `after_auth` error frame with its `SESSION_REVOKED`
+// message. Batches larger than an error batch can be aren't decoded.
+const CORE_REVOKED_SESSION = "session revoked: jazz.revokeUser ended this user's sessions";
+const CORE_REVOKED_BATCH_MAX_BYTES = 512;
+// `WireFrame::Error`'s postcard tag, the first byte of its frame.
+const WIRE_FRAME_ERROR_TAG = 1;
+
+/**
+ * Whether a core→client batch is the core ending the session as revoked.
+ * Only a decoded error frame counts: row data that happens to contain the
+ * message (any user can write it) never does.
+ */
+function isCoreRevocation(data: Uint8Array): boolean {
+  if (data.byteLength > CORE_REVOKED_BATCH_MAX_BYTES) return false;
+  let frames: Uint8Array[];
+  try {
+    frames = decodeWebSocketFrameBatch(data);
+  } catch {
+    return false;
+  }
+  return frames.some((frame) => {
+    if (frame[0] !== WIRE_FRAME_ERROR_TAG) return false;
+    try {
+      const error = decodeWireError(frame);
+      return (
+        error.code === "auth_failed" &&
+        error.retry === "after_auth" &&
+        error.message === CORE_REVOKED_SESSION
+      );
+    } catch {
+      return false;
+    }
+  });
+}
 // What a browser's request to a public route carries on to a remote core:
 // never its cookies or its app session.
 const REMOTE_FORWARDED_HEADERS = ["accept", "content-type", "if-none-match"];
@@ -918,6 +964,8 @@ interface Core {
    * in-process or Vercel core keeps with its data.
    */
   readonly appId: string;
+  /** What an in-process SQLite core keeps for signing agent tokens. */
+  readonly tokenSecret?: string;
   /** Where this process's own clients reach it. */
   readonly serverUrl: string;
   /**
@@ -1194,9 +1242,11 @@ async function openInProcessCore(
   const adminSecret = randomBytes(32).toString("base64url");
   // The core holds `<path>/jazz.lock` with an OS lock while it's open.
   if (store.kind === "sqlite") refuseServerlessDisk(store.path);
-  const appId = store.kind === "sqlite" ? await keptAppId(store.path) : randomUUID();
+  // A SQLite store keeps its app id in its own file: a new one on first
+  // start, so the app's identities stay the same across restarts (and
+  // restores of the file) without the app naming an id.
   const core = await JazzCore.open({
-    appId,
+    ...(store.kind === "sqlite" ? {} : { appId: randomUUID() }),
     backendSecret,
     adminSecret,
     ...(store.kind === "sqlite"
@@ -1225,8 +1275,10 @@ async function openInProcessCore(
       pinnedSocket(core.openInProcessSocket(onEvent), bundle),
     ),
   });
+  const appId = core.appId;
   const opened: Core = {
     appId,
+    ...(core.tokenSecret == null ? {} : { tokenSecret: core.tokenSecret }),
     serverUrl,
     adminSecret,
     backendSecret,
@@ -1238,59 +1290,6 @@ async function openInProcessCore(
     },
   };
   return opened;
-}
-
-/**
- * The app id an in-process SQLite core keeps beside its data, in
- * `<path>/app-id`: a new one on first start, so the app's identities stay
- * the same across restarts without the app naming an id.
- */
-async function keptAppId(dir: string): Promise<string> {
-  const file = join(dir, "app-id");
-  const kept = async (): Promise<string | undefined> => {
-    try {
-      return (await readFile(file, "utf8")).trim() || undefined;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      return undefined;
-    }
-  };
-  let appId = await kept();
-  if (appId === undefined) {
-    await mkdir(dir, { recursive: true });
-    // `wx`: two processes starting the same store at once agree on one id.
-    try {
-      appId = randomUUID();
-      await writeFile(file, `${appId}\n`, { flag: "wx" });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      appId = (await kept())!;
-    }
-  }
-  return appId;
-}
-
-/**
- * The secret an in-process SQLite core's agent tokens are signed with, kept
- * beside its data in `<path>/inspect-token-secret` (mode 0600) so tokens
- * survive restarts. Deleting the file revokes every token.
- */
-async function keptTokenSecret(dir: string): Promise<string> {
-  const file = join(dir, "inspect-token-secret");
-  try {
-    const kept = (await readFile(file, "utf8")).trim();
-    if (kept) return kept;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  const secret = newTokenSecret();
-  try {
-    await writeFile(file, `${secret}\n`, { flag: "wx", mode: 0o600 });
-    return secret;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    return (await readFile(file, "utf8")).trim();
-  }
 }
 
 /**
@@ -1795,8 +1794,22 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     );
   }
 
+  let warnedNoCoreRevocation = false;
+  function warnNoCoreRevocation() {
+    if (warnedNoCoreRevocation) return;
+    warnedNoCoreRevocation = true;
+    console.error(
+      "createJazz: the core has no session revocation (it runs an older jazz-tools), so jazz.revokeUser ends only the sessions this backend instance serves; sessions on other instances end at their expiresAt. Upgrade the core (a vercel() core is restarted on the newer version by the next deployment).",
+    );
+  }
+
   /** One admin account request to the core: this backend vouches for the identities. */
   async function adminAccounts(operation: string, body: unknown): Promise<{ account: string }> {
+    const parsed = (await adminAccountsCall(operation, body)) as { account: unknown };
+    return { ...parsed, account: String(parsed.account) };
+  }
+
+  async function adminAccountsCall(operation: string, body: unknown): Promise<unknown> {
     const response = await core.handle(
       "POST",
       `/apps/${encodeURIComponent(accountAppId(appId))}/admin/accounts/${operation}`,
@@ -1817,8 +1830,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         },
       );
     }
-    const parsed = JSON.parse(text) as { account: unknown };
-    return { ...parsed, account: String(parsed.account) };
+    return JSON.parse(text) as unknown;
   }
 
   const identity = (userId: string) => ({ issuer, subject: userId });
@@ -2260,6 +2272,50 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     openedAt: number;
   }>();
 
+  /** Thin sessions' transaction clients running now. */
+  let thinClients = 0;
+
+  /**
+   * The client a thin session's transactions are served by (SPEC 8.14):
+   * in memory, linked to the core as the session, for the app's schema.
+   * Refused for a thin client built against another version of it, and
+   * `null` past the cap.
+   */
+  function openThinClient(
+    schema: Uint8Array,
+    link: ThinLink,
+  ): ThinTransactionClient | null | { refused: string } {
+    if (thinClients >= MAX_THIN_TRANSACTION_CLIENTS) return null;
+    // The session's own link: the socket the relay opens for it, with the
+    // prelude the backend admitted for it, as the session's own socket is
+    // opened (a guest vouched for an endpoint keeps that vouching).
+    const webSocket = inProcessWebSocket((_url, onEvent) =>
+      withPrelude(core.openSocket(link.headers, onEvent, link.access), link.prelude),
+    );
+    const client = openThinSessionClient({
+      appId,
+      schema,
+      serverUrl: core.serverUrl,
+      prelude: link.prelude,
+      trusted: link.trusted,
+      webSocket,
+    });
+    thinClients += 1;
+    let closed = false;
+    return {
+      serve: (request) => client.serve(request),
+      async close() {
+        if (closed) return;
+        closed = true;
+        try {
+          await client.close();
+        } finally {
+          thinClients -= 1;
+        }
+      },
+    };
+  }
+
   function openClientSession(
     request: Request,
     onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
@@ -2273,6 +2329,13 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     let ended = false;
     let userId: string | undefined;
     let trusted = false;
+    // A thin client's socket (its Hello asks for thin results): its
+    // transactions are served here (SPEC 8.14), the rest relayed.
+    let helloSeen = false;
+    let thin: ThinRelay | undefined;
+    // The prelude the core admitted the session's socket with: its own
+    // client connects with the same.
+    let thinLink: ThinLink | undefined;
     // Users `revokeUser` named while this session's admission ran.
     let admitting = true;
     const revokedWhileAdmitting = new Set<string>();
@@ -2286,6 +2349,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       ended = true;
       liveSessions.delete(live);
       stopExpiry?.();
+      thin?.end();
       socket?.close();
     };
     // A signed-in browser's session renewed in place (see
@@ -2374,6 +2438,12 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       }
       userId = admitted.userId;
       trusted = admitted.trusted;
+      thinLink = {
+        prelude: admitted.prelude,
+        access: admitted.access,
+        trusted: admitted.trusted,
+        headers: headerPairs(request.headers),
+      };
       stopExpiry?.();
       const admittedAt = Date.now();
       if (admitted.user) {
@@ -2422,7 +2492,22 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       // accounts at all: the client only goes offline, so say why here.
       // The core refuses in its first message, so only that one is looked at.
       let firstFromCore = admitted.guest === true;
+      // A user's session the core ends because `revokeUser` ran, on this
+      // instance or another: refused here as `revokeUser` refuses it, and
+      // nothing more from the core reaches the client.
+      let revokedByCore = false;
       const relay: typeof onEvent = (error, event) => {
+        if (revokedByCore) return;
+        if (
+          admitted.user &&
+          event.kind === "message" &&
+          event.data &&
+          isCoreRevocation(event.data)
+        ) {
+          revokedByCore = true;
+          clientSession.revoke("revokeUser");
+          return;
+        }
         if (firstFromCore && event.kind === "message" && event.data) {
           firstFromCore = false;
           const { buffer, byteOffset, byteLength } = event.data;
@@ -2430,6 +2515,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
             warnGuestsOffOnCore();
         }
         onEvent(error, event);
+        if (thin && event.kind === "message" && event.data) thin.fromCore(event.data);
         if (renewal && !renewal.told && event.kind === "message") tellRenewal(renewalAt);
       };
       socket = core.openSocket(headerPairs(request.headers), relay, admitted.access);
@@ -2471,7 +2557,25 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         ? chain
             .then(async (ok) => {
               if (!ok || ended || !socket) return false;
-              return socket.sendWithRoom ? socket.sendWithRoom(data) : socket.send(data);
+              const core = socket;
+              const toCore = (message: Uint8Array) =>
+                core.sendWithRoom ? core.sendWithRoom(message) : core.send(message);
+              if (!helloSeen) {
+                helloSeen = true;
+                if (asksThinResults(data) && thinLink)
+                  thin = new ThinRelay({
+                    openClient: (schema) => openThinClient(schema, thinLink!),
+                    toCore,
+                    toClient: (message) => onEvent(null, { kind: "message", data: message }),
+                    close: (code, reason) => {
+                      onEvent(null, { kind: "close", code, reason });
+                      end();
+                    },
+                  });
+              } else if (thin) {
+                return thin.fromClient(data);
+              }
+              return toCore(data);
             })
             .catch(() => {
               // A core that failed to take a message ends the session.
@@ -2669,6 +2773,10 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     for (const credential of ["backend_secret", "admin_secret"]) {
       if (parsed[credential] != null || auth[credential] != null) return null;
     }
+    // The core compares this with the user's revocation mark: a
+    // `revokeUser` on any instance after this moment ends the session, and
+    // one before it refuses the session (see `revokeUser`).
+    const authenticatedAt = Date.now();
     const user = await authenticate(request);
     if (!user || user.userId !== stated.user_id) return null;
     // A browser states a user's session only once its sign-in (or link)
@@ -2680,7 +2788,10 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       if (error instanceof NoJazzAccountError) return null;
       throw error;
     }
-    const vouched = { backend_secret: core.backendSecret, backend_session: session };
+    const vouched = {
+      backend_secret: core.backendSecret,
+      backend_session: { ...session, authenticatedAt },
+    };
     const rewritten = { ...parsed, ...vouched, auth: { ...auth, ...vouched } };
     return {
       prelude: new TextEncoder().encode(JSON.stringify(rewritten)),
@@ -3055,7 +3166,14 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       new Uint8Array(0),
       "backend",
     );
-    return new Response(null, { status: response.status === 204 ? 204 : 502 });
+    if (response.status !== 204) return new Response(null, { status: 502 });
+    // The bundle this backend pins the client's socket to (see
+    // `pinnedSocket`): a client that evaluates its users' reads against its
+    // own permissions checks they are the ones published here (jazz#5808).
+    return new Response(null, {
+      status: 204,
+      headers: pin === undefined ? undefined : { [BUNDLE_HEADER]: pin },
+    });
   }
 
   /**
@@ -3503,7 +3621,6 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   }
 
   // The Inspector follows `reload`: it reads the current options each time.
-  let keptSecret: Promise<string> | undefined;
   let schemaOf: {
     app: CreateJazzOptions["app"];
     schema: ReturnType<typeof resolveSchemaSource>;
@@ -3546,14 +3663,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       const configured = options.inspector?.tokenSecret;
       if (configured !== undefined) return configured;
       if (store.kind === "remote") return store.secret ?? null;
-      if (store.kind === "sqlite") {
-        // Read once; a failed read is tried again on the next call.
-        keptSecret ??= keptTokenSecret(store.path).catch((error: unknown) => {
-          keptSecret = undefined;
-          throw error;
-        });
-        return keptSecret;
-      }
+      if (store.kind === "sqlite") return (core as Core).tokenSecret ?? null;
       if (store.kind === "memory") return memoryTokenSecret;
       // A Vercel core's only credential is the function's OIDC token: there
       // is no shared secret to sign with.
@@ -3602,6 +3712,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     async revokeUser(userId) {
       if (typeof userId !== "string" || userId === "")
         throw new Error("revokeUser: pass the user's id, as your authenticate names it");
+      // Sessions whose `authenticate` started before now end, wherever they
+      // are served.
+      const revokedBefore = Date.now();
       let ended = 0;
       for (const { session } of [...liveSessions]) {
         if (session.trusted) continue;
@@ -3611,6 +3724,18 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         if (session.userId !== userId) continue;
         session.revoke("revokeUser");
         ended += 1;
+      }
+      // The core ends the sessions other instances serve (on serverless,
+      // usually not this one), and refuses any they admit later on an
+      // `authenticate` answer from before now.
+      try {
+        await adminAccountsCall("revoke-sessions", { identity: identity(userId), revokedBefore });
+      } catch (error) {
+        // A core without the route: only this instance's sessions end.
+        // The route never answers 404 itself (a refused secret is 401/403,
+        // a core without a registry 503), so any 404 means it's missing.
+        if ((error as { status?: number }).status !== 404) throw error;
+        warnNoCoreRevocation();
       }
       return ended;
     },
@@ -3711,7 +3836,11 @@ async function compiledPermissions(options: CreateJazzOptions): Promise<Compiled
   provideCodegenNapi(jazzNapi);
   if (!testHarnessOptions.has(options)) await checkRunningBindings(bound.source);
   const permissions = options.permissions as unknown;
-  if (!isRecord(permissions) || typeof permissions.format !== "number") {
+  // `$schema` names the file's version; a legacy (pre-alpha.66) file has `format`.
+  if (
+    !isRecord(permissions) ||
+    (typeof permissions.$schema !== "string" && typeof permissions.format !== "number")
+  ) {
     throw new Error(
       'createJazz: `permissions` must be the app\'s jazz.permissions.json, imported as JSON: `import permissions from "./jazz.permissions.json" with { type: "json" }`.',
     );
@@ -4578,4 +4707,36 @@ function isLocalEndpoint(endpoint: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Thin sessions with transactions a backend serves at once, each with a client of its own. */
+const MAX_THIN_TRANSACTION_CLIENTS = 256;
+
+/** How a thin session's own client links to the core: as its socket was admitted. */
+interface ThinLink {
+  /** The prelude the backend admitted the socket with. */
+  prelude: Uint8Array;
+  access: BackendAccess;
+  /** A trusted backend client's socket, which names no session. */
+  trusted: boolean;
+  headers: string[][];
+}
+
+/** `socket`, sending `prelude` in place of the first message a client sends. */
+function withPrelude(socket: CoreSocket, prelude: Uint8Array): CoreSocket {
+  let first = true;
+  const replace = (data: Uint8Array) => {
+    if (!first) return data;
+    first = false;
+    return prelude;
+  };
+  return {
+    send: (data) => socket.send(replace(data)),
+    async sendWithRoom(data) {
+      const sent = replace(data);
+      return socket.sendWithRoom ? socket.sendWithRoom(sent) : socket.send(sent);
+    },
+    close: () => socket.close(),
+    ...(socket.opened ? { opened: socket.opened } : {}),
+  };
 }

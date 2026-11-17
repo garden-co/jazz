@@ -1385,7 +1385,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.executeSubscription(handle, updates);
     await Promise.resolve();
 
-    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(5, 3, "server died")]));
+    // `malformed_frame` (2) is fatal even with `later` (3): retrying cannot
+    // help. (`internal` with `later` is a server shutting down, retried.)
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(2, 3, "server died")]));
     await Promise.resolve();
 
     expect(subscription.closed).toBe(true);

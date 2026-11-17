@@ -1,0 +1,13 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "drafts": { "read": "true", "insert": "true", "update": "true", "delete": "true" },
+    "documents": {
+      "read": "branch in ['main', 'draft']",
+      "insert": "branch in ['main', 'draft', 'locked']",
+      "update": "branch in ['main', 'draft']",
+      "delete": "branch in ['main', 'draft']"
+    }
+  }
+}

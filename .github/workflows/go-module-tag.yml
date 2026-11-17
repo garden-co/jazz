@@ -8,7 +8,7 @@ name: Go module tag
 # carries none. Dispatched after attach-language-artifacts.yml attached the
 # libjazz_ffi-<os>-<arch>.tar.gz archives to the draft release v<version>.
 #
-#   1. Download the archives and SHA256SUMS from the draft release; check
+#   1. Download the archives and SHA256SUMS-languages from the draft release; check
 #      them.
 #   2. Run dev/scripts/go-embed-ffi-libraries.sh on v<version>'s commit and
 #      commit the result as its child.
@@ -19,9 +19,8 @@ name: Go module tag
 #      the publish environment (Anselm approves), refusing if it exists.
 #
 # A pull request changing this file runs it dry (read access only), on its
-# own head, or on feat/go-parity while main has no packages/jazz-go yet (a
-# fallback to remove once Go lands), with an archive it builds itself
-# (linux-x86_64 only) instead of a release's.
+# own head, with an archive it builds itself (linux-x86_64 only) instead of
+# a release's.
 on:
   pull_request:
     paths:
@@ -30,7 +29,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release, e.g. 2.0.0-alpha.65: v<version> must exist, and its draft release must hold the libjazz_ffi archives."
+        description: "Release, e.g. 2.0.0-alpha.66: v<version> must exist, and its draft release must hold the libjazz_ffi archives."
         required: true
         type: string
       dry-run:
@@ -54,7 +53,7 @@ env:
   MODULE: github.com/garden-co/jazz/packages/jazz-go/v2
 
 jobs:
-  # The draft release's archives, checked against its SHA256SUMS. A draft's
+  # The draft release's archives, checked against its SHA256SUMS-languages. A draft's
   # assets are visible only with write access, so this job has it, runs
   # only on dispatch, and runs no code from the checkout.
   assets:
@@ -67,8 +66,8 @@ jobs:
     steps:
       - name: Validate inputs
         run: |
-          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
-            echo "::error::version must look like 2.0.0-alpha.N or 2.0.0-alpha.N-rc.M, got '${VERSION}'"
+          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+((\.[0-9]+)?-rc\.[0-9]+)?$ ]]; then
+            echo "::error::version must look like 2.0.0-alpha.N, 2.0.0-alpha.N-rc.M or 2.0.0-alpha.N.K-rc.M, got '${VERSION}'"
             exit 1
           fi
       - name: Download and check
@@ -77,12 +76,12 @@ jobs:
         run: |
           mkdir -p "${RUNNER_TEMP}/art"
           cd "${RUNNER_TEMP}/art"
-          gh release download "v${VERSION}" --repo "${GITHUB_REPOSITORY}" --pattern 'libjazz_ffi-*.tar.gz' --pattern SHA256SUMS
+          gh release download "v${VERSION}" --repo "${GITHUB_REPOSITORY}" --pattern 'libjazz_ffi-*.tar.gz' --pattern SHA256SUMS-languages
           for archive in libjazz_ffi-*.tar.gz; do
-            grep " ${archive}\$" SHA256SUMS > "${archive}.sum" || { echo "::error::${archive} is not in SHA256SUMS"; exit 1; }
+            grep " ${archive}\$" SHA256SUMS-languages > "${archive}.sum" || { echo "::error::${archive} is not in SHA256SUMS-languages"; exit 1; }
             sha256sum -c "${archive}.sum"
           done
-          rm -f ./*.sum SHA256SUMS
+          rm -f ./*.sum SHA256SUMS-languages
           ls -la
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -102,8 +101,8 @@ jobs:
     steps:
       - name: Validate inputs
         run: |
-          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
-            echo "::error::version must look like 2.0.0-alpha.N or 2.0.0-alpha.N-rc.M, got '${VERSION}'"
+          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+((\.[0-9]+)?-rc\.[0-9]+)?$ ]]; then
+            echo "::error::version must look like 2.0.0-alpha.N, 2.0.0-alpha.N-rc.M or 2.0.0-alpha.N.K-rc.M, got '${VERSION}'"
             exit 1
           fi
 
@@ -119,16 +118,6 @@ jobs:
           if git ls-remote --exit-code --tags origin "refs/tags/packages/jazz-go/v${VERSION}" >/dev/null; then
             echo "::error::packages/jazz-go/v${VERSION} already exists: tags are never moved"
             exit 1
-          fi
-
-      # The PR proof needs jazz-go: from feat/go-parity until main has it.
-      - name: Use a branch with jazz-go (pull request only)
-        if: github.event_name == 'pull_request'
-        run: |
-          if [ ! -d packages/jazz-go ]; then
-            git fetch --depth=1 origin feat/go-parity
-            git checkout --detach FETCH_HEAD
-            git checkout "${GITHUB_SHA}" -- dev/scripts/go-embed-ffi-libraries.sh
           fi
 
       - name: Install Go
@@ -157,7 +146,20 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/art" "${RUNNER_TEMP}/pack"
           cp target/release/libjazz_ffi.so "${RUNNER_TEMP}/pack/"
           strip "${RUNNER_TEMP}/pack/libjazz_ffi.so"
-          tar -czf "${RUNNER_TEMP}/art/libjazz_ffi-linux-x86_64.tar.gz" -C "${RUNNER_TEMP}/pack" libjazz_ffi.so
+          # As attach-language-artifacts.yml packs it: ./-prefixed names.
+          tar -czf "${RUNNER_TEMP}/art/libjazz_ffi-linux-x86_64.tar.gz" -C "${RUNNER_TEMP}/pack" .
+
+      # The tag's commit can predate a fix to the embed script, so take it
+      # from the commit this workflow runs from (as release-candidate-npm.yml
+      # does with rc-tarballs.mjs). It only lays out files; the push job
+      # still refuses a commit that touches more than lib/ and embed_*.go.
+      - name: Take the embed script from the workflow's commit
+        if: github.event_name != 'pull_request'
+        run: |
+          git fetch -q --depth=1 origin "${GITHUB_SHA}"
+          # Overwritten in the working tree only: the commit below adds
+          # just packages/jazz-go/lib and embed_*.go.
+          git show "${GITHUB_SHA}:dev/scripts/go-embed-ffi-libraries.sh" > dev/scripts/go-embed-ffi-libraries.sh
 
       - name: Embed and commit
         id: commit

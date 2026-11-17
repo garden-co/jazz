@@ -179,9 +179,127 @@ this document or public receipts.
 
 `changesets-release-pr.yml` creates versions/changelogs and the release PR; it does
 not publish. `publish-jazz-tools-alpha.yml` publishes packages and creates the
-source tag. GitHub Release creation/publication is currently manual. Do not assume
+source tag, then dispatches `publish-jazz-crates-alpha.yml`, which publishes the Rust crates (see "Rust crates
+on crates.io"). GitHub Release creation/publication is currently manual. Do not assume
 a green Changesets action or an existing tag means the packages or GitHub Release
 have been published.
+
+## Rust crates on crates.io
+
+Jazz's Rust crates are versioned in lockstep with the jazz-tools npm package.
+`pnpm release:version` runs `dev/scripts/sync-crate-versions.mjs` after
+`changeset version`, so the Version Packages PR bumps them together.
+`dev/scripts/check-lockstep-versions.mjs` checks npm, the crates and the Go
+module's `packages/jazz-go/version.go` (once it exists) in CI's lint partition.
+Run it on the Version Packages PR head before merging.
+
+The published crates are exactly the dependency closure of `jazz-app-support`,
+`jazz-tools`, `jazz-codegen` and `jazz-ffi` (`dev/scripts/rust-crates.mjs`).
+`node dev/scripts/publish-crates.mjs --list` prints them in publish order:
+
+```
+jazz-alpha59-alpha60-dump  jazz-ruzstd  jazz-compression  jazz-text  jazz-types
+jazz-model  jazz-protocol  jazz-db  jazz-core  jazz-native-transport  jazz-app-support
+jazz-codegen  jazz-ffi  jazz-otel  jazz-server  jazz-tools  jazz-wasm-tracing
+```
+
+`jazz-core` is the engine (`crates/jazz`, the package formerly named `jazz`;
+`jazz` on crates.io is an unrelated project), and its library is still named `jazz`.
+`jazz-tools` is the CLI (`crates/jazz-cli`, formerly package `jazz-cli`), so `cargo install jazz-tools`
+installs the `jazz-tools` binary. `jazz-ruzstd` is the patched ruzstd fork in
+`vendor/ruzstd` and keeps its upstream version (0.8.3). Every other workspace
+crate has `publish = false`, except `jazz-wasm-tracing` (the wasm-tracing
+fork jazz-wasm uses), which is published last, at its own version. Published crates resolve
+upstream `sqlite-wasm-rs`: the root `[patch.crates-io]` only applies inside
+this workspace (and only to wasm builds).
+
+`publish-jazz-crates-alpha.yml` is dispatched (`mode: publish`,
+`tag: v<version>`) by the `dispatch-crates` job of "Publish jazz-tools alpha",
+once its npm publish succeeds. crates.io trusted publishing refuses
+`workflow_run` triggers, so the workflow is only ever dispatched; it waits for
+the `publish` environment's approval like the npm job. It publishes only after npm has jazz-tools at that version and
+`v<version>` points at the release commit. It verifies every package
+(`cargo package`). Then, before publishing anything, it checks that every
+new crate's bootstrap token is set and that the OIDC exchange works, so a
+missing credential stops the run before it is half published. (The exchange
+succeeds if any existing crate trusts this workflow, so still do step 1
+below for jazz-tools.) It then publishes each crate in order, fetching a
+fresh OIDC token right before the first crate that needs one. A version already on
+crates.io is skipped, so a failed run can be re-run. For each crate it asks
+crates.io whether the crate exists:
+
+- **existing crates** are published with trusted publishing (OIDC);
+- **crates that don't exist yet** are published with the `publish`
+  environment's `CRATES_IO_BOOTSTRAP_TOKEN` secret.
+
+To check a candidate without publishing, dispatch `publish-jazz-crates-alpha.yml` on the
+rc branch with `mode: dry-run`. It runs `cargo publish --dry-run` for every
+crate in dependency order, needs no credential, and runs outside the `publish`
+environment. A real manual run is `mode: publish` with `tag: v<version>`.
+
+### One-time bootstrap (first publish of new crates)
+
+A crate can only get a trusted publisher once it exists on crates.io, so new
+crates are published with a short-lived token the first time:
+
+1. **Before the run:** on crates.io, check that `jazz-tools` (it already
+   exists) has a GitHub trusted publisher (Settings → Trusted Publishing) for
+   repository `garden-co/jazz`, workflow `publish-jazz-crates-alpha.yml`,
+   environment `publish`. One may exist since alpha.62; add it if not.
+2. **Create the token:** crates.io → Account Settings → API Tokens → New
+   Token. Use the scope `publish-new`, an expiry of 1 day, and crate scopes
+   for exactly the new crates. Store it as the `CRATES_IO_BOOTSTRAP_TOKEN`
+   secret of the `publish` environment (Settings → Environments → publish).
+   Don't paste it anywhere else. The new crates are: jazz-alpha59-alpha60-dump,
+   jazz-ruzstd, jazz-compression, jazz-text, jazz-types, jazz-model,
+   jazz-protocol, jazz-db, jazz-core, jazz-native-transport, jazz-app-support,
+   jazz-codegen, jazz-ffi, jazz-otel, jazz-server.
+3. **Publish:** "Publish jazz-tools alpha" dispatches `publish-jazz-crates-alpha.yml`
+   after the npm publish; to run it by hand, dispatch it with `mode: publish`, `tag: v<version>`. The summary at the
+   end of its log shows which auth each crate used.
+4. **Afterwards, for every new crate:** add the same trusted publisher
+   (`garden-co/jazz`, `publish-jazz-crates-alpha.yml`, environment `publish`). Then
+   delete the `CRATES_IO_BOOTSTRAP_TOKEN` secret and revoke the token on
+   crates.io. Also add the `garden-co` owners team to each crate (`cargo
+owner --add github:garden-co:<team> <crate>`), so they aren't owned by one
+   person only.
+5. From then on every crate publishes through OIDC. A crate added to the
+   closure later needs steps 2 to 4 for that crate alone. Until then, the
+   workflow fails for it with a message naming the missing token.
+
+## Kotlin on Maven Central
+
+`jazz-kotlin` (the JVM jar, with every platform's `libjazz_ffi` inside) and
+`jazz-kotlin-android` (the AAR) publish to Maven Central as
+`tools.jazz:jazz-kotlin` and `tools.jazz:jazz-kotlin-android`, at jazz-tools'
+version (the Gradle builds read it from `packages/jazz-tools/package.json`).
+`.github/workflows/publish-jazz-kotlin.yml` runs `dev/scripts/publish-kotlin.sh`.
+
+1. **After "Attach language artifacts" and the GitHub Release are published,**
+   dispatch "Publish jazz-kotlin" with `mode=dry-run`, `tag=v<version>`. It
+   builds `refs/tags/v<version>`'s commit (never a branch of that name) with
+   the pinned JDK and Gradle 8.14.3: the jar from the release's
+   `libjazz_ffi-<platform>.tar.gz` (checked against `SHA256SUMS-languages`,
+   their build-provenance attestations, and `libjazz_ffi-source.txt` naming
+   that commit) and the AAR. It signs both with a throwaway key and checks
+   every file, POM and signature. Its artifact is what Central would get.
+2. **Publish:** dispatch it with `mode=publish`, `tag=v<version>`. The `publish`
+   environment's reviewer approves; it reads `MAVEN_CENTRAL_USERNAME` and
+   `MAVEN_CENTRAL_PASSWORD` (a Central Portal user token) and
+   `MAVEN_SIGNING_KEY` / `MAVEN_SIGNING_KEY_PASSWORD`. One Gradle run builds,
+   signs and uploads; the same checks then run on those files. The two
+   deployments wait, validated, on central.sonatype.com → Publish →
+   Deployments: once the run is green, check them and press Publish.
+3. A published version can't be replaced or deleted on Central. A failed run
+   publishes nothing; drop any deployment it left in the portal.
+
+The artifacts are signed by the release key, RSA 4096, `Jazz Releases
+<releases@jazz.tools>`, fingerprint
+`A23F 5FC8 350C E279 A2DF  0C99 3682 3E73 6D53 8486`, which expires 2028-11-15.
+Its public key is on keyserver.ubuntu.com and keys.openpgp.org; the private
+key and passphrase are backed up in AWS Secrets Manager (shared-services,
+us-east-2, `jazz/release/maven-signing-key`). Extend the expiry before then and
+re-upload the public key; the fingerprint stays.
 
 ## Release branch lifecycle and alpha55 migration
 

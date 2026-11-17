@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { useAll, useSession } from "jazz-tools/react";
+import { useAll, useJazzSession } from "jazz-tools/react";
 import { Button } from "@astryxdesign/core/Button";
 import { ClickableCard } from "@astryxdesign/core/ClickableCard";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
@@ -17,7 +17,7 @@ import { NewSessionDialog } from "@/components/new-session-dialog";
 
 export function SessionBrowser() {
   const router = useRouter();
-  const author = useSession()?.user;
+  const author = useJazzSession().user?.accountId;
   const { data: sessions = [], isLoading } = useAll(app.sessions.orderBy("$createdAt", "desc"));
   const [isCreating, setIsCreating] = useState(false);
 

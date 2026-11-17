@@ -22,16 +22,23 @@ export type Language = {
   /**
    * Whether the language runs on a backend, as a backend client of your main
    * backend (`setup/backend-client`). Client-only languages (Swift, Kotlin in
-   * .65) get no tabs on pages whose frontmatter says `languageTabs: backend`.
+   * .66) get no tabs on pages whose frontmatter says `languageTabs: backend`.
    */
   backend: boolean;
   /**
    * Whether the language can run your app's main backend (createJazz, serving
-   * end users, publishing permissions). Only TypeScript in .65: pages whose
+   * end users, publishing permissions). Only TypeScript in .66: pages whose
    * frontmatter says `languageTabs: main-backend` get no other tabs. `backend`
    * alone means a backend client (`languageTabs: backend` pages).
    */
   mainBackend?: boolean;
+  /**
+   * Shipped as experimental (alpha.66: Rust, Swift, Kotlin and Go are clients
+   * of a TypeScript backend). The build labels the language's tabs and setup
+   * page with `<ExperimentalBadge>`, linking to its Language Support tab.
+   * Remove the flag to drop every label at once.
+   */
+  experimental?: boolean;
   enabled: boolean;
 };
 
@@ -50,17 +57,19 @@ export const LANGUAGES: readonly Language[] = [
   { label: "Effect", backend: true, mainBackend: true, enabled: true },
   {
     label: "Rust",
+    setupPage: "setup/rust",
+    experimental: true,
     backend: true,
     bindings: {
       file: "examples/stage-plan/apps/rust-cli/src/jazz_app.rs",
       lang: "rust",
       symbols: ["TaskStatus", "Task", "NewTask"],
     },
-    setupPage: "setup/rust",
     enabled: true,
   },
   {
     label: "Swift",
+    experimental: true,
     backend: false,
     setupPage: "setup/swift",
     bindings: {
@@ -68,21 +77,23 @@ export const LANGUAGES: readonly Language[] = [
       lang: "swift",
       symbols: ["TaskStatus", "Task", "NewTask"],
     },
-    enabled: false,
+    enabled: true,
   },
   {
     label: "Kotlin",
+    experimental: true,
     backend: false,
     setupPage: "setup/kotlin",
     bindings: {
       file: "examples/stage-plan/apps/kotlin-cli/src/main/kotlin/JazzApp.kt",
       lang: "kotlin",
-      symbols: ["TaskStatus", "Task", "TaskInsert"],
+      symbols: ["TaskStatus", "Task", "NewTask"],
     },
-    enabled: false,
+    enabled: true,
   },
   {
     label: "Go",
+    experimental: true,
     backend: true,
     setupPage: "setup/go",
     bindings: {
@@ -90,7 +101,7 @@ export const LANGUAGES: readonly Language[] = [
       lang: "go",
       symbols: ["TaskStatus", "Task", "NewTask"],
     },
-    enabled: false,
+    enabled: true,
   },
 ];
 
@@ -235,6 +246,36 @@ export function filterLanguageTabs(
   let out = source;
   for (const edit of edits.sort((a, b) => b.start - a.start)) {
     out = out.slice(0, edit.start) + edit.text + out.slice(edit.end);
+  }
+  return out;
+}
+
+/**
+ * Puts an `<ExperimentalBadge>` at the top of every `jazz-environment` tab of
+ * an experimental language, and below the frontmatter of its setup page
+ * (`pageSlug` is the page's path under `content/docs`, without extension).
+ */
+export function markExperimental(
+  source: string,
+  pageSlug: string,
+  languages: readonly Language[] = LANGUAGES,
+): string {
+  // Language Support is where the labels point: no labels there.
+  if (pageSlug === "reference/language-support") return source;
+  const experimental = languages.filter((l) => l.experimental && l.enabled);
+  let out = source;
+  for (const l of experimental) {
+    const open = new RegExp(`^([ \\t]*)<Tab value="${l.label}">[ \\t]*$`, "gm");
+    out = out.replace(open, (line, indent: string) => {
+      return `${line}\n${indent}  <ExperimentalBadge language="${l.label}" />\n`;
+    });
+  }
+  const setup = experimental.find((l) => l.setupPage === pageSlug);
+  if (setup) {
+    // The source may or may not still carry its frontmatter at this stage.
+    const end = /^---\n[\s\S]*?\n---\n/.exec(out);
+    const at = end ? end[0].length : 0;
+    out = `${out.slice(0, at)}\n<ExperimentalBadge language="${setup.label}" />\n\n${out.slice(at)}`;
   }
   return out;
 }

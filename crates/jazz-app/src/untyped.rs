@@ -17,7 +17,7 @@
 //! decodes it to milliseconds since the Unix epoch).
 //!
 //! ```ignore
-//! use jazz_app::untyped::{Hop, Query, Table};
+//! use jazz_app_support::untyped::{Hop, Query, Table};
 //! let todos = Table::new("todos", ["title", "done", "project"]);
 //! let projects = Table::new("projects", ["name"]);
 //! let open_projects = Query::table(todos)
@@ -26,7 +26,6 @@
 //!     .into_core()?;
 //! ```
 
-use std::collections::BTreeSet;
 use std::ops::Bound;
 
 use jazz::query::{
@@ -165,6 +164,22 @@ impl Query {
         matches!(self.source, Some(Source::Union(_)))
     }
 
+    /// Read only `part` of `column`'s value (TS `select` with a partial
+    /// selection). Not of a hop, gather, union or history read, where the
+    /// core cannot read part of a value.
+    pub fn select_part(mut self, column: &str, part: jazz::query::Part) -> Self {
+        if self.source.is_some() {
+            return self.refuse(
+                "part(...) on hop_to(...), gather(...) or union(...) is not supported yet",
+            );
+        }
+        if self.is_history() {
+            return self.refuse("part(...) on a history read is not supported");
+        }
+        self.query = self.query.select_part(column, part);
+        self
+    }
+
     fn is_history(&self) -> bool {
         jazz::schema::history::is_history_table(&self.query.table)
     }
@@ -291,17 +306,26 @@ impl Query {
         self.order_by(ACCEPTED_AT_COLUMN, direction)
     }
 
-    /// The rows `hop` reaches from this query's rows. Hops chain; filters,
-    /// order and window after a hop apply to the rows it reached.
-    /// `order_by`, `limit` or `offset` before a hop is not supported.
-    pub fn hop_to(self, hop: Hop) -> Self {
+    /// The rows `hop` reaches from this query's rows. Hops chain; filters
+    /// after a hop apply to the rows it reached. As in TypeScript, a query
+    /// has one order and window, applied to the rows it ends on: an
+    /// `order_by`, `limit` or `offset` before a hop orders and windows the
+    /// rows the hop reaches (an order names a column of the table reached),
+    /// and later ones add to or replace it as they would without the hop.
+    pub fn hop_to(mut self, hop: Hop) -> Self {
         let include_deleted = self.include_deleted;
+        let order_by = std::mem::take(&mut self.query.order_by);
+        let limit = self.query.limit.take();
+        let offset = std::mem::take(&mut self.query.offset);
         let (column, to, forward) = match hop {
             Hop::Forward { column, to } | Hop::ForwardArray { column, to } => (column, to, true),
             Hop::Reverse { column, to } => (column, to, false),
         };
         let mut query = Self::table(to);
         query.include_deleted = include_deleted;
+        query.query.order_by = order_by;
+        query.query.limit = limit;
+        query.query.offset = offset;
         let (expr, scope, hops) = match self.path("hop_to(...)") {
             Ok(path) => path,
             Err(reason) => return query.refuse(reason),
@@ -423,17 +447,32 @@ impl Query {
     /// no NUL, and each different. Like TypeScript's `union`, it takes
     /// `order_by`, `limit` and `offset`, and nothing else.
     pub fn union(table: Table, arms: impl IntoIterator<Item = (String, Query)>) -> Self {
+        Self::union_of(
+            table,
+            arms.into_iter().map(|(label, arm)| (Some(label), arm)),
+        )
+    }
+
+    /// [`Query::union`] whose arms are labelled by what they read
+    /// (`jazz.union-arm-label.v2`, the label every client derives for the
+    /// same arm). Two identical arms are refused: name them with
+    /// [`Query::union`] to read the same query twice.
+    pub fn union_unnamed(table: Table, arms: impl IntoIterator<Item = Query>) -> Self {
+        Self::union_of(table, arms.into_iter().map(|arm| (None, arm)))
+    }
+
+    /// [`Query::union`] where each arm is named (`Some`) or labelled by
+    /// what it reads (`None`), as in [`Query::union_unnamed`].
+    pub fn union_of(table: Table, arms: impl IntoIterator<Item = (Option<String>, Query)>) -> Self {
         let mut union = Self::table(table);
-        let mut labels = BTreeSet::new();
         let mut inputs = Vec::new();
         for (label, arm) in arms {
-            if label.is_empty() || label.len() > 4096 || label.contains('\0') {
+            if let Some(label) = &label
+                && (label.is_empty() || label.len() > 4096 || label.contains('\0'))
+            {
                 return union.refuse(format!(
                     "union(...) labels must be 1..=4096 bytes and NUL-free, not {label:?}"
                 ));
-            }
-            if !labels.insert(label.clone()) {
-                return union.refuse(format!("union(...) labels must differ: {label:?} repeats"));
             }
             if arm.query.table != union.query.table {
                 let reason = format!(
@@ -443,13 +482,24 @@ impl Query {
                 return union.refuse(reason);
             }
             match arm.into_arm() {
-                Ok(input) => inputs.push(RelationUnionArm { label, input }),
+                Ok(input) => inputs.push(RelationUnionArm {
+                    label: label.unwrap_or_default(),
+                    input,
+                }),
                 Err(reason) => return union.refuse(reason),
             }
         }
         if inputs.is_empty() {
             return union.refuse("union(...) needs at least one query");
         }
+        // Derives the unnamed arms' labels and refuses repeated labels.
+        let mut expr = RelationExpr::Union { inputs };
+        if let Err(error) = q::fill_union_arm_labels(&mut expr) {
+            return union.refuse(error.to_string());
+        }
+        let RelationExpr::Union { inputs } = expr else {
+            unreachable!("filling labels keeps the union")
+        };
         union.source = Some(Source::Union(inputs));
         union
     }
@@ -512,6 +562,7 @@ impl Query {
         subquery.limit = query.limit;
         subquery.offset = query.offset;
         subquery.nested_arrays = query.array_subqueries;
+        subquery.partial = query.partial;
         Ok(subquery)
     }
 
@@ -521,6 +572,9 @@ impl Query {
         if let Some(reason) = self.refused {
             return Err(reason);
         }
+        if !self.query.partial.is_empty() {
+            return Err(format!("{what} after part(...) is not supported yet"));
+        }
         if self.is_history() {
             return Err(format!("{what} on a history read is not supported"));
         }
@@ -529,12 +583,10 @@ impl Query {
                 "{what} after select(...) or include(...) is not supported"
             ));
         }
-        if !self.query.order_by.is_empty() || self.query.limit.is_some() || self.query.offset > 0 {
-            return Err(format!(
-                "{what} after order_by, limit or offset is not supported; \
-                 order and window the rows it reaches"
-            ));
-        }
+        // Callers carry the order and window over to the rows they reach.
+        debug_assert!(
+            self.query.order_by.is_empty() && self.query.limit.is_none() && self.query.offset == 0
+        );
         let table = self.query.table;
         let source = self.source.unwrap_or_else(|| Source::Path {
             expr: RelationExpr::TableScan {
@@ -573,9 +625,13 @@ impl Query {
         if self.is_history() {
             return Err("union(...) of history reads is not supported".to_owned());
         }
-        if self.query.select.is_some() || !self.query.array_subqueries.is_empty() {
+        if self.query.select.is_some()
+            || !self.query.array_subqueries.is_empty()
+            || !self.query.partial.is_empty()
+        {
             return Err(
-                "select(...) or include(...) on a union(...) arm is not supported".to_owned(),
+                "select(...), part(...) or include(...) on a union(...) arm is not supported"
+                    .to_owned(),
             );
         }
         let table = self.query.table.clone();
