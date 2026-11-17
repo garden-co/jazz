@@ -1,11 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { DateInput, Selector, TextInput } from "@astryxdesign/core";
 import { useAll, useDb } from "jazz-tools/react";
-import { app } from "../../schema";
+import { app } from "../../jazz.generated";
 import { artistStatuses, genres, releaseFormats, releaseStatuses, searchKey } from "../fixtures";
-import { nextCatalogNumber, saveRelease } from "../lib/mutations";
+import { CatalogNumberTakenError, nextCatalogNumber, saveRelease } from "../lib/mutations";
 import { useOrganization } from "../lib/organization";
 import { useWrite } from "../lib/use-write";
 import { roleLabels, type Role } from "../roles";
@@ -112,7 +112,14 @@ export function ReleaseDialog({
     setNumberError(undefined);
   };
 
-  const save = () => {
+  // saveRelease's transaction reads the number's holders itself and throws
+  // CatalogNumberTakenError, so there is no separate check first. The dialog
+  // closes once the transaction commits locally; the server's answer arrives
+  // in the background like any other write.
+  const isSaving = useRef(false);
+  const submit = () => {
+    if (isSaving.current) return false;
+    isSaving.current = true;
     const number = catalogNumber.trim();
     const id = release?.id ?? crypto.randomUUID();
     const commit = saveRelease(
@@ -130,24 +137,21 @@ export function ReleaseDialog({
         searchKey: searchKey(title.trim(), number),
       },
     );
-    write(release ? "Couldn't save the release" : "Couldn't add the release", async () =>
-      (await commit).wait(),
-    );
-    if (!release) onCreated?.(id);
-  };
-
-  // A local read gives instant feedback; saveRelease's transaction is the real check.
-  const submit = () => {
-    const number = catalogNumber.trim();
-    void db
-      .all(app.releases.where({ organizationId: organization.id, catalogNumber: number }))
-      .then((taken) => {
-        if (taken.some((row) => row.id !== release?.id)) {
-          setNumberError(`${number} is already in use`);
-          return;
-        }
-        save();
-        dialog.onOpenChange(false);
+    const failure = release ? "Couldn't save the release" : "Couldn't add the release";
+    void commit
+      .then(
+        (committed) => {
+          dialog.onOpenChange(false);
+          if (!release) onCreated?.(id);
+          write(failure, () => committed.wait());
+        },
+        (error: unknown) => {
+          if (error instanceof CatalogNumberTakenError) setNumberError(error.message);
+          else write(failure, () => Promise.reject(error));
+        },
+      )
+      .finally(() => {
+        isSaving.current = false;
       });
     return false;
   };

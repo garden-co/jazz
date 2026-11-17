@@ -3,8 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
-import { definePermissions } from "../permissions/index.js";
-import { schema as s } from "../schema-namespace.js";
+import { testApp, testPermissions } from "../testing/index.js";
 import { runInspectCommand } from "./cli.js";
 import { runMcpServer } from "./mcp.js";
 import { inspectorLink, parseInspectorLink, readsClaims } from "./protocol.js";
@@ -133,39 +132,28 @@ describe("claims with `as`", () => {
   });
 
   it("readsClaims finds claims read anywhere in compiled permissions", () => {
-    const app = s.defineApp(
-      { expenses: s.table({ title: s.string(), owner: s.uuid() }, {}) },
-      { migrations: "none" },
-    );
-    const byOwner = definePermissions(app, ({ policy, session }) => {
-      policy.expenses.allowRead.where({ owner: session.user });
+    const app = testApp({
+      tables: { expenses: { columns: { title: "string", owner: "uuid" } } },
     });
-    const byClaim = definePermissions(app, ({ policy, anyOf, session }) => {
-      policy.expenses.allowRead.where(
-        anyOf([{ owner: session.user }, session.where({ "claims.role": "manager" })]),
-      );
+    const readWhere = (read: string) => testPermissions(app, { tables: { expenses: { read } } });
+    const byOwner = readWhere("owner = session.user");
+    const byClaim = readWhere("owner = session.user or session.claims.role = 'manager'");
+    const byClaimValue = testPermissions(app, {
+      tables: { expenses: { update: { old: "owner = session.claims.team", new: "true" } } },
     });
-    const byClaimValue = definePermissions(app, ({ policy, session }) => {
-      policy.expenses.allowUpdate.whereOld({ owner: session.claims.team as never });
-    });
-    const byClaimList = definePermissions(app, ({ policy, session }) => {
-      policy.expenses.allowRead.where({ owner: { in: session.claims.owners as never } });
-    });
+    const byClaimList = readWhere("owner in session.claims.owners");
     const sessionForms = [
-      { "claims.role": { in: ["manager", "admin"] } },
-      { "claims.teams": { contains: "finance" } },
-      { "claims.suspended": { isNull: true } },
-      { "claims.suspended": { isNull: false } },
+      "session.claims.role in ['manager', 'admin']",
+      "session.claims.teams contains 'finance'",
+      "session.claims.suspended = null",
+      "session.claims.suspended != null",
     ];
     expect(readsClaims(byOwner)).toBe(false);
     expect(readsClaims(byClaim)).toBe(true);
     expect(readsClaims(byClaimValue)).toBe(true);
     expect(readsClaims(byClaimList)).toBe(true);
     for (const form of sessionForms) {
-      const permissions = definePermissions(app, ({ policy, session }) => {
-        policy.expenses.allowRead.where(session.where(form));
-      });
-      expect(readsClaims(permissions), JSON.stringify(form)).toBe(true);
+      expect(readsClaims(readWhere(form)), form).toBe(true);
     }
     expect(readsClaims(undefined)).toBe(false);
   });

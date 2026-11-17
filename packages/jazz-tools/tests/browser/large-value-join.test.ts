@@ -14,8 +14,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { Db } from "../../src/runtime/db.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
-import { schema as s } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
 import {
   TestCleanup,
   createBrowserTestDb as createDb,
@@ -23,20 +21,9 @@ import {
   waitForCondition,
   withTimeout,
 } from "./support.js";
-import { getJazzServerInfo, startJazzApp } from "./testing-server.js";
-
-const app = s.defineApp(
-  {
-    files: s.table({ name: s.string(), contents: s.bytes() }, {}),
-  },
-  { migrations: "none" },
-);
-
-const permissions = s.definePermissions(app, ({ policy }) => [
-  policy.files.allowRead.always(),
-  policy.files.allowInsert.always(),
-  policy.files.allowUpdate.always(),
-]);
+import { deploy, getJazzServerInfo, startJazzApp } from "./testing-server.js";
+import { app } from "./apps/large-value-join/jazz.generated.js";
+import permissions from "./apps/large-value-join/jazz.permissions.json";
 
 const MB = 1024 * 1024;
 
@@ -65,10 +52,10 @@ describe("browser persistent join next to a large value", () => {
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: app.wasmSchema,
-      permissions,
+      app,
+      permissions: permissions,
     });
-    const server = await startJazzApp(core, { schema: app.wasmSchema, permissions });
+    const server = await startJazzApp(core, { schema: app, permissions });
 
     const alice = await withTimeout(
       open("large-value-join-alice", server),

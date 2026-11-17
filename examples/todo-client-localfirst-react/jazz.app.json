@@ -1,0 +1,28 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "a333087f8b8b72a54ba3a8c934c95abcf5333e51ed6998dd570c5a6ff1a23a4b"
+  },
+  "tables": {
+    "projects": {
+      "columns": { "name": "string" },
+      "relations": { "todosViaProject": { "reverse": "todos", "relation": "project" } }
+    },
+    "todos": {
+      "columns": {
+        "title": "string",
+        "done": "boolean",
+        "description": "string?",
+        "owner_id": "uuid",
+        "parentId": "uuid?",
+        "projectId": "uuid?"
+      },
+      "relations": {
+        "parent": { "rel": "todos", "column": "parentId" },
+        "project": { "rel": "projects", "column": "projectId" },
+        "todosViaParent": { "reverse": "todos", "relation": "parent" }
+      }
+    }
+  }
+}

@@ -1,13 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useAll, useJazzSession, useSession } from "jazz-tools/react";
+import { useAll, useJazzSession } from "jazz-tools/react";
 import { AppShell } from "@astryxdesign/core/AppShell";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
 import { SideNav, SideNavHeading, SideNavItem, SideNavSection } from "@astryxdesign/core/SideNav";
 import { TopNav, TopNavHeading } from "@astryxdesign/core/TopNav";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { StatusScreen } from "@/components/status-screen";
 import { bootstrapWorkspace } from "@/src/lib/account-enrollment";
 import { authClient } from "@/src/lib/auth-client";
@@ -41,7 +41,7 @@ export function ChatPage({ agentLabel }: { agentLabel: string }) {
 }
 
 export function MusicAgentApp({ agentLabel, userName }: { agentLabel: string; userName: string }) {
-  const account = useSession()?.user;
+  const account = useJazzSession().user?.accountId;
   const { data: artists = [], db } = useAll(app.artists);
   const { data: conversations = [] } = useAll(app.conversations.orderBy("$createdAt", "desc"));
   const [selectedId, setSelectedId] = useState<string>();

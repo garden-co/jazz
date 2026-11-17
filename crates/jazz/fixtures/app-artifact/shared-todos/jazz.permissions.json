@@ -1,0 +1,14 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "tables": {
+    "shares": { "read": "allowedTo.read(todoRow)" },
+    "todos": {
+      "read": {
+        "anyOf": ["owner = session.user", "exists shares(todo = this.id, user = session.user)"]
+      },
+      "insert": "owner = session.user",
+      "update": "owner = session.user",
+      "delete": { "allOf": ["owner = session.user", "not owner = null"] }
+    }
+  }
+}

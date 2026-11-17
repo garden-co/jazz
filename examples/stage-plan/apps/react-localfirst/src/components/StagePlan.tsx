@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { useAll, useDb, useSession } from "jazz-tools/react";
+import { useAll, useDb, useJazzSession } from "jazz-tools/react";
 import { AppShell } from "@astryxdesign/core/AppShell";
 import { useToast } from "@astryxdesign/core";
-import { app } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
@@ -37,7 +37,7 @@ type Setup =
  * server rejects part of the demo show, offer to finish it.
  */
 function useSetup(route: Route): { me?: Me; setup: Setup } {
-  const account = useSession()?.user;
+  const account = useJazzSession().user?.accountId;
   const { data: profiles, db } = useAll(account ? app.crew.where({ account }) : undefined);
   const [setup, setSetup] = useState<Setup>({ status: "loading" });
   const [attempt, setAttempt] = useState(0);

@@ -11,7 +11,7 @@ import {
   Text,
   Timestamp,
 } from "@astryxdesign/core";
-import { app, type Room } from "../../schema";
+import { app, type Room } from "../../jazz.generated";
 import { ProfileAvatar, useDirectory } from "../lib/profiles";
 
 export interface RoomSummary {

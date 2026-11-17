@@ -1,0 +1,164 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "d61899bce482b21c443fb002c1627b455f18e77ae0ee114bddd99ae158e282ae"
+  },
+  "tables": {
+    "better_auth_account": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_jwks": { "read": "false", "insert": "false", "update": "false", "delete": "false" },
+    "better_auth_session": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_user": { "read": "false", "insert": "false", "update": "false", "delete": "false" },
+    "better_auth_verification": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "patterns": {
+      "read": "exists session_members(session_id = this.session_id, member_author = session.user)",
+      "insert": {
+        "anyOf": [
+          "exists session_members(session_id = this.session_id, member_author = session.user, role = 'editor')",
+          "exists session_members(session_id = this.session_id, member_author = session.user, role = 'owner')"
+        ]
+      },
+      "update": {
+        "anyOf": [
+          "exists session_members(session_id = this.session_id, member_author = session.user, role = 'editor')",
+          "exists session_members(session_id = this.session_id, member_author = session.user, role = 'owner')"
+        ]
+      },
+      "delete": "exists sessions(id = this.session_id, $createdBy.account = session.user)"
+    },
+    "presence": {
+      "read": "exists session_members(session_id = this.session_id, member_author = session.user)",
+      "insert": {
+        "allOf": [
+          "exists session_members(session_id = this.session_id, member_author = session.user)",
+          "allowedTo.update(profile)"
+        ]
+      },
+      "update": {
+        "allOf": [
+          "exists session_members(session_id = this.session_id, member_author = session.user)",
+          "allowedTo.update(profile)"
+        ]
+      },
+      "delete": "$createdBy.account = session.user"
+    },
+    "profiles": {
+      "read": { "anyOf": ["author = session.user", "allowedTo.read(presenceViaProfile)"] },
+      "insert": "author = session.user",
+      "update": "author = session.user",
+      "delete": "author = session.user"
+    },
+    "session_members": {
+      "read": "allowedTo.read(`session`)",
+      "insert": "allowedTo.update(`session`)",
+      "update": "false",
+      "delete": "allowedTo.update(`session`)"
+    },
+    "sessions": {
+      "read": {
+        "anyOf": [
+          "$createdBy.account = session.user",
+          "exists session_members(session_id = this.id, member_author = session.user)"
+        ]
+      },
+      "insert": "true",
+      "update": "$createdBy.account = session.user",
+      "delete": "$createdBy.account = session.user"
+    },
+    "steps": {
+      "read": "exists session_members(session_id = this.session_id, member_author = session.user)",
+      "insert": {
+        "allOf": [
+          {
+            "anyOf": [
+              "exists session_members(session_id = this.session_id, member_author = session.user, role = 'editor')",
+              "exists session_members(session_id = this.session_id, member_author = session.user, role = 'owner')"
+            ]
+          },
+          "exists tracks(id = this.track_id, session_id = this.session_id)",
+          "exists patterns(id = this.pattern_id, session_id = this.session_id)"
+        ]
+      },
+      "update": {
+        "allOf": [
+          {
+            "anyOf": [
+              "exists session_members(session_id = this.session_id, member_author = session.user, role = 'editor')",
+              "exists session_members(session_id = this.session_id, member_author = session.user, role = 'owner')"
+            ]
+          },
+          "exists tracks(id = this.track_id, session_id = this.session_id)",
+          "exists patterns(id = this.pattern_id, session_id = this.session_id)"
+        ]
+      },
+      "delete": {
+        "anyOf": [
+          "exists session_members(session_id = this.session_id, member_author = session.user, role = 'editor')",
+          "exists session_members(session_id = this.session_id, member_author = session.user, role = 'owner')"
+        ]
+      }
+    },
+    "tracks": {
+      "read": "exists session_members(session_id = this.session_id, member_author = session.user)",
+      "insert": {
+        "anyOf": [
+          "exists session_members(session_id = this.session_id, member_author = session.user, role = 'editor')",
+          "exists session_members(session_id = this.session_id, member_author = session.user, role = 'owner')"
+        ]
+      },
+      "update": {
+        "anyOf": [
+          "exists session_members(session_id = this.session_id, member_author = session.user, role = 'editor')",
+          "exists session_members(session_id = this.session_id, member_author = session.user, role = 'owner')"
+        ]
+      },
+      "delete": "exists sessions(id = this.session_id, $createdBy.account = session.user)"
+    },
+    "transport_observations": {
+      "read": "exists session_members(session_id = this.session_id, member_author = session.user)",
+      "insert": {
+        "allOf": [
+          {
+            "anyOf": [
+              "exists session_members(session_id = this.session_id, member_author = session.user, role = 'editor')",
+              "exists session_members(session_id = this.session_id, member_author = session.user, role = 'owner')"
+            ]
+          },
+          {
+            "anyOf": [
+              "pattern_id = null",
+              "exists patterns(id = this.pattern_id, session_id = this.session_id)"
+            ]
+          }
+        ]
+      },
+      "update": {
+        "anyOf": [
+          "exists session_members(session_id = this.session_id, member_author = session.user, role = 'editor')",
+          "exists session_members(session_id = this.session_id, member_author = session.user, role = 'owner')"
+        ]
+      },
+      "delete": {
+        "anyOf": [
+          "exists session_members(session_id = this.session_id, member_author = session.user, role = 'editor')",
+          "exists session_members(session_id = this.session_id, member_author = session.user, role = 'owner')"
+        ]
+      }
+    }
+  }
+}

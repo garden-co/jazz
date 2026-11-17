@@ -33,6 +33,11 @@ import { MessagePortBrowserFollowerConnection } from "./browser-follower-connect
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import { waitForInspectorOpening } from "./inspector-control-lifecycle.js";
 import { toError } from "../util.js";
+import {
+  browserStoreGeneration,
+  browserStoreGenerationChanged,
+  renewBrowserStoreGeneration,
+} from "../browser-store-generation.js";
 import { describeBrokerWorkerLoadFailure } from "./broker-worker-load-failure.js";
 
 /**
@@ -83,17 +88,18 @@ function appServesWorker(runtimeSources: BrowserWorkerInitOptions["runtimeSource
 
 /**
  * Whether the worker starts from the URL Jazz resolves: one the app serves,
- * a versioned one, or the one a bundler that can't build the worker from
+ * or the one a bundler that can't build the worker from
  * `new SharedWorker(new URL(...))` named for it (Metro).
+ *
+ * A `wasmVersion` alone doesn't: the bundler's worker URL already changes
+ * with its bytes, and the realm name carries the versioned asset scope
+ * (`createBrowserSharedWorkerBaseName`), so tabs of another deployment never
+ * share the worker.
  */
 function usesJazzResolvedWorkerUrl(
   runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
 ): boolean {
-  return (
-    appServesWorker(runtimeSources) ||
-    Boolean(runtimeSources?.wasmVersion) ||
-    bundledBrowserWorkerType() !== null
-  );
+  return appServesWorker(runtimeSources) || bundledBrowserWorkerType() !== null;
 }
 
 /**
@@ -221,6 +227,8 @@ export function deleteBrowserStore(
       const answer = event.data;
       if (answer?.type === "delete-store-result") {
         finish();
+        // A tab in the back/forward cache meanwhile must not come back to it.
+        if (answer.outcome === "deleted") renewBrowserStoreGeneration(dbName);
         resolve(answer.outcome);
       } else if (answer?.type === "delete-store-error") {
         finish();
@@ -235,6 +243,9 @@ export function deleteBrowserStore(
     }
     port.addEventListener("message", onMessage);
     port.start();
+    // Before as well as after: a tab coming back while the delete runs must
+    // not reconnect to it. A delete that deletes nothing costs it a reload.
+    renewBrowserStoreGeneration(dbName);
     port.postMessage({
       type: "delete-store",
       dbName,
@@ -615,6 +626,9 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   private cancelBootstrap: (() => void) | null = null;
   /** Lets go of this connection's liveness lock (see `holdLivenessLock`). */
   private releaseLivenessLock: (() => void) | null = null;
+  private readonly dbName: string;
+  /** The store's incarnation when the page left for the back/forward cache. */
+  private storeGenerationWhenLeft: string | null = null;
 
   constructor(
     runtime: NativeRuntimeAdapter,
@@ -638,6 +652,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     const runtimeSources = resolveBrowserWorkerRuntimeSources(options.runtimeSources);
     const workerName = createBrowserSharedWorkerBaseName(runtimeSources, options.dbName);
     this.workerName = workerName;
+    this.dbName = options.dbName;
     const createWorker = (name: string) => createBrokerSharedWorker(runtimeSources, name);
     // Retain admission failures as state rather than leaving a process-wide
     // bootstrap promise rejected. The manager converts this state back into
@@ -887,8 +902,16 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
             onExplicitOfflineChange: this.callbacks.onExplicitOfflineChange,
             onRemoteLinkChange: this.callbacks.onRemoteLinkChange,
             onFailure: this.callbacks.onFailure,
-            onStorageReset: this.callbacks.onStorageReset,
-            onStorageInvalidated: this.callbacks.onStorageInvalidated,
+            // Each tab that hears of a reset records it, for the tabs in the
+            // back/forward cache that don't (see `storeChangedSinceLeaving`).
+            onStorageReset: (resetId) => {
+              renewBrowserStoreGeneration(this.dbName);
+              this.callbacks.onStorageReset?.(resetId);
+            },
+            onStorageInvalidated: () => {
+              renewBrowserStoreGeneration(this.dbName);
+              this.callbacks.onStorageInvalidated?.();
+            },
           },
           options.logLevel === "trace",
         );
@@ -995,6 +1018,38 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     return this.heldByAnotherSignIn;
   }
 
+  /**
+   * The page is leaving for the back/forward cache: detach from the worker
+   * and let go of the liveness lock, now, so the worker doesn't count the
+   * page as a live tab while it is cached (see `page-cache`). This
+   * connection is closed after; the page opens a new one when it returns.
+   * Declines (`false`) unless connected and idle (see the follower's
+   * `leaveForPageCache`), or without localStorage to tell, on return,
+   * whether the store was reset meanwhile.
+   */
+  leaveForPageCache(): boolean {
+    if (this.closed || this.readyError || !this.connection) return false;
+    // Without localStorage a tab coming back couldn't tell a reset store:
+    // it keeps its connection and its locks, as before.
+    const generation = browserStoreGeneration(this.dbName);
+    if (generation === null || !this.connection.leaveForPageCache()) return false;
+    this.storeGenerationWhenLeft = generation;
+    this.closed = true;
+    this.connection = null;
+    this.worker = null;
+    this.releaseLivenessLock?.();
+    return true;
+  }
+
+  /**
+   * Whether the store was deleted, reset or invalidated (by another tab, or
+   * by clearing site data) since this connection left for the back/forward
+   * cache: the worker told the tabs attached then, not this one.
+   */
+  storeChangedSinceLeaving(): boolean {
+    return browserStoreGenerationChanged(this.dbName, this.storeGenerationWhenLeft);
+  }
+
   async shutdown(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -1021,7 +1076,14 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
 
   async deleteStorage(): Promise<{ pendingUploads?: number } | void> {
     await this.ready();
-    return this.connection?.deleteStorage();
+    // Before as well as after (see `storeChangedSinceLeaving`): a tab coming
+    // back mid-delete reloads rather than reconnect to what is going.
+    renewBrowserStoreGeneration(this.dbName);
+    try {
+      return await this.connection?.deleteStorage();
+    } finally {
+      renewBrowserStoreGeneration(this.dbName);
+    }
   }
 
   async storePendingUploads(): Promise<number | undefined> {

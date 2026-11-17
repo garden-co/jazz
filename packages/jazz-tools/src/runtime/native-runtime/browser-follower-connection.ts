@@ -311,6 +311,33 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     this.dispose(new Error("Browser follower connection is closed"));
   }
 
+  /**
+   * Detach from the worker now, without waiting for it: the page is leaving
+   * for the back/forward cache (see `page-cache`). The worker detaches the
+   * tab and sends nothing back, so Chrome has no message to evict the cached
+   * page for. The runtime keeps its writes; the connection that replaces
+   * this one on return replays them, as after a worker failure.
+   *
+   * Declines (`false`) while work waits on the worker (an operation, or a
+   * write the worker hasn't settled yet): its outcome would be lost. That page keeps its connection, and with it its liveness
+   * lock, while it is cached.
+   */
+  leaveForPageCache(): boolean {
+    if (this.closed || this.failed || !this.established || this.hasPendingWork()) return false;
+    try {
+      // As a tab that closes: the last tab out releases the worker's hold on
+      // the store, so a tab under another sign-in may open it meanwhile.
+      this.port.postMessage({
+        type: "close",
+        releaseContext: true,
+      } satisfies BrowserFollowerPortRequest);
+    } catch {
+      // A port that can't send is as good as closed; disposal still detaches it.
+    }
+    this.dispose(new Error("Browser follower connection left for the back/forward cache"));
+    return true;
+  }
+
   async waitForPendingWrites(): Promise<void> {
     await this.flushLocal();
     await this.request({ type: "flush-pending-writes" });

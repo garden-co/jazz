@@ -1,0 +1,865 @@
+{
+  "app": "{\n  \"$schema\": \"https://jazz.tools/schemas/jazz.app.v1.json\",\n  \"tables\": {\n    \"shares\": {\n      \"columns\": { \"todo\": \"uuid?\", \"user\": \"uuid\" },\n      \"relations\": { \"todoRow\": { \"rel\": \"todos\", \"column\": \"todo\" } },\n      \"history\": \"latest\"\n    },\n    \"todos\": {\n      \"columns\": {\n        \"name\": \"string\",\n        \"owner\": \"uuid?\",\n        \"tags\": { \"array\": \"string\" },\n        \"status\": { \"enum\": [\"open\", \"done\"], \"optional\": true },\n        \"meta\": { \"json\": { \"type\": \"object\" }, \"optional\": true, \"transform\": \"jsonText\" }\n      },\n      \"relations\": { \"shares\": { \"reverse\": \"shares\", \"relation\": \"todoRow\" } },\n      \"indexes\": [\"owner\"],\n      \"computed\": { \"shareCount\": { \"type\": \"int\", \"from\": [\"id\"] } }\n    }\n  },\n  \"history\": {\n    \"00304e9bce65\": {\n      \"tables\": {\n        \"shares\": {\n          \"columns\": {\n            \"todo\": { \"type\": \"uuid\", \"optional\": true, \"references\": \"todos\" },\n            \"user\": \"uuid\"\n          }\n        },\n        \"todos\": { \"columns\": { \"title\": \"string\", \"owner\": \"uuid?\" } }\n      }\n    }\n  },\n  \"migrations\": [\n    {\n      \"from\": \"00304e9bce65\",\n      \"migrate\": {\n        \"todos\": {\n          \"name\": { \"renameFrom\": \"title\" },\n          \"tags\": { \"add\": { \"array\": \"string\" }, \"default\": [] },\n          \"status\": { \"add\": { \"enum\": [\"open\", \"done\"] }, \"default\": null },\n          \"meta\": { \"add\": { \"json\": { \"type\": \"object\" } }, \"default\": null }\n        }\n      }\n    }\n  ],\n  \"transforms\": { \"jsonText\": { \"stored\": { \"json\": { \"type\": \"object\" } }, \"view\": \"string\" } }\n}\n",
+  "cases": [
+    {
+      "name": "true",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "true"
+          }
+        }
+      }
+    },
+    {
+      "name": "false",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "false"
+          }
+        }
+      }
+    },
+    {
+      "name": "owner = session.user",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "owner = session.user"
+          }
+        }
+      }
+    },
+    {
+      "name": "owner != null",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "owner != null"
+          }
+        }
+      }
+    },
+    {
+      "name": "owner = null",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "owner = null"
+          }
+        }
+      }
+    },
+    {
+      "name": "name != 'it''s'",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "name != 'it''s'"
+          }
+        }
+      }
+    },
+    {
+      "name": "name in ['a', 'b']",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "name in ['a', 'b']"
+          }
+        }
+      }
+    },
+    {
+      "name": "owner in session.claims.people",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "owner in session.claims.people"
+          }
+        }
+      }
+    },
+    {
+      "name": "tags contains 'urgent'",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "tags contains 'urgent'"
+          }
+        }
+      }
+    },
+    {
+      "name": "session.claims.role = 'admin'",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "session.claims.role = 'admin'"
+          }
+        }
+      }
+    },
+    {
+      "name": "session.claims.role in ['admin', 'editor']",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "session.claims.role in ['admin', 'editor']"
+          }
+        }
+      }
+    },
+    {
+      "name": "session.claims.team = null",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "session.claims.team = null"
+          }
+        }
+      }
+    },
+    {
+      "name": "session.claims.labels contains 'x'",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "session.claims.labels contains 'x'"
+          }
+        }
+      }
+    },
+    {
+      "name": "$createdBy.account = session.user",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "$createdBy.account = session.user"
+          }
+        }
+      }
+    },
+    {
+      "name": "exists shares(todo = this.id, user = session.user)",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "exists shares(todo = this.id, user = session.user)"
+          }
+        }
+      }
+    },
+    {
+      "name": "exists shares()",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "exists shares()"
+          }
+        }
+      }
+    },
+    {
+      "name": "allowedTo.read(shares)",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "allowedTo.read(shares)"
+          }
+        }
+      }
+    },
+    {
+      "name": "allowedTo.read(todoRow)",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "allowedTo.read(todoRow)"
+          },
+          "todos": {
+            "read": "true",
+            "update": "true"
+          }
+        }
+      }
+    },
+    {
+      "name": "allowedTo.update(todoRow, maxDepth: 3)",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "allowedTo.update(todoRow, maxDepth: 3)"
+          },
+          "todos": {
+            "read": "true",
+            "update": "true"
+          }
+        }
+      }
+    },
+    {
+      "name": "not owner = session.user",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "not owner = session.user"
+          }
+        }
+      }
+    },
+    {
+      "name": "owner = session.user or name = 'x'",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "owner = session.user or name = 'x'"
+          }
+        }
+      }
+    },
+    {
+      "name": "(owner = session.user or name = 'x') and tags contains 'y'",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "(owner = session.user or name = 'x') and tags contains 'y'"
+          }
+        }
+      }
+    },
+    {
+      "name": "not (owner = null or name = 'x')",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "not (owner = null or name = 'x')"
+          }
+        }
+      }
+    },
+    {
+      "name": "$createdBy = session.user",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "$createdBy = session.user"
+          }
+        }
+      }
+    },
+    {
+      "name": "$createdBy.identity = session.identity",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "$createdBy.identity = session.identity"
+          }
+        }
+      }
+    },
+    {
+      "name": "$updatedBy = session.user",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "$updatedBy = session.user"
+          }
+        }
+      }
+    },
+    {
+      "name": "$updatedBy.account = session.user",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "$updatedBy.account = session.user"
+          }
+        }
+      }
+    },
+    {
+      "name": "$updatedBy.identity = session.identity",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "$updatedBy.identity = session.identity"
+          }
+        }
+      }
+    },
+    {
+      "name": "$deletedBy = session.user",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "$deletedBy = session.user"
+          }
+        }
+      }
+    },
+    {
+      "name": "$deletedBy.account = session.user",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "$deletedBy.account = session.user"
+          }
+        }
+      }
+    },
+    {
+      "name": "$deletedBy.identity = session.identity",
+      "permissions": {
+        "format": 1,
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "$deletedBy.identity = session.identity"
+          }
+        }
+      }
+    },
+    {
+      "name": "update.new comparing several columns with the old row",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "true",
+            "update": {
+              "new": "exists todos(id = this.id, name = this.name, owner = this.owner)",
+              "old": "owner = session.user"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": {
+              "anyOf": [
+                "name <= int(3)",
+                "name = literal(null)",
+                "owner = '12345678-9abc-def0-1234-56789abcdef0'",
+                "session.claims.team != 'x'",
+                "session.claims.`odd path`.`and` > double('NaN')",
+                "owner = null",
+                "session.claims.team = null",
+                "meta != null",
+                "session.claims.team != null",
+                "tags contains session.claims.team",
+                "session.claims.team contains 'y'",
+                "owner in session.claims.team",
+                "name in [bigint(1099511627776), session.claims.team, text('it''s')]",
+                "session.claims.team in [bool(true), literal(null), double(-0.5), timestamp(1700000000000), bytes('00ff'), txid('07070707070707070707070707070707'), array(int(1), null), row(uuid('12345678-9abc-def0-1234-56789abcdef0'), text('r')), row(null)]",
+                "exists shares()",
+                "exists shares(todo = this.id, exists todos(name = 'n', exists shares(user = session.user)))",
+                "exists (from a as t where t.a >= int(3) or t.b = null or t.c != null or t.d in [param.p, session.claims.team, outer.t.e, frontier.t.f, id(row), id(outer), id(frontier), json('[1,{\"a\":\"it''s\"}]'), json('null'), json('1.5e+300'), -7, literal(null)] or t.g contains 'bare' or allOf(not false) or not true left join union(arm: from recursive(seed: from b as t, step: from c as t, frontier: id(frontier), dedupe: (t.id), maxDepth: 4), `fixpoint`: from recursive(seed: from b as t, step: from c as t, frontier: t.id, dedupe: (), maxDepth: fixpoint)) on t.x = t.y select t.c as c, id(row) as id distinct on (t.id) order by t.c desc, t.id offset 2 limit 10)",
+                "exists (from a as t join b as t)",
+                "allowedTo.update(via owner, maxDepth: 3)",
+                "allowedTo.delete(shares)",
+                "allowedTo.read(via shares.user)",
+                "allOf(not false)",
+                "anyOf()",
+                "not ((true or false) and not not true)"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 0",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "name <= int(3)"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 1",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "name = literal(null)"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 2",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "owner = '12345678-9abc-def0-1234-56789abcdef0'"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 3",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "session.claims.team != 'x'"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 4",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "session.claims.`odd path`.`and` > double('NaN')"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 5",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "owner = null"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 6",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "session.claims.team = null"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 7",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "meta != null"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 8",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "session.claims.team != null"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 9",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "tags contains session.claims.team"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 10",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "session.claims.team contains 'y'"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 11",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "owner in session.claims.team"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 12",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "name in [bigint(1099511627776), session.claims.team, text('it''s')]"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 13",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "session.claims.team in [bool(true), literal(null), double(-0.5), timestamp(1700000000000), bytes('00ff'), txid('07070707070707070707070707070707'), array(int(1), null), row(uuid('12345678-9abc-def0-1234-56789abcdef0'), text('r')), row(null)]"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 14",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "exists shares()"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 15",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "exists shares(todo = this.id, exists todos(name = 'n', exists shares(user = session.user)))"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 16",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "exists (from a as t where t.a >= int(3) or t.b = null or t.c != null or t.d in [param.p, session.claims.team, outer.t.e, frontier.t.f, id(row), id(outer), id(frontier), json('[1,{\"a\":\"it''s\"}]'), json('null'), json('1.5e+300'), -7, literal(null)] or t.g contains 'bare' or allOf(not false) or not true left join union(arm: from recursive(seed: from b as t, step: from c as t, frontier: id(frontier), dedupe: (t.id), maxDepth: 4), `fixpoint`: from recursive(seed: from b as t, step: from c as t, frontier: t.id, dedupe: (), maxDepth: fixpoint)) on t.x = t.y select t.c as c, id(row) as id distinct on (t.id) order by t.c desc, t.id offset 2 limit 10)"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 17",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "exists (from a as t join b as t)"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 18",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "allowedTo.update(via owner, maxDepth: 3)"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 19",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "allowedTo.delete(shares)"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 20",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "allowedTo.read(via shares.user)"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 21",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "allOf(not false)"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 22",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "anyOf()"
+          }
+        }
+      }
+    },
+    {
+      "name": "every policy variant, item 23",
+      "permissions": {
+        "tables": {
+          "shares": {
+            "read": "true",
+            "update": "true"
+          },
+          "todos": {
+            "read": "not ((true or false) and not not true)"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -3,7 +3,7 @@ import { schema as s } from "jazz-tools";
 // Better Auth owns these rows through the trusted server route. Keeping them
 // in the app schema lets the adapter use normal Jazz persistence while the
 // app's public permissions deny every client operation on them.
-export const schema = {
+export const tables = {
   better_auth_user: s.table(
     {
       name: s.string(),

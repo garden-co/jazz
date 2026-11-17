@@ -9,8 +9,8 @@ import {
   View,
   type ListRenderItem,
 } from "react-native";
-import { useAll, useSession } from "jazz-tools/react-native";
-import { app, type Todo } from "../schema";
+import { useAll, useJazzSession } from "jazz-tools/react-native";
+import { app, type Todo } from "../jazz.generated";
 
 // #region read-write-expo
 export function TodoList() {
@@ -31,8 +31,8 @@ export function TodoList() {
 
   // #region reading-reactive-hooks-expo
   const { data: todos = [], db } = useAll(todosQuery);
-  const session = useSession();
-  const sessionUserId = session?.user ?? null;
+  const session = useJazzSession();
+  const sessionUserId = session.user?.accountId ?? null;
   // #endregion reading-reactive-hooks-expo
 
   // #region writing-use-db-expo

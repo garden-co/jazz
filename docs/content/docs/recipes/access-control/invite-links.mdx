@@ -20,12 +20,12 @@ and write run under different credentials.
 ## Schema
 
 Keep invite codes in their own table, not on the resource row. Jazz permissions apply to whole rows, so a
-`joinCode` on the chat would be visible to every chat member. This table has no client read rule;
-only the backend checks its code. The members table records which invite each user used to join, so
+`joinCode` on the chat would be visible to every chat member. This table's read rule is `false`, so
+invite codes never sync to a client; only the backend checks them. The members table records which invite each user used to join, so
 you can audit or revoke individual memberships later.
 
 <include cwd lang="ts" meta='title="schema.ts"'>
-  ../examples/docs/todo-server-ts/src/invite-snippets.ts#invite-schema
+  ../examples/docs/todo-server-ts/src/recipes/invite/schema.ts#schema
 </include>
 
 ## Permissions
@@ -36,11 +36,17 @@ else. The only way for an invitee to join is the server route below. The server 
 [backend identity](/docs/setup/deployment/own-server#trusted-backend-use) and inserts the row
 on their behalf after validating the join code.
 
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-server-ts/src/invite-snippets.ts#invite-permissions
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-server-ts/src/recipes/invite/schema.ts#permissions
 </include>
 
-See [Declarative Permissions](/docs/schemas/policies) for more on `exists.where`, `allOf`, and `anyOf`, and [Acting for a user in your backend](/docs/setup/auth/backend#acting-for-a-user-in-your-backend) for how the backend stamps the user as the row's author while keeping backend permissions.
+Users can read their own membership row (`mine`), chat creators can read every member of their
+chats, and either can delete it: users can leave, and creators can remove any member. Invite rows can
+be created and deleted by the chat's creator, and no client can read them.
+
+`isChatCreator` and `isChatMember` are plain TypeScript helpers and `mine` is a plain condition;
+`npx jazz-tools generate` inlines them wherever they're used.
+See [Declarative Permissions](/docs/schemas/policies) for more on `exists`, `allOf` and `anyOf`, and [Acting for a user in your backend](/docs/setup/auth/backend#acting-for-a-user-in-your-backend) for how the backend stamps the user as the row's author while keeping backend permissions.
 
 ## Generating a link
 
@@ -70,7 +76,7 @@ link or retrying after a transient error won't create duplicate rows.
 ### Server route
 
 The route reads and writes as the backend: the invitee has no read access to the chat until they're
-a member, and the `chatMembers.allowInsert` rule only admits the chat's creator, so they can't
+a member, and the `chatMembers` insert policy only admits the chat's creator, so they can't
 insert their own membership directly. `await jazz.withAttribution(request)` asks your
 `authenticate` who the caller is, then keeps backend permissions while stamping the membership's
 edit metadata to that user.

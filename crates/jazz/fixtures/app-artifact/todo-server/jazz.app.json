@@ -1,0 +1,23 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "tables": {
+    "projects": {
+      "columns": { "name": "string" },
+      "relations": { "todosViaProject": { "reverse": "todos", "relation": "projectRelation" } }
+    },
+    "todos": {
+      "columns": {
+        "title": "string",
+        "done": "boolean",
+        "description": "string?",
+        "parent": "uuid?",
+        "project": "uuid?"
+      },
+      "relations": {
+        "parentRelation": { "rel": "todos", "column": "parent" },
+        "projectRelation": { "rel": "projects", "column": "project" },
+        "todosViaParent": { "reverse": "todos", "relation": "parentRelation" }
+      }
+    }
+  }
+}

@@ -2,6 +2,7 @@ import type { BrowserWebSocket, WebSocketConstructor } from "./websocket.js";
 import {
   forgetStreamEndpoint,
   recallStreamEndpoint,
+  recallStreamEndpointNow,
   rememberStreamEndpoint,
   streamEndpointMemoryAvailable,
 } from "./stream-endpoint-memory.js";
@@ -451,6 +452,18 @@ export function httpStreamFallbackWebSocket(
         return;
       }
       if (!streamEndpointMemoryAvailable()) {
+        this.inner = this.openNative();
+        return;
+      }
+      // A page answers from its copy of the memory, without waiting for
+      // IndexedDB (see `recallStreamEndpointNow`).
+      const known = recallStreamEndpointNow(url);
+      if (known === true) {
+        streamEndpoints.add(url);
+        this.openStream();
+        return;
+      }
+      if (known === false) {
         this.inner = this.openNative();
         return;
       }

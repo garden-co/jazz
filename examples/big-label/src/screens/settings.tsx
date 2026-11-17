@@ -12,7 +12,7 @@ import {
   VStack,
 } from "@astryxdesign/core";
 import { useDb } from "jazz-tools/react";
-import { app } from "../../schema";
+import { app } from "../../jazz.generated";
 import { PageHeader, PageSection } from "../components/page";
 import { fixtureProfiles } from "../fixtures";
 import { useCan, useOrganization } from "../lib/organization";

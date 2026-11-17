@@ -1,15 +1,16 @@
 //! HTTP and WebSocket routes for the Jazz server.
 //!
 //! Split into submodules so each piece is independently navigable:
-//! - [`websocket`] — engine wire-frame WebSocket boundary
-//! - [`http`] — HTTP endpoint handlers and their request/response types
-//! - [`utils`] — parser/validator helpers used by both
+//! - `websocket` — engine wire-frame WebSocket boundary
+//! - `http` — HTTP endpoint handlers and their request/response types
+//! - `utils` — parser/validator helpers used by both
 //!
 //! The router builder [`create_router`] re-exports unchanged from this module
 //! so existing callers (`server::routes::create_router`) continue to resolve.
 
 mod accounts;
 pub(crate) mod http;
+mod metered_socket;
 mod utils;
 mod websocket;
 
@@ -102,6 +103,10 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
             post(accounts::found_local_first_for_admin),
         )
         .route("/accounts/revoke", post(accounts::revoke_for_admin))
+        .route(
+            "/accounts/revoke-sessions",
+            post(accounts::revoke_sessions_for_admin),
+        )
         .route("/migrations/graph", get(migration_graph_handler))
         .route(
             "/introspection/subscriptions",

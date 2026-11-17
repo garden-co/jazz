@@ -150,12 +150,9 @@ pub fn json_value_to_policy_claim(
         serde_json::Value::Null => Some(Value::Nullable(None)),
         serde_json::Value::Bool(value) => Some(Value::Bool(value)),
         serde_json::Value::Number(value) => Some(json_number_to_policy_claim(value, origin)?),
-        serde_json::Value::String(value) => Some(
-            value
-                .parse()
-                .map(Value::Uuid)
-                .unwrap_or(Value::String(value)),
-        ),
+        // A string stays the text it is: a policy compares it as the type
+        // of what it meets (a UUID column reads it as the UUID it spells).
+        serde_json::Value::String(value) => Some(Value::String(value)),
         serde_json::Value::Array(values) => {
             let mut projected = Vec::with_capacity(values.len());
             for value in values {

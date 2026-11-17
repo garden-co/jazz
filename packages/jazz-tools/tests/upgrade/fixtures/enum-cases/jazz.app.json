@@ -1,0 +1,12 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "issues": {
+      "columns": {
+        "title": "string",
+        "kind": { "enum": { "bug": { "severity": "int" }, "feature": { "area": "string" } } }
+      }
+    }
+  }
+}

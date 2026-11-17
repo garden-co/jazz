@@ -4,7 +4,7 @@ description: "Learn how to write declarative permissions, from simple ownership 
 reviewedAt: "b29b48d1a"
 ---
 
-Declarative permissions control who can read, insert, update, and delete rows. You declare them as policies in `permissions.ts`, and Jazz enforces them server-side. Clients that fail a policy check have their writes rejected and their reads filtered.
+Declarative permissions control who can read, insert, update, and delete rows. You declare them as policies in `schema.ts`, next to your tables, and Jazz enforces them server-side. Clients that fail a policy check have their writes rejected and their reads filtered.
 
 If you know Postgres row-level security (RLS), declarative permissions are similar: rules over rows and the signed-in user. In Jazz they are typed TypeScript next to your schema, every operation is denied until a policy grants it, and you test them like the rest of your app.
 
@@ -13,167 +13,643 @@ Jazz decides permissions per table:
 - every read, insert, update, and delete requires an explicit grant
 - every omitted operation is denied, including on tables with no policy declarations
 
-For example, declaring `allowRead` without `allowInsert`, `allowUpdate`, or
-`allowDelete` makes that table read-only. A table without any grants returns no
+For example, declaring `read` without `insert`, `update`, or `delete` makes that table
+read-only. A table without any grants returns no
 rows to permission-scoped reads and rejects writes on the server. Optimistic
 local writes can still appear before the server accepts or rejects them.
 
 ## Authoring workflow
 
-Permissions are authored in TypeScript.
+Permissions live in `schema.ts`, after your tables. The tools for writing them are properties of
+the schema, so they know your tables, columns and relations. If we have the following schema:
 
-If we have the following schema:
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
 
-<include cwd lang="ts" meta='title="schema.ts"'>
-  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-schema-ts
-</include>
+export const schema = s.defineSchema({
+  projects: s.table(
+    { name: s.string(), owner_id: s.uuid() },
+    {
+      todos: s.reverse("todos", "project"),
+    },
+  ),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      parentId: s.uuid().optional(),
+      projectId: s.uuid().optional(),
+      owner_id: s.uuid(),
+    },
+    {
+      parent: s.rel("todos", "parentId"),
+      children: s.reverse("todos", "parent"),
+      project: s.rel("projects", "projectId"),
+      shares: s.reverse("todoShares", "todo"),
+    },
+  ),
+  todoShares: s.table(
+    { todoId: s.uuid(), user_id: s.uuid(), can_read: s.boolean() },
+    {
+      todo: s.rel("todos", "todoId"),
+    },
+  ),
+});
+```
 
-We can define permissions in `permissions.ts`:
+We can define permissions below it, in the same file:
 
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-server-ts/permissions.ts
-</include>
+<Tabs groupId="app-source" items={["schema.ts", "Generated JSON"]} persist>
+<Tab value="schema.ts">
+
+```ts title="schema.ts"
+const { definePermissions, session } = schema;
+
+export const permissions = definePermissions({
+  projects: {
+    read: true,
+    insert: true,
+  },
+  todos: {
+    read: { owner_id: session.user },
+    insert: { owner_id: session.user },
+    update: { owner_id: session.user },
+    delete: { owner_id: session.user },
+  },
+  todoShares: {},
+});
+```
+
+</Tab>
+<Tab value="Generated JSON">
+
+```json title="jazz.permissions.json"
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "tables": {
+    "projects": {
+      "read": "true",
+      "insert": "true"
+    },
+    "todos": {
+      "read": "owner_id = session.user",
+      "insert": "owner_id = session.user",
+      "update": "owner_id = session.user",
+      "delete": "owner_id = session.user"
+    }
+  }
+}
+```
+
+</Tab>
+</Tabs>
+
+`npx jazz-tools generate` reads the `permissions` export and writes the second tab,
+`jazz.permissions.json`, which is what your backend loads. You don't edit it, but it's worth a
+look: it shows exactly what each rule means. Every example on this page shows both. (The generated
+file also starts with a `$generated` marker, left out here.)
 
 <Callout type="info">
-  Write your permissions policies in `permissions.ts` next to `schema.ts`. By default Jazz looks for both files at your project root — except in SvelteKit projects, where they should live in `src/lib/` (the standard location for shared app code).
+  Keep `schema.ts` at your project root, or in `src/` — in SvelteKit projects, in `src/lib/` (the
+  standard location for shared app code). If your policies grow long, move them to a sibling
+  `permissions.ts` that imports `schema` from `./schema` and exports `permissions`; `generate`
+  refuses an app that defines them in both files.
 
-Run `npx jazz-tools validate` before publishing to surface missing table or operation grants that will deny access. You do not need to write a schema migration to update permissions policies. Updated policies go live when your main backend restarts or deploys with them.
+TypeScript refuses permissions that leave out a table. Run `npx jazz-tools generate` before publishing: it compiles every policy against your schema, points at the exact spot of a mistake, and warns about operations without a grant, which will deny access. You do not need to write a schema migration to update permissions policies. Updated policies go live when your main backend restarts or deploys with them.
+
+Only backends read `jazz.permissions.json`: `createJazz({ app, permissions })` takes it, imported as JSON (`import permissions from "./jazz.permissions.json" with { type: "json" }`). Client bundles never include it, and nothing imports `schema.ts` at runtime.
 
 </Callout>
 
-Apps that do not need user-scoped filtering must still declare every required operation explicitly, using grants such as `policy.todos.allowRead.always()` and `policy.todos.allowInsert.always()`.
+### Rules
+
+`definePermissions` takes one entry per table, and TypeScript requires every table of the schema.
+`{}` grants nothing, so every operation on that table is denied. A table's rules are its
+operations:
+
+| Key                     | Checks                                                                |
+| ----------------------- | --------------------------------------------------------------------- |
+| `read`                  | Rows a session may read                                               |
+| `insert`                | Rows a session may create                                             |
+| `update`                | Rows a session may change, checked before and after the change        |
+| `updateIf` / `updateTo` | An update with different checks before and after it (always together) |
+| `delete`                | Rows a session may delete                                             |
+
+An operation without a key is denied. Each rule is one of:
+
+- a condition such as `{ owner_id: session.user }`, which applies to the row being checked;
+- `true` or `false`;
+- a function of the row, `(todo) => …`, for conditions that refer to the row's columns or
+  relations, such as `allowedTo.read(todo.project)`. `updateTo` also receives the row as it was
+  before the update: `(todo, old) => …`.
+
+Apps that do not need user-scoped filtering must still declare every required operation explicitly,
+with rules such as `read: true` and `insert: true`.
 
 ## Basic policies
 
 ### Simple conditions
 
-Use the policy helpers `allowRead`, `allowInsert`, `allowUpdate`, and `allowDelete` with [`.where(...)`](/docs/reference/where-operators) to restrict access based on column values.
+A plain object is a condition on the row: each key is a column, and every key must match. A value
+on its own means `=`, an array means "one of", and `null` matches an empty optional column.
+`ne`, `gt`, `gte`, `lt`, `lte` and `contains` compare in other ways, for example
+`{ priority: gte(3) }`, `{ parentId: ne(null) }` or `{ tags: contains("urgent") }`. A session value
+such as `session.user` can stand where a value does.
 
 Policies decide which rows a user may read or write, not which columns. To keep a column from some
 users, move it to its own table with a one-to-one relation to the row, and give that table its own
 policies.
 
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-simple-ts
-</include>
+<Tabs groupId="app-source" items={["schema.ts", "Generated JSON"]} persist>
+<Tab value="schema.ts">
 
-### `.always()`
+```ts title="schema.ts"
+const { definePermissions, session } = schema;
 
-Use `.always()` when an operation should always be permitted. It is equivalent to `.where({})`.
+export const permissions = definePermissions({
+  todos: {
+    read: { owner_id: session.user },
+    // Users cannot create todos with different owners.
+    insert: { owner_id: session.user },
+    // Users can update their own todos, but only if not already done.
+    updateIf: { owner_id: session.user, done: false },
+    updateTo: { owner_id: session.user },
+    // Users can only delete their own todos.
+    delete: { owner_id: session.user },
+  },
+  // ...
+});
+```
 
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-always-ts
-</include>
+</Tab>
+<Tab value="Generated JSON">
 
-### `.never()`
+```json title="jazz.permissions.json"
+{
+  "tables": {
+    "todos": {
+      "read": "owner_id = session.user",
+      "insert": "owner_id = session.user",
+      "update": {
+        "old": {
+          "allOf": ["owner_id = session.user", "done = false"]
+        },
+        "new": "owner_id = session.user"
+      },
+      "delete": "owner_id = session.user"
+    }
+  }
+}
+```
 
-Use `.never()` when an operation should be impossible. It is equivalent to
-`.where(anyOf([]))`.
+</Tab>
+</Tabs>
 
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-never-ts
-</include>
+`updateIf` and `updateTo` are explained in [Update policies](#update-policies-old-row-vs-new-row).
+Examples on this page leave out the other tables with `// ...`; in your file, list them all.
+
+### `true`
+
+Use `true` when an operation should always be permitted.
+
+<Tabs groupId="app-source" items={["schema.ts", "Generated JSON"]} persist>
+<Tab value="schema.ts">
+
+```ts title="schema.ts"
+export const permissions = definePermissions({
+  todos: {
+    read: true,
+    insert: true,
+    update: true,
+    delete: true,
+  },
+  // ...
+});
+```
+
+</Tab>
+<Tab value="Generated JSON">
+
+```json title="jazz.permissions.json"
+{
+  "tables": {
+    "todos": {
+      "read": "true",
+      "insert": "true",
+      "update": "true",
+      "delete": "true"
+    }
+  }
+}
+```
+
+</Tab>
+</Tabs>
+
+### `false`
+
+Use `false` when an operation should be impossible. Leaving the operation out denies it too;
+`false` says it's on purpose, and stays in the generated file.
+
+<Tabs groupId="app-source" items={["schema.ts", "Generated JSON"]} persist>
+<Tab value="schema.ts">
+
+```ts title="schema.ts"
+export const permissions = definePermissions({
+  todos: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  // ...
+});
+```
+
+</Tab>
+<Tab value="Generated JSON">
+
+```json title="jazz.permissions.json"
+{
+  "tables": {
+    "todos": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    }
+  }
+}
+```
+
+</Tab>
+</Tabs>
 
 #### Tables only your backend writes
 
 A table your users read but only your backend writes (an audit log, imported data, counters a job
 keeps) needs no write grants: your backend isn't checked when it acts as the system (see
-[System-authored rows](/docs/setup/auth/backend#system-authored-rows)). `npx jazz-tools validate`
-warns about each operation without a policy, so say it's on purpose with `.never()` rather than
+[System-authored rows](/docs/setup/auth/backend#system-authored-rows)). `npx jazz-tools generate`
+warns about each operation without a policy, so say it's on purpose with `false` rather than
 adding an allow rule to silence the warning:
 
-```ts title="permissions.ts"
-policy.auditLog.allowRead.where({ ownerId: session.user });
-policy.auditLog.allowInsert.never();
-policy.auditLog.allowUpdate.never();
-policy.auditLog.allowDelete.never();
+<Tabs groupId="app-source" items={["schema.ts", "Generated JSON"]} persist>
+<Tab value="schema.ts">
+
+```ts title="schema.ts"
+export const schema = s.defineSchema({
+  auditLog: s.table({
+    ownerId: s.uuid(),
+    action: s.string(),
+  }),
+});
+
+const { definePermissions, session } = schema;
+
+export const permissions = definePermissions({
+  auditLog: {
+    read: { ownerId: session.user },
+    insert: false,
+    update: false,
+    delete: false,
+  },
+});
 ```
+
+</Tab>
+<Tab value="Generated JSON">
+
+```json title="jazz.permissions.json"
+{
+  "tables": {
+    "auditLog": {
+      "read": "ownerId = session.user",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    }
+  }
+}
+```
+
+</Tab>
+</Tabs>
 
 ## Composing policies
 
 ### Combining conditions (`allOf` / `anyOf`)
 
-Combine conditions with `allOf` (all must match) or `anyOf` (any can match).
+Combine conditions with `allOf` (all must match), `anyOf` (any can match) and `not`:
 
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-combinators-ts
-</include>
+<Tabs groupId="app-source" items={["schema.ts", "Generated JSON"]} persist>
+<Tab value="schema.ts">
 
-Plain objects in a condition are row predicates. This includes tables with columns such as `type`,
-`column`, or `operation` that also appear in Jazz's policy representation. Results from helpers such
-as `allowedTo.*`, `allOf`, and `anyOf` remain directly composable with those row
-predicates.
+```ts title="schema.ts"
+const { definePermissions, session, anyOf, allOf, allowedTo } = schema;
 
-An object such as `{ type: "True" }` is row data only when the table schema declares a `type` column.
-On a table without that column, Jazz rejects the unbranded policy-shaped value rather than silently
-interpreting it as either row data or policy IR. For advanced cases that need manually-authored
-policy IR, use `raw(...)` to opt in explicitly:
-
-```ts
-definePermissions(app, ({ policy, raw }) => {
-  policy.documents.allowRead.where(raw({ type: "True" }));
+export const permissions = definePermissions({
+  projects: {
+    read: { owner_id: session.user },
+  },
+  todos: {
+    // Users can read a todo if they own it, or if it's not done and they can read its project.
+    read: (todo) =>
+      anyOf({ owner_id: session.user }, allOf({ done: false }, allowedTo.read(todo.project))),
+  },
+  // ...
 });
 ```
 
+</Tab>
+<Tab value="Generated JSON">
+
+```json title="jazz.permissions.json"
+{
+  "tables": {
+    "projects": {
+      "read": "owner_id = session.user"
+    },
+    "todos": {
+      "read": {
+        "anyOf": [
+          "owner_id = session.user",
+          {
+            "allOf": ["done = false", "allowedTo.read(project)"]
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+</Tab>
+</Tabs>
+
+`anyOf()` with no conditions matches nothing, and `allOf()` everything.
+
+### Helpers
+
+When several policies repeat a condition, give it a name. A helper is an ordinary TypeScript
+value or function: `generate` writes out its result wherever you use it, so helpers cost nothing
+at runtime and can take any parameters, call each other and live in other modules.
+
+<Tabs groupId="app-source" items={["schema.ts", "Generated JSON"]} persist>
+<Tab value="schema.ts">
+
+```ts title="schema.ts"
+const { definePermissions, exists, session, anyOf } = schema;
+
+const mine = { owner_id: session.user };
+const isSharedWithMe = (todoId: s.Uuid) =>
+  exists.todoShares({ todoId, user_id: session.user, can_read: true });
+
+export const permissions = definePermissions({
+  todos: {
+    read: (todo) => anyOf(mine, isSharedWithMe(todo.id)),
+    update: mine,
+    delete: mine,
+  },
+  todoShares: {
+    read: (share) => anyOf({ user_id: session.user }, share.todo.where(mine)),
+    insert: (share) => share.todo.where(mine),
+  },
+  // ...
+});
+```
+
+</Tab>
+<Tab value="Generated JSON">
+
+```json title="jazz.permissions.json"
+{
+  "tables": {
+    "todoShares": {
+      "read": {
+        "anyOf": [
+          "user_id = session.user",
+          "exists todos(id = this.todoId, owner_id = session.user)"
+        ]
+      },
+      "insert": "exists todos(id = this.todoId, owner_id = session.user)"
+    },
+    "todos": {
+      "read": {
+        "anyOf": [
+          "owner_id = session.user",
+          "exists todoShares(todoId = this.id, user_id = session.user, can_read = true)"
+        ]
+      },
+      "update": "owner_id = session.user",
+      "delete": "owner_id = session.user"
+    }
+  }
+}
+```
+
+</Tab>
+</Tabs>
+
+A helper's parameters are typed with the schema's value types: `s.Uuid` for a UUID column or
+`id`, `s.Value<"string">` for a string column, and so on. Pass a column of the row (`todo.projectId`)
+and the helper's condition follows that row. A condition object such as `mine` works on any table
+with those columns, and inside `.where(...)`.
+
 ### Session claims
 
-When your backend's `authenticate` returns claims, `session.where(...)` lets you check them directly in permissions without mapping them onto row columns first.
+When your backend's `authenticate` returns claims, `session.claims.<path>` lets you check them
+directly in permissions without mapping them onto row columns first. Compare a claim with a value
+using `eq`, `ne`, `gt` and the other comparisons, or `isIn` for a list:
 
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-session-claims-ts
-</include>
+<Tabs groupId="app-source" items={["schema.ts", "Generated JSON"]} persist>
+<Tab value="schema.ts">
 
-A claim can also be the value a row is compared with, for example rows of the user's organization:
+```ts title="schema.ts"
+const { definePermissions, session, anyOf, eq } = schema;
 
-```ts
-policy.projects.allowRead.where({ orgId: session.claims["org"] });
+export const permissions = definePermissions({
+  todos: {
+    read: anyOf({ owner_id: session.user }, eq(session.claims.role, "manager")),
+  },
+  // ...
+});
+```
+
+</Tab>
+<Tab value="Generated JSON">
+
+```json title="jazz.permissions.json"
+{
+  "tables": {
+    "todos": {
+      "read": {
+        "anyOf": ["owner_id = session.user", "session.claims.role = 'manager'"]
+      }
+    }
+  }
+}
+```
+
+</Tab>
+</Tabs>
+
+A claim can also be the value a row is compared with, for example rows of the user's organization
+(`{ orgId: session.claims.org }`), or a list to test membership in
+(`{ teamId: isIn(session.claims.teams) }`).
+
+Claims are JSON, so a claim is compared as the type of the column it meets, the same way in every
+policy form: a `s.uuid()` column (or `id`) reads a string claim as the UUID it spells, a text column
+compares the claim's text exactly, and an integer column accepts a JSON number or a string such as
+`"42"`. A claim the column can't hold matches no rows.
+
+Untyped claims accept any path. To have TypeScript check them, declare their shape:
+
+```ts title="schema.ts"
+export const schema = s.defineSchema(
+  {
+    projects: s.table({
+      name: s.string(),
+      orgId: s.string(),
+      teamId: s.string(),
+    }),
+  },
+  { claims: s.claims<{ role: "manager" | "member"; org: string; teams: string[] }>() },
+);
 ```
 
 ### Inherited access (`allowedTo.*`)
 
 A row can inherit its access from a related row. Use
-`allowedTo.read/insert/update/delete(relationName)` to express that inheritance.
-The argument is an explicit relationship name declared on the protected table,
-using the same names as `hopTo`. For `writer: s.rel("users", "authorId")`, use
-`allowedTo.update("writer")`; the stored column `authorId` is not accepted here.
+`allowedTo.read/insert/update/delete(row.relation)` to express that inheritance.
+The argument is a relation declared on the protected table. For
+`writer: s.rel("users", "authorId")`, write `allowedTo.update(post.writer)`.
 
-Reverse names work with the same helpers. Given
-`authored: s.reverse("posts", "writer")` on `users`,
-`allowedTo.delete("authored")` grants deletion only when at least one referencing
+Reverse relations work the same way. Given `authored: s.reverse("posts", "writer")` on `users`,
+`allowedTo.delete(user.authored)` grants deletion only when at least one referencing
 post permits deletion for the current identity. Readability or mere existence
 of a referencing post does not grant deletion. No matching reference means no
 grant; nullable references contribute no match, and UUID arrays use membership.
-The explicit source form `allowedTo.deleteReferencing(policy.posts, "writer")`
-uses the named forward relationship on `posts` that targets the protected table.
+For a link no relation names, pass a column instead: `allowedTo.read(post.authorId)` follows the
+forward column itself, and `allowedTo.delete(schema.tables.posts.writer)` the rows of `posts` whose
+`writer` column points here.
 
-Relationship-name resolution preserves existing operation-policy semantics and
-each update rule's old/new row checks. The global helper's TypeScript name check covers the app's declared
-relationships; permission compilation also checks the particular rule's table,
-and the source direction and target for `*Referencing`.
+Inheritance keeps each operation's own policy, and each update rule's before and after checks.
+TypeScript only offers relations of the rule's table, and `jazz-tools generate` checks their
+direction and target.
 
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-allowed-to-ts
-</include>
+<Tabs groupId="app-source" items={["schema.ts", "Generated JSON"]} persist>
+<Tab value="schema.ts">
+
+```ts title="schema.ts"
+const { definePermissions, session, anyOf, allOf, allowedTo } = schema;
+
+export const permissions = definePermissions({
+  projects: {
+    read: { owner_id: session.user },
+    update: { owner_id: session.user },
+  },
+  todos: {
+    // Users can read a todo if it's not done, or if they can read its project.
+    read: (todo) => anyOf({ done: false }, allowedTo.read(todo.project)),
+    // Users can update a todo if they can update its project and it's not done.
+    updateIf: (todo) => allOf(allowedTo.update(todo.project), { done: false }),
+    updateTo: (todo) => allowedTo.update(todo.project),
+  },
+  // ...
+});
+```
+
+</Tab>
+<Tab value="Generated JSON">
+
+```json title="jazz.permissions.json"
+{
+  "tables": {
+    "projects": {
+      "read": "owner_id = session.user",
+      "update": "owner_id = session.user"
+    },
+    "todos": {
+      "read": {
+        "anyOf": ["done = false", "allowedTo.read(project)"]
+      },
+      "update": {
+        "old": {
+          "allOf": ["allowedTo.update(project)", "done = false"]
+        },
+        "new": "allowedTo.update(project)"
+      }
+    }
+  }
+}
+```
+
+</Tab>
+</Tabs>
 
 ### Share-based access
 
-Sometimes access isn't determined by ownership or a parent relationship, but by a separate "shares" table. Use `policy.<table>.exists.where(...)` to check whether a matching row exists in another table.
+Sometimes access isn't determined by ownership or a parent relationship, but by a separate "shares"
+table. Use `exists.<table>({ … })` to check whether a matching row exists in another table.
 
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-shares-ts
-</include>
+<Tabs groupId="app-source" items={["schema.ts", "Generated JSON"]} persist>
+<Tab value="schema.ts">
 
-The callback form `(todo) => ...` gives you access to the current row, so you can correlate it with rows in other tables.
+```ts title="schema.ts"
+const { definePermissions, session, anyOf, exists } = schema;
 
-A `where(...)` key can also reach one hop through a relation, qualified with the relation's name:
-`policy.docs.allowRead.where({ "author.uid": session.identity.subject })` reads `uid` on the
-row `author` leads to (from alpha.62). The name of the table a relation leads to works too, when
-only one of the table's relations leads there, also before alpha.62.
+export const permissions = definePermissions({
+  todos: {
+    // Users can read a todo if they own it, or if someone shared it with them.
+    read: (todo) =>
+      anyOf(
+        { owner_id: session.user },
+        exists.todoShares({ todoId: todo.id, user_id: session.user, can_read: true }),
+      ),
+  },
+  // ...
+});
+```
+
+</Tab>
+<Tab value="Generated JSON">
+
+```json title="jazz.permissions.json"
+{
+  "tables": {
+    "todos": {
+      "read": {
+        "anyOf": [
+          "owner_id = session.user",
+          "exists todoShares(todoId = this.id, user_id = session.user, can_read = true)"
+        ]
+      }
+    }
+  }
+}
+```
+
+</Tab>
+</Tabs>
+
+Inside `exists.todoShares({ … })`, the keys are columns of `todoShares`, and `todo.id` is the
+current row, so you can correlate it with rows in other tables. Every key must match. Pass more
+conditions after the object for what an object can't say, such as
+`exists.todoShares({ todoId: todo.id }, anyOf({ can_read: true }, { user_id: session.user }))`.
+
+A relation of the row gives a shorter form: `todo.shares.where({ user_id: session.user })` checks
+the rows `shares` leads to, here the same `todoShares` rows. It works for forward relations too:
+`todo.project.where({ owner_id: session.user })`.
+
+An `exists` can also follow a relation from the row it finds, with `.hop`:
+`exists.docs({ id: doc.id }).hop("author", { uid: session.identity.subject })` reads `uid` on the
+row `author` leads to.
 
 One correlation links the two rows: the one on the other table's `id`, if there is one. It must
-follow a relation, either `id` against a column declared with `s.rel` to that table, or two columns
-that are relations to the same table; otherwise validation fails with `JoinNotRefCompatible`.
-Further correlations, such as `authUserId: row.authUserId`, only need comparable column types.
+follow a relation, either `id` against a column declared with an `s.rel` to that table, or two
+columns that are relations to the same table; otherwise validation fails with
+`JoinNotRefCompatible`. Further correlations, such as `authUserId: row.authUserId`, only need
+comparable column types.
 
 To match the `userId` your `authenticate` returned (for example an `assignee` text column holding
 your auth's user ids), compare with `session.identity.subject`: `session.user` is the Jazz account,
@@ -188,7 +664,9 @@ has not accepted yet. Rows a transaction writes cannot grant each other access i
 each one has to be allowed by rows that already exist or that the transaction writes and are
 themselves allowed. Every write must also still be allowed by the state the whole transaction
 leaves behind, so demoting your own membership from admin in the same transaction as creating a
-document that requires admin is rejected. The order in which you make the writes doesn't matter.
+document that requires admin is rejected. The order in which you make the writes doesn't matter. See
+[Know when permissions are checked](/docs/writing/transactions#know-when-permissions-are-checked)
+for when a transaction's writes are checked and more examples.
 
 Importing many rows whose permissions rest on rows that already exist (for example, thousands of
 folders under existing parents) is checked once per row. A transaction whose rows mostly depend on
@@ -199,56 +677,117 @@ transactions.
 
 ### Access through related rows
 
-When access depends on rows in another table, check that a matching path exists with
-`policy.exists(...)` around a relation: start from a table, filter it, follow a relation with
-`hopTo`, and filter again. For example, a doctor may read the patients they have an appointment
-with:
+When access depends on rows in another table, check that a matching path exists: start from a
+table with `exists.<table>`, filter it, follow a relation with `.hop("relation", { … })`, and
+filter again. For example, a doctor may read the patients they have an appointment with:
 
 ```ts title="schema.ts"
-const schema = {
-  doctors: s.table({ userId: s.string(), name: s.string() }, {}),
-  patients: s.table({ name: s.string() }, {}),
+export const schema = s.defineSchema({
+  doctors: s.table({
+    userId: s.string(),
+    name: s.string(),
+  }),
+  patients: s.table({
+    name: s.string(),
+  }),
   appointments: s.table(
     { doctorId: s.uuid(), patientId: s.uuid(), at: s.timestamp() },
-    { doctor: s.rel("doctors", "doctorId"), patient: s.rel("patients", "patientId") },
+    {
+      doctor: s.rel("doctors", "doctorId"),
+      patient: s.rel("patients", "patientId"),
+    },
   ),
-};
+});
 ```
 
-```ts title="permissions.ts"
-// Read rules only: who may book or change appointments needs insert and update policies too.
-s.definePermissions(app, ({ policy, session }) => [
-  // A doctor reads their own record.
-  policy.doctors.allowRead.where({ userId: session.identity.subject }),
-  // Patients with an appointment whose doctor is the signed-in user.
-  policy.patients.allowRead.where((patient) =>
-    policy.exists(
-      policy.appointments
-        .where({ patientId: patient.id })
-        .hopTo("doctor")
-        .where({ userId: session.identity.subject }),
-    ),
-  ),
-  // A doctor's own appointments: "doctors.userId" filters the related doctor.
-  policy.appointments.allowRead.where({ "doctors.userId": session.identity.subject }),
-]);
+<Tabs groupId="app-source" items={["schema.ts", "Generated JSON"]} persist>
+<Tab value="schema.ts">
+
+```ts title="schema.ts"
+const { definePermissions, session, exists } = schema;
+
+export const permissions = definePermissions({
+  doctors: {
+    // A doctor reads their own record.
+    read: { userId: session.identity.subject },
+  },
+  patients: {
+    // Patients with an appointment whose doctor is the signed-in user.
+    read: (patient) =>
+      exists
+        .appointments({ patientId: patient.id })
+        .hop("doctor", { userId: session.identity.subject }),
+  },
+  appointments: {
+    // A doctor's own appointments.
+    read: (appointment) => appointment.doctor.where({ userId: session.identity.subject }),
+  },
+});
 ```
 
-`hopTo` takes a relation name declared with `s.rel` or `s.reverse`, and the `where` after it
-filters the rows it reaches. A relation takes one `hopTo`: chaining a second one is not supported
-yet. A qualified key filters a related table directly: `"doctors.userId"` is qualified with the
-table's name, which works because only one relation leads from `appointments` to `doctors`. From
-alpha.62 the relation's name, `"doctor.userId"`, works as well (see
-[Share-based access](#share-based-access)).
+</Tab>
+<Tab value="Generated JSON">
+
+```json title="jazz.permissions.json"
+{
+  "tables": {
+    "appointments": {
+      "read": "exists doctors(id = this.doctorId, userId = session.identity.subject)"
+    },
+    "doctors": {
+      "read": "userId = session.identity.subject"
+    },
+    "patients": {
+      "read": "exists appointments(patientId = this.id).doctor(userId = session.identity.subject)"
+    }
+  }
+}
+```
+
+</Tab>
+</Tabs>
+
+These are read rules only: who may book or change appointments needs insert and update policies
+too. A hop takes a relation declared with `s.rel` or `s.reverse`, and the conditions after it
+filter the rows it reaches. An `exists` takes one hop: chaining a second one is not supported yet;
+for longer paths, see [Relation queries](#relation-queries).
 
 <Accordions type="single">
 <Accordion title="Recursive inheritance">
 
 If a table references itself (e.g. a comment that can have sub-comments), you can inherit access recursively up to a fixed depth.
 
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-recursive-inherits-ts
-</include>
+<Tabs groupId="app-source" items={["schema.ts", "Generated JSON"]} persist>
+<Tab value="schema.ts">
+
+```ts title="schema.ts"
+export const permissions = definePermissions({
+  todos: {
+    // Users can read a todo if they can read its parent (follows the chain upward).
+    read: (todo) => allowedTo.read(todo.parent),
+    // Users can update a todo if they can update its parent, up to 5 levels deep.
+    update: (todo) => allowedTo.update(todo.parent, { maxDepth: 5 }),
+  },
+  // ...
+});
+```
+
+</Tab>
+<Tab value="Generated JSON">
+
+```json title="jazz.permissions.json"
+{
+  "tables": {
+    "todos": {
+      "read": "allowedTo.read(parent)",
+      "update": "allowedTo.update(parent, maxDepth: 5)"
+    }
+  }
+}
+```
+
+</Tab>
+</Tabs>
 
 `maxDepth` must be a non-negative integer. A value of `0` performs no inheritance
 hop, so the inheritance condition cannot grant access; `1` checks only the
@@ -261,23 +800,176 @@ policy expansion is rejected during schema validation.
 
 ### Update policies: old row vs new row
 
-Update policies can check both the row **before** the update (`.whereOld(...)`) and the row
-**after** the update (`.whereNew(...)`). This is useful when you need to verify that the user had
-permission to modify the original row and that the result is also valid.
+An update policy can check both the row **before** the update and the row **after** it. `update`
+applies the same condition to both. To check them differently, use `updateIf` for the row before the
+update (may this user change it?) and `updateTo` for the row after it (is the result valid?). They
+always come together, and replace `update`.
 
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-whereold-wherenew-ts
-</include>
+<Tabs groupId="app-source" items={["schema.ts", "Generated JSON"]} persist>
+<Tab value="schema.ts">
 
-If you only use `.whereOld(...)`, the same condition is applied to both the old and new row. The
-same applies if you only use `.whereNew(...)`. Use both when the old-row and new-row checks differ.
+```ts title="schema.ts"
+export const permissions = definePermissions({
+  todos: {
+    // Users can only update their own rows, and the result must still be owned by them.
+    update: { owner_id: session.user },
+  },
+  // ...
+});
+```
 
-`exists` runs before a write is applied, so it can be used to prevent some columns from being updated.
-The row being written is always seen as it was before the write, even inside a transaction.
+</Tab>
+<Tab value="Generated JSON">
 
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-update-protected-columns
-</include>
+```json title="jazz.permissions.json"
+{
+  "tables": {
+    "todos": {
+      "update": "owner_id = session.user"
+    }
+  }
+}
+```
+
+</Tab>
+</Tabs>
+
+`updateTo` also receives the row as it was before the update, as its second argument. Compare a
+column of the new row with the old one to say what an update may not change, or how it may change
+it:
+
+<Tabs groupId="app-source" items={["schema.ts", "Generated JSON"]} persist>
+<Tab value="schema.ts">
+
+```ts title="schema.ts"
+const { definePermissions, session, allOf } = schema;
+
+export const permissions = definePermissions({
+  todos: {
+    updateIf: { owner_id: session.user },
+    // parentId and projectId cannot be updated.
+    updateTo: (todo, old) =>
+      allOf({ owner_id: session.user }, { parentId: old.parentId, projectId: old.projectId }),
+  },
+  // ...
+});
+```
+
+</Tab>
+<Tab value="Generated JSON">
+
+```json title="jazz.permissions.json"
+{
+  "tables": {
+    "todos": {
+      "update": {
+        "old": "owner_id = session.user",
+        "new": {
+          "allOf": [
+            "owner_id = session.user",
+            "exists todos(id = this.id, parentId = this.parentId, projectId = this.projectId)"
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+</Tab>
+</Tabs>
+
+`old` works in direct comparisons with the row's own columns: `{ status: old.status }`,
+`{ ownerId: ne(old.ownerId) }`, `{ version: gt(old.version) }`. As the generated JSON shows, the
+comparisons of one object become one `exists` on the same table: while the update is checked, the
+stored row is still the old version, also inside a transaction that wrote the row before. `old`
+can't be used inside another `exists`, and TypeScript rejects it there.
+
+## Relation queries
+
+Everything a policy can express has a form in TypeScript. Most policies need only the forms
+above. For the rest, such as a path of several hops, a join, or a walk up a tree of any depth,
+`exists(...)` takes a relation query built from the schema's `from`, with SQL-like steps:
+
+- `from.<table>(alias?)` starts from a table, and `from(query, alias?)` from another query; `.join(other, { on: [["a.x", "b.y"]], left? })`
+  joins another, and `.where({ "alias.col": value })` filters;
+- `.select({ id: "a.id" })`, `.distinctOn(...)`, `.orderBy(...)`, `.limit(n)` and `.offset(n)`
+  shape the result;
+- `union({ label: query, … })` combines queries, and `from(recursive({ seed, step, frontier, dedupe,
+maxDepth }))` repeats a step from a starting set, up to `maxDepth` times or `"fixpoint"`;
+- inside them, `outer("col")` is a column of the row being checked, `frontier("col")` one of the
+  rows a recursive step starts from, and `rowId("row")` a row's identity.
+
+Column references in these queries are strings such as `"f.ownerId"`, so TypeScript doesn't check
+them; `generate` does. For example, with folders and files:
+
+```ts title="schema.ts"
+export const schema = s.defineSchema({
+  folders: s.table({
+    name: s.string(),
+    ownerId: s.uuid(),
+  }),
+  files: s.table(
+    { name: s.string(), folderId: s.uuid() },
+    {
+      folder: s.rel("folders", "folderId"),
+    },
+  ),
+});
+```
+
+a user may read a file in a folder they own:
+
+<Tabs groupId="app-source" items={["schema.ts", "Generated JSON"]} persist>
+<Tab value="schema.ts">
+
+```ts title="schema.ts"
+const { definePermissions, session, exists, from } = schema;
+
+export const permissions = definePermissions({
+  files: {
+    read: exists(
+      from
+        .files()
+        .join(from.folders("f"), { on: [["files.folderId", "f.id"]] })
+        .where({ "f.ownerId": session.user })
+        .select({ id: "files.id" }),
+    ),
+  },
+  folders: {
+    read: { ownerId: session.user },
+  },
+});
+```
+
+</Tab>
+<Tab value="Generated JSON">
+
+```json title="jazz.permissions.json"
+{
+  "tables": {
+    "files": {
+      "read": "exists (from files join folders as f on files.folderId = f.id where f.ownerId = session.user select files.id as id)"
+    },
+    "folders": {
+      "read": "ownerId = session.user"
+    }
+  }
+}
+```
+
+</Tab>
+</Tabs>
+
+(The same rule is shorter as `file.folder.where({ ownerId: session.user })`; the query form is for
+what the shorter forms can't say.) The engine supports recursive queries in policies only when they
+walk from the row being checked; to inherit access up a tree, use
+[`allowedTo` with `maxDepth`](#inherited-access-allowedto) instead.
+
+Values in policies are plain JavaScript values, typed by the column they meet. Where a value has no
+column to take its type from, `typed.int(5)`, `typed.text("5")`, `typed.uuid(…)`,
+`typed.timestamp(…)` and the like give it one. The full expression grammar is in
+[App files](/docs/reference/app-files#expressions).
 
 ## Policy enforcement and request context
 
@@ -314,7 +1006,7 @@ These results are advice, not permission enforcement. A result can become stale,
 means Jazz could not give a definite answer. The authority still makes the final decision when the
 read or write reaches it.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#dry-run-permissions-ts
@@ -324,6 +1016,30 @@ read or write reaches it.
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-effect/src/docs-snippets.ts#dry-run-permissions-effect
     </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#dry-run-permissions-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#dry-run-permissions-swift
+    </include>
+
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#reading-permission-advice-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#dry-run-permissions-go
+    </include>
+
   </Tab>
 </Tabs>
 
@@ -345,27 +1061,88 @@ Jazz always tracks this metadata; select the columns explicitly to include them 
 
 ### Authorship-based policies
 
-You can use these edit metadata magic columns directly in `permissions.ts`. This is useful for simple
+You can use these edit metadata magic columns directly in permissions. This is useful for simple
 "creator can read/edit/delete their own rows" policies without adding explicit `owner_id` columns.
 
 Compare `$createdBy` with `session.user` to scope a rule to the row's creator. `session.user` is
 the account, so the rule matches rows written through any identity linked to it, including
-alpha.59 rows whose author was imported with an account. To match only the exact login that wrote the row, compare
-`$createdBy.identity` with `session.identity` (its `{ issuer, subject }`). `session.claims`
-holds the claims your `authenticate` returned, not a raw JWT payload; with
+alpha.59 rows whose author was imported with an account. To match only the exact login that wrote
+the row, compare `{ "$createdBy.identity": session.identity }` (its issuer and subject).
+`session.claims` holds the claims your `authenticate` returned, not a raw JWT payload; with
 [`fromJWT()`](/docs/setup/auth/custom#tokens-from-your-identity-provider), `session.identity` is
 `{ issuer: "jazz:backend", subject }`, not your provider's `iss`. Claims never replace the
 canonical author identity.
 
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-created-by-ts
-</include>
+<Tabs groupId="app-source" items={["schema.ts", "Generated JSON"]} persist>
+<Tab value="schema.ts">
 
-The creator condition is a plain row predicate, so it composes inside larger rules:
+```ts title="schema.ts"
+const { definePermissions, session } = schema;
 
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-created-by-combinator-ts
-</include>
+// Only the row's creator can read, create, update, or delete it.
+const createdByMe = { $createdBy: session.user };
+
+export const permissions = definePermissions({
+  todos: {
+    read: createdByMe,
+    insert: createdByMe,
+    update: createdByMe,
+    delete: createdByMe,
+  },
+  // ...
+});
+```
+
+</Tab>
+<Tab value="Generated JSON">
+
+```json title="jazz.permissions.json"
+{
+  "tables": {
+    "todos": {
+      "read": "$createdBy = session.user",
+      "insert": "$createdBy = session.user",
+      "update": "$createdBy = session.user",
+      "delete": "$createdBy = session.user"
+    }
+  }
+}
+```
+
+</Tab>
+</Tabs>
+
+The creator condition is a plain condition, so it composes inside larger rules:
+
+<Tabs groupId="app-source" items={["schema.ts", "Generated JSON"]} persist>
+<Tab value="schema.ts">
+
+```ts title="schema.ts"
+export const permissions = definePermissions({
+  todos: {
+    read: anyOf({ $createdBy: session.user }, { done: true }),
+  },
+  // ...
+});
+```
+
+</Tab>
+<Tab value="Generated JSON">
+
+```json title="jazz.permissions.json"
+{
+  "tables": {
+    "todos": {
+      "read": {
+        "anyOf": ["$createdBy = session.user", "done = true"]
+      }
+    }
+  }
+}
+```
+
+</Tab>
+</Tabs>
 
 For more dynamic sharing or ownership models, prefer explicit tables and relations rather than
 encoding extra meaning into authorship alone.
@@ -390,7 +1167,7 @@ thin client rejects with a `ThinRemoteError` whose `code` is `WriteRejected` and
 starts with the reason, such as `authorization_denied: …`. Use
 `db.onMutationError(...)` as a fallback for rejections without an active wait;
 see [Handling mutation errors](/docs/writing/writing-data#handling-mutation-errors).
-A backend connected to Jazz Cloud doesn't refuse a session's write up front either: the cloud
+A backend connected to Jazz Cloud (deprecated) doesn't refuse a session's write up front either: the cloud
 decides it, and a denial arrives through `wait(...)` with the same `permission_denied` code. A store
 with no authority above it, such as a client with `serverUrl: null` or a backend on its own
 storage, refuses some denied writes at once (the write call throws), and accepts others, such as a
@@ -412,15 +1189,15 @@ An empty query result can also mean that read permissions filtered out rows.
 
 As the app developer, check your own configuration:
 
-1. Run `npx jazz-tools validate` and check that every required table
+1. Run `npx jazz-tools generate` and check that every required table
    and operation has an explicit grant. For updates and upserts that update an
    existing row, also check the required read permission.
 2. Check that the grants match the authenticated session and the relevant row
    values, including both old and new values for updates. Test these cases with
    [permission tests](/docs/tooling/testing#testing-permissions).
 3. Deploy your main backend with the intended policies
-   and verify the app ID and deployed configuration. Editing `permissions.ts`
-   locally does not update the server's policies.
+   and verify the app ID and deployed configuration. Changing `schema.ts` and
+   running `generate` locally does not update the server's policies.
 
 Treat `permission_denied` as a generic rejection: it does not tell the caller
 whether a policy is missing, a predicate failed, or a protected row exists.

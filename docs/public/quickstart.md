@@ -51,10 +51,26 @@
    - For existing apps migrating from another data store, the existing data should constrain this
      enough.
    - Write permission tests next to the policies: /docs/tooling/testing
-   - Before the first change to a schema the app has already run with data, run
-     `npx jazz-tools migrations create`, and keep `defineApp(schema, { migrations })` importing
-     `./migrations` (/docs/schemas/migrations). Never delete or move the store to get past a schema
-     error: it means a migration is missing, and the user's data is in that store.
+   - Write the tables and the policies in `schema.ts`, at the app root (or `src/`, `src/lib/`):
+     `export const schema = s.defineSchema({ … })` with `s.table(…)` entries, then
+     `export const permissions = schema.definePermissions({ … })`, listing every table. Policies are
+     TypeScript: `exists.chatMembers({ chatId: chat.id, userId: session.user })`,
+     `allowedTo.read(message.chat)`, `{ $createdBy: session.user }`, `{ role: ["admin", "owner"] }`.
+     Factor repeated conditions into plain functions.
+   - After changing `schema.ts`, run `npx jazz-tools generate`: it writes `jazz.app.json`,
+     `jazz.permissions.json` and `jazz.generated.ts`, the typed bindings app code imports
+     (`import { app } from "./jazz.generated"`). Commit all of them; they are generated, so never
+     edit them by hand (`generate` refuses a hand-edited file). An error from `generate` points at
+     the spot in `schema.ts`. Backends pass the permissions to `createJazz`:
+     `import permissions from "./jazz.permissions.json" with { type: "json" }`.
+   - When `generate` says the tables changed since the last version, run
+     `npx jazz-tools migrations create --name <name>`: it writes a migration to `migrations/*.ts`.
+     Fill in what it asks for, then run `generate` again (/docs/schemas/migrations). Never delete or
+     move the store to get past a schema error: it means a migration is missing, and the user's
+     data is in that store.
+   - An alpha.65 app (`schema.ts` with `s.defineApp`, and `permissions.ts`): run
+     `npx jazz-tools@2.0.0-alpha.66 upgrade` first, before bumping the dependency, and review the
+     diff (/docs/operating/backups-and-upgrades#upgrading-from-alpha65).
    - In either case, use these Jazz features instead of modeling them yourself:
      - Built-in metadata columns like `$createdBy`, `$createdAt`, `$updatedBy` and `$updatedAt`:
        /docs/reading/metadata

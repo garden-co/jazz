@@ -1,0 +1,260 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "2ce75f9ae7ddb876ef6adaa4cdbe3e7c93aec8a0e7324140a32af6a9c1b8d4ed"
+  },
+  "tables": {
+    "activity": {
+      "columns": {
+        "showId": "uuid",
+        "taskId": "uuid",
+        "actorId": "uuid",
+        "kind": { "enum": ["created", "moved", "assigned", "renamed", "commented", "deleted"] },
+        "detail": "string?"
+      },
+      "relations": {
+        "actor": { "rel": "crew", "column": "actorId" },
+        "show": { "rel": "shows", "column": "showId" },
+        "task": { "rel": "tasks", "column": "taskId" }
+      }
+    },
+    "better_auth_account": {
+      "columns": {
+        "accountId": "string",
+        "providerId": "string",
+        "userId": "uuid",
+        "password": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_jwks": {
+      "columns": {
+        "publicKey": "string",
+        "privateKey": "string",
+        "createdAt": "timestamp",
+        "expiresAt": "timestamp?",
+        "alg": "string?",
+        "crv": "string?"
+      }
+    },
+    "better_auth_session": {
+      "columns": {
+        "expiresAt": "timestamp",
+        "token": "string",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp",
+        "ipAddress": "string?",
+        "userAgent": "string?",
+        "userId": "uuid"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_user": {
+      "columns": {
+        "name": "string",
+        "email": "string",
+        "emailVerified": "boolean",
+        "image": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": {
+        "better_auth_accountViaUser": { "reverse": "better_auth_account", "relation": "user" },
+        "better_auth_sessionViaUser": { "reverse": "better_auth_session", "relation": "user" }
+      }
+    },
+    "better_auth_verification": {
+      "columns": {
+        "identifier": "string",
+        "value": "string",
+        "expiresAt": "timestamp",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      }
+    },
+    "checklistItems": {
+      "columns": { "title": "string", "done": "boolean", "ownerAccount": "uuid" }
+    },
+    "comments": {
+      "columns": { "taskId": "uuid", "authorId": "uuid", "body": "string" },
+      "relations": {
+        "author": { "rel": "crew", "column": "authorId" },
+        "task": { "rel": "tasks", "column": "taskId" }
+      }
+    },
+    "crew": {
+      "columns": { "account": "uuid", "name": "string" },
+      "relations": {
+        "assignedTasks": { "reverse": "tasks", "relation": "assignee" },
+        "memberships": { "reverse": "showCrew", "relation": "crew" }
+      }
+    },
+    "showCrew": {
+      "columns": {
+        "showId": "uuid",
+        "crewId": "uuid",
+        "account": "uuid",
+        "role": { "enum": ["chief", "crew"] },
+        "inviteCode": "string?"
+      },
+      "relations": {
+        "crew": { "rel": "crew", "column": "crewId" },
+        "show": { "rel": "shows", "column": "showId" }
+      }
+    },
+    "showInvites": {
+      "columns": { "showId": "uuid", "code": "string" },
+      "relations": { "show": { "rel": "shows", "column": "showId" } }
+    },
+    "shows": {
+      "columns": {
+        "name": "string",
+        "venue": "string",
+        "date": "string",
+        "doors": "string",
+        "chiefAccount": "uuid"
+      },
+      "relations": {
+        "activity": { "reverse": "activity", "relation": "show" },
+        "crew": { "reverse": "showCrew", "relation": "show" },
+        "invites": { "reverse": "showInvites", "relation": "show" },
+        "tasks": { "reverse": "tasks", "relation": "show" }
+      }
+    },
+    "tasks": {
+      "columns": {
+        "showId": "uuid",
+        "title": "string",
+        "status": { "enum": ["todo", "doing", "done", "blocked"] },
+        "assigneeId": "uuid?",
+        "notes": "string?",
+        "rank": "float"
+      },
+      "relations": {
+        "activity": { "reverse": "activity", "relation": "task" },
+        "assignee": { "rel": "crew", "column": "assigneeId" },
+        "comments": { "reverse": "comments", "relation": "task" },
+        "show": { "rel": "shows", "column": "showId" }
+      }
+    }
+  },
+  "history": {
+    "c338db39787f": {
+      "tables": {
+        "activity": {
+          "columns": {
+            "showId": { "type": "uuid", "references": "shows" },
+            "taskId": { "type": "uuid", "references": "tasks" },
+            "actorId": { "type": "uuid", "references": "crew" },
+            "kind": { "enum": ["created", "moved", "assigned", "renamed", "commented", "deleted"] },
+            "detail": "string?"
+          }
+        },
+        "better_auth_account": {
+          "columns": {
+            "issuer": "string",
+            "accountId": "string",
+            "providerId": "string",
+            "userId": { "type": "uuid", "references": "better_auth_user" },
+            "password": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_jwks": {
+          "columns": {
+            "publicKey": "string",
+            "privateKey": "string",
+            "createdAt": "timestamp",
+            "expiresAt": "timestamp?",
+            "alg": "string?",
+            "crv": "string?"
+          }
+        },
+        "better_auth_session": {
+          "columns": {
+            "expiresAt": "timestamp",
+            "token": "string",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp",
+            "ipAddress": "string?",
+            "userAgent": "string?",
+            "userId": { "type": "uuid", "references": "better_auth_user" }
+          }
+        },
+        "better_auth_user": {
+          "columns": {
+            "name": "string",
+            "email": "string",
+            "emailVerified": "boolean",
+            "image": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_verification": {
+          "columns": {
+            "identifier": "string",
+            "value": "string",
+            "expiresAt": "timestamp",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "checklistItems": {
+          "columns": { "title": "string", "done": "boolean", "ownerAccount": "uuid" }
+        },
+        "comments": {
+          "columns": {
+            "taskId": { "type": "uuid", "references": "tasks" },
+            "authorId": { "type": "uuid", "references": "crew" },
+            "body": "string"
+          }
+        },
+        "crew": { "columns": { "account": "uuid", "name": "string" } },
+        "showCrew": {
+          "columns": {
+            "showId": { "type": "uuid", "references": "shows" },
+            "crewId": { "type": "uuid", "references": "crew" },
+            "account": "uuid",
+            "role": { "enum": ["chief", "crew"] },
+            "inviteCode": "string?"
+          }
+        },
+        "showInvites": {
+          "columns": { "showId": { "type": "uuid", "references": "shows" }, "code": "string" }
+        },
+        "shows": {
+          "columns": {
+            "name": "string",
+            "venue": "string",
+            "date": "string",
+            "doors": "string",
+            "chiefAccount": "uuid"
+          }
+        },
+        "tasks": {
+          "columns": {
+            "showId": { "type": "uuid", "references": "shows" },
+            "title": "string",
+            "status": { "enum": ["todo", "doing", "done", "blocked"] },
+            "assigneeId": { "type": "uuid", "optional": true, "references": "crew" },
+            "notes": "string?",
+            "rank": "float"
+          }
+        }
+      }
+    }
+  },
+  "migrations": [
+    {
+      "from": "c338db39787f",
+      "migrate": {
+        "better_auth_account": { "issuer": { "drop": "string", "backwardsDefault": "" } }
+      }
+    }
+  ]
+}

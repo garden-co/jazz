@@ -1054,13 +1054,22 @@ describe("websocket frame carrier", () => {
     expect(isWireError(nonminimalTag)).toBe(false);
     expect(() => decodeWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
 
+    // A code or retry from a newer server is still the server's error: it is
+    // read, and the link retries it as a refusal (#5927 R10), instead of throwing.
     const unknownCode = encodeWireError(7, 3, "future code");
-    expect(() => isWireError(unknownCode)).toThrow("unknown WireErrorCode discriminant 7");
-    expect(() => decodeWireError(unknownCode)).toThrow("unknown WireErrorCode discriminant 7");
+    expect(isWireError(unknownCode)).toBe(true);
+    expect(decodeWireError(unknownCode)).toEqual({
+      code: "unknown:7",
+      retry: "later",
+      message: "future code",
+    });
 
     const unknownRetry = encodeWireError(6, 4, "future retry");
-    expect(() => isWireError(unknownRetry)).toThrow("unknown WireRetry discriminant 4");
-    expect(() => decodeWireError(unknownRetry)).toThrow("unknown WireRetry discriminant 4");
+    expect(decodeWireError(unknownRetry)).toEqual({
+      code: "not_ready",
+      retry: "unknown:4",
+      message: "future retry",
+    });
   });
 
   describe("heartbeat", () => {

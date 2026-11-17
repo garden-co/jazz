@@ -1,12 +1,16 @@
 import { createHmac, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
-import { createServer as createNetServer, type AddressInfo, type Socket } from "node:net";
+import {
+  connect as connectTcp,
+  createServer as createNetServer,
+  type AddressInfo,
+  type Socket,
+} from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defineShippedApp } from "../testing/client-migrations.js";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { fetchFor } from "../runtime/in-process-transport.js";
 import { createJazz, vercel, vercelBlob } from "./index.js";
@@ -23,13 +27,9 @@ import {
   type SandboxSdk,
 } from "./vercel-store.js";
 
-const app = await defineShippedApp({ notes: s.table({ text: s.string() }, {}) });
-const permissions = s.definePermissions(app, ({ policy }) => {
-  policy.notes.allowRead.always();
-  policy.notes.allowInsert.always();
-  policy.notes.allowUpdate.never();
-  policy.notes.allowDelete.never();
-});
+const app = testApp({ tables: { notes: { columns: { text: "string" } } } });
+// Updates and deletes are denied.
+const permissions = { format: 1, tables: { notes: { read: "true", insert: "true" } } };
 
 // The cores earlier versions created by default, production's and one per
 // preview branch (see vercel-namespace.test.ts).
@@ -684,6 +684,80 @@ describe("vercel() store", () => {
       await restarting;
     }
   }, 60_000);
+  it("starts a fresh session when connections stop reaching a core that still answers /health", async () => {
+    // Vercel's router in front of the core. While `cut`, it passes plain
+    // HTTP (so `/health` answers) but holds every WebSocket upgrade without
+    // an answer, and it has dropped the connections it was passing: the
+    // core runs on, unreached. A fresh session routes again.
+    const core = await startTrustedCore(randomUUID());
+    const target = new URL(core.url);
+    let cut = false;
+    const passing = new Set<Socket>();
+    const router = createNetServer((client) => {
+      client.once("data", (head) => {
+        if (cut && /^upgrade:\s*websocket/im.test(head.toString("latin1"))) {
+          // Held: never answered, never closed.
+          cleanups.push(async () => client.destroy());
+          return;
+        }
+        const upstream = connectTcp(Number(target.port), target.hostname, () => {
+          upstream.write(head);
+          client.pipe(upstream).pipe(client);
+        });
+        passing.add(client);
+        const end = () => {
+          passing.delete(client);
+          client.destroy();
+          upstream.destroy();
+        };
+        client.on("error", end).on("close", end);
+        upstream.on("error", end).on("close", end);
+      });
+    });
+    await new Promise<void>((resolve) => router.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise((resolve) => router.close(resolve)));
+    const url = `http://127.0.0.1:${(router.address() as AddressInfo).port}`;
+    const fake = fakeVercel({ appId: core.appId, url });
+    onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: vercel({
+        namespace: legacyNamespace,
+        sdk: fake.sdk,
+        backendCredential: core.credential,
+      }),
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const row = await jazz.db.insert(app.notes, { text: "kept" }).wait({ tier: "global" });
+
+    cut = true;
+    for (const socket of passing) socket.destroy();
+    fake.state.onStart = () => {
+      cut = false;
+    };
+    fake.calls.length = 0;
+
+    // Reads fail while nothing gets through, then succeed once the
+    // instance has stopped the session no connection reaches and woken a
+    // fresh one, without anything else intervening.
+    const deadline = Date.now() + 90_000;
+    let seen: string[] | undefined;
+    while (!seen && Date.now() < deadline) {
+      try {
+        const notes = await jazz.db.all(app.notes.where({ id: row.id }), { tier: "remote" });
+        seen = notes.map((note) => note.text);
+      } catch {
+        await sleep(500);
+      }
+    }
+    expect(seen).toEqual(["kept"]);
+    expect(fake.calls.filter((call) => !call.startsWith("extend"))).toEqual([
+      "stop",
+      "resume jazz-prj-test-production",
+      expect.stringMatching(/^start /),
+    ]);
+  }, 120_000);
   it.each([400, 409, 422])(
     "opens every concurrent first request on a cold deploy: losing the race to create the Sandbox waits for the winner's (%i)",
     async (status) => {

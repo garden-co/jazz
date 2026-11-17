@@ -19,6 +19,19 @@ const KEY_NAMESPACE = new TextEncoder().encode("jazz-auth-key-v1");
 /** RFC 4122 DNS namespace, for audiences that are not UUIDs. */
 const DNS_NAMESPACE = parseUuidText("6ba7b810-9dad-11d1-80b4-00c04fd430c8")!;
 const encoder = new TextEncoder();
+// noble enables an 8-bit window for the base point at import, so the first
+// `getPublicKey`/`sign` builds a 4096-point table: ~40 ms of a page's startup,
+// for the one or two signatures a load makes. A 4-bit window builds an eighth
+// of them (a few ms) and signs a fraction of a millisecond slower, with the
+// same results. Set on first use, not at import, so the module stays free of
+// side effects (`sideEffects` in package.json). It applies to this noble
+// instance, which the app may share.
+let baseWindowSet = false;
+function useSmallBaseWindow(): void {
+  if (baseWindowSet) return;
+  baseWindowSet = true;
+  ed25519.Point.BASE.precompute(4);
+}
 
 export interface SelfSignedTokenOptions {
   /** The 32-byte identity seed, base64url-encoded. */
@@ -32,6 +45,7 @@ export function mintSelfSignedToken(
   issuer: typeof LOCAL_FIRST_ISSUER | typeof ANONYMOUS_ISSUER,
   options: SelfSignedTokenOptions,
 ): string {
+  useSmallBaseWindow();
   const signingKey = signingKeyFromSeed(decodeSeed(options.secret));
   const publicKey = ed25519.getPublicKey(signingKey);
   const audienceUuid = parseUuidText(options.audience);
@@ -59,6 +73,7 @@ export function mintSelfSignedToken(
 
 /** The user id a seed signs as. */
 export function selfSignedUserId(secret: string): string {
+  useSmallBaseWindow();
   const publicKey = ed25519.getPublicKey(signingKeyFromSeed(decodeSeed(secret)));
   return formatUuid(uuidV5(KEY_NAMESPACE, publicKey));
 }

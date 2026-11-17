@@ -5,7 +5,7 @@
 //   node build.mjs --outputs          (what to ship to the measurement host)
 //
 // Only the framework build runs: `next build` or `vite build`. The apps'
-// `build` scripts also run `jazz-tools validate`, a check with no output, and
+// `build` scripts also run `jazz-tools generate --check`, a check with no output, and
 // big-label's hardcodes another env.
 import { spawnSync } from "node:child_process";
 import { rmSync } from "node:fs";

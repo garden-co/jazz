@@ -1,0 +1,78 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "245a29888b185efdefc0cc6acf9524395087f4dea86035379dedc05916dc53bd"
+  },
+  "tables": {
+    "artists": { "read": "ownerAccount = session.user" },
+    "attachments": {
+      "read": "allowedTo.read(conversation)",
+      "insert": {
+        "allOf": [
+          "exists conversations(id = this.conversationId, ownerAccount = session.user)",
+          "exists turns(id = this.turnId, conversationId = this.conversationId, role = 'user')"
+        ]
+      }
+    },
+    "better_auth_account": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_jwks": { "read": "false", "insert": "false", "update": "false", "delete": "false" },
+    "better_auth_session": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_user": { "read": "false", "insert": "false", "update": "false", "delete": "false" },
+    "better_auth_verification": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "calendarEvents": { "read": "ownerAccount = session.user" },
+    "conversations": {
+      "read": "ownerAccount = session.user",
+      "insert": {
+        "allOf": [
+          "ownerAccount = session.user",
+          "exists artists(id = this.artistId, ownerAccount = session.user)"
+        ]
+      },
+      "update": {
+        "old": "ownerAccount = session.user",
+        "new": {
+          "allOf": [
+            "ownerAccount = session.user",
+            "exists artists(id = this.artistId, ownerAccount = session.user)"
+          ]
+        }
+      },
+      "delete": "ownerAccount = session.user"
+    },
+    "profiles": { "read": "accountId = session.user" },
+    "songs": { "read": "ownerAccount = session.user" },
+    "toolCalls": { "read": "allowedTo.read(conversation)" },
+    "turns": {
+      "read": "allowedTo.read(conversation)",
+      "insert": {
+        "allOf": [
+          { "allOf": ["role = 'user'", "status = 'complete'"] },
+          "exists conversations(id = this.conversationId, ownerAccount = session.user)",
+          {
+            "anyOf": [
+              "parentId = null",
+              "exists turns(id = this.parentId, conversationId = this.conversationId)"
+            ]
+          }
+        ]
+      }
+    },
+    "venues": { "read": "ownerAccount = session.user" }
+  }
+}

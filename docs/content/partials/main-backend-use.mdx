@@ -23,7 +23,7 @@ code first. Use it for system work: jobs, webhooks, migrations, admin routes.
 
 ```ts
 import { jazz } from "./jazz.server";
-import { app } from "./schema";
+import { app } from "./jazz.generated";
 
 await jazz.db.insert(app.auditLog, { event: "invoice.paid" });
 ```
@@ -41,7 +41,7 @@ actions, server components. Concurrent requests stay isolated.
 
 ```ts title="app/api/todos/route.ts"
 import { jazz } from "@/jazz.server";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 
 export async function GET(request: Request) {
   const db = await jazz.forReqUser(request);

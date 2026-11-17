@@ -1,28 +1,22 @@
-import { existsSync } from "fs";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises";
-import { tmpdir } from "os";
-import { basename, dirname, join, resolve } from "path";
-import { fileURLToPath, pathToFileURL } from "url";
+/**
+ * Load an app's TypeScript (`schema.ts`, `permissions.ts`, `migrations/*.ts`)
+ * for `jazz-tools generate`: bundle it with esbuild, run the bundle, read its
+ * exports. `jazz-tools` resolves to the CLI's own copy, so `npx jazz-tools`
+ * works in a project without node_modules. Node only.
+ */
+import { existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { build, type Plugin } from "esbuild";
-import { schemaToWasm } from "./codegen/schema-reader.js";
-import type { SchemaDefinition } from "./typed-app.js";
-import type { Column, OperationPolicy, Schema, SqlType, TablePolicies } from "./schema.js";
-import type {
-  ColumnDescriptor,
-  ColumnType,
-  TableSchema,
-  Value,
-  WasmSchema,
-} from "./drivers/types.js";
-import { schemaDefinitionToAst } from "./migrations.js";
-import type { CompiledPermissionsMap } from "./schema-permissions.js";
-import { validatePermissionsAgainstSchema } from "./schema-permissions.js";
 
-const localJazzToolsSourceEntry = fileURLToPath(new URL("./index.ts", import.meta.url));
-const localJazzToolsEntry = existsSync(localJazzToolsSourceEntry)
-  ? localJazzToolsSourceEntry
-  : fileURLToPath(new URL("./index.js", import.meta.url));
-const schemaLoaderEnvelopeExport = "__jazzSchemaLoaderEnvelope";
+// The authoring DSL alone (`schema`, `migration`): app TS loaded for
+// `generate` never needs the runtime.
+function localJazzToolsEntry(): string {
+  const source = fileURLToPath(new URL("./authoring.ts", import.meta.url));
+  return existsSync(source) ? source : fileURLToPath(new URL("./authoring.js", import.meta.url));
+}
 
 async function removeTempDirectory(tempDir: string): Promise<void> {
   await rm(tempDir, { force: true, recursive: true });
@@ -34,98 +28,74 @@ export const schemaLoaderTestHooks: {
   removeTempDirectory,
 };
 
-export interface LoadedSchemaProject {
-  rootDir: string;
-  schemaFile: string;
-  permissionsFile?: string;
-  permissions?: CompiledPermissionsMap;
-  schema: Schema;
-  wasmSchema: WasmSchema;
+/**
+ * `jazz-tools` resolves to this copy of the package's authoring DSL, so
+ * `npx jazz-tools generate` works in a project without node_modules, and
+ * the app's TS and the CLI share one DSL.
+ */
+export function localJazzToolsPlugin(): Plugin {
+  return {
+    name: "local-jazz-tools",
+    setup(build) {
+      build.onResolve({ filter: /^jazz-tools$/ }, () => ({ path: localJazzToolsEntry() }));
+      build.onResolve({ filter: /^file:\/\// }, (args) => ({ path: fileURLToPath(args.path) }));
+    },
+  };
 }
 
-type LoadedTsModule = {
-  module: Record<string, unknown>;
-  collectedSchema: Schema;
-};
-
 async function bundleToTempFile(filePath: string, tempDir: string): Promise<string> {
-  const outFile = join(tempDir, "schema.mjs");
-  const entryFile = join(tempDir, "entry.mjs");
-  const sourceUrl = pathToFileURL(resolve(filePath)).href;
-
-  await writeFile(
-    entryFile,
-    [
-      `import * as module from ${JSON.stringify(sourceUrl)};`,
-      `import { getCollectedSchema } from "jazz-tools";`,
-      `export const ${schemaLoaderEnvelopeExport} = { module, collectedSchema: getCollectedSchema() };`,
-      "",
-    ].join("\n"),
-  );
-
+  const outFile = join(tempDir, `${basename(filePath).replace(/\.[cm]?[jt]sx?$/, "")}.mjs`);
   await build({
-    entryPoints: [entryFile],
+    entryPoints: [resolve(filePath)],
     bundle: true,
     format: "esm",
     platform: "node",
     outfile: outFile,
+    // Stack traces point at the app's own lines: the permissions DSL names
+    // the line a refused rule comes from.
+    sourcemap: "inline",
+    sourcesContent: false,
+    logLevel: "silent",
     // jazz-napi must stay external: inlining its loader breaks the relative
     // require of the platform .node binding once the bundle runs from outside
     // the package directory.
     external: ["jazz-napi", "*.node"],
     plugins: [localJazzToolsPlugin()],
   });
-
   return outFile;
 }
 
-function localJazzToolsPlugin(): Plugin {
-  return {
-    name: "local-jazz-tools",
-    setup(build) {
-      build.onResolve({ filter: /^jazz-tools$/ }, () => ({ path: localJazzToolsEntry }));
-      build.onResolve({ filter: /^file:\/\// }, (args) => ({ path: fileURLToPath(args.path) }));
-    },
-  };
-}
+let sourceMapsEnabled = false;
 
-async function loadTsModule(filePath: string): Promise<LoadedTsModule> {
+/**
+ * Run the TS module at `filePath` (bundled with what it imports) and return
+ * its exports. Each load bundles afresh, so edits are always seen.
+ */
+export async function loadModule(filePath: string): Promise<Record<string, unknown>> {
+  if (!sourceMapsEnabled) {
+    sourceMapsEnabled = true;
+    process.setSourceMapsEnabled?.(true);
+  }
   const tempDir = await mkdtemp(join(tmpdir(), "jazz-schema-loader-"));
   let loadFailed = false;
   try {
-    const outFile = await bundleToTempFile(filePath, tempDir);
-    // The output path is unique per load, so runtime import caching cannot
-    // cross-contaminate concurrent schema loads.
-    let loaded: Record<string, unknown>;
+    let outFile: string;
     try {
-      loaded = (await import(pathToFileURL(outFile).href)) as Record<string, unknown>;
+      outFile = await bundleToTempFile(filePath, tempDir);
     } catch (error) {
-      // The bundle runs schema.ts and the files it imports together: say
-      // which file was being loaded, as Node would name the failing one.
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Bundling ${basename(filePath)} failed: ${message}`, { cause: error });
+    }
+    try {
+      // The output path is unique per load, so the import cache can't hand
+      // back an earlier load.
+      return { ...((await import(pathToFileURL(outFile).href)) as Record<string, unknown>) };
+    } catch (error) {
+      // The DSL's own refusals name their JSON path and line already.
+      if ((error as { code?: string })?.code === "JAZZ_PERMISSIONS_DSL") throw error;
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Loading ${basename(filePath)} failed: ${message}`, { cause: error });
     }
-    const envelope = loaded[schemaLoaderEnvelopeExport];
-    if (typeof envelope !== "object" || envelope === null) {
-      throw new Error("Schema loader bundle did not return its private result envelope.");
-    }
-    const { module, collectedSchema } = envelope as {
-      module?: unknown;
-      collectedSchema?: unknown;
-    };
-    if (
-      typeof module !== "object" ||
-      module === null ||
-      typeof collectedSchema !== "object" ||
-      collectedSchema === null ||
-      Array.isArray(collectedSchema)
-    ) {
-      throw new Error("Schema loader bundle returned an invalid private result envelope.");
-    }
-    return {
-      module: module as Record<string, unknown>,
-      collectedSchema: collectedSchema as Schema,
-    };
   } catch (error) {
     loadFailed = true;
     throw error;
@@ -133,503 +103,7 @@ async function loadTsModule(filePath: string): Promise<LoadedTsModule> {
     try {
       await schemaLoaderTestHooks.removeTempDirectory(tempDir);
     } catch (cleanupError) {
-      if (!loadFailed) {
-        throw cleanupError;
-      }
+      if (!loadFailed) throw cleanupError;
     }
   }
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await access(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function columnTypeToSqlType(columnType: ColumnType): SqlType {
-  switch (columnType.type) {
-    case "Text":
-      return "TEXT";
-    case "Boolean":
-      return "BOOLEAN";
-    case "Integer":
-      return "INTEGER";
-    case "BigInt":
-      return "BIGINT";
-    case "Double":
-      return "REAL";
-    case "Timestamp":
-      return "TIMESTAMP";
-    case "Uuid":
-      return "UUID";
-    case "Bytea":
-      return "BYTEA";
-    case "Json":
-      return columnType.schema ? { kind: "JSON", schema: columnType.schema } : { kind: "JSON" };
-    case "Enum":
-      return { kind: "ENUM", variants: [...columnType.variants] };
-    case "EnumPayload":
-      return {
-        kind: "ENUM",
-        cases: columnType.cases.map((entry) => ({
-          name: entry.name,
-          fields: entry.fields.map((field) => ({
-            name: field.name,
-            sqlType: columnTypeToSqlType(field.column_type),
-            nullable: field.nullable,
-            ...(field.default === undefined
-              ? {}
-              : { default: wasmValueToDefault(field.default, field.column_type, field.nullable) }),
-          })),
-        })),
-      };
-    case "Array":
-      return { kind: "ARRAY", element: columnTypeToSqlType(columnType.element) };
-    case "Row":
-      throw new Error("Root schema loading does not yet support row-valued columns.");
-  }
-}
-
-function wasmValueToDefault(value: Value, columnType: ColumnType, nullable = true): unknown {
-  if (value.type === "Null") {
-    if (!nullable) {
-      throw new Error("Null default does not match non-nullable column.");
-    }
-    return null;
-  }
-
-  switch (columnType.type) {
-    case "Integer":
-      if (value.type !== "Integer") {
-        throw new Error("Integer default does not match column type.");
-      }
-      return value.value;
-    case "BigInt":
-      if (value.type !== "BigInt") {
-        throw new Error("BigInt default does not match column type.");
-      }
-      return value.value;
-    case "Double":
-      if (value.type !== "Double") {
-        throw new Error("Double default does not match column type.");
-      }
-      return value.value;
-    case "Boolean":
-      if (value.type !== "Boolean") {
-        throw new Error("Boolean default does not match column type.");
-      }
-      return value.value;
-    case "Text":
-      if (value.type !== "Text") {
-        throw new Error("Text default does not match column type.");
-      }
-      return value.value;
-    case "Timestamp":
-      if (value.type !== "Timestamp") {
-        throw new Error("Timestamp default does not match column type.");
-      }
-      return value.value;
-    case "Uuid":
-      if (value.type !== "Uuid") {
-        throw new Error("Uuid default does not match column type.");
-      }
-      return value.value;
-    case "Bytea":
-      if (value.type !== "Bytea") {
-        throw new Error("Bytea default does not match column type.");
-      }
-      return new Uint8Array(value.value);
-    case "Json":
-      if (value.type !== "Text") {
-        throw new Error("Json default does not match column type.");
-      }
-      return JSON.parse(value.value);
-    case "Enum":
-      if (value.type !== "Text") {
-        throw new Error("Enum default does not match column type.");
-      }
-      return value.value;
-    case "EnumPayload":
-      if (value.type !== "Enum") {
-        throw new Error("Payload enum default does not match column type.");
-      }
-      if (!Array.isArray(value.value.values)) {
-        throw new Error("Payload enum default values must be an array.");
-      }
-      const entry = columnType.cases.find((candidate) => candidate.name === value.value.case);
-      if (!entry) {
-        throw new Error(`Unknown payload enum case "${value.value.case}".`);
-      }
-      if (value.value.values.length !== entry.fields.length) {
-        throw new Error(
-          `Payload enum case "${value.value.case}" default has ${value.value.values.length} values; expected ${entry.fields.length}.`,
-        );
-      }
-      return {
-        type: value.value.case,
-        ...Object.fromEntries(
-          entry.fields.map((field, index) => [
-            field.name,
-            wasmValueToDefault(value.value.values[index]!, field.column_type, field.nullable),
-          ]),
-        ),
-      };
-    case "Array":
-      if (value.type !== "Array") {
-        throw new Error("Array default does not match column type.");
-      }
-      return value.value.map((inner) => wasmValueToDefault(inner, columnType.element));
-    case "Row":
-      throw new Error("Root schema loading does not yet support row-valued defaults.");
-  }
-}
-
-function columnMergeStrategyToAst(
-  strategy: ColumnDescriptor["merge_strategy"],
-): Column["mergeStrategy"] {
-  switch (strategy) {
-    case undefined:
-      return undefined;
-    case "Counter":
-      return "counter";
-    case "GSet":
-      return "g-set";
-    case "Text":
-      return "text";
-    case "Markdown":
-      return "markdown";
-    case "Html":
-      return "html";
-  }
-}
-
-function wasmColumnToAst(column: ColumnDescriptor): Column {
-  return {
-    name: column.name,
-    sqlType: columnTypeToSqlType(column.column_type),
-    nullable: column.nullable,
-    default:
-      column.default === undefined
-        ? undefined
-        : wasmValueToDefault(column.default, column.column_type, column.nullable),
-    references: column.references,
-    mergeStrategy: columnMergeStrategyToAst(column.merge_strategy),
-  };
-}
-
-function wasmTableToAst(name: string, table: TableSchema): Schema["tables"][number] {
-  return {
-    name,
-    columns: table.columns.map(wasmColumnToAst),
-    ...(table.relations ? { relations: structuredClone(table.relations) } : {}),
-    indexedColumns: table.indexed_columns ? [...table.indexed_columns] : undefined,
-    compositeIndexes: table.composite_indexes?.map((columns) => [...columns]),
-    branchBy: table.branchBy ? [...table.branchBy] : undefined,
-    history: table.history,
-    policies: table.policies as TablePolicies | undefined,
-  };
-}
-
-function wasmSchemaToAst(wasmSchema: WasmSchema): Schema {
-  return {
-    tables: Object.entries(wasmSchema).map(([tableName, table]) =>
-      wasmTableToAst(tableName, table),
-    ),
-  };
-}
-
-function isTypedAppLike(
-  value: Record<string, unknown>,
-): value is { wasmSchema: WasmSchema; schemaAst?: Schema } {
-  if (!("wasmSchema" in value)) {
-    return false;
-  }
-
-  const schema = value.wasmSchema;
-  return typeof schema === "object" && schema !== null && !Array.isArray(schema);
-}
-
-type LoadedSchemaInput = {
-  schema: Schema;
-  wasmSchema?: WasmSchema;
-};
-
-function schemaFromLoadedModule(
-  loaded: Record<string, unknown>,
-  collected: Schema,
-): LoadedSchemaInput | null {
-  const candidates = [loaded.schema, loaded.schemaDef, loaded.default, loaded.app].filter(
-    (candidate): candidate is Record<string, unknown> =>
-      typeof candidate === "object" && candidate !== null,
-  );
-
-  for (const candidate of candidates) {
-    if (isTypedAppLike(candidate)) {
-      return {
-        schema: candidate.schemaAst ?? wasmSchemaToAst(candidate.wasmSchema),
-        wasmSchema: candidate.wasmSchema,
-      };
-    }
-  }
-
-  for (const candidate of candidates) {
-    try {
-      return { schema: schemaDefinitionToAst(candidate as SchemaDefinition) };
-    } catch {
-      // Try the next supported export shape.
-    }
-  }
-
-  if (collected.tables.length > 0) {
-    return { schema: collected };
-  }
-
-  return null;
-}
-
-function schemaInputFromLoadedModule(filePath: string, loaded: LoadedTsModule): LoadedSchemaInput {
-  const directSchema = schemaFromLoadedModule(loaded.module, loaded.collectedSchema);
-  if (directSchema) {
-    return directSchema;
-  }
-
-  throw new Error(
-    `Could not find a schema in ${filePath}. ` +
-      `Define tables with side-effect table(...) calls at module scope, ` +
-      `or export const schema / app / default. ` +
-      `By convention, schema.ts (and permissions.ts) live at the project root ` +
-      `(or src/lib/ for SvelteKit). See https://jazz.tools/docs/schemas/defining-tables.`,
-  );
-}
-
-function isOperationPolicyLike(input: unknown): input is OperationPolicy {
-  if (typeof input !== "object" || input === null || Array.isArray(input)) {
-    return false;
-  }
-  const opPolicy = input as Record<string, unknown>;
-  return Object.keys(opPolicy).every((key) => key === "using" || key === "with_check");
-}
-
-function isTablePoliciesLike(input: unknown): input is TablePolicies {
-  if (typeof input !== "object" || input === null || Array.isArray(input)) {
-    return false;
-  }
-  const tablePolicy = input as Record<string, unknown>;
-  const validOperationKeys = ["select", "insert", "update", "delete"];
-  return Object.entries(tablePolicy).every(([key, value]) => {
-    if (!validOperationKeys.includes(key)) {
-      return false;
-    }
-    return isOperationPolicyLike(value);
-  });
-}
-
-function isPermissionsMap(input: unknown): input is Record<string, TablePolicies> {
-  if (typeof input !== "object" || input === null) {
-    return false;
-  }
-  return Object.values(input).every((value) => isTablePoliciesLike(value));
-}
-
-async function loadPermissionsModule(filePath: string): Promise<Record<string, TablePolicies>> {
-  const { module } = await loadTsModule(filePath);
-  const candidate = module.default ?? module.permissions ?? null;
-  if (!candidate) {
-    throw new Error(
-      `Missing permissions export in ${basename(filePath)}. ` +
-        `Export default definePermissions(...) (or export const permissions = definePermissions(...)).`,
-    );
-  }
-  if (!isPermissionsMap(candidate)) {
-    throw new Error(
-      `Invalid permissions export in ${basename(filePath)}. Expected default export from definePermissions(...).`,
-    );
-  }
-  return candidate;
-}
-
-function permissionsFromSchemaModule(
-  filePath: string,
-  module: Record<string, unknown>,
-): Record<string, TablePolicies> | undefined {
-  const candidate = module.permissions ?? null;
-  if (!candidate) {
-    return undefined;
-  }
-  if (!isPermissionsMap(candidate)) {
-    throw new Error(
-      `Invalid permissions export in ${basename(filePath)}. Expected definePermissions(...).`,
-    );
-  }
-  return candidate;
-}
-
-function findInlinePolicyTables(schema: Schema): string[] {
-  return schema.tables.filter((table) => table.policies).map((table) => table.name);
-}
-
-interface SchemaRootCandidate {
-  rootDir: string;
-  schemaFile: string;
-}
-
-function schemaRootCandidates(appRoot: string): SchemaRootCandidate[] {
-  return [
-    {
-      rootDir: appRoot,
-      schemaFile: join(appRoot, "schema.ts"),
-    },
-    {
-      rootDir: join(appRoot, "src"),
-      schemaFile: join(appRoot, "src", "schema.ts"),
-    },
-    {
-      rootDir: join(appRoot, "src", "lib"),
-      schemaFile: join(appRoot, "src", "lib", "schema.ts"),
-    },
-  ];
-}
-
-function resolveSchemaRootCandidate(appRoot: string): SchemaRootCandidate | null {
-  const matches = schemaRootCandidates(appRoot).filter((candidate) =>
-    existsSync(candidate.schemaFile),
-  );
-  if (matches.length === 0) return null;
-  if (matches.length > 1) {
-    throw new Error(
-      `Ambiguous schema location: found ${matches
-        .map((m) => m.schemaFile)
-        .join(" and ")}. Delete all but one so the schema root is unambiguous.`,
-    );
-  }
-  return matches[0];
-}
-
-function describeExpectedSchemaFiles(schemaDir: string): string {
-  return schemaRootCandidates(schemaDir)
-    .map((candidate) => candidate.schemaFile)
-    .join(" or ");
-}
-
-function resolveRootSchemaFiles(schemaDir: string): SchemaRootCandidate | null {
-  return resolveSchemaRootCandidate(schemaDir);
-}
-
-export async function hasRootSchema(schemaDir: string): Promise<boolean> {
-  return resolveRootSchemaFiles(schemaDir) !== null;
-}
-
-/** The root schema.ts of the project in `schemaDir`, if it has one. */
-export function rootSchemaFile(schemaDir: string): string | null {
-  return resolveRootSchemaFiles(schemaDir)?.schemaFile ?? null;
-}
-
-/** The generated module an app imports its `migrations` from. */
-export const CLIENT_MIGRATIONS_MODULE = "index.ts";
-
-const IMPORTS_CLIENT_MIGRATIONS = /from\s+["']\.\/migrations(?:\/index(?:\.[jt]s)?)?["']/;
-
-/**
- * Whether schema.ts imports its migrations module: the CLI keeps the module
- * current only for an app that does.
- */
-export async function importsClientMigrations(schemaFile: string): Promise<boolean> {
-  return IMPORTS_CLIENT_MIGRATIONS.test(await readFile(schemaFile, "utf8"));
-}
-
-/** Where the migrations module of the app whose schema is `schemaFile` lives. */
-export function clientMigrationsPath(schemaFile: string): string {
-  return join(dirname(schemaFile), "migrations", CLIENT_MIGRATIONS_MODULE);
-}
-
-/**
- * Write the migrations module with `bundle` (its JSON), or empty, leaving
- * it alone when unchanged so a watcher sees no edit.
- */
-export async function writeClientMigrationsModule(
-  path: string,
-  bundle: string | null,
-): Promise<void> {
-  const contents = [
-    "// Generated by jazz-tools from schema.ts and its migrations. Do not edit:",
-    "// `jazz-tools validate` and `jazz-tools migrations create` rewrite it.",
-    'import type { ClientMigrations } from "jazz-tools";',
-    "",
-    "// JSON, which Rust apps read too: formatters leave it as it is.",
-    "// biome-ignore format: generated JSON",
-    "// prettier-ignore",
-    `export const migrations: ClientMigrations = ${bundle ?? JSON.stringify({ schemas: [], migrations: [] })};`,
-    "",
-  ].join("\n");
-  if ((await readFile(path, "utf8").catch(() => null)) === contents) return;
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, contents);
-}
-
-export async function loadCompiledSchema(schemaDir: string): Promise<LoadedSchemaProject> {
-  const resolved = resolveRootSchemaFiles(schemaDir);
-  if (!resolved) {
-    throw new Error(
-      `Schema file not found. Jazz looks for schema.ts (and, optionally, permissions.ts alongside it) ` +
-        `at the project root, ./src/, or ./src/lib/ (SvelteKit). ` +
-        `Searched: ${describeExpectedSchemaFiles(schemaDir)}. ` +
-        `Pass --schema-dir <path> to point at a different root.`,
-    );
-  }
-  // schema.ts imports the migrations module `jazz-tools` generates from it:
-  // a fresh project gets an empty one, which validate and migrations create
-  // write whole.
-  const migrationsModule = clientMigrationsPath(resolved.schemaFile);
-  if (!existsSync(migrationsModule) && (await importsClientMigrations(resolved.schemaFile))) {
-    await writeClientMigrationsModule(migrationsModule, null);
-  }
-
-  const loadedModule = await loadTsModule(resolved.schemaFile);
-  const loadedSchema = schemaInputFromLoadedModule(resolved.schemaFile, loadedModule);
-  let schema = loadedSchema.schema;
-  const tablesWithInlinePolicies = findInlinePolicyTables(schema);
-  if (tablesWithInlinePolicies.length > 0 && !loadedSchema.wasmSchema) {
-    throw new Error(
-      `Inline table permissions in ${basename(resolved.schemaFile)} are no longer supported. ` +
-        "Move policies to permissions.ts. " +
-        `Tables: ${tablesWithInlinePolicies.join(", ")}.`,
-    );
-  }
-
-  const permissionsFile = join(resolved.rootDir, "permissions.ts");
-  let permissions: CompiledPermissionsMap | undefined;
-  let resolvedPermissionsFile: string | undefined;
-  if (await pathExists(permissionsFile)) {
-    resolvedPermissionsFile = permissionsFile;
-    permissions = await loadPermissionsModule(permissionsFile);
-    validatePermissionsAgainstSchema(
-      schema.tables.map((table) => table.name),
-      permissions,
-    );
-  } else {
-    const schemaModulePermissions = permissionsFromSchemaModule(
-      resolved.schemaFile,
-      loadedModule.module,
-    );
-    if (schemaModulePermissions) {
-      resolvedPermissionsFile = resolved.schemaFile;
-      permissions = schemaModulePermissions;
-      validatePermissionsAgainstSchema(
-        schema.tables.map((table) => table.name),
-        permissions,
-      );
-    }
-  }
-
-  return {
-    rootDir: resolved.rootDir,
-    schemaFile: resolved.schemaFile,
-    permissionsFile: resolvedPermissionsFile,
-    permissions,
-    schema,
-    wasmSchema: loadedSchema.wasmSchema ?? schemaToWasm(schema),
-  };
 }

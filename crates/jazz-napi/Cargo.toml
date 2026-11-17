@@ -2,6 +2,7 @@
 name = "jazz-napi"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [features]
 # Linux RN API harness only; never enabled by published binding defaults.
@@ -17,7 +18,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 jazz-native-relay = { path = "../jazz-native-relay", optional = true }
-jazz = { path = "../jazz", default-features = false, features = ["runtime"] }
+jazz = { package = "jazz-core", path = "../jazz", default-features = false, features = ["runtime"] }
+jazz-codegen.workspace = true
 jazz-server = { path = "../jazz-server", features = ["embedded-server"] }
 jazz-otel.workspace = true
 jazz-text = { path = "../jazz-text", features = ["serde"] }

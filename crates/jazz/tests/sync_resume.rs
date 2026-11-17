@@ -2792,3 +2792,141 @@ fn a_closed_reads_point_is_forgotten_when_a_row_it_counts_is_lost() {
     pump(&server, &client);
     assert_eq!(ids(&client, None), ids(&server, Some(alice())));
 }
+
+/// Offset pages: a window past an offset subscribes to the prefix through
+/// its end (`remote_query`), so page n+1's read covers every row of page
+/// n's. While page n's read is live the session keeps those rows current
+/// on the replica, so page n+1's opening ships only its own rows (and no
+/// supporting row the session already watches).
+#[test]
+fn a_next_offset_page_ships_only_its_own_rows_while_the_previous_one_is_live() {
+    let server = seeded(20);
+    let client = open(1, alice());
+    let (client_side, server_side, shipped) = pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+
+    let mut pages = Vec::new();
+    for page in 0..4 {
+        let before = *shipped.borrow();
+        let query = window(page * 5, 5);
+        let prepared = client.prepare_query(&query).unwrap();
+        pages.push(block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap());
+        pump(&server, &client);
+        let page_ids = window_ids(&client, &query, None);
+        assert_eq!(page_ids.len(), 5, "page {page}");
+        assert_eq!(
+            page_ids,
+            window_ids(&server, &query, Some(alice())),
+            "page {page}"
+        );
+        let sent = *shipped.borrow() - before;
+        if page == 0 {
+            assert!(sent >= 5, "the first page ships its rows and their support");
+        } else {
+            assert_eq!(
+                sent, 5,
+                "page {page} ships its own five rows, not the prefix"
+            );
+        }
+    }
+}
+
+/// Without a live read covering the prefix, the replica's copies are cold
+/// and the next page ships the prefix as before.
+#[test]
+fn a_next_offset_page_ships_the_prefix_once_the_previous_one_ended() {
+    let server = seeded(20);
+    let client = open(1, alice());
+    let (client_side, server_side, shipped) = pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+
+    let first = client.prepare_query(&window(0, 5)).unwrap();
+    let stream = block_on(client.subscribe(&first, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    drop(stream);
+    pump(&server, &client);
+
+    let before = *shipped.borrow();
+    let query = window(5, 5);
+    let prepared = client.prepare_query(&query).unwrap();
+    let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        window_ids(&client, &query, None),
+        window_ids(&server, &query, Some(alice()))
+    );
+    assert!(
+        *shipped.borrow() - before >= 10,
+        "the prefix and the window ship"
+    );
+}
+
+/// Edits above a deduplicated page still reach it: a prefix row that
+/// moves past the window, one deleted, and one inserted at the top, both
+/// while the previous page is live and after it ended.
+#[test]
+fn edits_above_a_deduplicated_offset_page_reach_it() {
+    let server = seeded(20);
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+
+    let first = client.prepare_query(&window(0, 5)).unwrap();
+    let first_stream = block_on(client.subscribe(&first, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    let query = window(5, 5);
+    let prepared = client.prepare_query(&query).unwrap();
+    let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    let check = |what: &str| {
+        assert_eq!(
+            window_ids(&client, &query, None),
+            window_ids(&server, &query, Some(alice())),
+            "{what}"
+        );
+    };
+    check("opening");
+    let page_before = window_ids(&client, &query, None);
+
+    // m0 (first by body) moves to the end: every row of the page shifts.
+    block_on(server.update(
+        "messages",
+        id(3, 0),
+        cells(&[("body", Value::String("zz".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &client);
+    check("a prefix row moved past the window");
+    assert_ne!(window_ids(&client, &query, None), page_before);
+
+    drop(first_stream);
+    pump(&server, &client);
+    check("previous page ended");
+
+    block_on(server.delete("messages", id(3, 10), Default::default())).unwrap();
+    pump(&server, &client);
+    check("a prefix row deleted");
+
+    block_on(server.insert(
+        "messages",
+        cells(&[
+            ("room", Value::Uuid(id(1, 0).0)),
+            ("body", Value::String("a".into())),
+        ]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(server.update(
+        "messages",
+        id(3, 2),
+        cells(&[("body", Value::String("m2 edited".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &client);
+    check("a row inserted at the top and a prefix row edited");
+}

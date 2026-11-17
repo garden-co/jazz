@@ -1,11 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { schema as s } from "../schema-namespace.js";
-import { definePermissions } from "../permissions/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import type { Db } from "../runtime/db.js";
 import { formatAuthSecret } from "../runtime/auth-secret-codec.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
-import { startTestJazz, type TestJazz } from "../testing/index.js";
+import { startTestJazz, testApp, type TestJazz } from "../testing/index.js";
 import { createAccountManagerWithMinter } from "../accounts/account-manager-core.js";
 import type { AccountManagerConfig } from "../accounts/create-account-manager.js";
 import {
@@ -26,26 +24,18 @@ import { JazzClient } from "../runtime/client.js";
 import type { Session } from "../runtime/context.js";
 import { LOCAL_FIRST_ISSUER, mintSelfSignedToken } from "./self-signed-token.js";
 import { parseSnapshotRef, serializeSnapshotRef } from "../runtime/snapshot-ref.js";
+// documents (branched by `branch`), files and notes; typed, for the streaming inputs.
+import { app } from "../../tests/typed-app/apps/thin/jazz.generated.js";
 
-const app = s.defineApp(
-  {
-    notes: s.table({ text: s.string(), done: s.boolean() }, {}),
-    documents: s.table({ branch: s.string(), title: s.string() }, {}).branchBy("branch"),
-    files: s.table({ name: s.string(), data: s.bytes() }, {}),
+const mine = "$createdBy = session.user";
+const permissions = {
+  format: 1,
+  tables: {
+    notes: { read: mine, insert: "true", update: mine, delete: mine },
+    documents: { read: mine, insert: "true", update: mine },
+    files: { read: mine, insert: "true" },
   },
-  { migrations: "none" },
-);
-const permissions = definePermissions(app, ({ policy, session }) => {
-  policy.notes.allowRead.where({ $createdBy: session.user });
-  policy.notes.allowInsert.always();
-  policy.notes.allowUpdate.where({ $createdBy: session.user });
-  policy.notes.allowDelete.where({ $createdBy: session.user });
-  policy.documents.allowRead.where({ $createdBy: session.user });
-  policy.documents.allowInsert.always();
-  policy.documents.allowUpdate.where({ $createdBy: session.user });
-  policy.files.allowRead.where({ $createdBy: session.user });
-  policy.files.allowInsert.always();
-});
+};
 
 const opened: Db[] = [];
 let server: TestJazz | undefined;
@@ -115,6 +105,47 @@ describe("self-signed tokens", () => {
 });
 
 describe("thin client", () => {
+  it("signs in on the next load with the token the last one minted, without signing again", async () => {
+    const server = await startServer();
+    let stored: string | null = null;
+    const store = {
+      async read() {
+        return stored;
+      },
+      async update(transform: (current: string | null) => string) {
+        stored = transform(stored);
+      },
+    };
+    const open = async () => {
+      const mintToken = vi.fn(mintLocalFirstTokenInJs);
+      const accounts = await createAccountManagerWithMinter(
+        { appId: server.appId, serverUrl: server.url, store },
+        mintToken,
+      );
+      const db = await createClient({
+        appId: server.appId,
+        serverUrl: server.url,
+        account: accounts.getLoggedIn() ?? accounts.createLocalFirst(),
+      });
+      opened.push(db);
+      return { db, mintToken };
+    };
+    const first = await open();
+    const note = first.db.insert(app.notes, { text: "first load", done: false });
+    await note.wait({ tier: "global" });
+    expect(first.mintToken).toHaveBeenCalledOnce();
+    await expect.poll(() => JSON.parse(stored!).tokens).toBeDefined();
+    await first.db.shutdown();
+
+    // The reload: the server takes the stored token and names the same user.
+    const second = await open();
+    expect((await second.db.all(app.notes)).map((row) => row.text)).toEqual(["first load"]);
+    await second.db
+      .insert(app.notes, { text: "second load", done: false })
+      .wait({ tier: "global" });
+    expect(second.mintToken).not.toHaveBeenCalled();
+  }, 60_000);
+
   it("reads, writes and subscribes through the server under its own policies", async () => {
     const server = await startServer();
     const alice = await thinDb(server);
@@ -932,10 +963,9 @@ describe("thin client", () => {
     const server = await startServer();
     const db = await thinDb(server);
     // A bundle built against a schema this server doesn't have.
-    const stale = s.defineApp(
-      { notes: s.table({ text: s.string(), done: s.boolean(), extra: s.string() }, {}) },
-      { migrations: "none" },
-    );
+    const stale = testApp({
+      tables: { notes: { columns: { text: "string", done: "boolean", extra: "string" } } },
+    });
     const notDeployed = { name: "ThinRemoteError", code: "SchemaNotDeployed" };
     await expect(db.all(stale.notes)).rejects.toMatchObject(notDeployed);
     await expect(
@@ -1070,7 +1100,11 @@ describe("thin client", () => {
     const write = db.insert(app.notes, { text: "unsent", done: false });
     // The connection that would send it ends with a terminal error.
     await db.reconnect().catch(() => {});
-    internals.lost(internals.carrier, { code: "gone", retry: "never", message: "for good" });
+    internals.lost(internals.carrier, {
+      code: "malformed_frame",
+      retry: "never",
+      message: "for good",
+    });
     await expect(read).rejects.toThrow(/for good/);
     // Never sent, so it certainly didn't commit.
     const writeError = await write.wait({ tier: "global" }).catch((error: unknown) => error);
@@ -1080,6 +1114,51 @@ describe("thin client", () => {
     await expect.poll(() => liveError?.message).toMatch(/for good/);
     unsubscribe();
     expect(db.getSyncStatus().link).toMatchObject({ state: "offline", reason: "stopped" });
+  }, 60_000);
+
+  // #5927 R10: the link decides by the error's code. A malformed frame the
+  // server says to retry `later` cannot succeed by retrying, so the thin
+  // client stops, as every other host does, instead of reconnecting forever.
+  it("stops on a malformed frame even when the server says to retry later", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    const internals = runtime as unknown as {
+      carrier: unknown;
+      lost(carrier: unknown, error: { code: string; retry: string; message: string }): void;
+    };
+    internals.lost(internals.carrier, {
+      code: "malformed_frame",
+      retry: "later",
+      message: "bad envelope",
+    });
+    expect(db.getSyncStatus().link).toMatchObject({ state: "offline", reason: "stopped" });
+    await expect(db.all(app.notes)).rejects.toThrow(/bad envelope/);
+  }, 60_000);
+
+  // An `auth_failed` with a retry this client doesn't know comes from a newer
+  // server: it is retried like any refusal, never taken as a refused
+  // credential that waits for a new one (native clients can't decode it).
+  it("retries a refusal whose retry it doesn't know instead of waiting for a credential", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    const internals = runtime as unknown as {
+      carrier: unknown;
+      lost(carrier: unknown, error: { code: string; retry: string; message: string }): void;
+    };
+    internals.lost(internals.carrier, {
+      code: "auth_failed",
+      retry: "unknown:9",
+      message: "token expired",
+    });
+    const link = db.getSyncStatus().link;
+    expect(link).not.toMatchObject({ reason: "auth" });
+    expect(link).toMatchObject({ retrying: true });
+    // It reconnects with the same credential.
+    await expect.poll(() => db.getSyncStatus().link.state).toBe("connected");
   }, 60_000);
 
   // E12: a sign-out drains writes with `shutdown({ waitForSync: true })`.

@@ -1,0 +1,336 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "20649b4171bf34fd96832203c7ab0e646a82da077d6e7f157d3576f349da42f9"
+  },
+  "tables": {
+    "artists": {
+      "columns": {
+        "ownerAccount": "uuid",
+        "name": "string",
+        "homeCity": "string",
+        "genre": "string"
+      },
+      "relations": {
+        "calendarEventsViaArtist": { "reverse": "calendarEvents", "relation": "artist" },
+        "conversationsViaArtist": { "reverse": "conversations", "relation": "artist" },
+        "songsViaArtist": { "reverse": "songs", "relation": "artist" }
+      }
+    },
+    "attachments": {
+      "columns": {
+        "conversationId": "uuid",
+        "turnId": "uuid",
+        "filename": "string",
+        "mediaType": "string",
+        "byteLength": "int",
+        "payload": "bytes"
+      },
+      "relations": {
+        "conversation": { "rel": "conversations", "column": "conversationId" },
+        "turn": { "rel": "turns", "column": "turnId" }
+      },
+      "indexes": ["conversationId"]
+    },
+    "better_auth_account": {
+      "columns": {
+        "accountId": "string",
+        "providerId": "string",
+        "userId": "uuid",
+        "password": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_jwks": {
+      "columns": {
+        "publicKey": "string",
+        "privateKey": "string",
+        "createdAt": "timestamp",
+        "expiresAt": "timestamp?",
+        "alg": "string?",
+        "crv": "string?"
+      }
+    },
+    "better_auth_session": {
+      "columns": {
+        "expiresAt": "timestamp",
+        "token": "string",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp",
+        "ipAddress": "string?",
+        "userAgent": "string?",
+        "userId": "uuid"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_user": {
+      "columns": {
+        "name": "string",
+        "email": "string",
+        "emailVerified": "boolean",
+        "image": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": {
+        "better_auth_accountViaUser": { "reverse": "better_auth_account", "relation": "user" },
+        "better_auth_sessionViaUser": { "reverse": "better_auth_session", "relation": "user" }
+      }
+    },
+    "better_auth_verification": {
+      "columns": {
+        "identifier": "string",
+        "value": "string",
+        "expiresAt": "timestamp",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      }
+    },
+    "calendarEvents": {
+      "columns": {
+        "ownerAccount": "uuid",
+        "artistId": "uuid",
+        "date": "string",
+        "kind": { "enum": ["show", "hold", "travel", "studio"] },
+        "title": "string",
+        "city": "string"
+      },
+      "relations": { "artist": { "rel": "artists", "column": "artistId" } },
+      "indexes": ["ownerAccount", "date"]
+    },
+    "conversations": {
+      "columns": {
+        "ownerAccount": "uuid",
+        "artistId": "uuid",
+        "title": "string",
+        "headTurnId": "uuid?"
+      },
+      "relations": {
+        "artist": { "rel": "artists", "column": "artistId" },
+        "attachmentsViaConversation": { "reverse": "attachments", "relation": "conversation" },
+        "toolCallsViaConversation": { "reverse": "toolCalls", "relation": "conversation" },
+        "turnsViaConversation": { "reverse": "turns", "relation": "conversation" }
+      },
+      "indexes": ["ownerAccount"]
+    },
+    "profiles": {
+      "columns": { "accountId": "uuid", "authUserId": "string", "displayName": "string" },
+      "indexes": ["accountId", "authUserId"]
+    },
+    "songs": {
+      "columns": {
+        "ownerAccount": "uuid",
+        "artistId": "uuid",
+        "title": "string",
+        "durationSeconds": "int",
+        "energy": { "enum": ["low", "medium", "high"] }
+      },
+      "relations": { "artist": { "rel": "artists", "column": "artistId" } },
+      "indexes": ["ownerAccount"]
+    },
+    "toolCalls": {
+      "columns": {
+        "conversationId": "uuid",
+        "turnId": "uuid",
+        "ordinal": "int",
+        "name": "string",
+        "argumentsJson": "string",
+        "resultJson": "string?",
+        "status": { "enum": ["running", "complete", "error"] },
+        "durationMs": "int?"
+      },
+      "relations": { "conversation": { "rel": "conversations", "column": "conversationId" } },
+      "indexes": ["conversationId"]
+    },
+    "turns": {
+      "columns": {
+        "conversationId": "uuid",
+        "parentId": "uuid?",
+        "role": { "enum": ["user", "assistant"] },
+        "body": "string",
+        "status": { "enum": ["queued", "streaming", "complete", "interrupted", "failed"] },
+        "provider": "string?",
+        "error": "string?",
+        "runnerId": "string?",
+        "heartbeatAt": "timestamp?"
+      },
+      "relations": {
+        "attachmentsViaTurn": { "reverse": "attachments", "relation": "turn" },
+        "childrenViaParent": { "reverse": "turns", "relation": "parent" },
+        "conversation": { "rel": "conversations", "column": "conversationId" },
+        "parent": { "rel": "turns", "column": "parentId" }
+      },
+      "indexes": ["conversationId", "status"]
+    },
+    "venues": {
+      "columns": {
+        "ownerAccount": "uuid",
+        "name": "string",
+        "city": "string",
+        "capacity": "int",
+        "style": "string",
+        "bookingContact": "string"
+      },
+      "indexes": ["ownerAccount", "city"]
+    }
+  },
+  "history": {
+    "5c11d90336bf": {
+      "tables": {
+        "artists": {
+          "columns": {
+            "ownerAccount": "uuid",
+            "name": "string",
+            "homeCity": "string",
+            "genre": "string"
+          }
+        },
+        "attachments": {
+          "columns": {
+            "conversationId": { "type": "uuid", "references": "conversations" },
+            "turnId": { "type": "uuid", "references": "turns" },
+            "filename": "string",
+            "mediaType": "string",
+            "byteLength": "int",
+            "payload": "bytes"
+          },
+          "indexes": ["conversationId"]
+        },
+        "better_auth_account": {
+          "columns": {
+            "issuer": "string",
+            "accountId": "string",
+            "providerId": "string",
+            "userId": { "type": "uuid", "references": "better_auth_user" },
+            "password": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_jwks": {
+          "columns": {
+            "publicKey": "string",
+            "privateKey": "string",
+            "createdAt": "timestamp",
+            "expiresAt": "timestamp?",
+            "alg": "string?",
+            "crv": "string?"
+          }
+        },
+        "better_auth_session": {
+          "columns": {
+            "expiresAt": "timestamp",
+            "token": "string",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp",
+            "ipAddress": "string?",
+            "userAgent": "string?",
+            "userId": { "type": "uuid", "references": "better_auth_user" }
+          }
+        },
+        "better_auth_user": {
+          "columns": {
+            "name": "string",
+            "email": "string",
+            "emailVerified": "boolean",
+            "image": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_verification": {
+          "columns": {
+            "identifier": "string",
+            "value": "string",
+            "expiresAt": "timestamp",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "calendarEvents": {
+          "columns": {
+            "ownerAccount": "uuid",
+            "artistId": { "type": "uuid", "references": "artists" },
+            "date": "string",
+            "kind": { "enum": ["show", "hold", "travel", "studio"] },
+            "title": "string",
+            "city": "string"
+          },
+          "indexes": ["ownerAccount", "date"]
+        },
+        "conversations": {
+          "columns": {
+            "ownerAccount": "uuid",
+            "artistId": { "type": "uuid", "references": "artists" },
+            "title": "string",
+            "headTurnId": "uuid?"
+          },
+          "indexes": ["ownerAccount"]
+        },
+        "profiles": {
+          "columns": { "accountId": "uuid", "authUserId": "string", "displayName": "string" },
+          "indexes": ["accountId", "authUserId"]
+        },
+        "songs": {
+          "columns": {
+            "ownerAccount": "uuid",
+            "artistId": { "type": "uuid", "references": "artists" },
+            "title": "string",
+            "durationSeconds": "int",
+            "energy": { "enum": ["low", "medium", "high"] }
+          },
+          "indexes": ["ownerAccount"]
+        },
+        "toolCalls": {
+          "columns": {
+            "conversationId": { "type": "uuid", "references": "conversations" },
+            "turnId": "uuid",
+            "ordinal": "int",
+            "name": "string",
+            "argumentsJson": "string",
+            "resultJson": "string?",
+            "status": { "enum": ["running", "complete", "error"] },
+            "durationMs": "int?"
+          },
+          "indexes": ["conversationId"]
+        },
+        "turns": {
+          "columns": {
+            "conversationId": { "type": "uuid", "references": "conversations" },
+            "parentId": { "type": "uuid", "optional": true, "references": "turns" },
+            "role": { "enum": ["user", "assistant"] },
+            "body": "string",
+            "status": { "enum": ["queued", "streaming", "complete", "interrupted", "failed"] },
+            "provider": "string?",
+            "error": "string?",
+            "runnerId": "string?",
+            "heartbeatAt": "timestamp?"
+          },
+          "indexes": ["conversationId", "status"]
+        },
+        "venues": {
+          "columns": {
+            "ownerAccount": "uuid",
+            "name": "string",
+            "city": "string",
+            "capacity": "int",
+            "style": "string",
+            "bookingContact": "string"
+          },
+          "indexes": ["ownerAccount", "city"]
+        }
+      }
+    }
+  },
+  "migrations": [
+    {
+      "from": "5c11d90336bf",
+      "migrate": {
+        "better_auth_account": { "issuer": { "drop": "string", "backwardsDefault": "" } }
+      }
+    }
+  ]
+}
