@@ -73,13 +73,10 @@ export function NativeJazzProvider<Config>(
       }
       error={
         error === undefined
-          ? (state) => (
+          ? ({ retry }) => (
               <View accessibilityRole="alert">
                 <Text>Jazz couldn’t start. Please try again.</Text>
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={() => void state.retry().catch(() => {})}
-                >
+                <Pressable accessibilityRole="button" onPress={() => void retry()}>
                   <Text>Try again</Text>
                 </Pressable>
               </View>
