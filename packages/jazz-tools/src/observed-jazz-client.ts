@@ -33,6 +33,13 @@ export async function createObservedJazzClient(
     session = nextSession ?? null;
     manager.setSession(getDbInternalSession(db));
   });
+  // A link that connects again may lift what rejected live subscriptions.
+  let linked = db.getSyncStatus().link.state === "connected";
+  const stopLinkWatch = db.onSyncStatusChange(({ link }) => {
+    const connected = link.state === "connected";
+    if (connected && !linked) manager.retryRejected();
+    linked = connected;
+  });
   const detach = attach?.(db);
 
   return attachSubscriptionStore(
@@ -45,6 +52,7 @@ export async function createObservedJazzClient(
         if (options?.waitForSync) await db.shutdown(options);
         await runCleanupSteps([
           () => stopSessionSync?.(),
+          () => stopLinkWatch(),
           ...(detach ? [detach] : []),
           () => manager.shutdown(),
           () => db.shutdown(),

@@ -15,14 +15,12 @@ vi.mock("ws", () => {
 
 it("loads the backend entry and runs without ws; attach() names the missing package", async () => {
   const backend = await import("./index.js");
-  const { schema: s } = await import("../index.js");
+  const { testApp } = await import("../testing/test-app.js");
   // The Node client loads too.
   expect(typeof backend.createJazzClient).toBe("function");
 
-  const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" });
-  const permissions = s.definePermissions(app, ({ policy }) => {
-    policy.todos.allowRead.always();
-  });
+  const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
+  const permissions = { format: 1, tables: { todos: { read: "true" } } };
   const jazz = await backend.createJazz({ app, permissions, store: backend.memory() }).ready();
   try {
     // A host without socket upgrades sends clients to the HTTP stream.

@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useRef } from "react";
-import { useDb, useSession } from "jazz-tools/react";
+import { useDb, useJazzSession } from "jazz-tools/react";
 import { useRouter } from "@/hooks/useRouter";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { waitForWrite } from "@/lib/db-write";
-import { app } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
 import { DurabilityTier } from "jazz-tools";
 
 export const CreateChatRedirect = () => {
   const db = useDb();
-  const session = useSession();
+  const session = useJazzSession();
   const { navigate } = useRouter();
   const initialized = useRef(false);
   const sharedWriteOptions: { tier: DurabilityTier } = useMemo(
@@ -16,7 +16,7 @@ export const CreateChatRedirect = () => {
     [db],
   );
 
-  const userId = session?.user ?? null;
+  const userId = session.user?.accountId ?? null;
   const myProfile = useMyProfile();
 
   useEffect(() => {

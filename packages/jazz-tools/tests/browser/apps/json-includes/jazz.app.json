@@ -1,0 +1,25 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "children": {
+      "columns": { "parentId": "uuid", "metadata": { "json": true } },
+      "relations": { "parent": { "rel": "parents", "column": "parentId" } }
+    },
+    "parents": {
+      "columns": {
+        "name": "string",
+        "state": { "enum": ["draft", "open", "closed"] },
+        "summaryId": "uuid?"
+      },
+      "relations": {
+        "summary": { "rel": "summaries", "column": "summaryId" },
+        "childrenViaParent": { "reverse": "children", "relation": "parent" }
+      }
+    },
+    "summaries": {
+      "columns": { "metadata": { "json": true } },
+      "relations": { "parentsViaSummary": { "reverse": "parents", "relation": "summary" } }
+    }
+  }
+}

@@ -23,7 +23,7 @@ session, use `Jazz.layerDb(session.db)` instead.
 ```ts
 import { Effect, Stream } from "effect";
 import { Jazz } from "jazz-tools/effect";
-import { app } from "./schema";
+import { app } from "./jazz.generated";
 
 const program = Effect.gen(function* () {
   const jazz = yield* Jazz;

@@ -1,38 +1,39 @@
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
-import { startTestJazz } from "../testing/index.js";
+import { startTestJazz, testApp } from "../testing/index.js";
 
-const app = s.defineApp(
-  {
-    users: s.table({ accountId: s.uuid() }, {}),
-    topics: s.table({ title: s.string() }, {}),
-    notes: s.table(
-      { userId: s.uuid(), topicId: s.uuid(), text: s.string() },
-      { user: s.rel("users", "userId"), topic: s.rel("topics", "topicId") },
-    ),
+const app = testApp({
+  tables: {
+    users: { columns: { accountId: "uuid" } },
+    topics: { columns: { title: "string" } },
+    notes: {
+      columns: { userId: "uuid", topicId: "uuid", text: "string" },
+      relations: {
+        user: { rel: "users", column: "userId" },
+        topic: { rel: "topics", column: "topicId" },
+      },
+    },
   },
-  { migrations: "none" },
-);
+});
 
 // The referenced table's read policy compares a session claim, and the insert
-// policy of the referencing table checks the referenced row.
-const permissions = s.definePermissions(app, ({ policy, session, allOf }) => {
-  for (const table of [policy.users, policy.topics, policy.notes]) {
-    table.allowUpdate.never();
-    table.allowDelete.never();
-  }
-  policy.users.allowRead.always();
-  policy.users.allowInsert.where({ accountId: session.user });
-  policy.topics.allowInsert.always();
-  policy.topics.allowRead.where(session.where({ "claims.role": "editor" }));
-  policy.notes.allowRead.always();
-  policy.notes.allowInsert.where((row) =>
-    allOf([
-      policy.users.exists.where({ id: row.userId, accountId: session.user }),
-      policy.topics.exists.where({ id: row.topicId }),
-    ]),
-  );
-});
+// policy of the referencing table checks the referenced row. No table allows
+// update or delete.
+const permissions = {
+  format: 1,
+  tables: {
+    users: { read: "true", insert: "accountId = session.user" },
+    topics: { read: "session.claims.role = 'editor'", insert: "true" },
+    notes: {
+      read: "true",
+      insert: {
+        allOf: [
+          "exists users(id = this.userId, accountId = session.user)",
+          "exists topics(id = this.topicId)",
+        ],
+      },
+    },
+  },
+};
 
 const outcome = (write: { wait(options: { tier: "global" }): Promise<unknown> }) =>
   write.wait({ tier: "global" }).then(
@@ -88,6 +89,24 @@ describe("deployed permissions with claims in referenced read policies", () => {
       ).toBe("permission_denied");
       // The denial must not break the session's later writes.
       expect(await outcome(editor.db.insert(app.topics, { title: "later" }))).toBe("accepted");
+
+      // waitForSync reports a refusal that settled before it was called,
+      // even when a later write was accepted (jazz#5728), and only once.
+      // Graceful shutdown (server.stop below) doesn't fail on it.
+      editor.db.insert(app.notes, {
+        userId: viewer.userId,
+        topicId: topic.value.id,
+        text: "refused, unwaited",
+      });
+      expect(await outcome(editor.db.insert(app.topics, { title: "accepted after" }))).toBe(
+        "accepted",
+      );
+      // It is the editor's: another user's wait, and the backend's own, are
+      // not told of it.
+      await viewer.db.waitForSync();
+      await server.jazz.db.waitForSync();
+      await expect(editor.db.waitForSync()).rejects.toThrow(/authorization_denied/);
+      await editor.db.waitForSync();
     } finally {
       await server.stop();
     }

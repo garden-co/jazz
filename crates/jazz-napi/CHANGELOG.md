@@ -1,5 +1,13 @@
 # jazz-napi
 
+## 2.0.0-alpha.65
+
+### Patch Changes
+
+- c3ef03b: Server: a Backend or Admin websocket no longer busy-loops if the account registry stops, and an account websocket then closes with a retryable `NotReady` error.
+
+## 2.0.0-alpha.64
+
 ## 2.0.0-alpha.63
 
 ## 2.0.0-alpha.62

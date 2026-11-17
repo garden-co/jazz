@@ -1,0 +1,24 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "7fb8f69225343e8b833999e3667a1f42bec763dd716662db26bd6c433ef0c5e0"
+  },
+  "tables": {
+    "comments": {
+      "columns": { "body": "string", "taskId": "uuid" },
+      "relations": { "task": { "rel": "tasks", "column": "taskId" } }
+    },
+    "projects": {
+      "columns": { "name": "string" },
+      "relations": { "tasks": { "reverse": "tasks", "relation": "project" } }
+    },
+    "tasks": {
+      "columns": { "title": "string", "done": "boolean", "projectId": "uuid" },
+      "relations": {
+        "comments": { "reverse": "comments", "relation": "task" },
+        "project": { "rel": "projects", "column": "projectId" }
+      }
+    }
+  }
+}

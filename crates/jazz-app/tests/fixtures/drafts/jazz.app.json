@@ -1,0 +1,13 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "drafts": {
+      "columns": { "name": "string", "base": "string?", "base_snapshot_ref": "string?" }
+    },
+    "documents": {
+      "columns": { "branch": "string", "title": "string" },
+      "branchBy": ["branch"]
+    }
+  }
+}

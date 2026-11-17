@@ -40,16 +40,53 @@ pub enum LargeValueUpdatePage {
     },
 }
 
+impl LargeValueUpdatePage {
+    /// The UTF-8 byte page `range` of a text value: offsets are `str`
+    /// indices, and each splice in it must start and end on a char
+    /// boundary.
+    pub fn text(range: std::ops::Range<usize>) -> Self {
+        Self::TextUtf8 {
+            from: range.start as u64,
+            to: range.end as u64,
+        }
+    }
+
+    /// The byte page `range` of a bytes value.
+    pub fn bytes(range: std::ops::Range<usize>) -> Self {
+        Self::Bytes {
+            from: range.start as u64,
+            to: range.end as u64,
+        }
+    }
+}
+
 /// One sequential splice, in the coordinates of its page.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct LargeValueUpdateSplice {
-    /// Page-relative start.
+    /// Page-relative start, in the page's units (bytes, UTF-8 bytes or
+    /// UTF-16 code units).
     pub at: u64,
     /// Page units to remove.
     pub delete: u64,
     /// Replacement bytes, UTF-8 for text pages.
     pub insert: Vec<u8>,
 }
+
+impl LargeValueUpdateSplice {
+    /// Replaces `delete` units at `at` with `insert`: UTF-8 bytes in a
+    /// [`LargeValueUpdatePage::text`] page.
+    pub fn text(at: usize, delete: usize, insert: &str) -> Self {
+        Self {
+            at: at as u64,
+            delete: delete as u64,
+            insert: insert.as_bytes().to_vec(),
+        }
+    }
+}
+
+/// How the error for a UTF-8 text splice offset that is not on a char
+/// boundary begins.
+pub const NOT_CHAR_BOUNDARY: &str = "UTF-8 splice offset is not on a char boundary";
 
 pub use jazz_model::model::public_api::types::LargeValueDeltaSplice;
 
@@ -137,6 +174,17 @@ fn check_range(range: &std::ops::Range<u64>, len: u64) -> Result<(), Error> {
         return Err(query("value range is out of bounds"));
     }
     Ok(())
+}
+
+/// `range` clamped to `len` units (SPEC 19.12): the part of the range the
+/// value covers, empty at the end when the range starts past it. An
+/// inverted range still fails.
+fn clamp_range(range: std::ops::Range<u64>, len: u64) -> Result<std::ops::Range<u64>, Error> {
+    if range.start > range.end {
+        return Err(query("value range is out of bounds"));
+    }
+    let end = range.end.min(len);
+    Ok(range.start.min(end)..end)
 }
 
 /// The byte offset of UTF-16 position `at` in `text`, or `None` inside a
@@ -250,7 +298,7 @@ impl Inner {
         if utf16 && crate::large::kind(&col) == lv::LargeValueKind::Bytes {
             return Err(not_large(table, column));
         }
-        self.cell_range(cell.as_ref(), range, utf16)
+        self.cell_range(cell.as_ref(), range, utf16, false)
     }
 
     /// `delta(a, b)` (SPEC 19.6) between the values `column` of `row` holds
@@ -391,18 +439,30 @@ impl Inner {
     }
 
     /// `range` of a cell's logical value (UTF-16 code units when `utf16`,
-    /// else bytes), reading only the chunks it covers.
+    /// else bytes), reading only the chunks it covers. With `clamp`, a range
+    /// past the value's end reads the part the value covers (a query's
+    /// partial selection, SPEC 19.12); otherwise it fails.
     pub(crate) fn cell_range(
         &self,
         cell: ValueRef<'_>,
         range: std::ops::Range<u64>,
         utf16: bool,
+        clamp: bool,
     ) -> Result<Vec<u8>, Error> {
+        #[cfg(feature = "testing")]
+        crate::large::CELL_RANGES.with(|count| count.set(count.get() + 1));
+        let fit = |range: std::ops::Range<u64>, len: u64| {
+            if clamp {
+                clamp_range(range, len)
+            } else {
+                check_range(&range, len).map(|()| range)
+            }
+        };
         match self.chunks.logical(cell)? {
             Logical::Inline(bytes) if utf16 => {
                 let text = std::str::from_utf8(bytes).map_err(|_| query("cell is not text"))?;
                 let len = text.encode_utf16().count() as u64;
-                check_range(&range, len)?;
+                let range = fit(range, len)?;
                 let (Some(start), Some(end)) =
                     (utf16_byte(text, range.start), utf16_byte(text, range.end))
                 else {
@@ -411,7 +471,7 @@ impl Inner {
                 Ok(bytes[start..end].to_vec())
             }
             Logical::Inline(bytes) => {
-                check_range(&range, bytes.len() as u64)?;
+                let range = fit(range, bytes.len() as u64)?;
                 Ok(bytes[range.start as usize..range.end as usize].to_vec())
             }
             Logical::Chunked(value) => {
@@ -420,7 +480,7 @@ impl Inner {
                 } else {
                     value.byte_length
                 };
-                check_range(&range, len)?;
+                let range = fit(range, len)?;
                 if utf16 {
                     // A UTF-16 code unit is one to three UTF-8 bytes, so
                     // these bytes hold the range: the pull asks for them.
@@ -435,6 +495,42 @@ impl Inner {
                     })
                 }
             }
+        }
+    }
+
+    /// Whether [`Inner::partial_cell`] would refuse `part` of `cell`, as far
+    /// as that is decided without reading a chunk: an inline value is read
+    /// as it would be (it is in the cell), a chunked one is checked against
+    /// the lengths in its descriptor. What only a chunked value's content
+    /// decides (a range splitting a code point or a surrogate pair, a JSON
+    /// pointer that is not there) is not checked.
+    pub(crate) fn check_part(
+        &self,
+        ty: &ValueType,
+        cell: ValueRef<'_>,
+        part: &crate::query::Part,
+    ) -> Result<(), Error> {
+        use crate::query::Part;
+        if let ValueType::Nullable(inner) = ty {
+            return match cell {
+                ValueRef::Null => Ok(()),
+                cell => self.check_part(inner, cell, part),
+            };
+        }
+        let value = match self.chunks.logical(cell)? {
+            Logical::Inline(_) => return self.partial_cell(ty, cell, part).map(drop),
+            Logical::Chunked(value) => value,
+        };
+        // A query's partial selection is clamped to the value
+        // ([`Inner::partial_cell`]): only an inverted range refuses.
+        match part {
+            Part::Bytes { from, to } | Part::TextUtf8 { from, to } => {
+                clamp_range(*from..*to, value.byte_length).map(drop)
+            }
+            Part::TextUtf16 { from, to } => {
+                clamp_range(*from..*to, value.utf16_length.unwrap_or(0)).map(drop)
+            }
+            Part::JsonPointer(_) => Ok(()),
         }
     }
 
@@ -459,13 +555,15 @@ impl Inner {
                 .map_err(|_| query(split))
         };
         Ok(Some(match part {
-            Part::Bytes { from, to } => Value::Bytes(self.cell_range(cell, *from..*to, false)?),
+            Part::Bytes { from, to } => {
+                Value::Bytes(self.cell_range(cell, *from..*to, false, true)?)
+            }
             Part::TextUtf16 { from, to } => text(
-                self.cell_range(cell, *from..*to, true)?,
+                self.cell_range(cell, *from..*to, true, true)?,
                 "UTF-16 range splits a surrogate pair",
             )?,
             Part::TextUtf8 { from, to } => text(
-                self.cell_range(cell, *from..*to, false)?,
+                self.cell_range(cell, *from..*to, false, true)?,
                 "UTF-8 range splits a code point",
             )?,
             Part::JsonPointer(pointer) => {
@@ -1431,6 +1529,42 @@ fn closed() -> Error {
     )
 }
 
+/// Whether byte `offset` of the text that `edits` (byte splices, in order)
+/// made from `raw`, `len` bytes long, is a char boundary: its end, or a byte
+/// that doesn't continue a code point. Reads at most one byte of `raw`.
+fn utf8_boundary(
+    inner: &Inner,
+    raw: ValueRef<'_>,
+    edits: &[Edit],
+    mut offset: u64,
+    len: u64,
+) -> Result<bool, Error> {
+    if offset >= len {
+        return Ok(offset == len);
+    }
+    let continues = |byte: u8| byte & 0b1100_0000 == 0b1000_0000;
+    for edit in edits.iter().rev() {
+        let Edit::Splice {
+            offset: at,
+            delete,
+            insert,
+        } = edit
+        else {
+            continue;
+        };
+        if offset < *at {
+            continue;
+        }
+        let inserted = insert.len() as u64;
+        if offset < at + inserted {
+            return Ok(!continues(insert[(offset - at) as usize]));
+        }
+        offset = offset - inserted + delete;
+    }
+    let byte = inner.cell_range(raw, offset..offset + 1, false, false)?;
+    Ok(byte.first().is_none_or(|byte| !continues(*byte)))
+}
+
 /// Splices in a page's coordinates, lowered to byte coordinates of the
 /// current value. Each later splice is relative to the value the earlier
 /// ones produced.
@@ -1502,8 +1636,10 @@ fn lower_splices(
         }
         return Ok(edits);
     }
+    let utf8_text = matches!(within, LargeValueUpdatePage::TextUtf8 { .. });
+    let mut value_len = len;
     let mut page_len = to - from;
-    let mut edits = Vec::new();
+    let mut edits: Vec<Edit> = Vec::new();
     for splice in splices {
         let end = splice
             .at
@@ -1512,6 +1648,18 @@ fn lower_splices(
         if end > page_len {
             return Err(query("splice deletion leaves the selected page"));
         }
+        if utf8_text {
+            // A UTF-8 offset is refused off a char boundary rather than
+            // splitting a code point. Only the byte at each end is read.
+            for offset in [from + splice.at, from + end] {
+                if !utf8_boundary(inner, raw, &edits, offset, value_len)? {
+                    return Err(query(format!("{NOT_CHAR_BOUNDARY}: {offset}")));
+                }
+            }
+            std::str::from_utf8(&splice.insert)
+                .map_err(|_| query("text splice is not valid UTF-8"))?;
+        }
+        value_len = value_len - splice.delete + splice.insert.len() as u64;
         page_len = page_len - splice.delete + splice.insert.len() as u64;
         edits.push(Edit::Splice {
             offset: from + splice.at,

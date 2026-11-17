@@ -243,6 +243,13 @@ export declare class NapiDb {
    * the SQLite file when their write call returns, so only `global` waits.
    */
   waitForPendingWrites(tier: string): Uint8Array | PendingNativeRead
+  /**
+   * TS `waitForSync`: complete once `writer`'s writes so far (a trusted
+   * session's author bytes; none for this database's own) reached `tier`,
+   * failing with a rejection of theirs, including one that settled
+   * before and no wait reported.
+   */
+  waitForSync(tier: string, writer?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
   close(): Promise<undefined>
 }
 
@@ -399,6 +406,28 @@ export declare function captureTextRange(text: string, version: number | undefin
  */
 export declare function checkClientMigrations(migrations: string, target: string): void
 
+/**
+ * The options the generated TS bindings pass to `bindApp` (`{ source,
+ * schema, relations }`, without the computed and transform callbacks), as
+ * JSON text, for tests that define an app inline.
+ */
+export declare function compileApp(appJson: string): string
+
+/** What `migrationsCreate` wrote. */
+export interface CreatedMigration {
+  /** The new `jazz.app.json` text. */
+  app: string
+  /** Whether a version and migration were added. */
+  changed: boolean
+  /** JSON paths of the `"TODO: …"` strings left for the author. */
+  todos: Array<string>
+  /**
+   * Why nothing was written, when it isn't simply that nothing changed
+   * (an index-only edit).
+   */
+  note?: string
+}
+
 export interface DeleteOptions {
   author?: Uint8Array
   attribution?: Uint8Array
@@ -416,6 +445,38 @@ export interface DeleteOptions {
  * original. It keeps the app id: the copy serves the same app.
  */
 export declare function detachStore(dataDir: string): void
+
+/** Options of [`generate_for_dir`] and [`migrations_create_for_dir`]. */
+export interface DirOptions {
+  /** Fail when the files or bindings are stale, and write nothing. */
+  check?: boolean
+  /**
+   * The bindings' languages (`"ts"`, `"rust"`, …); by default each the
+   * directory's files say the app is written in.
+   */
+  lang?: Array<string>
+  /**
+   * The language assumed when nothing in the directory names one and
+   * no other language's manifest is there (the npm CLI passes `"ts"`).
+   */
+  fallback?: string
+}
+
+/** What `generateForDir` / `migrationsCreateForDir` did in an app's directory. */
+export interface DirOutcome {
+  /** Lines to print. */
+  notes: Array<string>
+  /** Warnings to print. */
+  warnings: Array<string>
+  /** Bindings files written, relative to the directory. */
+  written: Array<string>
+  /** Bindings files already up to date, relative to the directory. */
+  current: Array<string>
+  /** `migrationsCreateForDir`: whether `jazz.app.json` changed. */
+  changed: boolean
+  /** `migrationsCreateForDir`: JSON paths of the TODOs left to resolve. */
+  todos: Array<string>
+}
 
 /** Authenticates before returning plaintext; rejects short or invalid ciphertext. */
 export declare function e2eeSodiumDecrypt(key: Uint8Array, nonce: Uint8Array, aad: Uint8Array, ciphertext: Uint8Array): Uint8Array
@@ -465,6 +526,28 @@ export interface ExplainedReadRow {
   holds: Array<boolean>
 }
 
+/**
+ * The bindings for `appJson` (a `jazz.app.json` text) in `lang` (`"ts"`):
+ * the whole `jazz.generated.ts`.
+ */
+export declare function generate(lang: string, appJson: string): string
+
+/** The `$generated` marker to write: `{ by }`, what wrote the files. */
+export interface GeneratedBy {
+  /**
+   * E.g. "jazz-tools generate from schema.ts — edit the TypeScript, not
+   * this file".
+   */
+  by: string
+}
+
+/**
+ * `jazz-tools generate [--check]` in `dir`, the directory of the app's
+ * `jazz.app.json`: the same languages, checks and bytes as the
+ * `jazz-tools` binary, which runs the same code.
+ */
+export declare function generateForDir(dir: string, options?: DirOptions | undefined | null): DirOutcome
+
 export interface InsertOptions {
   rowId?: Uint8Array
   author?: Uint8Array
@@ -505,6 +588,38 @@ export type JsonValue =
  */
 export declare function loadAppArtifact(app: string, permissions: string): JsonValue
 
+/**
+ * Read and check a backend's `jazz.permissions.json` (`permissions`)
+ * against the compiled app its generated bindings embed (`schema`: JSON of
+ * `{ schema, relations }`, the options they pass to `bindApp`), for a
+ * deployed backend that has the bindings but not `jazz.app.json`. Same
+ * result and checks as `loadAppArtifact`.
+ */
+export declare function loadBackendApp(schema: string, permissions: string): JsonValue
+
+/**
+ * What the migration between two schemas in the engine's JSON form
+ * (`{ "tables": … }`) does, as `migrations create` decides it, as JSON:
+ * `{ createTables, dropTables, renameTables: [{ from, to }], migrate:
+ * [{ table, steps, addedVariants, unchangedRows }] }`, each step
+ * `{ step: "add" | "drop" | "maybeRenamed" | "maybeRenamedAway", column, … }`.
+ * Throws, with the reason, for a change no migration step does.
+ */
+export declare function migrationDiff(fromJson: string, toJson: string): string
+
+/**
+ * Write the migration from the version the committed bindings
+ * (`bindings`, `jazz.generated.ts`'s text, or null when there are none) were
+ * generated from to `appJson`'s edited `tables`, named `name`.
+ */
+export declare function migrationsCreate(appJson: string, bindings: string | undefined | null, name: string): CreatedMigration
+
+/**
+ * `jazz-tools migrations create --name <name>` in `dir`, as the
+ * `jazz-tools` binary runs it.
+ */
+export declare function migrationsCreateForDir(dir: string, name: string, options?: DirOptions | undefined | null): DirOutcome
+
 export declare function mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
 
 /** Exact build/ABI fingerprint for the generated native artifact. */
@@ -522,6 +637,28 @@ export interface RestoreOptions {
   branch?: JsonValue
   updatedAtMs?: number
 }
+
+/**
+ * The engine's hash of a schema in its own JSON form (`{ "tables": … }`),
+ * policies dropped as a deployment drops them, as 64 hex characters. Not
+ * [`schema_source_hash`], which hashes the `jazz.app.json` file.
+ */
+export declare function schemaHash(engineSchemaJson: string): string
+
+/**
+ * Whether rows pass unchanged between two schemas in the engine's JSON form
+ * (`{ "tables": … }`), so a deployment connects them without a migration:
+ * the rule `migrations create` follows to decide whether to write one.
+ * Indexes, history retention, merge strategies, column order and defaults
+ * of columns outside `branchBy` don't count; everything else does.
+ */
+export declare function schemasAreCompatible(leftJson: string, rightJson: string): boolean
+
+/**
+ * `"sha256:<hex>"` of a `jazz.app.json` text, CRLF read as LF: the
+ * `source` generated bindings record.
+ */
+export declare function schemaSourceHash(appJson: string): string
 
 /**
  * Serve a production core (the `jazz_server::run` shell: connection and
@@ -621,8 +758,26 @@ export interface UpstreamRefusal {
   message: string
 }
 
+/**
+ * Check committed bindings (`bindings`, or null) against `appJson`. Throws
+ * with `error.code` `JAZZ_SCHEMA_CHANGED` when `tables` changed since the
+ * bindings were generated and no migration leads from that version (run
+ * `migrations create` before regenerating: the bindings hold the only
+ * copy of that version), or `JAZZ_BINDINGS_STALE` when regenerating is
+ * enough (including when there are none).
+ */
+export declare function validateBindings(appJson: string, bindings?: string | undefined | null): void
+
 /** Validate a schema and its embedded permissions without opening a database. */
 export declare function validateSchema(schema: Uint8Array): void
+
+/**
+ * Whether a `jazz.app.json` or `jazz.permissions.json` text is as the tool
+ * its `$generated` marker names wrote it: `"none"` (no marker), `"match"`
+ * or `"mismatch"` (edited since; formatting alone doesn't count). Throws
+ * when the text isn't a JSON object or the marker is malformed.
+ */
+export declare function verifyGenerated(text: string): "none" | "match" | "mismatch"
 
 export declare function verifyLocalFirstIdentityProof(token: string | undefined | null, expectedAudience: string): VerifyTokenResult
 
@@ -633,12 +788,38 @@ export interface VerifyTokenResult {
 }
 
 /**
+ * A schema in the engine's JSON form (`{ "tables": … }`) as the readable
+ * `tables` of a `jazz.app.json` `history` version (no relations, computed
+ * fields or transforms), as JSON text.
+ */
+export declare function versionTables(engineSchemaJson: string): string
+
+/**
  * Build the `jazz.app.json` and `jazz.permissions.json` texts from what
  * `jazz-tools validate` compiled (an
  * [`ArtifactInput`](jazz::tools::deployment::artifact::ArtifactInput) as
- * JSON): the files' only writer, which refuses what a reader would.
+ * JSON): the files' only writer, which refuses what a reader would. With
+ * `options.generated`, each file carries a `$generated` marker.
  */
-export declare function writeAppArtifact(input: string): WrittenAppFiles
+export declare function writeAppArtifact(input: string, options?: WriteAppFilesOptions | undefined | null): WrittenAppFiles
+
+/**
+ * Check an app's readable `jazz.app.json` (`app`) and
+ * `jazz.permissions.json` (`permissions`) as a backend does and render
+ * them canonically through the writer, which reads its output back to
+ * exactly the same app. With `options.generated`, each file carries a
+ * `$generated` marker. Idempotent.
+ */
+export declare function writeAppFiles(app: string, permissions: string, options?: WriteAppFilesOptions | undefined | null): WrittenAppFiles
+
+/** How [`write_app_artifact`] and [`write_app_files`] write the files. */
+export interface WriteAppFilesOptions {
+  /**
+   * Mark each file `"$generated": { "by", "sha256" }`, first after
+   * `$schema`.
+   */
+  generated?: GeneratedBy
+}
 
 /** An app's two files, as [`write_app_artifact`] renders them. */
 export interface WrittenAppFiles {

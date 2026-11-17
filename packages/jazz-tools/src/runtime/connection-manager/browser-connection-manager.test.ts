@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { JazzClient } from "../client.js";
 import { SharedBrowserForegroundNodeLease } from "../native-runtime/browser-shared-worker-connection.js";
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
@@ -12,6 +12,7 @@ import { isStoreHeldByAnotherTabError } from "../store-held-by-another-tab-error
 import type { DbForConnection } from "./types.js";
 import type { RemoteLinkState } from "../remote-link-state.js";
 import type { LinkStatus } from "../sync-status.js";
+import { pageCacheForTest } from "../page-cache.js";
 
 function deferred() {
   let resolve!: () => void;
@@ -1770,6 +1771,160 @@ describe("BrowserConnectionManager write readiness", () => {
       fixture.allowFinish();
       fixture.host.isShuttingDown = true;
       await fixture.manager.shutdown();
+    }
+  });
+});
+
+// One window for these cases: the page cache listens on the first one it sees.
+const page = new EventTarget();
+const fire = (type: string, persisted = false) =>
+  page.dispatchEvent(Object.assign(new Event(type), { persisted }));
+
+describe("BrowserConnectionManager in the back/forward cache", () => {
+  beforeEach(() => {
+    vi.stubGlobal("window", page);
+  });
+  afterEach(() => {
+    pageCacheForTest.reset();
+    vi.unstubAllGlobals();
+  });
+
+  async function cachedManagerFixture(leaves = true) {
+    const fixture = await leasedManagerFixture();
+    const created = () =>
+      fixture.createConnection.mock.results.map(
+        (result) => result.value as BrowserWorkerConnection,
+      );
+    const first = created()[0]!;
+    first.leaveForPageCache = vi.fn(() => leaves);
+    const finish = async () => {
+      fixture.allowFinish();
+      fixture.host.isShuttingDown = true;
+      await fixture.manager.shutdown().catch(() => undefined);
+    };
+    return { ...fixture, created, first, finish };
+  }
+
+  it("lets go of an idle connection when the page leaves, and opens a new one, same client and lease, when it returns", async () => {
+    const fixture = await cachedManagerFixture();
+    try {
+      fire("pagehide", true);
+      expect(fixture.first.leaveForPageCache).toHaveBeenCalledOnce();
+      expect(fixture.createConnection).toHaveBeenCalledOnce();
+      fire("pageshow", true);
+      await pageCacheForTest.returned();
+      expect(fixture.createConnection).toHaveBeenCalledTimes(2);
+      await expect(fixture.manager.ensureReady("runtime")).resolves.toBeUndefined();
+      expect(fixture.createClient).toHaveBeenCalledOnce();
+      expect(fixture.client.discard).not.toHaveBeenCalled();
+      expect(fixture.host.runtimeSource.acquireBrowserForegroundNodeLease).toHaveBeenCalledOnce();
+      // The parked connection closed itself; the manager doesn't shut it down again.
+      expect(fixture.first.shutdown).not.toHaveBeenCalled();
+    } finally {
+      await fixture.finish();
+    }
+  });
+
+  it("makes what needs the worker while the page is away wait for the connection it opens on return", async () => {
+    const fixture = await cachedManagerFixture();
+    try {
+      fire("pagehide", true);
+      let ready = false;
+      const waiting = fixture.manager.ensureReady("runtime").then(() => (ready = true));
+      const writes = fixture.manager.waitForPendingWrites();
+      await Promise.resolve();
+      expect(ready).toBe(false);
+      fire("pageshow", true);
+      await waiting;
+      await writes;
+      const second = fixture.created()[1]!;
+      expect(second.waitForPendingWrites).toHaveBeenCalledOnce();
+    } finally {
+      await fixture.finish();
+    }
+  });
+
+  it("reloads instead of reconnecting when the store was reset or deleted while the page was away", async () => {
+    const reload = vi.fn();
+    vi.stubGlobal("location", { reload });
+    const fixture = await cachedManagerFixture();
+    try {
+      fixture.first.storeChangedSinceLeaving = vi.fn(() => true);
+      fire("pagehide", true);
+      fire("pageshow", true);
+      await pageCacheForTest.returned();
+      expect(reload).toHaveBeenCalledOnce();
+      expect(fixture.createConnection).toHaveBeenCalledOnce();
+    } finally {
+      await fixture.finish();
+    }
+  });
+
+  it("fails what needs the worker, and doesn't reconnect, when the store changed and the reload guard refuses", async () => {
+    const reload = vi.fn();
+    vi.stubGlobal("location", { reload });
+    // The reload guard refuses: the page reloaded for an invalidation moments ago.
+    vi.stubGlobal("sessionStorage", {
+      getItem: () => String(Date.now()),
+      setItem: () => {},
+    });
+    const fixture = await cachedManagerFixture();
+    try {
+      fixture.first.storeChangedSinceLeaving = vi.fn(() => true);
+      fire("pagehide", true);
+      const waiting = fixture.manager.ensureReady("runtime");
+      fire("pageshow", true);
+      await pageCacheForTest.returned();
+      expect(reload).not.toHaveBeenCalled();
+      expect(fixture.createConnection).toHaveBeenCalledOnce();
+      await expect(waiting).rejects.toThrow("back/forward cache: reload the page");
+    } finally {
+      await fixture.finish();
+    }
+  });
+
+  it("keeps a connection that can't leave, and opens none when the page returns", async () => {
+    const fixture = await cachedManagerFixture(false);
+    try {
+      fire("pagehide", true);
+      fire("pageshow", true);
+      await pageCacheForTest.returned();
+      expect(fixture.createConnection).toHaveBeenCalledOnce();
+      await expect(fixture.manager.ensureReady("runtime")).resolves.toBeUndefined();
+    } finally {
+      await fixture.finish();
+    }
+  });
+
+  it("stays explicitly offline across the cache", async () => {
+    const fixture = await cachedManagerFixture();
+    try {
+      await fixture.manager.disconnect();
+      fire("pagehide", true);
+      fire("pageshow", true);
+      await pageCacheForTest.returned();
+      await fixture.manager.ensureReady("runtime");
+      // The fixture's connections share their mocks: once for the first, once for the new one.
+      await vi.waitFor(() => expect(fixture.created()[1]!.disconnect).toHaveBeenCalledTimes(2));
+      expect(fixture.manager.isExplicitlyOffline()).toBe(true);
+    } finally {
+      await fixture.finish();
+    }
+  });
+
+  it("opens nothing for a page that shut down while away, and lets what waited go", async () => {
+    const fixture = await cachedManagerFixture();
+    try {
+      fire("pagehide", true);
+      const waiting = fixture.manager.ensureReady("runtime");
+      fixture.allowFinish();
+      await fixture.manager.shutdown();
+      await expect(waiting).resolves.toBeUndefined();
+      fire("pageshow", true);
+      await pageCacheForTest.returned();
+      expect(fixture.createConnection).toHaveBeenCalledOnce();
+    } finally {
+      await fixture.finish();
     }
   });
 });

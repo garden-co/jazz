@@ -1,37 +1,21 @@
-import { sha256 } from "@noble/hashes/sha2.js";
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/test-app.js";
 import type { WasmRow } from "../drivers/types.js";
 import type { Runtime } from "./client.js";
 import { translateQuery } from "./query-adapter.js";
-import fixture from "../../fixtures/union-arm-window-v1.json";
 import {
   createNapiNativeRuntimeAdapter,
   hasJazzNapiBuild,
 } from "./testing/napi-runtime-test-utils.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "./testing/wasm-runtime-test-utils.js";
 
-const app = s.defineApp(
-  { rooms: s.table({ title: s.string(), code: s.string() }, {}) },
-  { migrations: "none" },
-);
+const app = testApp({ tables: { rooms: { columns: { title: "string", code: "string" } } } });
 
-it("pins windowed UNION labels while retaining the legacy unmodified label", () => {
-  const seeds = [
-    app.rooms,
-    app.rooms.orderBy("title").offset(1).limit(1),
-    app.rooms.orderBy("title").offset(2).limit(1),
-    app.rooms.limit(0),
-    app.rooms.offset(0),
-  ];
-  expect(fixture.encoding).toBe("jazz.sdk.union-arm-output.v1");
-  for (const [index, seed] of seeds.entries()) {
-    const expected = fixture.cases[index]!;
-    const bytes = Buffer.from(expected.utf8_hex, "hex");
-    expect(bytes.toString("utf8")).toBe(expected.preimage);
-    expect(`derived:${Buffer.from(sha256(bytes)).toString("hex")}`).toBe(expected.label);
-    expect(JSON.parse(app.union([seed])._build()).union.inputs[0].label).toBe(expected.label);
-  }
+it("sends unnamed arms with an empty label, for Rust to label", () => {
+  const union = app.union([app.rooms, app.rooms.orderBy("title").offset(1).limit(1)]);
+  const labels = JSON.parse(union._build()).union.inputs.map((arm: any) => arm.label);
+  expect(labels).toEqual(["", ""]);
+  expect(() => app.union({ "": app.rooms })).toThrow(/names must not be empty/);
 });
 
 it("keeps seed windows separate from subsequent UNION builder clones", () => {
@@ -98,6 +82,23 @@ for (const host of ["NAPI", "WASM"] as const) {
           ])
           .orderBy("title");
         expect(await titles(runtime, query)).toEqual(["b", "c"]);
+      });
+
+      it("labels unnamed arms in Rust: identical ones are refused, named ones read twice", async () => {
+        const runtime = await open();
+        await expect(titles(runtime, app.union([app.rooms, app.rooms]))).rejects.toThrow(
+          /name the arms/,
+        );
+        const twice = app.union({ one: app.rooms, two: app.rooms }).orderBy("title");
+        expect(await titles(runtime, twice)).toEqual(["a", "a", "b", "b", "c", "c", "d", "d"]);
+        const pages = [
+          app.rooms.orderBy("title").limit(1),
+          app.rooms.orderBy("title").offset(3).limit(1),
+        ];
+        const forward = app.union(pages).orderBy("title");
+        const backward = app.union([...pages].reverse()).orderBy("title");
+        expect(await titles(runtime, forward)).toEqual(["a", "d"]);
+        expect(await titles(runtime, backward)).toEqual(["a", "d"]);
       });
 
       it("applies each named arm's page before the outer UNION page", async () => {

@@ -3,7 +3,7 @@
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { useAll } from "jazz-tools/react";
 import { Avatar, type AvatarSize } from "@astryxdesign/core";
-import { app, type Profile } from "../../schema";
+import { app, type Profile } from "../../jazz.generated";
 import { useObjectUrl } from "./use-object-url";
 
 export interface ProfileDirectory {

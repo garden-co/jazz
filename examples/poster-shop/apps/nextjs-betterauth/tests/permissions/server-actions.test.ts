@@ -1,8 +1,8 @@
 import type { Db } from "jazz-tools";
 import { createJazz, memory, type Jazz } from "jazz-tools/backend";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import permissions from "../../permissions.js";
-import { app } from "../../schema.js";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
+import { app } from "../../jazz.generated.js";
 import { ensurePersonalCanvas, seedPersonalCanvas } from "../../src/lib/bootstrap.js";
 import { redeemInvite } from "../../src/lib/join.js";
 

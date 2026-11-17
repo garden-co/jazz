@@ -13,7 +13,7 @@ import { Elements, PaymentElement, useElements, useStripe } from "@stripe/react-
 import type { Stripe } from "@stripe/stripe-js";
 import { loadStripe } from "@stripe/stripe-js/pure";
 import { useState } from "react";
-import type { Order, Payment as PaymentRow } from "@/schema";
+import type { Order, Payment as PaymentRow } from "@/jazz.generated";
 import { formatMoney } from "@/src/store/pricing";
 
 let stripePromise: Promise<Stripe | null> | undefined;

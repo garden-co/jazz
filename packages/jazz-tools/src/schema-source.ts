@@ -64,7 +64,8 @@ export function resolveSchemaSource(input: SchemaSourceInput): WasmSchema {
   }
   // A real table named `default` resolved above; this is a module wrapper.
   const wrapped = commonJsWrapped(input);
-  if (wrapped !== undefined && resolvesAsSchema(wrapped)) throw commonJsWrapperError("schema.ts");
+  if (wrapped !== undefined && resolvesAsSchema(wrapped))
+    throw commonJsWrapperError("jazz.generated.ts");
 
   throw new Error(
     "Invalid schema source. Pass a WasmSchema, a generated app object, or a generated query/table object.",

@@ -491,5 +491,101 @@
     "schema": { "$schema": "http://json-schema.org/draft-04/schema#", "type": "integer" },
     "valid": [0],
     "invalid": [-0]
+  },
+  {
+    "description": "$dynamicRef without $dynamicAnchor is not supported by the browser runtime yet",
+    "schema": { "properties": { "next": { "$dynamicRef": "#" } } },
+    "browserUnsupported": true
+  },
+  {
+    "description": "$dynamicAnchor in a subschema is not supported by the browser runtime yet",
+    "schema": { "properties": { "tree": { "$dynamicAnchor": "node" } } },
+    "browserUnsupported": true
+  },
+  {
+    "description": "draft 4 asserts idn-email, which the browser runtime does not support yet",
+    "schema": { "$schema": "http://json-schema.org/draft-04/schema#", "format": "idn-email" },
+    "browserUnsupported": true
+  },
+  {
+    "description": "draft-07 contentMediaType is refused next to $ref too",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "$ref": "#/definitions/a",
+      "definitions": { "a": {} },
+      "contentMediaType": "application/json"
+    },
+    "browserUnsupported": true
+  },
+  {
+    "description": "the x flag in a pattern",
+    "schema": { "pattern": "(?x)a b" },
+    "browserUnsupported": true
+  },
+  {
+    "description": "a case-insensitive flag after the start of a pattern",
+    "schema": { "pattern": "a(?i)b" },
+    "browserUnsupported": true
+  },
+  {
+    "description": "a Unicode class named loosely",
+    "schema": { "pattern": "^\\p{greek}$" },
+    "browserUnsupported": true
+  },
+  {
+    "description": "spaces inside a counted repetition",
+    "schema": { "pattern": "^a{ 2}$" },
+    "browserUnsupported": true
+  },
+  {
+    "description": "a possessive quantifier in a patternProperties key",
+    "schema": { "patternProperties": { "^a++$": {} } },
+    "browserUnsupported": true
+  },
+  {
+    "description": "contentMediaType only annotates in 2020-12",
+    "schema": { "contentMediaType": "application/json" },
+    "valid": ["{", 1]
+  },
+  {
+    "description": "idn-hostname only annotates in 2020-12",
+    "schema": { "format": "idn-hostname" },
+    "valid": ["not a host name!"]
+  },
+  {
+    "description": "$dynamicRef is not a 2019-09 keyword",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2019-09/schema",
+      "$dynamicRef": "#node",
+      "type": "integer"
+    },
+    "valid": [1],
+    "invalid": ["a"]
+  },
+  {
+    "description": "draft-07 ignores a pattern next to $ref",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "$ref": "#/definitions/a",
+      "definitions": { "a": { "type": "string" } },
+      "pattern": "^a*+$"
+    },
+    "valid": ["b"],
+    "invalid": [1]
+  },
+  {
+    "description": "a Unicode class named as in JS",
+    "schema": { "type": "string", "pattern": "^\\p{Greek}+$" },
+    "valid": ["αβ"],
+    "invalid": ["ab"]
+  },
+  {
+    "description": "an unsupported format inside const is data",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "const": { "format": "idn-hostname" }
+    },
+    "valid": [{ "format": "idn-hostname" }],
+    "invalid": [{}]
   }
 ]

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { createRoot } from "solid-js";
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/index.js";
 import {
   createSolidJazzClient,
   isPendingSolidJazzClientReady,
@@ -10,18 +10,7 @@ import {
 } from "./create-solid-jazz-client.js";
 import { getSubscriptionStore } from "../subscription-store-internal.js";
 
-const app = s.defineApp(
-  {
-    todos: s.table(
-      {
-        title: s.string(),
-        done: s.boolean(),
-      },
-      {},
-    ),
-  },
-  { migrations: "none" },
-);
+const app = testApp({ tables: { todos: { columns: { title: "string", done: "boolean" } } } });
 
 function makeAppId(scope: string): string {
   return `solid-create-jazz-client-${scope}-${randomUUID()}`;

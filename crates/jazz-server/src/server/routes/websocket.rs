@@ -696,6 +696,60 @@ async fn account_still_admitted(
     }
 }
 
+/// What wakes a live socket to re-check its account admission.
+enum AccountWatch {
+    /// The link carries no account identity (Backend, Admin): nothing can
+    /// revoke it, so it never wakes.
+    Unaccounted,
+    /// Woken by every registry change. The registry owner thread holds the
+    /// only sender, so a closed watch means the registry is gone.
+    Registry(tokio::sync::watch::Receiver<u64>),
+    /// An account identity on a server without a registry: re-checked every
+    /// second (each check fails closed).
+    Poll,
+}
+
+/// Why [`AccountWatch::wake`] returned.
+#[derive(Debug, PartialEq, Eq)]
+enum AccountWake {
+    /// Something may have changed: re-check.
+    Recheck,
+    /// The registry owner is gone: nothing can confirm the account any more.
+    RegistryGone,
+}
+
+impl AccountWatch {
+    /// Subscribe *before* the admission check (see
+    /// [`account_admission_current`]).
+    fn subscribe(
+        identity: Option<AuthorSubject>,
+        accounts: Option<&crate::server::accounts::AccountRegistryOwner>,
+    ) -> Self {
+        match (identity, accounts) {
+            (None, _) => Self::Unaccounted,
+            (Some(_), Some(registry)) => Self::Registry(registry.subscribe()),
+            (Some(_), None) => Self::Poll,
+        }
+    }
+
+    /// Wait until the account should be re-checked. Never resolves for an
+    /// unaccounted link, and resolves once (not in a loop) when the registry
+    /// is gone: the caller must stop on [`AccountWake::RegistryGone`].
+    async fn wake(&mut self) -> AccountWake {
+        match self {
+            Self::Unaccounted => std::future::pending().await,
+            Self::Registry(changes) => match changes.changed().await {
+                Ok(()) => AccountWake::Recheck,
+                Err(_) => AccountWake::RegistryGone,
+            },
+            Self::Poll => {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                AccountWake::Recheck
+            }
+        }
+    }
+}
+
 /// Per-message admission check for a live account socket.
 ///
 /// Every registry mutation runs on the registry owner thread and bumps
@@ -711,12 +765,12 @@ async fn account_still_admitted(
 async fn account_admission_current(
     state: &ServerState,
     identity: Option<AuthorSubject>,
-    changes: &mut Option<tokio::sync::watch::Receiver<u64>>,
+    watch: &mut AccountWatch,
 ) -> Result<(), super::accounts::AdmissionError> {
     if identity.is_none() {
         return Ok(());
     }
-    if let Some(changes) = changes {
+    if let AccountWatch::Registry(changes) = watch {
         match changes.has_changed() {
             Ok(false) => return Ok(()),
             Ok(true) => {
@@ -1109,7 +1163,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
 
     let account_identity =
         matches!(admission.credential, WebSocketCredential::Session).then_some(admission.identity);
-    let mut account_changes = state.accounts.as_ref().map(|registry| registry.subscribe());
+    let mut account_changes = AccountWatch::subscribe(account_identity, state.accounts.as_ref());
     let mut activity_rx = core_server_shell.subscribe_activity();
     // Subscribe before checking: a revocation concurrent with this check must
     // remain visible even if no application traffic arrives afterward.
@@ -1199,13 +1253,12 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                 // browser) asked for a heartbeat frame it can see instead.
                 let _ = writer_tx.try_send(keepalive_beat(heartbeat));
             }
-            _ = async {
-                if let Some(changes) = &mut account_changes { let _ = changes.changed().await; }
-                else if account_identity.is_some() {
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                } else { std::future::pending::<()>().await; }
-            } => {
-                if let Err(error) = account_still_admitted(&state, account_identity).await {
+            wake = account_changes.wake() => {
+                let admitted = match wake {
+                    AccountWake::Recheck => account_still_admitted(&state, account_identity).await,
+                    AccountWake::RegistryGone => Err(super::accounts::AdmissionError::Unavailable),
+                };
+                if let Err(error) = admitted {
                     queue_ws_error(&writer_tx, error.into_wire());
                     break;
                 }
@@ -1745,6 +1798,32 @@ mod tests {
         ColumnType, PolicyExpr, Schema, SchemaBuilder, TablePolicies,
         TableSchema as PublicTableSchema,
     };
+
+    /// A Backend or Admin link carries no account identity: a dead registry
+    /// must not wake it (each wake used to resolve at once, a hot loop).
+    /// An account link wakes exactly once with `RegistryGone` and fails closed.
+    #[tokio::test]
+    async fn account_watch_does_not_spin_once_the_registry_is_gone() {
+        let registry = crate::server::accounts::AccountRegistryOwner::in_memory_for_test();
+        let identity = AuthorSubject::reserved(jazz::tools::identity::LOCAL_FIRST_ISSUER, "alice")
+            .expect("author");
+        let mut unaccounted = AccountWatch::subscribe(None, Some(&registry));
+        let mut account = AccountWatch::subscribe(Some(identity), Some(&registry));
+        registry.close().expect("close registry");
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), unaccounted.wake())
+                .await
+                .is_err(),
+            "a link without an account identity never wakes"
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), account.wake())
+                .await
+                .expect("an account link wakes when the registry goes"),
+            AccountWake::RegistryGone
+        );
+    }
     use jazz::tools::{AppId, AuthMode};
 
     const WS_STORM_SIZE: usize = 24;
@@ -4423,7 +4502,13 @@ mod tests {
         );
 
         let state = core.server_state();
-        let mut changes = state.accounts.as_ref().map(|registry| registry.subscribe());
+        let mut changes = AccountWatch::Registry(
+            state
+                .accounts
+                .as_ref()
+                .expect("account registry")
+                .subscribe(),
+        );
         let registry = state.accounts.as_ref().expect("account registry");
         registry.fail_next_write_for_test();
         let revoked = revoke(
@@ -4487,7 +4572,13 @@ mod tests {
                 .with_account(account),
         );
         let state = core.server_state();
-        let mut changes = state.accounts.as_ref().map(|registry| registry.subscribe());
+        let mut changes = AccountWatch::Registry(
+            state
+                .accounts
+                .as_ref()
+                .expect("account registry")
+                .subscribe(),
+        );
         account_admission_current(&state, identity, &mut changes)
             .await
             .expect("admitted");
@@ -4537,8 +4628,13 @@ mod tests {
                 for _ in 0..sockets {
                     let state = state.clone();
                     tasks.push(tokio::spawn(async move {
-                        let mut changes =
-                            state.accounts.as_ref().map(|registry| registry.subscribe());
+                        let mut changes = AccountWatch::Registry(
+                            state
+                                .accounts
+                                .as_ref()
+                                .expect("account registry")
+                                .subscribe(),
+                        );
                         for _ in 0..CHECKS_PER_SOCKET {
                             let result = if gated {
                                 account_admission_current(&state, identity, &mut changes).await

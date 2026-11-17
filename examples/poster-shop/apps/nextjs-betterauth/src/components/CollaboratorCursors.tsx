@@ -3,7 +3,7 @@
 import { Avatar, AvatarGroup } from "@astryxdesign/core";
 import { useAll, useDb } from "jazz-tools/react";
 import { memo, useCallback, useEffect, useRef } from "react";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { cursorColor, cursorColorKey } from "@/src/lib/poster";
 
 /** At most one presence write per interval; the last position always lands. */

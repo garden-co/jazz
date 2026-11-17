@@ -17,7 +17,6 @@ mod identity;
 pub use crate::runtime::{ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle};
 pub mod alpha59_alpha60;
 pub(crate) mod deployment;
-mod permissions_validation;
 pub mod routes;
 #[cfg(any(test, feature = "embedded-server"))]
 pub(crate) mod runtime_catalogue;

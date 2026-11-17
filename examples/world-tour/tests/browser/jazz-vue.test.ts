@@ -24,7 +24,7 @@ import {
   useAll,
   useSession,
 } from "jazz-tools/vue";
-import { app } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
 import { SCOPE, SERVER_URL } from "./test-constants.js";
 
 interface Scope {

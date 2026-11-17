@@ -1,4 +1,10 @@
 use jazz::tools::native_transport_connector::NativeTransportLink;
+
+mod http_stream;
+pub use http_stream::{
+    HttpStreamError, HttpStreamFallbackConnector, HttpStreamTransportKind,
+    UPGRADE_FAILURES_BEFORE_STREAM, UPGRADE_HANGS_BEFORE_STREAM,
+};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -161,6 +167,11 @@ fn native_connect_error(error: NativeConnectFailure) -> NativeTransportError {
 /// Match typed transport/wire causes, never diagnostic strings. Retry only
 /// failures that may resolve without changing the request or credentials.
 fn native_transport_error(error: WebSocketClientError) -> NativeTransportError {
+    // The server answered with a wire error: the shared link decides what it
+    // means (`LinkFailure::from_wire_error`), as it does for every host.
+    if let WebSocketClientError::ServerWireError(error) = error {
+        return NativeTransportError::Wire(error);
+    }
     let retryable = match &error {
         // A proxy may accept TCP while its upstream is restarting and close
         // before HTTP upgrade completes. No rejected response was received.
@@ -221,20 +232,13 @@ fn native_transport_error(error: WebSocketClientError) -> NativeTransportError {
                 408 | 425 | 429 | 500 | 502 | 503 | 504
             )
         }
-        WebSocketClientError::ServerWireError(error) => {
-            error.code == jazz::wire::WireErrorCode::NotReady
-                && error.retry == jazz::wire::WireRetry::Later
-        }
         _ => false,
     };
-    // A refused credential stays refused until the caller brings a new one,
-    // whether the upgrade itself was refused or Core said so before hello.
+    // A refused credential stays refused until the caller brings a new one.
+    // Core saying so before hello is a wire error, classified above.
     let auth_rejected = match &error {
         WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Http(response)) => {
             response.status().as_u16() == 401
-        }
-        WebSocketClientError::ServerWireError(error) => {
-            error.code == jazz::wire::WireErrorCode::AuthFailed
         }
         _ => false,
     };
@@ -473,20 +477,49 @@ impl WebSocketTransport {
         wake: Arc<dyn Fn() + Send + Sync>,
         requested_link: NativeTransportLink,
     ) -> Result<Self, NativeConnectFailure> {
-        let Upgrade {
-            authorization,
-            bundle,
-        } = upgrade;
         let deadline = tokio::time::Instant::now() + WS_CLIENT_HANDSHAKE_TIMEOUT;
         let url = ws_url(base_url.as_ref(), app_id);
         let activity = LinkActivity::new();
-        let (mut ws, _) = tokio::time::timeout_at(
+        let (ws, _) = tokio::time::timeout_at(
             deadline,
-            open_client_websocket(url, authorization.as_deref(), Arc::clone(&activity)),
+            open_client_websocket(url, upgrade.authorization.as_deref(), Arc::clone(&activity)),
         )
         .await
         .map_err(|_| NativeConnectFailure::WebSocket(WebSocketClientError::HandshakeTimeout))??;
+        Self::establish(
+            ws,
+            deadline,
+            Liveness::new(activity, WS_CLIENT_LIVENESS),
+            Session {
+                peer_identity,
+                auth,
+                bundle: upgrade.bundle,
+                requested_link,
+            },
+            wake,
+        )
+        .await
+        .map_err(NativeConnectFailure::from)
+    }
 
+    /// Opens the session over a carrier that is open: the prelude, both
+    /// hellos, then the pump.
+    pub(crate) async fn establish<C>(
+        mut ws: C,
+        deadline: tokio::time::Instant,
+        liveness: Liveness,
+        session: Session,
+        wake: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<Self, WebSocketClientError>
+    where
+        C: Carrier + Send + 'static,
+    {
+        let Session {
+            peer_identity,
+            auth,
+            bundle,
+            requested_link,
+        } = session;
         let prelude = encode_prelude(peer_identity, auth, bundle, requested_link)?;
         tokio::time::timeout_at(deadline, ws.send(Message::Binary(prelude.into())))
             .await
@@ -522,8 +555,7 @@ impl WebSocketTransport {
         {
             return Err(WebSocketClientError::ServerRejected(
                 "upstream does not support requested scope_isolated_client_relay link".to_owned(),
-            )
-            .into());
+            ));
         }
 
         let (inbound_tx, inbound_rx) = mpsc::channel(WS_CLIENT_INBOUND_FRAME_SLOTS);
@@ -536,7 +568,7 @@ impl WebSocketTransport {
         let task = tokio::spawn(async move {
             let terminal = run_ws_pump(
                 ws,
-                Liveness::new(activity, WS_CLIENT_LIVENESS),
+                liveness,
                 inbound_tx,
                 inbound_budget,
                 outbound_rx,
@@ -611,6 +643,10 @@ impl WireTransport for WebSocketTransport {
         let frame = inbound.try_recv().ok();
         frame.map(|frame| frame.bytes)
     }
+
+    fn features(&self) -> jazz::wire::WireFeatures {
+        self.features
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -623,6 +659,14 @@ struct WebSocketClientPrelude {
 
     #[serde(skip_serializing_if = "is_ordinary_link")]
     requested_link: NativeTransportLink,
+}
+
+/// Who a session is for, as its prelude states it.
+pub(crate) struct Session {
+    pub(crate) peer_identity: AuthorSubject,
+    pub(crate) auth: AuthConfig,
+    pub(crate) bundle: Option<String>,
+    pub(crate) requested_link: NativeTransportLink,
 }
 
 /// What a socket carries beside its auth: the upgrade's `Authorization`
@@ -967,8 +1011,24 @@ impl Liveness {
 /// terminal the link waits on, for ever.
 const WS_CLIENT_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
-type ClientSink<S> = futures::stream::SplitSink<tokio_tungstenite::WebSocketStream<S>, Message>;
-type ClientSource<S> = futures::stream::SplitStream<tokio_tungstenite::WebSocketStream<S>>;
+type ClientSink<C> = futures::stream::SplitSink<C, Message>;
+type ClientSource<C> = futures::stream::SplitStream<C>;
+
+/// What the pump and the handshake run over: a WebSocket, or the HTTP
+/// stream transport's session, which carries the same messages.
+pub(crate) trait Carrier:
+    futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+    + futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+    + Unpin
+{
+}
+
+impl<C> Carrier for C where
+    C: futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin
+{
+}
 
 /// How a pump ends: with this terminal, closing the socket first or not.
 struct Ending {
@@ -1071,16 +1131,16 @@ impl InboundSide {
 /// the signs of life, and frames it sends meanwhile reach the application, so
 /// neither side waits on the other. A socket whose peer has gone leaves the
 /// send pending with a full kernel buffer and nothing to read.
-async fn send_watched<S>(
-    sink: &mut ClientSink<S>,
-    source: &mut ClientSource<S>,
+async fn send_watched<C>(
+    sink: &mut ClientSink<C>,
+    source: &mut ClientSource<C>,
     inbound: &InboundSide,
     message: Message,
     liveness: &mut Liveness,
     ticker: &mut tokio::time::Interval,
 ) -> Result<(), Ending>
 where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    C: Carrier,
 {
     let send = sink.send(message);
     tokio::pin!(send);
@@ -1109,12 +1169,12 @@ where
     }
 }
 
-async fn receive_server_hello<S>(
-    ws: &mut tokio_tungstenite::WebSocketStream<S>,
+async fn receive_server_hello<C>(
+    ws: &mut C,
     deadline: tokio::time::Instant,
 ) -> Result<WireHello, WebSocketClientError>
 where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    C: Carrier,
 {
     let message = tokio::time::timeout_at(deadline, ws.next())
         .await
@@ -1138,7 +1198,19 @@ where
         return Err(WebSocketClientError::UnexpectedHandshakeMessage);
     }
     if jazz::wire::wire_hello_version_range(&encoded[0]).is_none() {
-        let frame = decode_frame(&encoded[0]).map_err(WebSocketClientError::DecodeFrame)?;
+        let frame = match decode_frame(&encoded[0]) {
+            Ok(frame) => frame,
+            // An error frame this client cannot read (a code or retry from a
+            // newer server) is still the server refusing this attempt. Nothing
+            // negotiates versions before hello, so it is retried with backoff
+            // and reported at once, never taken as a reason to stop for good.
+            Err(error) if jazz::wire::is_wire_error_frame(&encoded[0]) => {
+                return Err(WebSocketClientError::ServerRejected(format!(
+                    "server sent an error this client cannot decode: {error}"
+                )));
+            }
+            Err(error) => return Err(WebSocketClientError::DecodeFrame(error)),
+        };
         if let WireFrame::Error(error) = frame {
             return Err(WebSocketClientError::ServerWireError(error));
         }
@@ -1169,8 +1241,8 @@ fn finish_outbound_pump(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_ws_pump<S>(
-    ws: tokio_tungstenite::WebSocketStream<S>,
+async fn run_ws_pump<C>(
+    ws: C,
     mut liveness: Liveness,
     inbound: mpsc::Sender<InboundFrame>,
     inbound_budget: Arc<Semaphore>,
@@ -1179,7 +1251,7 @@ async fn run_ws_pump<S>(
     wake: Arc<dyn Fn() + Send + Sync>,
 ) -> NativeTransportTerminal
 where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    C: Carrier,
 {
     let (mut sink, mut source) = ws.split();
     let inbound = InboundSide {
@@ -1310,14 +1382,21 @@ mod tests {
                 "token expired",
             )))
         };
+        // Core's answer reaches the shared link classification intact.
+        let classified = |code, retry| match wire(code, retry) {
+            NativeTransportError::Wire(error) => {
+                jazz::link::LinkFailure::from_wire_error(&error, false)
+            }
+            other => panic!("a server's wire error stays typed, got {other:?}"),
+        };
         assert!(matches!(
-            wire(WireErrorCode::AuthFailed, WireRetry::Never),
-            NativeTransportError::AuthRejected(_)
+            classified(WireErrorCode::AuthFailed, WireRetry::Never),
+            jazz::link::LinkFailure::AuthRejected { .. }
         ));
         assert!(wire(WireErrorCode::NotReady, WireRetry::Later).is_retryable());
         assert!(matches!(
-            wire(WireErrorCode::MalformedFrame, WireRetry::Never),
-            NativeTransportError::Terminal(_)
+            classified(WireErrorCode::MalformedFrame, WireRetry::Never),
+            jazz::link::LinkFailure::Fatal(_)
         ));
         let http = |status: u16| {
             let response = tokio_tungstenite::tungstenite::http::Response::builder()
@@ -2246,6 +2325,129 @@ mod tests {
                 assert!(!error.is_retryable());
                 assert!(error.to_string().contains("scope_isolated_client_relay"));
             }
+            server.await.unwrap();
+        }
+    }
+
+    /// A server's answer before hello reaches the shared link classification
+    /// as a wire error (#5927 R10), so the native client treats it as the
+    /// web and Node clients do: `NotReady` is a server still starting. An
+    /// error frame with a code this client does not know (a newer server) is
+    /// a refusal the link retries, never a reason to stop for good.
+    ///
+    /// ```text
+    /// client ─prelude, hello─► server ─Error frame─► client ─► LinkFailure
+    /// ```
+    // The connector handshake is the observable contract; a synthetic
+    // upstream lets us send a code no real server of this version sends.
+    #[tokio::test]
+    async fn a_server_wire_error_before_hello_is_classified_by_the_link() {
+        use jazz::link::LinkFailure;
+        use jazz::wire::{WireErrorCode, WireRetry};
+        let not_ready = encode_frame(&WireFrame::Error(WireError::new(
+            WireErrorCode::NotReady,
+            WireRetry::Later,
+            "still starting",
+        )))
+        .unwrap();
+        // `WireFrame::Error` (tag 1), code 99, retry `never`, empty message.
+        let unknown_code = vec![1, 99, 0, 0];
+        for (frame, expected) in [(not_ready, "serverNotReady"), (unknown_code, "refusal")] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let _prelude = socket.next().await.unwrap().unwrap();
+                let _client_hello = socket.next().await.unwrap().unwrap();
+                socket
+                    .send(Message::Binary(
+                        postcard::to_allocvec(&vec![frame]).unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
+            });
+            let error = NativeWebSocketConnector
+                .connect(NativeTransportRequest {
+                    requested_link: NativeTransportLink::OrdinarySession,
+                    server_url: format!("http://{address}"),
+                    app_id: AppId::random(),
+                    peer_identity: AuthorSubject::SYSTEM,
+                    auth: AuthConfig::default(),
+                    authorization: None,
+                    bundle: None,
+                    wake: Arc::new(|| {}),
+                })
+                .await
+                .err()
+                .expect("a server error must refuse the attempt");
+            let kind = match error {
+                NativeTransportError::Wire(error) => {
+                    match LinkFailure::from_wire_error(&error, false) {
+                        LinkFailure::ServerNotReady(_) => "serverNotReady",
+                        other => panic!("unexpected classification {other:?}"),
+                    }
+                }
+                // A connector `Terminal` is a refusal the link retries
+                // (`LinkFailure::Refused`), not a stop.
+                NativeTransportError::Terminal(message) => {
+                    assert!(message.contains("cannot decode"), "{message}");
+                    "refusal"
+                }
+                other => panic!("unexpected error {other:?}"),
+            };
+            assert_eq!(kind, expected);
+            server.await.unwrap();
+        }
+    }
+
+    /// The transport a client attaches reports what its `Hello` negotiated:
+    /// the database sends a serializable commit that read through a branch
+    /// view only over a link with the feature (jazz#5806), so a transport
+    /// that forgot to report it would refuse those commits for good.
+    #[tokio::test]
+    async fn the_attached_transport_reports_its_negotiated_features() {
+        for offered in [true, false] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let _prelude = socket.next().await.unwrap().unwrap();
+                let _hello = socket.next().await.unwrap().unwrap();
+                let mut features = current_wire_features();
+                if !offered {
+                    features &= !jazz::wire::FEATURE_SERIALIZABLE_BRANCH_READS;
+                }
+                let hello = encode_frame(&WireFrame::Hello(WireHello::current(
+                    WirePeerRole::Core,
+                    features,
+                )))
+                .unwrap();
+                socket
+                    .send(Message::Binary(
+                        postcard::to_allocvec(&vec![hello]).unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
+            });
+            let connected = NativeWebSocketConnector
+                .connect(NativeTransportRequest {
+                    requested_link: NativeTransportLink::OrdinarySession,
+                    server_url: format!("http://{address}"),
+                    app_id: AppId::random(),
+                    peer_identity: AuthorSubject::SYSTEM,
+                    auth: AuthConfig::default(),
+                    authorization: None,
+                    bundle: None,
+                    wake: Arc::new(|| {}),
+                })
+                .await
+                .expect("handshake");
+            assert_eq!(
+                connected.transport.features() & jazz::wire::FEATURE_SERIALIZABLE_BRANCH_READS != 0,
+                offered
+            );
             server.await.unwrap();
         }
     }

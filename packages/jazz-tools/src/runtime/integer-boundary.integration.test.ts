@@ -1,27 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
-import { createPolicyTestApp } from "../testing/index.js";
+import { createPolicyTestApp, testApp } from "../testing/index.js";
 
-const app = s.defineApp(
-  {
-    ints: s.table({ value: s.int() }, {}),
-  },
-  { migrations: "none" },
-);
+const app = testApp({ tables: { ints: { columns: { value: "int" } } } });
 
-const permissions = s.definePermissions(app, ({ policy }) => {
-  policy.ints.allowInsert.always();
-  policy.ints.allowRead.always();
-  policy.ints.allowUpdate.always();
-  policy.ints.allowDelete.always();
-});
+const permissions = {
+  tables: { ints: { insert: "true", read: "true", update: "true", delete: "true" } },
+};
 
 describe("public integer values", () => {
   it("round-trips i32 boundaries and rejects invalid values before the runtime", async () => {
-    const testApp = await createPolicyTestApp(app, permissions, expect);
+    const policyApp = await createPolicyTestApp(app, permissions, expect);
 
     try {
-      const db = testApp.as({
+      const db = policyApp.as({
         issuer: "https://issuer.example",
         user_id: "integer-boundary",
         claims: {},
@@ -40,7 +31,7 @@ describe("public integer values", () => {
         );
       }
     } finally {
-      await testApp.shutdown();
+      await policyApp.shutdown();
     }
   }, 10_000);
 });
