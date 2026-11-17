@@ -3330,15 +3330,13 @@ pub(crate) enum Support {
     /// `nested` is shared between arrays that rest on the same support (see
     /// [`SupportMemo`]). `policy_depth` is the remaining depth when `nested`
     /// is the table's own policy support, so the walk can tell a key was
-    /// followed deeper already. `recode` turns the parent's cell into the
-    /// child column's where the two store equal values differently.
+    /// followed deeper already.
     Array {
         table: String,
         inner: String,
         outer: String,
         outer_array: bool,
         inner_array: bool,
-        recode: Option<Recode>,
         nested: Rc<Vec<Support>>,
         policy_depth: Option<usize>,
     },
@@ -3351,67 +3349,6 @@ pub(crate) enum Support {
         member: String,
         parent: String,
     },
-}
-
-/// How a [`Support::Array`] turns a cell of its `outer` column into the
-/// cell its `inner` column stores the same value as, where the two differ:
-/// an enum column stores a variant as its own tag (see
-/// [`crate::values::EnumTags`]), so the same variant is a different tag
-/// in another enum column and a name in a text column. Queries and
-/// policies compare such columns by name; following by the raw cell would
-/// miss the rows they match.
-///
-/// Tags are looked up as the follow happens, so a renumbering since the
-/// support was built is seen.
-#[derive(Debug)]
-pub(crate) struct Recode {
-    /// The outer column's tags, if it is an enum column.
-    outer: Option<crate::values::ColumnTags>,
-    /// The inner column's tags, if it is an enum column.
-    inner: Option<crate::values::ColumnTags>,
-}
-
-impl Recode {
-    /// The recoding from `outer` to `inner` (`None` for `id`), or `None`
-    /// where they store values alike: neither is an enum column, or both
-    /// are the same stored column.
-    fn between(
-        outer: Option<&crate::values::Column>,
-        inner: Option<&crate::values::Column>,
-    ) -> Option<Self> {
-        let outer = outer.and_then(|column| column.tags.clone());
-        let inner = inner.and_then(|column| column.tags.clone());
-        match (&outer, &inner) {
-            (None, None) => None,
-            (Some(a), Some(b)) if Rc::ptr_eq(a, b) => None,
-            _ => Some(Self { outer, inner }),
-        }
-    }
-
-    /// `value`, an outer cell (or array element), as the inner column
-    /// stores it. A variant the inner column has no tag for stays a name,
-    /// which no enum cell equals: no stored row holds it.
-    fn apply(&self, value: Sql) -> Sql {
-        let name = match (&self.outer, value) {
-            (Some(tags), Sql::Integer(tag)) => match tags.borrow().name(tag) {
-                Some(name) => name.to_owned(),
-                None => return Sql::Integer(tag),
-            },
-            (_, Sql::Text(name)) => match String::from_utf8(name) {
-                Ok(name) => name,
-                Err(name) => return Sql::Text(name.into_bytes()),
-            },
-            (_, other) => return other,
-        };
-        match self
-            .inner
-            .as_ref()
-            .and_then(|tags| tags.borrow().tag(&name))
-        {
-            Some(tag) => Sql::Integer(tag),
-            None => Sql::Text(name.into_bytes()),
-        }
-    }
 }
 
 /// The nested policy support built for one [`Support`] tree, by (stored table,
@@ -4021,7 +3958,6 @@ impl Inner {
                     outer: "id".to_owned(),
                     outer_array: false,
                     inner_array: crate::compile::is_array(seeds, &seed.team_column),
-                    recode: None,
                     nested: Rc::default(),
                     policy_depth: None,
                 });
@@ -4053,10 +3989,6 @@ impl Inner {
                 outer: parent.stored_name(&array.outer_column).to_owned(),
                 outer_array: crate::compile::is_array(parent, &array.outer_column),
                 inner_array: crate::compile::is_array(child, &array.inner_column),
-                recode: Recode::between(
-                    parent.column(&array.outer_column),
-                    child.column(&array.inner_column),
-                ),
                 nested: Rc::new(self.array_support(child, &array.nested_arrays)?),
                 policy_depth: None,
             });
@@ -4150,10 +4082,6 @@ impl Inner {
                 outer: table.stored_name(outer).to_owned(),
                 outer_array: crate::compile::is_array(table, outer),
                 inner_array: crate::compile::is_array(consulted, inner),
-                // The policy compares the two columns by value: follow the
-                // rows whose cell holds the outer row's value, however each
-                // column stores it.
-                recode: Recode::between(table.column(outer), consulted.column(inner)),
                 nested: self.shared_support(consulted, depth - 1, memo)?,
                 policy_depth: Some(depth - 1),
             });
@@ -4207,7 +4135,6 @@ impl Inner {
                 outer: table.stored_name(column).to_owned(),
                 outer_array: crate::compile::is_array(table, column),
                 inner_array: false,
-                recode: None,
                 // The parent's read rests on its own policy's support,
                 // its correlated `EXISTS` clauses included, not just on its
                 // parents in turn.
@@ -4236,7 +4163,6 @@ impl Inner {
                 outer: parent.stored_name(source).to_owned(),
                 outer_array: crate::compile::is_array(parent, source),
                 inner_array: crate::compile::is_array(target, &join.on_column),
-                recode: Recode::between(parent.column(source), target.column(&join.on_column)),
                 nested: Rc::new(self.join_support(target, &join.nested_joins)?),
                 policy_depth: None,
             });
@@ -4444,16 +4370,12 @@ impl Inner {
                     outer,
                     outer_array,
                     inner_array,
-                    recode,
                     nested,
                     policy_depth,
                 } => match image_cell(image, outer) {
                     Some(Sql::Null) | None => continue,
                     Some(value) if *outer_array => {
-                        let mut elements = array_elements(&value).unwrap_or_default();
-                        if let Some(recode) = recode {
-                            elements = elements.into_iter().map(|e| recode.apply(e)).collect();
-                        }
+                        let elements = array_elements(&value).unwrap_or_default();
                         (
                             table,
                             inner.as_str(),
@@ -4466,10 +4388,7 @@ impl Inner {
                     Some(value) => (
                         table,
                         inner.as_str(),
-                        vec![match recode {
-                            Some(recode) => recode.apply(value),
-                            None => value,
-                        }],
+                        vec![value],
                         &nested[..],
                         *policy_depth,
                         *inner_array,
@@ -4535,6 +4454,35 @@ impl Inner {
         contains: bool,
         value: &Sql,
     ) -> Result<Rc<Vec<Image>>, Error> {
+        // `value` is portable, as images carry it (see
+        // [`Inner::portable_enums`]): an enum variant by its name, whatever
+        // column it came from. An enum column's cells hold this store's tags
+        // for it, so the lookup binds the tag; watch keys stay on the name,
+        // as written rows' keys are. A name the column has no tag for stays
+        // a name, which no cell holds.
+        let tagged;
+        let value = match value {
+            Sql::Text(name)
+                if !contains
+                    && column != "id"
+                    && self
+                        .names
+                        .stored_type(table, column)
+                        .is_some_and(crate::values::is_enum_type) =>
+            {
+                let tag = std::str::from_utf8(name)
+                    .ok()
+                    .and_then(|name| self.names.tags().column(table, column).borrow().tag(name));
+                match tag {
+                    Some(tag) => {
+                        tagged = Sql::Integer(tag);
+                        &tagged
+                    }
+                    None => value,
+                }
+            }
+            _ => value,
+        };
         let read = || {
             let filter = if column == "id" {
                 "id = ?1".to_owned()
