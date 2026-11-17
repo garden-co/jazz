@@ -1797,7 +1797,9 @@ found none receives the version with no other write to a space table.
 ### 3.5 Rotation and removal
 
 **Rotation** is by an updater (R16) whose device is active and holds the
-current version (it acquires it first, §3.3). It generates a new epoch and
+current version (it acquires it first, §3.3; if it cannot, `rotate` fails
+`rotation-needs-key`, and so does a recovery rotation by a device that holds
+no version at all). It generates a new epoch and
 `K'`, and inserts, in one ledger transaction that read the chain, the
 space's member rows and the chosen members' public account rows at its
 cut, one successor whose `predecessor` and `historyEpochId` are both the
@@ -2289,8 +2291,8 @@ source.
   takes an asynchronous callback, so the staging call awaits acquisition
   (§3.3) inside it and retries; the callback itself is not replayed. A
   binding that exposes a synchronous callback (one that cannot await)
-  instead fails such a staging call with `key-pending` and aborts the
-  transaction; the application acquires keys first with
+  instead fails such a staging call with `key-pending` (or `space-pending`
+  when what is missing is the space's root) and aborts the transaction; the application acquires keys first with
   `db.encryption.acquire(space)` (which also prepares a missing space's
   root unless its creation was refused on this device while the client runs, §3.2, and makes a pending rotation, §3.5) and runs the transaction
   again.
@@ -2497,6 +2499,12 @@ Publication stages: account `request`, `bootstrap`, `challenge`, `proof`,
 `approval`, `account-rotation`, `account-key`, `recovery-root`,
 `recovery-delivery`, `account-reset`; space `create`, `rotate`,
 `delivery`, `write`.
+
+The missing-key contradictions: `missing-root-key` (an accepted account
+root names a device with no published device keys, §1.2),
+`missing-signer-key` (a signed record's signer device has none at the
+record's position) and `missing-recipient-key` (an approval approves a
+device that has none). Replay cannot verify such records and fails closed.
 
 Serialization and transaction conflicts are retried internally only by
 operations that are safe to repeat because they re-read their evidence and
