@@ -67,7 +67,10 @@ pub fn session_claims(session: Session) -> Result<BTreeMap<String, Value>, Strin
         }
         _ => BTreeMap::new(),
     };
-    let provider_claims = policy_claims(provider_claims)?;
+    // Worded as `AuthAdmissionError::InvalidJwt` words it: the refusal a
+    // client is shown.
+    let provider_claims =
+        policy_claims(provider_claims).map_err(|error| format!("invalid bearer JWT: {error}"))?;
     Ok(admitted_session_claims(
         &session.issuer,
         &session.user_id,

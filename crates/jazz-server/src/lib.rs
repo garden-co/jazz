@@ -2,6 +2,8 @@
 
 mod kv;
 pub mod middleware;
+// Shared with the Durable Object host (jazz-wasm); not a stable API.
+#[doc(hidden)]
 pub mod portable;
 pub mod profiling;
 pub mod resources;
