@@ -77,7 +77,9 @@ homepage = "https://jazz.tools"
 rust-version = "1.93"
 
 [workspace.dependencies]
-jazz = { package = "jazz-core", version = "=2.0.0-alpha.66", path = "crates/jazz", default-features = false, features = ["sqlite"] }
+jazz = { package = "jazz-core", version = "=2.0.0-alpha.66", path = "crates/jazz", default-features = false, features = [
+  "sqlite",
+] }
 jazz-sql = { version = "=2.0.0-alpha.66", path = "crates/jazz-sql" }
 jazz-db = { version = "=2.0.0-alpha.66", path = "crates/jazz/layers/db", default-features = false }
 jazz-model = { version = "=2.0.0-alpha.66", path = "crates/jazz/layers/model", default-features = false }

@@ -19,7 +19,9 @@ embedded-server = ["jazz/runtime", "dep:tower"]
 test = ["embedded-server", "jazz/testing"]
 
 [dependencies]
-jazz = { package = "jazz-core", version = "=2.0.0-alpha.66", path = "../jazz", default-features = false, features = ["runtime"] }
+jazz = { package = "jazz-core", version = "=2.0.0-alpha.66", path = "../jazz", default-features = false, features = [
+  "runtime",
+] }
 jazz-sql.workspace = true
 jazz-otel = { workspace = true, optional = true }
 axum = { version = "0.8.9", default-features = false, features = [
