@@ -63,7 +63,7 @@ pub const FEATURE_SERIALIZABLE_BRANCH_READS: WireFeatures = 1 << 12;
 /// (`Predicate::Search`, SPEC 20.4). A node sends such a query upstream
 /// only to an upstream that offered this; queries without a search are
 /// byte-identical either way.
-pub const FEATURE_INDEX_SEARCH: WireFeatures = 1 << 13;
+pub const FEATURE_INDEX_SEARCH: WireFeatures = 1 << 15;
 
 /// Bitset of optional protocol features advertised by one peer.
 pub type WireFeatures = u64;
@@ -1035,6 +1035,30 @@ mod tests {
                 payload,
             },
         })
+    }
+
+    /// Index search is wire feature bit 15 (SPEC 20.4); bits 13 and 14 belong
+    /// to other features in flight. No two features share a bit.
+    #[test]
+    fn index_search_is_feature_bit_15_and_shares_it_with_nothing() {
+        assert_eq!(FEATURE_INDEX_SEARCH, 1 << 15);
+        let features = [
+            FEATURE_PAYLOAD_LZ4,
+            FEATURE_PAYLOAD_ZSTD,
+            FEATURE_AUTHORIZATION_SCOPE_VIEWS,
+            FEATURE_SCOPE_ISOLATED_CLIENT_RELAY,
+            FEATURE_THIN_RESULTS,
+            FEATURE_HEARTBEAT,
+            FEATURE_SERIALIZABLE_BRANCH_READS,
+            FEATURE_INDEX_SEARCH,
+        ];
+        let mut seen: WireFeatures = 0;
+        for feature in features {
+            assert_eq!(feature.count_ones(), 1, "{feature:#x}");
+            assert_eq!(seen & feature, 0, "{feature:#x} is taken");
+            seen |= feature;
+        }
+        assert_ne!(current_wire_features() & FEATURE_INDEX_SEARCH, 0);
     }
 
     #[test]

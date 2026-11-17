@@ -241,11 +241,19 @@ const WIRE_FRAME_HEARTBEAT = 7;
  * upstream rather than have it validated against the wrong rows (jazz#5806).
  */
 export const FEATURE_SERIALIZABLE_BRANCH_READS = 1 << 12;
+/**
+ * `FEATURE_INDEX_SEARCH` in `crates/jazz/layers/protocol/src/wire.rs`: the
+ * server decodes and answers queries with an index search (SPEC 20.4).
+ * Without it, the core keeps such queries local and refuses them at
+ * `Remote` tier.
+ */
+export const FEATURE_INDEX_SEARCH = 1 << 15;
 export const CLIENT_WIRE_FEATURES =
   FEATURE_PAYLOAD_ZSTD |
   FEATURE_AUTHORIZATION_SCOPE_VIEWS |
   FEATURE_AUXILIARY_CHUNKS |
-  FEATURE_SERIALIZABLE_BRANCH_READS;
+  FEATURE_SERIALIZABLE_BRANCH_READS |
+  FEATURE_INDEX_SEARCH;
 
 // The server route accepts WebSocket messages up to one MiB. Reserve enough
 // postcard framing bytes that a burst of otherwise-valid wire frames remains
