@@ -609,6 +609,8 @@ mod executing_policy_context {
             .unwrap()
     }
 
+    /// Alice explicitly pins an open bundle; Bob changing the current owner policy
+    /// must leave that bundle's documented permission contract intact.
     #[test]
     fn pinned_view_keeps_its_bundle_after_owner_policy_revocation() {
         let db = owner();

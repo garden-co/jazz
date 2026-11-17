@@ -3691,7 +3691,7 @@ impl Db {
     /// keep their data. Changing a column's type is not supported yet, and a
     /// new required column needs a default.
     pub async fn activate_schema(&self, schema: JazzSchema) -> Result<(), Error> {
-        self.activate(schema, &[], None)
+        self.activate(schema, &[])
     }
 
     /// [`Db::activate_schema`], with the migration lenses into `schema`
@@ -3704,7 +3704,7 @@ impl Db {
         schema: JazzSchema,
         lenses: &[MigrationLens],
     ) -> Result<(), Error> {
-        self.activate(schema, lenses, None)
+        self.activate(schema, lenses)
     }
 
     /// Admit `schema` without making it current: the stored tables grow to
@@ -3719,13 +3719,8 @@ impl Db {
         self.admit(schema, lenses, None)
     }
 
-    fn activate(
-        &self,
-        schema: JazzSchema,
-        lenses: &[MigrationLens],
-        revision: Option<u64>,
-    ) -> Result<(), Error> {
-        self.admit(schema, lenses, Some(revision))
+    fn activate(&self, schema: JazzSchema, lenses: &[MigrationLens]) -> Result<(), Error> {
+        self.admit(schema, lenses, Some(None))
     }
 
     /// Apply `change` to the store's catalogue in one transaction: publish
