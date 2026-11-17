@@ -1,5 +1,9 @@
 # StagePlan: Go CLI
 
+> **Experimental:** client only, backends are TypeScript. A Go program is an app client
+> (an end user) or a backend client of a TypeScript main backend (`createJazz`); Go servers
+> come later. See [Language Support](https://jazz.tools/docs/reference/language-support).
+
 StagePlan's stage-prep board in a terminal, written in Go with
 [`jazz-go`](../../../../packages/jazz-go), as one of the app's users. It
 signs in through the app's Jazz endpoint, its main backend's `/jazz`, with a

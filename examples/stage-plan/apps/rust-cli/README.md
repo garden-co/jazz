@@ -1,5 +1,8 @@
 # StagePlan: Rust CLI
 
+> [!WARNING]
+> **Experimental: client only; backends are TypeScript.** See [Language Support](https://jazz.tools/docs/reference/language-support#jazz-environment-rust).
+
 StagePlan from the command line, in Rust, with the `jazz-app-support` crate. It is a **backend client** of StagePlan's TypeScript main backend (`createJazz`): it connects to the main backend's `/jazz` with a machine credential (an OIDC token) that the main backend trusts through `trustWorkload`. As a **scoped** client it acts as one user (`session.user` in the permissions). As a **trusted** client it acts as the system, and for any user with `for_user`. It can:
 
 - create the user's show, as its crew chief;

@@ -1,5 +1,10 @@
 # StagePlan from Swift
 
+> **Experimental: client only, backends are TypeScript.** Jazz for Swift is
+> an end-user client; StagePlan's backend runs in TypeScript. See
+> `packages/jazz-swift/README.md` for what Swift supports and doesn't yet, and
+> [Language Support](https://jazz.tools/docs/reference/language-support).
+
 A command-line tool over StagePlan's app, written in Swift. Its `schema.ts`
 re-exports `../react-localfirst`'s, `npx jazz-tools generate` writes
 `jazz.app.json` and `jazz.permissions.json` from it, and `JazzApp.swift` is
@@ -14,6 +19,12 @@ token from `$JAZZ_BEARER` (or `--bearer-stdin`). As that user it makes sure a
 show exists with them as its chief (`--show <name>`) or targets one by id
 (`--show-id <id>`), lists the show's tasks by `rank`, adds tasks and moves
 them between stages.
+
+This example lives in the Jazz repository and depends on the Swift package
+from source (`.package(name: "jazz", path: "../../../..")`), so it builds the
+Jazz core first. Your app depends on the published package instead,
+`.package(url: "https://github.com/garden-co/jazz-swift", exact: "2.0.0-alpha.66")`,
+which brings the core prebuilt on macOS and iOS (see the Swift setup page).
 
 ```bash
 ../../../../packages/jazz-swift/scripts/build-ffi.sh --lib-only   # once, and after jazz-ffi changes

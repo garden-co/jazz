@@ -40,16 +40,16 @@ async fn durable_writes_wait_for_the_servers_verdict() {
     let mine = durable.insert(NewNote::new(me, "mine")).await.unwrap();
     assert_eq!(mine.owner, me);
 
-    // Refused: the durable write fails with the server's verdict.
+    // Refused: the durable write fails with the server's verdict, coded
+    // as TS's.
     let refused = durable.insert(NewNote::new(someone_else, "not mine")).await;
-    assert!(refused.is_err(), "{refused:?}");
+    assert_permission_denied(refused.map(drop));
 
     // A plain write returns at once; wait_for_sync reports its refusal.
     jazz.insert(NewNote::new(someone_else, "also not mine"))
         .await
         .unwrap();
-    let synced = jazz.wait_for_sync().await;
-    assert!(synced.is_err(), "{synced:?}");
+    assert_permission_denied(jazz.wait_for_sync().await);
 
     // A durable transaction fails the same way, and leaves nothing behind.
     let refused = durable
@@ -58,7 +58,7 @@ async fn durable_writes_wait_for_the_servers_verdict() {
             Ok(())
         })
         .await;
-    assert!(refused.is_err(), "{refused:?}");
+    assert_permission_denied(refused);
 
     // What the server accepted is all that stays.
     let remote = jazz
@@ -71,7 +71,17 @@ async fn durable_writes_wait_for_the_servers_verdict() {
     server.shutdown().await;
 }
 
-/// A transaction body that panics rolls back and reports it.
+/// A write the server's permissions refused, with TS's code and reason.
+fn assert_permission_denied(result: jazz_app_support::Result<()>) {
+    match result {
+        Err(jazz_app_support::Error::WriteRejected { code, reason, .. }) => {
+            assert_eq!(code, "permission_denied");
+            assert_eq!(reason, "Write rejected by server authorization");
+        }
+        other => panic!("expected a permission_denied rejection, got {other:?}"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wait_for_sync_reports_a_refusal_that_settled_before_it() {
     let app_id = AppId::random();
@@ -93,11 +103,8 @@ async fn wait_for_sync_reports_a_refusal_that_settled_before_it() {
         .insert(NewNote::new(me, "accepted after"))
         .await
         .unwrap();
-    let synced = jazz.wait_for_sync().await;
-    assert!(
-        synced.is_err(),
-        "the earlier refusal is reported: {synced:?}"
-    );
+    // The earlier refusal is reported.
+    assert_permission_denied(jazz.wait_for_sync().await);
     // Reported once.
     jazz.wait_for_sync().await.unwrap();
 
@@ -280,9 +287,18 @@ async fn mutation_errors_report_unwaited_refusals() {
         serde_json::json!({
             "transaction": first.transaction.to_string(),
             "message": first.message,
+            "code": "permission_denied",
+            "reason": "Write rejected by server authorization",
             "denied": true,
             "serializable": false,
         })
+    );
+    assert_eq!(
+        (first.code.as_str(), first.reason.as_str()),
+        (
+            "permission_denied",
+            "Write rejected by server authorization"
+        )
     );
     // A later one, live.
     jazz.insert(NewNote::new(someone_else, "late"))

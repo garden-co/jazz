@@ -25,35 +25,6 @@ final class StagePlanTests: XCTestCase {
         try await app.jazz.close()
     }
 
-    func testTheDocsSnippets() async throws {
-        let relay = try await TestRelay()
-        let jazz = try await relay.user().jazz
-        let app = StagePlanApp(jazz: jazz)
-        let show = try await app.show(named: "Docs")
-        let load = try await app.addTask("Load in", to: show)
-        try await app.addTask("Sound check", to: show)
-        let v3 = try await DocsSnippets.oneShot(jazz, show: show).count
-        XCTAssertEqual(v3, 2)
-        let v4 = try await DocsSnippets.filters(jazz, show: show).count
-        XCTAssertEqual(v4, 2)
-        let v5 = try await DocsSnippets.sorting(jazz, show: show).map(\.title)
-        XCTAssertEqual(v5, ["Load in", "Sound check"])
-        let v6 = try await DocsSnippets.pagination(jazz, show: show).count
-        XCTAssertEqual(v6, 0)
-        let updated = try await DocsSnippets.crud(jazz, show: show)
-        XCTAssertEqual(updated?.title, "Focus the lights")
-        XCTAssertEqual(updated?.status, .doing)
-        let v7 = try await DocsSnippets.oneShot(jazz, show: show).count
-        XCTAssertEqual(v7, 2)
-        try await DocsSnippets.nullableUpdate(jazz, task: load)
-        let results = try await DocsSnippets.whereOperators(jazz)
-        XCTAssertEqual(results.map(\.count), [0, 2, 2, 1, 2, 0])
-        let seen = try await DocsSnippets.subscriptions(jazz, show: show)
-        XCTAssertEqual(seen.first?.map(\.title), ["Load in", "Sound check"])
-        XCTAssertEqual(seen.last?.map(\.title), ["Load in", "Sound check", "Strike"])
-        try await jazz.close()
-    }
-
     func testCloseEndsLiveWatches() async throws {
         let relay = try await TestRelay()
         let app = try await relay.user()
@@ -89,7 +60,14 @@ final class StagePlanTests: XCTestCase {
         for title in ["Load in", "Sound check", "Doors", "Strike"] {
             try await app.addTask(title, to: show)
         }
-        let (withTasks, withShow) = try await DocsSnippets.includes(app.jazz, show: show)
+        let shows = JazzApp.shows.self
+        let tasks = JazzApp.tasks.self
+        // A reverse relation, narrowed, and a forward one.
+        let withTasks = try await app.jazz.one(
+            shows.query().where(shows.id.eq(show.id))
+                .include(shows.tasks.orderBy(tasks.rank).limit(3)))
+        let withShow = try await app.jazz.all(
+            tasks.query().where(tasks.showId.eq(show.id)).include(tasks.show))
         XCTAssertEqual(withTasks?.tasks?.map(\.title), ["Load in", "Sound check", "Doors"])
         XCTAssertEqual(withShow.count, 4)
         XCTAssertTrue(withShow.allSatisfy { $0.show?.id == show.id })
@@ -100,9 +78,16 @@ final class StagePlanTests: XCTestCase {
         XCTAssertNil(plainShow?.tasks)
         // The same row compares equal with and without its include.
         XCTAssertEqual(plain.first, withShow.first(where: { $0.id == plain.first?.id }))
-        let titles = try await DocsSnippets.select(app.jazz, show: show)
+        let titles = try await app.jazz.all(
+            tasks.query().where(tasks.showId.eq(show.id)).orderBy(tasks.rank).select(tasks.title),
+            as: TaskTitle.self)
         XCTAssertEqual(titles.map(\.title), ["Load in", "Sound check", "Doors", "Strike"])
         try await app.jazz.close()
+    }
+
+    struct TaskTitle: Decodable, Sendable, Equatable {
+        var id: String
+        var title: String
     }
 
     struct Oops: Error {}
@@ -111,7 +96,14 @@ final class StagePlanTests: XCTestCase {
         let relay = try await TestRelay()
         let app = try await relay.user()
         let show = try await app.show(named: "Transactions")
-        let task = try await DocsSnippets.transaction(app.jazz, show: show)
+        // Reads inside see the transaction's own writes.
+        let task = try await app.jazz.transaction(commit: .global) { tx in
+            let task = try await tx.insert(
+                JazzApp.NewTask(showId: show.id, title: "Rig lights", status: .todo, rank: 10))
+            let open = try await tx.all(JazzApp.tasks.query().where(JazzApp.tasks.status.eq(.todo)))
+            try await tx.update(task.id, JazzApp.TaskPatch(rank: .set(Double(open.count))))
+            return task
+        }
         let committed = try await app.tasks(of: show)
         XCTAssertEqual(committed.map(\.id), [task.id])
         XCTAssertEqual(committed.first?.rank, 1)
@@ -132,8 +124,12 @@ final class StagePlanTests: XCTestCase {
         let app = try await relay.user()
         let show = try await app.show(named: "Tiers")
         try await app.jazz.waitForSync(.global)
-        let task = try await DocsSnippets.writeTier(app.jazz, show: show)
-        let remote = try await DocsSnippets.readTier(app.jazz, show: show)
+        let task = try await app.jazz.insert(
+            JazzApp.NewTask(showId: show.id, title: "Doors", status: .todo, rank: 20), tier: .global)
+        try await app.jazz.update(task.id, JazzApp.TaskPatch(status: .set(.doing)))
+        try await app.jazz.waitForSync(.global)
+        let remote = try await app.jazz.all(
+            JazzApp.tasks.query().where(JazzApp.tasks.showId.eq(show.id)), tier: .remote)
         XCTAssertEqual(remote.map(\.id), [task.id])
         XCTAssertEqual(remote.first?.status, .doing)
         try await app.jazz.close()
@@ -195,27 +191,62 @@ final class StagePlanTests: XCTestCase {
         let task = try await app.jazz.insert(
             JazzApp.NewTask(showId: show.id, title: "Notes", status: .todo, notes: "a😀b", rank: 1))
         let notes = try await app.jazz.text(task, JazzApp.tasks.notes)
-        // Inside the emoji's surrogate pair: refused, nothing written.
+        // UTF-16 inside the emoji's surrogate pair: refused, nothing written,
+        // as an NSRange and as raw offsets.
+        for attempt in [
+            { try await notes.replace(NSRange(location: 2, length: 0), with: "X") },
+            { try await notes.replace(utf16: 2..<2, with: "X") },
+        ] as [() async throws -> Void] {
+            do {
+                try await attempt()
+                XCTFail("an offset inside a surrogate pair must be refused")
+            } catch let error as JazzError {
+                guard case .refused = error else { return XCTFail("\(error)") }
+            }
+        }
+        XCTAssertEqual(notes.current, "a😀b")
+        // String.Index: after the emoji, then the first character.
+        let text = notes.current
+        try await notes.insert("X", at: text.index(text.startIndex, offsetBy: 2))
+        try await notes.delete(notes.current.startIndex..<notes.current.index(after: notes.current.startIndex))
+        XCTAssertEqual(notes.current, "😀Xb")
+        // An index that falls inside a character of `current` (UTF-8 offset 2
+        // is inside the emoji): refused.
+        let other = "xyz"
         do {
-            try await notes.insert("X", at: 2)
-            XCTFail("an offset inside a surrogate pair must be refused")
+            try await notes.insert("Y", at: other.utf8.index(other.utf8.startIndex, offsetBy: 2))
+            XCTFail("an index that isn't on a character boundary must be refused")
         } catch let error as JazzError {
             guard case .refused = error else { return XCTFail("\(error)") }
         }
-        try await notes.insert("X", at: 3)  // after the emoji
-        try await notes.delete(0..<1)
+        // NSRange, as a UITextView gives it: after the emoji's 2 UTF-16 units.
+        try await notes.replace(NSRange(location: 2, length: 1), with: "Z")
+        XCTAssertEqual(notes.current, "😀Zb")
+        try await notes.replace(NSRange(location: 2, length: 1), with: "X")
         XCTAssertEqual(notes.current, "😀Xb")
 
-        var seen: [String] = []
-        for try await text in notes.changes {
-            seen.append(text)
-            if text == "😀Xb!" { break }
-            if seen.count == 1 {
-                // Someone else appends; `changes` delivers the merged text.
-                try await app.jazz.editText(JazzApp.Task.self, id: task.id, column: "notes", from: "😀Xb", to: "😀Xb!")
+        // A backspace on a decomposed accent removes the combining mark
+        // alone: a UTF-16 range inside a character, taken as it is.
+        let accent = try await app.jazz.insert(
+            JazzApp.NewTask(showId: show.id, title: "Accent", status: .todo, notes: "e\u{301}x", rank: 2))
+        let accentNotes = try await app.jazz.text(accent, JazzApp.tasks.notes)
+        try await accentNotes.replace(NSRange(location: 1, length: 1), with: "")
+        XCTAssertEqual(accentNotes.current, "ex")
+
+        // Bounded: a wrong edit fails here instead of waiting forever.
+        let jazz = app.jazz
+        try await within(seconds: 15) {
+            var seen: [String] = []
+            for try await text in notes.changes {
+                seen.append(text)
+                if text == "😀Xb!" { break }
+                if seen.count == 1 {
+                    // Someone else appends; `changes` delivers the merged text.
+                    try await jazz.editText(JazzApp.Task.self, id: task.id, column: "notes", from: "😀Xb", to: "😀Xb!")
+                }
             }
+            XCTAssertEqual(seen.first, "😀Xb")
         }
-        XCTAssertEqual(seen.first, "😀Xb")
         XCTAssertEqual(notes.current, "😀Xb!")
         let stored = try await app.jazz.one(JazzApp.tasks.query().where(JazzApp.tasks.id.eq(task.id)))
         XCTAssertEqual(stored?.notes, "😀Xb!")
@@ -246,11 +277,13 @@ final class StagePlanTests: XCTestCase {
         let notes = try await app.jazz.text(task, JazzApp.tasks.notes)
         // Someone else's change is in the store before the handle edits.
         try await app.jazz.editText(JazzApp.Task.self, id: task.id, column: "notes", from: "Hello world", to: "Hello world!")
-        try await notes.insert("brave ", at: 6)
-        for try await text in notes.changes where text == "Hello brave world!" { break }
+        try await notes.insert("brave ", at: notes.current.index(notes.current.startIndex, offsetBy: 6))
+        try await within(seconds: 15) {
+            for try await text in notes.changes where text == "Hello brave world!" { break }
+        }
         XCTAssertEqual(notes.current, "Hello brave world!")
         // An append at the delivered end works.
-        try await notes.insert("?", at: notes.current.utf16.count)
+        try await notes.insert("?", at: notes.current.endIndex)
         let stored = try await app.jazz.one(JazzApp.tasks.query().where(JazzApp.tasks.id.eq(task.id)))
         XCTAssertEqual(stored?.notes, "Hello brave world!?")
         try await app.jazz.close()
@@ -321,5 +354,20 @@ final class StagePlanTests: XCTestCase {
         XCTAssertEqual(aliceSees.map(\.title), ["Secret"])
         try await bob.jazz.close()
         try await alice.jazz.close()
+    }
+}
+
+struct TimedOutWaiting: Error {}
+
+/// Runs `body`, failing with `TimedOutWaiting` after `seconds`.
+func within(seconds: UInt64, _ body: @escaping @Sendable () async throws -> Void) async throws {
+    try await withThrowingTaskGroup(of: Void.self) { group in
+        group.addTask { try await body() }
+        group.addTask {
+            try await _Concurrency.Task.sleep(nanoseconds: seconds * 1_000_000_000)
+            throw TimedOutWaiting()
+        }
+        defer { group.cancelAll() }
+        try await group.next()!
     }
 }

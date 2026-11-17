@@ -120,6 +120,24 @@ fn hops_unions_and_deleted_rows() {
         refused(json!({ "union": [{ "table": "tasks" }, { "table": "shows" }] }))
             .contains("every arm")
     );
+    // An unlabelled arm is labelled by what it reads, so two identical ones
+    // are refused; labelled, the same query reads twice.
+    assert!(
+        refused(json!({ "union": [{ "table": "tasks" }, { "table": "tasks" }] }))
+            .contains("name the arms")
+    );
+    let twice = json!({ "union": [
+        { "table": "tasks", "label": "one" },
+        { "table": "tasks", "label": "two" },
+    ] });
+    assert_eq!(
+        rows(&jazz, twice).len(),
+        2 * rows(&jazz, json!({ "table": "tasks" })).len()
+    );
+    assert!(
+        refused(json!({ "union": [{ "table": "tasks", "label": 1 }] }))
+            .contains("must be a string")
+    );
 }
 
 const TREE_APP: &str = r#"{

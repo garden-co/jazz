@@ -56,10 +56,12 @@ pub struct Updated<T> {
 }
 
 /// One edit of a large value in a subscription update: replace `delete`
-/// bytes at byte offset `at` with `insert` (UTF-8 for text). Text edits
-/// also carry the same edit in UTF-16 code units (`at_utf16`,
-/// `delete_utf16`), for hosts whose strings count those (Swift, Kotlin,
-/// JavaScript).
+/// bytes at byte offset `at` with `insert` (UTF-8 for text). On a text
+/// column `at` and `delete` are UTF-8 byte offsets, `str` indices, so
+/// `value.replace_range(at..at + delete, insert)` applies it to a Rust
+/// `String`. Text edits also carry the same edit in UTF-16 code units
+/// (`at_utf16`, `delete_utf16`), for hosts whose strings count those
+/// (Kotlin, JavaScript); Rust code doesn't need them.
 pub use jazz::db::LargeValueDeltaSplice as ValueSplice;
 
 #[derive(Debug, Clone, PartialEq)]

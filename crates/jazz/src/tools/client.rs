@@ -786,15 +786,23 @@ fn link_failure(error: NativeTransportError) -> LinkFailure {
         },
         NativeTransportError::Terminal(message) => LinkFailure::Refused(message),
         NativeTransportError::Retryable(message) => LinkFailure::Network(message),
+        NativeTransportError::Wire(error) => LinkFailure::from_wire_error(&error, false),
     }
 }
 
 /// How an established link ended. Losing an admitted link is an outage,
-/// whatever the transport calls it, unless the server refused the credential.
+/// whatever the transport calls it, unless the server refused the credential
+/// or ended it with a wire error, which the link classifies.
 fn terminal_failure(stopped: NativeTransportTerminal) -> LinkFailure {
     match stopped {
         NativeTransportTerminal::Failed(error @ NativeTransportError::AuthRejected(_)) => {
             link_failure(error)
+        }
+        // Not reached: the native transport reports a server's wire error
+        // only before hello, as a failed connect. Were an admitted link to
+        // end with one, the link would classify it as admitted.
+        NativeTransportTerminal::Failed(NativeTransportError::Wire(error)) => {
+            LinkFailure::from_wire_error(&error, true)
         }
         NativeTransportTerminal::Failed(
             NativeTransportError::Terminal(message) | NativeTransportError::Retryable(message),
@@ -984,13 +992,10 @@ impl JazzClient {
                     keeper.live = Some((attempt, link.terminal));
                     keeper.handle(LinkInput::Admitted(attempt));
                 }
-                Err(
-                    NativeTransportError::Terminal(error)
-                    | NativeTransportError::AuthRejected(error),
-                ) => {
-                    return Err(JazzError::Connection(error));
+                Err(error) if !error.is_retryable() => {
+                    return Err(JazzError::Connection(error.to_string()));
                 }
-                Err(error @ NativeTransportError::Retryable(_)) => {
+                Err(error) => {
                     tracing::debug!(%error, "jazz client starts offline");
                     keeper.handle(LinkInput::Ended(attempt, link_failure(error)));
                 }
@@ -1025,8 +1030,40 @@ impl JazzClient {
             .and_then(|context| context.transaction_id)
     }
 
-    /// The explicit session reads and writes run as, with its claims
-    /// registered for policy evaluation.
+    /// The explicit session a read runs as, with its claims: carried by the
+    /// read itself ([`crate::db::PreparedQuery::with_identity_claims`]), so each
+    /// handle's reads evaluate with its own session's claims. Registering
+    /// them per author would let another handle for the same user (other
+    /// claims) change what this handle's live reads show.
+    fn read_session(&self) -> Result<Option<(AuthorSubject, BTreeMap<String, CoreValue>)>> {
+        let Some(session) = self
+            .write_context
+            .as_ref()
+            .and_then(|context| context.session())
+        else {
+            return Ok(None);
+        };
+        Ok(Some((
+            session.author_subject()?,
+            session_claims_to_core_claims(session)?,
+        )))
+    }
+
+    /// `query` prepared for this handle's reads: with its session's own
+    /// claims when it acts for one, and that session's author.
+    fn prepare_read(
+        &self,
+        query: &Query,
+    ) -> Result<(crate::db::PreparedQuery, Option<AuthorSubject>)> {
+        let prepared = self.prepare(query)?;
+        Ok(match self.read_session()? {
+            Some((author, claims)) => (prepared.with_identity_claims(author, claims), Some(author)),
+            None => (prepared, None),
+        })
+    }
+
+    /// The explicit session writes run as, with its claims registered for
+    /// policy evaluation (and so carried to the core with its writes).
     fn session_identity(&self) -> Result<Option<AuthorSubject>> {
         let Some(session) = self
             .write_context
@@ -1286,9 +1323,8 @@ impl JazzClient {
         query: &Query,
         opts: ReadOpts,
     ) -> Result<CoreSubscriptionStream> {
-        let prepared = self.prepare(query)?;
+        let (prepared, session) = self.prepare_read(query)?;
         let opts = self.branch_opts(opts);
-        let session = self.session_identity()?;
         let db = self.db()?;
         crate::db::block_on(async {
             match session {
@@ -1314,7 +1350,8 @@ impl JazzClient {
         let read = with_history_identity(&query);
         let opts = self.branch_opts(opts);
         let rows = if let Some(transaction_id) = self.open_transaction()? {
-            let prepared = self.prepare(&read)?;
+            // A transaction opened for a session reads as that session.
+            let (prepared, session) = self.prepare_read(&read)?;
             let db = self.db()?;
             // A client's serializable read hydrates from the authority,
             // which needs ticks to answer. A branch view composes over the
@@ -1324,7 +1361,7 @@ impl JazzClient {
                 .settle(db.tx_ref(transaction_id).all_prepared_in(
                     &prepared,
                     false,
-                    None,
+                    session,
                     ReadTier::LocalFirst,
                     &opts.read_view.source,
                 ))
@@ -1345,23 +1382,13 @@ impl JazzClient {
                 }
             }
         } else {
-            let prepared = self.prepare(&read)?;
-            let session = self.session_identity()?;
+            let (prepared, session) = self.prepare_read(&read)?;
             let db = self.db()?;
-            let read_local = || {
-                crate::db::block_on(async {
-                    let roots = match &session {
-                        Some(author) => {
-                            db.all_for_identity(&prepared, opts.clone(), author.clone())
-                                .await
-                        }
-                        None => db.all(&prepared, opts.clone()).await,
-                    }?;
-                    // Array relations nest in their parents' cells, as a
-                    // subscription's rows carry them.
-                    db.nest_relations(&prepared, roots)
-                })
-            };
+            // Array relations nest in their parents' cells, as a
+            // subscription's rows carry them, read as the same session as
+            // the roots.
+            let read_local =
+                || crate::db::block_on(db.all_nested(&prepared, opts.clone(), session));
             // A row whose large values are still being fetched answers once
             // their chunks arrive, while the upstream that will send them is
             // connected.
@@ -1702,7 +1729,7 @@ impl JazzClient {
         &self,
         action: PermissionAdviceRequest,
     ) -> Result<crate::protocol::PermissionAdvice> {
-        if self.session_identity()?.is_some() || self.transaction_id().is_some() {
+        if self.read_session()?.is_some() || self.transaction_id().is_some() {
             return Err(JazzError::Query(
                 "permission advice for an explicit session or in a transaction is not supported"
                     .into(),
@@ -1741,7 +1768,7 @@ impl JazzClient {
     }
 
     /// [`JazzClient::update`] with edits of large-capable columns: a text
-    /// column's [`LargeValueUpdate::TextEdit`] (merged over what this
+    /// column's [`crate::db::LargeValueUpdate::TextEdit`] (merged over what this
     /// store has, as the authority merges), splices within a page, JSON
     /// replacements by pointer. The patch and the edits apply as one row
     /// update; a failing edit leaves the row unchanged.
@@ -1961,6 +1988,38 @@ impl JazzClient {
         Ok(true)
     }
 
+    /// The transactions of the thin session this client stands in for
+    /// (SPEC 8.14): a client a thin session's backend opened in memory,
+    /// linked to the core as that session, serves the session's
+    /// transaction requests ([`crate::thin_transactions`]).
+    pub fn thin_transactions(&self) -> Result<crate::thin_transactions::ThinTransactions> {
+        crate::thin_transactions::ThinTransactions::new(self.shared.identity.author)
+            .map_err(|error| JazzError::Connection(error.message))
+    }
+
+    /// Serve one of the thin session's transaction requests: a commit
+    /// answers once the core accepted its upload.
+    pub async fn serve_thin_transaction(
+        &self,
+        transactions: &mut crate::thin_transactions::ThinTransactions,
+        request: &crate::thin::ThinRequest,
+    ) -> Result<crate::thin::ThinBody> {
+        let db = self.db()?;
+        self.shared
+            .settle(transactions.serve(db, request.id, &request.op))
+            .await
+    }
+
+    /// End the thin session's open transactions and uploads: nothing of
+    /// them reached the core.
+    pub async fn release_thin_transactions(
+        &self,
+        transactions: crate::thin_transactions::ThinTransactions,
+    ) -> Result<()> {
+        let db = self.db()?;
+        self.shared.settle(transactions.release(db)).await
+    }
+
     /// How many of this client's commits await the server's verdict.
     pub fn pending_uploads(&self) -> usize {
         self.shared.db.pending_upload_count()
@@ -1984,16 +2043,11 @@ impl JazzClient {
             .settle(db.wait_for_sync(CoreDurabilityTier::Global, writer))
             .await?
             .map_err(|error| {
-                if error.is_authorization_denied() {
-                    JazzError::Sync(format!(
-                        "a write was rejected before reaching the server: {}",
-                        crate::db::AUTHORIZATION_DENIED
-                    ))
-                } else {
+                JazzError::write_rejected(&error).unwrap_or_else(|| {
                     JazzError::Write(format!(
                         "a write was rejected before reaching the server: {error}"
                     ))
-                }
+                })
             })
     }
 
@@ -2031,20 +2085,14 @@ impl JazzClient {
             .await?
             .map(drop)
             .map_err(|error| {
-                // A policy rejection is reported by its reason, as the
-                // authority's verdict on the transaction.
-                if error.is_authorization_denied() {
-                    JazzError::Sync(format!(
-                        "{} {tier:?} durability: {}",
-                        super::REJECTED_BEFORE,
-                        crate::db::AUTHORIZATION_DENIED
-                    ))
-                } else {
+                // A rejection carries the authority's verdict as TS's code
+                // and reason.
+                JazzError::write_rejected(&error).unwrap_or_else(|| {
                     JazzError::Write(format!(
                         "{} {tier:?} durability: {error}",
                         super::REJECTED_BEFORE
                     ))
-                }
+                })
             })
     }
 
@@ -2449,12 +2497,20 @@ impl JazzClient {
                 continue;
             }
             let _ = self.shared.db.discard_rejected_transaction(rejection.seq);
+            let (code, reason) =
+                super::rejection_code_and_reason(&rejection.error).unwrap_or_else(|| {
+                    // Any other refusal is a plain `write_rejected`, as TS
+                    // reports it, with the core's diagnostic.
+                    ("write_rejected".to_owned(), rejection.error.to_string())
+                });
             errors.push(MutationError {
                 transaction: TransactionId::from_committed_tx(TxId {
                     time: crate::time::TxTime(rejection.seq),
                     node,
                 }),
                 message: rejection.error.to_string(),
+                code,
+                reason,
                 denied: rejection.error.is_authorization_denied(),
                 serializable: rejection.serializable,
             });
@@ -2555,15 +2611,24 @@ pub struct StreamingUpload {
 /// A write of this client the server refused: see
 /// [`JazzClient::take_mutation_errors`].
 ///
-/// Serializes as `{"transaction": "<id>", "message", "denied",
-/// "serializable"}`, the transaction as its string id.
+/// Serializes as `{"transaction": "<id>", "message", "code", "reason",
+/// "denied", "serializable"}`, the transaction as its string id. More
+/// fields may come.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct MutationError {
     /// The refused commit, as its write returned it.
     #[serde(serialize_with = "serialize_display")]
     pub transaction: TransactionId,
+    /// The core's diagnostic.
     pub message: String,
+    /// TS's code (`MutationErrorEvent.code`): `permission_denied`,
+    /// `serialization_conflict`, `transaction_conflict`,
+    /// `client_clock_too_far_ahead` or `write_rejected`.
+    pub code: String,
+    /// TS's readable reason (`MutationErrorEvent.reason`).
+    pub reason: String,
     /// Refused by a permission.
     pub denied: bool,
     /// A serializable transaction's commit.

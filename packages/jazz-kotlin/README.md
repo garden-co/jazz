@@ -1,8 +1,10 @@
 # jazz-kotlin
 
+> **Experimental:** client only, backends are TypeScript. See [Language Support](https://jazz.tools/docs/reference/language-support#jazz-environment-kotlin).
+
 The Kotlin runtime for Jazz apps (JVM and Android apps; your app's main backend runs in TypeScript): `suspend` calls and `Flow` subscriptions over
 [`jazz-ffi`](../../crates/jazz-ffi) (UniFFI, through JNA), for the typed bindings
-`jazz-tools generate` writes to `src/main/kotlin/JazzApp.kt` beside a `build.gradle.kts`.
+`npx jazz-tools generate` writes from your `schema.ts` to `src/main/kotlin/JazzApp.kt`, beside a `build.gradle.kts`.
 
 ```kotlin
 val jazz = jazzapp.open(JazzConfig(appId = …, serverUrl = "https://app.example/jazz", auth = JazzAuth.DeviceAccount(key)))

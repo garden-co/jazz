@@ -1,4 +1,4 @@
-// The fixture app, from src/app/jazz.app.json (`jazz-tools generate --schema-dir src/app`).
+// The fixture app, from src/app/jazz.app.json and its committed bindings (a JSON-only test fixture).
 import { app } from "./app/jazz.generated.ts";
 import { openJazzClient, type OpenJazzClientConfig } from "jazz-tools/_dev/native-account-session";
 import { assertPersistedTitleForRun, persistedTitleForRun } from "./run-marker";

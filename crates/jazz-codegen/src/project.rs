@@ -275,7 +275,7 @@ pub fn migrations_create(dir: &Path, langs: &[Selected], name: &str) -> Result<O
     }
     let Some((lang, text)) = committed else {
         outcome.notes.push(
-            "no committed bindings, so no earlier version to migrate from: run `jazz-tools generate`"
+            "no committed bindings, so no earlier version to migrate from: run `npx jazz-tools generate`"
                 .into(),
         );
         return Ok(outcome);
@@ -305,7 +305,7 @@ pub fn migrations_create(dir: &Path, langs: &[Selected], name: &str) -> Result<O
         outcome.current = generated.current;
     } else {
         outcome.notes.push(format!(
-            "resolve {} TODO{} in {}, then run `jazz-tools generate`:",
+            "resolve {} TODO{} in {}, then run `npx jazz-tools generate`:",
             created.todos.len(),
             if created.todos.len() == 1 { "" } else { "s" },
             APP_FILE
@@ -334,6 +334,55 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// Bindings headed as before alpha.66 still read: `--check` passes on
+    /// them, and plain `generate` rewrites them with today's header.
+    #[test]
+    fn bindings_with_the_old_header_stay_current_until_generate_rewrites_them() {
+        let dir = dir();
+        std::fs::write(dir.join(APP_FILE), V1).unwrap();
+        for (lang, old, new) in [
+            (
+                Lang::TypeScript,
+                crate::ts::LEGACY_HEADER,
+                crate::ts::HEADER,
+            ),
+            (Lang::Rust, crate::rust::LEGACY_HEADER, crate::rust::HEADER),
+            (
+                Lang::Swift,
+                crate::swift::LEGACY_HEADER,
+                crate::swift::HEADER,
+            ),
+            (
+                Lang::Kotlin,
+                crate::kotlin::LEGACY_HEADER,
+                crate::kotlin::HEADER,
+            ),
+            (Lang::Go, crate::go::LEGACY_HEADER, crate::go::HEADER),
+        ] {
+            generate(&dir, &[lang.into()], false).unwrap();
+            let path = dir.join(lang.file());
+            let written = std::fs::read_to_string(&path).unwrap();
+            assert!(written.starts_with(new), "{lang:?}");
+            assert!(written.contains(crate::EDIT_NOTE), "{lang:?}");
+            let mut legacy = written.replacen(new, old, 1).replacen(
+                crate::EDIT_NOTE,
+                "Regenerate it after changing jazz.app.json.",
+                1,
+            );
+            // An older generator recorded the digest of what it wrote.
+            if let Some(digest) = bindings::output_digest(lang, &written) {
+                legacy = legacy.replacen(&digest, "0123456789abcdef", 1);
+            }
+            std::fs::write(&path, &legacy).unwrap();
+            let checked = generate(&dir, &[lang.into()], true).unwrap();
+            assert_eq!(checked.current, vec![lang.file().to_string()], "{lang:?}");
+            let outcome = generate(&dir, &[lang.into()], false).unwrap();
+            assert_eq!(outcome.written, vec![lang.file().to_string()], "{lang:?}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), written, "{lang:?}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// Plain `generate` rewrites TS bindings an older generator wrote (another
@@ -393,7 +442,7 @@ mod tests {
         assert!(
             generate(&dir, &[ts.into()], true)
                 .unwrap_err()
-                .contains("run `jazz-tools generate`")
+                .contains("run `npx jazz-tools generate`")
         );
         generate(&dir, &[ts.into()], false).unwrap();
         generate(&dir, &[ts.into()], true).unwrap();
