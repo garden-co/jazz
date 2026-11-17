@@ -341,6 +341,32 @@ fn short_values_have_fixed_meanings() {
     );
 }
 
+/// The shortest record length is the boundary itself: one byte short of
+/// it, even a well-formed envelope of a mechanism nobody routes is
+/// invalid; at it, the same envelope is unsupported.
+#[test]
+fn the_shortest_record_length_is_the_boundary_for_any_mechanism() {
+    let world = world(4);
+    let held = held_of(&world, ALICE, ROW);
+    let domain = shared(&world);
+    let address = space(ROW);
+    let target = row(&domain, &address, ROW_1);
+    let registry = &world.shared.registry;
+    let unknown = Mechanism::new("com.example.short", 1);
+    let header = envelope::encode(unknown, &[]).unwrap().len();
+    let below = envelope::encode(unknown, &vec![0; 77 - header]).unwrap();
+    let at = envelope::encode(unknown, &vec![0; 78 - header]).unwrap();
+    assert_eq!((below.len(), at.len()), (77, 78));
+    assert_eq!(
+        open_cell(registry, &held, &target, &title(), &below, false).unwrap(),
+        Opened::Unreadable(DataError::InvalidCiphertext)
+    );
+    assert_eq!(
+        open_cell(registry, &held, &target, &title(), &at, false).unwrap(),
+        Opened::Unreadable(DataError::UnsupportedFormat)
+    );
+}
+
 #[test]
 fn an_unrouted_cell_mechanism_is_unsupported_not_invalid() {
     let world = world(5);
