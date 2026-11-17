@@ -148,13 +148,16 @@ impl Report {
     }
 }
 
-/// The import keeps `--app-id` beside the data exactly as given; verify
+/// What the imported store records, read without writing to it or minting
+/// anything: a data dir without a store was not imported.
+fn imported_identity(data_dir: &std::path::Path) -> Result<jazz_server::RecordedIdentity, String> {
+    jazz_server::read_store_identity(data_dir)
+}
+
+/// The import keeps `--app-id` in the store exactly as given; verify
 /// checks against the same id.
 fn check_app_id(data_dir: &std::path::Path, app_id: &str) -> Result<(), String> {
-    let path = data_dir.join("app-id");
-    let kept =
-        std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let kept = kept.trim_end_matches('\n');
+    let kept = imported_identity(data_dir)?.app_id.unwrap_or_default();
     if kept != app_id {
         return Err(format!(
             "--app-id {app_id} is not the id {} was imported with ({kept})",
@@ -169,11 +172,8 @@ fn check_app_id(data_dir: &std::path::Path, app_id: &str) -> Result<(), String> 
 /// there. A remote store would need its credentials, so verify reads it
 /// only before that first start.
 fn blob_store(data_dir: &std::path::Path) -> Result<BlobStore, String> {
-    let marker = data_dir.join("blob-store");
-    let recorded = match std::fs::read_to_string(&marker) {
-        Ok(recorded) => recorded.trim_end_matches('\n').to_owned(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BlobStore::Sqlite),
-        Err(error) => return Err(format!("{}: {error}", marker.display())),
+    let Some(recorded) = imported_identity(data_dir)?.blob_store else {
+        return Ok(BlobStore::Sqlite);
     };
     match recorded.as_str() {
         "sqlite" => Ok(BlobStore::Sqlite),
@@ -678,7 +678,12 @@ mod tests {
     fn verify_refuses_another_app_id_than_the_import_kept() {
         let dir = tempfile::tempdir().unwrap();
         let id = "0a590000-0000-4000-8000-000000000059";
-        std::fs::write(dir.path().join("app-id"), format!("{id}\n")).unwrap();
+        assert!(check_app_id(dir.path(), id).is_err(), "no store, no import");
+        jazz_server::open_store_identity(
+            dir.path(),
+            jazz_server::IdentityOpen::Server { app_id: id },
+        )
+        .unwrap();
         check_app_id(dir.path(), id).unwrap();
         let refused = check_app_id(dir.path(), &id.to_uppercase()).unwrap_err();
         assert!(refused.contains("is not the id"), "{refused}");
@@ -686,20 +691,33 @@ mod tests {
 
     #[test]
     fn verify_reads_large_values_where_the_backend_moved_them() {
-        let dir = tempfile::tempdir().unwrap();
+        // Each store as a backend from before kept its record: a
+        // `blob-store` file, which the store imports on open.
+        let with_marker = |marker: Option<&str>| {
+            let dir = tempfile::tempdir().unwrap();
+            if let Some(marker) = marker {
+                std::fs::write(dir.path().join("blob-store"), marker).unwrap();
+            }
+            jazz_server::open_store_identity(
+                dir.path(),
+                jazz_server::IdentityOpen::Server { app_id: "app" },
+            )
+            .unwrap();
+            dir
+        };
+        let dir = with_marker(None);
         assert!(matches!(blob_store(dir.path()), Ok(BlobStore::Sqlite)));
-        let marker = dir.path().join("blob-store");
-        std::fs::write(&marker, "files\n").unwrap();
+        let dir = with_marker(Some("files\n"));
         assert!(matches!(
             blob_store(dir.path()),
             Ok(BlobStore::Files { dir: None })
         ));
-        std::fs::write(&marker, "files values\n").unwrap();
+        let dir = with_marker(Some("files values\n"));
         assert!(matches!(
             blob_store(dir.path()),
             Ok(BlobStore::Files { dir: Some(at) }) if at == dir.path().join("values")
         ));
-        std::fs::write(&marker, "s3 bucket/prefix\n").unwrap();
+        let dir = with_marker(Some("s3 bucket/prefix\n"));
         let refused = blob_store(dir.path()).err().unwrap();
         assert!(
             refused.contains("before the backend's first start"),

@@ -147,8 +147,10 @@ export type JazzStore =
 
 /**
  * A SQLite core in this process, kept in the directory `path`. It generates
- * its app id on first start and keeps it beside its data, in `<path>/app-id`
- * (`jazz-alpha59-alpha60-import` writes an alpha.59 app's id there). Large
+ * its app id on first start and keeps it in its own file, `<path>/jazz.sqlite`,
+ * with the rest of its identity, so a copy of that file is the same store
+ * (`jazz-alpha59-alpha60-import` records an alpha.59 app's id there). To
+ * open a copy beside the original, detach it first: `jazz-tools store detach`. Large
  * values' bytes go to `blobs`, by default `files()` in `<path>/blobs`.
  *
  * Only one process can open `path` at a time (it holds `<path>/jazz.lock`
@@ -962,6 +964,8 @@ interface Core {
    * in-process or Vercel core keeps with its data.
    */
   readonly appId: string;
+  /** What an in-process SQLite core keeps for signing agent tokens. */
+  readonly tokenSecret?: string;
   /** Where this process's own clients reach it. */
   readonly serverUrl: string;
   /**
@@ -1238,9 +1242,11 @@ async function openInProcessCore(
   const adminSecret = randomBytes(32).toString("base64url");
   // The core holds `<path>/jazz.lock` with an OS lock while it's open.
   if (store.kind === "sqlite") refuseServerlessDisk(store.path);
-  const appId = store.kind === "sqlite" ? await keptAppId(store.path) : randomUUID();
+  // A SQLite store keeps its app id in its own file: a new one on first
+  // start, so the app's identities stay the same across restarts (and
+  // restores of the file) without the app naming an id.
   const core = await JazzCore.open({
-    appId,
+    ...(store.kind === "sqlite" ? {} : { appId: randomUUID() }),
     backendSecret,
     adminSecret,
     ...(store.kind === "sqlite"
@@ -1269,8 +1275,10 @@ async function openInProcessCore(
       pinnedSocket(core.openInProcessSocket(onEvent), bundle),
     ),
   });
+  const appId = core.appId;
   const opened: Core = {
     appId,
+    ...(core.tokenSecret == null ? {} : { tokenSecret: core.tokenSecret }),
     serverUrl,
     adminSecret,
     backendSecret,
@@ -1282,59 +1290,6 @@ async function openInProcessCore(
     },
   };
   return opened;
-}
-
-/**
- * The app id an in-process SQLite core keeps beside its data, in
- * `<path>/app-id`: a new one on first start, so the app's identities stay
- * the same across restarts without the app naming an id.
- */
-async function keptAppId(dir: string): Promise<string> {
-  const file = join(dir, "app-id");
-  const kept = async (): Promise<string | undefined> => {
-    try {
-      return (await readFile(file, "utf8")).trim() || undefined;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      return undefined;
-    }
-  };
-  let appId = await kept();
-  if (appId === undefined) {
-    await mkdir(dir, { recursive: true });
-    // `wx`: two processes starting the same store at once agree on one id.
-    try {
-      appId = randomUUID();
-      await writeFile(file, `${appId}\n`, { flag: "wx" });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      appId = (await kept())!;
-    }
-  }
-  return appId;
-}
-
-/**
- * The secret an in-process SQLite core's agent tokens are signed with, kept
- * beside its data in `<path>/inspect-token-secret` (mode 0600) so tokens
- * survive restarts. Deleting the file revokes every token.
- */
-async function keptTokenSecret(dir: string): Promise<string> {
-  const file = join(dir, "inspect-token-secret");
-  try {
-    const kept = (await readFile(file, "utf8")).trim();
-    if (kept) return kept;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  const secret = newTokenSecret();
-  try {
-    await writeFile(file, `${secret}\n`, { flag: "wx", mode: 0o600 });
-    return secret;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    return (await readFile(file, "utf8")).trim();
-  }
 }
 
 /**
@@ -3666,7 +3621,6 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   }
 
   // The Inspector follows `reload`: it reads the current options each time.
-  let keptSecret: Promise<string> | undefined;
   let schemaOf: {
     app: CreateJazzOptions["app"];
     schema: ReturnType<typeof resolveSchemaSource>;
@@ -3709,14 +3663,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       const configured = options.inspector?.tokenSecret;
       if (configured !== undefined) return configured;
       if (store.kind === "remote") return store.secret ?? null;
-      if (store.kind === "sqlite") {
-        // Read once; a failed read is tried again on the next call.
-        keptSecret ??= keptTokenSecret(store.path).catch((error: unknown) => {
-          keptSecret = undefined;
-          throw error;
-        });
-        return keptSecret;
-      }
+      if (store.kind === "sqlite") return (core as Core).tokenSecret ?? null;
       if (store.kind === "memory") return memoryTokenSecret;
       // A Vercel core's only credential is the function's OIDC token: there
       // is no shared secret to sign with.
