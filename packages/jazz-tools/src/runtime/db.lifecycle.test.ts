@@ -1,18 +1,14 @@
 import { expect, it } from "vitest";
-import { schema as s } from "../schema-namespace.js";
-import { definePermissions } from "../permissions/index.js";
+import { testApp } from "../testing/test-app.js";
 import { createDb } from "./default-create-db.js";
 import type { Db } from "./db.js";
 import { DbClosedError, GracefulShutdownSyncError } from "./graceful-shutdown-error.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { startTestJazz } from "../testing/index.js";
 
-const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
+const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
 
-const permissions = definePermissions(app, ({ policy }) => {
-  policy.notes.allowRead.always();
-  policy.notes.allowInsert.always();
-});
+const permissions = { format: 1, tables: { notes: { read: "true", insert: "true" } } };
 
 async function withDb(run: (db: Db) => Promise<void>): Promise<void> {
   const server = await startTestJazz({ app, permissions, coreOptions: { inMemory: true } });
