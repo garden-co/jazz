@@ -9,6 +9,10 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::portable::admission::{
+    RequestedWebSocketLink, SessionRevocation, WebSocketAdmission, WebSocketCredential,
+    WebSocketPrelude, ws_link_admission,
+};
 use crate::portable::session::{session_claims, ws_peer_identity, ws_validate_session_identity};
 #[cfg(test)]
 use crate::portable::websocket_codec::decode_ws_frame_batch;
@@ -30,6 +34,7 @@ use axum::{
 use futures::{SinkExt as _, StreamExt as _};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
+#[cfg(test)]
 use jazz::records::Value as CoreValue;
 #[cfg(test)]
 use jazz::tools::Session;
@@ -228,35 +233,6 @@ async fn serve_upgraded_ws<IO>(
     .await;
 }
 
-#[derive(Clone, Debug)]
-struct WebSocketAdmission {
-    identity: AuthorSubject,
-    claims: BTreeMap<String, CoreValue>,
-    trust: CommitUnitTrust,
-    credential: WebSocketCredential,
-    requested_link: RequestedWebSocketLink,
-    /// The published permissions bundle the backend pinned this session
-    /// to (see [`jazz::catalogue`]).
-    bundle: Option<jazz::catalogue::BundleId>,
-    /// A user session the app's backend stated: `jazz.revokeUser` can end
-    /// it from any backend instance (see [`SessionRevocation`]).
-    revocation: Option<SessionRevocation>,
-}
-
-/// What a backend-stated user session is checked against: the user's
-/// session revocation mark in the account registry. The session ends once
-/// the mark is past the time the backend's `authenticate` started for it
-/// (`authenticatedAt` in the stated session, on the backend's clock), so a
-/// revocation from one backend instance reaches sessions another holds, and
-/// refuses those it admits later on an answer from before the revocation.
-#[derive(Clone, Debug)]
-struct SessionRevocation {
-    principal: jazz::account_registry::Principal,
-    /// Unix milliseconds. A backend that doesn't state it (older than this
-    /// check) gets the time the core admitted the session.
-    authenticated_at_ms: u64,
-}
-
 fn unix_now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -354,15 +330,6 @@ async fn session_not_revoked(
         }
         _ => Ok(()),
     }
-}
-
-/// Authentication class selected by the prelude, independently of the
-/// permission subject carried by each forwarded transaction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WebSocketCredential {
-    Admin,
-    Backend,
-    Session,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -548,76 +515,6 @@ fn ws_live_admissions_for(state: &ServerState, key: WebSocketAdmissionKey) -> us
         .by_key
         .get(&key)
         .map_or(0, VecDeque::len)
-}
-
-#[derive(serde::Deserialize)]
-struct WebSocketPrelude {
-    peer_identity: String,
-    auth: jazz::tools::websocket_prelude_auth::AuthConfig,
-    /// A one-shot authenticated authority-catalogue transfer. This is not a
-    /// subscriber session and never admits application frames.
-    #[serde(default)]
-    bootstrap_catalogue: bool,
-    /// Requested before any wire frame.  It is only a request: after JWT/cookie
-    /// authentication and feature negotiation the server either creates its
-    /// own immutable admitted relay capability or rejects the connection.
-    #[serde(default)]
-    requested_link: RequestedWebSocketLink,
-    /// The audience a trusted backend verified the client's local-first
-    /// proof against; honoured only with that backend's secret (see
-    /// [`crate::middleware::auth::LOCAL_FIRST_AUDIENCE_HEADER`]).
-    #[serde(default)]
-    local_first_audience: Option<String>,
-    /// The published permissions bundle (hex id) the backend that opened
-    /// this socket serves with; honoured only on that backend's word (its
-    /// credential on the upgrade, or its secret here), as a client could
-    /// otherwise pick an older bundle's laxer policies.
-    #[serde(default)]
-    bundle: Option<String>,
-}
-
-/// The only client-selectable *request* at the WebSocket boundary.  This is
-/// intentionally separate from `WirePeerRole`: a wire hello says what a peer
-/// implements, not what authority it receives.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RequestedWebSocketLink {
-    #[default]
-    OrdinarySession,
-    ScopeIsolatedClientRelay,
-}
-
-/// Select the server-owned link capability after credential admission and wire
-/// feature negotiation. This stays separate from the client prelude because a
-/// request alone cannot grant scoped relay authority.
-fn ws_link_admission(
-    admission: &WebSocketAdmission,
-    negotiated_features: u64,
-    admission_epoch: u64,
-) -> Result<ServerLinkAdmission, WireError> {
-    match admission.requested_link {
-        RequestedWebSocketLink::OrdinarySession
-            if admission.credential == WebSocketCredential::Admin
-                && admission.identity == AuthorSubject::SYSTEM
-                && admission.trust == CommitUnitTrust::TrustedAuthority =>
-        {
-            Ok(ServerLinkAdmission::AuthorityQueryDelegate)
-        }
-        RequestedWebSocketLink::OrdinarySession => Ok(ServerLinkAdmission::OrdinarySession),
-        RequestedWebSocketLink::ScopeIsolatedClientRelay
-            if admission.trust == CommitUnitTrust::Session
-                && negotiated_features & jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY != 0 =>
-        {
-            // This epoch was minted by the server for this accepted socket.
-            // Reconnects necessarily get a fresh capability.
-            Ok(ServerLinkAdmission::ScopeIsolatedClientRelay { admission_epoch })
-        }
-        RequestedWebSocketLink::ScopeIsolatedClientRelay => Err(WireError::new(
-            WireErrorCode::UnsupportedFeature,
-            WireRetry::Never,
-            "scope-isolated client relay requires an authenticated session and negotiated relay feature",
-        )),
-    }
 }
 
 async fn ws_admission(
