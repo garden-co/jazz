@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef } from "react";
-import { useDb, useSession } from "jazz-tools/react";
+import { useDb, useJazzSession } from "jazz-tools/react";
 import { useRouter } from "@/hooks/useRouter";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { waitForWrite } from "@/lib/db-write";
-import { app } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
 import { type DurabilityTier } from "jazz-tools";
 
 interface InviteHandlerProps {
@@ -13,7 +13,7 @@ interface InviteHandlerProps {
 
 export function InviteHandler({ chatId, code }: InviteHandlerProps) {
   const db = useDb();
-  const session = useSession();
+  const session = useJazzSession();
   const { navigate } = useRouter();
   const handled = useRef(false);
   const sharedWriteOptions: { tier: DurabilityTier } = useMemo(
@@ -21,7 +21,7 @@ export function InviteHandler({ chatId, code }: InviteHandlerProps) {
     [db],
   );
 
-  const userId = session?.user ?? null;
+  const userId = session.user?.accountId ?? null;
   const myProfile = useMyProfile();
 
   useEffect(() => {

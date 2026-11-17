@@ -1,17 +1,19 @@
-//! Todo Server - Example backend using jazz-tools.
+//! Todo Server - Example backend using the `jazz-app-support` crate.
 //!
-//! Demonstrates a simple todo list API backed by Jazz for local persistence
-//! and server sync.
+//! Demonstrates a simple todo list API over a Jazz app, run as a backend
+//! client of the app's TypeScript main backend (`createJazz`): local
+//! persistence, and sync through the main backend's /jazz.
 //!
 //! # Running
 //!
 //! ```bash
-//! # Start a configured Jazz server with this example's schema and permissions.
-//! # Set JAZZ_APP_ID, JAZZ_SERVER_URL and JAZZ_BACKEND_SECRET (and optionally
-//! # TODO_USER_ID, the user this service acts as).
+//! # The main backend's /jazz, its app id, and a machine credential it
+//! # trusts with `trustWorkload` (an OIDC token):
+//! export JAZZ_SERVER_URL=https://todo.example/jazz JAZZ_APP_ID=…
+//! export JAZZ_TOKEN_FILE=/var/run/secrets/tokens/jazz   # or JAZZ_TOKEN / JAZZ_TOKEN_COMMAND
 //!
 //! # Then run the todo backend
-//! cargo run --manifest-path examples/docs/todo-server-rs/Cargo.toml
+//! cargo run -p todo-server-docs
 //! ```
 //!
 //! # API
@@ -20,154 +22,109 @@
 //! |-------|--------|-------------|
 //! | `/todos` | GET | List all todo items |
 //! | `/todos` | POST | Create new item |
+//! | `/todos/:id` | GET | Get one item |
 //! | `/todos/:id` | PUT | Update item |
 //! | `/todos/:id` | DELETE | Delete item |
 //! | `/todos/live` | GET | SSE stream of full-list snapshots |
 
-mod client_worker;
-mod docs_snippets;
-mod routes;
-
+use std::future::IntoFuture;
 use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::process::Command;
-use std::sync::Arc;
+use std::time::Duration;
 
-use axum::Router;
-use jazz::tools::{AppContext, AppId, ClientStorage, Schema, Session};
-use tokio::sync::broadcast;
+use futures_util::FutureExt;
+use todo_server_docs::jazz_app::{AppFiles, AppId, CLOSE_TIMEOUT, Config, Jazz, Storage};
+use todo_server_docs::{credential::Credential, jazz_app, router_until};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
-use client_worker::TodoClient;
-use routes::Todo;
-
-/// Application state shared across request handlers.
-pub struct AppState {
-    pub client: TodoClient,
-    /// Broadcast channel for SSE updates. Sends the full list of todos.
-    pub sse_tx: broadcast::Sender<Vec<Todo>>,
+/// Resolves on Ctrl-C, or SIGTERM (what a container runtime sends).
+async fn signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut terminate = signal(SignalKind::terminate()).expect("listen for SIGTERM");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
-fn load_schema_from_cli(schema_dir: &str) -> Result<Schema, Box<dyn std::error::Error>> {
-    let jazz_tools_bin = std::env::var("JAZZ_TOOLS_BIN").unwrap_or_else(|_| "jazz-tools".into());
-    let output = Command::new(jazz_tools_bin)
-        .args(["schema", "compile", "--schema-dir", schema_dir])
-        .output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("schema compile failed: {stderr}").into());
-    }
-
-    Ok(serde_json::from_slice(&output.stdout)?)
+fn env(name: &str) -> Result<String, String> {
+    std::env::var(name).map_err(|_| format!("set {name}"))
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("todo_server=info".parse().unwrap())
-                .add_directive("jazz_rs=debug".parse().unwrap()),
+                .add_directive("todo_server_docs=info".parse().unwrap()),
         )
         .init();
 
-    // Configuration from environment or defaults
-    let app_id = std::env::var("JAZZ_APP_ID").unwrap_or_else(|_| "todo-app".to_string());
-    let server_url =
-        std::env::var("JAZZ_SERVER_URL").unwrap_or_else(|_| "http://localhost:1625".to_string());
-    // This service is the app's backend: it holds the core's backend secret
-    // and acts as one user of the app.
-    let backend_secret = std::env::var("JAZZ_BACKEND_SECRET")
-        .map_err(|_| "set JAZZ_BACKEND_SECRET to the sync server's backend secret")?;
-    // The published permissions bundle (its hex id) this service's user
-    // session is pinned to, as createJazz pins the sessions it states: the
-    // core governs the session by it and refuses one without.
-    let bundle = std::env::var("JAZZ_BUNDLE")
-        .map_err(|_| "set JAZZ_BUNDLE to the permissions bundle the app published")?;
-    let user_id = std::env::var("TODO_USER_ID").unwrap_or_else(|_| "todo-service".to_string());
+    // Configuration from the environment
+    let app_id = env("JAZZ_APP_ID")?;
+    let server_url = env("JAZZ_SERVER_URL")?;
+    let credential = Credential::from_env()?;
     let data_dir = std::env::var("TODO_DATA_DIR").unwrap_or_else(|_| "./todo-data".to_string());
     let port: u16 = std::env::var("TODO_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(3000);
 
-    info!("Starting todo server");
-    info!("App ID: {}", app_id);
-    info!("Jazz server: {}", server_url);
-    info!("Data directory: {}", data_dir);
+    // #region context-setup-rust-backend-client
+    // This service is a backend client of the app's main backend: it syncs
+    // through the main backend's /jazz with its machine credential, and the
+    // main backend decides who it is (`trustWorkload` in `createJazz`):
+    // scoped as one user, with that user's permissions, or trusted.
+    let app_id = AppId::from_string(&app_id).map_err(|_| {
+        format!("JAZZ_APP_ID `{app_id}` is not an app id (createJazz's jazz.appId)")
+    })?;
+    let config = Config::new(app_id)
+        .server(&server_url)
+        .storage(Storage::Dir(data_dir.into()))
+        .credential(credential.provider());
 
-    let schema_root = env!("CARGO_MANIFEST_DIR");
-    let schema = load_schema_from_cli(schema_root)?;
+    // The app's files: the schema the bindings embed, and the permissions,
+    // which a backend client checks the users it acts for by (as TS
+    // createJazzClient requires `permissions`).
+    let files = AppFiles::new(jazz_app::APP, None)
+        .with_permissions(include_bytes!("../jazz.permissions.json").as_slice());
+    let jazz = Jazz::open(files, config).await?;
+    // #endregion context-setup-rust-backend-client
     info!(
-        "Loaded schema from {schema_root}/schema.ts ({} tables)",
-        schema.len()
+        "Connected to {server_url} as a {:?} backend client",
+        jazz.backend_client()
     );
 
-    // The app's schema versions and lenses, from the jazz.app.json and
-    // jazz.permissions.json `jazz-tools validate` writes beside schema.ts, so
-    // this client stores each version as the server does.
-    let read = |file: &str| std::fs::read(format!("{schema_root}/{file}"));
-    let app = jazz::tools::deployment::artifact::load(
-        &read(jazz::tools::deployment::artifact::APP_FILE)?,
-        &read(jazz::tools::deployment::artifact::PERMISSIONS_FILE)?,
-    )?;
-    if jazz::tools::SchemaHash::compute(&schema) != app.current_hash() {
-        return Err(format!(
-            "jazz.app.json is not for this schema.ts (its current schema is {}): \
-             run `npx jazz-tools validate` and commit jazz.app.json and jazz.permissions.json",
-            app.current_hash()
-        )
-        .into());
-    }
-    let migrations = app.client_migrations();
-
-    // Create Jazz client
-    // #region context-setup-rust-backend
-    let app_id = AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id));
-    let context = AppContext {
-        app_id,
-        client_id: None,
-        schema,
-        server_url,
-        data_dir: PathBuf::from(data_dir),
-        storage: ClientStorage::Persistent,
-        account_id: None,
-        jwt_token: None,
-        backend_secret: Some(backend_secret),
-        // The user this service acts as, named as `createJazz` names its users.
-        backend_session: Some(Session::new("jazz:backend", user_id)),
-        bundle: Some(bundle),
-        admin_secret: None,
-        migrations,
-    };
-    // #endregion context-setup-rust-backend
-
-    let client = TodoClient::connect(context).await?;
-    info!("Connected to Jazz");
-
-    // Create broadcast channel for SSE updates
-    let (sse_tx, _) = broadcast::channel::<Vec<Todo>>(16);
-
-    // Build application state
-    let state = Arc::new(AppState { client, sse_tx });
-
-    // Build router
-    let app = Router::new()
-        .nest("/", routes::create_router())
+    // Ctrl-C or SIGTERM: stop accepting, end the live streams, let the
+    // requests in flight finish (for up to 10 seconds), then stop the
+    // client, so the writes already made finish and the store closes.
+    let stopping = signal().boxed().shared();
+    let app = router_until(jazz.clone(), stopping.clone())
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
-        .with_state(state);
-
-    // Start server
+        .layer(CorsLayer::permissive());
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    info!("Listening on http://{}", addr);
-
+    info!("Listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
-
+    let serving = axum::serve(listener, app)
+        .with_graceful_shutdown(stopping.clone())
+        .into_future();
+    tokio::pin!(serving);
+    tokio::select! {
+        served = &mut serving => served?,
+        () = async {
+            stopping.await;
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        } => info!("Requests still open after 10 s; stopping anyway"),
+    }
+    info!("Shutting down");
+    jazz.close(CLOSE_TIMEOUT).await?;
     Ok(())
 }

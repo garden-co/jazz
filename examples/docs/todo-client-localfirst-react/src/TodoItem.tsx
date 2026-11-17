@@ -1,5 +1,5 @@
 import { useAll } from "jazz-tools/react";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 
 export function TodoItem({ id }: { id: string }) {
   const { data: todos = [], db } = useAll(app.todos.where({ id }).limit(1));

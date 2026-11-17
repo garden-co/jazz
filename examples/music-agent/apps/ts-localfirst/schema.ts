@@ -1,7 +1,6 @@
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations/index.js";
 
-const schema = {
+export const schema = s.defineSchema({
   conversations: s.table(
     {
       title: s.string(),
@@ -43,9 +42,29 @@ const schema = {
     },
     { turn: s.rel("turns", "turn_id") },
   ),
-};
+});
 
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
-export type Conversation = s.RowOf<typeof app.conversations>;
-export type Turn = s.RowOf<typeof app.turns>;
+const { definePermissions } = schema;
+
+export const permissions = definePermissions({
+  attachments: {
+    read: true,
+    insert: true,
+    update: true,
+  },
+  conversations: {
+    read: true,
+    insert: true,
+    update: true,
+  },
+  tool_calls: {
+    read: true,
+    insert: true,
+    update: true,
+  },
+  turns: {
+    read: true,
+    insert: true,
+    update: true,
+  },
+});

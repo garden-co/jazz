@@ -90,6 +90,8 @@ pub struct Anchor {
 )]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Resolved {
+    /// UTF-16 code units from the value's start, or UTF-8 bytes from
+    /// [`Anchor::resolve_utf8`].
     pub position: usize,
     pub confidence: f64,
     /// Another place matched about as well: the anchor needs more context
@@ -118,7 +120,33 @@ impl Anchor {
         }
     }
 
-    /// Where this anchor lands in `text`, the value at `version`.
+    /// The anchor at the UTF-8 byte offset `position` (a `str` index) of
+    /// `text`, the value at `version`. An offset inside a code point or past
+    /// the end is refused. The anchor is the same as [`Anchor::capture`]'s:
+    /// its `position` hint still counts UTF-16 code units, so hosts that
+    /// count those resolve it too.
+    pub fn capture_utf8(
+        text: &str,
+        version: Option<u64>,
+        position: usize,
+        side: Side,
+    ) -> Result<Self, crate::NotCharBoundary> {
+        let position = crate::utf8_to_utf16(text, position)?;
+        Ok(Self::capture(text, version, position, side))
+    }
+
+    /// Where this anchor lands in `text`, as [`Anchor::resolve`], with the
+    /// position in UTF-8 bytes (a `str` index, always on a char boundary).
+    pub fn resolve_utf8(&self, text: &str, version: Option<u64>) -> Resolved {
+        let resolved = self.resolve(text, version);
+        Resolved {
+            position: crate::utf16_to_utf8(text, resolved.position),
+            ..resolved
+        }
+    }
+
+    /// Where this anchor lands in `text`, the value at `version`, in UTF-16
+    /// code units ([`Anchor::resolve_utf8`] gives UTF-8 bytes).
     pub fn resolve(&self, text: &str, version: Option<u64>) -> Resolved {
         let text: Vec<u16> = text.encode_utf16().collect();
         let hint = self.position.map(|position| position.min(text.len()));

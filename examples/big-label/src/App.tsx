@@ -19,8 +19,8 @@ import {
   TopNav,
   TopNavHeading,
 } from "@astryxdesign/core";
-import { useAll, useSession } from "jazz-tools/react";
-import { app } from "../schema";
+import { useAll, useJazzSession } from "jazz-tools/react";
+import { app } from "../jazz.generated";
 import { OrganizationProvider, type CurrentOrganization } from "./lib/organization";
 import { href, useRoute, type Route } from "./lib/route";
 import { isRole, roleLabels } from "./roles";
@@ -57,9 +57,9 @@ export function Operations({
   setupError?: { message: string; retry: () => void } | null;
   onSignOut: () => void;
 }) {
-  const session = useSession();
+  const session = useJazzSession();
   const route = useRoute();
-  const account = session?.user;
+  const account = session.user?.accountId;
   // Every label this account belongs to: an indexed lookup on the denormalized userId.
   const { data: memberships, isLoading } = useAll(
     account

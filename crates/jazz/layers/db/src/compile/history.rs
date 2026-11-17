@@ -15,9 +15,11 @@
 //! `$transactionId` is the `(tx, node)` the writer committed under, as
 //! `_jazz_transactions` records it for an upload. The authority's own commits
 //! are not recorded there: they are `(seq, authority node)`. A replica
-//! lists only versions whose transaction it knows. `$acceptedAt` is the
-//! authority's stamp for the commit (ms, distinct per commit) as an HLC
-//! with a zero logical counter.
+//! lists only versions whose transaction it knows. `$acceptedAt` is when
+//! the authority accepted the commit: the version's hybrid-clock position,
+//! as an HLC whose logical counter is the position's (distinct per commit,
+//! ordered as the authority accepted them), whatever `updatedAt` the
+//! writer named.
 
 use crate::schema::history::{ACCEPTED_AT_COLUMN, HistoryMetadataColumn, TRANSACTION_ID_COLUMN};
 
@@ -203,8 +205,19 @@ impl Ctx<'_> {
                 recorded.to_owned()
             }
         };
-        let accepted =
-            format!("(COALESCE(v.\"$updatedAt\", v.\"$createdAt\") << {ACCEPTED_AT_COUNTER_BITS})");
+        // The authority's accept time is the version's position: an
+        // accepted `_clock` is the commit's hybrid-clock position (its ms
+        // since `HLC_EPOCH_MS` above `HLC_COUNTER_BITS` of counter), so
+        // `$acceptedAt` keeps both, the ms and the counter that tells
+        // commits of one ms apart. `$updatedAt` stays the writer's time,
+        // which an explicit `updatedAt` (an import, a backfill) sets.
+        let accepted = format!(
+            "((((v._clock >> {hlc_bits}) + {epoch}) << {ACCEPTED_AT_COUNTER_BITS}) \
+             | (v._clock & {counter}))",
+            hlc_bits = crate::db::shard::HLC_COUNTER_BITS,
+            epoch = crate::db::shard::HLC_EPOCH_MS,
+            counter = (1u64 << crate::db::shard::HLC_COUNTER_BITS) - 1,
+        );
         let mut deletion = String::new();
         for column in ["$deletedAt", "$deletedBy"] {
             deletion.push_str(&format!(

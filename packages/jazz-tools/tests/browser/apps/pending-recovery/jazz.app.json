@@ -1,0 +1,8 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "headers": { "columns": { "version": "int" } },
+    "items": { "columns": { "version": "int" } }
+  }
+}

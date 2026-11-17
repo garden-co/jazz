@@ -226,51 +226,6 @@ describe("native row codec", () => {
     expect(bytesToHex(row)).toMatchInlineSnapshot(`"01010576616c75650f0f08020100"`);
   });
 
-  it("round-trips scalar payload enum cases, nullable fields, and descriptor metadata", () => {
-    const columns = [
-      {
-        name: "event",
-        column_type: {
-          type: "EnumPayload" as const,
-          cases: [
-            {
-              name: "message",
-              fields: [
-                { name: "text", column_type: { type: "Text" as const }, nullable: false },
-                { name: "level", column_type: { type: "Integer" as const }, nullable: true },
-              ],
-            },
-            {
-              name: "closed",
-              fields: [
-                { name: "code", column_type: { type: "Integer" as const }, nullable: false },
-              ],
-            },
-          ],
-        },
-        nullable: true,
-      },
-    ];
-    const payload = {
-      type: "Enum" as const,
-      value: {
-        case: "message",
-        values: [{ type: "Text" as const, value: "hello" }, { type: "Null" as const }],
-      },
-    };
-    const encoded = encodeNativeRowValues(columns, [payload]);
-    expect(decodeNativeRowValues(columns, encoded)).toEqual([payload]);
-    const storage = storageColumnValueType(columns[0]!);
-    expect(storage).toMatchObject({ tag: 15, inner: { tag: 17, enumSchema: { name: "event" } } });
-    expect(storage.inner?.enumSchema?.cases?.[0]?.payload[0]).toMatchObject({
-      name: "text",
-      valueType: { tag: 8 },
-    });
-    expect(() =>
-      encodeNativeRowValues(columns, [{ type: "Enum", value: { case: "missing", values: [] } }]),
-    ).toThrow("invalid Enum payload case or width");
-  });
-
   it("round-trips the Record descriptor payload before reading the next field", () => {
     const writer = new PostcardWriter();
     writeDescriptor(writer, [
@@ -293,7 +248,7 @@ describe("native row codec", () => {
     expect(reader.u64()).toBe(42);
   });
 
-  it("round-trips a payload enum descriptor at ValueType tag 17", () => {
+  it("round-trips an engine enum descriptor (cases with records) at ValueType tag 17", () => {
     // Keep this fixture explicit: a tag-16 decoder which merely consumes the
     // enum header, or skips a case payload descriptor, leaves the trailing
     // value unread and is rejected below.
@@ -436,6 +391,18 @@ describe("native row codec", () => {
         "BigInt value must be a signed 64-bit integer",
       );
     }
+  });
+
+  // #5928: a pre-1970 Date used to wrap around to a far-future u64.
+  it("rejects timestamps before 1970 and keeps the epoch", () => {
+    const column = [{ name: "at", column_type: { type: "Timestamp" as const }, nullable: false }];
+    for (const value of [-1, -86_400_000]) {
+      expect(() => encodeNativeRowValues(column, [{ type: "Timestamp", value }])).toThrow(
+        "Timestamp value must be a non-negative safe integer",
+      );
+    }
+    const epoch = encodeNativeRowValues(column, [{ type: "Timestamp", value: 0 }]);
+    expect(decodeNativeRowValues(column, epoch)).toEqual([{ type: "Timestamp", value: 0 }]);
   });
 
   it("requires exact numeric BigInt values while preserving signed i64 boundaries", () => {

@@ -1,14 +1,14 @@
 <script lang="ts">
-	import { getSession, QuerySubscription } from 'jazz-tools/svelte';
-	import { app } from '../session-app.js';
+	import { getJazzSession, QuerySubscription } from 'jazz-tools/svelte';
+	import { app } from '../session-app/jazz.generated.js';
 
 
   // #region auth-session-svelte-hook
-  const session = getSession();
+  const session = getJazzSession();
   // #endregion auth-session-svelte-hook
 
   // #region auth-session-svelte-user
-  const sessionUser = $derived(session.current?.user ?? null);
+  const sessionUser = $derived($session.user?.accountId ?? null);
   // #endregion auth-session-svelte-user
 
   // #region auth-session-svelte-query

@@ -1,0 +1,13 @@
+{
+  "receipts": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "label",
+        "nullable": false
+      }
+    ]
+  }
+}
