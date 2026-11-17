@@ -457,7 +457,7 @@ fn mid_letter_punctuation_stays_inside_words() {
         ["3", "4", "home", "about", "a", "b"]
     );
     // WB4: niqqud before a gershayim belongs to the letter before it.
-    assert_eq!(terms(simple(), "צהָ״ל"), ["צהָל"]);
+    assert_eq!(terms(simple(), "צהָ״ל"), ["צהל"]);
     assert_eq!(terms(simple(), "say \"hi\""), ["say", "hi"]);
     assert_eq!(terms(simple(), "a\"b"), ["a", "b"]);
     assert_eq!(terms(simple(), "שלום״"), ["שלום"]);
@@ -475,6 +475,24 @@ fn the_prefix_word_keeps_its_exact_term_slot() {
     let q = en().query("jazz running run", true).unwrap();
     assert_eq!(q.terms, ["jazz", "run"]);
     assert_eq!(q.prefix.unwrap().lo, "run");
+}
+
+/// Hebrew points and cantillation and Arabic harakat fold away, so pointed
+/// and unpointed spellings meet; the letters stay.
+#[test]
+fn hebrew_points_and_arabic_harakat_fold_away() {
+    assert_eq!(terms(simple(), "שָׁלוֹם"), terms(simple(), "שלום"));
+    assert_eq!(terms(simple(), "בְּרֵאשִׁ֖ית"), ["בראשית"]);
+    assert_eq!(terms(simple(), "مَرْحَبًا"), terms(simple(), "مرحبا"));
+    assert_eq!(terms(simple(), "رَحْمٰن"), ["رحمن"]);
+    // The tatweel only stretches a word, and Quranic marks annotate it.
+    assert_eq!(terms(simple(), "مـرحبا"), ["مرحبا"]);
+    assert_eq!(terms(simple(), "ٱلرَّحْمَـٰنِ"), ["ٱلرحمن"]);
+    assert_eq!(terms(simple(), "الرحمن\u{06DA}"), ["الرحمن"]);
+    // Alef forms are not normalised: alef wasla stays its own letter.
+    assert_ne!(terms(simple(), "ٱلرحمن"), terms(simple(), "الرحمن"));
+    // Hebrew punctuation is not a point: maqaf (U+05BE) still separates.
+    assert_eq!(terms(simple(), "בית־ספר"), ["בית", "ספר"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -501,6 +519,8 @@ const TERM_CASES: &[&str] = &[
     "e\u{1ab0}x e\u{1dc0}x e\u{20d0}x e\u{fe20}x 葛\u{e0100}",
     "col·lecció צה״ל צה\"ל ג׳ירפה a· say \"hi\"",
     "3·4 Home·About COL·LECCIÓ צהָ״ל",
+    "שָׁלוֹם בְּרֵאשִׁ֖ית مَرْحَبًا رَحْمٰن בית־ספר",
+    "مـرحبا ٱلرَّحْمَـٰنِ الرحمن\u{06DA} أحمد",
 ];
 
 const IMPACT_CASES: &[&[(u8, u16, &str)]] = &[

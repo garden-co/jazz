@@ -334,12 +334,10 @@ fn joins(c: char, before: Option<char>, after: Option<char>) -> bool {
 }
 
 /// Whether `c` extends the character before it (UAX #29 WB4): a combining
-/// mark (the combining-diacritics blocks, Hebrew points and accents, marks
-/// of the unspaced scripts) or an ignored character.
+/// mark that folds away (combining diacritics, Hebrew points, Arabic
+/// harakat), a mark of the unspaced scripts, or an ignored character.
 fn extends(c: char) -> bool {
-    dropped_mark(c as u32)
-        || matches!(class(c), Class::Mark | Class::Ignored)
-        || matches!(c as u32, 0x0591..=0x05BD | 0x05BF | 0x05C1..=0x05C2 | 0x05C4..=0x05C5 | 0x05C7)
+    dropped_mark(c as u32) || matches!(class(c), Class::Mark | Class::Ignored)
 }
 
 /// UAX #29's Hebrew_Letter: the Hebrew letters and their presentation forms.
@@ -413,11 +411,23 @@ fn fold_letter(n: u16) -> Option<&'static str> {
 }
 
 /// Marks that fold away: the combining diacritical mark blocks (so
-/// decomposed and precomposed spellings meet) and variation selectors.
+/// decomposed and precomposed spellings meet), Hebrew points and
+/// cantillation, Arabic harakat, Quranic marks and the tatweel, and
+/// variation selectors. Nobody types
+/// vowel points into a search box, so pointed and unpointed spellings meet.
 fn dropped_mark(n: u32) -> bool {
     matches!(n,
         0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF
-        | 0xFE20..=0xFE2F | 0xFE00..=0xFE0F | 0xE0100..=0xE01EF)
+        | 0xFE20..=0xFE2F | 0xFE00..=0xFE0F | 0xE0100..=0xE01EF
+        // Hebrew points and cantillation marks.
+        | 0x0591..=0x05BD | 0x05BF | 0x05C1..=0x05C2 | 0x05C4..=0x05C5 | 0x05C7
+        // Arabic harakat and the superscript alef.
+        | 0x064B..=0x065F | 0x0670
+        // Arabic tatweel (a letter that only stretches the line).
+        | 0x0640
+        // Quranic annotation marks.
+        | 0x0610..=0x061A | 0x06D6..=0x06DC | 0x06DF..=0x06E4 | 0x06E7..=0x06E8
+        | 0x06EA..=0x06ED | 0x08CA..=0x08FF)
 }
 
 /// Unicode 16.0.0 simple case folding.

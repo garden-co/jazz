@@ -160,7 +160,23 @@ term 34  # "4"
 term 686f6d65  # "home"
 term 61626f7574  # "about"
 term 636f6c6c656363696f  # "colleccio"
-term d7a6d794d6b8d79c  # "צה\u{5b8}ל"
+term d7a6d794d79c  # "צהל"
+
+analyzer jazz-text/1:en
+text d7a9d6b8d781d79cd795d6b9d79d20d791d6b0d6bcd7a8d6b5d790d7a9d6b4d781d696d799d7aa20d985d98ed8b1d992d8add98ed8a8d98bd8a720d8b1d98ed8add992d985d9b0d98620d791d799d7aad6bed7a1d7a4d7a8  # "ש\u{5b8}\u{5c1}לו\u{5b9}ם ב\u{5b0}\u{5bc}ר\u{5b5}אש\u{5b4}\u{5c1}\u{596}ית م\u{64e}ر\u{652}ح\u{64e}ب\u{64b}ا ر\u{64e}ح\u{652}م\u{670}ن בית־ספר"
+term d7a9d79cd795d79d  # "שלום"
+term d791d7a8d790d7a9d799d7aa  # "בראשית"
+term d985d8b1d8add8a8d8a7  # "مرحبا"
+term d8b1d8add985d986  # "رحمن"
+term d791d799d7aa  # "בית"
+term d7a1d7a4d7a8  # "ספר"
+
+analyzer jazz-text/1:en
+text d985d980d8b1d8add8a8d8a720d9b1d984d8b1d98ed991d8add992d985d98ed980d9b0d986d99020d8a7d984d8b1d8add985d986db9a20d8a3d8add985d8af  # "مـرحبا ٱلر\u{64e}\u{651}ح\u{652}م\u{64e}ـ\u{670}ن\u{650} الرحمن\u{6da} أحمد"
+term d985d8b1d8add8a8d8a7  # "مرحبا"
+term d9b1d984d8b1d8add985d986  # "ٱلرحمن"
+term d8a7d984d8b1d8add985d986  # "الرحمن"
+term d8a3d8add985d8af  # "أحمد"
 
 analyzer jazz-text/1:simple
 text   # ""
@@ -321,4 +337,20 @@ term 34  # "4"
 term 686f6d65  # "home"
 term 61626f7574  # "about"
 term 636f6c6c656363696f  # "colleccio"
-term d7a6d794d6b8d79c  # "צה\u{5b8}ל"
+term d7a6d794d79c  # "צהל"
+
+analyzer jazz-text/1:simple
+text d7a9d6b8d781d79cd795d6b9d79d20d791d6b0d6bcd7a8d6b5d790d7a9d6b4d781d696d799d7aa20d985d98ed8b1d992d8add98ed8a8d98bd8a720d8b1d98ed8add992d985d9b0d98620d791d799d7aad6bed7a1d7a4d7a8  # "ש\u{5b8}\u{5c1}לו\u{5b9}ם ב\u{5b0}\u{5bc}ר\u{5b5}אש\u{5b4}\u{5c1}\u{596}ית م\u{64e}ر\u{652}ح\u{64e}ب\u{64b}ا ر\u{64e}ح\u{652}م\u{670}ن בית־ספר"
+term d7a9d79cd795d79d  # "שלום"
+term d791d7a8d790d7a9d799d7aa  # "בראשית"
+term d985d8b1d8add8a8d8a7  # "مرحبا"
+term d8b1d8add985d986  # "رحمن"
+term d791d799d7aa  # "בית"
+term d7a1d7a4d7a8  # "ספר"
+
+analyzer jazz-text/1:simple
+text d985d980d8b1d8add8a8d8a720d9b1d984d8b1d98ed991d8add992d985d98ed980d9b0d986d99020d8a7d984d8b1d8add985d986db9a20d8a3d8add985d8af  # "مـرحبا ٱلر\u{64e}\u{651}ح\u{652}م\u{64e}ـ\u{670}ن\u{650} الرحمن\u{6da} أحمد"
+term d985d8b1d8add8a8d8a7  # "مرحبا"
+term d9b1d984d8b1d8add985d986  # "ٱلرحمن"
+term d8a7d984d8b1d8add985d986  # "الرحمن"
+term d8a3d8add985d8af  # "أحمد"
