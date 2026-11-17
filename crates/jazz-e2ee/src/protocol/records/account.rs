@@ -1,15 +1,19 @@
 //! Account and device tables (`E2EE_PROTOCOL.md` §1.2) and the contexts and
-//! signed bytes of §2.3–§2.9. Every context's `application` is the subject
-//! account's domain `Dₐ(account)`.
+//! signed bytes of §2.3–§2.9 and §2.12. Every context's `application` is
+//! the subject account's domain `Dₐ(account)`.
 
+use crate::agility::{MechanismId, PublicKey};
 use crate::context::CryptoContext;
 
 use super::super::domain::AccountDomain;
 
 use super::super::error::ProtocolResult;
-use super::super::ids::{self, IdForm};
+use super::super::ids::IdForm;
 use super::super::json;
-use super::{KeyColumns, append_framed, context, ensure, ensure_account, ensure_id, frame, row_id};
+use super::{
+    KeyColumns, append_framed, context, ensure, ensure_account, ensure_bytes, ensure_id,
+    ensure_mechanism, env, frame, row_id,
+};
 
 /// The only ledger version this client supports; any other is an
 /// unsupported capability.
@@ -23,6 +27,7 @@ const SUCCESSOR_POLICY: &str = "jazz.e2ee.account-successor.v1";
 const PUBLIC_SUCCESSOR_POLICY: &str = "jazz.e2ee.public-account-successor.v1";
 const RECOVERY_POLICY: &str = "jazz.e2ee.recovery.v1";
 const LOCAL_FIRST_ROOT_POLICY: &str = "jazz.e2ee.local-first-account-root.v1";
+const ACCOUNT_KEY_POLICY: &str = "jazz.e2ee.account-key.v1";
 const SCOPE: &str = "account";
 
 /// `__e2ee_device_requests`: a device's identity; row ID = device ID.
@@ -41,7 +46,8 @@ pub struct DeviceKeysRow {
 }
 
 /// `__e2ee_account_identities`: the private account root. Its ID is the
-/// account ID at generation 0 and the derived reset identity otherwise.
+/// account ID at generation 0 and a random ID after a reset (§1.2, §2.11);
+/// a generation's identity is found by its generation, device and epoch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountIdentity {
     pub id: String,
@@ -112,8 +118,9 @@ pub struct DeviceDelivery {
     pub verification: Vec<u8>,
 }
 
-/// `__e2ee_public_device_approvals`: the key-free membership grant. A
-/// recovery approval carries `recovery_root_id` and `recovery_signature`.
+/// `__e2ee_public_device_approvals`: the key-free signed approval that
+/// admits the device to the account epoch. A recovery approval carries
+/// `recovery_root_id` and `recovery_signature`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicDeviceApproval {
     pub id: String,
@@ -194,6 +201,21 @@ pub struct RecoveryDelivery {
     pub envelope: Vec<u8>,
 }
 
+/// `__e2ee_account_keys`: the public half of an account epoch's sealing key
+/// pair for one key sealing mechanism (§2.12), signed by the device
+/// `signerId`. Space keys are sealed to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountSealingKey {
+    pub id: String,
+    pub account_id: String,
+    pub epoch_id: String,
+    pub signer_id: String,
+    pub mechanism: String,
+    pub version: u32,
+    pub public_key: Vec<u8>,
+    pub signature: Vec<u8>,
+}
+
 row_id!(
     DeviceRequest,
     DeviceKeysRow,
@@ -208,11 +230,8 @@ row_id!(
     AccountSuccessor,
     RecoveryRoot,
     RecoveryDelivery,
+    AccountSealingKey,
 );
-
-fn ensure_bytes(value: &[u8], what: &'static str) -> ProtocolResult<()> {
-    ensure(!value.is_empty(), what)
-}
 
 impl DeviceRequest {
     pub fn validate(&self) -> ProtocolResult<()> {
@@ -235,13 +254,18 @@ impl DeviceKeysRow {
 }
 
 impl AccountIdentity {
-    /// The ID must be the identity ID of `account_id` at this generation.
+    /// The ID is `account_id` at generation 0 and a version 4 or 7 UUID
+    /// above it.
     pub fn validate(&self, account_id: &str) -> ProtocolResult<()> {
-        ensure_account(account_id, "empty account ID")?;
-        ensure(
-            self.id == ids::account_identity_id(account_id, self.generation),
-            "identity ID does not match its generation",
-        )?;
+        ensure_account(account_id, "invalid account ID")?;
+        if self.generation == 0 {
+            ensure(
+                self.id == account_id,
+                "generation 0 identity ID is not the account ID",
+            )?;
+        } else {
+            ensure_id(&self.id, IdForm::Random, "invalid reset identity ID")?;
+        }
         ensure_id(&self.device_id, IdForm::Random, "invalid device ID")?;
         ensure_id(&self.epoch_id, IdForm::Random, "invalid epoch ID")?;
         ensure_bytes(&self.envelope, "empty identity envelope")?;
@@ -262,7 +286,7 @@ impl AccountRoot {
 
     fn check_unsigned(&self) -> ProtocolResult<()> {
         ensure_id(&self.id, IdForm::Random, "invalid account root ID")?;
-        ensure_account(&self.account_id, "empty account ID")?;
+        ensure_account(&self.account_id, "invalid account ID")?;
         ensure_id(&self.device_id, IdForm::Random, "invalid device ID")?;
         ensure_id(&self.epoch_id, IdForm::Random, "invalid epoch ID")?;
         match (
@@ -321,10 +345,10 @@ impl AccountRoot {
     }
 
     /// Whether `identity` is this root's private half: same generation,
-    /// device, epoch and ledger version, with the identity ID of that
-    /// generation.
+    /// device, epoch and ledger version, and at generation 0 the account ID
+    /// as its ID.
     pub fn matches_identity(&self, identity: &AccountIdentity) -> bool {
-        identity.id == ids::account_identity_id(&self.account_id, self.generation)
+        (self.generation != 0 || identity.id == self.account_id)
             && identity.generation == self.generation
             && identity.device_id == self.device_id
             && identity.epoch_id == self.epoch_id
@@ -402,7 +426,7 @@ impl PublicDeviceApproval {
     /// What the signatures cover: IDs are version 4 or 7 (a recovery
     /// root's also 8), and a recovery approval has `signerId = deviceId`.
     fn check_unsigned(&self) -> ProtocolResult<()> {
-        ensure_account(&self.account_id, "empty account ID")?;
+        ensure_account(&self.account_id, "invalid account ID")?;
         for id in [&self.id, &self.epoch_id, &self.device_id, &self.signer_id] {
             ensure_id(id, IdForm::Random, "invalid public approval ID")?;
         }
@@ -492,7 +516,7 @@ fn successor_header(
     retired_recovery_root_ids: &[u8],
     membership: &[u8],
 ) -> ProtocolResult<(String, Vec<String>)> {
-    ensure_account(account_id, "empty account ID")?;
+    ensure_account(account_id, "invalid account ID")?;
     for value in [id, predecessor, epoch_id, signer_id] {
         ensure_id(value, IdForm::Random, "invalid successor ID")?;
     }
@@ -688,7 +712,7 @@ impl RecoveryRoot {
             IdForm::RandomOrDerived,
             "invalid recovery root ID",
         )?;
-        ensure_account(&self.account_id, "empty account ID")?;
+        ensure_account(&self.account_id, "invalid account ID")?;
         ensure_id(&self.signer_id, IdForm::Random, "invalid signer ID")?;
         ensure_id(&self.epoch_id, IdForm::Random, "invalid epoch ID")?;
         self.keys.validate()?;
@@ -735,10 +759,64 @@ impl RecoveryDelivery {
     }
 }
 
+impl AccountSealingKey {
+    /// The published public key with its mechanism.
+    pub fn public(&self) -> PublicKey {
+        PublicKey {
+            mechanism: MechanismId::new(self.mechanism.clone(), self.version),
+            bytes: self.public_key.clone(),
+        }
+    }
+
+    /// A complete received record.
+    pub fn validate(&self) -> ProtocolResult<()> {
+        self.check_unsigned()?;
+        ensure_bytes(&self.signature, "empty account key signature")
+    }
+
+    /// Everything the signature covers: IDs of their forms, a valid
+    /// mechanism and a public key of 1 to 65,536 bytes.
+    fn check_unsigned(&self) -> ProtocolResult<()> {
+        ensure_id(&self.id, IdForm::Random, "invalid account key ID")?;
+        ensure_account(&self.account_id, "invalid account ID")?;
+        ensure_id(&self.epoch_id, IdForm::Random, "invalid epoch ID")?;
+        ensure_id(&self.signer_id, IdForm::Random, "invalid signer ID")?;
+        ensure_mechanism(&self.mechanism, self.version)?;
+        ensure(
+            (1..=json::MAX_DELIVERY_BYTES).contains(&self.public_key.len()),
+            "invalid public key length",
+        )
+    }
+
+    /// `ctx{application: D, policy: "jazz.e2ee.account-key.v1", scope:
+    /// "account", identifier: account, table: "__e2ee_account_keys", row:
+    /// id, column: signerId, epoch: epochId} ‖ frame[env(mechanism,
+    /// publicKey)]` (§2.12).
+    pub fn signed_bytes(&self, application: &AccountDomain) -> ProtocolResult<Vec<u8>> {
+        self.check_unsigned()?;
+        let prefix = context(CryptoContext {
+            application: application.as_str(),
+            policy: ACCOUNT_KEY_POLICY,
+            scope: SCOPE,
+            identifier: &self.account_id,
+            table: "__e2ee_account_keys",
+            row: &self.id,
+            column: &self.signer_id,
+            epoch: &self.epoch_id,
+            recipient: "",
+        })?;
+        append_framed(
+            prefix,
+            &[&env(&self.mechanism, self.version, &self.public_key)?],
+        )
+    }
+}
+
 /// `A(recipient, column)` of §2.3: `ctx{application: D, policy:
 /// "jazz.e2ee.account-identity.v1", scope: "account", identifier: account,
 /// table: "__e2ee_account_identities", row: identity ID, column, epoch,
-/// recipient}`. The identity ID is the account ID at generation 0 (§2.11).
+/// recipient}`. The identity ID is the account ID at generation 0 and the
+/// reset identity's random ID above it (§2.11).
 pub fn identity_context(
     application: &AccountDomain,
     account_id: &str,

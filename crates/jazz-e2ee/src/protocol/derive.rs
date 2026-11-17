@@ -1,9 +1,9 @@
-//! Derivations from secrets and keys (`E2EE_PROTOCOL.md` §2.1, §2.9, §3.1).
+//! Derivations from secrets and keys (`E2EE_PROTOCOL.md` §2.1, §2.9,
+//! §2.12).
 
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::agility::{KeyPair, KeySealer, Signer};
-use crate::context::frame_record;
+use crate::agility::{KeyPair, KeySealer, Signer as _};
 use crate::mechanisms::{key_seal, signature};
 use crate::primitives::hash;
 
@@ -18,9 +18,7 @@ const RECOVERY_GENERATION_SEED_LABEL: &[u8] = b"jazz.e2ee.recovery-generation-se
 const RECOVERY_KEM_LABEL: &[u8] = b"jazz.e2ee.recovery-kem-key.v1\0";
 const RECOVERY_SIGN_LABEL: &[u8] = b"jazz.e2ee.recovery-sign-key.v1\0";
 const RECOVERY_ROOT_ID_LABEL: &[u8] = b"jazz.e2ee.recovery-root-id.v1\0";
-const GROUP_KEM_LABEL: &[u8] = b"jazz.e2ee.group-kem-key.v1\0";
-const GROUP_SIGN_LABEL: &[u8] = b"jazz.e2ee.group-sign-key.v1\0";
-const COMMITMENT_LABEL: &[u8] = b"jazz.e2ee.recipient-commitment.v1\0";
+const ACCOUNT_KEM_LABEL: &[u8] = b"jazz.e2ee.account-kem-key.v1\0";
 const LOCAL_DEVICE_CHECK_LABEL: &str = "jazz.e2ee.local-device-check.v1\0";
 const RECOVERY_MATERIAL_CHECK_LABEL: &str = "jazz.e2ee.recovery-material-check.v1\0";
 
@@ -163,40 +161,31 @@ impl RecoveryKeys {
     }
 }
 
-/// A group epoch's key pairs (§3.1), derived from its epoch key with the
-/// mechanisms the group's public-key record names. Each derivation binds its
-/// mechanism's header `H`: `BLAKE2b-256(key = epoch key,
-/// "jazz.e2ee.group-kem-key.v1" ‖ 00 ‖ H(sealer))` and
-/// `BLAKE2b-256(key = epoch key, "jazz.e2ee.group-sign-key.v1" ‖ 00 ‖
-/// H(signer))`, so one epoch key never yields the same input for two
-/// mechanisms.
-pub fn group_epoch_key_pairs(
+/// The input keying material of an account epoch's sealing key pair for
+/// `sealer`'s mechanism (§2.12): `BLAKE2b-256(key = K,
+/// "jazz.e2ee.account-kem-key.v1" ‖ 00 ‖ H(m))`, where `H(m)` is the
+/// mechanism's common envelope header (its ID and version, no payload), so
+/// one epoch key never gives two mechanisms the same input.
+pub fn account_sealing_ikm(
     sealer: &dyn KeySealer,
-    signer: &dyn Signer,
     epoch_key: &[u8; 32],
-) -> ProtocolResult<(KeyPair, KeyPair)> {
-    let kem_ikm =
-        hash::keyed_hash_parts(epoch_key, &[GROUP_KEM_LABEL, &sealer.mechanism().header()?]);
-    let sign_seed = hash::keyed_hash_parts(
+) -> ProtocolResult<Zeroizing<[u8; 32]>> {
+    Ok(hash::keyed_hash_parts(
         epoch_key,
-        &[GROUP_SIGN_LABEL, &signer.mechanism().header()?],
-    );
-    Ok((
-        sealer.derive_key_pair(&kem_ikm[..])?,
-        signer.derive_key_pair(&sign_seed[..])?,
+        &[ACCOUNT_KEM_LABEL, &sealer.mechanism().header()?],
     ))
 }
 
-/// A successor's recipient commitment (§3.1):
-/// `BLAKE2b-256(key = salt, "jazz.e2ee.recipient-commitment.v1" ‖ 00 ‖
-/// frame[membership, revision])`.
-pub fn recipient_commitment(
-    salt: &[u8; 32],
-    membership: &[u8],
-    revision: &[u8],
-) -> ProtocolResult<[u8; 32]> {
-    let framed = frame_record(&[membership, revision])?;
-    Ok(*hash::keyed_hash_parts(salt, &[COMMITMENT_LABEL, &framed]))
+/// An account epoch's sealing key pair for `sealer`'s mechanism (§2.12):
+/// HPKE `DeriveKeyPair` (the mechanism's deterministic derivation) of
+/// [`account_sealing_ikm`]. Every device holding the epoch key derives it;
+/// nothing private is stored.
+pub fn account_sealing_key_pair(
+    sealer: &dyn KeySealer,
+    epoch_key: &[u8; 32],
+) -> ProtocolResult<KeyPair> {
+    let ikm = account_sealing_ikm(sealer, epoch_key)?;
+    Ok(sealer.derive_key_pair(&ikm[..])?)
 }
 
 /// The bytes a new local device seals and signs to check its key pairs

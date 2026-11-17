@@ -5,15 +5,17 @@
 mod common;
 
 use common::TestRandom;
-use common::protocol::{Env, Ledger};
+use common::protocol::{ALICE, Env, Ledger};
 use jazz_e2ee::agility::MechanismId;
+use jazz_e2ee::mechanisms::key_seal;
 use jazz_e2ee::mechanisms::signature;
-use jazz_e2ee::protocol::account::build::{self, ResetPolicy, RotationTarget};
+use jazz_e2ee::protocol::account::build::{self, LocalDevice, ResetPolicy, RotationTarget};
 use jazz_e2ee::protocol::account::{AccountKeyEvidence, PrivateAccountLedger, verify_private};
-use jazz_e2ee::protocol::derive::{RecoveryKeys, RecoverySecret};
+use jazz_e2ee::protocol::derive::{self, RecoveryKeys, RecoverySecret};
 use jazz_e2ee::protocol::error::{
     IntrinsicContradiction, ProtocolError, RecoveryFailure, RefusalCode, UnsupportedCapability,
 };
+use jazz_e2ee::protocol::ids::IdForm;
 use jazz_e2ee::protocol::records::account::{AccountKind, AccountRoot};
 use jazz_e2ee::protocol::{Accepted, Position, ids, signing};
 
@@ -30,10 +32,10 @@ fn refused(code: RefusalCode) -> ProtocolError {
 /// ```
 #[test]
 fn bootstrap_makes_the_first_device_active() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(1);
     let laptop = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     build::check_bootstrap(&env.writer(), &laptop, &ledger.public, &ledger.private).unwrap();
     let (at, key) = ledger.root(&env, &laptop, 0, &mut rng);
@@ -54,16 +56,16 @@ fn bootstrap_makes_the_first_device_active() {
 /// from its request, and an account that already has history.
 #[test]
 fn bootstrap_preconditions_refuse() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(2);
     let laptop = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     assert_eq!(
         build::check_bootstrap(&env.writer(), &laptop, &ledger.public, &ledger.private),
         Err(refused(RefusalCode::NoDeviceRequest))
     );
     let impostor = env.device(&mut rng);
-    let mut other = Ledger::new("alice");
+    let mut other = Ledger::new(ALICE);
     other.request(&laptop, &mut rng);
     other.private.requests[0].row.keys = impostor.keys();
     assert_eq!(
@@ -87,11 +89,11 @@ fn bootstrap_preconditions_refuse() {
 /// ```
 #[test]
 fn approval_activates_a_device_that_then_obtains_the_key() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(3);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     let (_, key) = ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -132,11 +134,11 @@ fn approval_activates_a_device_that_then_obtains_the_key() {
 /// carrying a recovery signature, is skipped rather than failing replay.
 #[test]
 fn tampered_approvals_are_skipped() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(4);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -168,12 +170,12 @@ fn tampered_approvals_are_skipped() {
 /// ```
 #[test]
 fn approvals_in_one_batch_do_not_authorise_each_other() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(5);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
     let tablet = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -206,11 +208,11 @@ fn approvals_in_one_batch_do_not_authorise_each_other() {
 /// ```
 #[test]
 fn removal_rotates_and_excludes_the_device() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(6);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -261,11 +263,11 @@ fn removal_rotates_and_excludes_the_device() {
 /// does not move.
 #[test]
 fn concurrent_successors_at_one_position_both_lose() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(7);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -279,7 +281,7 @@ fn concurrent_successors_at_one_position_both_lose() {
     );
     let mut other = ledger.public.clone();
     other.successors.pop();
-    let mut staged = Ledger::new("alice");
+    let mut staged = Ledger::new(ALICE);
     staged.public = other;
     staged.private = ledger.private.clone();
     staged.private.successors.pop();
@@ -302,11 +304,11 @@ fn concurrent_successors_at_one_position_both_lose() {
 /// skipped; so is one whose public revision differs from replay's.
 #[test]
 fn successor_tie_with_recovery_root_and_wrong_revision_are_skipped() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(8);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -348,10 +350,10 @@ fn successor_tie_with_recovery_root_and_wrong_revision_are_skipped() {
 /// ```
 #[test]
 fn recovery_restores_a_new_device() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(9);
     let laptop = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     let (_, key) = ledger.root(&env, &laptop, 0, &mut rng);
     let secret = RecoverySecret::from_bytes([7; 32]);
@@ -445,10 +447,10 @@ fn recovery_restores_a_new_device() {
 /// any root, and a root without a delivery of the current epoch has none.
 #[test]
 fn recovery_failures_keep_their_codes() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(10);
     let laptop = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     let recovery =
@@ -482,10 +484,10 @@ fn recovery_failures_keep_their_codes() {
 /// ignored.
 #[test]
 fn retired_recovery_root_no_longer_approves() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(11);
     let laptop = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     let recovery =
@@ -558,10 +560,10 @@ fn retired_recovery_root_no_longer_approves() {
 /// ```
 #[test]
 fn reset_starts_a_new_generation() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(12);
     let laptop = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     let recovery =
@@ -597,10 +599,11 @@ fn reset_starts_a_new_generation() {
     )
     .unwrap();
     let (reset_at, reset_key) = ledger.root(&env, &phone, 1, &mut rng);
-    assert_eq!(
-        ledger.private.identities[1].row.id,
-        ids::account_identity_id("alice", 1)
-    );
+    // A reset identity's ID is random, not derived: nobody can predict and
+    // occupy it in advance.
+    let reset_identity = &ledger.private.identities[1].row.id;
+    assert!(ids::is_id(reset_identity, IdForm::Random));
+    assert_ne!(reset_identity, ALICE);
 
     let state = ledger.state(&env);
     assert_eq!(state.generation, 1);
@@ -649,11 +652,11 @@ fn reset_starts_a_new_generation() {
 /// otherwise it is ignored.
 #[test]
 fn a_generation_counts_only_after_the_previous_one() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(13);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.request(&phone, &mut rng);
     // A raw generation-1 root with no generation-0 root before it.
@@ -661,7 +664,7 @@ fn a_generation_counts_only_after_the_previous_one() {
         id: ids::random_v4(&mut rng).unwrap(),
         ledger_version: 1,
         generation: 1,
-        account_id: "alice".into(),
+        account_id: ALICE.into(),
         device_id: phone.id.clone(),
         epoch_id: ids::random_v4(&mut rng).unwrap(),
         kind: AccountKind::App,
@@ -673,7 +676,7 @@ fn a_generation_counts_only_after_the_previous_one() {
     assert!(ledger.replay(&env).current().unwrap().is_none());
     // Bootstrap refuses an account with any root, so laptop's generation-0
     // root is built on its own and then accepted here.
-    let mut scratch = Ledger::new("alice");
+    let mut scratch = Ledger::new(ALICE);
     scratch.request(&laptop, &mut rng);
     scratch.root(&env, &laptop, 0, &mut rng);
     let at = ledger.next();
@@ -687,10 +690,10 @@ fn a_generation_counts_only_after_the_previous_one() {
 }
 
 fn bootstrapped(seed: u64) -> (Env, Ledger, TestRandom) {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(seed);
     let laptop = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     (env, ledger, rng)
@@ -708,7 +711,7 @@ fn intrinsic_contradictions_fail_replay() {
             .unwrap_err()
     };
 
-    let mut conflicting = Ledger::new("alice");
+    let mut conflicting = Ledger::new(ALICE);
     conflicting.public = ledger.public.clone();
     let mut other: AccountRoot = conflicting.public.roots[0].row.clone();
     other.id = ids::random_v4(&mut rng).unwrap();
@@ -720,7 +723,7 @@ fn intrinsic_contradictions_fail_replay() {
         ProtocolError::Intrinsic(IntrinsicContradiction::ConflictingRoots)
     );
 
-    let mut keys = Ledger::new("alice");
+    let mut keys = Ledger::new(ALICE);
     keys.public = ledger.public.clone();
     let mut second = keys.public.keys[0].clone();
     second.row.id = ids::random_v4(&mut rng).unwrap();
@@ -731,7 +734,7 @@ fn intrinsic_contradictions_fail_replay() {
         ProtocolError::Intrinsic(IntrinsicContradiction::ConflictingDeviceKeys)
     );
 
-    let mut missing = Ledger::new("alice");
+    let mut missing = Ledger::new(ALICE);
     missing.public = ledger.public.clone();
     missing.public.keys.clear();
     assert_eq!(
@@ -744,11 +747,11 @@ fn intrinsic_contradictions_fail_replay() {
 /// once its signature verifies.
 #[test]
 fn approval_without_recipient_keys_is_a_contradiction() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(15);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -768,11 +771,11 @@ fn approval_without_recipient_keys_is_a_contradiction() {
 /// mechanism or version.
 #[test]
 fn unsupported_capabilities_are_not_invalid() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(16);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -818,11 +821,11 @@ fn unsupported_capabilities_are_not_invalid() {
 /// acquisition then reports the key unavailable, not an error.
 #[test]
 fn private_verification_drops_unverified_records() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(17);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -856,11 +859,11 @@ fn private_verification_drops_unverified_records() {
 /// unavailable through it.
 #[test]
 fn invalid_delivery_marker_makes_the_key_unavailable() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(18);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -879,12 +882,12 @@ fn invalid_delivery_marker_makes_the_key_unavailable() {
 /// approver, a challenge for another device, and a tampered proof.
 #[test]
 fn approval_handshake_refusals() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(19);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
     let tablet = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -939,11 +942,11 @@ fn debug_free_of(rendered: &str, secret: &[u8; 32]) {
 /// devices and recovery keys and secrets.
 #[test]
 fn debug_output_never_contains_secrets() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(40);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.request(&phone, &mut rng);
     let writer = env.writer();
@@ -1037,10 +1040,10 @@ fn state_beyond_the_cut_is_refused() {
 /// invalid.
 #[test]
 fn recovery_secret_survives_a_reset() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(42);
     let laptop = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     let secret = RecoverySecret::from_bytes([6; 32]);
@@ -1071,11 +1074,11 @@ fn recovery_secret_survives_a_reset() {
 /// it.
 #[test]
 fn rotation_skips_recovery_roots_of_other_mechanisms() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(43);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -1107,11 +1110,11 @@ fn rotation_skips_recovery_roots_of_other_mechanisms() {
 /// private approval pairs with the public approval of its own ID only.
 #[test]
 fn private_evidence_is_bound_to_its_state() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(31);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -1180,11 +1183,11 @@ fn recover_with(
 /// another retires both in one rotation.
 #[test]
 fn removing_a_registering_device_retires_its_roots() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(30);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -1231,7 +1234,7 @@ fn removing_a_registering_device_retires_its_roots() {
     assert!(!state.is_removed(&phone.id));
 
     // Removing the laptop, which registered only the first root.
-    let mut ledger2 = Ledger::new("alice");
+    let mut ledger2 = Ledger::new(ALICE);
     ledger2.request(&laptop, &mut rng);
     ledger2.root(&env, &laptop, 0, &mut rng);
     ledger2.request(&phone, &mut rng);
@@ -1255,11 +1258,11 @@ fn removing_a_registering_device_retires_its_roots() {
 /// with another root retires that other root when removed.
 #[test]
 fn removal_retires_every_root_a_device_recovered_with() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(31);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -1300,11 +1303,11 @@ fn removal_retires_every_root_a_device_recovered_with() {
 /// unverifiable (an unsupported capability), with no grace path.
 #[test]
 fn retired_signing_mechanism_leaves_the_chain_unverifiable() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(32);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -1324,5 +1327,115 @@ fn retired_signing_mechanism_leaves_the_chain_unverifiable() {
     assert_eq!(
         replay.current().unwrap_err(),
         ProtocolError::Unsupported(UnsupportedCapability::SigningMechanism)
+    );
+}
+
+/// Asserts that the `index`th sealing key record was accepted at `at`, for
+/// `epoch_id`, signed by `signer` over its signed bytes, with the public key
+/// derived from the epoch key `key` (§2.12).
+fn assert_sealing_key(
+    env: &Env,
+    ledger: &Ledger,
+    index: usize,
+    at: Position,
+    signer: &LocalDevice,
+    epoch_id: &str,
+    key: &[u8; 32],
+) {
+    let record = &ledger.public.account_keys[index];
+    assert_eq!(record.position, at);
+    record.row.validate().unwrap();
+    assert_eq!(record.row.account_id, ALICE);
+    assert_eq!(record.row.epoch_id, epoch_id);
+    assert_eq!(record.row.signer_id, signer.id);
+    assert_eq!(
+        record.row.public(),
+        derive::account_sealing_key_pair(&key_seal::Builtin, key)
+            .unwrap()
+            .public
+    );
+    let bytes = record.row.signed_bytes(&env.application()).unwrap();
+    assert!(
+        signing::verify(
+            &env.registry,
+            &signer.signing.public,
+            &bytes,
+            &record.row.signature
+        )
+        .unwrap()
+    );
+}
+
+/// Every account epoch's creation writes its sealing key record in the same
+/// transaction (§2.12): a bootstrap and a reset signed by the root's
+/// device, a rotation by its author, also when the author removes itself.
+/// A later publication for the current epoch is by an active device that
+/// holds the current key; a removed device is refused.
+#[test]
+fn every_epoch_publishes_its_sealing_key() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(41);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    let (root_at, root_key) = ledger.root(&env, &laptop, 0, &mut rng);
+    let root_epoch = ledger.state(&env).epoch_id().to_owned();
+    assert_sealing_key(&env, &ledger, 0, root_at, &laptop, &root_epoch, &root_key);
+
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    let (rotation_at, rotation) = ledger.rotate(
+        &env,
+        &phone,
+        RotationTarget::RemoveDevice(phone.id.clone()),
+        &mut rng,
+    );
+    let state = ledger.state(&env);
+    assert_eq!(state.epoch_id(), rotation.public.epoch_id);
+    assert!(state.is_removed(&phone.id));
+    assert_sealing_key(
+        &env,
+        &ledger,
+        1,
+        rotation_at,
+        &phone,
+        &rotation.public.epoch_id,
+        &rotation.key,
+    );
+
+    let key = ledger.acquire(&env, &laptop).unwrap();
+    let later = build::account_sealing_key(&env.writer(), &state, &laptop, &key, &mut rng).unwrap();
+    let later_at = ledger.next();
+    ledger
+        .public
+        .account_keys
+        .push(Accepted::new(later_at, later));
+    assert_sealing_key(
+        &env,
+        &ledger,
+        2,
+        later_at,
+        &laptop,
+        &rotation.public.epoch_id,
+        &rotation.key,
+    );
+    assert_eq!(
+        build::account_sealing_key(&env.writer(), &state, &phone, &key, &mut rng),
+        Err(refused(RefusalCode::DeviceNotActive))
+    );
+
+    let tablet = env.device(&mut rng);
+    ledger.request(&tablet, &mut rng);
+    let (reset_at, reset_key) = ledger.root(&env, &tablet, 1, &mut rng);
+    let reset_epoch = ledger.state(&env).epoch_id().to_owned();
+    assert_sealing_key(
+        &env,
+        &ledger,
+        3,
+        reset_at,
+        &tablet,
+        &reset_epoch,
+        &reset_key,
     );
 }

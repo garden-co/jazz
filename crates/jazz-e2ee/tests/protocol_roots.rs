@@ -6,7 +6,7 @@
 mod common;
 
 use common::TestRandom;
-use common::protocol::{Env, Ledger};
+use common::protocol::{ALICE, Env, Ledger};
 use jazz_e2ee::protocol::account::build::{self, ResetPolicy, RootAuthority, RotationTarget};
 use jazz_e2ee::protocol::account::{AccountReplay, verify_private};
 use jazz_e2ee::protocol::derive::{RecoveryKeys, RecoverySecret};
@@ -372,11 +372,11 @@ fn local_first_generations_need_the_same_identity() {
 /// is `root-not-mine` too.
 #[test]
 fn substituted_app_root_is_not_mine() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(104);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -387,7 +387,7 @@ fn substituted_app_root_is_not_mine() {
 
     // The server replaces the root with one of its own device.
     let mallory = env.device(&mut rng);
-    let mut substituted = Ledger::new("alice");
+    let mut substituted = Ledger::new(ALICE);
     substituted.public = ledger.public.clone();
     substituted.private = ledger.private.clone();
     let root = &mut substituted.public.roots[0].row;
@@ -434,11 +434,11 @@ fn substituted_app_root_is_not_mine() {
 /// reset, as they fail every state as of a position after both.
 #[test]
 fn conflicting_roots_fail_at_every_generation() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(105);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -467,12 +467,12 @@ fn conflicting_roots_fail_at_every_generation() {
 /// is rejected and reported instead.
 #[test]
 fn generation_zero_conflict_survives_a_later_reset() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(109);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
     let tablet = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     let phone_at = ledger.request(&phone, &mut rng);
@@ -500,12 +500,16 @@ fn generation_zero_conflict_survives_a_later_reset() {
     let mut malformed = second.clone();
     malformed.row.epoch_id = "not-an-id".into();
     let mut foreign = second.clone();
-    foreign.row.account_id = "mallory".into();
+    foreign.row.account_id = "3a110000-0000-5000-8000-0000000003a1".into();
+    // Account IDs are UUIDs: any other text is malformed.
+    let mut not_uuid = second.clone();
+    not_uuid.row.account_id = "mallory".into();
     for (row, reason) in [
         (malformed, RootRejection::Malformed),
         (foreign, RootRejection::ForeignAccount),
+        (not_uuid, RootRejection::Malformed),
     ] {
-        let mut view = Ledger::new("alice");
+        let mut view = Ledger::new(ALICE);
         view.public = ledger.public.clone();
         view.public.roots.push(row.clone());
         assert_eq!(view.state(&env).generation, 1);
@@ -520,12 +524,12 @@ fn generation_zero_conflict_survives_a_later_reset() {
 /// does an invalid or foreign recovery root.
 #[test]
 fn invalid_rows_in_the_same_transaction_do_not_block_a_successor() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(106);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
     let stranger = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -583,7 +587,7 @@ fn invalid_rows_in_the_same_transaction_do_not_block_a_successor() {
     bad_root.row.signature[last] ^= 1;
     let mut foreign_root = ledger.public.recovery_roots[0].clone();
     foreign_root.row.id = ids::random_v4(&mut rng).unwrap();
-    foreign_root.row.account_id = "mallory".into();
+    foreign_root.row.account_id = "3a110000-0000-5000-8000-0000000003a1".into();
     foreign_root.position = at;
     for root in [bad_root, foreign_root] {
         let mut view = ledger.public.clone();
@@ -615,11 +619,11 @@ fn invalid_rows_in_the_same_transaction_do_not_block_a_successor() {
 /// passes.
 #[test]
 fn device_no_longer_active_after_removal_and_reset() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(107);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -674,10 +678,10 @@ fn device_no_longer_active_after_removal_and_reset() {
 /// the replaced root.
 #[test]
 fn replaced_root_before_a_reset_is_not_mine() {
-    let env = Env::new("alice");
+    let env = Env::new(ALICE);
     let mut rng = TestRandom(110);
     let laptop = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     let floor = ledger
@@ -688,7 +692,7 @@ fn replaced_root_before_a_reset_is_not_mine() {
     let tablet = env.device(&mut rng);
     ledger.request(&tablet, &mut rng);
     ledger.root(&env, &tablet, 1, &mut rng);
-    let mut replaced = Ledger::new("alice");
+    let mut replaced = Ledger::new(ALICE);
     replaced.public = ledger.public.clone();
     replaced.private = ledger.private.clone();
     let root = &mut replaced.public.roots[0].row;

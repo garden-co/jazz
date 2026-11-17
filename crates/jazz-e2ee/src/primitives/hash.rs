@@ -20,7 +20,7 @@ pub fn keyed_hash_parts(key: &[u8; 32], parts: &[&[u8]]) -> Zeroizing<[u8; 32]> 
     Zeroizing::new(mac.finalize().into_bytes().into())
 }
 
-/// SHA-256, for the protocol's public derived IDs.
+/// SHA-256.
 pub fn sha256(input: &[u8]) -> [u8; 32] {
     use sha2::Digest;
     sha2::Sha256::digest(input).into()

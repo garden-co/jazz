@@ -2,17 +2,19 @@
 //! §2.4).
 
 use super::super::error::{ProtocolError, ProtocolResult};
+use super::super::ids::{self, IdForm};
 use super::super::position::{Accepted, Position, before, check_read};
 use super::super::records::account::{
-    AccountIdentity, AccountRoot, AccountSuccessor, DeviceApproval, DeviceChallenge,
-    DeviceDelivery, DeviceKeysRow, DeviceProof, DeviceRequest, PublicAccountSuccessor,
-    PublicDeviceApproval, RecoveryDelivery, RecoveryRoot,
+    AccountIdentity, AccountRoot, AccountSealingKey, AccountSuccessor, DeviceApproval,
+    DeviceChallenge, DeviceDelivery, DeviceKeysRow, DeviceProof, DeviceRequest,
+    PublicAccountSuccessor, PublicDeviceApproval, RecoveryDelivery, RecoveryRoot,
 };
 
-/// The public rows of one account at cut `through`: everything account
-/// replay reads (R10). Device keys are the account's `__e2ee_device_keys`
-/// rows; the other tables may hold rows naming other accounts, which replay
-/// ignores or, for roots, treats as contradictions.
+/// The public rows of one account at cut `through` (R10). Device keys are
+/// the account's `__e2ee_device_keys` rows; the other tables may hold rows
+/// naming other accounts, which replay ignores or, for roots, rejects.
+/// Account replay does not read `account_keys`: whether a sealing key
+/// record is valid (§2.12) is not decided here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicAccountLedger {
     pub account_id: String,
@@ -22,6 +24,7 @@ pub struct PublicAccountLedger {
     pub approvals: Vec<Accepted<PublicDeviceApproval>>,
     pub successors: Vec<Accepted<PublicAccountSuccessor>>,
     pub recovery_roots: Vec<Accepted<RecoveryRoot>>,
+    pub account_keys: Vec<Accepted<AccountSealingKey>>,
 }
 
 impl PublicAccountLedger {
@@ -35,19 +38,22 @@ impl PublicAccountLedger {
             approvals: Vec::new(),
             successors: Vec::new(),
             recovery_roots: Vec::new(),
+            account_keys: Vec::new(),
         }
     }
 
-    /// Every row is at or before the cut, and no table repeats a row ID.
+    /// The account ID is a UUID, every row is at or before the cut, and no
+    /// table repeats a row ID.
     pub fn check(&self) -> ProtocolResult<()> {
-        if self.account_id.is_empty() {
-            return Err(ProtocolError::InvalidRecord("empty account ID"));
+        if !ids::is_id(&self.account_id, IdForm::Any) {
+            return Err(ProtocolError::InvalidRecord("invalid account ID"));
         }
         check_read(&self.roots, self.through)?;
         check_read(&self.keys, self.through)?;
         check_read(&self.approvals, self.through)?;
         check_read(&self.successors, self.through)?;
-        check_read(&self.recovery_roots, self.through)
+        check_read(&self.recovery_roots, self.through)?;
+        check_read(&self.account_keys, self.through)
     }
 
     /// The rows accepted strictly before `cut` (§2.4, "State as of a
@@ -61,10 +67,12 @@ impl PublicAccountLedger {
             approvals: before(&self.approvals, cut),
             successors: before(&self.successors, cut),
             recovery_roots: before(&self.recovery_roots, cut),
+            account_keys: before(&self.account_keys, cut),
         }
     }
 
-    /// Whether the account has any public evidence at all.
+    /// Whether the account has any of the public evidence that refuses a
+    /// bootstrap (§2.3): roots, approvals, successors or recovery roots.
     pub fn is_empty(&self) -> bool {
         self.roots.is_empty()
             && self.approvals.is_empty()

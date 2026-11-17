@@ -16,8 +16,10 @@
 //! - [`agility`] and [`registry`]: one trait per role, keys that name their
 //!   mechanism, routing by envelope header and per-role selection, so a
 //!   custom mechanism plugs in beside the built-ins.
-//! - [`protocol`]: the protocol's records, signed bytes, derived IDs and
-//!   account replay, as pure functions over ledger rows.
+//! - [`protocol`]: the typed rows of the internal account, device, member
+//!   and space tables with their signed bytes and contexts, the recovery and
+//!   account sealing key derivations, and account replay, as pure functions
+//!   over ledger rows.
 //! - `conformance` (feature `conformance`): the test kit every mechanism
 //!   implementation runs.
 //!

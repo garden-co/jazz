@@ -31,8 +31,8 @@ hpke = { version = "0.15.1", default-features = false, features = ["alloc", "x25
 rand_core = { version = "0.10.1", default-features = false }
 # SHA-1 only for the local-first subject and account ID (UUIDv5, §2.3).
 sha1 = { version = "0.10.6", default-features = false }
-# SHA-256 for the protocol's public derived IDs; SHA-512 for the
-# local-first signing key.
+# SHA-256, one of the protocol's primitives; SHA-512 for the local-first
+# signing key.
 sha2 = { version = "0.11.1", default-features = false }
 thiserror = "2"
 zeroize = { version = "1.8.2", default-features = false, features = ["alloc"] }

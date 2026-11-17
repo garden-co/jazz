@@ -1,16 +1,17 @@
-//! Protocol fixtures (`E2EE_PROTOCOL.md` §0, §1.2, §2, §3): every derived ID
-//! label, the recovery and group key derivations, the recipient commitment
-//! and the signed bytes of every record kind reproduce byte for byte.
+//! Protocol fixtures (`E2EE_PROTOCOL.md` §0, §1.2, §1.3, §2, §3): the
+//! recovery and account sealing key derivations, the canonical encodings,
+//! and the signed bytes and contexts of every record kind reproduce byte for
+//! byte.
 //!
-//! Derivations are cross-checked against libsodium (SHA-256, keyed
-//! BLAKE2b, Ed25519 seed key pairs); signed bytes are rebuilt here from the
+//! Derivations are cross-checked against libsodium (keyed BLAKE2b, Ed25519
+//! seed key pairs); signed bytes and contexts are rebuilt here from the
 //! spec's formulas with the context and framing primitives, and their
 //! SHA-256 digests are pinned.
 
 mod common;
 
 use common::{TestRandom, to_hex};
-use jazz_e2ee::agility::KeySealer;
+use jazz_e2ee::agility::{KeySealer, MechanismImpl};
 use jazz_e2ee::context::{CryptoContext, frame_record};
 use jazz_e2ee::envelope::{self, Mechanism};
 use jazz_e2ee::mechanisms::{key_envelope, key_seal, signature};
@@ -18,27 +19,30 @@ use jazz_e2ee::primitives::hash;
 use jazz_e2ee::protocol::derive::{self, RecoveryKeys, RecoverySecret};
 use jazz_e2ee::protocol::domain::AppDomain;
 use jazz_e2ee::protocol::error::ProtocolError;
-use jazz_e2ee::protocol::ids::{self, IdForm, StagedChange};
+use jazz_e2ee::protocol::ids::{self, IdForm};
 use jazz_e2ee::protocol::json;
+use jazz_e2ee::protocol::records::KeyColumns;
 use jazz_e2ee::protocol::records::account::*;
-use jazz_e2ee::protocol::records::group::*;
-use jazz_e2ee::protocol::records::scoped::{KeyRequest, Notice, NoticeScope};
 use jazz_e2ee::protocol::records::space::*;
-use jazz_e2ee::protocol::records::{
-    KeyColumns, MemberKind, NoticeKind, Operation, Role, ScopeKind,
-};
 use libsodium_sys as ffi;
 
 const APP: &str = "0f8e3a4c-1d2b-4c5d-8e6f-7a8b9c0d1e2f";
+/// Account IDs are UUIDs of any version; Jazz's registry mints version 5.
+const ALICE: &str = "a11ce000-0000-5000-8000-00000000a11c";
+const BOB: &str = "b0b00000-0000-5000-8000-00000000b0b0";
 const SCOPE: &str = "5c0e1d2a-3b4c-7d5e-8f60-718293a4b5c6";
 const ROW: &str = "018f2e3d-4c5b-7a69-8877-665544332211";
+const ROOT: &str = "d4d4d4d4-d4d4-4d4d-8d4d-d4d4d4d4d4d4";
 const D1: &str = "11111111-1111-4111-8111-111111111111";
 const D2: &str = "22222222-2222-4222-8222-222222222222";
 const E1: &str = "e1e1e1e1-e1e1-4e1e-8e1e-e1e1e1e1e1e1";
 const E2: &str = "e2e2e2e2-e2e2-4e2e-ae2e-e2e2e2e2e2e2";
+const E3: &str = "e3e3e3e3-e3e3-7e3e-be3e-e3e3e3e3e3e3";
+/// Account epochs of the space records' author and recipient.
+const AE: &str = "aeaeaeae-aeae-4aea-8aea-aeaeaeaeaeae";
+const BE: &str = "bebebebe-bebe-4beb-9beb-bebebebebebe";
 const R1: &str = "a1a1a1a1-a1a1-4a1a-9a1a-a1a1a1a1a1a1";
 const R2: &str = "b2b2b2b2-b2b2-7b2b-bb2b-b2b2b2b2b2b2";
-const G1: &str = "c3c3c3c3-c3c3-4c3c-8c3c-c3c3c3c3c3c3";
 
 fn sodium_init() {
     // SAFETY: libsodium's documented initialisation, idempotent.
@@ -130,91 +134,9 @@ fn application_domains() {
     assert!(domain.account("").is_err());
 }
 
-/// Every public derived ID label: SHA-256 of the canonical JSON, cross-checked
-/// with libsodium, with the version 8 bits; pinned.
-#[test]
-fn public_derived_ids() {
-    let staged = StagedChange {
-        role: "manager",
-        operation: "add",
-        kind: "account",
-        recipient_id: "alice",
-        n: 0,
-    };
-    let space = ids::space_id(SCOPE, ROW);
-    let cases: [(&str, String, Vec<&str>, &str); 7] = [
-        (
-            "space",
-            space.clone(),
-            vec!["jazz.e2ee.space-id.v1", SCOPE, ROW],
-            "619ee262-ebb9-865c-a8db-26ede397c780",
-        ),
-        (
-            "account reset",
-            ids::account_identity_id("alice", 1),
-            vec!["jazz.e2ee.account-reset.v1", "alice", "1"],
-            "0499408f-e71b-82e6-b00e-5cd5a54871e4",
-        ),
-        (
-            "reset notice",
-            ids::reset_notice_id(&space, "bob", 2),
-            vec!["jazz.e2ee.reset-notice.v1", &space, "bob", "2"],
-            "3341a6cb-739f-86d7-b467-b7a6697ea872",
-        ),
-        (
-            "admission notice",
-            ids::admission_notice_id(G1, "bob", 3),
-            vec!["jazz.e2ee.admission-notice.v1", G1, "bob", "3"],
-            "a3f2b36b-d96a-8cfd-8f7f-f76b551a701d",
-        ),
-        (
-            "key request answer",
-            ids::key_request_answer_id(R1),
-            vec!["jazz.e2ee.key-request-answer.v1", R1],
-            "7b2495e3-7747-819f-a09c-65567c132b7e",
-        ),
-        (
-            "space grant",
-            ids::space_grant_id(&space, staged),
-            vec![
-                "jazz.e2ee.space-grant-id.v1",
-                &space,
-                "manager",
-                "add",
-                "account",
-                "alice",
-                "0",
-            ],
-            "d0f306db-f7f6-81bc-bad7-c99ce5d5e1a2",
-        ),
-        (
-            "group membership",
-            ids::group_membership_id(G1, StagedChange { n: 12, ..staged }),
-            vec![
-                "jazz.e2ee.group-membership-id.v1",
-                G1,
-                "manager",
-                "add",
-                "account",
-                "alice",
-                "12",
-            ],
-            "f2836b75-48c9-80bd-8306-e571d645fd42",
-        ),
-    ];
-    for (label, derived, parts, pinned) in cases {
-        let independent = v8(&sodium_sha256(json::strings(&parts).as_bytes()));
-        assert_eq!(derived, independent, "{label}");
-        assert_eq!(derived, pinned, "{label}");
-        assert!(ids::is_id(&derived, IdForm::Derived));
-        assert!(!ids::is_id(&derived, IdForm::Random));
-    }
-    // Generation 0's identity is the account itself.
-    assert_eq!(ids::account_identity_id("alice", 0), "alice");
-}
-
-/// UUID forms: random IDs are versions 4 and 7, derived ones version 8,
-/// always lowercase with the RFC variant.
+/// UUID forms: random IDs are versions 4 and 7, derived recovery root IDs
+/// version 8, account IDs and the space address any version; always
+/// lowercase with the RFC variant.
 #[test]
 fn uuid_forms() {
     assert!(ids::is_id(D1, IdForm::Random));
@@ -233,6 +155,12 @@ fn uuid_forms() {
         IdForm::Any
     ));
     assert!(!ids::is_id("alice", IdForm::Any));
+    assert!(ids::is_id(ALICE, IdForm::Any));
+    assert!(!ids::is_id(ALICE, IdForm::Random));
+    let derived = ids::uuid_v8([0x5a; 16]);
+    assert_eq!(ids::uuid_version(&derived), Some(8));
+    assert!(ids::is_id(&derived, IdForm::RandomOrDerived));
+    assert!(!ids::is_id(&derived, IdForm::Random));
     let mut rng = TestRandom(1);
     let random = ids::random_v4(&mut rng).unwrap();
     assert_eq!(ids::uuid_version(&random), Some(4));
@@ -306,59 +234,43 @@ fn recovery_secret_format() {
     }
 }
 
-/// Group epoch key pairs (§3.1) from epoch key `20`–`3f`, cross-checked with
-/// libsodium; and the recipient commitment with salt `00`–`1f`.
+/// The account sealing key pair of §2.12, from epoch key `00`–`1f` and
+/// `jazz.wrap.hpke-x25519` v1: the mechanism header, the input keying
+/// material (cross-checked with libsodium) and the public key are the
+/// spec's fixture.
 #[test]
-fn group_keys_and_commitment() {
-    let epoch_key: [u8; 32] = core::array::from_fn(|i| 0x20 + i as u8);
-    let (sealing, signing) =
-        derive::group_epoch_key_pairs(&key_seal::Builtin, &signature::Builtin, &epoch_key).unwrap();
-    let kem_ikm = sodium_keyed(
-        &epoch_key,
-        &[
-            b"jazz.e2ee.group-kem-key.v1\0".as_slice(),
-            &env("jazz.wrap.hpke-x25519", &[]),
-        ]
-        .concat(),
-    );
-    let sign_seed = sodium_keyed(
-        &epoch_key,
-        &[
-            b"jazz.e2ee.group-sign-key.v1\0".as_slice(),
-            &env("jazz.sodium.sign", &[]),
-        ]
-        .concat(),
-    );
+fn account_sealing_key_derivation() {
+    let epoch_key: [u8; 32] = core::array::from_fn(|i| i as u8);
+    let header = key_seal::Builtin.mechanism().header().unwrap();
     assert_eq!(
-        sealing.public,
-        key_seal::Builtin.derive_key_pair(&kem_ikm).unwrap().public
+        to_hex(&header),
+        "4a45324501156a617a7a2e777261702e68706b652d78323535313900000001"
     );
-    assert_eq!(signing.public.bytes, sodium_sign_public(&sign_seed));
+    let ikm = derive::account_sealing_ikm(&key_seal::Builtin, &epoch_key).unwrap();
     assert_eq!(
-        to_hex(&sealing.public.bytes),
-        "9101836ab4383917d38ffc10bbdd92fdce579c2aa058e1027b7b5a093421bd57"
-    );
-    assert_eq!(
-        to_hex(&signing.public.bytes),
-        "9d89b966d907e4bb3c54c2baa2b8aa9c4979a5d056440e3aad2cdc48bf62310c"
-    );
-
-    let salt: [u8; 32] = core::array::from_fn(|i| i as u8);
-    let membership = json::encode_member_map([("alice", E1), ("bob", E2)]).unwrap();
-    let revision = json::encode_revision(["space-grant:".to_owned() + R1]).unwrap();
-    let commitment = derive::recipient_commitment(&salt, &membership, &revision).unwrap();
-    let framed = frame_record(&[&membership, &revision]).unwrap();
-    assert_eq!(
-        commitment,
+        *ikm,
         sodium_keyed(
-            &salt,
-            &[b"jazz.e2ee.recipient-commitment.v1\0".as_slice(), &framed].concat()
+            &epoch_key,
+            &[b"jazz.e2ee.account-kem-key.v1\0".as_slice(), &header].concat()
         )
     );
     assert_eq!(
-        to_hex(&commitment),
-        "e7a1e4c01b42b4be0d6ab89df09316eebef4b81be89c34cc5ac63ff1941677b5"
+        to_hex(&ikm[..]),
+        "ac4df8236cf35730587626b161094aafe5fc81447b7b051142e49322fbdb0aea"
     );
+    let pair = derive::account_sealing_key_pair(&key_seal::Builtin, &epoch_key).unwrap();
+    assert_eq!(pair.public.mechanism, key_seal::MECHANISM);
+    assert_eq!(
+        pair.public,
+        key_seal::Builtin.derive_key_pair(&ikm[..]).unwrap().public
+    );
+    assert_eq!(
+        to_hex(&pair.public.bytes),
+        "49dcff86a89b83bdde5eda452d647296878278a9fe29f2df2e93b1ad3b014773"
+    );
+    // Another epoch key gives another key pair.
+    let other = derive::account_sealing_key_pair(&key_seal::Builtin, &[7; 32]).unwrap();
+    assert_ne!(other.public, pair.public);
 }
 
 /// The local device check and recovery material check bytes.
@@ -403,14 +315,6 @@ fn canonical_json() {
     );
     assert_eq!(json::decode_delivery_map(&deliveries).unwrap().len(), 2);
     assert!(json::encode_delivery_map([(D1, Vec::<u8>::new())]).is_err());
-    let members = json::encode_member_map([("bob", E2), ("alice", E1)]).unwrap();
-    assert_eq!(
-        json::decode_member_map(&members).unwrap(),
-        vec![
-            ("alice".to_owned(), E1.to_owned()),
-            ("bob".to_owned(), E2.to_owned())
-        ]
-    );
     let non_canonical = [
         format!(r#"[ "{D1}"]"#),
         format!(r#"["{E1}","{D1}"]"#),
@@ -487,145 +391,98 @@ fn env(id: &str, payload: &[u8]) -> Vec<u8> {
     envelope::encode(Mechanism::new(id, 1), payload).unwrap()
 }
 
-/// Pinned SHA-256 digests of each record kind's signed bytes.
+/// Pinned SHA-256 digests of each record kind's signed bytes and contexts.
 const SIGNED_DIGESTS: &[(&str, &str)] = &[
     (
         "public approval",
-        "48e3021a9cb5a1ae45883deb517de3682c8ba654471438e101d145ea5b8cefd2",
+        "6629c281de9e66edebc66540166595b0b3d98467561f7222e19ea9b88cdba5e5",
     ),
     (
         "recovery approval",
-        "64b56b3ecc09dda2a1a1668cd767f66815b42967b263ef394fbf4eee55030ba0",
+        "280e1e6d4ad56648f3195ae7c76a7217da2d74d08affb8181d1c9813223f05a8",
     ),
     (
         "proof",
-        "d89278f913e7164ad71f8256f2ae4be8865b68c934e53725de58404db145acb5",
+        "37be290f12cb75e3bb785edc30be786055f207889aa7362b9997104ff23afea3",
     ),
     (
         "private approval",
-        "052745e830da1bbc4873b31f2816d205db09f7e22b9f13443d86fd00e9181536",
+        "c40fce76268353969df7bebd823203a79c3e1bbe58ce575a5f1c7da487381a39",
     ),
     (
         "delivery marker context",
-        "82e0d4d5e4518187ea62e070a6dc8d0b2d70144b169516360673726a210f81bb",
+        "4c359a10bf33ce207965dd1b2b840a741daf0977aae4a294a77cd91f900aa639",
     ),
     (
         "identity context",
-        "4a7d74bd7bb8239ecff5cb8ebee1ca38a974a39008bc9d61661e9dedddaf1bb4",
+        "c01ed5f6fff94f24cb96f1086ae0ae6baf1ec5d091dec258b037754d30342e45",
     ),
     (
         "public successor",
-        "cf9e203e93b191c5a3bf56cd52ff9bd2b4f3ff331ecbb518f1ca5dbe47d829f2",
+        "f0645b2c559531b74252c093ebc2e486e1fe73ceb3b95d69148d903efbdcc03a",
     ),
     (
         "private successor",
-        "070c4fad3a2c47261e2974d1540caa4a0a9aa4b1615c3ad34fc4eb2ff6c80a43",
+        "64fe1afb62c6bb148b64a906545b582ff9680cfdca38dab55dcc2a2655032e10",
     ),
     (
         "recovery root",
-        "181861d75da53f4d7ae9675db94876fb9c2b3cfbfce1a1f65ce8235788802807",
+        "3c14d7506f3fbe7c8f98ffcb62e3b5865bef12d4becb41773320e047ad1d41d1",
     ),
     (
         "local-first account root",
-        "e64e3656b255c4e638d80254fe13981bf7b95eaeb4c51a3c3fdd7cc6232c8209",
+        "a40be2825d055a2c33e2289958ae563497a0bd6291c8d3a18aeef0dd6f733942",
     ),
     (
         "recovery delivery context",
-        "46461c62e2128155884595d677787ad0db2aadd9c2a8943aaf4f6890c8e97cc5",
+        "ad79282df32943d66e55c317dfe867444a290e86450e6adc9ccc34db5d73b017",
+    ),
+    (
+        "account sealing key",
+        "811b76df3c20c55eb998dccd393fa952b1309c4d6b1f108db6bc8b19575a7d2d",
     ),
     (
         "space root",
-        "d4ae8cea889f24f95c1de39cb72b607cbc0916ec90c23416df4c21739f750319",
+        "f347181edf79d1fb84704603d172525025a6ab76c9f31bde9661d64cdd28c140",
     ),
     (
-        "space grant",
-        "260b598fc3d3fe4bce067a1c6f257139138a4a222c9ca3bfc4e7f7dfa23eaa0a",
+        "space root marker context",
+        "ba230b93c7d6574cf98e2f3a0d37598ac66381134b748736aeef24f2663098c1",
+    ),
+    (
+        "space root account envelope context",
+        "d062a07f180753c2af6bb6b23e9a43bb3e813496c44b6e3bcf7f98d03f7b6073",
     ),
     (
         "space successor",
-        "f8ac443fe950ba42243ffdcb88397de12956486913e84ed9b449d11a5bc4a796",
+        "121fcd67394e7b3fe38662b41bc4baf806030fbd3e1f17869559d59d10e0a327",
     ),
     (
-        "space delivery",
-        "3b3e8eb5dc3edfbd1fb60681238e13ab8c7ec9000dd7696157956ff90e05a639",
+        "space successor marker context",
+        "4ccfd24f6231c231e4e203a39d17babe301379569ac5259cce7382529311dde1",
     ),
     (
-        "space group delivery",
-        "4b03bb289e337fd8bfa849c658fbb85aa1c4fc81dcfa32e6db283d2c8995f98a",
+        "space successor history context",
+        "7a87b5a2663ed2b6ccb0f1ab37bc5f23f40e035551fd8f5eaec4b6876ddba602",
     ),
     (
-        "space recovery delivery",
-        "47ba294c8d9b194794c7b6235eda541581a46535bea9d3b8a592339730e26c89",
+        "space successor account envelope context",
+        "0448a531c4763e66d89d9b3b499ee4e88a202c351e62c566e72111731ad400a2",
     ),
     (
-        "space repair",
-        "cf0dc7aebda173bd2bd9c3bfcce756f6bfacd33990c4f3fe45b66e58f86fdb82",
-    ),
-    (
-        "space notice",
-        "d6e88ad84e8977cf26348300f772a2eff5b7f89b9a19cbeff7c05cbe3aa61443",
-    ),
-    (
-        "group notice",
-        "80e208d7644120b725d423c529ea262146119021e2253c7eb54c64d845243cdb",
-    ),
-    (
-        "key request",
-        "1306b82a95b02755b08d9575aec28bdcf2258a9a8f19f1908fea18318e4f4f85",
-    ),
-    (
-        "group root",
-        "4ea6ec90054688bbf51ee94f952a06d8ee834db2cc329a2368ec0c64be08d9a6",
-    ),
-    (
-        "group binding",
-        "23574fc129e05a138297b5d2046bfa68597c07efd76090702986445f3ba7157a",
-    ),
-    (
-        "group public key",
-        "6bf416898b9fb758ae24204dffe1bd8ea448c8256057edb7dcf0307fe5e1c66b",
-    ),
-    (
-        "group membership",
-        "4d36206a72261b2479e3b186a8609daad68dab51c1b99d1eb7e03fdd310a08c4",
-    ),
-    (
-        "group successor",
-        "958bee2af71a8caafc8b8038cdf135d474836c03f18509bd0f85d8a866ea8307",
-    ),
-    (
-        "group delivery",
-        "58612a73c8d2ebb1f5daab4fc6bbde389849a5bc6266ee36015e128f796b81c7",
-    ),
-    (
-        "group child delivery",
-        "49f4e328d96a3395325c98994ae1231e6db0284f309cc017486c624454e76843",
-    ),
-    (
-        "group recovery delivery",
-        "5eef6289f089354083ec6c892842a3e2376d7f3bdcb1996a47cff0d341341db8",
-    ),
-    (
-        "group repair",
-        "9417094e6c2606e7990a99c9cd9090cbe4a478bf65a2bc8e201e540663913a2e",
-    ),
-    (
-        "rotation request",
-        "2906560cd53e0a2e2feae6bbf490cf171c013d5dd892b8aebd1ebf25a57b3657",
+        "space delivery context",
+        "c4fa4d613e46faeb54457df953e00c23f43aa49abd33497b694ebc8778f19c93",
     ),
 ];
 
-/// Every record kind's signed bytes equal the spec's formula, rebuilt here,
-/// and their digests are pinned.
+/// Every record kind's signed bytes and contexts equal the spec's formula,
+/// rebuilt here, and their digests are pinned.
 #[test]
 fn signed_bytes() {
     let d = domain();
-    let da = d.account("alice").unwrap();
-    let ds = d.shared();
+    let da = d.account(ALICE).unwrap();
     let wrap = key_envelope::MECHANISM.id;
-    let address = SpaceAddress::new(SCOPE, ROW).unwrap();
-    let space = address.space_id.clone();
-    let author = json::strings(&["alice", D1, E1]);
+    let scope = SpaceScope::new(SCOPE, ROW, ROOT).unwrap();
     let x = |column: &str, recipient: &str, epoch: &str| {
         ctx(
             da.as_str(),
@@ -633,20 +490,7 @@ fn signed_bytes() {
             SCOPE,
             ROW,
             "__e2ee_spaces",
-            &space,
-            column,
-            epoch,
-            recipient,
-        )
-    };
-    let g = |column: &str, recipient: &str, epoch: &str| {
-        ctx(
-            da.as_str(),
-            "jazz.e2ee.group.v1",
-            "group",
-            G1,
-            "__e2ee_groups",
-            G1,
+            ROOT,
             column,
             epoch,
             recipient,
@@ -657,7 +501,7 @@ fn signed_bytes() {
     // Account records (§2.5, §2.8, §2.9).
     let approval = PublicDeviceApproval {
         id: R1.into(),
-        account_id: "alice".into(),
+        account_id: ALICE.into(),
         epoch_id: E1.into(),
         device_id: D2.into(),
         signer_id: D1.into(),
@@ -672,7 +516,7 @@ fn signed_bytes() {
             da.as_str(),
             "jazz.e2ee.public-device-approval.v1",
             "account",
-            "alice",
+            ALICE,
             "__e2ee_public_device_approvals",
             R1,
             &format!("approval-signature:{D1}"),
@@ -693,7 +537,7 @@ fn signed_bytes() {
             da.as_str(),
             "jazz.e2ee.recovery-device-approval.v1",
             "account",
-            "alice",
+            ALICE,
             "__e2ee_public_device_approvals",
             R1,
             &format!("recovery-signature:{R2}"),
@@ -711,7 +555,7 @@ fn signed_bytes() {
             da.as_str(),
             "jazz.e2ee.device-approval.v1",
             "account",
-            "alice",
+            ALICE,
             "__e2ee_device_challenges",
             R1,
             column,
@@ -721,29 +565,29 @@ fn signed_bytes() {
     };
     cases.push((
         "proof",
-        proof_signed_bytes(&da, "alice", challenge, b"proof").unwrap(),
+        proof_signed_bytes(&da, ALICE, challenge, b"proof").unwrap(),
         append(p("proof-signature"), &[b"proof"]),
     ));
     cases.push((
         "private approval",
-        approval_signed_bytes(&da, "alice", challenge, D1, b"marker").unwrap(),
+        approval_signed_bytes(&da, ALICE, challenge, D1, b"marker").unwrap(),
         append(p(&format!("approval-signature:{D1}")), &[b"marker"]),
     ));
     cases.push((
         "delivery marker context",
-        delivery_marker_context(&da, "alice", challenge, b"sealed").unwrap(),
+        delivery_marker_context(&da, ALICE, challenge, b"sealed").unwrap(),
         append(p("delivery-verification"), &[b"sealed"]),
     ));
     cases.push((
         "identity context",
-        identity_context(&da, "alice", "alice", E1, "envelope", D1).unwrap(),
+        identity_context(&da, ALICE, ALICE, E1, "envelope", D1).unwrap(),
         ctx(
             da.as_str(),
             "jazz.e2ee.account-identity.v1",
             "account",
-            "alice",
+            ALICE,
             "__e2ee_account_identities",
-            "alice",
+            ALICE,
             "envelope",
             E1,
             D1,
@@ -752,7 +596,7 @@ fn signed_bytes() {
     let membership = json::encode_id_list([D1]).unwrap();
     let public_successor = PublicAccountSuccessor {
         id: R1.into(),
-        account_id: "alice".into(),
+        account_id: ALICE.into(),
         predecessor: E1.into(),
         epoch_id: E2.into(),
         signer_id: D1.into(),
@@ -771,7 +615,7 @@ fn signed_bytes() {
                 da.as_str(),
                 "jazz.e2ee.public-account-successor.v1",
                 "account",
-                "alice",
+                ALICE,
                 "__e2ee_public_account_successors",
                 R1,
                 "signature",
@@ -791,7 +635,7 @@ fn signed_bytes() {
     let deliveries = json::encode_delivery_map([(D1, vec![7u8; 3])]).unwrap();
     let private_successor = AccountSuccessor {
         id: R1.into(),
-        account_id: "alice".into(),
+        account_id: ALICE.into(),
         predecessor: E1.into(),
         epoch_id: E2.into(),
         signer_id: D1.into(),
@@ -813,7 +657,7 @@ fn signed_bytes() {
                 da.as_str(),
                 "jazz.e2ee.account-successor.v1",
                 "account",
-                "alice",
+                ALICE,
                 "__e2ee_account_successors",
                 R1,
                 "signature",
@@ -835,7 +679,7 @@ fn signed_bytes() {
     ));
     let root = RecoveryRoot {
         id: R2.into(),
-        account_id: "alice".into(),
+        account_id: ALICE.into(),
         signer_id: D1.into(),
         epoch_id: E1.into(),
         keys: keys(),
@@ -849,7 +693,7 @@ fn signed_bytes() {
                 da.as_str(),
                 "jazz.e2ee.recovery.v1",
                 "account",
-                "alice",
+                ALICE,
                 "__e2ee_recovery_roots",
                 R2,
                 &json::strings(&["root", D1]),
@@ -865,7 +709,7 @@ fn signed_bytes() {
         id: R1.into(),
         ledger_version: 1,
         generation: 0,
-        account_id: "alice".into(),
+        account_id: ALICE.into(),
         device_id: D1.into(),
         epoch_id: E1.into(),
         kind: AccountKind::LocalFirst,
@@ -880,7 +724,7 @@ fn signed_bytes() {
                 da.as_str(),
                 "jazz.e2ee.local-first-account-root.v1",
                 "account",
-                "alice",
+                ALICE,
                 "__e2ee_account_roots",
                 R1,
                 "local-first-signature",
@@ -935,12 +779,12 @@ fn signed_bytes() {
     };
     cases.push((
         "recovery delivery context",
-        recovery_delivery_context(&da, "alice", &recovery_delivery).unwrap(),
+        recovery_delivery_context(&da, ALICE, &recovery_delivery).unwrap(),
         ctx(
             da.as_str(),
             "jazz.e2ee.recovery.v1",
             "account",
-            "alice",
+            ALICE,
             "__e2ee_recovery_deliveries",
             R1,
             "envelope",
@@ -949,547 +793,144 @@ fn signed_bytes() {
         ),
     ));
 
-    // Space records (§3.2).
+    // The account sealing key (§2.12).
+    let account_key = AccountSealingKey {
+        id: R1.into(),
+        account_id: ALICE.into(),
+        epoch_id: E1.into(),
+        signer_id: D1.into(),
+        mechanism: "jazz.wrap.hpke-x25519".into(),
+        version: 1,
+        public_key: vec![0x11; 32],
+        signature: vec![],
+    };
+    cases.push((
+        "account sealing key",
+        account_key.signed_bytes(&da).unwrap(),
+        append(
+            ctx(
+                da.as_str(),
+                "jazz.e2ee.account-key.v1",
+                "account",
+                ALICE,
+                "__e2ee_account_keys",
+                R1,
+                D1,
+                E1,
+                "",
+            ),
+            &[&env("jazz.wrap.hpke-x25519", &[0x11; 32])],
+        ),
+    ));
+
+    // Space records (§3.1): the root at epoch E2, then a recovery rotation
+    // to E3 whose history opens E1, so every coordinate is distinct.
     let space_root = SpaceRoot {
-        id: space.clone(),
+        id: ROOT.into(),
         scope_id: SCOPE.into(),
         identifier: ROW.into(),
-        creator_account_id: "alice".into(),
+        creator_account_id: ALICE.into(),
         device_id: D1.into(),
-        account_epoch_id: E1.into(),
+        account_epoch_id: AE.into(),
         epoch_id: E2.into(),
-        initial_grant_id: SpaceRoot::expected_initial_grant_id(&space, "alice"),
         mechanism: wrap.into(),
         version: 1,
         verification: env(wrap, b"marker"),
-        author_envelope: b"sealed".to_vec(),
+        account_envelope: b"sealed".to_vec(),
         signature: vec![],
     };
-    let initial_grant = space_root.initial_grant_id.clone();
-    assert_eq!(
-        initial_grant,
-        ids::space_grant_id(
-            &space,
-            StagedChange {
-                role: "manager",
-                operation: "add",
-                kind: "account",
-                recipient_id: "alice",
-                n: 0
-            }
-        )
-    );
+    assert_eq!(space_root.scope().unwrap(), scope);
     cases.push((
         "space root",
         space_root.signed_bytes(&da).unwrap(),
         frame_record(&[
-            &x(
-                &json::strings(&["root", "alice", D1, E1, &initial_grant]),
-                "",
-                E2,
-            ),
+            &x(&json::strings(&["root", ALICE, D1, AE]), "", E2),
             &env(wrap, &env(wrap, b"marker")),
             b"sealed",
         ])
         .unwrap(),
     ));
-    let grant = SpaceGrant {
-        id: R1.into(),
-        space_id: space.clone(),
-        epoch_id: E2.into(),
-        author_account_id: "alice".into(),
-        author_device_id: D1.into(),
-        author_epoch_id: E1.into(),
-        operation: Operation::Add,
-        role: Role::Member,
-        recipient_kind: MemberKind::Account,
-        recipient_id: "bob".into(),
-        recipient_epoch_id: E1.into(),
-        signature: vec![],
-    };
     cases.push((
-        "space grant",
-        grant.signed_bytes(&da, &address).unwrap(),
-        x(
-            &json::strings(&["grant", R1, "alice", D1, E1, "add", "member"]),
-            &json::strings(&["account", "bob", E1]),
-            E2,
-        ),
+        "space root marker context",
+        space_root.marker_context(&da).unwrap(),
+        x("verification", "", E2),
+    ));
+    cases.push((
+        "space root account envelope context",
+        space_root.account_envelope_context(&da).unwrap(),
+        x("account-envelope", &json::strings(&[ALICE, AE]), E2),
     ));
     let space_successor = SpaceSuccessor {
         id: R1.into(),
-        space_id: space.clone(),
-        predecessor: E1.into(),
-        epoch_id: E2.into(),
-        author_account_id: "alice".into(),
+        scope_id: SCOPE.into(),
+        identifier: ROW.into(),
+        predecessor: E2.into(),
+        history_epoch_id: E1.into(),
+        epoch_id: E3.into(),
+        author_account_id: ALICE.into(),
         author_device_id: D1.into(),
-        author_epoch_id: E1.into(),
-        commitment: vec![9; 32],
+        author_epoch_id: AE.into(),
         verification: b"marker".to_vec(),
         history: b"history".to_vec(),
-        author_envelope: b"sealed".to_vec(),
+        account_envelope: b"sealed".to_vec(),
         signature: vec![],
     };
     cases.push((
         "space successor",
-        space_successor.signed_bytes(&da, &address).unwrap(),
+        space_successor.signed_bytes(&da, &scope).unwrap(),
         append(
-            x(&json::strings(&["successor", R1, "signature"]), &author, E2),
-            &[E1.as_bytes(), &[9; 32], b"marker", b"history", b"sealed"],
-        ),
-    ));
-    let delivery = SpaceDelivery {
-        id: R1.into(),
-        space_id: space.clone(),
-        epoch_id: E2.into(),
-        sender_account_id: "alice".into(),
-        sender_device_id: D1.into(),
-        sender_epoch_id: E1.into(),
-        recipient_account_id: "bob".into(),
-        recipient_device_id: D2.into(),
-        recipient_epoch_id: E1.into(),
-        envelope: b"sealed".to_vec(),
-        signature: vec![],
-    };
-    cases.push((
-        "space delivery",
-        delivery.signed_bytes(&da, &address).unwrap(),
-        frame_record(&[
-            &x(
-                &json::strings(&["delivery", R1, "alice", D1, E1]),
-                &json::strings(&["bob", D2, E1]),
-                E2,
-            ),
-            b"sealed",
-        ])
-        .unwrap(),
-    ));
-    let group_delivery = SpaceGroupDelivery {
-        id: R1.into(),
-        space_id: space.clone(),
-        epoch_id: E2.into(),
-        sender_account_id: "alice".into(),
-        sender_device_id: D1.into(),
-        sender_epoch_id: E1.into(),
-        recipient_group_id: G1.into(),
-        recipient_group_epoch_id: E1.into(),
-        envelope: b"sealed".to_vec(),
-        signature: vec![],
-    };
-    cases.push((
-        "space group delivery",
-        group_delivery.signed_bytes(&da, &address).unwrap(),
-        frame_record(&[
-            &x(
-                &json::strings(&["group-delivery", R1, "alice", D1, E1]),
-                &json::strings(&[G1, E1]),
-                E2,
-            ),
-            b"sealed",
-        ])
-        .unwrap(),
-    ));
-    let space_recovery = SpaceRecoveryDelivery {
-        id: R1.into(),
-        space_id: space.clone(),
-        epoch_id: E2.into(),
-        sender_account_id: "alice".into(),
-        sender_device_id: D1.into(),
-        sender_epoch_id: E1.into(),
-        recipient_account_id: "bob".into(),
-        recovery_root_id: R2.into(),
-        recipient_epoch_id: E1.into(),
-        envelope: b"sealed".to_vec(),
-        signature: vec![],
-    };
-    cases.push((
-        "space recovery delivery",
-        space_recovery.signed_bytes(&da, &address).unwrap(),
-        frame_record(&[
-            &x(
-                &json::strings(&["recovery-delivery", R1, "alice", D1, E1]),
-                &json::strings(&["bob", R2, E1]),
-                E2,
-            ),
-            b"sealed",
-        ])
-        .unwrap(),
-    ));
-    let repair = SpaceRepair {
-        id: R1.into(),
-        space_id: space.clone(),
-        epoch_id: E2.into(),
-        delivery_kind: DeliveryKind::Recovery,
-        delivery_id: R2.into(),
-        account_id: "bob".into(),
-        device_id: D2.into(),
-        account_epoch_id: E1.into(),
-        signature: vec![],
-    };
-    cases.push((
-        "space repair",
-        repair.signed_bytes(&da, &address).unwrap(),
-        x(
-            &json::strings(&["repair", R1, "recovery", R2, "bob", D2]),
-            E1,
-            E2,
-        ),
-    ));
-    let notice_id = ids::reset_notice_id(&space, "bob", 1);
-    let notice = Notice {
-        id: notice_id.clone(),
-        scope_id: space.clone(),
-        epoch_id: E2.into(),
-        kind: NoticeKind::ResetApproved,
-        account_id: "bob".into(),
-        generation: 1,
-        author_account_id: "alice".into(),
-        author_device_id: D1.into(),
-        author_epoch_id: E1.into(),
-        signature: vec![],
-    };
-    cases.push((
-        "space notice",
-        notice
-            .signed_bytes(&da, NoticeScope::Space(&address))
-            .unwrap(),
-        x(
-            &json::strings(&["notice", &notice_id, "reset-approved", "alice", D1, E1]),
-            &json::strings(&["bob", "1"]),
-            E2,
-        ),
-    ));
-    let admitted_id = ids::admission_notice_id(G1, "bob", 2);
-    let group_notice = Notice {
-        id: admitted_id.clone(),
-        scope_id: G1.into(),
-        kind: NoticeKind::Admitted,
-        generation: 2,
-        ..notice.clone()
-    };
-    cases.push((
-        "group notice",
-        group_notice
-            .signed_bytes(&da, NoticeScope::Group(G1))
-            .unwrap(),
-        g(
-            &json::strings(&["notice", &admitted_id, "admitted", "alice", D1, E1]),
-            &json::strings(&["bob", "2"]),
-            E2,
-        ),
-    ));
-    let request = KeyRequest {
-        id: R1.into(),
-        scope_kind: ScopeKind::Space,
-        scope_id: space.clone(),
-        epoch_id: E2.into(),
-        account_id: "bob".into(),
-        device_id: D2.into(),
-        account_epoch_id: E1.into(),
-        signature: vec![],
-    };
-    cases.push((
-        "key request",
-        request.signed_bytes(&da).unwrap(),
-        ctx(
-            da.as_str(),
-            "jazz.e2ee.key-request.v1",
-            "space",
-            &space,
-            "__e2ee_key_requests",
-            R1,
-            &json::strings(&["bob", D2]),
-            E2,
-            E1,
-        ),
-    ));
-
-    // Group records (§3.1).
-    let group_root = GroupRoot {
-        id: G1.into(),
-        account_id: "alice".into(),
-        device_id: D1.into(),
-        account_epoch_id: E1.into(),
-        epoch_id: E2.into(),
-        mechanism: wrap.into(),
-        version: 1,
-        verification: env(wrap, b"marker"),
-        signature: vec![],
-    };
-    cases.push((
-        "group root",
-        group_root.signed_bytes(&da).unwrap(),
-        frame_record(&[
-            &g(&json::strings(&["root", "alice", D1, E1]), "", E2),
-            &env(wrap, &env(wrap, b"marker")),
-        ])
-        .unwrap(),
-    ));
-    let binding = GroupBinding {
-        id: G1.into(),
-        group_id: G1.into(),
-        scope_id: SCOPE.into(),
-        identifier: ROW.into(),
-        author_account_id: "alice".into(),
-        author_device_id: D1.into(),
-        author_epoch_id: E1.into(),
-        signature: vec![],
-    };
-    cases.push((
-        "group binding",
-        binding.signed_bytes(&da, E2).unwrap(),
-        ctx(
-            da.as_str(),
-            "jazz.e2ee.group-binding.v1",
-            "group",
-            G1,
-            "__e2ee_group_bindings",
-            G1,
-            &json::strings(&[SCOPE, ROW]),
-            E2,
-            &author,
-        ),
-    ));
-    let public_key = GroupPublicKey {
-        id: R1.into(),
-        group_id: G1.into(),
-        epoch_id: E2.into(),
-        predecessor_epoch_id: E1.into(),
-        proof_epoch_id: E1.into(),
-        author_account_id: "alice".into(),
-        author_device_id: D1.into(),
-        author_epoch_id: E1.into(),
-        keys: keys(),
-        key_signature: vec![1],
-        predecessor_signature: vec![1],
-        author_signature: vec![1],
-    };
-    cases.push((
-        "group public key",
-        public_key.signed_bytes(&ds).unwrap(),
-        append(
-            ctx(
-                ds.as_str(),
-                "jazz.e2ee.group-public-key.v1",
-                "group",
-                G1,
-                "__e2ee_group_public_keys",
-                R1,
-                &json::strings(&[E1, E1, "alice", D1, E1]),
-                E2,
-                "",
+            x(
+                &json::strings(&["successor", R1, "signature"]),
+                &json::strings(&[ALICE, D1, AE]),
+                E3,
             ),
             &[
-                &env("jazz.wrap.hpke-x25519", &[0x11; 32]),
-                &env("jazz.sodium.sign", &[0x22; 32]),
-            ],
-        ),
-    ));
-    let membership_record = GroupMembership {
-        id: R1.into(),
-        group_id: G1.into(),
-        epoch_id: E2.into(),
-        author_account_id: "alice".into(),
-        author_device_id: D1.into(),
-        author_epoch_id: E1.into(),
-        operation: Operation::Remove,
-        role: Role::Manager,
-        member_kind: MemberKind::Group,
-        member_id: R2.into(),
-        signature: vec![],
-    };
-    cases.push((
-        "group membership",
-        membership_record.signed_bytes(&da).unwrap(),
-        ctx(
-            da.as_str(),
-            "jazz.e2ee.group-membership.v1",
-            "group",
-            G1,
-            "__e2ee_group_membership",
-            R1,
-            &json::strings(&["remove", "manager", "alice", D1, E1]),
-            E2,
-            &json::strings(&["group", R2]),
-        ),
-    ));
-    let group_successor = GroupSuccessor {
-        id: R1.into(),
-        group_id: G1.into(),
-        predecessor: E1.into(),
-        proof_epoch_id: E1.into(),
-        epoch_id: E2.into(),
-        author_account_id: "alice".into(),
-        author_device_id: D1.into(),
-        author_epoch_id: E1.into(),
-        commitment: vec![9; 32],
-        verification: b"marker".to_vec(),
-        history: b"history".to_vec(),
-        author_envelope: b"sealed".to_vec(),
-        signature: vec![],
-    };
-    cases.push((
-        "group successor",
-        group_successor.signed_bytes(&da).unwrap(),
-        append(
-            ctx(
-                da.as_str(),
-                "jazz.e2ee.group-successor.v1",
-                "group",
-                G1,
-                "__e2ee_group_successors",
-                R1,
-                "signature",
-                E2,
-                &author,
-            ),
-            &[
+                E2.as_bytes(),
                 E1.as_bytes(),
-                E1.as_bytes(),
-                &[9; 32],
                 b"marker",
                 b"history",
                 b"sealed",
             ],
         ),
     ));
-    let gd = GroupDelivery {
-        id: R1.into(),
-        group_id: G1.into(),
-        epoch_id: E2.into(),
-        sender_account_id: "alice".into(),
-        sender_device_id: D1.into(),
-        sender_epoch_id: E1.into(),
-        recipient_account_id: "bob".into(),
-        recipient_device_id: D2.into(),
-        recipient_epoch_id: E1.into(),
-        envelope: b"sealed".to_vec(),
-        signature: vec![],
-    };
     cases.push((
-        "group delivery",
-        gd.signed_bytes(&da).unwrap(),
-        frame_record(&[
-            &g(
-                &json::strings(&["delivery", R1, "alice", D1, E1]),
-                &json::strings(&["bob", D2, E1]),
-                E2,
-            ),
-            b"sealed",
-        ])
-        .unwrap(),
+        "space successor marker context",
+        space_successor.marker_context(&da, &scope).unwrap(),
+        x("verification", "", E3),
     ));
-    let child = GroupChildDelivery {
-        id: R1.into(),
-        group_id: G1.into(),
-        epoch_id: E2.into(),
-        sender_account_id: "alice".into(),
-        sender_device_id: D1.into(),
-        sender_epoch_id: E1.into(),
-        recipient_group_id: R2.into(),
-        recipient_group_epoch_id: E1.into(),
-        envelope: b"sealed".to_vec(),
-        signature: vec![],
-    };
     cases.push((
-        "group child delivery",
-        child.signed_bytes(&da).unwrap(),
-        frame_record(&[
-            &g(
-                &json::strings(&["child-delivery", R1, "alice", D1, E1]),
-                &json::strings(&[R2, E1]),
-                E2,
-            ),
-            b"sealed",
-        ])
-        .unwrap(),
+        "space successor history context",
+        space_successor.history_context(&da, &scope).unwrap(),
+        x(&json::strings(&["successor", R1, "history"]), E1, E3),
     ));
-    let group_recovery = GroupRecoveryDelivery {
-        id: R1.into(),
-        group_id: G1.into(),
-        epoch_id: E2.into(),
-        sender_account_id: "alice".into(),
-        sender_device_id: D1.into(),
-        sender_epoch_id: E1.into(),
-        recipient_account_id: "bob".into(),
-        recovery_root_id: R2.into(),
-        recipient_epoch_id: E1.into(),
-        envelope: b"sealed".to_vec(),
-        signature: vec![],
-    };
     cases.push((
-        "group recovery delivery",
-        group_recovery.signed_bytes(&da).unwrap(),
-        frame_record(&[
-            &ctx(
-                da.as_str(),
-                "jazz.e2ee.group-recovery.v1",
-                "group",
-                G1,
-                "__e2ee_group_recovery_deliveries",
-                R1,
-                &author,
-                E2,
-                &json::strings(&["bob", R2, E1]),
-            ),
-            b"sealed",
-        ])
-        .unwrap(),
-    ));
-    let group_repair = GroupRepair {
-        id: R1.into(),
-        group_id: G1.into(),
-        epoch_id: E2.into(),
-        delivery_id: R2.into(),
-        account_id: "bob".into(),
-        device_id: D2.into(),
-        account_epoch_id: E1.into(),
-        signature: vec![],
-    };
-    cases.push((
-        "group repair",
-        group_repair.signed_bytes(&da).unwrap(),
-        ctx(
-            da.as_str(),
-            "jazz.e2ee.group-repair.v1",
-            "group",
-            G1,
-            "__e2ee_group_repairs",
-            R1,
-            &json::strings(&[R2, "bob", D2]),
-            E2,
-            E1,
+        "space successor account envelope context",
+        space_successor
+            .account_envelope_context(&da, &scope)
+            .unwrap(),
+        x(
+            &json::strings(&["successor", R1, "account-envelope"]),
+            &json::strings(&[ALICE, AE]),
+            E3,
         ),
     ));
-    let covers = String::from_utf8(json::encode_id_list([R2]).unwrap()).unwrap();
-    let rotation = RotationRequest {
-        id: R1.into(),
-        source_group_id: G1.into(),
-        source_epoch_id: E2.into(),
-        cause_kind: CauseKind::Rotation,
-        cause_id: R2.into(),
-        covers: covers.clone(),
-        author_account_id: "alice".into(),
-        author_device_id: D1.into(),
-        author_epoch_id: E1.into(),
-        signature: vec![],
+    let delivery = SpaceDelivery {
+        id: R2.into(),
+        scope_id: SCOPE.into(),
+        identifier: ROW.into(),
+        key_epoch_id: E3.into(),
+        sender_account_id: ALICE.into(),
+        recipient_account_id: BOB.into(),
+        recipient_account_epoch_id: BE.into(),
+        envelope: b"sealed".to_vec(),
     };
     cases.push((
-        "rotation request",
-        rotation.signed_bytes(&ds).unwrap(),
-        append(
-            ctx(
-                ds.as_str(),
-                "jazz.e2ee.rotation-request.v1",
-                "group",
-                G1,
-                "__e2ee_rotation_requests",
-                R1,
-                &json::strings(&["rotation", R2, E2, "alice", D1, E1]),
-                E1,
-                "",
-            ),
-            &[covers.as_bytes()],
+        "space delivery context",
+        delivery.seal_context(&da, &scope).unwrap(),
+        x(
+            &json::strings(&["delivery", R2, ALICE]),
+            &json::strings(&[BOB, BE]),
+            E3,
         ),
     ));
 
@@ -1499,19 +940,20 @@ fn signed_bytes() {
     assert_eq!(cases.len(), SIGNED_DIGESTS.len());
     for ((name, actual, _), (pinned_name, digest)) in cases.iter().zip(SIGNED_DIGESTS) {
         assert_eq!(name, pinned_name);
+        assert_eq!(hash::sha256(actual), sodium_sha256(actual), "{name}");
         assert_eq!(to_hex(&hash::sha256(actual)), *digest, "{name}");
     }
 }
 
-/// Each row's local invariants: ID forms, enum values, target columns,
-/// derived IDs and shapes.
+/// Each row's local invariants: ID forms (account IDs are UUIDs), enum
+/// values, target columns and shapes.
 #[test]
 fn row_validation() {
     let invalid =
         |result: Result<(), ProtocolError>| matches!(result, Err(ProtocolError::InvalidRecord(_)));
     let approval = PublicDeviceApproval {
         id: R1.into(),
-        account_id: "alice".into(),
+        account_id: ALICE.into(),
         epoch_id: E1.into(),
         device_id: D2.into(),
         signer_id: D1.into(),
@@ -1537,22 +979,24 @@ fn row_validation() {
     ));
     assert!(invalid(
         PublicDeviceApproval {
-            id: ids::key_request_answer_id(R1),
+            id: ids::uuid_v8([0x5a; 16]),
             ..approval.clone()
         }
         .validate()
     ));
-    assert!(invalid(
-        PublicDeviceApproval {
-            account_id: String::new(),
-            ..approval.clone()
-        }
-        .validate()
-    ));
+    for account_id in ["", "alice"] {
+        assert!(invalid(
+            PublicDeviceApproval {
+                account_id: account_id.into(),
+                ..approval.clone()
+            }
+            .validate()
+        ));
+    }
 
     let successor = PublicAccountSuccessor {
         id: R1.into(),
-        account_id: "alice".into(),
+        account_id: ALICE.into(),
         predecessor: E1.into(),
         epoch_id: E2.into(),
         signer_id: D1.into(),
@@ -1643,14 +1087,11 @@ fn row_validation() {
         AccountAction::RemoveDevice
     );
     assert!(AccountAction::parse("remove").is_err());
-    assert!(Operation::parse("Add").is_err());
-    assert_eq!(
-        NoticeKind::parse("reset-approved").unwrap(),
-        NoticeKind::ResetApproved
-    );
 
+    // The identity's ID is the account ID at generation 0 and random after
+    // a reset; nothing derives it.
     let identity = AccountIdentity {
-        id: "alice".into(),
+        id: ALICE.into(),
         ledger_version: 1,
         generation: 0,
         device_id: D1.into(),
@@ -1658,201 +1099,223 @@ fn row_validation() {
         envelope: vec![1],
         verification: vec![1],
     };
-    assert!(identity.validate("alice").is_ok());
+    assert!(identity.validate(ALICE).is_ok());
+    assert!(invalid(identity.validate("alice")));
+    assert!(invalid(
+        AccountIdentity {
+            id: R1.into(),
+            ..identity.clone()
+        }
+        .validate(ALICE)
+    ));
     assert!(invalid(
         AccountIdentity {
             generation: 1,
             ..identity.clone()
         }
-        .validate("alice")
+        .validate(ALICE)
     ));
-    assert!(
-        AccountIdentity {
-            generation: 1,
-            id: ids::account_identity_id("alice", 1),
-            ..identity
-        }
-        .validate("alice")
-        .is_ok()
-    );
-
-    let address = SpaceAddress::new(SCOPE, ROW).unwrap();
-    let notice = Notice {
-        id: ids::admission_notice_id(&address.space_id, "bob", 1),
-        scope_id: address.space_id.clone(),
-        epoch_id: E1.into(),
-        kind: NoticeKind::Admitted,
-        account_id: "bob".into(),
+    let reset = AccountIdentity {
         generation: 1,
-        author_account_id: "alice".into(),
-        author_device_id: D1.into(),
-        author_epoch_id: E1.into(),
-        signature: vec![1],
-    };
-    assert!(notice.validate(NoticeScope::Space(&address)).is_ok());
-    assert!(invalid(
-        Notice {
-            kind: NoticeKind::ResetApproved,
-            ..notice.clone()
-        }
-        .validate(NoticeScope::Space(&address))
-    ));
-    assert!(invalid(notice.validate(NoticeScope::Group(G1))));
-    // Neither kind names generation 0.
-    assert!(invalid(
-        Notice {
-            id: ids::admission_notice_id(&address.space_id, "bob", 0),
-            generation: 0,
-            ..notice.clone()
-        }
-        .validate(NoticeScope::Space(&address))
-    ));
-    // A reset approval is by another manager, never by the approved
-    // account; an admission notice may be the account's own.
-    let approval = Notice {
-        id: ids::reset_notice_id(&address.space_id, "bob", 1),
-        kind: NoticeKind::ResetApproved,
-        ..notice.clone()
-    };
-    assert!(approval.validate(NoticeScope::Space(&address)).is_ok());
-    let self_approval = Notice {
-        author_account_id: "bob".into(),
-        ..approval
-    };
-    assert_eq!(
-        self_approval.validate(NoticeScope::Space(&address)),
-        Err(ProtocolError::InvalidRecord(
-            "reset approval by the approved account"
-        ))
-    );
-    assert!(
-        Notice {
-            author_account_id: "bob".into(),
-            ..notice.clone()
-        }
-        .validate(NoticeScope::Space(&address))
-        .is_ok()
-    );
-
-    let request = RotationRequest {
         id: R1.into(),
-        source_group_id: G1.into(),
-        source_epoch_id: String::new(),
-        cause_kind: CauseKind::Remove,
-        cause_id: R2.into(),
-        covers: String::new(),
-        author_account_id: "alice".into(),
-        author_device_id: D1.into(),
-        author_epoch_id: E1.into(),
-        signature: vec![1],
+        ..identity
     };
-    assert!(request.validate().is_ok());
+    assert!(reset.validate(ALICE).is_ok());
     assert!(invalid(
-        RotationRequest {
-            covers: "[]".into(),
-            ..request.clone()
+        AccountIdentity {
+            id: ids::uuid_v8([0x5a; 16]),
+            ..reset
         }
-        .validate()
+        .validate(ALICE)
     ));
-    assert!(invalid(
-        RotationRequest {
-            cause_kind: CauseKind::Coverage,
-            ..request.clone()
-        }
-        .validate()
-    ));
-    assert!(
-        RotationRequest {
-            cause_kind: CauseKind::Coverage,
-            source_epoch_id: E1.into(),
-            covers: "[]".into(),
-            ..request
-        }
-        .validate()
-        .is_ok()
-    );
 
-    let root_key = GroupPublicKey {
-        id: G1.into(),
-        group_id: G1.into(),
+    let account_key = AccountSealingKey {
+        id: R1.into(),
+        account_id: ALICE.into(),
         epoch_id: E1.into(),
-        predecessor_epoch_id: String::new(),
-        proof_epoch_id: String::new(),
-        author_account_id: "alice".into(),
-        author_device_id: D1.into(),
-        author_epoch_id: E1.into(),
-        keys: keys(),
-        key_signature: vec![1],
-        predecessor_signature: vec![],
-        author_signature: vec![1],
-    };
-    assert!(root_key.validate().is_ok());
-    assert!(invalid(
-        GroupPublicKey {
-            id: R1.into(),
-            ..root_key.clone()
-        }
-        .validate()
-    ));
-    assert!(invalid(
-        GroupPublicKey {
-            predecessor_signature: vec![1],
-            ..root_key.clone()
-        }
-        .validate()
-    ));
-
-    let space_root_id = ids::space_id(SCOPE, ROW);
-    assert_eq!(address.space_id, space_root_id);
-    let grant = SpaceGrant {
-        id: R1.into(),
-        space_id: ids::space_id(SCOPE, D1),
-        epoch_id: E1.into(),
-        author_account_id: "alice".into(),
-        author_device_id: D1.into(),
-        author_epoch_id: E1.into(),
-        operation: Operation::Add,
-        role: Role::Member,
-        recipient_kind: MemberKind::Group,
-        recipient_id: "bob".into(),
-        recipient_epoch_id: E1.into(),
+        signer_id: D1.into(),
+        mechanism: "jazz.wrap.hpke-x25519".into(),
+        version: 1,
+        public_key: vec![0x11; 32],
         signature: vec![1],
     };
-    assert!(invalid(grant.validate(&address)));
-    assert!(invalid(
-        SpaceGrant {
-            space_id: space_root_id.clone(),
-            ..grant.clone()
-        }
-        .validate(&address)
-    ));
-    assert!(
-        SpaceGrant {
-            space_id: space_root_id,
-            recipient_kind: MemberKind::Account,
-            ..grant
-        }
-        .validate(&address)
-        .is_ok()
-    );
+    assert!(account_key.validate().is_ok());
+    for broken in [
+        AccountSealingKey {
+            id: ids::uuid_v8([0x5a; 16]),
+            ..account_key.clone()
+        },
+        AccountSealingKey {
+            account_id: "alice".into(),
+            ..account_key.clone()
+        },
+        AccountSealingKey {
+            signer_id: ALICE.into(),
+            ..account_key.clone()
+        },
+        AccountSealingKey {
+            mechanism: "Bad".into(),
+            ..account_key.clone()
+        },
+        AccountSealingKey {
+            public_key: vec![],
+            ..account_key.clone()
+        },
+        AccountSealingKey {
+            public_key: vec![0x11; 65_537],
+            ..account_key.clone()
+        },
+        AccountSealingKey {
+            signature: vec![],
+            ..account_key.clone()
+        },
+    ] {
+        assert!(invalid(broken.validate()));
+    }
 
-    let recipients = SuccessorRecipients {
+    // Space rows. The address is any UUID, every generated ID random.
+    let member = SpaceMember {
         id: R1.into(),
-        scope_id: G1.into(),
-        salt: vec![0; 31],
-        membership: json::encode_member_map([("alice", E1)]).unwrap(),
-        revision: b"[]".to_vec(),
+        scope_id: SCOPE.into(),
+        identifier: ROW.into(),
+        account_id: BOB.into(),
     };
-    assert!(invalid(recipients.validate()));
-    let recipients = SuccessorRecipients {
-        salt: vec![0; 32],
-        ..recipients
+    assert!(member.validate().is_ok());
+    for broken in [
+        SpaceMember {
+            id: ids::uuid_v8([0x5a; 16]),
+            ..member.clone()
+        },
+        SpaceMember {
+            identifier: "row-1".into(),
+            ..member.clone()
+        },
+        SpaceMember {
+            account_id: "bob".into(),
+            ..member.clone()
+        },
+    ] {
+        assert!(invalid(broken.validate()));
+    }
+
+    let wrap = key_envelope::MECHANISM.id;
+    let root = SpaceRoot {
+        id: ROOT.into(),
+        scope_id: SCOPE.into(),
+        identifier: ROW.into(),
+        creator_account_id: ALICE.into(),
+        device_id: D1.into(),
+        account_epoch_id: AE.into(),
+        epoch_id: E2.into(),
+        mechanism: wrap.into(),
+        version: 1,
+        verification: env(wrap, b"marker"),
+        account_envelope: vec![1],
+        signature: vec![1],
     };
-    assert_eq!(
-        recipients.commitment().unwrap(),
-        derive::recipient_commitment(&[0; 32], &recipients.membership, &recipients.revision)
-            .unwrap()
-    );
+    assert!(root.validate().is_ok());
+    for broken in [
+        SpaceRoot {
+            id: ids::uuid_v8([0x5a; 16]),
+            ..root.clone()
+        },
+        SpaceRoot {
+            creator_account_id: "alice".into(),
+            ..root.clone()
+        },
+        SpaceRoot {
+            verification: env("jazz.sodium.cell", b"marker"),
+            ..root.clone()
+        },
+        SpaceRoot {
+            account_envelope: vec![],
+            ..root.clone()
+        },
+        SpaceRoot {
+            signature: vec![],
+            ..root.clone()
+        },
+    ] {
+        assert!(invalid(broken.validate()));
+    }
+
+    let scope = root.scope().unwrap();
+    let other_space = SpaceScope::new(SCOPE, D2, ROOT).unwrap();
+    let successor = SpaceSuccessor {
+        id: R1.into(),
+        scope_id: SCOPE.into(),
+        identifier: ROW.into(),
+        predecessor: E2.into(),
+        history_epoch_id: E2.into(),
+        epoch_id: E3.into(),
+        author_account_id: ALICE.into(),
+        author_device_id: D1.into(),
+        author_epoch_id: AE.into(),
+        verification: vec![1],
+        history: vec![1],
+        account_envelope: vec![1],
+        signature: vec![1],
+    };
+    assert!(successor.validate(&scope).is_ok());
+    assert!(invalid(successor.validate(&other_space)));
+    for broken in [
+        SpaceSuccessor {
+            epoch_id: E2.into(),
+            ..successor.clone()
+        },
+        SpaceSuccessor {
+            history_epoch_id: E3.into(),
+            ..successor.clone()
+        },
+        SpaceSuccessor {
+            author_account_id: "alice".into(),
+            ..successor.clone()
+        },
+        SpaceSuccessor {
+            history: vec![],
+            ..successor.clone()
+        },
+        SpaceSuccessor {
+            signature: vec![],
+            ..successor.clone()
+        },
+    ] {
+        assert!(invalid(broken.validate(&scope)));
+    }
+
+    let delivery = SpaceDelivery {
+        id: R2.into(),
+        scope_id: SCOPE.into(),
+        identifier: ROW.into(),
+        key_epoch_id: E3.into(),
+        sender_account_id: ALICE.into(),
+        recipient_account_id: BOB.into(),
+        recipient_account_epoch_id: BE.into(),
+        envelope: vec![1],
+    };
+    assert!(delivery.validate(&scope).is_ok());
+    assert!(invalid(delivery.validate(&other_space)));
+    for broken in [
+        SpaceDelivery {
+            id: ids::uuid_v8([0x5a; 16]),
+            ..delivery.clone()
+        },
+        SpaceDelivery {
+            recipient_account_id: "bob".into(),
+            ..delivery.clone()
+        },
+        SpaceDelivery {
+            recipient_account_epoch_id: BOB.into(),
+            ..delivery.clone()
+        },
+        SpaceDelivery {
+            envelope: vec![],
+            ..delivery.clone()
+        },
+    ] {
+        assert!(invalid(broken.validate(&scope)));
+    }
+    assert!(SpaceScope::new(SCOPE, ROW, ALICE).is_err());
 
     let mut keys = keys();
     keys.mechanism = "Bad".into();
@@ -1906,10 +1369,11 @@ fn recovery_derivation_after_reset() {
     }
 }
 
-/// Independent, byte-by-byte constructions of three signed byte strings,
-/// with no crate encoder: `JE2C 01`, nine u32be-length-prefixed fields, then
-/// u32be-length-prefixed framed parts. The public approval is pinned in
-/// full.
+/// Independent, byte-by-byte constructions, with no crate encoder, of the
+/// public approval's, the recovery root's and the account sealing key's
+/// signed bytes and of a space delivery's sealing context: `JE2C 01`, nine
+/// u32be-length-prefixed fields, then u32be-length-prefixed framed parts.
+/// The public approval is pinned in full.
 #[test]
 fn hand_computed_signed_bytes() {
     fn field(value: &[u8]) -> Vec<u8> {
@@ -1924,13 +1388,13 @@ fn hand_computed_signed_bytes() {
         }
         out
     }
-    let da = domain().account("alice").unwrap();
-    let app = format!("[\"{APP}\",\"prod\",\"alice\"]");
+    let da = domain().account(ALICE).unwrap();
+    let app = format!("[\"{APP}\",\"prod\",\"{ALICE}\"]");
     assert_eq!(da.as_str(), app);
 
     let approval = PublicDeviceApproval {
         id: R1.into(),
-        account_id: "alice".into(),
+        account_id: ALICE.into(),
         epoch_id: E1.into(),
         device_id: D2.into(),
         signer_id: D1.into(),
@@ -1943,7 +1407,7 @@ fn hand_computed_signed_bytes() {
         &app,
         "jazz.e2ee.public-device-approval.v1",
         "account",
-        "alice",
+        ALICE,
         "__e2ee_public_device_approvals",
         R1,
         &column,
@@ -1955,7 +1419,7 @@ fn hand_computed_signed_bytes() {
 
     let root = RecoveryRoot {
         id: R2.into(),
-        account_id: "alice".into(),
+        account_id: ALICE.into(),
         signer_id: D1.into(),
         epoch_id: E1.into(),
         keys: keys(),
@@ -1970,7 +1434,7 @@ fn hand_computed_signed_bytes() {
         &app,
         "jazz.e2ee.recovery.v1",
         "account",
-        "alice",
+        ALICE,
         "__e2ee_recovery_roots",
         R2,
         &column,
@@ -1981,172 +1445,152 @@ fn hand_computed_signed_bytes() {
     expected.extend(field(&sealing_env));
     assert_eq!(root.signed_bytes(&da).unwrap(), expected);
 
-    let shared = domain().shared();
-    let covers = format!("[\"{R2}\"]");
-    let rotation = RotationRequest {
+    let account_key = AccountSealingKey {
         id: R1.into(),
-        source_group_id: G1.into(),
-        source_epoch_id: E2.into(),
-        cause_kind: CauseKind::Rotation,
-        cause_id: R2.into(),
-        covers: covers.clone(),
-        author_account_id: "alice".into(),
-        author_device_id: D1.into(),
-        author_epoch_id: E1.into(),
+        account_id: ALICE.into(),
+        epoch_id: E1.into(),
+        signer_id: D1.into(),
+        mechanism: "jazz.wrap.hpke-x25519".into(),
+        version: 1,
+        public_key: vec![0x11; 32],
         signature: vec![],
     };
-    let column = format!("[\"rotation\",\"{R2}\",\"{E2}\",\"alice\",\"{D1}\",\"{E1}\"]");
     let mut expected = context([
-        &format!("[\"{APP}\",\"prod\"]"),
-        "jazz.e2ee.rotation-request.v1",
-        "group",
-        G1,
-        "__e2ee_rotation_requests",
+        &app,
+        "jazz.e2ee.account-key.v1",
+        "account",
+        ALICE,
+        "__e2ee_account_keys",
         R1,
-        &column,
+        D1,
         E1,
         "",
     ]);
-    expected.extend(field(covers.as_bytes()));
-    assert_eq!(rotation.signed_bytes(&shared).unwrap(), expected);
+    expected.extend(field(&sealing_env));
+    assert_eq!(account_key.signed_bytes(&da).unwrap(), expected);
+
+    let delivery = SpaceDelivery {
+        id: R2.into(),
+        scope_id: SCOPE.into(),
+        identifier: ROW.into(),
+        key_epoch_id: E3.into(),
+        sender_account_id: ALICE.into(),
+        recipient_account_id: BOB.into(),
+        recipient_account_epoch_id: BE.into(),
+        envelope: vec![],
+    };
+    let column = format!("[\"delivery\",\"{R2}\",\"{ALICE}\"]");
+    let recipient = format!("[\"{BOB}\",\"{BE}\"]");
+    let expected = context([
+        &app,
+        "jazz.e2ee.space.v1",
+        SCOPE,
+        ROW,
+        "__e2ee_spaces",
+        ROOT,
+        &column,
+        E3,
+        &recipient,
+    ]);
+    let scope = SpaceScope::new(SCOPE, ROW, ROOT).unwrap();
+    assert_eq!(delivery.seal_context(&da, &scope).unwrap(), expected);
 }
 
-const PUBLIC_APPROVAL_HEX: &str = "4a45324301000000375b2230663865336134632d316432622d346335642d386536662d376138623963306431653266222c2270726f64222c22616c696365225d000000236a617a7a2e653265652e7075626c69632d6465766963652d617070726f76616c2e7631000000076163636f756e7400000005616c6963650000001e5f5f653265655f7075626c69635f6465766963655f617070726f76616c730000002461316131613161312d613161312d346131612d396131612d61316131613161316131613100000037617070726f76616c2d7369676e61747572653a31313131313131312d313131312d343131312d383131312d3131313131313131313131310000002465316531653165312d653165312d346531652d386531652d6531653165316531653165310000002432323232323232322d323232322d343232322d383232322d323232323232323232323232";
+const PUBLIC_APPROVAL_HEX: &str = "4a45324301000000565b2230663865336134632d316432622d346335642d386536662d376138623963306431653266222c2270726f64222c2261313163653030302d303030302d353030302d383030302d303030303030303061313163225d000000236a617a7a2e653265652e7075626c69632d6465766963652d617070726f76616c2e7631000000076163636f756e740000002461313163653030302d303030302d353030302d383030302d3030303030303030613131630000001e5f5f653265655f7075626c69635f6465766963655f617070726f76616c730000002461316131613161312d613161312d346131612d396131612d61316131613161316131613100000037617070726f76616c2d7369676e61747572653a31313131313131312d313131312d343131312d383131312d3131313131313131313131310000002465316531653165312d653165312d346531652d386531652d6531653165316531653165310000002432323232323232322d323232322d343232322d383232322d323232323232323232323232";
 
 /// Contexts and signed bytes come from a record's coordinates before its
-/// outputs exist: a delivery's sealing context needs no envelope, a public
-/// key record's signed bytes need none of the signatures over them. Only a
-/// complete record validates.
+/// outputs exist: a delivery's sealing context needs no envelope, a
+/// successor's contexts need none of its outputs, a sealing key record's
+/// signed bytes need no signature. Only a complete record validates.
 #[test]
 fn contexts_before_outputs() {
-    let da = domain().account("alice").unwrap();
-    let ds = domain().shared();
-    let address = SpaceAddress::new(SCOPE, ROW).unwrap();
+    let da = domain().account(ALICE).unwrap();
+    let scope = SpaceScope::new(SCOPE, ROW, ROOT).unwrap();
     let mut delivery = SpaceDelivery {
         id: R1.into(),
-        space_id: address.space_id.clone(),
-        epoch_id: E2.into(),
-        sender_account_id: "alice".into(),
-        sender_device_id: D1.into(),
-        sender_epoch_id: E1.into(),
-        recipient_account_id: "bob".into(),
-        recipient_device_id: D2.into(),
-        recipient_epoch_id: E1.into(),
+        scope_id: SCOPE.into(),
+        identifier: ROW.into(),
+        key_epoch_id: E2.into(),
+        sender_account_id: ALICE.into(),
+        recipient_account_id: BOB.into(),
+        recipient_account_epoch_id: BE.into(),
         envelope: Vec::new(),
-        signature: Vec::new(),
     };
-    let context = delivery.seal_context(&da, &address).unwrap();
-    assert!(delivery.signed_bytes(&da, &address).is_err());
-    assert!(delivery.validate(&address).is_err());
+    let context = delivery.seal_context(&da, &scope).unwrap();
+    assert!(delivery.validate(&scope).is_err());
     delivery.envelope = b"sealed".to_vec();
-    assert_eq!(delivery.seal_context(&da, &address).unwrap(), context);
-    let bytes = delivery.signed_bytes(&da, &address).unwrap();
-    assert!(delivery.validate(&address).is_err());
-    delivery.signature = vec![1];
-    delivery.validate(&address).unwrap();
-    assert_eq!(delivery.signed_bytes(&da, &address).unwrap(), bytes);
+    assert_eq!(delivery.seal_context(&da, &scope).unwrap(), context);
+    delivery.validate(&scope).unwrap();
 
     let mut successor = SpaceSuccessor {
         id: R1.into(),
-        space_id: address.space_id.clone(),
-        predecessor: E1.into(),
-        epoch_id: E2.into(),
-        author_account_id: "alice".into(),
-        author_device_id: D1.into(),
-        author_epoch_id: E1.into(),
-        commitment: Vec::new(),
-        verification: Vec::new(),
-        history: Vec::new(),
-        author_envelope: Vec::new(),
-        signature: Vec::new(),
-    };
-    successor.author_envelope_context(&da, &address).unwrap();
-    successor.history_context(&da, &address).unwrap();
-    successor.marker_context(&da, &address).unwrap();
-    assert!(successor.signed_bytes(&da, &address).is_err());
-    successor.commitment = vec![9; 32];
-    successor.verification = b"marker".to_vec();
-    successor.history = b"history".to_vec();
-    successor.author_envelope = b"sealed".to_vec();
-    successor.signed_bytes(&da, &address).unwrap();
-    assert!(successor.validate(&address).is_err());
-
-    let mut public_key = GroupPublicKey {
-        id: R1.into(),
-        group_id: G1.into(),
-        epoch_id: E2.into(),
-        predecessor_epoch_id: E1.into(),
-        proof_epoch_id: E1.into(),
-        author_account_id: "alice".into(),
-        author_device_id: D1.into(),
-        author_epoch_id: E1.into(),
-        keys: keys(),
-        key_signature: Vec::new(),
-        predecessor_signature: Vec::new(),
-        author_signature: Vec::new(),
-    };
-    let bytes = public_key.signed_bytes(&ds).unwrap();
-    assert!(public_key.validate().is_err());
-    public_key.key_signature = vec![1];
-    public_key.author_signature = vec![1];
-    assert!(public_key.validate().is_err());
-    public_key.predecessor_signature = vec![1];
-    public_key.validate().unwrap();
-    assert_eq!(public_key.signed_bytes(&ds).unwrap(), bytes);
-
-    let group_successor = GroupSuccessor {
-        id: R1.into(),
-        group_id: G1.into(),
-        predecessor: E1.into(),
-        proof_epoch_id: E1.into(),
-        epoch_id: E2.into(),
-        author_account_id: "alice".into(),
-        author_device_id: D1.into(),
-        author_epoch_id: E1.into(),
-        commitment: Vec::new(),
-        verification: Vec::new(),
-        history: Vec::new(),
-        author_envelope: Vec::new(),
-        signature: Vec::new(),
-    };
-    group_successor.context(&da, "history").unwrap();
-    assert!(
-        GroupSuccessor {
-            id: G1.into(),
-            ..group_successor.clone()
-        }
-        .context(&da, "history")
-        .is_err()
-    );
-
-    let space = address.space_id.clone();
-    let root = SpaceRoot {
-        id: space.clone(),
         scope_id: SCOPE.into(),
         identifier: ROW.into(),
-        creator_account_id: "alice".into(),
-        device_id: D1.into(),
-        account_epoch_id: E1.into(),
+        predecessor: E1.into(),
+        history_epoch_id: E1.into(),
         epoch_id: E2.into(),
-        initial_grant_id: SpaceRoot::expected_initial_grant_id(&space, "alice"),
+        author_account_id: ALICE.into(),
+        author_device_id: D1.into(),
+        author_epoch_id: AE.into(),
+        verification: Vec::new(),
+        history: Vec::new(),
+        account_envelope: Vec::new(),
+        signature: Vec::new(),
+    };
+    successor.account_envelope_context(&da, &scope).unwrap();
+    successor.history_context(&da, &scope).unwrap();
+    successor.marker_context(&da, &scope).unwrap();
+    assert!(successor.signed_bytes(&da, &scope).is_err());
+    successor.verification = b"marker".to_vec();
+    successor.history = b"history".to_vec();
+    successor.account_envelope = b"sealed".to_vec();
+    let bytes = successor.signed_bytes(&da, &scope).unwrap();
+    assert!(successor.validate(&scope).is_err());
+    successor.signature = vec![1];
+    successor.validate(&scope).unwrap();
+    assert_eq!(successor.signed_bytes(&da, &scope).unwrap(), bytes);
+
+    let mut account_key = AccountSealingKey {
+        id: R1.into(),
+        account_id: ALICE.into(),
+        epoch_id: E1.into(),
+        signer_id: D1.into(),
+        mechanism: "jazz.wrap.hpke-x25519".into(),
+        version: 1,
+        public_key: vec![0x11; 32],
+        signature: Vec::new(),
+    };
+    let bytes = account_key.signed_bytes(&da).unwrap();
+    assert!(account_key.validate().is_err());
+    account_key.signature = vec![1];
+    account_key.validate().unwrap();
+    assert_eq!(account_key.signed_bytes(&da).unwrap(), bytes);
+
+    let root = SpaceRoot {
+        id: ROOT.into(),
+        scope_id: SCOPE.into(),
+        identifier: ROW.into(),
+        creator_account_id: ALICE.into(),
+        device_id: D1.into(),
+        account_epoch_id: AE.into(),
+        epoch_id: E2.into(),
         mechanism: key_envelope::MECHANISM.id.into(),
         version: 1,
         verification: Vec::new(),
-        author_envelope: Vec::new(),
+        account_envelope: Vec::new(),
         signature: Vec::new(),
     };
     root.marker_context(&da).unwrap();
-    root.author_envelope_context(&da).unwrap();
+    root.account_envelope_context(&da).unwrap();
     // The marker must be an envelope of the root's own mechanism.
     let other_mechanism = SpaceRoot {
         verification: env("jazz.sodium.cell", b"marker"),
-        author_envelope: b"sealed".to_vec(),
+        account_envelope: b"sealed".to_vec(),
         ..root.clone()
     };
     assert!(other_mechanism.signed_bytes(&da).is_err());
-    let random_grant = SpaceRoot {
-        initial_grant_id: R1.into(),
-        ..root
-    };
-    assert!(random_grant.marker_context(&da).is_err());
+    // Contexts of another space's records are refused.
+    let other_space = SpaceScope::new(SCOPE, D2, ROOT).unwrap();
+    assert!(successor.history_context(&da, &other_space).is_err());
+    assert!(delivery.seal_context(&da, &other_space).is_err());
 }

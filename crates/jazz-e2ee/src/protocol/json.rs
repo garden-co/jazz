@@ -303,60 +303,6 @@ pub fn decode_revision(bytes: &[u8]) -> ProtocolResult<Vec<String>> {
     Ok(ids)
 }
 
-/// A member map (`encodeGroupMembership`): `json([[accountId, epochId], …])`
-/// sorted by account ID, strictly increasing, epoch IDs version 4 or 7 UUIDs.
-pub fn encode_member_map(
-    members: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
-) -> ProtocolResult<Vec<u8>> {
-    let mut entries: Vec<(String, String)> = members
-        .into_iter()
-        .map(|(account, epoch)| (account.as_ref().to_owned(), epoch.as_ref().to_owned()))
-        .collect();
-    entries.sort_by(|a, b| utf16_cmp(&a.0, &b.0));
-    check_member_map(&entries)?;
-    let value = Value::Array(
-        entries
-            .into_iter()
-            .map(|(account, epoch)| {
-                Value::Array(vec![Value::String(account), Value::String(epoch)])
-            })
-            .collect(),
-    );
-    let mut out = String::new();
-    push_value(&mut out, &value);
-    Ok(out.into_bytes())
-}
-
-fn check_member_map(entries: &[(String, String)]) -> ProtocolResult<()> {
-    let valid = strictly_increasing(entries, |entry| entry.0.as_str())
-        && entries
-            .iter()
-            .all(|(account, epoch)| !account.is_empty() && ids::is_id(epoch, IdForm::Random));
-    if valid {
-        Ok(())
-    } else {
-        Err(ProtocolError::InvalidRecord("invalid member map"))
-    }
-}
-
-pub fn decode_member_map(bytes: &[u8]) -> ProtocolResult<Vec<(String, String)>> {
-    let Value::Array(items) = parse_canonical(bytes)? else {
-        return Parser::fail();
-    };
-    let mut entries = Vec::with_capacity(items.len());
-    for item in items {
-        let mut pair = into_strings(item)?;
-        if pair.len() != 2 {
-            return Parser::fail();
-        }
-        let epoch = pair.pop().expect("two items");
-        let account = pair.pop().expect("two items");
-        entries.push((account, epoch));
-    }
-    check_member_map(&entries)?;
-    Ok(entries)
-}
-
 /// A delivery map (`encodeEpochDeliveries`):
 /// `json([[deviceId, [byte, …]], …])` sorted by device ID, strictly
 /// increasing, device IDs version 4 or 7 UUIDs, each envelope 1–65,536 bytes.

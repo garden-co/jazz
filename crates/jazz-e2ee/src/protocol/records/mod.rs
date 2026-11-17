@@ -1,18 +1,24 @@
 //! Typed rows of the internal E2EE tables (`E2EE_PROTOCOL.md` §1.2, §1.3),
-//! each with its local invariants and the exact bytes it signs or binds.
+//! one type per table, each with its local invariants and the exact bytes
+//! it signs or binds.
 //!
-//! Column types: IDs and account IDs are strings; key, envelope, signature,
-//! marker and canonical-JSON columns are bytes; mechanism versions and the
-//! ledger version are 32-bit unsigned integers (the common envelope's version
-//! field); generations are 64-bit unsigned integers, written as decimal
-//! strings wherever they enter JSON. Optional columns are `Option`.
+//! - [`account`]: the account and device tables, including the account
+//!   sealing keys (§1.2, §2).
+//! - [`space`]: the members table and the space roots, successors and
+//!   deliveries (§1.3, §3).
+//!
+//! Column types: record, epoch, device, recovery root and account IDs and
+//! the space address are UUIDs, held as their canonical lowercase text;
+//! key, envelope, signature, marker and canonical-JSON columns are bytes;
+//! mechanism versions and the ledger version are 32-bit unsigned integers
+//! (the common envelope's version field); generations are 64-bit unsigned
+//! integers, written as decimal strings wherever they enter JSON. Optional
+//! columns are `Option`.
 //!
 //! `validate` checks only what a row says about itself. Whether a row is
 //! accepted by replay depends on other rows and is decided by replay.
 
 pub mod account;
-pub mod group;
-pub mod scoped;
 pub mod space;
 
 use crate::agility::{MechanismId, PublicKey};
@@ -36,8 +42,20 @@ pub(crate) fn ensure_id(value: &str, form: IdForm, what: &'static str) -> Protoc
     ensure(ids::is_id(value, form), what)
 }
 
+/// Account IDs are UUIDs of any version (§0, "Identifiers").
 pub(crate) fn ensure_account(value: &str, what: &'static str) -> ProtocolResult<()> {
+    ensure_id(value, IdForm::Any, what)
+}
+
+pub(crate) fn ensure_bytes(value: &[u8], what: &'static str) -> ProtocolResult<()> {
     ensure(!value.is_empty(), what)
+}
+
+pub(crate) fn ensure_mechanism(id: &str, version: u32) -> ProtocolResult<()> {
+    ensure(
+        Mechanism::new(id, version).validate().is_ok(),
+        "invalid mechanism",
+    )
 }
 
 /// `env(m, p)`: the common envelope of mechanism `(id, version)` around `p`.
@@ -94,27 +112,6 @@ macro_rules! string_enum {
     };
 }
 pub(crate) use string_enum;
-
-string_enum!(
-    /// A grant's or membership record's `operation`.
-    Operation { Add => "add", Remove => "remove" }
-);
-string_enum!(
-    /// A grant's or membership record's `role`.
-    Role { Manager => "manager", Member => "member" }
-);
-string_enum!(
-    /// A grant's `recipientKind` or a membership record's `memberKind`.
-    MemberKind { Account => "account", Group => "group" }
-);
-string_enum!(
-    /// A notice's `kind`.
-    NoticeKind { ResetApproved => "reset-approved", Admitted => "admitted" }
-);
-string_enum!(
-    /// A key request's `scopeKind`.
-    ScopeKind { Space => "space", Group => "group" }
-);
 
 /// The six key columns of a device request, its device-keys projection and
 /// a recovery root: one sealing key and one signing key, each with its

@@ -42,14 +42,15 @@ impl AppDomain {
         &self.env
     }
 
-    /// `Dₛ = json([appId, env])`: content, group public keys and rotation
-    /// requests.
+    /// `Dₛ = json([appId, env])`: content (cells, equality tokens and
+    /// streams).
     pub fn shared(&self) -> SharedDomain {
         SharedDomain(json::strings(&[&self.app_id, &self.env]))
     }
 
-    /// `Dₐ(account) = json([appId, env, account])`: the account's ledger, the
-    /// groups and spaces it creates, and this device's private store scope.
+    /// `Dₐ(account) = json([appId, env, account])`: the account's ledger
+    /// records, the records of the spaces whose root it creates, and this
+    /// device's private store scope.
     pub fn account(&self, account_id: &str) -> ProtocolResult<AccountDomain> {
         if account_id.is_empty() {
             return Err(ProtocolError::InvalidRecord("empty account ID"));
@@ -62,14 +63,14 @@ impl AppDomain {
     }
 }
 
-/// The shared domain `Dₛ`, the `application` of content, group public-key
-/// records and rotation requests. Distinct from [`AccountDomain`] so that
-/// one cannot be passed where the other is required.
+/// The shared domain `Dₛ`, the `application` of content. Distinct from
+/// [`AccountDomain`] so that one cannot be passed where the other is
+/// required.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SharedDomain(String);
 
 /// An account domain `Dₐ(account)`, the `application` of the account's
-/// ledger records and of the groups and spaces it creates.
+/// ledger records and of the records of the spaces whose root it creates.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AccountDomain(String);
 

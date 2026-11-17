@@ -20,6 +20,9 @@ use jazz_e2ee::registry::Registry;
 use super::TestRandom;
 
 pub const APP_ID: &str = "0f8e3a4c-1d2b-4c5d-8e6f-7a8b9c0d1e2f";
+/// An account ID: a UUID, as every account ID is (version 5, as Jazz's
+/// account registry mints them).
+pub const ALICE: &str = "a11ce000-0000-5000-8000-00000000a11c";
 
 /// The mechanisms, domain and account under test.
 pub struct Env {
@@ -154,6 +157,9 @@ impl Ledger {
             .identities
             .push(Accepted::new(at, records.identity));
         self.public.roots.push(Accepted::new(at, records.root));
+        self.public
+            .account_keys
+            .push(Accepted::new(at, records.account_key));
         (at, *records.key)
     }
 
@@ -261,6 +267,9 @@ impl Ledger {
                 .recovery_deliveries
                 .push(Accepted::new(at, delivery.clone()));
         }
+        self.public
+            .account_keys
+            .push(Accepted::new(at, records.account_key.clone()));
     }
 
     /// Registers `recovery` by `signer` and delivers `key` to it, in two

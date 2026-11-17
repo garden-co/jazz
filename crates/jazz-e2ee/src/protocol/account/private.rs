@@ -8,7 +8,6 @@
 use std::collections::BTreeMap;
 
 use super::super::error::{ProtocolError, ProtocolResult};
-use super::super::ids;
 use super::super::json;
 use super::super::position::{Accepted, Position};
 use super::super::records::account::{
@@ -133,13 +132,14 @@ pub fn verify_private(
     let proofs = index(&private.proofs);
     let deliveries = index(&private.deliveries);
 
-    let identity_id = ids::account_identity_id(account_id, state.generation);
+    // The identity of the canonical root: same generation, device, epoch
+    // and ledger version, accepted at the root's position, with the account
+    // ID as its ID at generation 0 (a reset identity's ID is random).
     let identity = private
         .identities
         .iter()
         .find(|identity| {
-            identity.row.id == identity_id
-                && identity.position == state.root.position
+            identity.position == state.root.position
                 && state.root.row.matches_identity(&identity.row)
                 && identity.row.validate(account_id).is_ok()
                 && requests
@@ -147,15 +147,13 @@ pub fn verify_private(
                     .is_some()
         })
         .cloned();
-    // The account's own identity of this generation names another device
-    // or epoch than the canonical root:
-    // the public root is not the one the account wrote (§2.4,
-    // `root-not-mine`). R5 and R6 allow one identity per generation, written
-    // with its root.
+    // An identity the account wrote for the canonical generation names
+    // another device or epoch than the canonical root: the public root is
+    // not the one the account wrote (§2.4, `root-not-mine`). R5 and R6
+    // admit an identity only with its root, in one transaction.
     if identity.is_none()
         && private.identities.iter().any(|identity| {
-            identity.row.id == identity_id
-                && identity.row.generation == state.generation
+            identity.row.generation == state.generation
                 && identity.row.validate(account_id).is_ok()
                 && !state.root.row.matches_identity(&identity.row)
         })

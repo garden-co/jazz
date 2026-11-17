@@ -23,7 +23,7 @@ use super::super::json;
 use super::super::local_first::LocalFirstIdentity;
 use super::super::records::KeyColumns;
 use super::super::records::account::{
-    AccountAction, AccountIdentity, AccountKind, AccountRoot, AccountSuccessor,
+    AccountAction, AccountIdentity, AccountKind, AccountRoot, AccountSealingKey, AccountSuccessor,
     ChallengeCoordinates, DeviceApproval, DeviceChallenge, DeviceDelivery, DeviceKeysRow,
     DeviceProof, DeviceRequest, LEDGER_VERSION, PublicAccountSuccessor, PublicDeviceApproval,
     RecoveryDelivery, RecoveryRoot, approval_context, approval_signed_bytes,
@@ -235,11 +235,13 @@ impl AccountWriter<'_> {
     }
 }
 
-/// A new account root: its private identity, its public root and the epoch
-/// key. The key is never printed.
+/// A new account root: its private identity, its public root, the sealing
+/// key record of its epoch (§2.12) and the epoch key. The key is never
+/// printed.
 pub struct RootRecords {
     pub identity: AccountIdentity,
     pub root: AccountRoot,
+    pub account_key: AccountSealingKey,
     pub key: Zeroizing<[u8; 32]>,
 }
 
@@ -248,6 +250,7 @@ impl core::fmt::Debug for RootRecords {
         f.debug_struct("RootRecords")
             .field("identity", &self.identity)
             .field("root", &self.root)
+            .field("account_key", &self.account_key)
             .field("key", &"..")
             .finish()
     }
@@ -335,10 +338,10 @@ pub enum RootAuthority<'a> {
     LocalFirst(&'a LocalFirstIdentity),
 }
 
-/// The identity and public root `permit` allows for `device` (§2.3; at
-/// `g + 1` the reset of §2.11), of the kind `authority` gives. Both
-/// envelopes are opened again and a local-first signature is verified
-/// before the records are returned.
+/// The identity, public root and sealing key record `permit` allows for
+/// `device` (§2.3; at `g + 1` the reset of §2.11, whose identity has a
+/// random ID), of the kind `authority` gives. Both envelopes are opened
+/// again and every signature is verified before the records are returned.
 pub fn account_root(
     writer: &AccountWriter<'_>,
     device: &LocalDevice,
@@ -356,7 +359,11 @@ pub fn account_root(
     }
     let generation = permit.generation;
     let application = writer.application()?;
-    let identity_id = ids::account_identity_id(writer.account_id, generation);
+    let identity_id = if generation == 0 {
+        writer.account_id.to_owned()
+    } else {
+        ids::random_v4(rng)?
+    };
     let epoch_id = ids::random_v4(rng)?;
     let key = random_key(rng)?;
     let envelope_context = identity_context(
@@ -408,6 +415,7 @@ pub fn account_root(
         ))?)?;
         root.local_first_signature = Some(signature);
     }
+    let account_key = sealing_key_record(writer, device, &epoch_id, &key, rng)?;
     Ok(RootRecords {
         identity: AccountIdentity {
             id: identity_id,
@@ -419,8 +427,55 @@ pub fn account_root(
             verification,
         },
         root,
+        account_key,
         key,
     })
+}
+
+/// The sealing key record of account epoch `epoch_id` with key `key`, for
+/// the selected key sealing mechanism (§2.12), signed by `signer`.
+fn sealing_key_record(
+    writer: &AccountWriter<'_>,
+    signer: &LocalDevice,
+    epoch_id: &str,
+    key: &[u8; 32],
+    rng: &mut dyn RandomSource,
+) -> ProtocolResult<AccountSealingKey> {
+    let pair = derive::account_sealing_key_pair(writer.suite.key_seal, key)?;
+    let mut record = AccountSealingKey {
+        id: ids::random_v4(rng)?,
+        account_id: writer.account_id.to_owned(),
+        epoch_id: epoch_id.to_owned(),
+        signer_id: signer.id.clone(),
+        mechanism: pair.public.mechanism.id.clone(),
+        version: pair.public.mechanism.version,
+        public_key: pair.public.bytes.clone(),
+        signature: Vec::new(),
+    };
+    let bytes = record.signed_bytes(&writer.application()?)?;
+    record.signature = writer.sign(&signer.signing, &bytes)?;
+    Ok(record)
+}
+
+/// A later publication of the current epoch's sealing key record for the
+/// selected mechanism (§2.12, stage `account-key`), by an active device
+/// holding the current account key: the case of a mechanism migration,
+/// since the epoch's creation wrote the record of the mechanism selected
+/// then. It is for a selected mechanism the current epoch has no valid
+/// record of; the caller decides that, as replay does not yet judge
+/// sealing key records.
+pub fn account_sealing_key(
+    writer: &AccountWriter<'_>,
+    state: &AccountState,
+    signer: &LocalDevice,
+    account_key: &AccountKey,
+    rng: &mut dyn RandomSource,
+) -> ProtocolResult<AccountSealingKey> {
+    if !state.is_active(&signer.id) {
+        return refuse(RefusalCode::DeviceNotActive);
+    }
+    let key = current_key(state, account_key)?;
+    sealing_key_record(writer, signer, state.epoch_id(), key, rng)
 }
 
 /// A challenge and the secret it seals, kept only in memory and never
@@ -764,12 +819,13 @@ pub enum RotationTarget {
     RetireRecoveryRoot(String),
 }
 
-/// The rows of an account rotation and its new key, which is never
-/// printed.
+/// The rows of an account rotation, the sealing key record of its new
+/// epoch (§2.12) and its new key, which is never printed.
 pub struct RotationRecords {
     pub private: AccountSuccessor,
     pub public: PublicAccountSuccessor,
     pub recovery_deliveries: Vec<RecoveryDelivery>,
+    pub account_key: AccountSealingKey,
     pub key: Zeroizing<[u8; 32]>,
 }
 
@@ -779,6 +835,7 @@ impl core::fmt::Debug for RotationRecords {
             .field("private", &self.private)
             .field("public", &self.public)
             .field("recovery_deliveries", &self.recovery_deliveries)
+            .field("account_key", &self.account_key)
             .field("key", &"..")
             .finish()
     }
@@ -790,7 +847,8 @@ impl core::fmt::Debug for RotationRecords {
 /// authenticated with the key, the public one the public approvals replay
 /// accepted in it. Recovery roots whose key is not of the selected sealing
 /// mechanism get no delivery (§0, mechanism agility) and do not block the
-/// rotation.
+/// rotation. The new epoch's sealing key record is signed by the author,
+/// also when it removes itself.
 pub fn rotate(
     writer: &AccountWriter<'_>,
     state: &AccountState,
@@ -899,10 +957,12 @@ pub fn rotate(
             writer, &root.row, &epoch_id, &key, rng,
         )?);
     }
+    let account_key = sealing_key_record(writer, author, &epoch_id, &key, rng)?;
     Ok(RotationRecords {
         private,
         public,
         recovery_deliveries,
+        account_key,
         key,
     })
 }

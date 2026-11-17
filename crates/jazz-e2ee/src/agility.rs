@@ -69,9 +69,9 @@ pub fn is_custom_id(id: &str) -> bool {
             .all(|label| !label.is_empty() && !label.starts_with('-') && !label.ends_with('-'))
 }
 
-/// A public key and the mechanism it belongs to. Devices, groups and
-/// recovery roots advertise these; a sender seals only to a key of the
-/// mechanism it selected.
+/// A public key and the mechanism it belongs to. Devices, account sealing
+/// keys and recovery roots advertise these; a sender seals only to a key of
+/// the mechanism it selected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicKey {
     pub mechanism: MechanismId,
@@ -190,8 +190,8 @@ pub trait KeyWrapper: MechanismImpl {
 /// is a drop-in implementation.
 pub trait KeySealer: MechanismImpl {
     /// Deterministically derives a key pair from input keying material of at
-    /// least 32 bytes (HPKE `DeriveKeyPair`). Groups derive their key pairs
-    /// from epoch keys this way.
+    /// least 32 bytes (HPKE `DeriveKeyPair`). Accounts derive their sealing
+    /// key pairs from epoch keys this way.
     fn derive_key_pair(&self, ikm: &[u8]) -> Result<KeyPair>;
 
     /// A fresh key pair from 32 random bytes of input keying material.

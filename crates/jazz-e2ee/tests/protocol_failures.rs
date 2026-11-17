@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use common::TestRandom;
-use common::protocol::{Env, Ledger};
+use common::protocol::{ALICE, Env, Ledger};
 use jazz_e2ee::agility::{KeyPair, KeyWrapper, MechanismConfig, MechanismImpl, PublicKey, Signer};
 use jazz_e2ee::envelope::{self, Mechanism};
 use jazz_e2ee::mechanisms::{key_envelope, signature};
@@ -130,7 +130,7 @@ fn flaky() -> Flaky {
         ..MechanismConfig::default()
     };
     Flaky {
-        env: Env::with(registry, config, "alice"),
+        env: Env::with(registry, config, ALICE),
         signer_fails,
         wrapper_fails,
     }
@@ -150,7 +150,7 @@ fn signer_failure_stops_replay() {
     let mut rng = TestRandom(31);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -172,7 +172,7 @@ fn wrapper_failure_stops_key_authentication() {
     let env = &flaky.env;
     let mut rng = TestRandom(32);
     let laptop = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     let (_, key) = ledger.root(env, &laptop, 0, &mut rng);
     assert_eq!(*ledger.acquire(env, &laptop).unwrap().key(), key);
@@ -193,7 +193,7 @@ fn wrapper_failure_is_not_an_invalid_possession_proof() {
     let mut rng = TestRandom(33);
     let laptop = env.device(&mut rng);
     let phone = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
@@ -261,10 +261,10 @@ fn unreadable_fresh_output_is_a_provider_failure() {
         key_wrap: GARBLE.into(),
         ..MechanismConfig::default()
     };
-    let env = Env::with(registry, config, "alice");
+    let env = Env::with(registry, config, ALICE);
     let mut rng = TestRandom(34);
     let laptop = env.device(&mut rng);
-    let mut ledger = Ledger::new("alice");
+    let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     let writer = env.writer();
     let permit = build::check_bootstrap(&writer, &laptop, &ledger.public, &ledger.private).unwrap();

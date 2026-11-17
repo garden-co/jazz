@@ -37,6 +37,10 @@ pub enum IntrinsicContradiction {
     MissingRootKey,
     MissingRecipientKey,
     MissingSignerKey,
+    /// A valid sealing key record of the account's own current epoch that
+    /// does not derive from the epoch key (§2.12): only the account's own
+    /// devices can write one.
+    ConflictingAccountKey,
 }
 
 impl IntrinsicContradiction {
@@ -47,6 +51,7 @@ impl IntrinsicContradiction {
             Self::MissingRootKey => "missing-root-key",
             Self::MissingRecipientKey => "missing-recipient-key",
             Self::MissingSignerKey => "missing-signer-key",
+            Self::ConflictingAccountKey => "conflicting-account-key",
         }
     }
 }
@@ -103,17 +108,10 @@ pub enum RefusalCode {
     InvalidPossessionProof,
     TargetNotActive,
     UnsupportedRecipient,
-    SpaceSealed,
-    GroupSealed,
-    RecipientAbsent,
-    RecipientNeedsMaintenance,
-    GroupUnavailable,
     AccountResetNotAllowed,
     SpacePending,
-    ConfirmationStale,
-    RecipientStillDeclared,
-    RecipientsDeclared,
-    LastManager,
+    SpaceCreateRefused,
+    RotationNeedsKey,
     LocalFirstIdentityMismatch,
 }
 
@@ -132,17 +130,10 @@ impl RefusalCode {
             Self::InvalidPossessionProof => "invalid-possession-proof",
             Self::TargetNotActive => "target-not-active",
             Self::UnsupportedRecipient => "unsupported-recipient",
-            Self::SpaceSealed => "space-sealed",
-            Self::GroupSealed => "group-sealed",
-            Self::RecipientAbsent => "recipient-absent",
-            Self::RecipientNeedsMaintenance => "recipient-needs-maintenance",
-            Self::GroupUnavailable => "group-unavailable",
             Self::AccountResetNotAllowed => "account-reset-not-allowed",
             Self::SpacePending => "space-pending",
-            Self::ConfirmationStale => "confirmation-stale",
-            Self::RecipientStillDeclared => "recipient-still-declared",
-            Self::RecipientsDeclared => "recipients-declared",
-            Self::LastManager => "last-manager",
+            Self::SpaceCreateRefused => "space-create-refused",
+            Self::RotationNeedsKey => "rotation-needs-key",
             Self::LocalFirstIdentityMismatch => "local-first-identity-mismatch",
         }
     }
