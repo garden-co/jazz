@@ -49,7 +49,7 @@ pnpm dev
 
 In development Jazz uses a local app id and keeps its data in `.jazz/`; no
 separate server runs. A deployment sets its own `JAZZ_APP_ID` and
-`BETTER_AUTH_SECRET`. To keep the data on a sync server such as Jazz Cloud,
+`BETTER_AUTH_SECRET`. To keep the data on a sync server such as Jazz Cloud (deprecated),
 also set `JAZZ_SERVER_URL` and `JAZZ_ADMIN_SECRET`.
 
 Sign in with the pre-filled demo account (choose **Create account** the first

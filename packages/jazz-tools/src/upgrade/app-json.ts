@@ -1,34 +1,13 @@
 /**
- * Editing `jazz.app.json` for `jazz-tools upgrade`: the .64 file's `tsOnly`
- * markers and `slices` go, the `computed` fields and `transforms` the
- * conversion found come in. Printed as Jazz's Rust writer prints the file
- * (an object or array stays on one line while it fits in 100 columns), so
- * the diff shows only what upgrade changed.
+ * Reading `jazz.app.json` for `jazz-tools upgrade`, keeping key order (a
+ * `history` version named by an all-digit hash must stay where it is).
  */
 
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export type JsonObject = { [key: string]: Json };
 
-/** A column, computed field or transform type, as the file spells it. */
-export type TypeSpec = string | JsonObject;
-
-export interface ComputedDecl {
-  type: TypeSpec;
-  from: string[];
-}
-
-export interface TransformDecl {
-  stored: TypeSpec;
-  view: TypeSpec;
-}
-
 /** The `tsOnly` markers of a .64 file: per table, field → kind. */
 export type TsOnlyMarkers = Record<string, Record<string, "computed" | "transform">>;
-
-const WIDTH = 100;
-
-/** The key order Jazz's writer uses for a table. */
-const TABLE_KEYS = ["columns", "relations", "indexes", "branchBy", "history", "computed"];
 
 /**
  * Objects with an integer-like key (a `history` version named by an
@@ -164,144 +143,4 @@ export function tsOnlyMarkers(app: JsonObject): TsOnlyMarkers {
     }
   }
   return out;
-}
-
-/** The base type and optionality of a column spec (`"string?"`, `{ "enum": … }`). */
-export function columnType(spec: Json): { type: TypeSpec; nullable: boolean } {
-  if (typeof spec === "string") {
-    return spec.endsWith("?")
-      ? { type: spec.slice(0, -1), nullable: true }
-      : { type: spec, nullable: false };
-  }
-  if (!isObject(spec))
-    throw new Error(`a column spec is a string or an object, not ${JSON.stringify(spec)}`);
-  const {
-    optional,
-    default: _default,
-    merge: _merge,
-    references: _references,
-    transform: _t,
-    ...rest
-  } = spec;
-  const nullable = optional === true;
-  if ("type" in rest && Object.keys(rest).length === 1 && typeof rest.type === "string") {
-    const inner = columnType(rest.type);
-    return { type: inner.type, nullable: nullable || inner.nullable };
-  }
-  return { type: rest, nullable };
-}
-
-export interface AppEdits {
-  computed: Record<string, Record<string, ComputedDecl>>;
-  transforms: Record<string, TransformDecl>;
-  /** Per table, column → the transform it names. */
-  columnTransforms: Record<string, Record<string, string>>;
-}
-
-/**
- * The file with `tsOnly` and `slices` removed and `edits` added. Returns
- * what it removed, for the report.
- */
-export function editAppJson(
-  app: JsonObject,
-  edits: AppEdits,
-): { app: JsonObject; droppedSlices: string[] } {
-  const droppedSlices = isObject(app.slices) ? Object.keys(app.slices) : [];
-  const out: JsonObject = {};
-  for (const [key, value] of entriesOf(app)) {
-    if (key === "slices") continue;
-    if (key === "tables") {
-      out.tables = editTables(appTables(app), edits);
-      continue;
-    }
-    if (key === "transforms") continue; // re-added below, merged
-    out[key] = value;
-  }
-  const transforms: JsonObject = isObject(app.transforms) ? { ...app.transforms } : {};
-  for (const [name, decl] of Object.entries(edits.transforms)) {
-    transforms[name] = { stored: decl.stored, view: decl.view };
-  }
-  if (Object.keys(transforms).length > 0) out.transforms = transforms;
-  return { app: out, droppedSlices };
-}
-
-function editTables(tables: Record<string, JsonObject>, edits: AppEdits): JsonObject {
-  const out: JsonObject = {};
-  for (const [name, table] of Object.entries(tables)) {
-    const columnTransforms = edits.columnTransforms[name] ?? {};
-    const columns: JsonObject = {};
-    for (const [column, spec] of Object.entries(tableColumns(table))) {
-      const transform = columnTransforms[column];
-      columns[column] = transform === undefined ? spec : withTransform(spec, transform);
-    }
-    const computed: JsonObject = isObject(table.computed) ? { ...table.computed } : {};
-    for (const [field, decl] of Object.entries(edits.computed[name] ?? {})) {
-      computed[field] = { type: decl.type, from: decl.from };
-    }
-    const fields: JsonObject = {};
-    const rest = Object.entries(table).filter(
-      ([key]) => key !== "tsOnly" && key !== "computed" && key !== "columns",
-    );
-    // Known keys in the writer's order, then anything else as it was.
-    for (const key of TABLE_KEYS) {
-      if (key === "columns") fields.columns = columns;
-      else if (key === "computed") {
-        if (Object.keys(computed).length > 0) fields.computed = computed;
-      } else {
-        const found = rest.find(([k]) => k === key);
-        if (found) fields[key] = found[1];
-      }
-    }
-    for (const [key, value] of rest) if (!(key in fields)) fields[key] = value;
-    out[name] = fields;
-  }
-  return out;
-}
-
-/** A column spec naming `transform`: in object form, `transform` last. */
-function withTransform(spec: Json, transform: string): JsonObject {
-  if (typeof spec === "string") return { type: spec, transform };
-  if (!isObject(spec))
-    throw new Error(`a column spec is a string or an object, not ${JSON.stringify(spec)}`);
-  const { transform: _old, ...rest } = spec;
-  return { ...rest, transform };
-}
-
-/** Print as Jazz's Rust writer does. */
-export function printAppJson(value: Json): string {
-  return `${writeValue(value, 0, 0)}\n`;
-}
-
-function quote(text: string): string {
-  return JSON.stringify(text);
-}
-
-function inline(value: Json): string {
-  if (value === null) return "null";
-  if (typeof value === "boolean" || typeof value === "number") return String(value);
-  if (typeof value === "string") return quote(value);
-  if (Array.isArray(value)) return `[${value.map(inline).join(", ")}]`;
-  const entries = entriesOf(value);
-  if (entries.length === 0) return "{}";
-  return `{ ${entries.map(([k, v]) => `${quote(k)}: ${inline(v)}`).join(", ")} }`;
-}
-
-function writeValue(value: Json, indent: number, prefix: number): string {
-  const flat = inline(value);
-  const fits = prefix + [...flat].length <= WIDTH && !flat.includes("\n");
-  const pad = (n: number) => " ".repeat(n);
-  if (Array.isArray(value) && !fits && value.length > 0) {
-    const items = value.map(
-      (item) => `${pad(indent + 2)}${writeValue(item, indent + 2, indent + 2)}`,
-    );
-    return `[\n${items.join(",\n")}\n${pad(indent)}]`;
-  }
-  if (isObject(value) && !fits && entriesOf(value).length > 0) {
-    const items = entriesOf(value).map(([key, item]) => {
-      const head = `${quote(key)}: `;
-      return `${pad(indent + 2)}${head}${writeValue(item, indent + 2, indent + 2 + [...head].length)}`;
-    });
-    return `{\n${items.join(",\n")}\n${pad(indent)}}`;
-  }
-  return flat;
 }

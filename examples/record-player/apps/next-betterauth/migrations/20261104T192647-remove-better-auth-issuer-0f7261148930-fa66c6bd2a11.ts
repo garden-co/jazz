@@ -1,0 +1,101 @@
+// Existing issuer cells keep their stored values. New rows viewed by an old
+// schema get an empty, non-authoritative sentinel; this does not support an
+// authentication-package downgrade or reconstruct an issuer from providerId.
+import { schema as s, migration as m } from "jazz-tools";
+
+export default m.defineMigration({
+  migrate: {
+    better_auth_account: {
+      issuer: m.drop.string({ backwardsDefault: "" }),
+    },
+  },
+  fromHash: "0f7261148930",
+  toHash: "fa66c6bd2a11",
+  from: {
+    better_auth_account: s.table(
+      {
+        issuer: s.string(),
+        accountId: s.string(),
+        providerId: s.string(),
+        userId: s.uuid(),
+        password: s.string().optional(),
+        createdAt: s.timestamp(),
+        updatedAt: s.timestamp(),
+      },
+      {
+        user: s.rel("better_auth_user", "userId"),
+      },
+    ),
+    better_auth_session: s.table(
+      {
+        expiresAt: s.timestamp(),
+        token: s.string(),
+        createdAt: s.timestamp(),
+        updatedAt: s.timestamp(),
+        userId: s.uuid(),
+        ipAddress: s.string().optional(),
+        userAgent: s.string().optional(),
+      },
+      {
+        user: s.rel("better_auth_user", "userId"),
+      },
+    ),
+    better_auth_user: s.table(
+      {
+        name: s.string(),
+        email: s.string(),
+        emailVerified: s.boolean(),
+        image: s.string().optional(),
+        createdAt: s.timestamp(),
+        updatedAt: s.timestamp(),
+      },
+      {
+        better_auth_sessionViaUser: s.reverse("better_auth_session", "user"),
+        better_auth_accountViaUser: s.reverse("better_auth_account", "user"),
+      },
+    ),
+  },
+  to: {
+    better_auth_account: s.table(
+      {
+        accountId: s.string(),
+        providerId: s.string(),
+        userId: s.uuid(),
+        password: s.string().optional(),
+        createdAt: s.timestamp(),
+        updatedAt: s.timestamp(),
+      },
+      {
+        user: s.rel("better_auth_user", "userId"),
+      },
+    ),
+    better_auth_session: s.table(
+      {
+        expiresAt: s.timestamp(),
+        token: s.string(),
+        createdAt: s.timestamp(),
+        updatedAt: s.timestamp(),
+        userId: s.uuid(),
+        ipAddress: s.string().optional(),
+        userAgent: s.string().optional(),
+      },
+      {
+        user: s.rel("better_auth_user", "userId"),
+      },
+    ),
+    better_auth_user: s.table(
+      {
+        name: s.string(),
+        email: s.string(),
+        emailVerified: s.boolean(),
+        image: s.string().optional(),
+        createdAt: s.timestamp(),
+        updatedAt: s.timestamp(),
+      },
+      {
+        better_auth_sessionViaUser: s.reverse("better_auth_session", "user"),
+        better_auth_accountViaUser: s.reverse("better_auth_account", "user"),
+      },
+    ),
+  },
+});

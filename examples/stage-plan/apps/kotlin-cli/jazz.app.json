@@ -1,0 +1,88 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "bf26855a278ef390c6bb85976bfd1253a6968a1bbfbab3134607314aab6118be"
+  },
+  "tables": {
+    "activity": {
+      "columns": {
+        "showId": "uuid",
+        "taskId": "uuid",
+        "actorId": "uuid",
+        "kind": { "enum": ["created", "moved", "assigned", "renamed", "commented", "deleted"] },
+        "detail": "string?"
+      },
+      "relations": {
+        "actor": { "rel": "crew", "column": "actorId" },
+        "show": { "rel": "shows", "column": "showId" },
+        "task": { "rel": "tasks", "column": "taskId" }
+      }
+    },
+    "checklistItems": {
+      "columns": { "title": "string", "done": "boolean", "ownerAccount": "uuid" }
+    },
+    "comments": {
+      "columns": { "taskId": "uuid", "authorId": "uuid", "body": "string" },
+      "relations": {
+        "author": { "rel": "crew", "column": "authorId" },
+        "task": { "rel": "tasks", "column": "taskId" }
+      }
+    },
+    "crew": {
+      "columns": { "account": "uuid", "name": "string" },
+      "relations": {
+        "assignedTasks": { "reverse": "tasks", "relation": "assignee" },
+        "memberships": { "reverse": "showCrew", "relation": "crew" }
+      }
+    },
+    "showCrew": {
+      "columns": {
+        "showId": "uuid",
+        "crewId": "uuid",
+        "account": "uuid",
+        "role": { "enum": ["chief", "crew"] },
+        "inviteCode": "string?"
+      },
+      "relations": {
+        "crew": { "rel": "crew", "column": "crewId" },
+        "show": { "rel": "shows", "column": "showId" }
+      }
+    },
+    "showInvites": {
+      "columns": { "showId": "uuid", "code": "string" },
+      "relations": { "show": { "rel": "shows", "column": "showId" } }
+    },
+    "shows": {
+      "columns": {
+        "name": "string",
+        "venue": "string",
+        "date": "string",
+        "doors": "string",
+        "chiefAccount": "uuid"
+      },
+      "relations": {
+        "activity": { "reverse": "activity", "relation": "show" },
+        "crew": { "reverse": "showCrew", "relation": "show" },
+        "invites": { "reverse": "showInvites", "relation": "show" },
+        "tasks": { "reverse": "tasks", "relation": "show" }
+      }
+    },
+    "tasks": {
+      "columns": {
+        "showId": "uuid",
+        "title": "string",
+        "status": { "enum": ["todo", "doing", "done", "blocked"] },
+        "assigneeId": "uuid?",
+        "notes": { "type": "string", "optional": true, "merge": "text" },
+        "rank": "float"
+      },
+      "relations": {
+        "activity": { "reverse": "activity", "relation": "task" },
+        "assignee": { "rel": "crew", "column": "assigneeId" },
+        "comments": { "reverse": "comments", "relation": "task" },
+        "show": { "rel": "shows", "column": "showId" }
+      }
+    }
+  }
+}

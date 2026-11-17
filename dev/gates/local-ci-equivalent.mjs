@@ -28,7 +28,7 @@ export const RUST_WORKSPACE_TARGETS = Object.freeze([
   "--benches",
 ]);
 export const RUST_CI_FEATURES =
-  "jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test";
+  "jazz-core/testing,jazz-core/transport-compression-zstd,jazz-server/test,jazz-tools/test,jazz-app-support/axum,jazz-app-support/test-relay";
 
 // CI setup supplies this one coordination input. Every other JAZZ_* variable
 // is a test, fixture, benchmark, timeout, or assertion control and would make
@@ -44,8 +44,25 @@ export const ciPartitionJobs = Object.freeze({
   "storage-compat": "test-storage-compat",
   "durable-object-limits": "test-storage-compat",
   typescript: "test-ts",
+  "next-trace-decide": "test-next-trace",
+  "next-trace": "test-next-trace",
   "react-native": "test-react-native",
+  "jazz-ffi-bindings": "test-jazz-ffi-bindings",
+  "crates-package": "test-crates-package",
+  go: "test-go",
+  kotlin: "test-kotlin",
+  "kotlin-android": "test-kotlin-android",
 });
+
+/** The published API crates whose docs CI builds with warnings denied (`Rust API rustdoc`). */
+export const RUSTDOC_PACKAGES = Object.freeze([
+  "jazz-app-support",
+  "jazz-codegen",
+  "jazz-ffi",
+  "jazz-native-transport",
+  "jazz-core",
+  "jazz-server",
+]);
 
 const command = (label, executable, args, options = {}) =>
   Object.freeze({ label, executable, args: Object.freeze(args), ...options });
@@ -57,7 +74,7 @@ const command = (label, executable, args, options = {}) =>
 const differentialCommand = command("bounded maintained-vs-one-shot differential oracle", "bash", [
   "-lc",
   String.raw`set -euo pipefail
-test_binary="$(cargo test -p jazz --test maintained_differential --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
+test_binary="$(cargo test -p jazz-core --test maintained_differential --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
   const readline = require("node:readline");
   let executable;
   const lines = readline.createInterface({ input: process.stdin });
@@ -93,9 +110,14 @@ export const ciPartitions = Object.freeze({
     // Ready PRs run only this partition, so it carries the TypeScript
     // typecheck too. The binding declarations it needs are committed.
     command("jazz-tools typecheck", "pnpm", ["--filter", "jazz-tools", "check"]),
-    command("crate publication selector contract", "bash", [
-      "dev/scripts/publish-crates-alpha.test.sh",
+    command("crate publication selector contract", "node", [
+      "--test",
+      "dev/scripts/check-lockstep-versions.test.mjs",
     ]),
+    // npm packages, published Rust crates and the Go module share one version.
+    command("lockstep versions", "node", ["dev/scripts/check-lockstep-versions.mjs"]),
+    // Every tracked path must check out on Windows (the windows-x86_64 release jobs clone the repo).
+    command("Windows-valid paths", "node", ["dev/gates/windows-paths.mjs"]),
     command("CI workflow contracts", "pnpm", ["test:ci-workflow"]),
     command("Turbo cache-input contracts", "pnpm", ["test:turbo-cache-inputs"]),
     command("invariant registry", "bash", ["dev/gates/invariant-registry.sh"]),
@@ -113,6 +135,29 @@ export const ciPartitions = Object.freeze({
       "--features",
       RUST_CI_FEATURES,
     ]),
+    // The published API crates' docs are their Rust reference: broken
+    // intra-doc links (a feature-gated item linked from the default build,
+    // a private item linked from a public one) only show in rustdoc, which
+    // nothing else runs. One invocation for the default builds, and
+    // jazz-app-support again with its feature-gated endpoint.
+    command(
+      "Rust API rustdoc",
+      "cargo",
+      ["doc", "--no-deps", ...RUSTDOC_PACKAGES.flatMap((name) => ["-p", name])],
+      { env: { RUSTDOCFLAGS: "-D warnings" } },
+    ),
+    // jazz-core again on its own: in the shared run, cargo unifies its
+    // features with what jazz-app-support turns on, which hides links that
+    // break in jazz-core's own default build (the one docs.rs builds).
+    command("jazz-core rustdoc", "cargo", ["doc", "--no-deps", "-p", "jazz-core"], {
+      env: { RUSTDOCFLAGS: "-D warnings" },
+    }),
+    command(
+      "jazz-app-support rustdoc (unstable-endpoint)",
+      "cargo",
+      ["doc", "-p", "jazz-app-support", "--no-deps", "--features", "unstable-endpoint"],
+      { env: { RUSTDOCFLAGS: "-D warnings" } },
+    ),
     // Cold-load phase attribution is opt-in and off in every other build, so
     // without this its cfg'd spans and counters would rot unnoticed.
     command("cold-settle attribution compile", "cargo", [
@@ -176,6 +221,9 @@ export const ciPartitions = Object.freeze({
       "--features",
       RUST_CI_FEATURES,
     ]),
+    // jazz-ffi's C ABI from a C program linking its staticlib, and the Swift
+    // and Kotlin sources uniffi-bindgen generates (target/jazz-ffi-bindings).
+    command("jazz-ffi C ABI and UniFFI bindings", "bash", ["dev/gates/jazz-ffi.sh"]),
     // Runs after the workspace tests with the same feature selection, so its
     // `cargo nextest list` reuses the test binaries that were just built.
     command("ignored-test inventory", "node", ["dev/gates/ignored-tests.mjs"]),
@@ -234,6 +282,17 @@ export const ciPartitions = Object.freeze({
       "node",
       "dev/gates/example-bindings.mjs",
     ]),
+  ]),
+  // Whether a ready PR runs the Next.js trace test (B65-1): it touches how a
+  // backend reaches jazz-napi. Writes `run=true|false` to $GITHUB_OUTPUT for
+  // the test-next-trace job's later steps; outside a PR it always says run.
+  "next-trace-decide": Object.freeze([
+    command("Next.js trace decision", "node", ["dev/gates/next-trace.mjs", "--decide"]),
+  ]),
+  // The Next.js trace test alone. The typescript partition runs it too,
+  // inside the jazz-tools package's `test`.
+  "next-trace": Object.freeze([
+    command("Next.js trace of a createJazz route", "node", ["dev/gates/next-trace.mjs"]),
   ]),
   "react-native": Object.freeze([
     // React Native's bridge is deliberately opt-in. This producer must be
@@ -294,8 +353,60 @@ export const ciPartitions = Object.freeze({
       "test",
       "--workspace",
       "--features",
-      "jazz/durable-object-limits",
+      "jazz-core/durable-object-limits",
     ]),
+  ]),
+  // jazz-ffi's generated Kotlin and Swift, compiled with smoke programs and
+  // run against the library (needs a JDK and swiftc: the runner image); then
+  // the Jazz Swift package, the StagePlan Swift example and the docs Swift
+  // snippets on top of it.
+  "jazz-ffi-bindings": Object.freeze([
+    command("jazz-ffi Kotlin and Swift bindings", "bash", [
+      "dev/gates/jazz-ffi-compile-bindings.sh",
+    ]),
+    command("Jazz Swift package, StagePlan Swift example and docs Swift snippets", "bash", [
+      "dev/gates/jazz-swift.sh",
+    ]),
+  ]),
+  // Every crate publish-jazz-crates-alpha.yml publishes packages and builds from its
+  // .crate against the others, as crates.io will see them.
+  "crates-package": Object.freeze([
+    command("cargo package, published crates", "node", [
+      "dev/scripts/publish-crates.mjs",
+      "--verify",
+    ]),
+  ]),
+  // The Go bindings and the StagePlan Go example (installs Go when the
+  // image has none). go-cli's suite also runs against StagePlan's main
+  // backend in TypeScript (createJazz), so it needs a jazz-tools build.
+  go: Object.freeze([
+    command("native correctness-artifact producer", "node", [
+      "dev/gates/ensure-correctness-artifacts.mjs",
+    ]),
+    command("admitted Jazz Tools build for the Go e2e", "node", [
+      "dev/gates/run-correctness-consumer.mjs",
+      "--",
+      "pnpm",
+      "exec",
+      "turbo",
+      "run",
+      "build",
+      "--filter=jazz-tools",
+      "--only",
+    ]),
+    command("Go bindings", "bash", ["dev/gates/go-bindings.sh"], {
+      env: { JAZZ_GO_TS_MAIN_BACKEND: "1" },
+    }),
+  ]),
+  // jazz-kotlin over jazz-ffi, and the StagePlan Kotlin CLI and the docs todo
+  // app's Kotlin snippets end to end against `jazz-tools server`, on the JVM.
+  kotlin: Object.freeze([
+    command("Kotlin runtime and example", "bash", ["dev/scripts/test-kotlin.sh"]),
+  ]),
+  // jazz-kotlin-android's AAR built for arm64-v8a, armeabi-v7a and x86_64
+  // with cargo-ndk: a build check, no emulator.
+  "kotlin-android": Object.freeze([
+    command("Kotlin Android AAR build", "bash", ["dev/scripts/test-kotlin-android.sh"]),
   ]),
 });
 
@@ -307,7 +418,7 @@ export const focusedCommands = Object.freeze([
     "dev/gates/ignored-tests.mjs",
     "--self-test",
   ]),
-  command("core Rust library compile", "cargo", ["check", "-p", "jazz", "--lib"]),
+  command("core Rust library compile", "cargo", ["check", "-p", "jazz-core", "--lib"]),
   command("jazz-tools typecheck", "pnpm", ["--filter", "jazz-tools", "check"]),
 ]);
 

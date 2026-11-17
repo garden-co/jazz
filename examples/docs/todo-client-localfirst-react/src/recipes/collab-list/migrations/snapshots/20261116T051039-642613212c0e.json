@@ -1,0 +1,91 @@
+{
+  "projectMembers": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "projectId",
+        "nullable": false,
+        "references": "projects"
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "user_id",
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "project": {
+        "kind": "forward",
+        "table": "projects",
+        "column": "projectId"
+      }
+    }
+  },
+  "projects": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "name",
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "members": {
+        "kind": "reverse",
+        "table": "projectMembers",
+        "relation": "project"
+      },
+      "tasks": {
+        "kind": "reverse",
+        "table": "tasks",
+        "relation": "project"
+      }
+    }
+  },
+  "tasks": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "title",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Boolean"
+        },
+        "name": "done",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "assignee_id",
+        "nullable": true
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "projectId",
+        "nullable": false,
+        "references": "projects"
+      }
+    ],
+    "relations": {
+      "project": {
+        "kind": "forward",
+        "table": "projects",
+        "column": "projectId"
+      }
+    }
+  }
+}

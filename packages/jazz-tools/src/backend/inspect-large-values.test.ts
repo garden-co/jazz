@@ -30,8 +30,9 @@ function inspector(
   ],
 ) {
   const reads = { whole: 0, parts: [] as unknown[] };
-  // Like the store: a partial select reads only that part, and refuses a
-  // range past the end of the value.
+  // Like the store: a partial select reads only that part, clamped to the
+  // end of the value (#5502), and refuses a text part that splits a
+  // surrogate pair.
   const db = {
     all: async (builder: { _build(): string }) => {
       const query = JSON.parse(builder._build());
@@ -46,8 +47,18 @@ function inspector(
       const [[column, { from, to }]] = parts as [[string, { from: number; to: number }]];
       reads.parts.push({ column, from, to });
       const value = row[column] as string | Uint8Array;
-      if (to > value.length) throw new Error("query error: value range is out of bounds");
-      return [{ id: ID, [column]: value.slice(from, to) }];
+      const [start, end] = [Math.min(from, value.length), Math.min(to, value.length)];
+      const splits = (at: number) =>
+        typeof value === "string" &&
+        at > 0 &&
+        at < value.length &&
+        /[\ud800-\udbff]/.test(value[at - 1]!) &&
+        /[\udc00-\udfff]/.test(value[at]!);
+      if (splits(start) || splits(end)) {
+        throw new Error("query error: UTF-16 range splits a surrogate pair");
+      }
+      const part = value.slice(start, end);
+      return [{ id: ID, [column]: part }];
     },
   };
   const handle = createInspector({
@@ -150,11 +161,38 @@ describe("large values in Inspector answers", () => {
     expect(await refused({ column: "photo", from: photo.length, to: photo.length + 5 })).toMatch(
       /past the end of photo/,
     );
+    // An empty part past the end too; one at the end is the empty value.
+    expect(
+      await refused({ column: "photo", from: photo.length + 5, to: photo.length + 5 }),
+    ).toMatch(/past the end of photo/);
+    expect(
+      (
+        await call({
+          op: "get",
+          table: "entries",
+          id: ID,
+          column: "caption",
+          from: 200_000,
+          to: 200_000,
+        })
+      ).body,
+    ).toMatchObject({ value: "", from: 200_000, to: 200_000 });
     expect(await refused({ column: "count", from: 1, to: 2 })).toMatch(
       /for a bytes or text column/,
     );
     expect(await refused({ column: "photo", from: -1, to: 2 })).toMatch(/whole numbers/);
     expect(await refused({ column: "nope" })).toMatch(/has no column nope/);
+  });
+
+  it("answers an empty part right after a surrogate pair as empty, not past the end", async () => {
+    const call = inspector({ id: ID, name: "a🚀b", photo, caption, count: 3 });
+    // "a🚀b" is 4 UTF-16 units: 3 is inside it, after the emoji.
+    const get = (from: number, to: number) =>
+      call({ op: "get", table: "entries", id: ID, column: "name", from, to });
+    expect((await get(3, 3)).body).toMatchObject({ value: "", from: 3, to: 3 });
+    expect((await get(4, 4)).body).toMatchObject({ value: "", from: 4, to: 4 });
+    expect((await get(5, 5)).body.message).toMatch(/past the end of name/);
+    expect((await get(2, 2)).body.message).toMatch(/splits a surrogate pair/);
   });
 
   it("fits a first row that alone is larger than an answer carries", async () => {

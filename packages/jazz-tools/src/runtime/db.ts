@@ -1116,9 +1116,14 @@ function applyPartialValueSelections<T>(
       projected[column] = jsonPointerValue(value, selection.at);
       continue;
     }
+    // Like the engine (#5502): a range past the end of the value clamps to
+    // it, empty when it starts past it; an inverted range fails.
     if (value instanceof Uint8Array) {
-      if ("fromUtf8" in selection || selection.from > selection.to || selection.to > value.length) {
-        throw new Error(`Byte range for "${column}" is out of bounds.`);
+      if ("fromUtf8" in selection) {
+        throw new Error(`Byte range for "${column}" takes from and to, not fromUtf8 and toUtf8.`);
+      }
+      if (selection.from > selection.to) {
+        throw new Error(`Byte range for "${column}" ends before it starts.`);
       }
       projected[column] = value.slice(selection.from, selection.to);
       continue;
@@ -1128,29 +1133,29 @@ function applyPartialValueSelections<T>(
     }
     if ("fromUtf8" in selection) {
       const bytes = new TextEncoder().encode(value);
-      if (
-        selection.fromUtf8 > selection.toUtf8 ||
-        selection.toUtf8 > bytes.length ||
-        (selection.fromUtf8 < bytes.length &&
-          (bytes[selection.fromUtf8]! & 0b1100_0000) === 0b1000_0000) ||
-        (selection.toUtf8 < bytes.length &&
-          (bytes[selection.toUtf8]! & 0b1100_0000) === 0b1000_0000)
-      ) {
-        throw new Error(`UTF-8 range for "${column}" splits a code point or is out of bounds.`);
+      const to = Math.min(selection.toUtf8, bytes.length);
+      const from = Math.min(selection.fromUtf8, to);
+      if (selection.fromUtf8 > selection.toUtf8) {
+        throw new Error(`UTF-8 range for "${column}" ends before it starts.`);
       }
-      projected[column] = new Utf8Decoder({ fatal: true }).decode(
-        bytes.slice(selection.fromUtf8, selection.toUtf8),
-      );
+      if (
+        (from < bytes.length && (bytes[from]! & 0b1100_0000) === 0b1000_0000) ||
+        (to < bytes.length && (bytes[to]! & 0b1100_0000) === 0b1000_0000)
+      ) {
+        throw new Error(`UTF-8 range for "${column}" splits a code point.`);
+      }
+      projected[column] = new Utf8Decoder({ fatal: true }).decode(bytes.slice(from, to));
       continue;
     }
-    if (
-      selection.from > selection.to ||
-      !utf16Boundary(value, selection.from) ||
-      !utf16Boundary(value, selection.to)
-    ) {
-      throw new Error(`UTF-16 range for "${column}" splits a surrogate pair or is out of bounds.`);
+    const to = Math.min(selection.to, value.length);
+    const from = Math.min(selection.from, to);
+    if (selection.from > selection.to) {
+      throw new Error(`UTF-16 range for "${column}" ends before it starts.`);
     }
-    projected[column] = value.slice(selection.from, selection.to);
+    if (!utf16Boundary(value, from) || !utf16Boundary(value, to)) {
+      throw new Error(`UTF-16 range for "${column}" splits a surrogate pair.`);
+    }
+    projected[column] = value.slice(from, to);
   }
   return projected as T;
 }
@@ -3007,12 +3012,17 @@ export class Db {
             timeoutMs,
           );
     try {
-      await this.connection.waitForSync(control.signal);
+      await this.waitForUpstreamSync(control.signal);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       signal?.removeEventListener("abort", forward);
       this.shutdownAbort.signal.removeEventListener("abort", shutdown);
     }
+  }
+
+  /** @internal How {@link waitForSync} waits; a backend `Db` waits on its client. */
+  protected waitForUpstreamSync(signal: AbortSignal): Promise<void> {
+    return this.connection.waitForSync(signal);
   }
 
   getConfig(): DbConfig {

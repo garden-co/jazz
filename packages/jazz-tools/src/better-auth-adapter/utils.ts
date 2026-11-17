@@ -15,43 +15,114 @@ export function assertNativeJoinsDisabled(join?: unknown): void {
   }
 }
 
-// Identify if the query is supported by Jazz engine
-// Otherwise, we will fall back to client-side filtering
-export function isQuerySupported(tableSchema: WasmSchema[string], where?: CleanedWhere[]): boolean {
-  const columnByName = new Map(tableSchema.columns.map((column) => [column.name, column] as const));
+/**
+ * Thrown when Better Auth asks for a `where` shape the Jazz engine cannot
+ * answer at a cost proportional to the rows it touches. The adapter refuses
+ * it rather than loading the whole table and filtering in JavaScript.
+ *
+ * Detect it by `code`, which is stable.
+ */
+export class UnsupportedBetterAuthQueryError extends Error {
+  override readonly name = "UnsupportedBetterAuthQueryError";
+  readonly code = "unsupported_better_auth_query";
 
-  for (const condition of where ?? []) {
-    if (condition.connector === "OR") {
-      return false;
+  constructor(table: string, pattern: string) {
+    super(
+      `Reading "${table}" with ${pattern} is not supported by the Jazz Better Auth adapter yet`,
+    );
+  }
+}
+
+/**
+ * A Better Auth `where`, split into what the engine evaluates and the exact
+ * prefix/suffix checks the adapter applies to the engine's result.
+ *
+ * `starts_with`/`ends_with` are lowered to the engine's `contains` (a
+ * superset), so the residual only ever sees rows that contain the value.
+ */
+export interface BetterAuthQueryPlan {
+  conditions: CleanedWhere[];
+  residual: CleanedWhere[];
+}
+
+function describeCondition(condition: CleanedWhere): string {
+  return `"${condition.operator}" on "${condition.field}"`;
+}
+
+/**
+ * Splits `where` into engine conditions and a prefix/suffix residual, or
+ * throws {@link UnsupportedBetterAuthQueryError} for shapes the engine
+ * does not support (OR connectors, operators a column does not support,
+ * `null` comparisons the engine refuses, case-insensitive string matches).
+ */
+export function planBetterAuthQuery(
+  table: string,
+  tableSchema: WasmSchema[string],
+  where: CleanedWhere[] = [],
+): BetterAuthQueryPlan {
+  const columnByName = new Map(tableSchema.columns.map((column) => [column.name, column] as const));
+  const conditions: CleanedWhere[] = [];
+  const residual: CleanedWhere[] = [];
+
+  where.forEach((condition, index) => {
+    // Better Auth folds conditions left to right; the first one's connector joins nothing.
+    if (index > 0 && condition.connector === "OR") {
+      throw new UnsupportedBetterAuthQueryError(table, "an OR connector");
     }
 
-    const supportedOperators = getSupportedWhereOperatorsForSchemaColumn(
-      condition.field,
-      columnByName.get(condition.field),
-    );
-    if (!supportedOperators) {
-      return false;
+    const values = Array.isArray(condition.value) ? condition.value : [condition.value];
+    if (condition.mode === "insensitive" && values.some((value) => typeof value === "string")) {
+      throw new UnsupportedBetterAuthQueryError(
+        table,
+        `case-insensitive ${describeCondition(condition)}`,
+      );
+    }
+
+    const column = columnByName.get(condition.field);
+    const supportedOperators = getSupportedWhereOperatorsForSchemaColumn(condition.field, column);
+
+    if (condition.operator === "starts_with" || condition.operator === "ends_with") {
+      if (typeof condition.value !== "string" || !supportedOperators?.includes("contains")) {
+        throw new UnsupportedBetterAuthQueryError(table, describeCondition(condition));
+      }
+      conditions.push({ ...condition, operator: "contains" });
+      residual.push(condition);
+      return;
     }
 
     const jazzOperator = condition.operator === "not_in" ? "notIn" : condition.operator;
-    if (!supportedOperators.includes(jazzOperator as WhereOperator)) {
-      return false;
+    if (!supportedOperators?.includes(jazzOperator as WhereOperator)) {
+      throw new UnsupportedBetterAuthQueryError(table, describeCondition(condition));
     }
 
     if (condition.value === null) {
-      const column = columnByName.get(condition.field);
-
       if (!column?.nullable) {
-        return false;
+        throw new UnsupportedBetterAuthQueryError(
+          table,
+          `a null comparison on non-nullable "${condition.field}"`,
+        );
       }
-
       if (condition.operator === "ne" && column.references) {
-        return false;
+        throw new UnsupportedBetterAuthQueryError(
+          table,
+          `"ne" null on reference "${condition.field}"`,
+        );
       }
     }
-  }
 
-  return true;
+    conditions.push(condition);
+  });
+
+  return { conditions, residual };
+}
+
+/** Applies the exact `starts_with`/`ends_with` checks of a {@link BetterAuthQueryPlan}. */
+export function matchesResidual(row: Record<string, unknown>, residual: CleanedWhere[]): boolean {
+  return residual.every(({ field, operator, value }) => {
+    const cell = row[field];
+    if (typeof cell !== "string" || typeof value !== "string") return false;
+    return operator === "starts_with" ? cell.startsWith(value) : cell.endsWith(value);
+  });
 }
 
 export function createQueryBuilder(
@@ -81,127 +152,6 @@ export function createQueryBuilder(
       });
     },
   };
-}
-
-export function filterListByWhere<T>(data: T[], where: CleanedWhere[] | undefined): T[] {
-  if (!Array.isArray(data)) {
-    throw new Error("Expected data to be an array");
-  }
-
-  if (where === undefined) {
-    return data;
-  }
-
-  if (!Array.isArray(where)) {
-    throw new Error("Expected where to be an array");
-  }
-
-  // Helper to evaluate a single condition
-  function evaluateCondition(item: any, condition: CleanedWhere): boolean {
-    const { field, operator, value } = condition;
-    const itemValue = item[field];
-
-    switch (operator) {
-      case "eq":
-        return itemValue === value;
-      case "ne":
-        if (value === null) {
-          return itemValue !== null && itemValue !== undefined;
-        }
-        return itemValue !== value;
-      case "lt":
-        return value !== null && itemValue < value;
-      case "lte":
-        return value !== null && itemValue <= value;
-      case "gt":
-        return value !== null && itemValue > value;
-      case "gte":
-        return value !== null && itemValue >= value;
-      case "in":
-        return Array.isArray(value)
-          ? (value as (string | number | boolean | Date)[]).includes(itemValue)
-          : false;
-      case "not_in":
-        return Array.isArray(value)
-          ? !(value as (string | number | boolean | Date)[]).includes(itemValue)
-          : false;
-      case "contains":
-        return typeof itemValue === "string" && typeof value === "string"
-          ? itemValue.includes(value)
-          : false;
-      case "starts_with":
-        return typeof itemValue === "string" && typeof value === "string"
-          ? itemValue.startsWith(value)
-          : false;
-      case "ends_with":
-        return typeof itemValue === "string" && typeof value === "string"
-          ? itemValue.endsWith(value)
-          : false;
-      default:
-        throw new Error(`Unsupported operator: ${operator}`);
-    }
-  }
-
-  // Group conditions by connector (AND/OR)
-  // If no connector, default to AND between all
-  return data.filter((item) => {
-    let result: boolean = true;
-    for (let i = 0; i < where.length; i++) {
-      const condition = where[i]!;
-      const matches = evaluateCondition(item, condition);
-      if (i === 0) {
-        result = matches;
-      } else {
-        const connector = condition.connector || "AND";
-        if (connector === "AND") {
-          result = result && matches;
-        } else if (connector === "OR") {
-          result = result || matches;
-        } else {
-          throw new Error(`Unsupported connector: ${connector}`);
-        }
-      }
-    }
-    return result;
-  });
-}
-
-export function sortListByField<T extends Record<string, any> | null>(
-  data: T[],
-  sort?: { field: string; direction: "asc" | "desc" },
-): T[] {
-  if (!sort) {
-    return data;
-  }
-
-  const { field, direction } = sort;
-
-  data.sort((a, b) => {
-    if (a === null || b === null) {
-      return 0;
-    }
-
-    const aValue = a[field];
-    const bValue = b[field];
-    const aIsNullish = aValue === null || aValue === undefined;
-    const bIsNullish = bValue === null || bValue === undefined;
-
-    if (aIsNullish) {
-      return bIsNullish ? 0 : direction === "asc" ? -1 : 1;
-    }
-
-    if (bIsNullish) {
-      return direction === "asc" ? 1 : -1;
-    }
-
-    if (typeof aValue === "string" && typeof bValue === "string") {
-      return direction === "asc" ? aValue.localeCompare(bValue) : bValue.localeCompare(aValue);
-    }
-
-    return direction === "asc" ? aValue - bValue : bValue - aValue;
-  });
-
-  return data;
 }
 
 export function paginateList<T>(

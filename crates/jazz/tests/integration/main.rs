@@ -63,6 +63,10 @@ mod fanout_differential;
 mod fanout_policy_pins;
 #[path = "../flat_joins.rs"]
 mod flat_joins;
+#[path = "../follow_memo.rs"]
+mod follow_memo;
+#[path = "../follow_memo_policy.rs"]
+mod follow_memo_policy;
 #[path = "../gather_policy_double_ref.rs"]
 mod gather_policy_double_ref;
 #[path = "../history_reads.rs"]
@@ -87,6 +91,8 @@ mod large_value_sync;
 mod large_value_tx_update;
 #[path = "../large_values.rs"]
 mod large_values;
+#[path = "../late_enum_tags.rs"]
+mod late_enum_tags;
 #[path = "../latest_only_tables.rs"]
 mod latest_only_tables;
 #[path = "../link_identities.rs"]
@@ -137,8 +143,12 @@ mod recheck_sync;
 mod reconnect_fanout;
 #[path = "../rejected_retry_store.rs"]
 mod rejected_retry_store;
+#[path = "../relation_literal_types.rs"]
+mod relation_literal_types;
 #[path = "../relation_policies.rs"]
 mod relation_policies;
+#[path = "../relation_policy_validation.rs"]
+mod relation_policy_validation;
 #[path = "../relation_queries.rs"]
 mod relation_queries;
 #[path = "../relation_results.rs"]
@@ -241,6 +251,8 @@ mod text_splices;
 mod thin_origin_entry_ages;
 #[path = "../thin_origin_writes.rs"]
 mod thin_origin_writes;
+#[path = "../thin_transactions.rs"]
+mod thin_transactions;
 #[path = "../transaction_commit_kind.rs"]
 mod transaction_commit_kind;
 #[path = "../transaction_handles.rs"]
@@ -251,6 +263,8 @@ mod transaction_policy_exists;
 mod transaction_read_tiers;
 #[path = "../union_queries.rs"]
 mod union_queries;
+#[path = "../unsupported_json_schemas.rs"]
+mod unsupported_json_schemas;
 #[path = "../uuid_page_probe.rs"]
 mod uuid_page_probe;
 #[path = "../write_check_evidence.rs"]

@@ -124,8 +124,8 @@ Rust receipts, not a claim that the complete local CI-equivalent workflow ran.
 The explicit named-cell input role in SPEC 18 is shared by NAPI and WASM.
 A literal input fixture and nested Array<Record> case reject execution-descriptor
 serde; restoring that old generic decoder makes the literal test fail. Additional
-cases exercise duplicate/absent names, unknown tags, bounded depth/node count,
-and payload-enum input. The exact local write-merge row reader binds its source
+cases exercise duplicate/absent names, unknown tags and bounded depth/node
+count. The exact local write-merge row reader binds its source
 publication identities through the requested schema before the host encoder;
 its real Db transaction canary failed with unresolved publication roles before
 that correction.

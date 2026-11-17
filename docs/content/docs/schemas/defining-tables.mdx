@@ -1,6 +1,6 @@
 ---
 title: Defining Tables
-description: "Learn how to define tables and the relations between them in jazz.app.json."
+description: "Learn how to define tables and the relations between them in schema.ts."
 reviewedAt: "b29b48d1a"
 ---
 
@@ -10,91 +10,99 @@ A Jazz app is described by a few files at its root:
 
 ```text
 app-root/
-├── jazz.app.json           # Tables, columns, relations, schema history and migrations
-├── jazz.permissions.json   # Who may read and write which rows (backends only)
-├── jazz.generated.ts       # Typed bindings, written by `jazz-tools generate`
+├── schema.ts               # Tables, relations and permissions: the file you write
+├── migrations/             # Migrations between schema versions, written by `migrations create`
+├── jazz.app.json           # Generated from schema.ts and migrations/
+├── jazz.permissions.json   # Generated from the permissions in schema.ts
+├── jazz.generated.ts       # Typed bindings, generated
 └── jazz.computed.ts        # Only if the app declares computed fields or transforms
 ```
 
-- **`jazz.app.json`** is the source of truth for your data model. You write it, by hand or with an
-  agent. It also holds the earlier schema versions your app still ships and the migrations between
-  them (see [Migrations](/docs/schemas/migrations)). Clients and backends, in every language, read it.
-- **`jazz.permissions.json`** holds your [policies](/docs/schemas/policies). Only backends read it,
-  so no client bundle carries them.
-- **`jazz.generated.ts`** is generated from `jazz.app.json` by `npx jazz-tools generate`. It exports
-  the typed `app` your code queries, and one TypeScript type per table. Don't edit it.
+- **`schema.ts`** is the source of truth for your data model. It exports your tables as `schema`
+  and your [policies](/docs/schemas/policies) as `permissions`. You write it, by hand or with an
+  agent.
+- **`migrations/`** holds the migrations between the schema versions your app still ships, and
+  snapshots of those versions. `npx jazz-tools migrations create` writes them; see
+  [Migrations](/docs/schemas/migrations).
+- **`jazz.app.json`** and **`jazz.permissions.json`** are what `npx jazz-tools generate` writes from
+  them: the same tables, history and policies, as plain JSON. Clients and backends in every
+  language read `jazz.app.json`; only backends read `jazz.permissions.json`, so no client bundle
+  carries your policies. Don't edit them: see [Generated files](#generated-files).
+- **`jazz.generated.ts`** is also written by `generate`. It exports the typed `app` your code
+  queries, and one TypeScript type per table.
 - **`jazz.computed.ts`** implements the [computed fields and transforms](/docs/schemas/column-types#computed-columns)
-  `jazz.app.json` declares. Apps without either don't have it.
+  `schema.ts` declares. Apps without either don't have it.
 
 Commit all of them. Jazz also finds the files in `./src` or `./src/lib` (SvelteKit keeps them in
-`src/lib/`, the standard location for shared app code). The format of both JSON files is
-described in [App files](/docs/reference/app-files).
+`src/lib/`, the standard location for shared app code). Your app code imports `app` and the row
+types from `./jazz.generated`; nothing imports `schema.ts` at runtime.
 
 <Callout type="info">
-  Coming from alpha.64 or earlier, with `schema.ts`, `permissions.ts` and `migrations/`? Run `npx
-  jazz-tools upgrade`: see [Upgrading from
-  alpha.64](/docs/operating/backups-and-upgrades#upgrading-from-alpha64).
+  Coming from alpha.65, with `s.defineApp`, `permissions.ts` and `migrations/index.ts`? Run `npx
+  jazz-tools@2.0.0-alpha.66 upgrade`: see [Upgrading from
+  alpha.65](/docs/operating/backups-and-upgrades#upgrading-from-alpha65).
 </Callout>
 
 ## Table definitions
 
-Each entry of `tables` is a table: its stored `columns`, in order, and its named `relations`. A
-table with no relations leaves `relations` out.
+`schema.ts` exports `schema`, made by `s.defineSchema` from your tables. Each `s.table(columns,
+relations)` declares a table's stored columns, in order, and its named relations. A table with no
+relations leaves out the second argument.
 
-```json title="jazz.app.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
-  "tables": {
-    "projects": {
-      "columns": { "name": "string" },
-      "relations": { "todos": { "reverse": "todos", "relation": "project" } }
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  projects: s.table(
+    { name: s.string() },
+    {
+      todos: s.reverse("todos", "project"),
     },
-    "todos": {
-      "columns": {
-        "title": "string",
-        "done": "boolean",
-        "priority": "int?",
-        "description": "string?",
-        "owner_id": "uuid?",
-        "parentId": "uuid?",
-        "projectId": "uuid?"
-      },
-      "relations": {
-        "children": { "reverse": "todos", "relation": "parent" },
-        "parent": { "rel": "todos", "column": "parentId" },
-        "project": { "rel": "projects", "column": "projectId" }
-      }
-    }
-  }
-}
+  ),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      priority: s.int().optional(),
+      description: s.string().optional(),
+      owner_id: s.uuid().optional(),
+      parentId: s.uuid().optional(),
+      projectId: s.uuid().optional(),
+    },
+    {
+      children: s.reverse("todos", "parent"),
+      parent: s.rel("todos", "parentId"),
+      project: s.rel("projects", "projectId"),
+    },
+  ),
+});
 ```
 
-A column is a type (`"string"`, `"int"`, `"uuid"`, …) with a trailing `?` when it is optional, or
-an object when it needs options, such as `{ "type": "int", "default": 0 }`. See
-[Column Types](/docs/schemas/column-types) for all of them. The `$schema` line lets your editor
-complete and check the file.
+A column is a builder such as `s.string()`, `s.int()` or `s.uuid()`, with `.optional()` when it
+may be `null`, and options such as `.default(0)`. See [Column Types](/docs/schemas/column-types)
+for all of them. The [permissions](/docs/schemas/policies) follow in the same file.
 
 ## Explicit relations
 
-Store row IDs in UUID columns, then name a forward relation with `rel`. In the example below,
-`posts.author` follows `authorId` to a user. Once that forward relation is declared, a `reverse`
-relation lets a user find their `authoredPosts`:
+Store row IDs in UUID columns, then name a forward relation with `s.rel`. In the example below,
+`posts.author` follows `authorId` to a user. Once that forward relation is declared, `s.reverse`
+lets a user find their `authoredPosts`:
 
-```json title="jazz.app.json"
-{
-  "format": 1,
-  "tables": {
-    "posts": {
-      "columns": { "authorId": "uuid", "title": "string" },
-      "relations": { "author": { "rel": "users", "column": "authorId" } }
+```ts title="schema.ts"
+export const schema = s.defineSchema({
+  posts: s.table(
+    { authorId: s.uuid(), title: s.string() },
+    {
+      author: s.rel("users", "authorId"),
     },
-    "users": {
-      "columns": { "name": "string" },
-      "relations": { "authoredPosts": { "reverse": "posts", "relation": "author" } }
-    }
-  }
-}
+  ),
+  users: s.table(
+    { name: s.string() },
+    {
+      authoredPosts: s.reverse("posts", "author"),
+    },
+  ),
+});
 ```
 
 `author` is the public relation name, `users` is its target table, and `authorId` is the
@@ -104,21 +112,22 @@ local UUID column.
 (not the `authorId` column) on the `posts` table. Relations must be declared explicitly: a UUID
 column on its own does not create one.
 
-Use an optional UUID (`"uuid?"`) if a post might not have an author, or an array of UUIDs
-(`{ "array": "uuid" }`) if it can have several; `rel` points at the column either way.
+Use an optional UUID (`s.uuid().optional()`) if a post might not have an author, or an array of
+UUIDs (`s.array(s.uuid())`) if it can have several; `s.rel` points at the column either way.
 
 A declared relation does not guarantee the target row exists or is readable: a peer may not
 have synced it, it may have been deleted, or permissions may hide it. See
 [Missing references](/docs/reading/includes-and-relations#missing-references).
 
-`jazz-tools generate` checks the complete schema. Targets and local columns must exist, forward
-columns must have supported UUID shapes, and reverse declarations must resolve to a forward
-relation pointing back to their table. Relation names must not collide with stored column names.
+TypeScript checks table and relation names as you type. `jazz-tools generate` then checks the
+complete schema. Targets and local columns must exist, forward columns must have supported UUID
+shapes, and reverse declarations must resolve to a forward relation pointing back to their table.
+Relation names must not collide with stored column names.
 
 ### Arrays or reverse relations?
 
-- **One-to-many: point each child row at its parent** with a UUID column, and give the parent a
-  `reverse` relation, as `authoredPosts` does above. Each link is its own row, so two people
+- **One-to-many: point each child row at its parent** with a UUID column, and give the parent an
+  `s.reverse` relation, as `authoredPosts` does above. Each link is its own row, so two people
   adding at the same time never collide, any number of children fits, and each child has its own
   permissions and history. Use this for comments on a post or tasks in a project.
 - **An array of UUIDs on one row** suits a short list that belongs to that row and is usually
@@ -127,27 +136,26 @@ relation pointing back to their table. Relation names must not collide with stor
   people change it at once, the edit the server receives first wins, and the other is kept only in
   the row's history.
 - **Many-to-many links that people edit concurrently, or that carry data of their own** (a role,
-  when someone joined): use a join table with a `rel` to each side, like the members table in
+  when someone joined): use a join table with an `s.rel` to each side, like the members table in
   [Group permissions](/docs/recipes/access-control/group-permissions).
 
 See [Relationships](/docs/schemas/relationships) for more.
 
 ## Indexes
 
-By default every column gets a single-column index. List `indexes` to choose: a name is a
-single-column index, an array of names a composite index, which may end in `$createdAt` or
-`$updatedAt`. Once any single names are listed, only those columns get single-column indexes.
+A table has the indexes you declare, plus one on each relation column, which Jazz always indexes.
+`.indexOnly([...])` lists the columns that get a single-column index each, and `.compositeIndex([...])`
+declares an index over several columns, which may end in `$createdAt` or `$updatedAt`. Queries can filter
+and sort by any column; an index on the columns they use lets them read only the matching rows
+instead of the whole table.
 
-```json title="jazz.app.json"
-{
-  "format": 1,
-  "tables": {
-    "messages": {
-      "columns": { "chatId": "uuid", "text": "string" },
-      "indexes": ["chatId", ["chatId", "$createdAt"]]
-    }
-  }
-}
+```ts title="schema.ts"
+export const schema = s.defineSchema({
+  messages: s
+    .table({ chatId: s.uuid(), text: s.string() })
+    .indexOnly(["chatId"])
+    .compositeIndex(["chatId", "$createdAt"]),
+});
 ```
 
 Adding, removing or changing single-column indexes needs no migration: run `generate`, and the new
@@ -159,18 +167,17 @@ change: `generate` asks for a migration, and `migrations create` writes an empty
 
 By default a table keeps every version of every row, for [history](/docs/reading/history) reads,
 snapshots and branches. For a table whose rows change often and whose history you don't need, such
-as editor presence or cursors, keep only each row's latest version with `"history": "latest"`:
+as editor presence or cursors, keep only each row's latest version with `.history("latest")`:
 
-```json title="jazz.app.json"
-{
-  "format": 1,
-  "tables": {
-    "presence": {
-      "columns": { "doc": "string", "cursor": "string" },
-      "history": "latest"
-    }
-  }
-}
+```ts title="schema.ts"
+export const schema = s.defineSchema({
+  presence: s
+    .table({
+      doc: s.string(),
+      cursor: s.string(),
+    })
+    .history("latest"),
+});
 ```
 
 A latest-only table can't be read through `history`, at a snapshot or in a serializable
@@ -211,10 +218,75 @@ guarantee its history is complete.
 
 <include>../../partials/schema-setup.mdx</include>
 
+## Generated files
+
+`generate` writes `jazz.app.json` and `jazz.permissions.json` from `schema.ts` and `migrations/`.
+They describe your app to every language and to your backend, so commit them, but treat them like
+`jazz.generated.ts`: change `schema.ts` and run `generate` again. For the schema above,
+`jazz.app.json` starts like this:
+
+```json title="jazz.app.json"
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "…"
+  },
+  "tables": {
+    "projects": {
+      "columns": {
+        "name": "string"
+      },
+      "relations": {
+        "todos": { "reverse": "todos", "relation": "project" }
+      }
+    }
+  }
+}
+```
+
+The `$generated` marker holds a checksum of the rest of the file. Reformatting the file is fine,
+but `generate` refuses to overwrite a file whose content was edited by hand, unless you pass
+`--force`. The format is described in [App files](/docs/reference/app-files); this site shows the
+JSON next to each policy example, so you can see what a rule compiles to.
+
+`npx jazz-tools generate --check` compares what `schema.ts` would generate with the committed
+files and bindings without writing anything, and fails in CI when they differ.
+
 ## The generated bindings
 
-`jazz-tools generate` writes `jazz.generated.ts` from `jazz.app.json`. It exports the typed `app`
-you pass to queries, mutations, and subscriptions throughout your application code:
+`jazz-tools generate` also writes typed bindings from your schema, in your app's language: a row
+type and an insert type per table, and an enum type per enum column. For StagePlan's `tasks` table
+(the [StagePlan example](https://github.com/garden-co/jazz/tree/main/examples/stage-plan)):
+
+<Tabs
+  groupId="jazz-environment"
+  items={["TypeScript", "Rust", "Swift", "Kotlin", "Go"]}
+  persist
+  updateAnchor
+>
+  <Tab value="TypeScript">
+    <BindingsExcerpt language="TypeScript" />
+  </Tab>
+  <Tab value="Rust">
+    <BindingsExcerpt language="Rust" />
+  </Tab>
+  <Tab value="Swift">
+    <BindingsExcerpt language="Swift" />
+  </Tab>
+  <Tab value="Kotlin">
+    <BindingsExcerpt language="Kotlin" />
+  </Tab>
+  <Tab value="Go">
+    <BindingsExcerpt language="Go" />
+  </Tab>
+</Tabs>
+
+The rest of this section is about the TypeScript bindings; each language's setup page covers its
+own.
+
+In TypeScript, the bindings are `jazz.generated.ts`. It exports the typed `app` you pass to
+queries, mutations, and subscriptions throughout your application code:
 
 ```ts title="app.ts"
 import { app, type Todo } from "./jazz.generated";
@@ -226,8 +298,8 @@ The module also embeds every schema version your app ships and the migrations be
 Clients use them to lay out storage exactly like the server does and to read data written under
 older versions, so a client never has to rename or reshape stored data later.
 
-Commit it with `jazz.app.json`. `npx jazz-tools generate --check` fails in CI when it is missing or
-out of date, and `createJazz` refuses to start with bindings generated from another
+Commit it with `schema.ts` and the JSON files. `npx jazz-tools generate --check` fails in CI when it
+is missing or out of date, and `createJazz` refuses to start with bindings generated from another
 `jazz.app.json`: "bindings out of date: run `jazz-tools generate`". Formatters may reformat the
 file, except the `export const app` statement, which carries `prettier-ignore` and `biome-ignore`
 comments.
@@ -256,8 +328,5 @@ import { app } from "./jazz.generated";
 type TodoFilter = WhereOf<typeof app.todos>;
 ```
 
-## Large schemas
-
-The generated module declares every table's types directly, so TypeScript doesn't infer them from
-the schema: an app with hundreds of tables typechecks one table handle at a time, and every part
-of the app uses the same `app`.
+Inside `schema.ts`, where the bindings don't exist yet, `s.Row<typeof schema, "todos">` is a
+table's row type, for example to type a helper's parameter.

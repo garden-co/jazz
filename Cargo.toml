@@ -15,6 +15,8 @@ members = [
   "crates/jazz-native-transport",
   "crates/jazz-native-relay",
   "crates/jazz-app",
+  # JSON-in/JSON-out bindings of jazz-app-support: UniFFI (Swift, Kotlin), C ABI (Go).
+  "crates/jazz-ffi",
   "crates/jazz-cli",
   "crates/jazz-codegen",
   "crates/jazz-server",
@@ -22,10 +24,15 @@ members = [
   "crates/jazz-otel",
   "crates/jazz-sim",
   "crates/jazz-napi",
-  # Opens its app through jazz-app's Send + Clone handle.
+  # Opens its app through jazz-app-support's Send + Clone handle.
   "examples/todo-server-rs",
+  "examples/stage-plan/apps/rust-cli",
   # The docs copy, whose snippets the docs include by region.
   "examples/docs/todo-server-rs",
+  # The docs' backend-client snippets.
+  "examples/docs/backend-client-rs",
+  # Probes the backend-client contract against a TS main backend.
+  "examples/rust-backend-clients/probe",
   "examples/stage-plan/benchmarks",
   "examples/band-book/benchmarks",
   "examples/permissioned-resources/benchmarks",
@@ -41,6 +48,9 @@ members = [
   "examples/wequencer/benchmarks",
 ]
 exclude = [
+  # The patched ruzstd fork, published as jazz-ruzstd. Not a member, since its
+  # upstream tests aren't vendored; dev/scripts/publish-crates.mjs adds it
+  # while packaging so it verifies with the crates that depend on it.
   "vendor/ruzstd",
   "vendor/sqlite-wasm-rs",
   # The alpha59-alpha60 exporter and its test fixture, built inside an alpha.59
@@ -54,17 +64,31 @@ exclude = [
 [patch.crates-io]
 sqlite-wasm-rs = { path = "vendor/sqlite-wasm-rs" }
 
+# Shared by every crate published to crates.io. The version stays in
+# lockstep with the jazz-tools npm package: `pnpm release:version` runs
+# dev/scripts/sync-crate-versions.mjs, and CI checks it
+# (dev/scripts/check-lockstep-versions.mjs).
+[workspace.package]
+version = "2.0.0-alpha.66"
+license = "MIT"
+repository = "https://github.com/garden-co/jazz"
+homepage = "https://jazz.tools"
+rust-version = "1.93"
+
 [workspace.dependencies]
-jazz = { path = "crates/jazz", default-features = false }
-jazz-db = { path = "crates/jazz/layers/db", default-features = false }
-jazz-model = { path = "crates/jazz/layers/model", default-features = false }
-jazz-protocol = { path = "crates/jazz/layers/protocol", default-features = false }
-jazz-types = { path = "crates/jazz/layers/types", default-features = false }
-jazz-compression = { path = "crates/jazz-compression", default-features = false }
-jazz-text = { path = "crates/jazz-text" }
-jazz-codegen = { path = "crates/jazz-codegen" }
-jazz-otel = { path = "crates/jazz-otel" }
-jazz-native-transport = { path = "crates/jazz-native-transport" }
+jazz = { package = "jazz-core", version = "=2.0.0-alpha.66", path = "crates/jazz", default-features = false }
+jazz-db = { version = "=2.0.0-alpha.66", path = "crates/jazz/layers/db", default-features = false }
+jazz-model = { version = "=2.0.0-alpha.66", path = "crates/jazz/layers/model", default-features = false }
+jazz-protocol = { version = "=2.0.0-alpha.66", path = "crates/jazz/layers/protocol", default-features = false }
+jazz-types = { version = "=2.0.0-alpha.66", path = "crates/jazz/layers/types", default-features = false }
+jazz-compression = { version = "=2.0.0-alpha.66", path = "crates/jazz-compression", default-features = false }
+jazz-text = { version = "=2.0.0-alpha.66", path = "crates/jazz-text" }
+jazz-codegen = { version = "=2.0.0-alpha.66", path = "crates/jazz-codegen" }
+jazz-otel = { version = "=2.0.0-alpha.66", path = "crates/jazz-otel" }
+jazz-native-transport = { version = "=2.0.0-alpha.66", path = "crates/jazz-native-transport" }
+jazz-server = { version = "=2.0.0-alpha.66", path = "crates/jazz-server" }
+jazz-app-support = { version = "=2.0.0-alpha.66", path = "crates/jazz-app" }
+jazz-alpha59-alpha60-dump = { version = "=2.0.0-alpha.66", path = "crates/jazz-alpha59-alpha60-dump" }
 rustc-hash = "2.1.1"
 divan = { package = "codspeed-divan-compat", version = "5.0.1" }
 

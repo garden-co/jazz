@@ -28,8 +28,8 @@ appendix as authoritative.
 
 For ordinary Rust/core work, the full gate set is:
 
-1. `cargo test -p jazz -p jazz-types -p jazz-model -p jazz-protocol -p jazz-db`
-2. `cargo test -p jazz --no-default-features --features testing,transport-compression-zstd`
+1. `cargo test -p jazz-core -p jazz-types -p jazz-model -p jazz-protocol -p jazz-db`
+2. `cargo test -p jazz-core --no-default-features --features testing,transport-compression-zstd`
 3. `cargo check -p jazz-sim --benches` in the nightly `benchmark-api` job
 4. `dev/gates/ts-wire-codec.sh`
 5. `dev/t --test maintained_differential --exact maintained_one_shot_differential_oracle -- --ignored`

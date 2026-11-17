@@ -28,13 +28,6 @@ const app = testApp({
         owner: { rel: "users", column: "ownerId" },
       },
     },
-    events: {
-      columns: {
-        event: {
-          enum: { message: { text: "string", level: "int" }, closed: { code: "int" } },
-        },
-      },
-    },
   },
 });
 const scalarApp = testApp({
@@ -128,54 +121,22 @@ describe("translateQuery", () => {
     expect(relationJson).toContain('"-9007199254740993"');
   });
 
-  it("derives bounded, typed-distinct union labels", () => {
-    const first = app.todos.where({
-      metadata: { eq: new Date("2026-01-01T00:00:00.000Z") },
-    } as any);
-    const second = app.todos.where({
-      metadata: { eq: new Date("2026-01-02T00:00:00.000Z") },
-    } as any);
-    const bigint = app.todos.where({ metadata: { eq: 9_007_199_254_740_993n } } as any);
-    const bytes = app.todos.where({ attachment: { eq: new Uint8Array([1, 2, 3]) } } as any);
-    const wide = app.todos.where({ metadata: { eq: "x".repeat(10_000) } } as any);
-    const union = app.union([first, second, bigint, bytes, wide]) as any;
-    const labels = union._unionVal.union.inputs.map((arm: any) => arm.label);
-    expect(labels).toHaveLength(5);
-    expect(new Set(labels).size).toBe(5);
-    expect(
-      labels.every((label: string) => new TextEncoder().encode(label).byteLength <= 4096),
-    ).toBe(true);
-
-    const reordered = app.union([wide, bytes, bigint, second, first]) as any;
-    expect(new Set(reordered._unionVal.union.inputs.map((arm: any) => arm.label))).toEqual(
-      new Set(labels),
-    );
-    const inserted = app.union([first, app.todos.where({ title: "inserted" }), second]) as any;
-    expect(inserted._unionVal.union.inputs.map((arm: any) => arm.label)).toEqual([
-      labels[0],
-      expect.any(String),
-      labels[1],
-    ]);
-
-    const named = app.union({ duplicate: first, second });
-    expect((named as any)._unionVal.union.inputs.map((arm: any) => arm.label)).toEqual([
+  it("leaves unnamed union arms for Rust to label and keeps named ones", () => {
+    const first = app.todos.where({ title: "first" });
+    const second = app.todos.where({ title: "second" });
+    const unnamed = app.union([first, second, first]) as any;
+    expect(unnamed._unionVal.union.inputs.map((arm: any) => arm.label)).toEqual(["", "", ""]);
+    const named = app.union({ duplicate: first, second }) as any;
+    expect(named._unionVal.union.inputs.map((arm: any) => arm.label)).toEqual([
       "duplicate",
       "second",
     ]);
-    expect(() => app.union({ ["é".repeat(2049)]: first })).toThrow(/1..=4096 bytes/);
-
-    const nestedForward = app.union({
-      outer: app.union({ z: first, ä: second }),
-    }) as any;
-    const nestedReverse = app.union({
-      outer: app.union({ ä: second, z: first }),
-    }) as any;
-    expect(nestedForward._unionVal.union.inputs[0].input.union.inputs).not.toEqual(
-      nestedReverse._unionVal.union.inputs[0].input.union.inputs,
-    );
-    expect(nestedForward._unionVal.union.inputs[0].label).toEqual(
-      nestedReverse._unionVal.union.inputs[0].label,
-    );
+    const translated = JSON.parse(translateQuery(unnamed._build(), app.wasmSchema));
+    expect(translated.relation_ir.Union.inputs.map((arm: { label: string }) => arm.label)).toEqual([
+      "",
+      "",
+      "",
+    ]);
   });
 
   it("rejects public union modifiers that retained relation lowering cannot compose", () => {
@@ -433,49 +394,6 @@ describe("translateQuery", () => {
     expect(translated.table).toBe("users");
     expect(translated.relation_ir).toBeDefined();
     expect(translated.conditions).toBeUndefined();
-  });
-
-  it("lowers a payload enum match to the first-class relation predicate", () => {
-    const translated = JSON.parse(
-      translateQuery(
-        app.events.where({ event: { match: { type: "message", where: { level: 2 } } } })._build(),
-        app.wasmSchema,
-      ),
-    );
-
-    expect(translated.relation_ir).toEqual({
-      Project: {
-        input: {
-          Filter: {
-            input: { TableScan: { table: "events" } },
-            predicate: {
-              EnumMatch: {
-                column: { column: "event", scope: "events" },
-                case: "message",
-                payload: {
-                  Cmp: {
-                    left: { column: "level" },
-                    op: "Eq",
-                    right: { Literal: { type: "Integer", value: 2 } },
-                  },
-                },
-              },
-            },
-          },
-        },
-        columns: [{ alias: "event", expr: { Column: { column: "event", scope: "events" } } }],
-      },
-    });
-  });
-
-  it("rejects a payload enum match against an absent case field", () => {
-    const built = JSON.parse(app.events._build());
-    built.conditions = [
-      { column: "event", op: "match", value: { type: "closed", where: { level: 2 } } },
-    ];
-    expect(() => translateQuery(JSON.stringify(built), app.wasmSchema)).toThrow(
-      'unknown payload enum field "level" for case "closed"',
-    );
   });
 
   it("treats an omitted include limit as unbounded", () => {
