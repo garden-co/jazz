@@ -1753,8 +1753,9 @@ recipientAccountEpochId, envelope}`, with a random ID, sealed to that
 - **Receiving.** A member's devices watch deliveries addressed to their
   account and acquire the key (§3.3). While its account lacks a version
   that it needs, a member's device reports the space `key-pending` (§4.3).
-- **A delivery that does not open.** A delivery that provably fails to
-  open or authenticate (§3.3) is skipped, and the recipient's devices emit
+- **A delivery that does not open.** A delivery whose envelope provably
+  fails to open, or whose opened key fails its own version's marker (§3.3),
+  is skipped, and the recipient's devices emit
   an `invalid-delivery` encryption event `{space, sender, recipient,
 keyEpochId}`, once per delivery and device. Nothing is written: holders
   cannot see that the envelope failed, so they count the member as holding
@@ -1764,9 +1765,19 @@ keyEpochId}`, once per delivery and device. Nothing is written: holders
   reaches someone who manages members. A device does not report a delivery
   whose opening failed for any other reason: a provider failure (§0), a
   capability it lacks (§3.3, "Unresolved history"), or an account epoch it
-  cannot reach (another generation, which it skips). A member is trusted
-  with the key anyway (it could disclose it); the remedy for a member that
+  cannot reach (another generation, which it skips). A key that opens and
+  passes its own marker but fails a history link further back is not
+  reported against the sender: the fault is in the chain, not in the
+  delivery. Once a device holds a version, it opens no further deliveries
+  of it, so later bad deliveries of that version are not reported. A member
+  is trusted with the key anyway (it could disclose it); the remedy for a member that
   delivers badly is to remove it and rotate (§8).
+- **A member this client cannot evaluate.** When a member's account history
+  needs a capability this client lacks, or is missing from the read, the
+  client skips that member, delivers to the others, and reports it as
+  unsupported, never as invalid (§7). For the needs-rotation mark (§3.5) it
+  counts such a member as needing rotation, the safe direction. One such
+  member never stops deliveries or rotations for the rest of the space.
 - **Not a member.** A device whose account has no member row for the space
   (its own member rows are readable to it, R12) reports what it cannot
   decrypt `key-unavailable`: nobody will deliver to it.
