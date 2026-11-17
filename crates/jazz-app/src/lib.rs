@@ -50,6 +50,14 @@
 //! [`Query::part`] reads part of a large value ([`ValuePart`]): a byte
 //! range, a text range or a JSON subtree.
 //!
+//! Text offsets are UTF-8 bytes (`str` indices) throughout: splices
+//! ([`Page::text`], [`Splice::text`]), partial reads ([`ValuePart::text`]),
+//! subscription splices ([`ValueSplice::at`]) and anchors
+//! ([`text::Anchor::capture_utf8`], [`text::Anchor::resolve_utf8`]). An
+//! offset inside a code point is refused, not rounded. The UTF-16 forms
+//! (`Page::TextUtf16`, `ValuePart::TextUtf16`, `ValueSplice::at_utf16`, the
+//! anchors' own `position`) are for interop with hosts that count UTF-16.
+//!
 //! A bearer session is renewed by reconnecting with a fresh bearer, as
 //! TypeScript's bearer clients do (in-place renewal is for cookie sessions).
 
@@ -121,7 +129,12 @@ pub use jazz::tools::{AppId, DurabilityTier, ObjectId, ReadTier, ResultKey, Tran
 
 /// Stateless anchors and ranges into text values (cursors, selections,
 /// comments), captured from one value and found again in later ones, as
-/// TS's `db.textAnchors()`.
+/// TS's `db.textAnchors()`. In Rust, capture and resolve them in UTF-8
+/// byte offsets (`str` indices): [`text::Anchor::capture_utf8`],
+/// [`text::Anchor::resolve_utf8`], [`text::Range::capture_utf8`],
+/// [`text::Range::resolve_utf8`]. The plain `capture`/`resolve` and the
+/// anchors' stored `position` hints count UTF-16 code units, as JavaScript
+/// does, so anchors are shared across hosts.
 pub use jazz_text as text;
 
 /// The `jazz` crate, for generated code and [`Jazz::with_client`].

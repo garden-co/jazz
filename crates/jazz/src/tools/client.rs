@@ -786,15 +786,23 @@ fn link_failure(error: NativeTransportError) -> LinkFailure {
         },
         NativeTransportError::Terminal(message) => LinkFailure::Refused(message),
         NativeTransportError::Retryable(message) => LinkFailure::Network(message),
+        NativeTransportError::Wire(error) => LinkFailure::from_wire_error(&error, false),
     }
 }
 
 /// How an established link ended. Losing an admitted link is an outage,
-/// whatever the transport calls it, unless the server refused the credential.
+/// whatever the transport calls it, unless the server refused the credential
+/// or ended it with a wire error, which the link classifies.
 fn terminal_failure(stopped: NativeTransportTerminal) -> LinkFailure {
     match stopped {
         NativeTransportTerminal::Failed(error @ NativeTransportError::AuthRejected(_)) => {
             link_failure(error)
+        }
+        // Not reached: the native transport reports a server's wire error
+        // only before hello, as a failed connect. Were an admitted link to
+        // end with one, the link would classify it as admitted.
+        NativeTransportTerminal::Failed(NativeTransportError::Wire(error)) => {
+            LinkFailure::from_wire_error(&error, true)
         }
         NativeTransportTerminal::Failed(
             NativeTransportError::Terminal(message) | NativeTransportError::Retryable(message),
@@ -984,13 +992,10 @@ impl JazzClient {
                     keeper.live = Some((attempt, link.terminal));
                     keeper.handle(LinkInput::Admitted(attempt));
                 }
-                Err(
-                    NativeTransportError::Terminal(error)
-                    | NativeTransportError::AuthRejected(error),
-                ) => {
-                    return Err(JazzError::Connection(error));
+                Err(error) if !error.is_retryable() => {
+                    return Err(JazzError::Connection(error.to_string()));
                 }
-                Err(error @ NativeTransportError::Retryable(_)) => {
+                Err(error) => {
                     tracing::debug!(%error, "jazz client starts offline");
                     keeper.handle(LinkInput::Ended(attempt, link_failure(error)));
                 }
@@ -2038,16 +2043,11 @@ impl JazzClient {
             .settle(db.wait_for_sync(CoreDurabilityTier::Global, writer))
             .await?
             .map_err(|error| {
-                if error.is_authorization_denied() {
-                    JazzError::Sync(format!(
-                        "a write was rejected before reaching the server: {}",
-                        crate::db::AUTHORIZATION_DENIED
-                    ))
-                } else {
+                JazzError::write_rejected(&error).unwrap_or_else(|| {
                     JazzError::Write(format!(
                         "a write was rejected before reaching the server: {error}"
                     ))
-                }
+                })
             })
     }
 
@@ -2085,20 +2085,14 @@ impl JazzClient {
             .await?
             .map(drop)
             .map_err(|error| {
-                // A policy rejection is reported by its reason, as the
-                // authority's verdict on the transaction.
-                if error.is_authorization_denied() {
-                    JazzError::Sync(format!(
-                        "{} {tier:?} durability: {}",
-                        super::REJECTED_BEFORE,
-                        crate::db::AUTHORIZATION_DENIED
-                    ))
-                } else {
+                // A rejection carries the authority's verdict as TS's code
+                // and reason.
+                JazzError::write_rejected(&error).unwrap_or_else(|| {
                     JazzError::Write(format!(
                         "{} {tier:?} durability: {error}",
                         super::REJECTED_BEFORE
                     ))
-                }
+                })
             })
     }
 
@@ -2503,12 +2497,20 @@ impl JazzClient {
                 continue;
             }
             let _ = self.shared.db.discard_rejected_transaction(rejection.seq);
+            let (code, reason) =
+                super::rejection_code_and_reason(&rejection.error).unwrap_or_else(|| {
+                    // Any other refusal is a plain `write_rejected`, as TS
+                    // reports it, with the core's diagnostic.
+                    ("write_rejected".to_owned(), rejection.error.to_string())
+                });
             errors.push(MutationError {
                 transaction: TransactionId::from_committed_tx(TxId {
                     time: crate::time::TxTime(rejection.seq),
                     node,
                 }),
                 message: rejection.error.to_string(),
+                code,
+                reason,
                 denied: rejection.error.is_authorization_denied(),
                 serializable: rejection.serializable,
             });
@@ -2609,15 +2611,24 @@ pub struct StreamingUpload {
 /// A write of this client the server refused: see
 /// [`JazzClient::take_mutation_errors`].
 ///
-/// Serializes as `{"transaction": "<id>", "message", "denied",
-/// "serializable"}`, the transaction as its string id.
+/// Serializes as `{"transaction": "<id>", "message", "code", "reason",
+/// "denied", "serializable"}`, the transaction as its string id. More
+/// fields may come.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct MutationError {
     /// The refused commit, as its write returned it.
     #[serde(serialize_with = "serialize_display")]
     pub transaction: TransactionId,
+    /// The core's diagnostic.
     pub message: String,
+    /// TS's code (`MutationErrorEvent.code`): `permission_denied`,
+    /// `serialization_conflict`, `transaction_conflict`,
+    /// `client_clock_too_far_ahead` or `write_rejected`.
+    pub code: String,
+    /// TS's readable reason (`MutationErrorEvent.reason`).
+    pub reason: String,
     /// Refused by a permission.
     pub denied: bool,
     /// A serializable transaction's commit.
@@ -2670,8 +2681,30 @@ impl Deref for JazzTransaction {
     }
 }
 
+/// A write's or transaction's synchronous failure. A rejection the core
+/// decides before the write leaves the client (input it refuses, a taken
+/// id, a local transaction conflict) carries TS's code, as TS's
+/// synchronous writes do, with the core's detail as its reason.
 fn write_error(error: CoreError) -> JazzError {
-    JazzError::Write(error.to_string())
+    let Some((code, _)) = super::rejection_code_and_reason(&error) else {
+        return JazzError::Write(error.to_string());
+    };
+    let detail = match error.reason {
+        Some(reason) => error
+            .message
+            .strip_prefix(reason.as_str())
+            .and_then(|rest| rest.strip_prefix(": "))
+            .unwrap_or(&error.message),
+        None => &error.message,
+    };
+    // The authority's wording ("…by server authorization") would be wrong
+    // here: without a detail, the core's own diagnostic is the reason.
+    let reason = if detail.is_empty() {
+        error.to_string()
+    } else {
+        detail.to_owned()
+    };
+    JazzError::WriteRejected { code, reason }
 }
 
 fn local_first_opts(first_load_remote_wait: Duration) -> ReadOpts {
@@ -3276,6 +3309,37 @@ fn provenance(row: &CurrentRow) -> crate::model::metadata::RowProvenance {
 
 #[cfg(test)]
 mod tests {
+    /// A write refused before it leaves the client carries TS's code, with
+    /// the core's detail as its reason; any other failure stays a `Write`.
+    #[test]
+    fn local_write_rejections_are_coded() {
+        use crate::db::{Error, ErrorCode, Reason};
+        let denied = Error::with_reason(
+            ErrorCode::WriteRejected,
+            Reason::AuthorizationDenied,
+            "authorization_denied: policy denied INSERT on table notes",
+        );
+        match super::write_error(denied) {
+            JazzError::WriteRejected { code, reason, .. } => {
+                assert_eq!(code, "permission_denied");
+                assert_eq!(reason, "policy denied INSERT on table notes");
+            }
+            other => panic!("expected a coded rejection, got {other:?}"),
+        }
+        let exists = Error::with_reason(
+            ErrorCode::WriteRejected,
+            Reason::RowAlreadyExists,
+            "row 1 already exists",
+        );
+        assert!(matches!(
+            super::write_error(exists),
+            JazzError::WriteRejected { code, reason, .. }
+                if code == "write_rejected" && reason == "row 1 already exists"
+        ));
+        let storage = Error::new(ErrorCode::Storage, "disk");
+        assert!(matches!(super::write_error(storage), JazzError::Write(_)));
+    }
+
     use super::*;
     use crate::tools::native_transport_connector::ConnectedNativeTransport;
     use crate::tools::public_schema::{ColumnType, SchemaBuilder, TableSchema};

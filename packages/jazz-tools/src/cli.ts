@@ -54,10 +54,9 @@ export const VALIDATE_RENAMED =
 const CREATE_REMOVED = "`jazz-tools create` was removed. Start a project with `npm create jazz`.";
 
 const MIGRATE_ALPHA59_MOVED =
-  "`jazz-tools migrate-alpha59` moved to `jazz-alpha59-alpha60-import`, a native binary attached to each " +
-  "GitHub release next to `jazz-alpha59-alpha60-export`. Download both for your platform from " +
-  "https://github.com/garden-co/jazz/releases and run `jazz-alpha59-alpha60-import import --dump <dump> " +
-  "--data-dir <dir> --app-id <app id>`.";
+  "`jazz-tools migrate-alpha59` was removed. Move alpha.59 data with the exporter and importer from " +
+  "https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.65 (`jazz-alpha59-alpha60-export-<platform>` " +
+  "and `jazz-alpha59-alpha60-import-<platform>`), then upgrade from alpha.65.";
 
 function parseArgs(args: string[]): { command: string; options: BuildOptions } {
   const command = args[0] || "";
@@ -314,6 +313,19 @@ function exitOnError(task: Promise<unknown>): void {
   });
 }
 
+/** Run a `store` subcommand, which needs the store stopped. */
+function storeCommand(path: string, run: () => void): void {
+  try {
+    run();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/already open|jazz\.lock/i.test(message)) {
+      throw new Error(`${path} is in use: stop the backend or server using it first.`);
+    }
+    throw error;
+  }
+}
+
 function splitLeadingAppId(args: string[]): { appId?: string; args: string[] } {
   const first = args[0];
   if (!first || first.startsWith("-")) {
@@ -432,6 +444,9 @@ function printHelp(): void {
   console.log(
     "  inspect <command>     Read and change an app's data through its backend (see `inspect --help`)",
   );
+  console.log("  store detach <path>   Make a stopped copy of a store a store of its own");
+  console.log("  store set-app-id <path> <id>");
+  console.log("                        Make a stopped store serve another app id");
   console.log("\nOptions:");
   console.log(
     "  --schema-dir <path>   Project directory holding schema.ts (default: .; also ./src, ./src/lib)",
@@ -536,6 +551,33 @@ if (isMainModule()) {
   } else if (command === "validate") {
     console.error(VALIDATE_RENAMED);
     process.exit(1);
+  } else if (command === "store") {
+    const [subcommand, path, ...rest] = args.slice(1);
+    const usage =
+      "Usage: jazz-tools store detach <path>\n       jazz-tools store set-app-id <path> <app id>\n\n" +
+      "detach: make a stopped copy of a store a store of its own, so it claims its own chunk directory or s3() prefix instead of the original's.\n" +
+      "set-app-id: make a stopped store serve another app id from its next start.";
+    if (subcommand === "detach" && path && rest.length === 0) {
+      exitOnError(
+        import("jazz-napi").then(({ detachStore }) => {
+          storeCommand(path, () => detachStore(resolve(process.cwd(), path)));
+          console.log(
+            `${path} is now a store of its own; it claims its large values' place on its next start.`,
+          );
+        }),
+      );
+    } else if (subcommand === "set-app-id" && path && rest.length === 1) {
+      const appId = rest[0]!;
+      exitOnError(
+        import("jazz-napi").then(({ setStoreAppId }) => {
+          storeCommand(path, () => setStoreAppId(resolve(process.cwd(), path), appId));
+          console.log(`${path} serves app ${appId} from its next start.`);
+        }),
+      );
+    } else {
+      console.error(usage);
+      process.exit(1);
+    }
   } else if (command === "schema") {
     const subcommand = args[1] ?? "";
     if (subcommand === "compile") {

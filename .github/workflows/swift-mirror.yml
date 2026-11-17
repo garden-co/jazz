@@ -29,6 +29,9 @@ on:
       - "crates/jazz-ffi/**"
       - "dev/scripts/build-swift-xcframework.sh"
       - "dev/scripts/assemble-swift-mirror.sh"
+      - "examples/stage-plan/apps/swiftui/**"
+      - "examples/stage-plan/apps/swift-cli/**"
+      - "crates/jazz-codegen/src/swift.rs"
       - ".github/workflows/swift-mirror.yml"
   workflow_dispatch:
     inputs:
@@ -164,9 +167,41 @@ jobs:
           SWIFT
           cp packages/jazz-swift/mirror/Smoke.swift "$consumer/Sources/Smoke/Smoke.swift"
           (cd "$consumer" && swift run Smoke)
-          # The mirror package's scheme (jazz-swift): compiles the sources and
-          # resolves the XCFramework's iOS simulator slice.
-          (cd "$verify" && xcodebuild build -scheme jazz-swift -destination 'generic/platform=iOS Simulator' -quiet)
+      - name: Test on macOS and the iOS simulator
+        run: |
+          # The package's own tests (packages/jazz-swift/Tests), run against
+          # the release's XCFramework: the core on macOS and on an iOS
+          # simulator, and JazzQuery, SwiftUI's live query, on both.
+          verify="$RUNNER_TEMP/verify"
+          cp -R packages/jazz-swift/Tests "$verify/Tests"
+          perl -0pi -e 's/(\n        jazzFFI,\n    \])/\n        jazzFFI,\n        .testTarget(name: "JazzTests", dependencies: ["Jazz"], path: "Tests\/JazzTests"),\n    ]/' "$verify/Package.swift"
+          grep -n testTarget "$verify/Package.swift"
+          (cd "$verify" && swift test)
+          # The newest available iPhone simulator.
+          udid=$(xcrun simctl list devices available -j | python3 -c '
+          import json, re, sys
+          def version(runtime):
+              return [int(n) for n in re.findall(r"\d+", runtime.split("iOS")[-1])]
+          runtimes = sorted((r for r in json.load(sys.stdin)["devices"].items() if "iOS" in r[0]), key=lambda r: version(r[0]))
+          phones = [d for _, ds in runtimes for d in ds if d["name"].startswith("iPhone")]
+          if not phones:
+              sys.exit("no available iPhone simulator")
+          print(phones[-1]["udid"])')
+          echo "iOS simulator: $udid"
+          echo "SIMULATOR=$udid" >> "$GITHUB_ENV"
+          (cd "$verify" && xcodebuild test -scheme jazz-swift -destination "platform=iOS Simulator,id=$udid" -quiet)
+      - name: Build the SwiftUI example for macOS, and run its UI test on the iOS simulator
+        run: |
+          # examples/stage-plan/apps/swiftui depends on garden-co/jazz-swift;
+          # before publishing, that's the local copy of the mirror.
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          example=examples/stage-plan/apps/swiftui
+          perl -0pi -e "s|    url: https://github.com/garden-co/jazz-swift\n    exactVersion: [^\n]*|    path: $RUNNER_TEMP/verify|" "$example/project.yml"
+          # Fail rather than test the published package if the swap didn't match.
+          grep -q "path: $RUNNER_TEMP/verify" "$example/project.yml" || { echo "::error::project.yml still names the published package"; exit 1; }
+          (cd "$example" && xcodegen generate)
+          (cd "$example" && xcodebuild build -scheme StagePlanUI -destination 'platform=macOS' -quiet CODE_SIGNING_ALLOWED=NO)
+          (cd "$example" && xcodebuild test -scheme StagePlanUI -destination "platform=iOS Simulator,id=$SIMULATOR" -quiet CODE_SIGNING_ALLOWED=NO)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-swift-mirror

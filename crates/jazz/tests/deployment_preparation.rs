@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use jazz::tools::deployment::{
     DeploymentCatalogue, DeploymentError, DeploymentRequest, prepare_deployment,
+    schemas_are_compatible,
 };
 use jazz::tools::{
     ColumnType, HistoryRetention, Lens, LensOp, LensTransform, PolicyExpr, Schema, SchemaBuilder,
@@ -605,6 +606,81 @@ fn an_empty_migration_may_add_enum_variants_but_not_drop_them() {
             "{refused}"
         );
     }
+}
+
+/// What `schemas_are_compatible` (and so `migrations create`) counts as a
+/// change: a deployment over a store on `v1` needs a migration to each of
+/// these, or `v1` is left disconnected. An empty one connects an enum
+/// gaining variants or a table gaining `branchBy`; a branch column's
+/// default changing or `branchBy` being removed is refused even with one,
+/// since the branch columns determine row identity.
+///
+/// ```
+/// v1 status(todo, done)            ──none──► status(todo, done, blocked)   ✗ disconnected
+///                                  ──empty─►                               ✓
+/// v1 notes                         ──none──► notes branched by `branch`    ✗ disconnected
+///                                  ──empty─►                               ✓
+/// v1 branched, branch default "a"  ──none──► branch default "b"            ✗ disconnected
+///                                  ──empty─►                               ✗ immutable
+/// v1 branched by `branch`          ──empty─► not branched                  ✗ cannot be removed
+/// ```
+#[test]
+fn enum_additions_and_branch_changes_need_a_migration() {
+    let branched = |branch_by: bool, default: &str| {
+        let mut table = TableSchema::builder("notes")
+            .column("title", ColumnType::Text)
+            .column_with_default("branch", ColumnType::Text, Value::Text(default.into()));
+        if branch_by {
+            table = table.branch_by("branch");
+        }
+        SchemaBuilder::new().table(table).build()
+    };
+    let deploy = |v1: &Schema, v2: &Schema, migrations: Vec<Lens>| {
+        let stored = DeploymentCatalogue {
+            schemas: vec![v1.clone()],
+            admitted_schema_hashes: vec![SchemaHash::compute(v1)],
+            ..Default::default()
+        };
+        prepare_deployment(&stored, request(v2, std::slice::from_ref(v2), migrations))
+    };
+    let cases = [
+        (
+            tasks(&["todo", "done"], &["bug"]),
+            tasks(&["todo", "done", "blocked"], &["bug"]),
+            None,
+        ),
+        (branched(false, "a"), branched(true, "a"), None),
+        (
+            branched(true, "a"),
+            branched(true, "b"),
+            Some("branch column type and migration default are immutable"),
+        ),
+        (
+            branched(true, "a"),
+            branched(false, "a"),
+            Some("table branch columns cannot be removed"),
+        ),
+    ];
+    for (v1, v2, refused) in cases {
+        assert!(!schemas_are_compatible(&v1, &v2));
+        assert!(matches!(
+            deploy(&v1, &v2, vec![]),
+            Err(DeploymentError::DisconnectedGraph { .. })
+        ));
+        let with_empty = deploy(&v1, &v2, vec![migration(&v1, &v2, vec![])]);
+        match refused {
+            None => {
+                with_empty.unwrap();
+            }
+            Some(reason) => {
+                let error = with_empty.unwrap_err().to_string();
+                assert!(error.contains(reason), "{error}");
+            }
+        }
+    }
+    // A default outside `branchBy` is not a change.
+    let (plain_a, plain_b) = (branched(false, "a"), branched(false, "b"));
+    assert!(schemas_are_compatible(&plain_a, &plain_b));
 }
 
 #[test]

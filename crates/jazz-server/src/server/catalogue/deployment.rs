@@ -1,5 +1,4 @@
 use super::*;
-use crate::server::permissions_validation::validate_permissions_relations;
 use jazz::catalogue::{CatalogueLens, CataloguePut};
 use jazz::tools::deployment::{DeploymentCatalogue, PreparedDeployment};
 
@@ -98,7 +97,8 @@ impl StoredCatalogue {
             .filter(|(_, table)| table.policies != TablePolicies::default())
             .map(|(name, table)| (*name, table.policies.clone()))
             .collect::<HashMap<_, _>>();
-        validate_permissions_relations(&permissions).map_err(CatalogueError::WriteError)?;
+        // `prepare_deployment` refused what a deployment may not introduce
+        // (`check_deployable_policies`), as `jazz-tools validate` does.
         let permissions: jazz::catalogue::Permissions = permissions.into_iter().collect();
         let bundle = jazz::catalogue::bundle_id(&schema_hash, &permissions)
             .map_err(|error| CatalogueError::WriteError(error.to_string()))?;

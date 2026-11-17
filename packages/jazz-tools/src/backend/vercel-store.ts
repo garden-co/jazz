@@ -78,8 +78,16 @@ export interface VercelStoreOptions {
    * start and keeps it there.
    */
   appId?: never;
-  /** Sandbox region. Defaults to `iad1`. Fixed when the Sandbox is created. */
-  region?: string;
+  /**
+   * The Vercel region the core runs and keeps its data in: its Sandbox's
+   * region and its Drive's. Required. Fixed when the core is created;
+   * moving an existing core to another region isn't supported yet, so a
+   * different `region` for an existing core throws. `"iad1"` is where
+   * earlier versions created every core. Pick the region your functions run
+   * in: a request from a function elsewhere crosses regions to the core.
+   * See https://vercel.com/docs/sandbox/concepts/regions.
+   */
+  region: string;
   /**
    * Where large values' bytes go:
    * - `vercelBlob()`: the project's Blob store, written by the core
@@ -130,11 +138,13 @@ export interface SandboxSdk {
     get(params: Record<string, unknown>): Promise<SandboxHandle>;
     create(params: Record<string, unknown>): Promise<SandboxHandle>;
   };
-  Drive: { getOrCreate(params: Record<string, unknown>): Promise<unknown> };
+  Drive: { getOrCreate(params: Record<string, unknown>): Promise<{ readonly region: string }> };
 }
 
 export interface SandboxHandle {
   readonly status: string;
+  /** The region the Sandbox is configured to run in. */
+  readonly region: string;
   domain(port: number): string;
   currentSession(): {
     startedAt: Date;
@@ -537,7 +547,7 @@ export function resolveCoreBlobs(
   }
   if (blobs === undefined || blobs === "sqlite") return undefined;
   if (blobs.kind === "vercel-blob") return resolveVercelBlob(blobs, env);
-  return resolveVercelS3(blobs, options.region ?? "iad1", env);
+  return resolveVercelS3(blobs, options.region, env, warn);
 }
 
 /**
@@ -684,8 +694,68 @@ const PER_BRANCH_RECIPE =
 export function missingNamespaceError(): Error {
   return new Error(
     "vercel(): pass `namespace`, which names this deployment's core (its Sandbox is jazz-<project>-<namespace>). The usual choices:\n" +
-      "  vercel({ namespace: ({ environment }) => environment }) // one core per Vercel environment\n" +
-      `  vercel({ ${PER_BRANCH_RECIPE} }) // production's core and one per preview branch, the cores earlier versions created (perBranch is exported by jazz-tools/backend)`,
+      '  vercel({ namespace: ({ environment }) => environment, region: "iad1" }) // one core per Vercel environment\n' +
+      `  vercel({ ${PER_BRANCH_RECIPE}, region: "iad1" }) // production's core and one per preview branch, the cores earlier versions created (perBranch is exported by jazz-tools/backend)`,
+  );
+}
+
+/** Vercel's list of the regions a Sandbox can run in. */
+const SANDBOX_REGIONS_DOCS = "https://vercel.com/docs/sandbox/concepts/regions";
+
+/** Why `vercel()` needs a region, with the one that keeps existing cores where they are. */
+export function missingRegionError(): Error {
+  return new Error(
+    "vercel(): pass `region`, the Vercel region this deployment's core runs and keeps its data in (its Sandbox and its Drive, fixed when the core is created). " +
+      "Earlier versions created every core in iad1; to keep existing cores where they are, pass:\n" +
+      '  vercel({ namespace, region: "iad1" })\n' +
+      `For a new app, pick the region your functions run in (see ${SANDBOX_REGIONS_DOCS}).`,
+  );
+}
+
+/** Check `region` when `vercel()` is called, so `next dev` reports it too. */
+export function checkRegionOption(options: { region?: unknown }): string {
+  if (options.region === undefined) throw missingRegionError();
+  if (typeof options.region !== "string" || !options.region) {
+    throw new Error(
+      `vercel(): region must be a Vercel region such as "iad1" (see ${SANDBOX_REGIONS_DOCS}); got ${JSON.stringify(options.region)}`,
+    );
+  }
+  return options.region;
+}
+
+/**
+ * An existing core (its Sandbox, or its Drive) is in `actual`, not the
+ * configured region: refused, since nothing would move it.
+ */
+export function refuseRegionMove(what: string, actual: string, configured: string): void {
+  if (actual === configured) return;
+  throw new Error(
+    `vercel(): ${what} is in ${actual}, but \`region\` is ${JSON.stringify(configured)}. ` +
+      "Moving a core to another region isn't supported yet: its data would have to be copied (https://github.com/garden-co/jazz/issues/5441). " +
+      `To keep using this core, pass \`region: ${JSON.stringify(actual)}\`.`,
+  );
+}
+
+/** Said once per process, like the Blob store warning. */
+const WARNED_FUNCTION_REGION = Symbol.for("jazz-tools.vercel.warnedFunctionRegion");
+const warnedRegion = globalThis as { [WARNED_FUNCTION_REGION]?: true };
+
+/**
+ * Warn once per process when this function runs in another region than
+ * its core: every request then crosses regions.
+ */
+export function warnFunctionRegion(
+  core: string,
+  region: string,
+  env: Record<string, string | undefined>,
+  warn: (message: string) => void = console.warn,
+): void {
+  const functionRegion = env.VERCEL_REGION;
+  if (!functionRegion || functionRegion === region || warnedRegion[WARNED_FUNCTION_REGION]) return;
+  warnedRegion[WARNED_FUNCTION_REGION] = true;
+  warn(
+    `vercel(): this function runs in ${functionRegion}, but its core ${core} is in ${region}, so every request to the core makes a round trip between the two regions. ` +
+      `Run your functions in ${region} (the project's Function Region setting).`,
   );
 }
 
@@ -701,7 +771,7 @@ export function refuseVercelName(options: {
   if (!("name" in options)) return;
   const defaults =
     "To keep the cores earlier versions created by default (production's and one per preview branch), pass " +
-    `vercel({ ${PER_BRANCH_RECIPE} }) with perBranch from jazz-tools/backend.`;
+    `vercel({ ${PER_BRANCH_RECIPE}, region: "iad1" }) with perBranch from jazz-tools/backend.`;
   const project = options.credentials?.projectId ?? process.env.VERCEL_PROJECT_ID;
   const name = options.name;
   // The Sandbox a namespace names: "jazz-", the project id lowercased with
@@ -912,6 +982,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   const project = options.credentials?.projectId ?? env.VERCEL_PROJECT_ID;
   refuseVercelName(options);
   if (options.namespace === undefined) throw missingNamespaceError();
+  const region = checkRegionOption(options);
   if (!project) {
     throw new Error(
       "vercel(): VERCEL_PROJECT_ID is not set; enable system environment variables, or pass credentials with its projectId",
@@ -919,6 +990,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   }
   const { name, namespace } = coreName(project, options.namespace, env);
   const drive = driveName(name);
+  warnFunctionRegion(name, region, env);
   const creds = options.credentials ?? {};
   const idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
   const backendCredential = options.backendCredential ?? functionOidcToken;
@@ -1029,15 +1101,18 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
    * caller then waits for that one, like any other wake.
    */
   const provision = async (): Promise<SandboxHandle | null> => {
-    await sdk.Drive.getOrCreate({
+    // An existing Drive (say, of a deleted Sandbox) keeps its region, which
+    // can't change: a core there is refused like an existing Sandbox.
+    const created = await sdk.Drive.getOrCreate({
       name: drive,
-      region: options.region ?? "iad1",
+      region,
       maxSize: options.maxDriveBytes ?? 10 * 1024 ** 3,
       ...creds,
     });
+    refuseRegionMove(`core ${name}'s Drive ${drive}`, created.region, region);
     const sbx = await sdk.Sandbox.create({
       name,
-      region: options.region ?? "iad1",
+      region,
       image: "vercel/sandbox/node:24",
       ports: [VERCEL_CORE_PORT],
       resources: { vcpus: options.vcpus ?? 1 },
@@ -1097,6 +1172,9 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
             resume: false,
             ...creds,
           }).catch(() => null);
+          // Before resuming, which starts its server: a core elsewhere is
+          // never woken.
+          if (existing) refuseRegionMove(`core ${name}`, existing.region, region);
           sbx = existing
             ? await sdk.Sandbox.get({
                 name,
@@ -1122,6 +1200,9 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           sbx = await getRunning();
         }
       }
+      // A Sandbox is found by name only, and `region` applies only when it
+      // is created: a core elsewhere is refused, not silently used.
+      refuseRegionMove(`core ${name}`, sbx.region, region);
       // A core pinned to another workload never becomes ours: say so now,
       // not after the health checks time out.
       await refuseForeignPin(sbx);

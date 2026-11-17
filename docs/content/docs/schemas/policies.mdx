@@ -298,7 +298,10 @@ adding an allow rule to silence the warning:
 
 ```ts title="schema.ts"
 export const schema = s.defineSchema({
-  auditLog: s.table({ ownerId: s.uuid(), action: s.string() }),
+  auditLog: s.table({
+    ownerId: s.uuid(),
+    action: s.string(),
+  }),
 });
 
 const { definePermissions, session } = schema;
@@ -504,7 +507,11 @@ Untyped claims accept any path. To have TypeScript check them, declare their sha
 ```ts title="schema.ts"
 export const schema = s.defineSchema(
   {
-    projects: s.table({ name: s.string(), orgId: s.string(), teamId: s.string() }),
+    projects: s.table({
+      name: s.string(),
+      orgId: s.string(),
+      teamId: s.string(),
+    }),
   },
   { claims: s.claims<{ role: "manager" | "member"; org: string; teams: string[] }>() },
 );
@@ -529,6 +536,28 @@ forward column itself, and `allowedTo.delete(schema.tables.posts.writer)` the ro
 Inheritance keeps each operation's own policy, and each update rule's before and after checks.
 TypeScript only offers relations of the rule's table, and `jazz-tools generate` checks their
 direction and target.
+
+`allowedTo` can't be used inside an `exists` yet (in its conditions, a `.hop`, a relation's
+`.where` or a relation query), nor under `not`: it is only a rule's own check, alone or in `anyOf`
+and `allOf`. TypeScript rejects it in both places, and `jazz-tools generate` refuses a file that
+has it, with "`allowedTo.read(…)` inside `exists` is not supported yet" or "`not allowedTo.read(…)`
+is not supported yet". Write a rule that would negate inheritance without it (`not` works on the
+row's own columns and session values). Inside an `exists`, repeat the other table's rule instead,
+sharing it as a helper:
+
+```ts title="schema.ts"
+// Who may read a project, shared by the rules that need it.
+const readableProject = { owner_id: session.user };
+
+export const permissions = definePermissions({
+  projects: { read: readableProject },
+  todos: { read: (todo) => allowedTo.read(todo.project) },
+  todoShares: {
+    // Not `exists.todos({ id: share.todoId }, (todo) => allowedTo.read(todo.project))`:
+    read: (share) => exists.todos({ id: share.todoId }).hop("project", readableProject),
+  },
+});
+```
 
 <Tabs groupId="app-source" items={["schema.ts", "Generated JSON"]} persist>
 <Tab value="schema.ts">
@@ -676,8 +705,13 @@ filter again. For example, a doctor may read the patients they have an appointme
 
 ```ts title="schema.ts"
 export const schema = s.defineSchema({
-  doctors: s.table({ userId: s.string(), name: s.string() }),
-  patients: s.table({ name: s.string() }),
+  doctors: s.table({
+    userId: s.string(),
+    name: s.string(),
+  }),
+  patients: s.table({
+    name: s.string(),
+  }),
   appointments: s.table(
     { doctorId: s.uuid(), patientId: s.uuid(), at: s.timestamp() },
     {
@@ -893,7 +927,10 @@ them; `generate` does. For example, with folders and files:
 
 ```ts title="schema.ts"
 export const schema = s.defineSchema({
-  folders: s.table({ name: s.string(), ownerId: s.uuid() }),
+  folders: s.table({
+    name: s.string(),
+    ownerId: s.uuid(),
+  }),
   files: s.table(
     { name: s.string(), folderId: s.uuid() },
     {

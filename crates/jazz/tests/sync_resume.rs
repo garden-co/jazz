@@ -526,7 +526,26 @@ fn a_resumed_subscription_evicts_rows_whose_access_was_lost_while_away() {
         ids(&client, None).is_empty(),
         "the room's messages are evicted"
     );
-    assert_eq!(*shipped.borrow(), 0, "only evictions ship");
+    // Besides the evictions, the deleted membership the messages rested on
+    // ships as deleted: the replica no longer holds it as it was (#5097).
+    assert_eq!(
+        *shipped.borrow(),
+        1,
+        "only evictions and the membership's deletion ship"
+    );
+    let memberships = client.prepare_query(&Query::from("memberships")).unwrap();
+    let held = block_on(client.all(
+        &memberships,
+        ReadOpts {
+            tier: ReadTier::LocalOnly,
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    assert!(
+        held.iter().all(|row| row.row_uuid() != id(2, 0)),
+        "the deleted membership is gone from the replica"
+    );
 }
 
 /// A caught-up subscription resumes without shipping a row: no table its
@@ -2314,6 +2333,10 @@ fn resumed_windows_match_fresh_ones_through_random_churn() {
         for round in 0..12 {
             assert!(client.detach_connection(&upstream));
             let changes = next(6);
+            // Memberships deleted while away: the reads that rested on
+            // them no longer hold them, so each one's deletion ships once
+            // on the resume (#5097), which a fresh replica never held.
+            let mut lost_support = 0;
             for _ in 0..changes {
                 match next(5) {
                     0 => {
@@ -2340,6 +2363,7 @@ fn resumed_windows_match_fresh_ones_through_random_churn() {
                         Some(row) => {
                             block_on(server.delete("memberships", row, Default::default()))
                                 .unwrap();
+                            lost_support += 1;
                         }
                         None => {
                             let row = id(2, next_membership);
@@ -2424,7 +2448,7 @@ fn resumed_windows_match_fresh_ones_through_random_churn() {
                 );
             }
             assert!(
-                resumed <= fresh_count,
+                resumed <= fresh_count + lost_support,
                 "seed {seed_value} round {round}: a resume ships {resumed}, a fresh opening {fresh_count}"
             );
             resumed_total += resumed;
