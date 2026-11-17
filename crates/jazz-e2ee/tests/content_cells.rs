@@ -1618,3 +1618,30 @@ fn a_value_of_a_third_space_is_never_rehomed() {
         plaintext
     );
 }
+
+/// An acquisition whose read is older than the chain the device knows
+/// settles a missing version against the known chain: a version the
+/// newer read has is pending, never remembered as absent.
+#[test]
+fn an_older_acquisition_never_settles_a_known_version_as_absent() {
+    let mut world = world(31);
+    let address = space(ROW);
+    let mut held = held_of(&world, ALICE, ROW);
+    let older = chain_of(&world, ROW);
+    let v1 = world.rotate(ALICE);
+    let newer = chain_of(&world, ROW);
+    assert!(older.through() < newer.through());
+    held.observe_chain(&newer);
+    assert_eq!(
+        held.settle_missing(&address, &v1, Some(&older), true),
+        Ok(MissingKey::Report(DataError::KeyPending))
+    );
+    assert!(!held.known(&address).unwrap().is_absent(&v1));
+    // An epoch the known chain lacks is still settled as absent.
+    let stray = "0a0a0a0a-0a0a-4a0a-8a0a-0a0a0a0a0a0a";
+    assert_eq!(
+        held.settle_missing(&address, stray, Some(&older), true),
+        Ok(MissingKey::Report(DataError::InvalidCiphertext))
+    );
+    assert!(held.known(&address).unwrap().is_absent(stray));
+}

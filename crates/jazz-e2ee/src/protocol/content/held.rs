@@ -372,7 +372,8 @@ pub enum WriteChoice<'k> {
 pub struct KnownChain {
     root_id: String,
     epochs: Vec<String>,
-    unresolved: bool,
+    /// The capability the chain is unresolved for, past its last version.
+    unresolved: Option<UnsupportedCapability>,
     absent: BTreeSet<String>,
     /// The cut of the read these came from.
     through: Option<Position>,
@@ -410,12 +411,15 @@ impl KnownChain {
             .map(|version| version.epoch_id.clone())
             .collect();
         let other_root = self.root_id != chain.root.row.id;
-        let advanced =
-            epochs.len() > self.epochs.len() || (self.unresolved && chain.unresolved.is_none());
+        let advanced = epochs.len() > self.epochs.len()
+            || (self.unresolved.is_some() && chain.unresolved.is_none());
         if other_root || advanced {
             self.root_id = chain.root.row.id.clone();
             self.epochs = epochs;
-            self.unresolved = chain.unresolved.is_some();
+            self.unresolved = chain
+                .unresolved
+                .as_ref()
+                .map(|unresolved| unresolved.capability);
             self.absent.clear();
             self.through = Some(chain.through());
         }
@@ -661,8 +665,10 @@ impl HeldKeys {
     /// whether the account has a member row for the space.
     ///
     /// - Held now: open again.
-    /// - Not in the chain: `invalid-ciphertext`, remembered until the chain
-    ///   advances; an unresolved chain leaves it [`MissingKey::Unresolved`].
+    /// - Not in the chain the device knows after taking `chain` (an older
+    ///   read never replaces it): `invalid-ciphertext`, remembered until
+    ///   the chain advances; an unresolved chain leaves it
+    ///   [`MissingKey::Unresolved`].
     /// - Otherwise, not a member: `key-unavailable`; a member with no valid
     ///   root: `space-pending`; a member awaiting a delivery: `key-pending`.
     pub fn settle_missing(
@@ -681,18 +687,18 @@ impl HeldKeys {
         if self.holds(address, epoch_id) {
             return Ok(MissingKey::Held);
         }
-        if let Some(chain) = chain
-            && chain.depth_of(epoch_id).is_none()
-        {
-            if let Some(unresolved) = &chain.unresolved {
-                return Ok(MissingKey::Unresolved(unresolved.capability));
+        // Decided against the chain the device knows after taking this
+        // read: an acquisition whose read is older than it decides nothing
+        // about the chain.
+        if chain.is_some() {
+            let known = self.known.get_mut(address).expect("observed above");
+            if !known.epochs.iter().any(|known| known == epoch_id) {
+                if let Some(capability) = known.unresolved {
+                    return Ok(MissingKey::Unresolved(capability));
+                }
+                known.absent.insert(epoch_id.to_owned());
+                return Ok(MissingKey::Report(DataError::InvalidCiphertext));
             }
-            self.known
-                .get_mut(address)
-                .expect("observed above")
-                .absent
-                .insert(epoch_id.to_owned());
-            return Ok(MissingKey::Report(DataError::InvalidCiphertext));
         }
         Ok(MissingKey::Report(if !member {
             DataError::KeyUnavailable
