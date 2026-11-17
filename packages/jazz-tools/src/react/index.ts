@@ -35,6 +35,7 @@ export type {
   JazzSessionSnapshot,
   JazzSessionOperation,
   JazzUser,
+  LocalFirstUnavailable,
 } from "../session/jazz-session.js";
 export {
   useJazzSession,

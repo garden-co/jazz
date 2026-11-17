@@ -6,6 +6,8 @@
    with your app. It works best on serverless platforms like Vercel; Cloudflare support is coming.
    You don't need to deploy to start: locally, Jazz uses a SQLite file.
    Default: Vercel for a Next.js app, your own server otherwise.
+   On Vercel, `vercel()` also needs a `region` for its cores, fixed once they exist: the region the
+   project's functions run in (`iad1` unless the project changed it).
    See /docs/setup/deployment/vercel, /docs/setup/deployment/own-server
 2. **What auth provider or library should be used?** Jazz is unopinionated here: it hooks into
    however your backend already does auth, including roles and claims from your identity provider,

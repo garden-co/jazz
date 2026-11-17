@@ -1326,6 +1326,10 @@ fn policy_variants(expr: &PolicyExpr, seen: &mut BTreeSet<&'static str>) {
             }
             RelationPredicate::True => "Pred.True",
             RelationPredicate::False => "Pred.False",
+            // Queries only: the policy language has no prefix/suffix test.
+            RelationPredicate::StartsWith { .. } | RelationPredicate::EndsWith { .. } => {
+                unreachable!("not a policy predicate")
+            }
         };
         seen.insert(name);
     }
@@ -2620,12 +2624,8 @@ fn policies_the_dsl_and_the_engine_refused_are_refused() {
             "core schema policies only support Eq/Ne SessionCmp operators yet",
         );
     }
-    // Inheritance inside `exists`.
-    refused(
-        "todos",
-        "exists shares(todo = this.id, allowedTo.read(todoRow))",
-        "core schema policies do not support Inherits",
-    );
+    // Inheritance inside `exists`: see
+    // `allowed_to_inside_exists_is_refused_by_the_reader`.
     // Non-finite floats.
     for literal in ["'NaN'", "'inf'", "'-inf'"] {
         refused(
@@ -2652,6 +2652,162 @@ fn policies_the_dsl_and_the_engine_refused_are_refused() {
     let error = write(input).unwrap_err();
     assert!(error.is_unsupported(), "{error}");
     assert!(error.to_string().contains("takes no `maxDepth`"), "{error}");
+}
+
+/// `allowedTo` inside an `exists` (its conditions, a hop's, a relation's
+/// predicate) is refused where the file is read, naming the rule and
+/// pointing at the `allowedTo`, rather than by the engine when the schema
+/// compiles: the engine checks inheritance only on the row a rule is for.
+#[test]
+fn allowed_to_inside_exists_is_refused_by_the_reader() {
+    let message = "`allowedTo.read(…)` inside `exists` is not supported yet: repeat the \
+                   other table's read rule there instead (e.g. share it as a helper function)";
+    for (source, pointed) in [
+        (
+            "exists shares(todo = this.id, allowedTo.read(todoRow))",
+            "allowedTo.read(todoRow)",
+        ),
+        (
+            "exists shares(todo = this.id, anyOf(user = session.user, not allowedTo.read(via todo)))",
+            "allowedTo.read(via todo)",
+        ),
+        (
+            "exists shares(user = session.user).todoRow(allowedTo.read(shares))",
+            "allowedTo.read(shares)",
+        ),
+        (
+            "exists (from shares where allowedTo.read(todoRow))",
+            "allowedTo.read(todoRow)",
+        ),
+    ] {
+        let error = read_policy("todos", source).expect_err(source);
+        assert!(
+            error.starts_with("jazz.permissions.json: tables.todos.read: "),
+            "{source}:\n{error}"
+        );
+        assert!(error.contains(message), "{source}:\n{error}");
+        // The caret spans the whole `allowedTo.…(…)`.
+        let lines: Vec<&str> = error.lines().collect();
+        let at = lines.iter().position(|l| l.trim() == source).unwrap();
+        let caret = lines[at + 1];
+        let start = lines[at].find(pointed).unwrap();
+        assert_eq!(caret.find('^'), Some(start), "{error}");
+        assert_eq!(caret.trim().len(), pointed.len(), "{error}");
+    }
+    let error = read_policy(
+        "todos",
+        "exists shares(todo = this.id, allowedTo.delete(todoRow))",
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("`allowedTo.delete(…)` inside `exists` is not supported yet"),
+        "{error}"
+    );
+    // At a rule's top it is what inheritance is for.
+    read_policy("shares", "allowedTo.read(todoRow)").unwrap();
+}
+
+/// `not allowedTo…` (directly or through `anyOf` / `allOf` / `not`) is
+/// refused where the file is read, naming the rule and pointing at the
+/// `allowedTo`: the engine checks inheritance only as a grant.
+#[test]
+fn negated_allowed_to_is_refused_by_the_reader() {
+    let message = "`not allowedTo.read(…)` is not supported yet: write the rule without \
+                   negating inheritance (`not` works on this row's columns and session values)";
+    for source in [
+        "not allowedTo.read(todoRow)",
+        "anyOf(user = session.user, not allowedTo.read(todoRow))",
+        "not anyOf(user = session.user, allOf(user != null, allowedTo.read(todoRow)))",
+        "not not allowedTo.read(via todo)",
+    ] {
+        let error = read_policy("shares", source).expect_err(source);
+        assert!(
+            error.starts_with("jazz.permissions.json: tables.shares.read: "),
+            "{source}:\n{error}"
+        );
+        assert!(error.contains(message), "{source}:\n{error}");
+        let lines: Vec<&str> = error.lines().collect();
+        let at = lines.iter().position(|l| l.trim() == source).unwrap();
+        let caret = lines[at + 1];
+        let start = lines[at].find("allowedTo").unwrap();
+        assert_eq!(caret.find('^'), Some(start), "{error}");
+        assert_eq!(
+            caret.trim().len(),
+            lines[at][start..].find(')').unwrap() + 1,
+            "{error}"
+        );
+    }
+    // An update, both forms.
+    let written = write(shared_todos()).unwrap();
+    for (update, rule) in [
+        (
+            serde_json::json!("not allowedTo.update(todoRow)"),
+            "tables.shares.update",
+        ),
+        (
+            serde_json::json!({ "old": "true", "new": "anyOf(user = session.user, not allowedTo.update(todoRow))" }),
+            "tables.shares.update.new",
+        ),
+    ] {
+        let file = serde_json::json!({
+            "format": 1,
+            "tables": { "shares": { "update": update }, "todos": { "update": "true" } },
+        });
+        let error = load(written.app.as_bytes(), file.to_string().as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with(&format!("jazz.permissions.json: {rule}: ")),
+            "{error}"
+        );
+        assert!(
+            error.contains("`not allowedTo.update(…)` is not supported yet"),
+            "{error}"
+        );
+    }
+    // `not` on the row's own columns and session values still compiles.
+    read_policy("shares", "not user = session.user").unwrap();
+    read_policy(
+        "shares",
+        "anyOf(not user = session.user, allowedTo.read(todoRow))",
+    )
+    .unwrap();
+}
+
+/// A policy the engine refuses when the schema compiles is named by the
+/// rule it is in (table and operation, as the file names them), not by the
+/// table an `exists` in it reads.
+#[test]
+fn an_engine_refusal_names_the_rule_it_is_in() {
+    let written = write(shared_todos()).unwrap();
+    let load_with = |tables: serde_json::Value| {
+        let file = serde_json::json!({ "format": 1, "tables": tables });
+        load(written.app.as_bytes(), file.to_string().as_bytes())
+            .unwrap_err()
+            .to_string()
+    };
+    let refusal = "core schema policies only support Eq/Ne SessionCmp operators yet";
+    let inside = "exists shares(todo = this.id, session.claims.level > 3)";
+    for (tables, rule) in [
+        (
+            serde_json::json!({ "todos": { "read": inside } }),
+            "todos.read",
+        ),
+        (
+            serde_json::json!({ "todos": { "update": { "old": "true", "new": inside } } }),
+            "todos.update.new",
+        ),
+        (
+            serde_json::json!({ "todos": { "insert": inside } }),
+            "todos.insert",
+        ),
+    ] {
+        let error = load_with(tables);
+        assert_eq!(
+            error,
+            format!("jazz.permissions.json: tables.{rule}: {refusal}"),
+        );
+    }
 }
 
 /// The relation checks `load` runs on the current tables.

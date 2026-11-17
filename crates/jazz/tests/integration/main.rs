@@ -35,6 +35,8 @@ mod claims_change;
 mod claims_registry_refresh;
 #[path = "../column_defaults.rs"]
 mod column_defaults;
+#[path = "../column_operators.rs"]
+mod column_operators;
 #[path = "../commit_atomicity_frames.rs"]
 mod commit_atomicity_frames;
 #[path = "../composite_indexes.rs"]
@@ -229,6 +231,8 @@ mod sync_frame_bounds;
 mod sync_gather;
 #[path = "../sync_join.rs"]
 mod sync_join;
+#[path = "../sync_read_state.rs"]
+mod sync_read_state;
 #[path = "../sync_resume.rs"]
 mod sync_resume;
 #[path = "../sync_sessions.rs"]
@@ -243,6 +247,8 @@ mod sync_untrusted_clients;
 mod sync_wire_corpus;
 #[path = "../sync_write_only.rs"]
 mod sync_write_only;
+#[path = "../text_affix_predicates.rs"]
+mod text_affix_predicates;
 #[path = "../text_merge.rs"]
 mod text_merge;
 #[path = "../text_splices.rs"]
