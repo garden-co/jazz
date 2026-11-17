@@ -2777,9 +2777,11 @@ pub(crate) struct Session {
     /// their read policy depends on re-checks them: lost access ships an
     /// eviction, regained access ships the image.
     held: Kept,
-    /// False once the client disconnected or its transport failed; the
-    /// slot holds nothing and is reused by the next subscriber.
+    /// False once the client disconnected or its transport failed. Any
+    /// in-flight tick finishes cleanup before the next subscriber reuses it.
     open: bool,
+    // Preserve authorization and working state until a suspended tick finishes.
+    in_tick: bool,
     /// Which acceptance of this slot the session is ([`SubscriberId`]).
     generation: u64,
     /// Pushed chunk bytes admitted in the current staging-policy window,
@@ -2890,6 +2892,7 @@ impl Session {
             resume: BTreeMap::new(),
             held: Kept::default(),
             open: true,
+            in_tick: false,
             generation: 0,
             ingress: (Instant::now(), 0),
             backlog: VecDeque::new(),
@@ -9402,11 +9405,11 @@ impl Db {
             may_wait(link) && !(live && link.hint != RemoteLinkHint::Live)
         };
         {
-            let inner = self.inner.ready().await?;
+            let inner = self.inner.acquire().await?;
             if tier == ReadTier::Remote {
                 inner.check_not_stranded()?;
             }
-            if inner.client.borrow().is_none() || !strict && !answerable(inner) {
+            if inner.client.borrow().is_none() || !strict && !answerable(&inner) {
                 return Ok(None);
             }
         }
@@ -10919,6 +10922,15 @@ impl Db {
         let trusted = inner.identity.author == AuthorSubject::SYSTEM;
         let mut client_state = inner.client.borrow_mut();
         let client = client_state.as_mut().expect("client");
+        // Detachment can happen while pulls or upload chunks await SQL.
+        // Nothing prepared here was sent: retain it for the next connection.
+        if client.transport.is_none() {
+            commits.extend(waiting);
+            client.unsent.splice(0..0, commits);
+            out.extend(reads);
+            client.outbox.splice(0..0, out);
+            return Ok(());
+        }
         if !hold {
             client.unsent = waiting;
         }
@@ -12317,17 +12329,36 @@ impl Db {
         }
     }
 
-    /// The client went away: drop its subscriptions, watches and pending
-    /// replies now. A reconnect is a new subscriber that resumes from its
-    /// last settled seq.
+    /// The client went away: close its transport now. If a tick is in
+    /// flight, release its subscriptions, watches and replies when that tick
+    /// ends so an admitted operation retains its authorization context.
+    /// A reconnect is a new subscriber resuming from its last settled seq.
     pub fn disconnect_subscriber(&self, subscriber: SubscriberId) {
+        {
+            let mut sessions = self.inner.sessions.borrow_mut();
+            let Some(session) = sessions
+                .get_mut(subscriber.slot)
+                .filter(|session| session.open && session.generation == subscriber.generation)
+            else {
+                return;
+            };
+            if session.in_tick {
+                session.open = false;
+                session.transport = Box::new(ClosedTransport);
+                return;
+            }
+        }
+        self.close_subscriber(subscriber);
+    }
+
+    fn close_subscriber(&self, subscriber: SubscriberId) {
         let inner = self.inner.as_ref();
         let dropped = inner.fan.borrow().dropped.clone();
         if let Some(session) = inner
             .sessions
             .borrow_mut()
             .get_mut(subscriber.slot)
-            .filter(|session| session.open && session.generation == subscriber.generation)
+            .filter(|session| session.generation == subscriber.generation)
         {
             for (query, binding, include_deleted, view) in session.close(&dropped) {
                 inner.release_remote(
@@ -12490,6 +12521,9 @@ impl Db {
         let mut held: VecDeque<SyncMessage> = VecDeque::new();
         let mut barrier = HeldWrites::default();
         while let Some(message) = inbound.pop_front() {
+            if !self.inner.sessions.borrow()[index].open {
+                break;
+            }
             if !held.is_empty() && !self.overtakes(index, &barrier, &message).await {
                 self.note_held(&mut barrier, &message);
                 held.push_back(message);
@@ -13991,6 +14025,9 @@ impl Db {
                     }
                     _ => {}
                 }
+            }
+            if !inner.sessions.borrow()[index].open {
+                continue;
             }
             let subscriber = {
                 let session = &mut inner.sessions.borrow_mut()[index];
@@ -16140,6 +16177,37 @@ impl Db {
     /// One tick for both roles.
     pub(crate) async fn sync_tick(&self) -> Result<(), Error> {
         let _operation = self.inner.operation.lock().await;
+        // Disconnect closes the transport immediately, but must not erase
+        // the context an admitted operation is still using across SQL awaits.
+        // Clear it before releasing the lease, including on error/cancellation.
+        struct FinishSessions<'a>(&'a Db);
+        impl Drop for FinishSessions<'_> {
+            fn drop(&mut self) {
+                let closed: Vec<_> = self
+                    .0
+                    .inner
+                    .sessions
+                    .borrow_mut()
+                    .iter_mut()
+                    .enumerate()
+                    .filter_map(|(slot, session)| {
+                        let closing = session.in_tick && !session.open;
+                        session.in_tick = false;
+                        closing.then_some(SubscriberId {
+                            slot,
+                            generation: session.generation,
+                        })
+                    })
+                    .collect();
+                for subscriber in closed {
+                    self.0.close_subscriber(subscriber);
+                }
+            }
+        }
+        let _sessions = FinishSessions(self);
+        for session in self.inner.sessions.borrow_mut().iter_mut() {
+            session.in_tick = session.open;
+        }
         self.server_tick().await?;
         self.client_tick().await?;
         // Relayed fates and reads the upstream just answered go out now.
@@ -16515,7 +16583,7 @@ impl Db {
         // A branch view's head is current over a frozen base too: only a
         // snapshot read is wholly this store's.
         let frozen = matches!(opts.read_view.source, ReadViewSourceSpec::Snapshot { .. });
-        let non_durable = self.inner().await?.non_durable.get();
+        let non_durable = self.inner.non_durable.get();
         let mut fetched = None;
         if self.is_client()
             && let Some(reach) = remote_reach(&opts, non_durable, frozen)
@@ -17418,5 +17486,141 @@ mod tests {
         let mut joiner = FrameJoiner::with_ceiling(bytes.len() - 1);
         assert!(joiner.push(&parts[0]).unwrap().is_none());
         assert!(joiner.push(&parts[1]).is_err());
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod async_disconnect_tests {
+    use super::*;
+    use crate::db::async_settlement_tests::open;
+    use crate::options::block_on;
+    use std::future::Future;
+    use std::task::{Context, Waker};
+    fn disconnect_fixture() -> (
+        Db,
+        Db,
+        Upstream,
+        SubscriberId,
+        crate::db::SubscriptionStream,
+    ) {
+        let author = AuthorSubject::for_test_bytes([91; 16]);
+        let alice = open(91, author, PolicyExpr::True);
+        let bob = open(92, AuthorSubject::SYSTEM, PolicyExpr::True);
+        block_on(bob.set_authority());
+        let (up, down) = duplex();
+        let upstream = block_on(alice.connect_upstream(up));
+        let subscriber = block_on(bob.accept_subscriber(down, author)).unwrap();
+        let query = alice.prepare_query(&Query::from("notes")).unwrap();
+        let stream = block_on(alice.subscribe(&query, ReadOpts::default())).unwrap();
+        for _ in 0..4 {
+            block_on(alice.tick()).unwrap();
+            block_on(bob.tick()).unwrap();
+        }
+        block_on(alice.insert(
+            "notes",
+            BTreeMap::from([("body".into(), Value::String("hello".repeat(20_000)))]),
+            Default::default(),
+        ))
+        .unwrap();
+        (alice, bob, upstream, subscriber, stream)
+    }
+    /// Alice disconnects while Bob serves her write. Each SQL suspension must
+    /// leave the session closed and allow a fresh connection to finish syncing.
+    /// Internal to suspend native SQL and check that closed sessions retain no work.
+    #[test]
+    fn subscriber_disconnect_during_sql_cleans_up_before_reconnect() {
+        for boundary in 0..1000 {
+            let (alice, bob, _upstream, subscriber, _stream) = disconnect_fixture();
+            block_on(alice.tick()).unwrap();
+            let mut tick = Box::pin(bob.tick());
+            let mut cx = Context::from_waker(Waker::noop());
+            for _ in 0..boundary {
+                if let std::task::Poll::Ready(r) = tick.as_mut().poll(&mut cx) {
+                    r.unwrap();
+                    assert!(boundary > 0);
+                    return;
+                }
+            }
+            if let std::task::Poll::Ready(r) = tick.as_mut().poll(&mut cx) {
+                r.unwrap();
+                return;
+            }
+            bob.disconnect_subscriber(subscriber);
+            block_on(tick).unwrap();
+            assert_eq!(bob.open_subscribers(), 0);
+            assert_closed(&bob);
+            block_on(bob.tick()).unwrap();
+            reconnect(&alice, &bob);
+        }
+        panic!("tick did not finish");
+    }
+    /// Alice detaches during upload preparation, then reconnects to Bob. The
+    /// unsent large-value write must survive every SQL suspension without panic.
+    /// Internal because public native storage never suspends at these boundaries.
+    #[test]
+    fn upstream_detach_during_upload_preserves_pending_writes() {
+        for boundary in 0..1000 {
+            let (alice, bob, upstream, subscriber, _stream) = disconnect_fixture();
+            let mut tick = Box::pin(alice.tick());
+            let mut cx = Context::from_waker(Waker::noop());
+            for _ in 0..boundary {
+                if let std::task::Poll::Ready(r) = tick.as_mut().poll(&mut cx) {
+                    r.unwrap();
+                    assert!(boundary > 0);
+                    return;
+                }
+            }
+            if let std::task::Poll::Ready(r) = tick.as_mut().poll(&mut cx) {
+                r.unwrap();
+                return;
+            }
+            assert!(alice.detach_connection(&upstream));
+            block_on(tick).unwrap();
+            block_on(alice.tick()).unwrap();
+            bob.disconnect_subscriber(subscriber);
+            reconnect(&alice, &bob);
+        }
+        panic!("tick did not finish");
+    }
+
+    /// Alice disconnects while Bob is suspended, then Bob's tick is cancelled.
+    /// Cleanup must still release the closed session. Internal to cancel SQL.
+    #[test]
+    fn cancelling_a_tick_finishes_subscriber_cleanup() {
+        let (alice, bob, _, subscriber, _stream) = disconnect_fixture();
+        block_on(alice.tick()).unwrap();
+        let mut tick = Box::pin(bob.tick());
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(tick.as_mut().poll(&mut cx).is_pending());
+        bob.disconnect_subscriber(subscriber);
+        assert_eq!(bob.open_subscribers(), 0);
+        drop(tick);
+        assert_closed(&bob);
+    }
+
+    fn assert_closed(db: &Db) {
+        for session in db.inner.sessions.borrow().iter().filter(|s| !s.open) {
+            assert!(session.idle());
+            assert!(session.watch.holders.is_empty());
+            assert!(session.held.rows.is_empty());
+            assert!(session.shipped.is_empty());
+        }
+    }
+    fn reconnect(alice: &Db, bob: &Db) {
+        let (up, down) = duplex();
+        block_on(alice.connect_upstream(up));
+        block_on(bob.accept_subscriber(down, AuthorSubject::for_test_bytes([91; 16]))).unwrap();
+        for _ in 0..8 {
+            block_on(alice.tick()).unwrap();
+            block_on(bob.tick()).unwrap();
+        }
+        let query = bob.prepare_query(&Query::from("notes")).unwrap();
+        let rows = block_on(bob.read(&query)).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].cell("body"),
+            Some(Value::String("hello".repeat(20_000)))
+        );
+        assert_eq!(alice.pending_upload_count(), 0);
     }
 }

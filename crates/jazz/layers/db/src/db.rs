@@ -10674,8 +10674,6 @@ impl Db {
     pub async fn schema_view(&self, id: SchemaViewId) -> Result<Db, Error> {
         let schema = self
             .inner
-            .ready()
-            .await?
             .views
             .borrow()
             .get(&id)
@@ -12514,43 +12512,6 @@ impl TxRef<'_> {
         tier: ReadTier,
         source: &ReadViewSourceSpec,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let view = match source {
-            ReadViewSourceSpec::Current => None,
-            ReadViewSourceSpec::Snapshot { .. } => {
-                return Err(Error::new(
-                    ErrorCode::Query,
-                    "Reading a snapshot inside a transaction is not supported yet",
-                ));
-            }
-            // A live base needs nothing from the store; only a frozen one
-            // resolves its snapshot, under the store gate (which applies
-            // the staged writes of open transactions, so it is not taken
-            // for every branch read).
-            ReadViewSourceSpec::BranchView {
-                head,
-                base: None | Some(BranchViewBase::Current(_)),
-            } => Some(View {
-                head: head.clone(),
-                base: match source {
-                    ReadViewSourceSpec::BranchView {
-                        base: Some(BranchViewBase::Current(base)),
-                        ..
-                    } => Some(base.clone()),
-                    _ => None,
-                },
-                base_cut: None,
-            }),
-            ReadViewSourceSpec::BranchView { .. } => {
-                let opts = ReadOpts {
-                    read_view: ReadViewSpec {
-                        source: source.clone(),
-                        include_deleted,
-                    },
-                    ..ReadOpts::for_read_tier(ReadTier::LocalOnly)
-                };
-                ReadSpec::of(&opts, self.db.inner().await?).await?.view
-            }
-        };
         // Capture staging before queueing: later writes must not leak into
         // the prefix this read admitted, even when its predecessor is cancelled.
         let (prefix, state) = {
@@ -12569,12 +12530,7 @@ impl TxRef<'_> {
             .borrow_mut()
             .queue
             .push_back(guard.ticket.clone());
-        let through = ReadThrough {
-            view,
-            source: source.clone(),
-        };
-        let reading =
-            self.read_admitted(prepared, include_deleted, identity, tier, prefix, through);
+        let reading = self.read_admitted(prepared, include_deleted, identity, tier, prefix, source);
         let mut reading = std::pin::pin!(reading);
         std::future::poll_fn(|cx| {
             {
@@ -12611,11 +12567,50 @@ impl TxRef<'_> {
         identity: Option<AuthorSubject>,
         tier: ReadTier,
         prefix: BatchPrefix,
-        through: ReadThrough,
+        source: &ReadViewSourceSpec,
     ) -> Result<Vec<CurrentRow>, Error> {
         let token = self.db.batch_token(self.id)?;
         let admission = self.db.inner.operation.lock().await;
         self.db.check_batch(self.id, &token)?;
+        let view = match source {
+            ReadViewSourceSpec::Current => None,
+            ReadViewSourceSpec::Snapshot { .. } => {
+                return Err(Error::new(
+                    ErrorCode::Query,
+                    "Reading a snapshot inside a transaction is not supported yet",
+                ));
+            }
+            // Live bases need no storage access or overlay cleanup. Frozen
+            // bases resolve below, after queue admission and under this lease.
+            ReadViewSourceSpec::BranchView {
+                head,
+                base: None | Some(BranchViewBase::Current(_)),
+            } => Some(View {
+                head: head.clone(),
+                base: match source {
+                    ReadViewSourceSpec::BranchView {
+                        base: Some(BranchViewBase::Current(base)),
+                        ..
+                    } => Some(base.clone()),
+                    _ => None,
+                },
+                base_cut: None,
+            }),
+            ReadViewSourceSpec::BranchView { .. } => {
+                let opts = ReadOpts {
+                    read_view: ReadViewSpec {
+                        source: source.clone(),
+                        include_deleted,
+                    },
+                    ..ReadOpts::for_read_tier(ReadTier::LocalOnly)
+                };
+                ReadSpec::of(&opts, self.db.inner().await?).await?.view
+            }
+        };
+        let through = ReadThrough {
+            view,
+            source: source.clone(),
+        };
         // Except for LocalOnly, a client hydrates a serializable read from
         // the authority at the snapshot first. LocalFirst may answer from
         // the replica when the link cannot answer.
@@ -13782,6 +13777,88 @@ mod check_plan_tests {
 
 #[cfg(all(test, feature = "sqlite"))]
 mod async_settlement_tests {
+    /// Bob's schema lookup, serialized read and remote-read setup must not
+    /// roll back Alice's staged SQL overlay while her operation owns the lease.
+    /// Internal to hold the lease and poll each suspending storage boundary.
+    #[test]
+    fn read_setup_does_not_clean_storage_before_operation_admission() {
+        for path in ["schema_view", "serialized", "fetch"] {
+            let db = open(91, AuthorSubject::SYSTEM, PolicyExpr::True);
+            let view = block_on(db.register_schema_view(db.current_schema())).unwrap();
+            let id = view.schema_view_id();
+            block_on(db.become_replica());
+            let tx = OpenTransactionId::new();
+            block_on(db.begin_mergeable(tx)).unwrap();
+            block_on(db.tx_ref(tx).insert(
+                "notes",
+                BTreeMap::from([("body".into(), Value::String("uncommitted".into()))]),
+                Default::default(),
+            ))
+            .unwrap();
+            let query = db.prepare_query(&Query::from("notes")).unwrap();
+            assert_eq!(
+                block_on(db.tx_ref(tx).all_prepared(&query)).unwrap().len(),
+                1
+            );
+            assert!(db.inner.overlay.borrow().is_some());
+            let lease = block_on(db.inner.operation.lock());
+            let bytes = postcard::to_allocvec(&Query::from("notes")).unwrap();
+            let mut future: std::pin::Pin<Box<dyn Future<Output = ()>>> = match path {
+                "schema_view" => Box::pin(async {
+                    assert_eq!(db.schema_view(id).await.unwrap().schema_view_id(), id);
+                }),
+                "serialized" => Box::pin(async {
+                    let result = db
+                        .all_serialized_query(
+                            &bytes,
+                            ReadOpts::for_read_tier(ReadTier::LocalOnly),
+                            None,
+                            None,
+                            None,
+                        )
+                        .await
+                        .unwrap();
+                    let sync::SerializedReadResult::Rows(rows) = result else {
+                        panic!("expected flat rows");
+                    };
+                    assert!(rows.is_empty(), "another operation cannot read staged rows");
+                }),
+                _ => Box::pin(async {
+                    assert!(
+                        db.fetch(
+                            &query,
+                            None,
+                            false,
+                            sync::RemoteReach::BEST_EFFORT,
+                            None,
+                            None,
+                            false,
+                            &ReadViewSourceSpec::Current,
+                        )
+                        .await
+                        .unwrap()
+                        .is_none()
+                    );
+                }),
+            };
+            let mut cx = Context::from_waker(Waker::noop());
+            for _ in 0..32 {
+                assert!(future.as_mut().poll(&mut cx).is_pending(), "{path}");
+                assert!(
+                    db.inner.overlay.borrow().is_some(),
+                    "{path} rolled back another operation's overlay"
+                );
+            }
+            drop(lease);
+            block_on(future);
+            assert!(db.inner.operation.try_lock().is_some());
+            assert_eq!(
+                block_on(db.tx_ref(tx).all_prepared(&query)).unwrap().len(),
+                1
+            );
+        }
+    }
+
     use super::*;
     use crate::tools::{ColumnType, TablePolicies};
     use jazz_model::model::public_schema::{SchemaBuilder, TableSchemaBuilder};
@@ -13789,7 +13866,7 @@ mod async_settlement_tests {
     use std::sync::atomic::AtomicUsize;
     use std::task::Context;
 
-    fn open(node: u8, author: AuthorSubject, insert: PolicyExpr) -> Db {
+    pub(super) fn open(node: u8, author: AuthorSubject, insert: PolicyExpr) -> Db {
         let schema = JazzSchema::new(
             &SchemaBuilder::new()
                 .table(
@@ -13950,5 +14027,194 @@ mod async_settlement_tests {
         assert!(wakes.0.load(Ordering::Relaxed) > 0);
         assert!(wait.as_mut().poll(&mut cx).is_pending());
         assert!(alice.inner.operation.try_lock().is_some());
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod async_frozen_read_tests {
+    use super::*;
+    use crate::tools::{ColumnType, TablePolicies};
+    use jazz_model::model::public_schema::{SchemaBuilder, TableSchemaBuilder};
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Context;
+
+    fn branch(name: &str) -> BranchSelector {
+        BranchSelector::new([("branch", Value::String(name.into()))])
+    }
+
+    fn cells(body: &str) -> BTreeMap<String, Value> {
+        BTreeMap::from([("body".into(), Value::String(body.into()))])
+    }
+
+    fn open() -> (Db, Arc<AtomicUsize>, ReadViewSourceSpec) {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("notes")
+                        .column("branch", ColumnType::Text)
+                        .column("body", ColumnType::Text)
+                        .branch_by("branch")
+                        .policies(
+                            TablePolicies::new()
+                                .with_select(PolicyExpr::True)
+                                .with_insert(PolicyExpr::True),
+                        ),
+                )
+                .build(),
+        )
+        .unwrap();
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut conn: crate::host::OwnedConnection = Connection::open_in_memory().unwrap().into();
+        conn.sql_suspensions = Some(count.clone());
+        let db = block_on(async {
+            crate::format::admit(&mut conn.sql()).await.unwrap();
+            Db::open_on(
+                DbConfig::new(
+                    schema,
+                    DbIdentity {
+                        node: crate::ids::NodeUuid::from_bytes([93; 16]),
+                        author: AuthorSubject::SYSTEM,
+                    },
+                ),
+                conn.into(),
+                None,
+            )
+            .await
+            .unwrap()
+        });
+        block_on(db.become_replica());
+        block_on(db.insert(
+            "notes",
+            cells("base"),
+            InsertOptions {
+                target: ExactWriteTarget::Branch(branch("base")),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        let snapshot = block_on(db.capture_snapshot()).unwrap();
+        assert!(
+            !snapshot.dots.is_empty(),
+            "snapshot resolution must consult SQL"
+        );
+        let source = ReadViewSourceSpec::BranchView {
+            head: branch("draft"),
+            base: Some(BranchViewBase::Snapshot {
+                branch: branch("base"),
+                snapshot,
+            }),
+        };
+        (db, count, source)
+    }
+
+    fn only_base(rows: Vec<CurrentRow>) {
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cell("body"), Some(Value::String("base".into())));
+    }
+
+    /// Alice queues a frozen-base read behind another database operation.
+    /// No SQL runs through its lease, and later staging is outside the read's
+    /// first-poll prefix. Internal to count suspended SQL and hold the lease.
+    /// read queued -> later write staged -> read sees only its original prefix
+    #[test]
+    fn frozen_read_waits_and_keeps_its_admitted_prefix() {
+        let (db, count, source) = open();
+        let id = OpenTransactionId::new();
+        block_on(db.begin_mergeable(id)).unwrap();
+        let tx = db.tx_ref(id);
+        let query = db.prepare_query(&Query::from("notes")).unwrap();
+        let lease = block_on(db.inner.operation.lock());
+        let before = count.load(Ordering::Relaxed);
+        let mut read =
+            Box::pin(tx.all_prepared_in(&query, false, None, ReadTier::LocalOnly, &source));
+        let mut cx = Context::from_waker(Waker::noop());
+        for _ in 0..3 {
+            assert!(read.as_mut().poll(&mut cx).is_pending());
+        }
+        assert_eq!(count.load(Ordering::Relaxed), before);
+        drop(lease);
+        block_on(tx.insert(
+            "notes",
+            cells("later"),
+            InsertOptions {
+                target: ExactWriteTarget::Branch(branch("draft")),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        only_base(block_on(read).unwrap());
+        assert_eq!(
+            block_on(tx.all_prepared_in(&query, false, None, ReadTier::LocalOnly, &source))
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    /// Alice abandons a queued frozen read's transaction and reuses its ID.
+    /// The old read must fail rather than adopt the replacement batch.
+    /// Internal to pause before SQL admission without cancelling a SQL command.
+    #[test]
+    fn frozen_read_rejects_a_replacement_transaction() {
+        let (db, _, source) = open();
+        let id = OpenTransactionId::new();
+        block_on(db.begin_mergeable(id)).unwrap();
+        let tx = db.tx_ref(id);
+        let query = db.prepare_query(&Query::from("notes")).unwrap();
+        let lease = block_on(db.inner.operation.lock());
+        let mut read =
+            Box::pin(tx.all_prepared_in(&query, false, None, ReadTier::LocalOnly, &source));
+        assert!(
+            read.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        db.abandon_transaction_handle(id).unwrap();
+        block_on(db.begin_mergeable(id)).unwrap();
+        drop(lease);
+        assert!(
+            block_on(read)
+                .unwrap_err()
+                .message
+                .contains("no longer open")
+        );
+        only_base(
+            block_on(tx.all_prepared_in(&query, false, None, ReadTier::LocalOnly, &source))
+                .unwrap(),
+        );
+    }
+
+    /// Alice cancels the first queued frozen read. The next read keeps its
+    /// queue position and prefix, and cancellation before SQL leaves the store
+    /// usable. Internal to pause both reads behind the execution lease.
+    #[test]
+    fn cancelling_a_queued_frozen_read_releases_its_successor() {
+        let (db, _, source) = open();
+        let id = OpenTransactionId::new();
+        block_on(db.begin_mergeable(id)).unwrap();
+        let tx = db.tx_ref(id);
+        let query = db.prepare_query(&Query::from("notes")).unwrap();
+        let lease = block_on(db.inner.operation.lock());
+        let mut first =
+            Box::pin(tx.all_prepared_in(&query, false, None, ReadTier::LocalOnly, &source));
+        let mut second =
+            Box::pin(tx.all_prepared_in(&query, false, None, ReadTier::LocalOnly, &source));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(first.as_mut().poll(&mut cx).is_pending());
+        assert!(second.as_mut().poll(&mut cx).is_pending());
+        drop(first);
+        drop(lease);
+        block_on(tx.insert(
+            "notes",
+            cells("later"),
+            InsertOptions {
+                target: ExactWriteTarget::Branch(branch("draft")),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        only_base(block_on(second).unwrap());
+        block_on(db.commit_mergeable_handle(id)).unwrap();
     }
 }
