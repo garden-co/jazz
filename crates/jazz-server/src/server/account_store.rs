@@ -10,7 +10,8 @@ use jazz::account_registry::{
     self, AccountCommand, AccountCommandResult, AccountError, AccountId, AccountState, Assignment,
     LinkIntent, Principal,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use jazz::storage::Storage;
+use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::kv::HostSql;
@@ -133,7 +134,7 @@ impl StoredAccountRegistry {
 }
 
 /// The registry state in the store, inside one read or write.
-struct Sql<'a>(&'a Connection);
+struct Sql<'a>(&'a Storage);
 
 impl AccountState for Sql<'_> {
     type Error = RegistryError;

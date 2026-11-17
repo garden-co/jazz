@@ -34,6 +34,7 @@ pub use jazz_db::link;
 pub use jazz_db::pruned_txs_lookups_for_test;
 pub use jazz_db::result_tree;
 pub use jazz_db::slow;
+pub use jazz_db::storage;
 pub use jazz_db::thin_transactions;
 #[cfg(feature = "testing")]
 pub use jazz_db::{
