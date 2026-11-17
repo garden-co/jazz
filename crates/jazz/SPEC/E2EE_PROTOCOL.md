@@ -1233,10 +1233,14 @@ account, table: "__e2ee_device_removal_requests", row: id, column:
 epoch has another active device: a recovery root can restore access but
 cannot complete the removal, so the account's only device cannot leave this
 way. The device stays an active member, and keeps its keys, until it is
-removed; nothing else about it changes.
+removed; nothing else about it changes. The SDK shows it as "removal
+pending, waiting for another device", never as removed. A request does not
+outlive a reset: after one, a device approved again under the same ID is
+not removed by its earlier request.
 
 A request is **pending** while it is valid (its device was active with
-`epochId` at the request's position, and its signature verifies) and its
+`epochId` at the request's position, `epochId` is of the account's current
+generation, and its signature verifies) and its
 device is still active; a request that cannot be verified, including one
 with a signing mechanism the client lacks, is not pending. Any other active
 device that holds the current key and sees a pending request completes it,

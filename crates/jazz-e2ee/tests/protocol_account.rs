@@ -1932,3 +1932,84 @@ fn only_a_valid_removal_request_is_pending() {
         );
     }
 }
+
+/// A removal request is scoped to its generation (§2.8): after a reset, the
+/// same device approved again in the new generation is not removed by its
+/// request from before the reset.
+#[test]
+fn a_removal_request_from_before_a_reset_is_not_pending() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(29);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let tablet = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    let state = ledger.state(&env);
+    let request = build::removal_request(&env.writer(), &state, &phone, &mut rng).unwrap();
+    accept_request(&mut ledger, request);
+    assert_eq!(
+        ledger.state(&env).removal_requested,
+        [phone.id.clone()].into()
+    );
+
+    ledger.request(&tablet, &mut rng);
+    ledger.root(&env, &tablet, 1, &mut rng);
+    ledger.approve(&env, &tablet, &phone, &mut rng);
+    let state = ledger.state(&env);
+    assert_eq!(state.generation, 1);
+    assert!(state.is_active(&phone.id));
+    assert!(state.removal_requested.is_empty());
+}
+
+/// Both devices of an account request their removal: both are pending, the
+/// first completion removes the other device, and the remaining device's
+/// request stays pending with nobody to complete it. A device never removes
+/// itself, so the account never reaches zero devices.
+#[test]
+fn when_both_devices_request_removal_one_remains() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(30);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    let state = ledger.state(&env);
+    let by_laptop = build::removal_request(&env.writer(), &state, &laptop, &mut rng).unwrap();
+    let by_phone = build::removal_request(&env.writer(), &state, &phone, &mut rng).unwrap();
+    accept_request(&mut ledger, by_laptop);
+    accept_request(&mut ledger, by_phone);
+    assert_eq!(
+        ledger.state(&env).removal_requested,
+        [laptop.id.clone(), phone.id.clone()].into()
+    );
+
+    ledger.rotate(
+        &env,
+        &laptop,
+        RotationTarget::RemoveDevice(phone.id.clone()),
+        &mut rng,
+    );
+    let state = ledger.state(&env);
+    assert_eq!(state.active, [laptop.id.clone()].into());
+    assert_eq!(state.removal_requested, [laptop.id.clone()].into());
+    let key = ledger.acquire(&env, &laptop).unwrap();
+    assert_eq!(
+        build::rotate(
+            &env.writer(),
+            &state,
+            &laptop,
+            &key,
+            &RotationTarget::RemoveDevice(laptop.id.clone()),
+            &mut rng,
+        )
+        .unwrap_err(),
+        refused(RefusalCode::SelfRemoval)
+    );
+}
