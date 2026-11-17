@@ -265,7 +265,8 @@ pub struct Ctx<'a> {
     catalogue: Option<&'a dyn IdentitySource>,
     namespace: Option<Option<[u8; 16]>>,
     /// Compiling a table's policy for an `InheritsFrom`: one inside it is
-    /// refused rather than followed (it could recurse without end).
+    /// refused rather than followed (it could recurse without end). A
+    /// deployment refuses such a policy first (`check_deployable_policies`).
     in_inherits_from: bool,
 }
 

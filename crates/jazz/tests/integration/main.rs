@@ -79,6 +79,8 @@ mod host_tables;
 mod include_live;
 #[path = "../inherits_from_policies.rs"]
 mod inherits_from_policies;
+#[path = "../inherits_from_refusals.rs"]
+mod inherits_from_refusals;
 #[path = "../large_value_append.rs"]
 mod large_value_append;
 #[path = "../large_value_chunk_store.rs"]
