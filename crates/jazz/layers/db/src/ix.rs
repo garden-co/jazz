@@ -951,6 +951,67 @@ pub(crate) fn check_declaration(index: &Index, search: &IndexSearch) -> Result<(
     }
 }
 
+/// Whether a query narrows its table through a B-tree index (SPEC 20.5):
+/// some top-level filter, or a conjunct of the read policy that pins a
+/// column to the session or a literal, is `Eq`, `In` or a range on `id` or
+/// on the leading column of a declared index (a reference's, a declared
+/// column's, or a composite index's first). Decided from the schema alone,
+/// so every node decides it alike, whatever plan its SQLite picks.
+pub(crate) fn narrows(table: &Table, query: &Query) -> bool {
+    use crate::query::Operand;
+    use crate::tools::{CmpOp, PolicyExpr};
+    let leading: BTreeSet<&str> = table
+        .indexes
+        .iter()
+        .filter_map(|index| index.first().map(String::as_str))
+        .chain(["id"])
+        .collect();
+    let column = |operand: &Operand| match operand {
+        Operand::Column(column) => leading.contains(column.as_str()),
+        _ => false,
+    };
+    let not_column = |operand: &Operand| !matches!(operand, Operand::Column(_));
+    fn filter(
+        predicate: &Predicate,
+        column: &dyn Fn(&Operand) -> bool,
+        not_column: &dyn Fn(&Operand) -> bool,
+    ) -> bool {
+        match predicate {
+            Predicate::All(children) => children.iter().any(|p| filter(p, column, not_column)),
+            Predicate::Eq(left, right)
+            | Predicate::Gt(left, right)
+            | Predicate::Gte(left, right)
+            | Predicate::Lt(left, right)
+            | Predicate::Lte(left, right) => {
+                (column(left) && not_column(right)) || (column(right) && not_column(left))
+            }
+            Predicate::In(left, values) => column(left) && values.iter().all(not_column),
+            _ => false,
+        }
+    }
+    fn pin(policy: &PolicyExpr, leading: &BTreeSet<&str>) -> bool {
+        match policy {
+            PolicyExpr::And(children) => children.iter().any(|p| pin(p, leading)),
+            PolicyExpr::Cmp { column, op, .. } => {
+                leading.contains(column.as_str())
+                    && matches!(
+                        op,
+                        CmpOp::Eq | CmpOp::Gt | CmpOp::Ge | CmpOp::Lt | CmpOp::Le
+                    )
+            }
+            PolicyExpr::In { column, .. } => leading.contains(column.as_str()),
+            _ => false,
+        }
+    }
+    query
+        .filters
+        .iter()
+        .any(|predicate| filter(predicate, &column, &not_column))
+        || table
+            .policy(crate::tools::Operation::Select)
+            .is_some_and(|policy| pin(policy, &leading))
+}
+
 /// The order-preserving integer of a Rust score: smaller scores give
 /// smaller keys, for every finite `f64` (and `-0.0` = `0.0`).
 pub(crate) fn score_key(score: f64) -> i64 {

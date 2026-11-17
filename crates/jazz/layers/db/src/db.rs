@@ -5245,19 +5245,16 @@ impl Inner {
         let (sql, plain, params) = self
             .read_ctx(prepared, policy, claims, read)
             .compile_candidates(&prepared.query, &shadow, column, cap + 1)?;
-        // Filter-first: on the authority the other clauses must narrow
-        // the table through a B-tree index, or the search would score
-        // rows in proportion to the table (`INV-IX-4`).
-        if authority {
-            let plan = self.query_plan(&plain, &params[..params.len() - 1])?;
-            let scans_root = plan.lines().any(|step| {
-                let step = step.trim();
-                step == "SCAN t" || step.starts_with("SCAN t ")
-            });
-            if scans_root {
-                return Err(crate::ix::vector_unbounded(&table.name, &index.decl.name));
-            }
+        // Filter-first (SPEC 20.5): a node answering for others (the
+        // authority, a relay or server serving subscribers) scores only rows
+        // the query's clauses narrow through a B-tree index, or the search
+        // would cost in proportion to the table (`INV-IX-4`). A node
+        // answering its own queries scores its replica, under the cap.
+        let answers_for_others = self.authority || !self.sessions.is_empty();
+        if answers_for_others && !crate::ix::narrows(table, &prepared.query) {
+            return Err(crate::ix::vector_unbounded(&table.name, &index.decl.name));
         }
+        let _ = plain;
         let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
         let mut rows = statement
             .query(params_from_iter(params.iter()))

@@ -494,6 +494,12 @@ fn vector_searches_are_filter_first_and_bounded_on_the_authority() {
     )
     .expect_err("unfiltered on the authority");
     assert_eq!(error.reason, Some(Reason::VectorSearchUnbounded));
+    // A filter narrows only through a declared index: `title` has none.
+    let by_title = Query::from("notes")
+        .filter(eq(col("title"), lit(Value::String("Far".into()))))
+        .search("similar", nearest(&[0.0, 0.0], 2));
+    let error = try_ids(&db, &by_title).expect_err("not narrowed");
+    assert_eq!(error.reason, Some(Reason::VectorSearchUnbounded));
 
     // A client scores the rows it holds.
     let alice = open(2, schema());
