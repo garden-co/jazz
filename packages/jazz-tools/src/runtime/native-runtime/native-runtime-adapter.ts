@@ -3319,6 +3319,17 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   /**
+   * The upstream failure remote waits fail on now, and whether the client
+   * keeps reconnecting through it; null while there is none. A durable
+   * worker relays this as state to the tabs attached to it.
+   */
+  upstreamFailure(): { error: Error; retrying: boolean } | null {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.upstreamFailure();
+    const error = this.serverTransportError;
+    return error ? { error, retrying: this.serverTransportErrorRetrying } : null;
+  }
+
+  /**
    * The server refused a credential that nothing renews, so the link will
    * not reconnect on its own: end the waits and remote subscriptions held
    * for a new credential, as a terminal failure does (#3923). A later
