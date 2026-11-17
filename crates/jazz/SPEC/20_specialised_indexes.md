@@ -284,14 +284,18 @@ orders by `$score`. Ties are broken by `id`, as for every order. `Query` and
 
 **Wire.** `Query` travels in `SyncMessage`, so a peer that does not know
 `Predicate::Search` cannot decode a query using it. Support is the wire
-feature `FEATURE_INDEX_SEARCH` (the next free `WireFeatures` bit), not a
-protocol version: the wire version stays 6 and queries without a search are
+feature `FEATURE_INDEX_SEARCH`, not a protocol version: the wire version stays 6 and queries without a search are
 byte-identical. A node sends a query with a search upstream only if the
 upstream offered the feature; otherwise that query is answered from the
 replica alone and, at `Remote` tier, refused with "the server does not
 support index search". A transport reports what its link negotiated; one
 that cannot say (an in-process link aside) offers no optional feature. The
 new predicate's JSON and postcard bytes are pinned per op.
+
+`FEATURE_INDEX_SEARCH` is bit 15 (`1 << 15`). Its neighbours: bit 12 is
+`FEATURE_SERIALIZABLE_BRANCH_READS`, bit 13 `FEATURE_TEXT_AFFIX_PREDICATES`
+(jazz#5983) and bit 14 is taken by jazz#5991. TS clients declare it in
+`CLIENT_WIRE_FEATURES`.
 
 Validation refuses, with typed errors: an unknown index; an op not of the
 index's kind; an empty text after analysis; a vector of the wrong
