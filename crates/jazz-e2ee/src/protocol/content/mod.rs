@@ -13,10 +13,16 @@
 //!   and streaming large values (§4.1, §5.5).
 //! - [`equality`]: query tokens per held version and the query shapes that
 //!   are refused (§4.5).
+//! - [`store`]: the held-key and lineage records of the private store, their
+//!   canonical encoding, sealing and signing, and their load-time checks
+//!   (§6.2).
 
+mod canonical;
 pub mod cells;
 pub mod equality;
 pub mod held;
+pub mod store;
+mod stored;
 
 use crate::records::{CellIdentity, EqualityColumn, EqualityIdentity};
 
