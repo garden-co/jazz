@@ -2549,6 +2549,211 @@ fn an_index_names_a_stored_column() {
     });
 }
 
+fn with_vector_columns() -> ArtifactInput {
+    let mut input = todo_server();
+    let todos = input.schemas[0].get_mut(&TableName::from("todos")).unwrap();
+    let mut embedding = ColumnDescriptor::new("embedding", ColumnType::Vector { dimensions: 3 });
+    embedding.default = Some(Value::Bytea(
+        [0.1f32, -2.0, 3e-5]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect(),
+    ));
+    todos.columns.columns.push(embedding);
+    todos
+        .columns
+        .columns
+        .push(nullable("draft", ColumnType::Vector { dimensions: 1 }));
+    input.current = SchemaHash::compute(&structural(input.schemas[0].clone())).to_string();
+    input
+}
+
+/// A vector column is written `{ "vector": n }`, its default as `n` numbers
+/// that read back to the same `f32` bits, and the file reads back to the
+/// same schema (SPEC 20.1).
+#[test]
+fn vector_columns_round_trip_through_the_file() {
+    let input = with_vector_columns();
+    let expected = structural(input.schemas[0].clone());
+    let written = write(input).unwrap();
+    let app: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    let columns = &app["tables"]["todos"]["columns"];
+    assert_eq!(
+        columns["embedding"],
+        serde_json::json!({ "vector": 3, "default": [0.1, -2, 0.00003] }),
+        "{}",
+        written.app
+    );
+    assert_eq!(
+        columns["draft"],
+        serde_json::json!({ "vector": 1, "optional": true })
+    );
+    let loaded = load(written.app.as_bytes(), written.permissions.as_bytes()).unwrap();
+    assert_eq!(
+        loaded.current_hash(),
+        SchemaHash::compute(&expected),
+        "the file reads back to the schema it was written from"
+    );
+}
+
+/// The dimensions are part of the schema's identity: `vector(3)`,
+/// `vector(4)` and `bytes` are three different schemas.
+#[test]
+fn vector_dimensions_are_schema_identity() {
+    let hash = |ty: ColumnType| {
+        let mut input = todo_server();
+        input.schemas[0]
+            .get_mut(&TableName::from("todos"))
+            .unwrap()
+            .columns
+            .columns
+            .push(ColumnDescriptor::new("embedding", ty));
+        SchemaHash::compute(&structural(input.schemas[0].clone()))
+    };
+    let three = hash(ColumnType::Vector { dimensions: 3 });
+    assert_ne!(three, hash(ColumnType::Vector { dimensions: 4 }));
+    assert_ne!(three, hash(ColumnType::Bytea));
+    assert_eq!(three, hash(ColumnType::Vector { dimensions: 3 }));
+}
+
+#[test]
+fn malformed_vector_columns_are_refused_by_name() {
+    let column = |spec: serde_json::Value| {
+        edited_app(move |v| v["tables"]["todos"]["columns"]["embedding"] = spec)
+    };
+    for spec in [
+        serde_json::json!({ "vector": 0 }),
+        serde_json::json!({ "vector": 4097 }),
+        serde_json::json!({ "vector": 3.5 }),
+        serde_json::json!({ "vector": "3" }),
+        serde_json::json!({ "vector": -1 }),
+    ] {
+        let error = column(spec.clone());
+        assert!(
+            error.contains("a vector's dimensions are an integer from 1 to 4096"),
+            "{spec}: {error}"
+        );
+    }
+    let error = column(serde_json::json!({ "array": { "vector": 3 } }));
+    assert!(
+        error.contains("an array of vectors is not supported"),
+        "{error}"
+    );
+    let error = column(serde_json::json!({ "vector": 3, "array": "int" }));
+    assert!(error.contains("exactly one of"), "{error}");
+    let error = column(serde_json::json!({ "vector": 2, "default": [1, 2, 3] }));
+    assert!(
+        error.contains("a vector default has 2 numbers, not 3"),
+        "{error}"
+    );
+    let error = column(serde_json::json!({ "vector": 2, "default": [1, "x"] }));
+    assert!(
+        error.contains("finite numbers within float32 range"),
+        "{error}"
+    );
+    let error = column(serde_json::json!({ "vector": 1, "default": [1e39] }));
+    assert!(
+        error.contains("finite numbers within float32 range"),
+        "{error}"
+    );
+}
+
+fn point_bytes(lng: f64, lat: f64) -> Vec<u8> {
+    jazz_types::records::encode_point_f64le(lng, lat)
+        .unwrap()
+        .to_vec()
+}
+
+/// A point column is written `"point"` (`"point?"` when optional), its
+/// default as `[lng, lat]` in GeoJSON order, and the file reads back to the
+/// same schema (SPEC 20.1, 10.10).
+#[test]
+fn point_columns_round_trip_through_the_file() {
+    let mut input = todo_server();
+    let todos = input.schemas[0].get_mut(&TableName::from("todos")).unwrap();
+    todos
+        .columns
+        .columns
+        .push(ColumnDescriptor::new("location", ColumnType::Point));
+    todos
+        .columns
+        .columns
+        .push(nullable("pickup", ColumnType::Point));
+    let mut home = ColumnDescriptor::new("home", ColumnType::Point);
+    home.default = Some(Value::Bytea(point_bytes(-122.419416, 37.774929)));
+    todos.columns.columns.push(home);
+    input.current = SchemaHash::compute(&structural(input.schemas[0].clone())).to_string();
+
+    let expected = structural(input.schemas[0].clone());
+    let written = write(input).unwrap();
+    let app: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    let columns = &app["tables"]["todos"]["columns"];
+    assert_eq!(
+        columns["location"],
+        serde_json::json!("point"),
+        "{}",
+        written.app
+    );
+    assert_eq!(columns["pickup"], serde_json::json!("point?"));
+    assert_eq!(
+        columns["home"],
+        serde_json::json!({ "type": "point", "default": [-122.419416, 37.774929] })
+    );
+    let loaded = load(written.app.as_bytes(), written.permissions.as_bytes()).unwrap();
+    assert_eq!(
+        loaded.current_hash(),
+        SchemaHash::compute(&expected),
+        "the file reads back to the schema it was written from"
+    );
+}
+
+/// `point` is its own type: a schema with a point column differs from one
+/// with a bytes column.
+#[test]
+fn point_is_schema_identity() {
+    let hash = |ty: ColumnType| {
+        let mut input = todo_server();
+        input.schemas[0]
+            .get_mut(&TableName::from("todos"))
+            .unwrap()
+            .columns
+            .columns
+            .push(ColumnDescriptor::new("location", ty));
+        SchemaHash::compute(&structural(input.schemas[0].clone()))
+    };
+    assert_ne!(hash(ColumnType::Point), hash(ColumnType::Bytea));
+    assert_eq!(hash(ColumnType::Point), hash(ColumnType::Point));
+}
+
+#[test]
+fn malformed_point_columns_are_refused_by_name() {
+    let column = |spec: serde_json::Value| {
+        edited_app(move |v| v["tables"]["todos"]["columns"]["location"] = spec)
+    };
+    let error = column(serde_json::json!("pointt"));
+    assert!(error.contains("did you mean `point`"), "{error}");
+    let error = column(serde_json::json!({ "array": "point" }));
+    assert!(
+        error.contains("an array of points is not supported"),
+        "{error}"
+    );
+    for default in [
+        serde_json::json!([37.77, -122.42]),
+        serde_json::json!([181, 0]),
+        serde_json::json!([0]),
+        serde_json::json!([0, 0, 0]),
+        serde_json::json!(["0", 0]),
+        serde_json::json!({ "lng": 0, "lat": 0 }),
+    ] {
+        let error = column(serde_json::json!({ "type": "point", "default": default }));
+        assert!(
+            error.contains("a point is [lng, lat]")
+                || error.contains("doesn't fit this column's type"),
+            "{default}: {error}"
+        );
+    }
+}
+
 /// What the TS permissions compiler (and the engine behind it) refused, the
 /// loader refuses too, naming the spot.
 #[test]

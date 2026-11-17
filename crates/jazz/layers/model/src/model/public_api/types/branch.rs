@@ -349,6 +349,13 @@ fn hash_column_type(hasher: &mut jazz_types::sha256::Hasher, col_type: &ColumnTy
             hasher.update(&[8]);
             hash_row_descriptor(hasher, desc);
         }
+        ColumnType::Vector { dimensions } => {
+            hasher.update(&[17]);
+            hasher.update(&dimensions.to_le_bytes());
+        }
+        ColumnType::Point => {
+            hasher.update(&[18]);
+        }
     }
 }
 

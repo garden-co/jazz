@@ -272,5 +272,9 @@ mod write_check_evidence;
 #[path = "../write_receipt_owner.rs"]
 mod write_receipt_owner;
 
+#[path = "../point_columns.rs"]
+mod point_columns;
 #[path = "../transaction_read_prefix.rs"]
 mod transaction_read_prefix;
+#[path = "../vector_columns.rs"]
+mod vector_columns;

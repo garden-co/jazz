@@ -122,7 +122,7 @@ pub use session::{
 pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated, ValueSplice};
 pub use table::{Fields, Implementations, Insert, Table, Update};
 pub use transaction::{OpenTransaction, Transaction};
-pub use value::{ColumnValue, Json, Timestamp};
+pub use value::{ColumnValue, Json, Point, Timestamp};
 
 pub use jazz::account_registry::AccountId;
 pub use jazz::tools::{AppId, DurabilityTier, ObjectId, ReadTier, ResultKey, TransactionId};
