@@ -576,7 +576,15 @@ fn validate_public_column_type(column_type: &ColumnType) -> Result<(), QueryErro
                 }
             }
         }
-        ColumnType::Internal(_) | ColumnType::U48 => return Err(QueryError::OperandTypeMismatch),
+        // Vectors are compared only by a vector index search (SPEC 20.4),
+        // never as query literals. Points get bit-exact `Eq`/`in` through the
+        // shared operator table (jazz#5966); until then they are refused too.
+        ColumnType::Internal(_)
+        | ColumnType::U48
+        | ColumnType::Vector(_)
+        | ColumnType::Point => {
+            return Err(QueryError::OperandTypeMismatch);
+        }
         ColumnType::U8
         | ColumnType::U16
         | ColumnType::U32
@@ -840,6 +848,11 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
         // descriptor is carried by an otherwise supported record literal.
         ColumnType::Internal(_) => bytes.push(17),
         ColumnType::U48 => bytes.push(18),
+        ColumnType::Vector(dimensions) => {
+            bytes.push(19);
+            bytes.extend_from_slice(&dimensions.to_be_bytes());
+        }
+        ColumnType::Point => bytes.push(20),
     }
 }
 

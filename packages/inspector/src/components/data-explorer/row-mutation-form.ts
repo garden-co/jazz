@@ -20,7 +20,7 @@ export function parseBoolean(value: string): boolean | null {
 }
 
 function isBinaryColumnType(columnType: ColumnType): boolean {
-  if (columnType.type === "Bytea") return true;
+  if (columnType.type === "Bytea" || columnType.type === "Vector") return true;
   if (columnType.type === "Array") return isBinaryColumnType(columnType.element);
   return false;
 }
@@ -95,7 +95,24 @@ export function parseMutationFieldValue(columnType: ColumnType, valueText: strin
       }
     }
     case "Bytea":
+    case "Vector":
       throw new Error("Binary fields are read-only in the inspector.");
+    case "Point": {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(trimmed) as unknown;
+      } catch {
+        throw new Error("A point is a JSON array [lng, lat].");
+      }
+      if (
+        !Array.isArray(parsed) ||
+        parsed.length !== 2 ||
+        !parsed.every((coordinate) => typeof coordinate === "number")
+      ) {
+        throw new Error("A point is a JSON array [lng, lat].");
+      }
+      return parsed;
+    }
     case "Array": {
       let parsed: unknown;
       try {
@@ -170,6 +187,7 @@ function parseStructuredMutationValue(columnType: ColumnType, value: unknown): u
 export function formatMutationFieldValue(value: unknown): string {
   if (value === null || value === undefined) return "";
   if (value instanceof Uint8Array) return `(${value.length} bytes)`;
+  if (value instanceof Float32Array) return `[${value.length} floats]`;
   if (typeof value === "object") return stringifyForPresentation(value);
   return String(value);
 }

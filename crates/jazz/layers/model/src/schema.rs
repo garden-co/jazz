@@ -1750,6 +1750,11 @@ fn put_column_type(bytes: &mut Vec<u8>, column_type: &StorageColumnType) {
                 }
             }
         }
+        StorageColumnType::Vector(dimensions) => {
+            bytes.push(17);
+            bytes.extend_from_slice(&dimensions.to_le_bytes());
+        }
+        StorageColumnType::Point => bytes.push(18),
         _ => {
             panic!("raw stored-scalar backing types cannot appear in a Jazz schema")
         }
