@@ -1052,3 +1052,42 @@ fn a_record_this_device_cannot_read_survives_a_rewrite() {
             .is_err()
     );
 }
+
+/// When no key record of a document loads here (every one needs a
+/// mechanism this device lacks), the checked lineage still comes back, so
+/// the device can rewrite the document and carry every record over at the
+/// depth it needs.
+#[test]
+fn a_document_whose_keys_all_need_a_newer_client_can_still_be_rewritten() {
+    let (world, space, _) = alice_holding(12);
+    let owner = owner(&world, ALICE);
+    let document = owner
+        .seal_document(&space, &[], 0, &mut TestRandom(4))
+        .unwrap();
+    let unreadable = |index: usize| {
+        let mut record = document.keys[index].clone();
+        record.envelope = relabelled(key_seal::MECHANISM, UNROUTED_SEAL, &record.envelope);
+        resign_key(&world, record)
+    };
+    let carried = vec![unreadable(0), unreadable(1)];
+    let stored = HeldDocument {
+        revision: 0,
+        lineage: document.lineage.clone(),
+        keys: carried.clone(),
+    }
+    .encode()
+    .unwrap();
+    let loaded = owner.load(&decode_document(&stored).unwrap()).unwrap();
+    assert!(loaded.space.is_none(), "no key loads here");
+    let base = loaded.rewrite_base().expect("the checked lineage");
+    let rewritten = owner
+        .seal_document(base, &loaded.unsupported, 1, &mut TestRandom(5))
+        .unwrap()
+        .encode()
+        .unwrap();
+    let reloaded = owner.load(&decode_document(&rewritten).unwrap()).unwrap();
+    assert_eq!(
+        reloaded.unsupported, carried,
+        "every record is carried at its depth"
+    );
+}

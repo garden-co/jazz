@@ -92,11 +92,25 @@ pub struct Rejected {
 pub struct Loaded {
     pub revision: u64,
     pub space: Option<HeldSpace>,
+    /// When the lineage checked but no key of the document loaded: that
+    /// lineage as a held space with no keys. A rewrite builds on it
+    /// ([`Loaded::rewrite_base`]), so carried records keep the depth they
+    /// need. `None` otherwise.
+    pub lineage: Option<HeldSpace>,
     pub rejected: Vec<Rejected>,
     /// The key records skipped as [`Rejection::Unsupported`], as stored:
     /// the next rewrite of this document carries them over unchanged
     /// ([`StoreOwner::seal_document`]). Empty when the lineage was skipped.
     pub unsupported: Vec<HeldKeyRecord>,
+}
+
+impl Loaded {
+    /// The held space a rewrite of this document builds on: the loaded
+    /// keys, or the checked lineage alone when none loaded. Pass it with
+    /// [`Loaded::unsupported`] to [`StoreOwner::seal_document`].
+    pub fn rewrite_base(&self) -> Option<&HeldSpace> {
+        self.space.as_ref().or(self.lineage.as_ref())
+    }
 }
 
 /// The device whose store this is: its application, account and keys.
@@ -430,6 +444,13 @@ impl StoreOwner<'_> {
         }
         Ok(Loaded {
             revision: document.revision,
+            lineage: space.keys.is_empty().then(|| HeldSpace {
+                application: space.application.clone(),
+                scope: space.scope.clone(),
+                root: space.root.clone(),
+                successors: space.successors.clone(),
+                keys: BTreeMap::new(),
+            }),
             space: (!space.keys.is_empty()).then_some(space),
             rejected,
             unsupported,
@@ -440,6 +461,7 @@ impl StoreOwner<'_> {
         Loaded {
             revision: document.revision,
             space: None,
+            lineage: None,
             rejected: vec![Rejected {
                 record: RejectedRecord::Lineage,
                 reason,
