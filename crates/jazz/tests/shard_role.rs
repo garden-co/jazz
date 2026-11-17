@@ -394,6 +394,65 @@ fn a_fixed_part_lands_at_its_fixed_position() {
     assert_eq!(at, held, "at its fixed position");
 }
 
+/// A part's fixed position is its commit's decision, checked against the
+/// decider's clock: up to twice the offset bound past this shard's own
+/// clock, the part takes it and lands there (INV-SHARD-26). Further ahead
+/// is refused: no clock within the bound could have drawn it.
+#[test]
+fn a_part_takes_a_fixed_position_up_to_twice_the_offset_bound_ahead() {
+    let (db, _now) = shard(1);
+    let (writer, _upstream, sent_up, sent_down) = writer_of(&db);
+    let part = upload(&writer, &sent_up, None);
+    held_at(&db, part, &[]);
+    let beyond = hlc(NOW + 2 * HLC_MAX_OFFSET_MS) + 1;
+    let error = db.shard().fix(part, beyond).unwrap_err();
+    assert!(error.to_string().contains("more than twice"), "{error}");
+    let decided = hlc(NOW + HLC_MAX_OFFSET_MS + 200);
+    db.shard().fix(part, decided).unwrap();
+    pump(&db, &writer);
+    let Outcome::Accepted { at, .. } = fate(&sent_down) else {
+        panic!("refused");
+    };
+    assert_eq!(
+        at, decided,
+        "at the decided position, past this shard's own bound"
+    );
+    insert(&db, "after");
+    assert!(newest(&db) > decided, "nothing lands at or below it later");
+}
+
+/// A held part whose position is not fixed yet waits for it rather than
+/// being numbered on its own (INV-SHARD-27): the commit's other parts land
+/// at the position fixed for it, so landing this one anywhere else would
+/// split the commit. Once fixed, it lands there.
+#[test]
+fn a_held_part_lands_only_at_a_fixed_position() {
+    let (db, _now) = shard(1);
+    let (writer, _upstream, sent_up, sent_down) = writer_of(&db);
+    let part = upload(&writer, &sent_up, None);
+    let held = held_at(&db, part, &[]);
+    pump(&db, &writer);
+    assert!(
+        !sent_down
+            .borrow()
+            .iter()
+            .any(|m| matches!(m, SyncMessage::Fate { .. })),
+        "the unfixed part waits"
+    );
+    assert_eq!(
+        db.shard().lowest_hold(),
+        Some(held),
+        "its hold still stands"
+    );
+    insert(&db, "meanwhile");
+    db.shard().fix(part, held).unwrap();
+    pump(&db, &writer);
+    let Outcome::Accepted { at, .. } = fate(&sent_down) else {
+        panic!("refused");
+    };
+    assert_eq!(at, held, "it lands at its fixed position");
+}
+
 /// The shard's own local write to a row a part holds waits until the part
 /// lands, then lands above it: the part is never refused for a newer
 /// version of its row (INV-SHARD-19).

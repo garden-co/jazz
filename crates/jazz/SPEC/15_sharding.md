@@ -28,6 +28,8 @@ Invariant digest:
 - `INV-SHARD-23`: A cross-shard commit MUST be decided once, on its decider: committed when the decider's part lands, aborted when an abort records the part refused first. Either MUST stand as the part's recorded fate, which a resend of the part, a later hold of it and every later resolution answer, however late (§15.3).
 - `INV-SHARD-24`: A queued hold MUST be as durable as a standing one: a reopened shard MUST still hold it queued, with its part's data, in the order asked, and grant it once its rows are free (§15.3).
 - `INV-SHARD-25`: A part MUST be checked when it is held (and a queued one when it is granted), as its writer's session would commit it, with nothing written; once held, it MUST land as checked, so its fix is never refused (§15.3).
+- `INV-SHARD-26`: A held part MUST take the position its commit is fixed at whenever that is within twice `HLC_MAX_OFFSET_MS` of the shard's clock, and nothing the shard numbers later lands at or below it; a fixed position further ahead MUST be refused (§15.3).
+- `INV-SHARD-27`: A held part MUST land only at the position fixed for its commit: until it is fixed or released its commit waits, and it MUST NOT be numbered on its own (§15.3).
 - `INV-SHARD-21`: A reopened shard MUST wait out its clock plus `HLC_MAX_OFFSET_MS` at reopen before numbering its sessions' commits (a fixed part's and a resend's aside), so it never numbers at or below a position it served or observed before it stopped (§15.3).
 
 ## Details
@@ -125,7 +127,13 @@ the shard ownership above are outside this repository and stay exploratory
   (`INV-SHARD-18`). While a hold stands, `served_through` (what the store
   serves its sessions as settled) stays below `lowest_hold` (`INV-SHARD-17`),
   so no session is told it is settled past a position a part may still take.
-  `release` drops a refused commit's hold. Holding a part again returns its
+  A held part lands only at its fixed position: until it is fixed (or
+  released) its commit waits (`INV-SHARD-27`). The fixed position is the
+  commit's decision, which the decider checked against its own clock; since
+  that clock is within `HLC_MAX_OFFSET_MS` of every other shard's, a part
+  takes a fixed position up to twice the bound past its own shard's clock
+  (`INV-SHARD-26`), so a skewed decider never strands a part held at a
+  slower shard. `release` drops a refused commit's hold. Holding a part again returns its
   standing hold, a part is fixed only once it is held, and a part whose fate
   is recorded holds nothing (it answers its decision).
 - **Blocking.** A hold names the rows its part writes (`HeldRow`). Every
