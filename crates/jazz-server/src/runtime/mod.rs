@@ -2701,25 +2701,18 @@ impl Owner {
     /// Tests: the core holds nothing open between the pieces of work it
     /// serves, so that it also runs where storage cannot keep a
     /// transaction open across calls (Durable Objects' `transactionSync`).
-    /// Thin-client transactions are the one exception while the core still
-    /// runs them: their handles, and the overlay of the last one staged.
     /// A violation aborts the test process: the store loop catches panics
     /// and restarts the runtime, which a test could miss.
     #[cfg(test)]
     fn assert_holds_nothing(&self, after: &str) {
         let held = self.db.held_for_test();
-        let thin = self.open_thin_transactions();
-        let allowed = held.open_batches == thin
-            && !held.callback_transaction
-            && (thin > 0 || (!held.overlay && !held.sqlite_transaction));
-        if !allowed {
+        if !held.is_nothing() {
             // Straight to stderr: the test harness captures `eprintln!`,
             // and an abort loses what it captured.
             use std::io::Write as _;
             let _ = writeln!(
                 std::io::stderr(),
-                "the core holds {held:?} after {after}, with {thin} thin-client \
-                 transactions open: it must hold nothing between calls"
+                "the core holds {held:?} after {after}: it must hold nothing between calls"
             );
             std::process::abort();
         }
@@ -4517,11 +4510,11 @@ mod tests {
         }
     }
 
-    fn thin_query(transaction: Option<&str>) -> jazz::thin::ThinOp {
+    fn thin_query() -> jazz::thin::ThinOp {
         jazz::thin::ThinOp::Query {
             query: postcard::to_allocvec(&jazz::query::Query::from("docs")).unwrap(),
             options: Vec::new(),
-            transaction: transaction.map(str::to_owned),
+            transaction: None,
         }
     }
 
@@ -4545,9 +4538,9 @@ mod tests {
             .unwrap();
     }
 
-    /// A thin session's read of offloaded leaves after a restart, inside
-    /// and outside a transaction, waits for the fetch lane instead of
-    /// fetching on the store thread, and answers once they landed. While
+    /// A thin session's read of offloaded leaves after a restart waits for
+    /// the fetch lane instead of fetching on the store thread, and answers
+    /// once they landed. While
     /// the bucket does not answer, the store thread serves everyone else,
     /// and the session's next request waits behind the parked one.
     #[test]
@@ -4565,8 +4558,8 @@ mod tests {
         rt.block_on(async {
             let (session, mut stream) = thin_docs_session(&runtime).await;
             bucket.state.stall_gets.store(true, Ordering::Relaxed);
-            send_thin(&runtime, session, 1, thin_query(None)).await;
-            send_thin(&runtime, session, 2, thin_query(None)).await;
+            send_thin(&runtime, session, 1, thin_query()).await;
+            send_thin(&runtime, session, 2, thin_query()).await;
             assert_eq!(
                 next_thin(&mut stream, Duration::from_millis(500)).await,
                 None,
@@ -4583,35 +4576,6 @@ mod tests {
             }
         });
         assert!(bucket.state.calls.gets.load(Ordering::Relaxed) > 0);
-        store.close().unwrap();
-
-        // A transaction's read, after another restart.
-        let store = AppStore::open(&storage).unwrap();
-        let runtime = store.start_runtime(docs(), NodeRole::Core, false).unwrap();
-        rt.block_on(async {
-            let (session, mut stream) = thin_docs_session(&runtime).await;
-            let transaction = "0190f3e4000070008000000000000007";
-            send_thin(
-                &runtime,
-                session,
-                1,
-                jazz::thin::ThinOp::Begin {
-                    transaction: transaction.to_owned(),
-                    kind: "serializable".to_owned(),
-                },
-            )
-            .await;
-            assert_eq!(
-                next_thin(&mut stream, Duration::from_secs(5)).await,
-                Some((1, jazz::thin::ThinBody::Ok))
-            );
-            send_thin(&runtime, session, 2, thin_query(Some(transaction))).await;
-            let (answered, body) = next_thin(&mut stream, Duration::from_secs(20))
-                .await
-                .expect("the transaction's read answers");
-            assert_eq!(answered, 2);
-            assert_eq!(thin_body(body), value);
-        });
         store.close().unwrap();
     }
 
@@ -4631,7 +4595,7 @@ mod tests {
         rt.block_on(async {
             let (session, mut stream) = thin_docs_session(&runtime).await;
             bucket.state.failing.store(true, Ordering::Relaxed);
-            send_thin(&runtime, session, 1, thin_query(None)).await;
+            send_thin(&runtime, session, 1, thin_query()).await;
             let (answered, body) = next_thin(&mut stream, Duration::from_secs(20))
                 .await
                 .expect("refused, not left waiting");
@@ -4641,7 +4605,7 @@ mod tests {
                 "{body:?}"
             );
             let asked = bucket.state.calls.requests.load(Ordering::Relaxed);
-            send_thin(&runtime, session, 2, thin_query(None)).await;
+            send_thin(&runtime, session, 2, thin_query()).await;
             let (answered, body) = next_thin(&mut stream, Duration::from_secs(1))
                 .await
                 .expect("refused at once while fetches back off");
