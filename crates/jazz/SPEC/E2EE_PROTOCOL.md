@@ -2562,7 +2562,10 @@ creator's domain, §3.1). The signatures and author activity of the lineage
 were checked when the key was acquired (§3.3); the device's own
 signatures protect them since. A record that fails is skipped and reported,
 never fatal to the read (§4.2); a failed lineage record skips the space's
-keys and the space is acquired again. Nothing in either record depends on the
+keys and the space is acquired again. When the device rewrites the document,
+a held-key record skipped as unsupported is carried over unchanged, since it
+may hold a key only this device has, such as a `refused` key written by a
+newer client; a record that failed any other check may be dropped. Nothing in either record depends on the
 application schema, so a schema update never invalidates held keys; the cell
 context binds table, column and type (§4.1). Keeping a key replaces any
 record of the same device, root and epoch. `unpublished` is present only for

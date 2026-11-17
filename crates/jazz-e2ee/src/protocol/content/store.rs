@@ -11,8 +11,11 @@
 //! On load, a record that fails a check is skipped and reported, never
 //! fatal (§4.2); a lineage record that fails skips the whole document, and
 //! the space is acquired again. A provider failure fails the load. A
-//! `refused` key is kept for good (§3.2, §6.4): nothing here deletes a
-//! record, and a later record of the same epoch never lifts a refusal.
+//! `refused` key is kept for good (§3.2, §6.4): a rewrite of the document
+//! keeps every held key and carries over unchanged every key record the
+//! load skipped as unsupported (one only a newer client can open may be
+//! such a key), and a later record of the same epoch never lifts a
+//! refusal. A rewrite drops a record that failed any other check.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -90,6 +93,10 @@ pub struct Loaded {
     pub revision: u64,
     pub space: Option<HeldSpace>,
     pub rejected: Vec<Rejected>,
+    /// The key records skipped as [`Rejection::Unsupported`], as stored:
+    /// the next rewrite of this document carries them over unchanged
+    /// ([`StoreOwner::seal_document`]). Empty when the lineage was skipped.
+    pub unsupported: Vec<HeldKeyRecord>,
 }
 
 /// The device whose store this is: its application, account and keys.
@@ -214,19 +221,39 @@ impl StoreOwner<'_> {
         Ok(record)
     }
 
-    /// The whole document of `space`: its lineage and one record per held
-    /// key. Storing a key rewrites only its root's document (§6.1).
+    /// The whole document of `space`: its lineage, the records of
+    /// `carried`, unchanged, and one record per held key. Storing a key
+    /// rewrites only its root's document (§6.1). `carried` are the records
+    /// the last load of this document skipped as unsupported
+    /// ([`Loaded::unsupported`]), so that a key this device cannot open is
+    /// not lost; it is empty for a new document. A carried record of
+    /// another root is an invalid input.
     pub fn seal_document(
         &self,
         space: &HeldSpace,
+        carried: &[HeldKeyRecord],
         revision: u64,
         rng: &mut dyn RandomSource,
     ) -> ProtocolResult<HeldDocument> {
+        if carried.iter().any(|record| record.root_id != space.root.id) {
+            return Err(ProtocolError::InvalidRecord(
+                "a carried record of another root",
+            ));
+        }
         let lineage = self.seal_lineage(space)?;
-        let keys = space
-            .keys
-            .keys()
-            .map(|depth| self.seal_key(space, *depth, rng))
+        // Carried records first: a reader that opens both lets this
+        // device's own record of an epoch replace one carried, unless the
+        // carried one is `refused`.
+        let keys = carried
+            .iter()
+            .cloned()
+            .map(Ok)
+            .chain(
+                space
+                    .keys
+                    .keys()
+                    .map(|depth| self.seal_key(space, *depth, rng)),
+            )
             .collect::<ProtocolResult<_>>()?;
         Ok(HeldDocument {
             revision,
@@ -363,6 +390,7 @@ impl StoreOwner<'_> {
             keys: BTreeMap::new(),
         };
         let mut rejected = Vec::new();
+        let mut unsupported = Vec::new();
         for (index, record) in document.keys.iter().enumerate() {
             let outcome = match record {
                 Some(record) => self.check_key(&space, record)?,
@@ -375,19 +403,25 @@ impl StoreOwner<'_> {
                         space.keys.insert(depth, entry);
                     }
                 },
-                Err(reason) => rejected.push(Rejected {
-                    record: RejectedRecord::Key {
-                        index,
-                        epoch_id: record.as_ref().map(|record| record.epoch_id.clone()),
-                    },
-                    reason,
-                }),
+                Err(reason) => {
+                    if let (Rejection::Unsupported, Some(record)) = (reason, record) {
+                        unsupported.push(record.clone());
+                    }
+                    rejected.push(Rejected {
+                        record: RejectedRecord::Key {
+                            index,
+                            epoch_id: record.as_ref().map(|record| record.epoch_id.clone()),
+                        },
+                        reason,
+                    });
+                }
             }
         }
         Ok(Loaded {
             revision: document.revision,
             space: (!space.keys.is_empty()).then_some(space),
             rejected,
+            unsupported,
         })
     }
 
@@ -399,6 +433,7 @@ impl StoreOwner<'_> {
                 record: RejectedRecord::Lineage,
                 reason,
             }],
+            unsupported: Vec::new(),
         }
     }
 }

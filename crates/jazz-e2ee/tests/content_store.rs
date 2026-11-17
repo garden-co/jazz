@@ -355,7 +355,7 @@ fn lost_creation(world: &World) -> HeldSpace {
 
 fn stored(world: &World, space: &HeldSpace) -> Vec<u8> {
     owner(world, ALICE)
-        .seal_document(space, 3, &mut TestRandom(5))
+        .seal_document(space, &[], 3, &mut TestRandom(5))
         .unwrap()
         .encode()
         .unwrap()
@@ -551,7 +551,9 @@ fn key_rejections(
 fn every_held_key_check_skips_only_its_record() {
     let (world, space, _) = alice_holding(3);
     let owner = owner(&world, ALICE);
-    let document = owner.seal_document(&space, 0, &mut TestRandom(4)).unwrap();
+    let document = owner
+        .seal_document(&space, &[], 0, &mut TestRandom(4))
+        .unwrap();
     let lineage = document.lineage.clone();
     let good = document.keys[1].clone();
     assert_eq!(good.depth, 1);
@@ -669,7 +671,7 @@ fn a_lineage_that_fails_skips_the_document() {
     let other = world.approve_device(ALICE);
     let owner_alice = owner(&world, ALICE);
     let document = owner_alice
-        .seal_document(&space, 0, &mut TestRandom(4))
+        .seal_document(&space, &[], 0, &mut TestRandom(4))
         .unwrap();
     let lineage_reason = |world: &World, owner: StoreOwner<'_>, lineage: LineageRecord| {
         let _ = world;
@@ -834,7 +836,7 @@ fn a_key_record_of_a_mechanism_this_reader_does_not_route_is_unsupported() {
     let (world, space, _) = alice_holding(8);
     let owner_alice = owner(&world, ALICE);
     let document = owner_alice
-        .seal_document(&space, 0, &mut TestRandom(4))
+        .seal_document(&space, &[], 0, &mut TestRandom(4))
         .unwrap();
     let good = document.keys[1].clone();
     let mut unrouted = good.clone();
@@ -958,5 +960,80 @@ fn one_non_canonical_record_is_skipped_and_the_others_load() {
     assert_eq!(
         owner.load(&document).unwrap().rejected[0].record,
         RejectedRecord::Lineage
+    );
+}
+
+#[test]
+fn a_record_this_device_cannot_read_survives_a_rewrite() {
+    let (world, space, _) = alice_holding(11);
+    let owner = owner(&world, ALICE);
+    let document = owner
+        .seal_document(&space, &[], 0, &mut TestRandom(4))
+        .unwrap();
+    // The deeper key in an envelope only a newer client opens, and a copy
+    // of the root key whose signature fails.
+    let mut unreadable = document.keys[1].clone();
+    unreadable.envelope = relabelled(key_seal::MECHANISM, UNROUTED_SEAL, &unreadable.envelope);
+    let unreadable = resign_key(&world, unreadable);
+    let mut forged = document.keys[0].clone();
+    forged.signature[70] ^= 1;
+    let stored = HeldDocument {
+        revision: 0,
+        lineage: document.lineage.clone(),
+        keys: vec![document.keys[0].clone(), unreadable.clone(), forged],
+    }
+    .encode()
+    .unwrap();
+    let loaded = owner.load(&decode_document(&stored).unwrap()).unwrap();
+    assert_eq!(
+        loaded
+            .rejected
+            .iter()
+            .map(|rejected| rejected.reason)
+            .collect::<Vec<_>>(),
+        vec![Rejection::Unsupported, Rejection::Signature]
+    );
+    assert_eq!(loaded.unsupported, vec![unreadable.clone()]);
+
+    // The device rewrites the document, as when it stores a key.
+    let rewritten = owner
+        .seal_document(
+            loaded.space.as_ref().unwrap(),
+            &loaded.unsupported,
+            1,
+            &mut TestRandom(5),
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+    let record = unreadable.encode().unwrap();
+    assert!(
+        rewritten
+            .windows(record.len())
+            .any(|window| window == record.as_slice()),
+        "the unreadable record is carried over byte for byte"
+    );
+    let reloaded = owner.load(&decode_document(&rewritten).unwrap()).unwrap();
+    assert_eq!(reloaded.unsupported, vec![unreadable]);
+    // The forged record is dropped.
+    assert_eq!(
+        reloaded
+            .rejected
+            .iter()
+            .map(|rejected| rejected.reason)
+            .collect::<Vec<_>>(),
+        vec![Rejection::Unsupported]
+    );
+    assert_eq!(
+        marks(&reloaded.space.unwrap()),
+        marks(loaded.space.as_ref().unwrap())
+    );
+
+    // A record of another root is not carried.
+    let (_, _, lost) = alice_holding(11);
+    assert!(
+        owner
+            .seal_document(&lost, &loaded.unsupported, 2, &mut TestRandom(6))
+            .is_err()
     );
 }

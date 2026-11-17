@@ -409,7 +409,7 @@ fn an_interrupted_repair_keeps_the_key_and_finishes_after_a_restart() {
     let mut restarted = HeldKeys::new();
     for space in repairing.alice.spaces() {
         let bytes = owner
-            .seal_document(space, 0, &mut TestRandom(1))
+            .seal_document(space, &[], 0, &mut TestRandom(1))
             .unwrap()
             .encode()
             .unwrap();
