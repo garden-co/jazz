@@ -279,12 +279,12 @@ impl Transport for Cells {
     }
 }
 
-/// A catalogue holding one version whose public schema JSON is `json`,
+/// A catalogue holding one version `id` whose public schema JSON is `json`,
 /// as bytes on the wire.
-fn catalogue_bytes(json: &str) -> Vec<u8> {
+fn catalogue_bytes(id: SchemaVersionId, json: &str) -> Vec<u8> {
     let mut version = newer_version();
     version.schema = CatalogueSchema::Unsupported {
-        id: newer(),
+        id,
         json: json.as_bytes().to_vec(),
         error: String::new(),
     };
@@ -306,25 +306,33 @@ fn catalogue_bytes(json: &str) -> Vec<u8> {
 #[test]
 fn only_a_newer_shape_is_unsupported_and_a_corrupt_version_fails() {
     let valid = serde_json::to_string(schema().public_schema()).unwrap();
+    let id = schema().version_id();
+    let unsupported = |id: SchemaVersionId, json: &str| {
+        let decoded = decode_message(&catalogue_bytes(id, json));
+        match &decoded {
+            Ok(SyncMessage::Catalogue(c)) => match &c.versions[0].schema {
+                CatalogueSchema::Unsupported { error, .. } => error.clone(),
+                CatalogueSchema::Known(_) => panic!("read as known: {json}"),
+            },
+            _ => panic!("{json}: {decoded:?}"),
+        }
+    };
     assert!(matches!(
-        decode_message(&catalogue_bytes(&valid)),
+        decode_message(&catalogue_bytes(id, &valid)),
         Ok(SyncMessage::Catalogue(ref c)) if matches!(c.versions[0].schema, CatalogueSchema::Known(_))
     ));
     let newer_variant = valid.replacen(r#"{"type":"Text"}"#, r#"{"type":"Hologram"}"#, 1);
-    let decoded = decode_message(&catalogue_bytes(&newer_variant));
-    assert!(
-        matches!(
-            decoded,
-            Ok(SyncMessage::Catalogue(ref c))
-                if matches!(c.versions[0].schema, CatalogueSchema::Unsupported { .. })
-        ),
-        "{decoded:?}"
-    );
-    // A key this build does not know is ignored, as it always was: the
-    // version is read without it.
-    let newer_field = valid.replacen(r#""nullable":false"#, r#""nullable":false,"glow":1"#, 1);
+    assert!(unsupported(newer(), &newer_variant).contains("Hologram"));
+    // A key this build ignores, which the sender's id counts (a newer
+    // constraint): read without it, the version would be this build's own
+    // `schema()`, under an id the sender never wrote. It is not read.
+    let newer_key = valid.replacen(r#""nullable":false"#, r#""nullable":false,"maxBytes":4"#, 1);
+    let error = unsupported(newer(), &newer_key);
+    assert!(error.contains("keys this build ignores"), "{error}");
+    assert!(error.contains(&id.0.to_string()), "{error}");
+    // The same key under the id this build computes adds nothing it reads.
     assert!(matches!(
-        decode_message(&catalogue_bytes(&newer_field)),
+        decode_message(&catalogue_bytes(id, &newer_key)),
         Ok(SyncMessage::Catalogue(ref c)) if matches!(c.versions[0].schema, CatalogueSchema::Known(_))
     ));
     let syntax = valid.replacen('{', "{,", 1);
@@ -341,7 +349,10 @@ fn only_a_newer_shape_is_unsupported_and_a_corrupt_version_fails() {
         ("wrong type", &wrong_type),
         ("does not compile", &uncompilable),
     ] {
-        assert!(decode_message(&catalogue_bytes(json)).is_err(), "{case}");
+        assert!(
+            decode_message(&catalogue_bytes(id, json)).is_err(),
+            "{case}"
+        );
     }
     // The last is well-formed: the compiler, not the decoder, refuses it.
     let source: jazz::tools::Schema = serde_json::from_str(&uncompilable).unwrap();
