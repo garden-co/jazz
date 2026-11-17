@@ -646,11 +646,11 @@ async fn next(
         .expect("a typed delta")
 }
 
-/// A serializable transaction that read through the draft and wrote back
-/// through it (an upsert, a restore) conflicts at commit when main changed
-/// a row the draft inherits meanwhile; none of its writes land.
+/// A serializable transaction that read through the draft conflicts at
+/// commit when main changed a row the read inherited meanwhile, and the
+/// upsert and restore it made through the draft roll back with it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_serializable_branch_write_conflicts_when_its_base_changed() {
+async fn a_serializable_branch_read_conflicts_and_rolls_back_its_writes() {
     let jazz = bindings::open(Config::new(AppId::random())).await.unwrap();
     let main = jazz.on_branch("main");
     let intro = main
@@ -692,6 +692,51 @@ async fn a_serializable_branch_write_conflicts_when_its_base_changed() {
     let error = result.unwrap_err();
     assert!(
         error.to_string().contains("changed since its snapshot"),
+        "{error}"
+    );
+    assert_eq!(
+        titles(&draft.all(by_title()).await.unwrap()),
+        [("draft", "Intro, changed on main")]
+    );
+    jazz.shutdown().await.unwrap();
+}
+
+/// With no read at all, a serializable transaction's upsert through the
+/// draft of a row main changed meanwhile conflicts by itself: the row it
+/// writes over moved since the write was staged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_serializable_branch_upsert_conflicts_when_its_row_changed_on_the_base() {
+    let jazz = bindings::open(Config::new(AppId::random())).await.unwrap();
+    let main = jazz.on_branch("main");
+    let intro = main
+        .insert(NewDocument::new("main", "Intro"))
+        .await
+        .unwrap();
+    let draft = jazz.on_branch(Branch::from("draft").over("main"));
+
+    let concurrent = main.clone();
+    let result = jazz
+        .serializable_transaction(move |tx| async move {
+            tx.on_branch(Branch::from("draft").over("main"))?
+                .upsert(intro.id, NewDocument::new("draft", "Intro, drafted"))
+                .await?;
+            concurrent
+                .update(
+                    intro.id,
+                    DocumentUpdate {
+                        title: Some("Intro, changed on main".into()),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            Ok(())
+        })
+        .await;
+    let error = result.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("changed since transaction write was staged"),
         "{error}"
     );
     assert_eq!(
