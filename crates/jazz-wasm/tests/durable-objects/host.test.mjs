@@ -51,8 +51,10 @@ async function connect(mf, headers = {}) {
       (waiting.shift() ?? ((a) => answers.push(a)))(answer);
     }
   });
-  ws.addEventListener("close", () => {
+  let closeCode = null;
+  ws.addEventListener("close", (event) => {
     closed = true;
+    closeCode = event.code;
   });
   ws.accept();
   return {
@@ -65,6 +67,7 @@ async function connect(mf, headers = {}) {
             setTimeout(() => reject(new Error("no answer within 5 s")), 5000);
           }),
     closed: () => closed,
+    closeCode: () => closeCode,
     close: () => ws.close(),
   };
 }
@@ -227,5 +230,145 @@ test("a backend publishes its schema to a Durable Object core, which then serves
     await mf.dispose();
   } finally {
     rmSync(persist, { recursive: true, force: true });
+  }
+});
+
+/** Until `check()` holds, or fail after 5 s. */
+async function eventually(check, what) {
+  for (let waited = 0; !check(); waited += 20) {
+    if (waited > 5000) throw new Error(`not within 5 s: ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+/** An admin request to a test-only route (`durable-object-tests` builds). */
+function testRoute(mf, route, body) {
+  return mf.dispatchFetch(`http://core/apps/${APP}/test/${route}`, {
+    method: "POST",
+    headers: { "X-Jazz-Admin-Secret": SECRET, "content-type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+}
+
+/** A backend's thin connection, past its Hello and schema. */
+async function ready(mf) {
+  const socket = await connect(mf, backend);
+  socket.send(prelude);
+  socket.send(fixture.testThinHello());
+  assert.deepEqual(await socket.next(), { hello: true });
+  socket.send(fixture.testThinSchema(1n, SCHEMA));
+  assert.deepEqual(await socket.next(), { id: 1, ok: true });
+  return socket;
+}
+
+/** Send `bytes` of inserts (64 KiB titles) from id `from` on. */
+function flood(socket, bytes, from = 100) {
+  const title = "x".repeat(64 * 1024);
+  let id = BigInt(from);
+  for (let sent = 0; sent < bytes; sent += title.length) {
+    try {
+      socket.send(fixture.testThinInsertNote(id++, title));
+    } catch {
+      return;
+    }
+  }
+}
+
+const MiB = 1024 * 1024;
+
+test("a Durable Object core ends a socket that sends more than it can hold, and serves the others", async () => {
+  const mf = start(mkdtempSync(join(tmpdir(), "jazz-do-held-")));
+  try {
+    const flooding = await ready(mf);
+    const other = await ready(mf);
+    // The engine takes nothing: up to 1 MiB is held, then the socket is shed.
+    assert.equal(
+      (await testRoute(mf, "limits", { socket: MiB, global: 64 * MiB, paused: true })).status,
+      204,
+    );
+    flood(flooding, 2 * MiB);
+    const shed = await flooding.next();
+    assert.match(shed.error ?? "", /reconnect later/, JSON.stringify(shed));
+    await eventually(() => flooding.closed(), "the flooding socket closes");
+    assert.equal(other.closed(), false);
+
+    await testRoute(mf, "limits", { socket: 8 * MiB, global: 32 * MiB, paused: false });
+    other.send(fixture.testThinInsertNote(2n, "still served"));
+    assert.deepEqual(await other.next(), { id: 2, written: true });
+    other.close();
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("a Durable Object core sheds the socket holding most when all together hold too much", async () => {
+  const mf = start(mkdtempSync(join(tmpdir(), "jazz-do-global-")));
+  try {
+    const modest = await ready(mf);
+    const greedy = await ready(mf);
+    await testRoute(mf, "limits", { socket: 3 * MiB, global: 4 * MiB, paused: true });
+    // Modest holds 1.5 MiB; greedy passes the 4 MiB both may hold together
+    // while still under its own 3.
+    flood(modest, 1.5 * MiB);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    flood(greedy, 2.9 * MiB);
+    const shed = await greedy.next();
+    assert.match(shed.error ?? "", /reconnect later/, JSON.stringify(shed));
+    await eventually(() => greedy.closed(), "the greedy socket closes");
+
+    await testRoute(mf, "limits", { socket: 8 * MiB, global: 32 * MiB, paused: false });
+    const answer = await modest.next();
+    assert.equal(answer.written, true, JSON.stringify(answer));
+    assert.equal(modest.closed(), false);
+    modest.close();
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("a malformed message ends its own socket alone", async () => {
+  const mf = start(mkdtempSync(join(tmpdir(), "jazz-do-malformed-")));
+  try {
+    const broken = await ready(mf);
+    const other = await ready(mf);
+    broken.send(new Uint8Array([0xff, 0x00, 0x13, 0x37]));
+    const error = await broken.next();
+    assert.ok(error.error, JSON.stringify(error));
+    await eventually(() => broken.closed(), "the malformed socket closes");
+    other.send(fixture.testThinInsertNote(2n, "still served"));
+    assert.deepEqual(await other.next(), { id: 2, written: true });
+    other.close();
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("after a panic the object starts afresh on its storage", async () => {
+  const mf = start(mkdtempSync(join(tmpdir(), "jazz-do-panic-")));
+  try {
+    const before = await ready(mf);
+    before.send(fixture.testThinInsertNote(2n, "before the panic"));
+    assert.deepEqual(await before.next(), { id: 2, written: true });
+
+    const panicked = await testRoute(mf, "panic").catch((error) => error);
+    assert.ok(panicked instanceof Error || panicked.status >= 500, String(panicked?.status));
+    await eventually(() => before.closed(), "sockets close after the panic");
+    assert.equal(before.closeCode(), 1011);
+
+    // A fresh core, on a fresh wasm instance, over the same storage.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        const after = await ready(mf);
+        after.send(fixture.testThinQueryNotes(2n));
+        assert.deepEqual(await after.next(), { id: 2, titles: ["before the panic"] });
+        after.close();
+        break;
+      } catch (error) {
+        if (attempt >= 2) throw error;
+      }
+    }
+    assert.equal(await (await mf.dispatchFetch("http://core/health")).text(), "ok");
+  } finally {
+    await mf.dispose();
   }
 });
