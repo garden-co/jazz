@@ -29,8 +29,11 @@ async function bytes(data) {
   return null;
 }
 
-/** The Durable Object class over `wasm` (jazz-wasm's durable-object build). */
-export function createJazzCore(wasm) {
+/**
+ * The Durable Object class over `wasm` (jazz-wasm's durable-object build,
+ * initialised). `index.js` exports it ready over the packaged build.
+ */
+export function jazzCoreClass(wasm) {
   return class JazzCore extends DurableObject {
     constructor(ctx, env) {
       super(ctx, env);
