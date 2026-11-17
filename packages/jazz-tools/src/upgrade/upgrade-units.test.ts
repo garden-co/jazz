@@ -301,6 +301,32 @@ export const app = schema.defineApp(tables);
     );
   });
 
+  it("leaves local `schema` names alone: a destructured binding, a parameter property, and their uses", () => {
+    const out = codemod(
+      app(`function pick(o: { schema: number }) {
+  const { schema } = o;
+  return schema;
+}
+class Box {
+  constructor(public schema: number) {}
+  get size() {
+    return this.schema;
+  }
+}
+export const t: schema.Schema<typeof tables> = undefined as never;`),
+    );
+    expect(out.text).toContain("  const { schema } = o;\n  return schema;");
+    expect(out.text).toContain("  constructor(public schema: number) {}");
+    expect(out.text).toContain("    return this.schema;");
+    // What the import names is renamed, types included.
+    expect(out.text).toContain("export const t: s.Schema<typeof schema> = undefined as never;");
+  });
+
+  it("keeps an aliased re-export of the namespace under its name", () => {
+    const out = codemod(app("export { schema as ns };"));
+    expect(out.text).toContain("export { s as ns };");
+  });
+
   it("refuses, saying what to do, when the file already uses `s`", () => {
     expect(() => codemod(app("const s = 1;"))).toThrow(
       /schema\.ts:5: schema\.ts imports `schema` from jazz-tools bare and already uses `s`, the name upgrade gives it: import it as `schema as s` \(or another name\) yourself/,

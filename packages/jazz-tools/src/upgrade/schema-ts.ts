@@ -74,10 +74,12 @@ export function codemodSchema(input: SchemaCodemodInput): SchemaCodemod {
 
 /**
  * The text with a bare `schema` import from jazz-tools renamed `s`, or
- * undefined when there's none. Only references to the namespace change: a
- * property key stays (`{ schema }` becomes `{ schema: s }`). Refuses what
- * the rename can't keep: a re-export of the namespace (alpha.66's schema.ts
- * exports its own `schema`), or an `s` the file already binds or uses.
+ * undefined when there's none. Only what resolves to the import changes, by
+ * the TypeScript checker on the file alone: a property key stays (`{ schema }`
+ * becomes `{ schema: s }`), and a local `schema` (a destructured binding, a
+ * parameter, a class field) and its uses are left as they are. Refuses what
+ * the rename can't keep: an unaliased re-export of the namespace (alpha.66's
+ * schema.ts exports its own `schema`), or an `s` the file already binds or uses.
  */
 function bareSchemaImport(
   ts: Ts,
@@ -85,7 +87,16 @@ function bareSchemaImport(
   text: string,
   root: string,
 ): { text: string; line: number } | undefined {
-  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  // A program of this file alone: enough for the checker to resolve its names.
+  const options: TS.CompilerOptions = { noLib: true, noResolve: true, types: [], allowJs: false };
+  const host = ts.createCompilerHost(options);
+  const parsed = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  host.getSourceFile = (name) => (name === file ? parsed : undefined);
+  host.fileExists = (name) => name === file;
+  host.readFile = (name) => (name === file ? text : undefined);
+  const program = ts.createProgram([file], options, host);
+  const source = program.getSourceFile(file)!;
+  const checker = program.getTypeChecker();
   const where = (node: TS.Node) =>
     `${relative(root, file) || file}:${source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1}`;
   let element: TS.ImportSpecifier | undefined;
@@ -128,16 +139,25 @@ function bareSchemaImport(
   ];
   let takenAt: TS.Node | undefined;
   let reexport: TS.Node | undefined;
+  const imported = checker.getSymbolAtLocation(element.name);
   const visit = (node: TS.Node) => {
-    if (ts.isIdentifier(node) && node !== element!.name && isReference(node)) {
-      if (node.text === "s") takenAt ??= node;
-      if (node.text === "schema") {
+    if (ts.isIdentifier(node) && node !== element!.name) {
+      if (node.text === "s" && isReference(node)) takenAt ??= node;
+      if (node.text === "schema" && imported) {
         const parent = node.parent;
-        if (ts.isExportSpecifier(parent)) reexport ??= parent;
-        else if (ts.isShorthandPropertyAssignment(parent) && parent.name === node) {
+        if (ts.isShorthandPropertyAssignment(parent) && parent.name === node) {
           // The identifier is the key too: keep it.
-          edits.push({ start: node.getStart(source), end: node.getEnd(), text: "schema: s" });
-        } else {
+          if (checker.getShorthandAssignmentValueSymbol(parent) === imported) {
+            edits.push({ start: node.getStart(source), end: node.getEnd(), text: "schema: s" });
+          }
+        } else if (ts.isExportSpecifier(parent)) {
+          if (checker.getExportSpecifierLocalTargetSymbol(parent) === imported) {
+            // `export { schema as ns }` keeps its exported name; a bare `export { schema }` can't.
+            if (parent.propertyName) {
+              edits.push({ start: node.getStart(source), end: node.getEnd(), text: "s" });
+            } else reexport ??= parent;
+          }
+        } else if (isReference(node) && checker.getSymbolAtLocation(node) === imported) {
           edits.push({ start: node.getStart(source), end: node.getEnd(), text: "s" });
         }
       }
