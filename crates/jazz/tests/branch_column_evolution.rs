@@ -519,3 +519,31 @@ fn a_store_refuses_a_lens_that_drops_a_branch_column() {
         vec![(text("before"), text("eu"))]
     );
 }
+
+/// Lacking a branch column is not dropping it: a store running v1 that
+/// admitted v2 (adding `region`), as a deploy does, still opens under a
+/// v1 with a new nullable column and no lens, and reads its rows at the
+/// default region.
+#[test]
+fn a_version_lacking_an_admitted_branch_column_still_opens() {
+    let path = scratch("lacking");
+    {
+        let db = open_file(v1(), &path).unwrap();
+        write(&db, space("a"), "before");
+        block_on(db.admit_schema_with_lenses(v2(), &[])).unwrap();
+    }
+    let noted = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("docs")
+                    .column("space", ColumnType::Text)
+                    .column("body", ColumnType::Text)
+                    .nullable_column("note", ColumnType::Text)
+                    .branch_by("space")
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let db = open_file(noted, &path).unwrap();
+    assert_eq!(bodies(&db, space("a")), vec![(text("before"), None)]);
+}

@@ -851,8 +851,7 @@ fn a_required_column_changed_in_place_reads_its_default_in_existing_rows() {
     let _held = block_on(client.subscribe(&all, ReadOpts::default())).unwrap();
     pump(&server, &[&client]);
 
-    // The server is redeployed with the change; the client reconnects.
-    drop(_link);
+    // The server is redeployed with the change; a new transport replaces the old one.
     let server = common::reinstall(
         server,
         &server_path,

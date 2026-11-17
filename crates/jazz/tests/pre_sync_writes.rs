@@ -448,8 +448,7 @@ fn a_replica_uploads_a_transaction_through_views_of_different_versions() {
     .unwrap();
     let tx = block_on(client.commit_mergeable_handle(mixed)).unwrap().0;
     assert_eq!(ids(&client), vec![4, 5]);
-    // The server is redeployed at v2; the client reconnects.
-    drop(_link);
+    // The server is redeployed at v2; a new transport replaces the old one.
     let server = common::reinstall(server, &server_path, config(v2(), 0), vec![lens()]);
     let _link = link(&client, &server);
     fate(&server, &client, tx).expect("the mixed transaction lands whole");
@@ -548,8 +547,7 @@ fn a_transaction_uploads_under_the_version_its_writes_name() {
         Ok(())
     }))
     .unwrap();
-    // The server is redeployed at v2; the client reconnects.
-    drop(_link);
+    // The server is redeployed at v2; a new transport replaces the old one.
     let server = common::reinstall(server, &server_path, config(v2(), 0), vec![lens()]);
     let _link = link(&client, &server);
     pump(&server, &[&client]);

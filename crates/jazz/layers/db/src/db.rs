@@ -1827,8 +1827,10 @@ impl Db {
         let schema = names.resolve(&config.schema, &[], names.latest())?;
         names.check_branches(&schema)?;
         names.check_types(&schema)?;
-        // A version new to this file may not drop a branch column of the
-        // version it follows: its rows are keyed by it.
+        // A version new to this file without lenses is named against the
+        // latest admitted one. It may lack a branch column (an older client
+        // reads it at its default), but may not give one another type: that
+        // would be a new stored column, and the rows are keyed by the old.
         if names.get(&version).is_none()
             && let Some((_, latest)) = names
                 .latest_version()
@@ -1837,7 +1839,7 @@ impl Db {
             let before = names.resolve(latest, &[], names.latest())?;
             for table in schema.tables.values() {
                 if let Some(current) = before.by_stored(&table.stored) {
-                    check_branch_removal(current, table)?;
+                    check_branch_retype(current, table)?;
                 }
             }
         }
@@ -4368,6 +4370,23 @@ impl Inner {
 /// one (SPEC 4, INV-BVIEW-19): an older version admitted beside it names
 /// that column by its default. The other branch-column changes are refused
 /// for every admitted version ([`crate::names::Names::check_branches`]).
+/// A branch column `next` keeps by name but stores elsewhere (its type
+/// changed) is refused: `current`'s rows are keyed by the old one.
+fn check_branch_retype(current: &Table, next: &Table) -> Result<(), Error> {
+    for column in &current.branch_by {
+        let stored = current.stored_name(column);
+        if let Some(kept) = next.columns.iter().find(|c| c.name == *column)
+            && kept.stored != stored
+        {
+            return Err(unsupported(format!(
+                "changing the type of branch column {}.{column}",
+                next.name
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn check_branch_removal(current: &Table, next: &Table) -> Result<(), Error> {
     for column in &current.branch_by {
         let stored = current.stored_name(column);

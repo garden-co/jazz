@@ -204,12 +204,13 @@ fn client_rename_lens() -> Lens {
 }
 
 /// Exercises write authorization for a v2 update whose parent version was
-/// stored under the v1 table name.
+/// stored under the v1 table name. The authority admits v2 as a deploy does
+/// and keeps running under v1, so v1's (owner-only) update policy governs.
 ///
 /// ```text
 /// writer(v1) --users insert--> authority(v1)
-/// authority  --rename lens----> authority(v2)
-/// writer(v2) --people update--> authority(v2) --policy over projected v1 parent--> accepted
+/// authority  --admits v2 with the rename lens (stays current at v1)
+/// writer(v2) --people update--> authority --policy over projected v1 parent--> accepted
 /// ```
 #[test]
 fn renamed_table_update_policy_uses_projected_parent_version() {
