@@ -92,6 +92,7 @@ impl From<&Error> for SessionError {
         let kind = match error {
             Error::App(_) => "app",
             Error::Config(_) => "config",
+            Error::TextOffset(_) => "textOffset",
             Error::Server(_) => "server",
             Error::NotFound { .. } => "notFound",
             Error::Decode { .. } => "decode",
@@ -108,6 +109,7 @@ impl From<&Error> for SessionError {
             Error::StoreHeld(_) => "storeHeld",
             Error::Stopped => "stopped",
             Error::BundleMismatch { .. } => "bundleMismatch",
+            Error::WriteRejected { .. } => "writeRejected",
             Error::Jazz(_) => "jazz",
         };
         Self {

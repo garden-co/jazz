@@ -547,6 +547,9 @@ pub enum ForegroundDbCommandRequest {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct NativeAuthRejection {
     pub sequence: u64,
+    /// The classified refusal, `AuthFailureReason::as_str`: `expired`,
+    /// `missing`, `invalid`, `disabled` or `revoked`. Builds before it sent
+    /// the server's message in this same string, which hosts still classify.
     pub reason: String,
 }
 
@@ -921,10 +924,13 @@ impl WorkerLink {
 
     fn on_event(&mut self, event: LinkEvent) {
         match event {
-            LinkEvent::AuthFailed { message, .. } => {
+            // The link already classified the refusal; forward that, so
+            // the host never re-reads the server's wording, which is not
+            // part of compatibility (`wire.rs`).
+            LinkEvent::AuthFailed { reason, .. } => {
                 self.auth_rejected = Some(NativeAuthRejection {
                     sequence: next_upstream_event(),
-                    reason: message,
+                    reason: reason.as_str().to_owned(),
                 });
             }
             LinkEvent::AuthRestored => {}

@@ -602,8 +602,8 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
     .expect("blocked update settles within timeout")
     .expect_err("update outside the claim array is rejected by the server");
     assert!(
-        matches!(blocked_error, jazz::tools::JazzError::Sync(ref message)
-            if message.ends_with("authorization_denied")),
+        matches!(blocked_error, jazz::tools::JazzError::WriteRejected { ref code, .. }
+            if code == "permission_denied"),
         "{blocked_error}"
     );
 

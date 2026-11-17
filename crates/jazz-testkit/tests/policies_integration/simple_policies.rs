@@ -1772,7 +1772,7 @@ async fn updates_require_read_and_update_permissions_inner() {
     .expect("server decides the read-only update")
     .expect_err("read permission alone must not authorize UPDATE");
     assert!(
-        error.to_string().ends_with("authorization_denied"),
+        error.to_string().contains("(permission_denied)"),
         "unexpected rejection: {error}"
     );
     let read_only_after = wait_for_rows(
@@ -1830,7 +1830,7 @@ async fn updates_require_read_and_update_permissions_inner() {
     .expect("server decides the hidden-row update")
     .expect_err("UPDATE permission alone must not authorize updating a hidden row");
     assert!(
-        error.to_string().ends_with("authorization_denied"),
+        error.to_string().contains("(permission_denied)"),
         "unexpected rejection: {error}"
     );
 

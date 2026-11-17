@@ -61,6 +61,8 @@ export interface PrintedPermissions {
 }
 
 export interface PrintPermissionsOptions {
+  /** The name `schema.ts` imports jazz-tools' `schema` namespace as, for helper types. Default `s`. */
+  dsl?: string;
   /** The name `schema.ts` binds `s.defineSchema(…)` to. Default `schema`. */
   schemaName?: string;
   /** Spread before the tables, e.g. `betterAuth.permissions`. */
@@ -206,7 +208,8 @@ export function printPermissions(
   const skip = new Set(options.skipTables ?? []);
   const constants = options.constants ?? new Map<string, string>();
 
-  const first = new Printer(app, permissions, schemaName, constants, undefined);
+  const dsl = options.dsl ?? "s";
+  const first = new Printer(app, permissions, schemaName, constants, undefined, dsl);
   first.print(skip);
   const taken = new Set<string>([
     schemaName,
@@ -225,7 +228,7 @@ export function printPermissions(
   let printer!: Printer;
   let body = "";
   for (let round = 0; round < 8; round++) {
-    printer = new Printer(app, permissions, schemaName, constants, selected);
+    printer = new Printer(app, permissions, schemaName, constants, selected, dsl);
     body = printer.print(skip);
     let changed = false;
     for (const [key, helper] of selected.byKey) {
@@ -319,8 +322,8 @@ function selectHelpers(occurrences: Occurrence[], taken: Set<string>): Selection
       "fixed" in p ? [`${pascal(firstOcc.args[i]!.name)}${pascal(p.fixed.replace(/"/g, ""))}`] : [],
     );
     // A combination too long to name by its parts is named for the row it checks.
-    const row = /^s\.Row<typeof \w+, "(\w+)">$/.exec(
-      firstOcc.args.find((a) => a.type.startsWith("s.Row<"))?.type ?? "",
+    const row = /^\w+\.Row<typeof \w+, "(\w+)">$/.exec(
+      firstOcc.args.find((a) => /^\w+\.Row</.test(a.type))?.type ?? "",
     )?.[1];
     const hint =
       (firstOcc.hint === "anyRule" || firstOcc.hint === "allRules") && row
@@ -460,6 +463,7 @@ class Printer {
     readonly schemaName: string,
     readonly constants: ReadonlyMap<string, string>,
     readonly selection: Selection | undefined,
+    readonly dsl: string = "s",
   ) {}
 
   print(skip: Set<string>): string {
@@ -746,7 +750,7 @@ class Printer {
     return {
       text: ctx.row,
       name: ctx.row,
-      type: `s.Row<typeof ${this.schemaName}, ${JSON.stringify(ctx.table)}>`,
+      type: `${this.dsl}.Row<typeof ${this.schemaName}, ${JSON.stringify(ctx.table)}>`,
     };
   }
 
@@ -755,7 +759,7 @@ class Printer {
     return {
       text: member(ctx.row, column),
       name: column,
-      type: valueType(this.kindOf(ctx.table, column)),
+      type: valueType(this.kindOf(ctx.table, column), this.dsl),
     };
   }
 
@@ -991,7 +995,9 @@ class Printer {
             return [left, lit(named)];
           }
         }
-        const values = ast.values.map((v) => this.value(v, ctx, scope, kind, left));
+        // An enum column's list takes its union too: `role: [role]` with `role: "admin" | …`.
+        const type = this.enumType(scope.table, left);
+        const values = ast.values.map((v) => this.value(v, ctx, scope, kind, left, type));
         if (values.some((v) => !v)) return undefined;
         return [left, join(values as Frag[], (texts) => `[${texts.join(", ")}]`)];
       }
@@ -1289,7 +1295,7 @@ class Printer {
         const name = camel(key.replace(/^\$/, "").replace(/\./g, " ")) || "value";
         return {
           text: PLACEHOLDER(0),
-          args: [{ text, name, type: type ?? valueType(valueKind), literal: true }],
+          args: [{ text, name, type: type ?? valueType(valueKind, this.dsl), literal: true }],
           occ: [],
         };
       }
@@ -1311,9 +1317,9 @@ class Printer {
   }
 }
 
-function valueType(kind: string | undefined): string {
-  if (kind === "uuid") return "s.Uuid";
-  return `s.Value<${JSON.stringify(kind ?? "string")}>`;
+function valueType(kind: string | undefined, dsl = "s"): string {
+  if (kind === "uuid") return `${dsl}.Uuid`;
+  return `${dsl}.Value<${JSON.stringify(kind ?? "string")}>`;
 }
 
 /** `value` inside `render(…)`, keeping its placeholders. */

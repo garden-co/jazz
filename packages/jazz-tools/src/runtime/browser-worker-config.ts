@@ -18,7 +18,7 @@ import {
 
 import { normalizeOtlpEndpoint } from "./sync-telemetry.js";
 
-const SHARED_RUNTIME_PROTOCOL_VERSION = "jazz-shared-runtime-v2";
+const SHARED_RUNTIME_PROTOCOL_VERSION = "jazz-shared-runtime-v3";
 // Coupled to IndexedDbPageStore's durable epoch. Keeping it in the database
 // scope prevents an old worker from opening incompatible root metadata.
 const BROWSER_STORAGE_FORMAT_VERSION = "idbtree-v1";

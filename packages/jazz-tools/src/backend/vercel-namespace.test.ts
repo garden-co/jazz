@@ -2,7 +2,14 @@ import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { perBranch, vercel } from "./index.js";
 import { logStoreOpened } from "./store-log.js";
-import { coreName, DRIVE_NAME_MAX, driveName, SANDBOX_NAME_MAX } from "./vercel-store.js";
+import {
+  coreName,
+  DRIVE_NAME_MAX,
+  driveName,
+  refuseRegionMove,
+  SANDBOX_NAME_MAX,
+  warnFunctionRegion,
+} from "./vercel-store.js";
 
 /**
  * The core name jazz-tools gave a deployment by default before `namespace`
@@ -114,6 +121,61 @@ describe("vercel() namespace", () => {
     );
   });
 
+  it("needs a region, naming the one that keeps existing cores where they are", () => {
+    expect(() => vercel({ namespace: "production" } as never)).toThrow(/pass `region`/);
+    let message = "";
+    try {
+      vercel({ namespace: "production" } as never);
+    } catch (error) {
+      message = String(error);
+    }
+    expect(message).toContain('vercel({ namespace, region: "iad1" })');
+    expect(message).toContain("https://vercel.com/docs/sandbox/concepts/regions");
+    expect(() => vercel({ namespace: "production", region: "" })).toThrow(
+      /region must be a Vercel region/,
+    );
+    expect(() => vercel({ namespace: "production", region: 1 as never })).toThrow(
+      /region must be a Vercel region/,
+    );
+    expect(() => vercel({ namespace: "production", region: "fra1" })).not.toThrow();
+  });
+
+  it("refuses a core in another region than configured", () => {
+    expect(() => refuseRegionMove("core jazz-prj-1-production", "iad1", "iad1")).not.toThrow();
+    expect(() => refuseRegionMove("core jazz-prj-1-production", "iad1", "fra1")).toThrow(
+      /core jazz-prj-1-production is in iad1, but `region` is "fra1"\. Moving a core to another region isn't supported yet/,
+    );
+  });
+
+  it("warns once per process when the function runs in another region than its core, however many copies of jazz-tools load", async () => {
+    const warn = vi.fn();
+    // Its own region, or none (outside Vercel): nothing to say.
+    warnFunctionRegion("jazz-prj-1-production", "iad1", { VERCEL_REGION: "iad1" }, warn);
+    warnFunctionRegion("jazz-prj-1-production", "iad1", {}, warn);
+    expect(warn).not.toHaveBeenCalled();
+    warnFunctionRegion("jazz-prj-1-production", "iad1", { VERCEL_REGION: "sfo1" }, warn);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /runs in sfo1, but its core jazz-prj-1-production is in iad1, so every request to the core makes a round trip between the two regions/,
+      ),
+    );
+    warnFunctionRegion("jazz-prj-1-production", "iad1", { VERCEL_REGION: "sfo1" }, warn);
+    // Next.js bundles each route on its own: another copy of this module.
+    vi.resetModules();
+    const copy = await import("./vercel-store.js");
+    expect(copy.warnFunctionRegion).not.toBe(warnFunctionRegion);
+    copy.warnFunctionRegion("jazz-prj-1-production", "iad1", { VERCEL_REGION: "sfo1" }, warn);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps core and Drive names whatever the region", () => {
+    // Names never include the region: `region: "iad1"` reaches the cores
+    // earlier versions created, under the names they gave them.
+    expect(coreName("prj_1", "production", {}).name).toBe("jazz-prj-1-production");
+    expect(driveName("jazz-prj-1-production")).toBe("jazz-prj-1-production-data");
+  });
+
   it("is required, with the usual choices to copy", () => {
     expect(() => vercel({} as never)).toThrow(/pass `namespace`/);
     expect(() => vercel(undefined as never)).toThrow(/pass `namespace`/);
@@ -123,15 +185,21 @@ describe("vercel() namespace", () => {
     } catch (error) {
       message = String(error);
     }
-    expect(message).toContain("vercel({ namespace: ({ environment }) => environment })");
     expect(message).toContain(
-      'vercel({ namespace: ({ environment, branch }) => environment === "production" ? "production" : perBranch(branch) })',
+      'vercel({ namespace: ({ environment }) => environment, region: "iad1" })',
+    );
+    expect(message).toContain(
+      'vercel({ namespace: ({ environment, branch }) => environment === "production" ? "production" : perBranch(branch), region: "iad1" })',
     );
   });
 
   it("refuses `name`, saying how to migrate", () => {
     expect(() => vercel({ name: "jazz-prj-1-production" } as never)).toThrow(
       /`name` is now `namespace`.*namespace: "<rest>".*perBranch/,
+    );
+    // The recipe to copy is complete: it doesn't lead to the region error next.
+    expect(() => vercel({ name: "jazz-prj-1-production" } as never)).toThrow(
+      'perBranch(branch), region: "iad1" }) with perBranch',
     );
     expect(() => vercel({ namespace: "production", name: "x" } as never)).toThrow(
       /`name` is now `namespace`/,
@@ -153,12 +221,14 @@ describe("vercel() namespace", () => {
   });
 
   it("refuses an empty or oversized namespace", () => {
-    expect(() => vercel({ namespace: "" })).toThrow(/namespace is empty/);
-    expect(() => vercel({ namespace: "--" })).toThrow(/no letters or digits/);
-    expect(() => vercel({ namespace: 3 as never })).toThrow(/must be a string/);
+    expect(() => vercel({ namespace: "", region: "iad1" })).toThrow(/namespace is empty/);
+    expect(() => vercel({ namespace: "--", region: "iad1" })).toThrow(/no letters or digits/);
+    expect(() => vercel({ namespace: 3 as never, region: "iad1" })).toThrow(/must be a string/);
     // With a typical project id (32 characters) the prefix takes 38.
-    expect(() => vercel({ namespace: "a".repeat(SANDBOX_NAME_MAX - 38) })).not.toThrow();
-    expect(() => vercel({ namespace: "a".repeat(SANDBOX_NAME_MAX - 37) })).toThrow(
+    expect(() =>
+      vercel({ namespace: "a".repeat(SANDBOX_NAME_MAX - 38), region: "iad1" }),
+    ).not.toThrow();
+    expect(() => vercel({ namespace: "a".repeat(SANDBOX_NAME_MAX - 37), region: "iad1" })).toThrow(
       /is 91 characters; with this project's prefix jazz-prj-x+- it may have at most 90/,
     );
     expect(() => coreName("prj_1", () => "a".repeat(200), {})).toThrow(/at most 117/);

@@ -8,8 +8,16 @@
 
 use futures_core::Stream;
 use futures_util::StreamExt as _;
+/// The page of a cell a [`Jazz::splice`] edits, in its units: bytes of a
+/// bytes cell ([`Page::bytes`]), or UTF-8 bytes of a text one
+/// ([`Page::text`], the Rust way). `Page::TextUtf16` counts UTF-16 code
+/// units, for interop with hosts that count those.
+pub use jazz::db::LargeValueUpdatePage as Page;
+/// One splice of a [`Page`]: `delete` units at the page-relative `at`
+/// replaced by `insert` (UTF-8 for text). [`Splice::text`] builds one from
+/// a `&str`.
+pub use jazz::db::LargeValueUpdateSplice as Splice;
 use jazz::db::{JsonSetEdit, LargeValueUpdate};
-pub use jazz::db::{LargeValueUpdatePage as Page, LargeValueUpdateSplice as Splice};
 use jazz::tools::{ObjectId, StreamingUpload, Value};
 
 use crate::error::{Error, Result};
@@ -33,7 +41,23 @@ impl JsonColumn for Option<Json> {}
 
 impl Jazz {
     /// Splices within one page of a bytes or text cell: `splices` apply in
-    /// order, each at a page-relative offset, as TS's `applyDiffs` does.
+    /// order, each at a page-relative offset in the value the earlier ones
+    /// produced, as TS's `applyDiffs` does.
+    ///
+    /// Offsets count bytes on a bytes column ([`Page::bytes`]) and UTF-8
+    /// bytes on a text one ([`Page::text`], [`Splice::text`]): `str`
+    /// indices, as everywhere in Rust. A text offset inside a code point is
+    /// refused with [`Error::TextOffset`]. ([`Page::TextUtf16`] counts
+    /// UTF-16 code units instead, as TS and Kotlin do; it is there for
+    /// interop, not for Rust strings.)
+    ///
+    /// ```ignore
+    /// // "héllo" → "hello wörld": "é" is two bytes, at 1..3.
+    /// jazz.splice(id, notes::body(), Page::text(0..6), vec![
+    ///     Splice::text(1, 2, "e"),
+    ///     Splice::text(5, 0, " wörld"),
+    /// ]).await?;
+    /// ```
     pub async fn splice<T: Table, V: LargeColumn>(
         &self,
         id: ObjectId,
@@ -369,7 +393,8 @@ impl crate::transaction::Transaction {
         self.read_back(id).await
     }
 
-    /// [`Jazz::splice`] staged in the transaction.
+    /// [`Jazz::splice`] staged in the transaction, in the same units (UTF-8
+    /// bytes on a text column).
     pub fn splice<T: Table, V: LargeColumn>(
         &self,
         id: ObjectId,

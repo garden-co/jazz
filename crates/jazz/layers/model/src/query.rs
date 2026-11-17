@@ -41,6 +41,7 @@ include!("query/validation.rs");
 
 // Canonical request ordering, identity bytes, and normalized-facing contracts.
 include!("query/canonical_request.rs");
+include!("query/union_arm_label.rs");
 
 include!("query/doctest_support.rs");
 include!("query/tests.rs");
