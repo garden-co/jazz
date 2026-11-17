@@ -4,9 +4,8 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { generateSecret, identityOf, signChallenge, signToken } from "../local-first-auth/index.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
-import { defineShippedApp } from "../testing/client-migrations.js";
+import { testApp, testPermissions } from "../testing/index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
-import { schema as s } from "../index.js";
 import {
   acceptDeviceAccounts,
   createJazz,
@@ -26,15 +25,15 @@ import {
 
 const opt = { deviceAccounts: true } as const;
 
-const app = await defineShippedApp({
-  todos: s.table({ title: s.string(), owner: s.uuid() }, {}),
+const app = testApp({
+  tables: { todos: { columns: { title: "string", owner: "uuid" } } },
 });
-const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user });
-  policy.todos.allowInsert.where({ owner: session.user });
-  policy.todos.allowUpdate.never();
-  policy.todos.allowDelete.never();
-});
+const permissions = {
+  format: 1,
+  tables: { todos: { read: "owner = session.user", insert: "owner = session.user" } },
+};
+/** The same permissions, compiled, for a browser session (`createJazzClient`). */
+const clientPermissions = testPermissions(app, permissions);
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
@@ -83,7 +82,7 @@ describe("forReqUser for a device account", () => {
     const origin = await serve(jazz);
     const device = await createJazzClient({
       app,
-      permissions,
+      permissions: clientPermissions,
       serverUrl: `${origin}/jazz`,
       driver: { type: "memory" },
       initial: "device",
