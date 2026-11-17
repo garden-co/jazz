@@ -67,13 +67,14 @@ use crate::values::{
     to_sql, unsupported,
 };
 pub use sync::{
-    ACCEPTED, AccessProof, Acting, BuiltOn, CatalogueSchema, CatalogueUpdate, CatalogueVersion,
-    Cell as SyncCell, CellDelta, CorpusReader, FirstLoad, FrameJoiner, Image, MAX_SEQ, Outcome,
-    PENDING, Pos, ReadSpan, RejectedTransaction, RelationSnapshot, RemoteLinkHint,
-    SerializedReadResult, Since, SubscriberId, SyncMessage, Transport, TransportError, TxName,
-    UploadRefusal, UploadStatus, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta, WireError,
-    WireKind, WireOp, WirePull, WireTarget, WireTransport, WireTransportAdapter, WireWrite,
-    WriteConflict, decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
+    ACCEPTED, AccessProof, Acting, BuiltOn, CatalogueCell, CatalogueSchema, CatalogueUpdate,
+    CatalogueVersion, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad, FrameJoiner, Image,
+    MAX_SEQ, Outcome, PENDING, Pos, ReadSpan, RejectedTransaction, RelationSnapshot,
+    RemoteLinkHint, SerializedReadResult, Since, SubscriberId, SyncMessage, Transport,
+    TransportError, TxName, UploadRefusal, UploadStatus, Upstream, WireBase, WireChunk,
+    WireChunkRef, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, WireTransport,
+    WireTransportAdapter, WireWrite, WriteConflict, decode_message, duplex, encode_frames,
+    validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -2181,7 +2182,7 @@ impl Db {
     }
 
     /// The catalogue versions an upstream sent that this build cannot read
-    /// (a column type or schema key it does not know): each skipped, with a
+    /// (a column type or other variant it does not know): each skipped, with a
     /// `SchemaVersionUnsupported` error saying why. The store keeps syncing
     /// the versions it knows.
     pub fn unsupported_schema_versions(&self) -> Vec<(crate::ids::SchemaVersionId, Error)> {

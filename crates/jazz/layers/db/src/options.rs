@@ -505,7 +505,7 @@ pub enum Reason {
     /// another identity (code `Protocol`): relays serve one identity.
     IdentityMismatch,
     /// An upstream's catalogue named a schema version this build cannot read
-    /// (a column type or schema key it does not know): the version is
+    /// (a column type or other variant it does not know): the version is
     /// skipped and the store keeps syncing the versions it knows (code
     /// `Schema`).
     SchemaVersionUnsupported,
