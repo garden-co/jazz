@@ -593,10 +593,9 @@ describe("thin client", () => {
   it("ends a live query sent ahead of a schema the server refuses with that refusal", async () => {
     const server = await startServer();
     const db = await thinDb(server);
-    const stale = s.defineApp(
-      { notes: s.table({ text: s.string(), done: s.boolean(), extra: s.string() }, {}) },
-      { migrations: "none" },
-    );
+    const stale = testApp({
+      tables: { notes: { columns: { text: "string", done: "boolean", extra: "string" } } },
+    });
     const sent = recordSentAhead();
     let liveError: Error | undefined;
     const updates: unknown[] = [];
