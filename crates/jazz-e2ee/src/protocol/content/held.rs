@@ -31,6 +31,7 @@ use crate::registry::Registry;
 use super::super::domain::{AccountDomain, AppDomain};
 use super::super::error::{ProtocolError, ProtocolResult, UnsupportedCapability};
 use super::super::json;
+use super::super::position::Position;
 use super::super::records::space::{SpaceAddress, SpaceRoot, SpaceScope, SpaceSuccessor};
 use super::super::space::build::RootRecords;
 use super::super::space::keys::{Outcome, marker};
@@ -373,6 +374,8 @@ pub struct KnownChain {
     epochs: Vec<String>,
     unresolved: bool,
     absent: BTreeSet<String>,
+    /// The cut of the read these came from.
+    through: Option<Position>,
 }
 
 impl KnownChain {
@@ -392,9 +395,15 @@ impl KnownChain {
 
     /// Takes a newer read of the chain: when it advances (more versions,
     /// or the chain is resolved further) or names another root, the epochs
-    /// remembered as absent are forgotten. An older or equal read changes
-    /// nothing.
+    /// remembered as absent are forgotten. A read at an earlier cut than
+    /// the known one, or one that does not advance it, changes nothing.
     fn observe(&mut self, chain: &SpaceChain) {
+        if self
+            .through
+            .is_some_and(|through| chain.through() < through)
+        {
+            return;
+        }
         let epochs: Vec<String> = chain
             .versions
             .iter()
@@ -408,6 +417,7 @@ impl KnownChain {
             self.epochs = epochs;
             self.unresolved = chain.unresolved.is_some();
             self.absent.clear();
+            self.through = Some(chain.through());
         }
     }
 }

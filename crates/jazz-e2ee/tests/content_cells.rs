@@ -1377,3 +1377,58 @@ fn plaintext_and_equality_values_never_print() {
         assert_redacted(&debug, secret);
     }
 }
+
+/// A read of the chain that is older than the one the device knows never
+/// replaces it, even when the older read is resolved and the newer one is
+/// unresolved past a version this device lacks.
+#[test]
+fn an_older_read_of_the_chain_never_replaces_a_newer_one() {
+    use common::mechanisms::{OTHER_SEAL, OTHER_SIGN, custom_registry};
+    use jazz_e2ee::agility::MechanismConfig;
+    use jazz_e2ee::protocol::space::{AccountDirectory, SpaceChain};
+
+    let (registry, _) = custom_registry(OTHER_SEAL);
+    let mut world = World::with_registry(26, registry);
+    world.account(ALICE);
+    world.account_with(
+        BOB,
+        MechanismConfig {
+            signature: OTHER_SIGN.into(),
+            ..MechanismConfig::default()
+        },
+    );
+    world.add_member(ALICE);
+    world.add_member(BOB);
+    world.create(ALICE);
+    let address = space(ROW);
+    // A reader without Bob's signing mechanism.
+    let builtin = Registry::builtin();
+    let read_chain = |world: &World| {
+        let read = world.read();
+        let directory = AccountDirectory::new(
+            &read.ledgers,
+            &world.shared.domain,
+            &builtin,
+            read.space.through,
+        )
+        .unwrap();
+        SpaceChain::replay(&read.space, &directory)
+            .unwrap()
+            .unwrap()
+    };
+    let mut held = held_of(&world, ALICE, ROW);
+    let older = read_chain(&world);
+    let v1 = world.rotate(ALICE);
+    world.deliver(ALICE, BOB, &v1);
+    world.rotate(BOB);
+    let newer = read_chain(&world);
+    assert!(older.unresolved.is_none() && newer.unresolved.is_some());
+    assert!(older.through() < newer.through());
+
+    held.observe_chain(&newer);
+    assert!(held.incomplete(&address), "the device lacks {v1}");
+    held.observe_chain(&older);
+    let known = held.known(&address).unwrap();
+    assert_eq!(known.epochs().len(), 2);
+    assert!(held.incomplete(&address), "the device still lacks {v1}");
+}
