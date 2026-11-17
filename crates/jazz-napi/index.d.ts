@@ -236,6 +236,18 @@ export declare class NapiDb {
    * or below `high_water` is reused.
    */
   seedForegroundTxTimeHighWater(highWater: bigint): void
+  /**
+   * Serve one of a thin session's transaction requests (SPEC 8.14), as
+   * the backend's client linked to the core as that session: `request`
+   * is the request's wire frame, the answer the response's. A commit
+   * answers once the core accepted it. One request at a time.
+   */
+  serveThinTransaction(request: Uint8Array): Uint8Array | PendingNativeRead
+  /**
+   * End the thin session's open transactions and uploads: nothing of
+   * them reached the core.
+   */
+  releaseThinTransactions(): Uint8Array | PendingNativeRead
   /** Capture a snapshot reference, as its persisted string's bytes. */
   captureSnapshot(): Uint8Array | PendingNativeRead
   /**
@@ -251,6 +263,52 @@ export declare class NapiDb {
    */
   waitForSync(tier: string, writer?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
   close(): Promise<undefined>
+}
+
+/**
+ * One thin connection's frames split between the core and the session's
+ * backend, in the client's order (SPEC 8.14; `jazz::thin_transactions::
+ * ThinRouter`). Messages are WebSocket messages (frame batches).
+ */
+export declare class NapiThinRouter {
+  constructor()
+  /**
+   * Take one client message. Throws when it does not decode: the
+   * connection is broken.
+   */
+  fromClient(message: Uint8Array): void
+  /**
+   * Note one message the core sent the client: whether it answered a
+   * request sent to the core.
+   */
+  fromCore(message: Uint8Array): boolean
+  /**
+   * Note the backend's answer (a response frame, as
+   * `serveThinTransaction` gives it), and return the messages that carry
+   * it to the client.
+   */
+  answer(answer: Uint8Array): Array<Uint8Array>
+  /**
+   * Answer backend request `id` with an error the backend gave in its
+   * place (`code`, `message`): a request it stopped waiting for, or one
+   * it could not serve. Returns the messages that carry it to the client.
+   */
+  refuse(id: number, code: string, message: string): Array<Uint8Array>
+  /**
+   * Whether a client's Hello (its first message after the prelude) asks
+   * for thin results: a thin client, whose transactions its backend
+   * serves.
+   */
+  static asksThinResults(message: Uint8Array): boolean
+  /** What may go now, in order. */
+  ready(): Array<ThinStep>
+  /**
+   * The public schema JSON the client bound the connection to, once it
+   * did.
+   */
+  schema(): Uint8Array | null
+  /** Whether something routed waits on an answer that has not come. */
+  isWaiting(): boolean
 }
 
 /**
@@ -732,6 +790,19 @@ export interface SubscriptionServerFailureReason {
    * thrown core error's `code`.
    */
   errorCode: string
+}
+
+/**
+ * One step a [`NapiThinRouter`] releases: a message for the core, or a
+ * request frame for the backend's client (`serveThinTransaction`).
+ */
+export interface ThinStep {
+  core?: Uint8Array
+  backend?: Uint8Array
+  /** The backend request's id. */
+  id?: number
+  /** Whether the backend request is a commit. */
+  commit?: boolean
 }
 
 export interface UpdateOptions {

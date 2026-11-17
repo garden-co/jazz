@@ -1000,6 +1000,32 @@ impl Host {
 struct Inner {
     binding: Binding,
     host: Rc<Host>,
+    /// The thin session's transactions this database serves, when it is a
+    /// backend's client for one (`serveThinTransaction`): taken while a
+    /// request is served, so requests run one at a time.
+    thin: Rc<RefCell<Option<ThinState>>>,
+}
+
+/// A thin session's transactions, made on the first request.
+enum ThinState {
+    Idle(jazz::thin_transactions::ThinTransactions),
+    Serving,
+}
+
+/// The session's transactions while a request is served: back in their cell
+/// when it ends, or when the caller drops it (a request it stopped waiting
+/// for), so the next request finds them.
+struct Serving {
+    cell: Rc<RefCell<Option<ThinState>>>,
+    transactions: Option<jazz::thin_transactions::ThinTransactions>,
+}
+
+impl Drop for Serving {
+    fn drop(&mut self) {
+        if let Some(transactions) = self.transactions.take() {
+            *self.cell.borrow_mut() = Some(ThinState::Idle(transactions));
+        }
+    }
 }
 
 impl Inner {
@@ -1020,7 +1046,11 @@ impl Inner {
                 // refusal for the next delivery.
                 callback.call(event, ThreadsafeFunctionCallMode::NonBlocking) == napi::Status::Ok
             }));
-        Self { binding, host }
+        Self {
+            binding,
+            host,
+            thin: Rc::default(),
+        }
     }
 
     /// A write's receipt. A rejected write is reported to the
@@ -2687,6 +2717,92 @@ impl NapiDb {
         Ok(())
     }
 
+    /// Serve one of a thin session's transaction requests (SPEC 8.14), as
+    /// the backend's client linked to the core as that session: `request`
+    /// is the request's wire frame, the answer the response's. A commit
+    /// answers once the core accepted it. One request at a time.
+    #[napi(js_name = "serveThinTransaction")]
+    pub fn serve_thin_transaction(
+        &self,
+        request: Uint8Array,
+    ) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
+        let inner = self.open_inner()?;
+        let request = match jazz::wire::decode_postcard_frame(&request) {
+            Ok(jazz::wire::WireFrame::ThinRequest(request)) => request,
+            _ => {
+                return Err(napi::Error::from_reason(
+                    "serveThinTransaction takes a thin request frame",
+                )
+                .into());
+            }
+        };
+        let binding = inner.binding.clone();
+        let thin = Rc::clone(&inner.thin);
+        let state = thin.borrow_mut().replace(ThinState::Serving);
+        let transactions = match state {
+            Some(ThinState::Idle(transactions)) => transactions,
+            None => {
+                let made = if binding.author() == jazz::ids::AuthorSubject::SYSTEM {
+                    // A trusted backend client's session, linked as the
+                    // backend itself: its writes are the backend's, as the
+                    // core ran them as SYSTEM.
+                    Ok(jazz::thin_transactions::ThinTransactions::trusted())
+                } else {
+                    jazz::thin_transactions::ThinTransactions::new(binding.author())
+                };
+                match made {
+                    Ok(transactions) => transactions,
+                    Err(error) => {
+                        *thin.borrow_mut() = None;
+                        return Err(host_error(HostError::Engine(error)).into());
+                    }
+                }
+            }
+            Some(ThinState::Serving) => {
+                *thin.borrow_mut() = Some(ThinState::Serving);
+                return Err(napi::Error::from_reason(
+                    "serveThinTransaction serves one request at a time",
+                )
+                .into());
+            }
+        };
+        let mut serving = Serving {
+            cell: thin,
+            transactions: Some(transactions),
+        };
+        read_or_pending(Box::pin(async move {
+            let body = serving
+                .transactions
+                .as_mut()
+                .expect("held until dropped")
+                .serve(&binding.db, request.id, &request.op)
+                .await;
+            drop(serving);
+            jazz::wire::encode_frame(&jazz::wire::WireFrame::ThinResponse(
+                jazz::thin::ThinResponse {
+                    id: request.id,
+                    body,
+                },
+            ))
+            .map_err(|error| HostError::Argument(format!("encode thin answer: {error}")))
+        }))
+    }
+
+    /// End the thin session's open transactions and uploads: nothing of
+    /// them reached the core.
+    #[napi(js_name = "releaseThinTransactions")]
+    pub fn release_thin_transactions(&self) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
+        let inner = self.open_inner()?;
+        let binding = inner.binding.clone();
+        let state = inner.thin.borrow_mut().take();
+        read_or_pending(Box::pin(async move {
+            if let Some(ThinState::Idle(transactions)) = state {
+                transactions.release(&binding.db).await;
+            }
+            Ok(Vec::new())
+        }))
+    }
+
     /// Capture a snapshot reference, as its persisted string's bytes.
     #[napi(js_name = "captureSnapshot")]
     pub fn capture_snapshot(&self) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
@@ -3294,5 +3410,168 @@ mod subscription_pool_tests {
         );
         assert!(drained[0].1.closed);
         assert!(streams.is_empty());
+    }
+}
+
+/// One thin connection's frames split between the core and the session's
+/// backend, in the client's order (SPEC 8.14; `jazz::thin_transactions::
+/// ThinRouter`). Messages are WebSocket messages (frame batches).
+#[napi]
+pub struct NapiThinRouter {
+    router: RefCell<jazz::thin_transactions::ThinRouter>,
+}
+
+/// One step a [`NapiThinRouter`] releases: a message for the core, or a
+/// request frame for the backend's client (`serveThinTransaction`).
+#[napi(object)]
+pub struct ThinStep {
+    pub core: Option<Uint8Array>,
+    pub backend: Option<Uint8Array>,
+    /// The backend request's id.
+    pub id: Option<f64>,
+    /// Whether the backend request is a commit.
+    pub commit: Option<bool>,
+}
+
+#[napi]
+impl NapiThinRouter {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self {
+            router: RefCell::default(),
+        }
+    }
+
+    /// Take one client message. Throws when it does not decode: the
+    /// connection is broken.
+    #[napi(js_name = "fromClient")]
+    pub fn from_client(&self, message: Uint8Array) -> napi::Result<()> {
+        let frames = jazz::wire::decode_websocket_frame_batch(&message)
+            .map_err(|error| napi::Error::from_reason(format!("undecodable message: {error}")))?;
+        self.router
+            .borrow_mut()
+            .from_client(frames)
+            .map_err(napi::Error::from_reason)
+    }
+
+    /// Note one message the core sent the client: whether it answered a
+    /// request sent to the core.
+    #[napi(js_name = "fromCore")]
+    pub fn from_core(&self, message: Uint8Array) -> bool {
+        jazz::wire::decode_websocket_frame_batch(&message)
+            .is_ok_and(|frames| self.router.borrow_mut().from_core(&frames))
+    }
+
+    /// Note the backend's answer (a response frame, as
+    /// `serveThinTransaction` gives it), and return the messages that carry
+    /// it to the client.
+    #[napi]
+    pub fn answer(&self, answer: Uint8Array) -> napi::Result<Vec<Uint8Array>> {
+        let Ok(jazz::wire::WireFrame::ThinResponse(answer)) =
+            jazz::wire::decode_postcard_frame(&answer)
+        else {
+            return Err(napi::Error::from_reason(
+                "answer takes a thin response frame",
+            ));
+        };
+        self.router.borrow_mut().answered(&answer);
+        jazz::thin_transactions::answer_frames(answer)
+            .into_iter()
+            .map(|frame| {
+                jazz::wire::encode_websocket_frame_batch(&[frame])
+                    .map(Uint8Array::from)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))
+            })
+            .collect()
+    }
+
+    /// Answer backend request `id` with an error the backend gave in its
+    /// place (`code`, `message`): a request it stopped waiting for, or one
+    /// it could not serve. Returns the messages that carry it to the client.
+    #[napi]
+    pub fn refuse(&self, id: f64, code: String, message: String) -> napi::Result<Vec<Uint8Array>> {
+        let frame = jazz::wire::encode_frame(&jazz::wire::WireFrame::ThinResponse(
+            jazz::thin::ThinResponse {
+                id: id as u64,
+                body: jazz::thin::ThinBody::Error { code, message },
+            },
+        ))
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        self.answer(frame.into())
+    }
+
+    /// Whether a client's Hello (its first message after the prelude) asks
+    /// for thin results: a thin client, whose transactions its backend
+    /// serves.
+    #[napi(js_name = "asksThinResults")]
+    pub fn asks_thin_results(message: Uint8Array) -> bool {
+        let Ok(frames) = jazz::wire::decode_websocket_frame_batch(&message) else {
+            return false;
+        };
+        frames.first().is_some_and(|frame| {
+            matches!(
+                jazz::wire::decode_frame(frame),
+                Ok(jazz::wire::WireFrame::Hello(hello))
+                    if hello.features & jazz::wire::FEATURE_THIN_RESULTS != 0
+            )
+        })
+    }
+
+    /// What may go now, in order.
+    #[napi]
+    pub fn ready(&self) -> napi::Result<Vec<ThinStep>> {
+        let mut steps = Vec::new();
+        for step in self.router.borrow_mut().ready() {
+            match step {
+                jazz::thin_transactions::Step::ToCore(frames) => {
+                    for frame in frames {
+                        let message = jazz::wire::encode_websocket_frame_batch(&[frame])
+                            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                        steps.push(ThinStep {
+                            core: Some(message.into()),
+                            backend: None,
+                            id: None,
+                            commit: None,
+                        });
+                    }
+                }
+                jazz::thin_transactions::Step::ToBackend(request) => {
+                    let id = request.id as f64;
+                    let commit = matches!(request.op, jazz::thin::ThinOp::Commit { .. });
+                    let frame =
+                        jazz::wire::encode_frame(&jazz::wire::WireFrame::ThinRequest(request))
+                            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    steps.push(ThinStep {
+                        core: None,
+                        backend: Some(frame.into()),
+                        id: Some(id),
+                        commit: Some(commit),
+                    });
+                }
+            }
+        }
+        Ok(steps)
+    }
+
+    /// The public schema JSON the client bound the connection to, once it
+    /// did.
+    #[napi]
+    pub fn schema(&self) -> Option<Uint8Array> {
+        self.router
+            .borrow()
+            .schema()
+            .map(|schema| schema.to_vec().into())
+    }
+
+    /// Whether something routed waits on an answer that has not come.
+    #[napi(js_name = "isWaiting")]
+    pub fn is_waiting(&self) -> bool {
+        self.router.borrow().is_waiting()
+    }
+}
+
+impl Default for NapiThinRouter {
+    fn default() -> Self {
+        Self::new()
     }
 }
