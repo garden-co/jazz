@@ -4103,6 +4103,7 @@ impl Db {
         callback: impl AsyncFnOnce(&mut MergeableTx<'_>) -> Result<T, Error>,
     ) -> Result<(T, TxReceipt), Error> {
         {
+            let _operation = self.inner.operation.lock().await;
             let inner = self.inner().await?;
             inner.require_mutation_admission()?;
             if inner.tx.borrow().is_some() {
@@ -4119,6 +4120,7 @@ impl Db {
         let mut guard = CallbackTransactionGuard {
             db: self,
             restore_seq: None,
+            finalization: None,
             armed: true,
         };
         let mut tx = MergeableTx { db: self, identity };
@@ -4128,6 +4130,7 @@ impl Db {
             Ok(value)
         }
         .await;
+        guard.finalization = Some(self.inner.operation.lock().await);
         let captured;
         let prior;
         let changed = {
@@ -5017,12 +5020,14 @@ fn delta(
 
 /// A callback may suspend at any await, and may panic. Dropping
 /// [`Db::transaction_as`]'s future there, or unwinding out of it, rolls the
-/// unit back as its error path does ([`Store::roll_back_callback_tx`]) before
-/// another unit can start.
+/// unit back as its error path does ([`Store::roll_back_callback_tx`]). If
+/// another operation owns the connection, invalidate it instead of rolling
+/// back underneath that operation; the host must reopen the database.
 struct CallbackTransactionGuard<'a> {
     db: &'a Db,
     /// `inner.seq` before the unit took its own seq, once it has.
     restore_seq: Option<u64>,
+    finalization: Option<futures::lock::MutexGuard<'a, ()>>,
     armed: bool,
 }
 
@@ -5032,6 +5037,18 @@ impl Drop for CallbackTransactionGuard<'_> {
             return;
         }
         let inner = self.db.inner.as_ref();
+        let _cleanup = if self.finalization.is_none() {
+            let Some(lease) = inner.operation.try_lock() else {
+                // Another operation is suspended on this connection. Never
+                // roll its SQL back or clear its working state underneath it.
+                // As with interrupted SQL, discard this runtime and reopen.
+                inner.conn.invalidate();
+                return;
+            };
+            Some(lease)
+        } else {
+            None
+        };
         inner.forget_callback_tx(self.restore_seq);
         #[cfg(feature = "sqlite")]
         if inner.conn.native().is_ok() {
@@ -13777,6 +13794,102 @@ mod check_plan_tests {
 
 #[cfg(all(test, feature = "sqlite"))]
 mod async_settlement_tests {
+    /// Alice's callback setup waits for Bob's operation, and its finalization
+    /// excludes Bob's reads while SQL suspends. The callback can still read
+    /// through the original Db. Internal to hold/poll the operation lease.
+    #[test]
+    fn callback_sql_phases_are_serialized_without_locking_the_callback() {
+        let db = open(91, AuthorSubject::SYSTEM, PolicyExpr::True);
+        let query = db.prepare_query(&Query::from("notes")).unwrap();
+        let callback_done = std::cell::Cell::new(false);
+        let lease = block_on(db.inner.operation.lock());
+        let mut transaction = Box::pin(db.transaction(async |tx| {
+            tx.insert(
+                "notes",
+                BTreeMap::from([("body".into(), Value::String("alice".into()))]),
+                Default::default(),
+            )
+            .await?;
+            assert_eq!(db.read(&query).await?.len(), 1);
+            callback_done.set(true);
+            Ok(())
+        }));
+        let mut cx = Context::from_waker(Waker::noop());
+        for _ in 0..8 {
+            assert!(transaction.as_mut().poll(&mut cx).is_pending());
+            assert!(db.inner.tx.borrow().is_none(), "setup ran before admission");
+        }
+        drop(lease);
+        let mut competing = Box::pin(db.read(&query));
+        let mut finalization_pauses = 0;
+        loop {
+            match transaction.as_mut().poll(&mut cx) {
+                Poll::Ready(result) => {
+                    result.unwrap();
+                    break;
+                }
+                Poll::Pending if callback_done.get() => {
+                    finalization_pauses += 1;
+                    assert!(db.inner.operation.try_lock().is_none());
+                    assert!(competing.as_mut().poll(&mut cx).is_pending());
+                }
+                Poll::Pending => {}
+            }
+        }
+        assert!(finalization_pauses > 0);
+        assert_eq!(block_on(competing).unwrap().len(), 1);
+    }
+
+    /// Alice cancels her callback while Bob owns a suspended host write.
+    /// Cancellation must not roll back Bob's savepoint underneath him; the
+    /// interrupted shared runtime instead requires reopening. Internal to
+    /// inspect the SQL transaction without issuing another database operation.
+    #[test]
+    fn cancelling_callback_during_another_operation_requires_reopen() {
+        use crate::values::TransactionConnection;
+        let db = open(91, AuthorSubject::SYSTEM, PolicyExpr::True);
+        let entered = std::cell::Cell::new(false);
+        let mut transaction = Box::pin(db.transaction(async |_tx| {
+            entered.set(true);
+            std::future::pending::<Result<(), Error>>().await
+        }));
+        let mut cx = Context::from_waker(Waker::noop());
+        while !entered.get() {
+            assert!(transaction.as_mut().poll(&mut cx).is_pending());
+        }
+        let (send, wait) = futures::channel::oneshot::channel();
+        let mut other = Box::pin(db.host_put_then_wait_for_test(
+            crate::host::HostTable::new("callback_probe"),
+            b"key",
+            b"bob",
+            async { wait.await.unwrap() },
+        ));
+        assert!(other.as_mut().poll(&mut cx).is_pending());
+        assert!(db.inner.conn.transaction_open());
+        drop(transaction);
+        assert!(
+            db.inner.conn.transaction_open(),
+            "cancel rolled back Bob's SQL"
+        );
+        assert!(
+            db.inner
+                .conn
+                .check_usable()
+                .unwrap_err()
+                .message
+                .contains("reopen")
+        );
+        send.send(()).unwrap();
+        assert!(block_on(other).is_err());
+        let query = db.prepare_query(&Query::from("notes")).unwrap();
+        assert!(
+            block_on(db.read(&query))
+                .unwrap_err()
+                .message
+                .contains("reopen")
+        );
+    }
+
     /// Bob's schema lookup, serialized read and remote-read setup must not
     /// roll back Alice's staged SQL overlay while her operation owns the lease.
     /// Internal to hold the lease and poll each suspending storage boundary.

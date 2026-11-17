@@ -109,6 +109,10 @@ impl SqlExecution<'_> {
 }
 
 impl DbConnection {
+    pub(crate) fn invalidate(&self) {
+        self.shared.poisoned.set(true);
+    }
+
     pub(crate) fn check_usable(&self) -> Result<(), Error> {
         if self.shared.poisoned.get() {
             return Err(Error::new(
