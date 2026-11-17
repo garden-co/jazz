@@ -2900,3 +2900,30 @@ fn a_member_with_a_broken_account_history_is_skipped_and_marks_the_space() {
     world.deliver(ALICE, CAROL, &v0);
     assert!(world.acquire(CAROL).has_current(&chain));
 }
+
+/// A successor accepted at its predecessor's own position (here, in the
+/// root's transaction) is not strictly after it and is not a version; the
+/// same row one position later is (§3.3).
+#[test]
+fn a_successor_at_its_predecessors_position_is_not_a_version() {
+    let mut world = space(67, &[ALICE, BOB]);
+    let v0 = world.current();
+    let successor = world
+        .build_rotation(ALICE, false)
+        .unwrap()
+        .records
+        .successor;
+    let root_at = world.read().chain(&world).unwrap().root.position;
+
+    let mut same = world.read();
+    same.space
+        .successors
+        .push(Accepted::new(root_at, successor.clone()));
+    let chain = same.chain(&world).unwrap();
+    assert_eq!(chain.versions.len(), 1);
+    assert_eq!(chain.versions[0].epoch_id, v0);
+
+    let at = world.next();
+    world.space.successors.push(Accepted::new(at, successor));
+    assert_eq!(world.read().chain(&world).unwrap().versions.len(), 2);
+}
