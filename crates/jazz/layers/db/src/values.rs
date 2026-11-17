@@ -1,5 +1,6 @@
 //! Jazz values in SQLite cells, the schema as SQLite sees it, and rows.
 
+use crate::storage::Storage;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -31,16 +32,6 @@ pub(crate) trait CachedRow {
         F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>;
 }
 
-impl CachedRow for rusqlite::Connection {
-    fn cached_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
-    where
-        P: rusqlite::Params,
-        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
-    {
-        self.prepare_cached(sql)?.query_row(params, f)
-    }
-}
-
 pub(crate) fn storage(error: rusqlite::Error) -> Error {
     // Only the large-value collation and functions interrupt a statement,
     // when a chunk it needs is not local (see `crate::large`).
@@ -51,7 +42,7 @@ pub(crate) fn storage(error: rusqlite::Error) -> Error {
 }
 
 /// Open `SAVEPOINT name`; [`end_savepoint`] closes it.
-pub(crate) fn begin_savepoint(conn: &rusqlite::Connection, name: &str) -> Result<(), Error> {
+pub(crate) fn begin_savepoint(conn: &Storage, name: &str) -> Result<(), Error> {
     conn.execute_batch(&format!("SAVEPOINT {name}"))
         .map_err(storage)?;
     TAG_UNDO.with(|undo| {
@@ -70,16 +61,14 @@ thread_local! {
         RefCell::default();
 }
 
-/// A connection's key in [`TAG_UNDO`]: its SQLite handle, which moving the
-/// `Connection` keeps.
-fn undo_key(conn: &rusqlite::Connection) -> usize {
-    // SAFETY: the handle is only compared, never dereferenced.
-    unsafe { conn.handle() as usize }
+/// A store's key in [`TAG_UNDO`] ([`Storage::key`]).
+fn undo_key(conn: &Storage) -> usize {
+    conn.key()
 }
 
 /// Drop `conn`'s undo logs as it closes: a savepoint left open dies with
 /// it, and a later connection may get its handle's address.
-pub(crate) fn forget_tag_undo(conn: &rusqlite::Connection) {
+pub(crate) fn forget_tag_undo(conn: &Storage) {
     TAG_UNDO.with(|undo| undo.borrow_mut().remove(&undo_key(conn)));
     ROLLBACKS.with(|rollbacks| rollbacks.borrow_mut().remove(&undo_key(conn)));
 }
@@ -92,7 +81,7 @@ thread_local! {
 }
 
 /// How many rollbacks `conn` has seen (see [`ROLLBACKS`]).
-pub(crate) fn rollbacks(conn: &rusqlite::Connection) -> u64 {
+pub(crate) fn rollbacks(conn: &Storage) -> u64 {
     ROLLBACKS.with(|rollbacks| {
         rollbacks
             .borrow()
@@ -108,13 +97,13 @@ pub(crate) fn note_rollback(key: usize) {
 }
 
 /// `conn`'s key for [`note_rollback`], for a hook that cannot borrow it.
-pub(crate) fn rollback_key(conn: &rusqlite::Connection) -> usize {
+pub(crate) fn rollback_key(conn: &Storage) -> usize {
     undo_key(conn)
 }
 
 /// Stored enum column `tags` is about to change on `conn`: the innermost
 /// open savepoint logs how it was, once, to put back if it rolls back.
-pub(crate) fn tags_changing(conn: &rusqlite::Connection, tags: &ColumnTags) {
+pub(crate) fn tags_changing(conn: &Storage, tags: &ColumnTags) {
     TAG_UNDO.with(|undo| {
         if let Some(frame) = undo
             .borrow_mut()
@@ -131,7 +120,7 @@ pub(crate) fn tags_changing(conn: &rusqlite::Connection, tags: &ColumnTags) {
 /// the enclosing savepoint's (the outermost's are committed); rolled back,
 /// its columns' tags are put back. `all` closes every open log (SQLite
 /// rolled the whole transaction back).
-fn close_tag_undo(conn: &rusqlite::Connection, kept: bool, all: bool) {
+fn close_tag_undo(conn: &Storage, kept: bool, all: bool) {
     TAG_UNDO.with(|undo| {
         let mut undo = undo.borrow_mut();
         let key = undo_key(conn);
@@ -168,11 +157,7 @@ fn close_tag_undo(conn: &rusqlite::Connection, kept: bool, all: bool) {
 /// Release `SAVEPOINT name` (`keep`), or roll back everything since it. SQLite
 /// rolls a whole transaction back by itself after some errors (a full disk,
 /// an I/O error); then the savepoint is gone and there is nothing to undo.
-pub(crate) fn end_savepoint(
-    conn: &rusqlite::Connection,
-    name: &str,
-    keep: bool,
-) -> Result<(), Error> {
+pub(crate) fn end_savepoint(conn: &Storage, name: &str, keep: bool) -> Result<(), Error> {
     let sql = if keep {
         format!("RELEASE {name}")
     } else {

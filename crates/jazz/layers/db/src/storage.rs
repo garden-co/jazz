@@ -59,13 +59,13 @@ impl Storage {
         f: impl FnOnce(&Storage) -> Scoped<T>,
     ) -> Result<T, Error> {
         match &self.owner {
-            Owner::Native(conn) => {
-                crate::values::begin_savepoint(conn, name)?;
+            Owner::Native(_) => {
+                crate::values::begin_savepoint(self, name)?;
                 let (value, keep) = match f(self) {
                     Scoped::Keep(value) => (value, true),
                     Scoped::Undo(value) => (value, false),
                 };
-                crate::values::end_savepoint(conn, name, keep)?;
+                crate::values::end_savepoint(self, name, keep)?;
                 Ok(value)
             }
         }
@@ -78,7 +78,46 @@ impl Storage {
 /// name rusqlite. A managed variant (Durable Objects) answers the same
 /// calls from its own cursor.
 impl Storage {
-    fn native_conn(&self) -> &rusqlite::Connection {
+    /// Open a private in-memory database.
+    pub fn open_in_memory() -> SqlResult<Self> {
+        rusqlite::Connection::open_in_memory().map(Self::native)
+    }
+
+    /// Open (creating) the database file at `path`.
+    pub fn open(path: impl AsRef<std::path::Path>) -> SqlResult<Self> {
+        rusqlite::Connection::open(path).map(Self::native)
+    }
+
+    /// Open `path` with `flags`.
+    pub fn open_with_flags(
+        path: impl AsRef<std::path::Path>,
+        flags: rusqlite::OpenFlags,
+    ) -> SqlResult<Self> {
+        rusqlite::Connection::open_with_flags(path, flags).map(Self::native)
+    }
+
+    /// Open `path` with `flags` on the SQLite VFS named `vfs`.
+    pub fn open_with_flags_and_vfs(
+        path: impl AsRef<std::path::Path>,
+        flags: rusqlite::OpenFlags,
+        vfs: &str,
+    ) -> SqlResult<Self> {
+        rusqlite::Connection::open_with_flags_and_vfs(path, flags, vfs).map(Self::native)
+    }
+
+    /// Identifies this store among the open ones, for state kept beside it
+    /// (a savepoint's tag-undo log, its rollback count): stable while it
+    /// lives, possibly reused after it closes.
+    pub(crate) fn key(&self) -> usize {
+        match &self.owner {
+            // SAFETY: the handle is only compared, never dereferenced.
+            Owner::Native(conn) => unsafe { conn.handle() as usize },
+        }
+    }
+
+    /// The native connection, for what only native SQLite has (its
+    /// planner, limits and tracing).
+    pub(crate) fn native_conn(&self) -> &rusqlite::Connection {
         match &self.owner {
             Owner::Native(conn) => conn,
         }
@@ -117,6 +156,11 @@ impl Storage {
     /// Whether no transaction or savepoint is open.
     pub fn is_autocommit(&self) -> bool {
         self.native_conn().is_autocommit()
+    }
+
+    /// How long a statement waits for another connection's lock.
+    pub fn busy_timeout(&self, timeout: std::time::Duration) -> SqlResult<()> {
+        self.native_conn().busy_timeout(timeout)
     }
 
     /// The rowid of the last row inserted.
@@ -182,16 +226,6 @@ pub enum Scoped<T> {
 impl From<rusqlite::Connection> for Storage {
     fn from(conn: rusqlite::Connection) -> Self {
         Self::native(conn)
-    }
-}
-
-/// Transitional: call sites still written against rusqlite reach the
-/// native connection. Removed once they all use `Storage`'s own surface.
-impl std::ops::Deref for Storage {
-    type Target = rusqlite::Connection;
-
-    fn deref(&self) -> &rusqlite::Connection {
-        self.native_conn()
     }
 }
 
