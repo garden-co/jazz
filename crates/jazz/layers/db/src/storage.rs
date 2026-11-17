@@ -72,6 +72,105 @@ impl Storage {
     }
 }
 
+/// The SQL surface jazz-db runs its statements through. Each method is the
+/// rusqlite method of the same name, and returns rusqlite's types under
+/// this module's names, so call sites written against [`Storage`] don't
+/// name rusqlite. A managed variant (Durable Objects) answers the same
+/// calls from its own cursor.
+impl Storage {
+    fn native_conn(&self) -> &rusqlite::Connection {
+        match &self.owner {
+            Owner::Native(conn) => conn,
+        }
+    }
+
+    /// Prepare `sql` through the statement cache.
+    pub fn prepare_cached(&self, sql: &str) -> SqlResult<CachedStatement<'_>> {
+        self.native_conn().prepare_cached(sql)
+    }
+
+    /// Prepare `sql`, uncached.
+    pub fn prepare(&self, sql: &str) -> SqlResult<Statement<'_>> {
+        self.native_conn().prepare(sql)
+    }
+
+    /// Run one statement; how many rows it changed.
+    pub fn execute<P: Params>(&self, sql: &str, params: P) -> SqlResult<usize> {
+        self.native_conn().execute(sql, params)
+    }
+
+    /// Run statements with no parameters and no results.
+    pub fn execute_batch(&self, sql: &str) -> SqlResult<()> {
+        self.native_conn().execute_batch(sql)
+    }
+
+    /// Run a query expected to return a row; `f` reads the first.
+    pub fn query_row<T, P: Params>(
+        &self,
+        sql: &str,
+        params: P,
+        f: impl FnOnce(&Row<'_>) -> SqlResult<T>,
+    ) -> SqlResult<T> {
+        self.native_conn().query_row(sql, params, f)
+    }
+
+    /// Whether no transaction or savepoint is open.
+    pub fn is_autocommit(&self) -> bool {
+        self.native_conn().is_autocommit()
+    }
+
+    /// The rowid of the last row inserted.
+    pub fn last_insert_rowid(&self) -> i64 {
+        self.native_conn().last_insert_rowid()
+    }
+
+    /// How many rows all statements so far changed.
+    pub fn total_changes(&self) -> u64 {
+        self.native_conn().total_changes()
+    }
+
+    /// The current value of a SQLite limit.
+    pub fn limit(&self, limit: rusqlite::limits::Limit) -> SqlResult<i32> {
+        self.native_conn().limit(limit)
+    }
+
+    /// How many prepared statements the cache keeps.
+    pub fn set_prepared_statement_cache_capacity(&self, capacity: usize) {
+        self.native_conn()
+            .set_prepared_statement_cache_capacity(capacity)
+    }
+
+    /// Run `hook` as each outermost transaction commits; `true` turns the
+    /// commit into a rollback.
+    pub fn commit_hook(
+        &self,
+        hook: Option<impl FnMut() -> bool + Send + 'static>,
+    ) -> SqlResult<()> {
+        self.native_conn().commit_hook(hook)
+    }
+
+    /// Run `hook` as each outermost transaction rolls back, including
+    /// SQLite's own rollbacks after an error.
+    pub fn rollback_hook(&self, hook: Option<impl FnMut() + Send + 'static>) -> SqlResult<()> {
+        self.native_conn().rollback_hook(hook)
+    }
+}
+
+impl crate::values::CachedRow for Storage {
+    fn cached_row<T, P, F>(&self, sql: &str, params: P, f: F) -> SqlResult<T>
+    where
+        P: Params,
+        F: FnOnce(&Row<'_>) -> SqlResult<T>,
+    {
+        self.prepare_cached(sql)?.query_row(params, f)
+    }
+}
+
+pub use rusqlite::{
+    CachedStatement, Error as SqlError, OptionalExtension, Params, Result as SqlResult, Row, Rows,
+    Statement, ToSql, params, params_from_iter,
+};
+
 /// What a scope ([`Storage::scope_then`]) does with what it wrote.
 pub enum Scoped<T> {
     /// Keep it (committed with the outermost scope).
@@ -92,9 +191,7 @@ impl std::ops::Deref for Storage {
     type Target = rusqlite::Connection;
 
     fn deref(&self) -> &rusqlite::Connection {
-        match &self.owner {
-            Owner::Native(conn) => conn,
-        }
+        self.native_conn()
     }
 }
 
