@@ -8,7 +8,9 @@ wasm-pack build "$here/../.." --target web --dev --out-dir "$here/pkg" \
   --out-name jazz_wasm --no-pack -- --features durable-object-tests
 # The packaged Durable Object entry (`jazz-wasm/durable-object`), as
 # `build:durable-object` builds it, but unoptimised.
+# With `durable-object-tests`: its test routes (a panic, held limits).
 wasm-pack build "$here/../.." --target web --dev --out-dir durable-object/pkg \
-  --out-name jazz_wasm_do --no-pack -- --features durable-object
+  --out-name jazz_wasm_do --no-pack -- --features durable-object-tests
+node "$here/../../durable-object/reinstantiable.mjs"
 cd "$here/../.."
 node --test "$here/smoke.test.mjs" "$here/host.test.mjs"

@@ -4,8 +4,6 @@ import type { DurableObject } from "cloudflare:workers";
 export interface JazzCoreEnv {
   /** The Durable Object namespace of `JazzCore` (SQLite-backed). */
   JAZZ: DurableObjectNamespace;
-  /** The app the object serves. */
-  JAZZ_APP_ID: string;
   /** Admits the app's backend; at least 32 characters, stable across deployments. */
   JAZZ_CORE_SECRET: string;
   /** A public schema's JSON, served until one is published (optional). */
