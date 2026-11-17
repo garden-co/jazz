@@ -59,7 +59,7 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-25`: A resumed subscription MUST leave the replica with the same rows as a fresh subscription to the same query.
 - `INV-SYNC-27`: Per-session delivery state MUST live only in the serving process and be released on disconnect.
 - `INV-SYNC-28`: Results MUST travel as rows and be assembled into result trees by the receiver.
-- `INV-SYNC-30`: A replica MUST treat a subscription as settled only when its connected upstream has confirmed that subscription with its own `Settled`; a node with no upstream settles locally.
+- `INV-SYNC-30`: A replica MUST treat a subscription as settled only once an upstream has confirmed that subscription with its own `Settled`, and reports the last such confirmation, at its tier, until another replaces it (through an outage too); what waits for the server (a first load, a `Remote` opening, a relay settling its own sessions' reads) waits for the current connection's `Settled`. A node with no upstream settles locally.
 - `INV-SYNC-44`: The read protocol MUST be rows plus settlement.
 - `INV-SYNC-45`: Rows MUST be shipped raw, by the authority's stored table and column names, whatever schema version the subscriber declared; a replica mirrors its upstream's catalogue and applies the lenses locally.
 - `INV-SYNC-46`: A replica missing the chunks of a large value MUST request them and install the row only once its chunks are present; a writer pushes a value's new chunks before the commit that uses them.
@@ -496,7 +496,12 @@ opening, never before it; later ones carry only changes, after the tick's
 `Rows` and `AccessLost` and before its `Settled`. The replica keeps each live
 read's set in memory and across reconnects, replacing it with the read's
 first `Holds` on the new connection; neither side stores it. A row a
-replacing `Holds` drops stays cached until a later `members` leaves it out.
+replacing `Holds` drops that no live read holds, and that no `members` listing
+evicted, is no longer kept current for the reader: the replica asks for it
+again with `ResendWhole`, and the server ships it whole if the reader may still
+read it, else its `AccessLost`. So support the reader lost while the replica
+was away (a deleted membership row, say) leaves with the read that rested on
+it (`INV-SYNC-14`).
 `global` says the answer is the global authority's (directly, or through
 relays that settle by their upstream), not a relay's own store.
 
@@ -541,9 +546,14 @@ for each row, its newest version at or before the lowest position a live read
 or `known` reads at; a table that keeps less (latest-only) cannot be read
 through a cut.
 
-A replica treats a read as settled only once its connected upstream confirmed
-it with `Settled`; while the upstream is unanswered, offline or failing the
-read stays unsettled, and a node with no upstream settles locally
+A replica treats a read as settled only once an upstream confirmed it with
+`Settled`, and a subscription keeps reporting the last confirmation, at its
+tier, while the link is down: a client tells a current result as one that is
+settled while its link is up. Each connection starts every read over (its
+answer, refusal and first `Holds` are that connection's alone, a transport
+swapped in without a detach included), so what waits for the server (a first
+load, a `Remote` opening, a relay's settles to its own sessions) waits for the
+current connection's `Settled`. A node with no upstream settles locally
 (`INV-SYNC-30`). A `Remote` read never reports rows the answer no longer lists
 (`INV-SYNC-48`); `LocalFirst` and `LocalOnly` reads keep them.
 
