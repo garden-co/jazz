@@ -123,6 +123,29 @@ export class ThinRemoteError extends Error {
   }
 }
 
+/**
+ * The backend serving this session's transactions could not learn whether a
+ * commit applied: the core didn't confirm it in time. It may have applied,
+ * or may still: don't retry it as if it failed. Read the rows it wrote to
+ * find out.
+ */
+export class ThinCommitOutcomeUnknownError extends ThinRemoteError {
+  constructor(message: string) {
+    super(COMMIT_OUTCOME_UNKNOWN, message);
+    this.name = "ThinCommitOutcomeUnknownError";
+  }
+}
+
+/** The code of a commit whose outcome is unknown (SPEC 8.14). */
+export const COMMIT_OUTCOME_UNKNOWN = "commit_outcome_unknown";
+
+/** The error a thin request's error answer is thrown as. */
+export function thinRemoteError(code: string, message: string): ThinRemoteError {
+  return code === COMMIT_OUTCOME_UNKNOWN
+    ? new ThinCommitOutcomeUnknownError(message)
+    : new ThinRemoteError(code, message);
+}
+
 /** The connection ended before the server answered. A write may or may not have committed. */
 export class ThinConnectionLostError extends Error {
   constructor(
@@ -710,7 +733,7 @@ export class ThinRuntime implements Runtime {
     })
       .finally(() => clearTimeout(oneShot?.windowTimer))
       .then((body) => {
-        if (body.type === "error") throw new ThinRemoteError(body.code, body.message);
+        if (body.type === "error") throw thinRemoteError(body.code, body.message);
         return body;
       });
     return { answer, oneShot };
@@ -1263,6 +1286,11 @@ export class ThinRuntime implements Runtime {
       rows: [],
     });
     return id;
+  }
+
+  hasStagedTransactionWrites(id: OpenTransactionId): boolean | undefined {
+    const transaction = this.transactions.get(id);
+    return transaction ? transaction.staged : undefined;
   }
 
   commitTransaction(id: OpenTransactionId): Promise<TxId> {

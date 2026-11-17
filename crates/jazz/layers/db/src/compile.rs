@@ -1234,9 +1234,6 @@ impl<'a> Ctx<'a> {
             let mut conjuncts = Vec::new();
             flatten_all(filter, &mut conjuncts);
             for conjunct in conjuncts {
-                if matches!(conjunct, Predicate::EnumMatch { .. }) {
-                    return Err(unsupported("enum-match filters in flat joins"));
-                }
                 let mut predicate = conjunct.clone();
                 let mut reads = BTreeSet::new();
                 let mut failed = None;
@@ -2080,9 +2077,7 @@ impl<'a> Ctx<'a> {
                 Term::NaN => "0".to_owned(),
                 term => format!("({} IS NULL)", term.sql().expect("present")),
             },
-            Predicate::EnumMatch { .. } => {
-                return Err(unsupported("enum payload predicates"));
-            }
+            Predicate::Removed(removed) => match *removed {},
         })
     }
 
@@ -2817,6 +2812,23 @@ impl<'a> Ctx<'a> {
             RelationValueRef::SessionRef(path) if is_claim(path) => {
                 self.claim_term(scope.session, path, ty)
             }
+            // A bare string reads as the column's type, as the schema compile
+            // reads it (`coerce_literal_for_column_type`): UUID-shaped text
+            // compared with a text column stays text, and a UUID column's
+            // literal is a UUID in any spelling. `json_value` alone decides by
+            // shape, so a mismatch would never be equal and `!=` would admit
+            // every row.
+            RelationValueRef::Literal(serde_json::Value::String(text)) if ty.is_some() => {
+                let value = match ty {
+                    // Any spelling `Uuid::parse_str` reads (hyphenated,
+                    // simple, braced, urn), as the compile accepts it.
+                    Some(ValueType::Uuid) => uuid::Uuid::parse_str(text)
+                        .map(Value::Uuid)
+                        .unwrap_or_else(|_| Value::String(text.clone())),
+                    _ => Value::String(text.clone()),
+                };
+                self.value_term(&value)
+            }
             value => self.rel_value(value, rel, scope),
         }
     }
@@ -2940,9 +2952,7 @@ impl<'a> Ctx<'a> {
                 let right = self.rel_value_as(right, ty.as_ref(), rel, scope)?;
                 self.contains(left, right)
             }
-            RelationPredicate::EnumMatch { .. } => {
-                return Err(unsupported("enum payload relation predicates"));
-            }
+            RelationPredicate::Removed(removed) => match *removed {},
         })
     }
 }
@@ -3008,9 +3018,8 @@ fn outer_key_only(rel: &RelationExpr) -> bool {
                 refs(right)
             }
             RelationPredicate::In { values, .. } => values.iter().map(refs).sum(),
-            RelationPredicate::EnumMatch { payload, .. } | RelationPredicate::Not(payload) => {
-                predicate_refs(payload)
-            }
+            RelationPredicate::Not(payload) => predicate_refs(payload),
+            RelationPredicate::Removed(removed) => match *removed {},
             RelationPredicate::And(parts) | RelationPredicate::Or(parts) => {
                 parts.iter().map(predicate_refs).sum()
             }
@@ -3592,7 +3601,7 @@ pub(crate) fn json_ids<'a>(ids: impl IntoIterator<Item = &'a [u8]>) -> Sql {
     Sql::Text(serde_json::Value::Array(items).to_string().into_bytes())
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {

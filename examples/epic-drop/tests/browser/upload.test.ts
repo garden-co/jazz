@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createJazzClient, type Db, type JazzSession } from "jazz-tools";
 import { memoryAccountStore } from "../../../testing/accounts.js";
-import { app } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
 import { fileTableQuery } from "../../src/file-list-query.js";
 import { SCOPE, SERVER_URL } from "./test-constants.js";
 

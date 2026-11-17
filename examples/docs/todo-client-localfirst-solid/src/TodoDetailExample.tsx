@@ -1,6 +1,6 @@
 import { Match, Switch } from "solid-js";
 import { useOne } from "jazz-tools/solid";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 
 // #region reading-one-solid
 export function TodoDetailExample(props: { id: string }) {

@@ -733,3 +733,103 @@ fn going_offline_during_a_reauthentication_shows_offline() {
     alice.send(LinkInput::SetOffline(true));
     assert_eq!(alice.link.status().phase, LinkPhase::Offline);
 }
+
+/// Every host classifies a server's wire error with
+/// [`LinkFailure::from_wire_error`]; this pins the whole table. A unit test,
+/// not a client test: the classification is a pure function, and the same
+/// table is what the TypeScript hosts are checked against.
+///
+/// ```text
+/// server ──WireError──► host ──from_wire_error(admitted?)──► link
+/// ```
+#[test]
+fn a_server_wire_error_is_classified_by_code_and_admission() {
+    use crate::wire::{WireError, WireErrorCode as C, WireRetry as R};
+    let kind = |code, retry, message: &str, admitted| match LinkFailure::from_wire_error(
+        &WireError::new(code, retry, message),
+        admitted,
+    ) {
+        LinkFailure::Network(_) => "network",
+        LinkFailure::Refused(_) => "refused",
+        LinkFailure::ServerNotReady(_) => "serverNotReady",
+        LinkFailure::AuthRejected { .. } => "authRejected",
+        LinkFailure::Fatal(_) => "fatal",
+        LinkFailure::Reauthenticate(_) => "reauthenticate",
+    };
+    for admitted in [false, true] {
+        let reconnect = |pre| if admitted { "network" } else { pre };
+        // The server is starting, or over its connection cap.
+        assert_eq!(
+            kind(C::NotReady, R::Later, "x", admitted),
+            reconnect("serverNotReady")
+        );
+        assert_eq!(
+            kind(C::Backpressure, R::Later, "x", admitted),
+            reconnect("refused")
+        );
+        // A runtime that cannot serve the session now (shutting down in a
+        // rolling deploy) is unavailable, not broken.
+        assert_eq!(
+            kind(C::Internal, R::Later, "x", admitted),
+            reconnect("refused")
+        );
+        for retry in [R::Never, R::AfterAuth, R::AfterResume] {
+            assert_eq!(kind(C::Internal, retry, "x", admitted), "fatal");
+        }
+        // `later` does not make a malformed frame retryable.
+        for code in [
+            C::MalformedFrame,
+            C::UnsupportedFeature,
+            C::UnsupportedProtocolVersion,
+        ] {
+            for retry in [R::Never, R::AfterAuth, R::AfterResume, R::Later] {
+                assert_eq!(
+                    kind(code, retry, "x", admitted),
+                    "fatal",
+                    "{code:?} {retry:?}"
+                );
+            }
+        }
+        // Without `later`, overload and bootstrap are not a request to reconnect.
+        assert_eq!(kind(C::NotReady, R::Never, "x", admitted), "fatal");
+        assert_eq!(
+            kind(C::Backpressure, R::AfterResume, "x", admitted),
+            "fatal"
+        );
+        // A refused credential, whatever the retry says.
+        for retry in [R::Never, R::AfterAuth, R::AfterResume, R::Later] {
+            assert_eq!(
+                kind(C::AuthFailed, retry, "token expired", admitted),
+                "authRejected"
+            );
+        }
+        // Only `after_resume` with the prefix is a planned re-authentication.
+        let planned = "reauthenticate: the session reached its expiry";
+        assert_eq!(
+            kind(C::AuthFailed, R::AfterResume, planned, admitted),
+            "reauthenticate"
+        );
+        assert_eq!(
+            kind(C::AuthFailed, R::AfterAuth, planned, admitted),
+            "authRejected"
+        );
+    }
+}
+
+/// A refusal carries the reason its message names, as the link reports it.
+#[test]
+fn a_refused_credential_keeps_its_reason() {
+    use crate::wire::{WireError, WireErrorCode, WireRetry};
+    let error = WireError::new(
+        WireErrorCode::AuthFailed,
+        WireRetry::AfterAuth,
+        "token expired",
+    );
+    assert_eq!(
+        LinkFailure::from_wire_error(&error, false),
+        LinkFailure::AuthRejected {
+            reason: AuthFailureReason::Expired,
+            message: "token expired".into(),
+        }
+    );
+}

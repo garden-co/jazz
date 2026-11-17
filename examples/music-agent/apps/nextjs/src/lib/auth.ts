@@ -1,7 +1,7 @@
 import { betterAuth } from "better-auth";
 import { nextCookies } from "better-auth/next-js";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { backendJazzClient } from "@/src/lib/backend-jazz-client";
 import { appOrigin } from "@/src/lib/app-origin";
 import { serverSecret } from "@/src/lib/server-secret";

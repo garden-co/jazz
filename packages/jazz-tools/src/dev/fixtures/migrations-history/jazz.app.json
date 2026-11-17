@@ -1,0 +1,165 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "better_auth_account": {
+      "columns": {
+        "accountId": "string",
+        "providerId": "string",
+        "userId": "uuid",
+        "accessToken": "string?",
+        "refreshToken": "string?",
+        "idToken": "string?",
+        "accessTokenExpiresAt": "timestamp?",
+        "refreshTokenExpiresAt": "timestamp?",
+        "scope": "string?",
+        "password": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_jwks": {
+      "columns": {
+        "publicKey": "string",
+        "privateKey": "string",
+        "createdAt": "timestamp",
+        "expiresAt": "timestamp?",
+        "alg": "string?",
+        "crv": "string?"
+      }
+    },
+    "better_auth_session": {
+      "columns": {
+        "expiresAt": "timestamp",
+        "token": "string",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp",
+        "ipAddress": "string?",
+        "userAgent": "string?",
+        "userId": "uuid",
+        "impersonatedBy": "string?"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_user": {
+      "columns": {
+        "name": "string",
+        "email": "string",
+        "emailVerified": "boolean",
+        "image": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp",
+        "role": "string?",
+        "banned": "boolean?",
+        "banReason": "string?",
+        "banExpires": "timestamp?"
+      },
+      "relations": {
+        "better_auth_accountViaUser": { "reverse": "better_auth_account", "relation": "user" },
+        "better_auth_sessionViaUser": { "reverse": "better_auth_session", "relation": "user" }
+      }
+    },
+    "better_auth_verification": {
+      "columns": {
+        "identifier": "string",
+        "value": "string",
+        "expiresAt": "timestamp",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      }
+    },
+    "messages": {
+      "columns": {
+        "author_name": "string",
+        "chat_id": "string",
+        "text": "string",
+        "sent_at": "timestamp"
+      }
+    }
+  },
+  "history": {
+    "8acd8a85eef5": {
+      "tables": {
+        "better_auth_account": {
+          "columns": {
+            "issuer": "string",
+            "accountId": "string",
+            "providerId": "string",
+            "userId": { "type": "uuid", "references": "better_auth_user" },
+            "accessToken": "string?",
+            "refreshToken": "string?",
+            "idToken": "string?",
+            "accessTokenExpiresAt": "timestamp?",
+            "refreshTokenExpiresAt": "timestamp?",
+            "scope": "string?",
+            "password": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_jwks": {
+          "columns": {
+            "publicKey": "string",
+            "privateKey": "string",
+            "createdAt": "timestamp",
+            "expiresAt": "timestamp?",
+            "alg": "string?",
+            "crv": "string?"
+          }
+        },
+        "better_auth_session": {
+          "columns": {
+            "expiresAt": "timestamp",
+            "token": "string",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp",
+            "ipAddress": "string?",
+            "userAgent": "string?",
+            "userId": { "type": "uuid", "references": "better_auth_user" },
+            "impersonatedBy": "string?"
+          }
+        },
+        "better_auth_user": {
+          "columns": {
+            "name": "string",
+            "email": "string",
+            "emailVerified": "boolean",
+            "image": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp",
+            "role": "string?",
+            "banned": "boolean?",
+            "banReason": "string?",
+            "banExpires": "timestamp?"
+          }
+        },
+        "better_auth_verification": {
+          "columns": {
+            "identifier": "string",
+            "value": "string",
+            "expiresAt": "timestamp",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "messages": {
+          "columns": {
+            "author_name": "string",
+            "chat_id": "string",
+            "text": "string",
+            "sent_at": "timestamp"
+          }
+        }
+      }
+    }
+  },
+  "migrations": [
+    {
+      "from": "8acd8a85eef5",
+      "migrate": {
+        "better_auth_account": { "issuer": { "drop": "string", "backwardsDefault": "" } }
+      }
+    }
+  ]
+}

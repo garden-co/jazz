@@ -1,6 +1,5 @@
 import { schema as s } from "jazz-tools";
-import { schema as betterAuthSchema } from "./schema-better-auth/schema";
-import { migrations } from "./migrations";
+import { tables as betterAuthSchema } from "./schema-better-auth/schema";
 
 /**
  * BandBook is a Notion-style workspace: a tree of pages, each holding an
@@ -12,7 +11,7 @@ import { migrations } from "./migrations";
  * child and its parent belong to the same workspace, so no write can graft a
  * page from one band onto another band's tree.
  */
-const schema = {
+export const schema = s.defineSchema({
   ...betterAuthSchema,
   workspaces: s.table(
     { name: s.string() },
@@ -188,23 +187,4 @@ const schema = {
       { workspace: s.rel("workspaces", "workspaceId"), page: s.rel("pages", "pageId") },
     )
     .indexOnly(["token", "pageId", "workspaceId"]),
-};
-
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
-export type Workspace = s.RowOf<typeof app.workspaces>;
-export type Member = s.RowOf<typeof app.members>;
-export type Page = s.RowOf<typeof app.pages>;
-export type PageGrant = s.RowOf<typeof app.pageGrants>;
-export type Block = s.RowOf<typeof app.blocks>;
-export type Attachment = s.RowOf<typeof app.attachments>;
-export type SongSheet = s.RowOf<typeof app.songSheets>;
-export type SheetComment = s.RowOf<typeof app.sheetComments>;
-export type SheetPresence = s.RowOf<typeof app.sheetPresence>;
-export type Issue = s.RowOf<typeof app.issues>;
-export type Invite = s.RowOf<typeof app.invites>;
-export type WorkspaceRole = Member["role"];
-export type GrantRole = PageGrant["role"];
-export type BlockKind = Block["kind"];
-export type IssueStatus = Issue["status"];
-export type IssuePriority = Issue["priority"];
+});

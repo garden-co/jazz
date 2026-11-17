@@ -8,7 +8,7 @@ use super::support::{
     has_any_change, has_removed, has_row, lacks_row, wait_for_global_txs, wait_for_query,
     wait_for_rows, wait_for_subscription_update,
 };
-use super::{assert_client_policy_denied, pe, permissions};
+use super::{pe, permissions};
 use jazz::tools::{ColumnDescriptor, RowDescriptor, Schema, TableName};
 use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, SchemaBuilder, TablePolicies, TableSchema,
@@ -2855,7 +2855,7 @@ async fn update_with_check_inherits_denies_when_parent_is_not_updateable_inner()
         .await
         .expect_err("authority should reject inherited WITH CHECK");
     assert!(
-        update_err.to_string().contains("authorization_denied"),
+        update_err.to_string().contains("(permission_denied)"),
         "expected policy rejection, got {update_err}"
     );
     let rows = wait_for_query(

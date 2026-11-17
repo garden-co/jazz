@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createJazzContext } from "../backend/create-jazz-context.js";
-import { schema as s } from "../schema-namespace.js";
-import { definePermissions } from "../permissions/index.js";
+import { testApp, testPermissions } from "../testing/test-app.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { startTestJazz } from "../testing/index.js";
@@ -10,36 +9,32 @@ import { startTestJazz } from "../testing/index.js";
 // The string-typed parent column is the control shape without a relation.
 const apps = {
   "nullable self-reference": () =>
-    s.defineApp(
-      {
-        categories: s.table(
-          { name: s.string(), parentId: s.uuid().optional() },
-          { parent: s.rel("categories", "parentId") },
-        ),
+    testApp({
+      tables: {
+        categories: {
+          columns: { name: "string", parentId: "uuid?" },
+          relations: { parent: { rel: "categories", column: "parentId" } },
+        },
       },
-      { migrations: "none" },
-    ),
+    }),
   "optional string parent column": () =>
-    s.defineApp(
-      {
-        categories: s.table({ name: s.string(), parentId: s.string().optional() }, {}),
-      },
-      { migrations: "none" },
-    ),
+    testApp({
+      tables: { categories: { columns: { name: "string", parentId: "string?" } } },
+    }),
 };
 
 describe("transaction-committed rows in a hierarchical table", () => {
   for (const [shape, makeApp] of Object.entries(apps)) {
     for (const writer of ["backend", "local-first client"] as const) {
       it(`are returned by Global one-shot reads with a ${shape} (${writer})`, async () => {
-        const app = makeApp() as ReturnType<(typeof apps)["nullable self-reference"]>;
-        const permissions = definePermissions(app, ({ policy }) => {
-          policy.categories.allowRead.always();
-          policy.categories.allowInsert.always();
-        });
+        const app = makeApp();
+        const permissions = {
+          format: 1,
+          tables: { categories: { read: "true", insert: "true" } },
+        } as const;
         const server = await startTestJazz({
-          app: app,
-          permissions: permissions,
+          app,
+          permissions,
           coreOptions: { inMemory: true },
         });
         let context: ReturnType<typeof createJazzContext> | undefined;
@@ -50,7 +45,7 @@ describe("transaction-committed rows in a hierarchical table", () => {
             context = createJazzContext({
               appId: server.appId,
               app,
-              permissions,
+              permissions: testPermissions(app, permissions),
               serverUrl: server.core.url,
               adminSecret: server.adminSecret,
               backendSecret: server.backendSecret,

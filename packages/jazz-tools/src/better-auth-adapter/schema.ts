@@ -5,9 +5,6 @@ import type { ColumnType, WasmSchema } from "../drivers/types.js";
 import { assertUserColumnNameAllowed } from "../magic-columns.js";
 import { assertSchemaNameAllowed } from "../schema-name.js";
 
-const DEFAULT_SCHEMA_FILE_PATH = "./schema-better-auth/schema.ts";
-const JS_IDENTIFIER_PATTERN = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
-
 interface SchemaNameResolvers {
   getModelName: (model: string) => string;
   getFieldName: ({ model, field }: { model: string; field: string }) => string;
@@ -101,119 +98,6 @@ function assertStoredFieldNameAllowed(args: {
   }
 
   assertUserColumnNameAllowed(storedFieldName);
-}
-
-function formatStringLiteral(value: string): string {
-  return JSON.stringify(value);
-}
-
-function formatObjectKey(key: string): string {
-  return JS_IDENTIFIER_PATTERN.test(key) ? key : JSON.stringify(key);
-}
-
-function formatPropertyAccess(objectName: string, key: string): string {
-  return JS_IDENTIFIER_PATTERN.test(key)
-    ? `${objectName}.${key}`
-    : `${objectName}[${formatStringLiteral(key)}]`;
-}
-
-function withOptionalSuffix(expression: string, field: DBFieldAttribute): string {
-  return field.required === false ? `${expression}.optional()` : expression;
-}
-
-function toJazzSchemaReferenceExpression(args: {
-  modelName: string;
-  fieldName: string;
-  storedFieldName: string;
-  field: DBFieldAttribute;
-  getModelName: (model: string) => string;
-}): string {
-  const { modelName, fieldName, field } = args;
-  const reference = field.references;
-
-  if (!reference) {
-    throw new Error(`Field "${modelName}.${fieldName}" is missing Better Auth reference metadata.`);
-  }
-
-  if (reference.field !== "id") {
-    throw new Error(
-      `Field "${modelName}.${fieldName}" references "${reference.model}.${reference.field}", but Jazz schema.ts only supports references to "id".`,
-    );
-  }
-
-  switch (field.type) {
-    case "string": {
-      return withOptionalSuffix("s.uuid()", field);
-    }
-    case "string[]": {
-      return withOptionalSuffix("s.array(s.uuid())", field);
-    }
-    case "number":
-    case "number[]":
-      throw new Error(
-        `Field "${modelName}.${fieldName}" cannot be emitted as a Jazz reference because Better Auth references must use string or string[] fields.`,
-      );
-    default:
-      throw new Error(
-        `Field "${modelName}.${fieldName}" uses unsupported Better Auth reference type: ${String(field.type)}.`,
-      );
-  }
-}
-
-function toJazzSchemaColumnExpression(args: {
-  modelName: string;
-  fieldName: string;
-  storedFieldName: string;
-  field: DBFieldAttribute;
-  getModelName: (model: string) => string;
-}): string {
-  const { modelName, fieldName, storedFieldName, field, getModelName } = args;
-
-  if (field.references) {
-    return toJazzSchemaReferenceExpression({
-      modelName,
-      fieldName,
-      storedFieldName,
-      field,
-      getModelName,
-    });
-  }
-
-  if (Array.isArray(field.type)) {
-    return withOptionalSuffix(
-      `s.enum(${field.type.map((variant) => formatStringLiteral(variant)).join(", ")})`,
-      field,
-    );
-  }
-
-  switch (field.type) {
-    case "string":
-      return withOptionalSuffix("s.string()", field);
-    case "number":
-      if (field.bigint) {
-        throw new Error(
-          `Field "${modelName}.${fieldName}" uses Better Auth bigint numbers, which Jazz schema.ts cannot represent.`,
-        );
-      }
-      return withOptionalSuffix("s.int()", field);
-    case "boolean":
-      return withOptionalSuffix("s.boolean()", field);
-    case "date":
-      return withOptionalSuffix("s.timestamp()", field);
-    case "json":
-      return withOptionalSuffix("s.json()", field);
-    case "string[]":
-      return withOptionalSuffix("s.array(s.string())", field);
-    case "number[]":
-      if (field.bigint) {
-        throw new Error(
-          `Field "${modelName}.${fieldName}" uses Better Auth bigint arrays, which Jazz schema.ts cannot represent.`,
-        );
-      }
-      return withOptionalSuffix("s.array(s.int())", field);
-    default:
-      throw new Error(`Unsupported Better Auth field type: ${String(field.type)}`);
-  }
 }
 
 export function createSchemaNameResolvers(args: {
@@ -310,122 +194,251 @@ export function buildJazzSchemaFromTables(args: {
   });
 }
 
-export function buildJazzSchemaSourceText(args: {
+// ---------------------------------------------------------------------------
+// schema-better-auth/schema.ts generation, for Better Auth's `generate` command.
+// ---------------------------------------------------------------------------
+
+const DEFAULT_SCHEMA_FILE_PATH = "./schema-better-auth/schema.ts";
+const APP_FILE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** A column of `jazz.app.json`, in its readable form (SPEC §10.10). */
+export type AppFileColumn = string | Record<string, unknown>;
+
+/** A table of `jazz.app.json`. */
+export interface AppFileTable {
+  columns: Record<string, AppFileColumn>;
+  relations?: Record<
+    string,
+    { rel: string; column: string } | { reverse: string; relation: string }
+  >;
+  [key: string]: unknown;
+}
+
+function assertAppFileIdentifier(kind: "table" | "column", name: string, where: string): void {
+  if (!APP_FILE_IDENTIFIER.test(name)) {
+    throw new Error(
+      `${where}: the ${kind} name "${name}" can't be written to jazz.app.json, which only allows identifiers ([A-Za-z_][A-Za-z0-9_]*). ` +
+        `Rename it with Better Auth's ${kind === "table" ? "modelName" : "fieldName"} option.`,
+    );
+  }
+}
+
+function optionalColumn(type: string | Record<string, unknown>, field: DBFieldAttribute) {
+  const optional = field.required === false;
+  if (typeof type === "string") return optional ? `${type}?` : type;
+  return optional ? { ...type, optional: true } : type;
+}
+
+function toAppFileColumn(modelName: string, fieldName: string, field: DBFieldAttribute) {
+  const where = `Field "${modelName}.${fieldName}"`;
+  const reference = field.references;
+  if (reference) {
+    if (reference.field !== "id") {
+      throw new Error(
+        `${where} references "${reference.model}.${reference.field}", but Jazz app files only support references to "id".`,
+      );
+    }
+    switch (field.type) {
+      case "string":
+        return optionalColumn("uuid", field);
+      case "string[]":
+        return optionalColumn({ array: "uuid" }, field);
+      case "number":
+      case "number[]":
+        throw new Error(
+          `${where} cannot be emitted as a Jazz reference because Better Auth references must use string or string[] fields.`,
+        );
+      default:
+        throw new Error(
+          `${where} uses unsupported Better Auth reference type: ${String(field.type)}.`,
+        );
+    }
+  }
+  if (Array.isArray(field.type)) return optionalColumn({ enum: [...field.type] }, field);
+  switch (field.type) {
+    case "string":
+      return optionalColumn("string", field);
+    case "number":
+      if (field.bigint) {
+        throw new Error(
+          `${where} uses Better Auth bigint numbers, which Jazz app files cannot represent.`,
+        );
+      }
+      return optionalColumn("int", field);
+    case "boolean":
+      return optionalColumn("boolean", field);
+    case "date":
+      return optionalColumn("timestamp", field);
+    case "json":
+      return optionalColumn({ json: true }, field);
+    case "string[]":
+      return optionalColumn({ array: "string" }, field);
+    case "number[]":
+      if (field.bigint) {
+        throw new Error(
+          `${where} uses Better Auth bigint arrays, which Jazz app files cannot represent.`,
+        );
+      }
+      return optionalColumn({ array: "int" }, field);
+    default:
+      throw new Error(`Unsupported Better Auth field type: ${String(field.type)}`);
+  }
+}
+
+/**
+ * The Better Auth tables as `jazz.app.json` tables, by table name. Each
+ * reference column gets a forward relation `<column>Relation`.
+ */
+export function buildBetterAuthAppTables(args: {
   tables: BetterAuthDBSchema;
   getModelName: (model: string) => string;
   getFieldName: ({ model, field }: { model: string; field: string }) => string;
-}): string {
+}): Record<string, AppFileTable> {
   const { tables, getModelName, getFieldName } = args;
-  const blocks: string[] = [];
-  const permissionsBlocks: string[] = [];
+  const result: Record<string, AppFileTable> = {};
 
   for (const [modelName, model] of Object.entries(tables)) {
     const tableName = getModelName(modelName);
     assertSchemaNameAllowed(tableName);
-    const lines = [`  ${formatObjectKey(tableName)}: s.table({`];
-    const relations: string[] = [];
+    assertAppFileIdentifier("table", tableName, `Model "${modelName}"`);
+    const columns: Record<string, AppFileColumn> = {};
+    const relations: NonNullable<AppFileTable["relations"]> = {};
 
     for (const [fieldName, field] of Object.entries(model.fields)) {
-      if (fieldName === "id") {
-        continue;
-      }
-
+      if (fieldName === "id") continue;
       const storedFieldName = getFieldName({ model: modelName, field: fieldName });
       assertStoredFieldNameAllowed({ modelName, fieldName, storedFieldName });
-
+      assertAppFileIdentifier("column", storedFieldName, `Field "${modelName}.${fieldName}"`);
+      columns[storedFieldName] = toAppFileColumn(modelName, fieldName, field);
       if (field.references) {
-        const alias = `${storedFieldName}Relation`;
-        if (
-          Object.keys(model.fields).some(
-            (f) => getFieldName({ model: modelName, field: f }) === alias,
-          )
-        )
-          throw new Error(`Generated relationship "${tableName}.${alias}" collides with a column.`);
-        relations.push(
-          `    ${formatObjectKey(alias)}: s.rel(${formatStringLiteral(getModelName(field.references.model))}, ${formatStringLiteral(storedFieldName)}),`,
-        );
+        relations[`${storedFieldName}Relation`] = {
+          rel: getModelName(field.references.model),
+          column: storedFieldName,
+        };
       }
-      const expression = toJazzSchemaColumnExpression({
-        modelName,
-        fieldName,
-        storedFieldName,
-        field,
-        getModelName,
-      });
-
-      // Better Auth owns these fields, including its required timestamps.
-      // Keep their domain meaning instead of recommending Jazz provenance columns.
-      lines.push(
-        `    ${formatObjectKey(storedFieldName)}: ${
-          ["createdAt", "createdBy", "updatedAt", "updatedBy"].includes(storedFieldName)
-            ? `s.allowExternalProvenanceName(${expression})`
-            : expression
-        },`,
-      );
     }
 
-    lines.push("  }, {", ...relations, "  }),");
-    blocks.push(lines.join("\n"));
-
-    const policy = formatPropertyAccess("policy", tableName);
-    permissionsBlocks.push(
-      [
-        `  ${policy}.allowRead.never();`,
-        `  ${policy}.allowInsert.never();`,
-        `  ${policy}.allowUpdate.never();`,
-        `  ${policy}.allowDelete.never();`,
-      ].join("\n"),
-    );
+    for (const name of Object.keys(relations)) {
+      if (name in columns) {
+        throw new Error(`Generated relationship "${tableName}.${name}" collides with a column.`);
+      }
+    }
+    result[tableName] = Object.keys(relations).length > 0 ? { columns, relations } : { columns };
   }
 
+  return result;
+}
+
+/** A key of an object literal: bare when it can be. */
+function objectKey(name: string): string {
+  return APP_FILE_IDENTIFIER.test(name) ? name : JSON.stringify(name);
+}
+
+/** A readable column type as the `s.*` builder expression that declares it. */
+function columnExpression(column: AppFileColumn): string {
+  if (typeof column === "string") {
+    const optional = column.endsWith("?");
+    const base = optional ? column.slice(0, -1) : column;
+    return `${scalarExpression(base)}${optional ? ".optional()" : ""}`;
+  }
+  const { optional, ...type } = column as Record<string, unknown> & { optional?: boolean };
+  return `${typeExpression(type)}${optional ? ".optional()" : ""}`;
+}
+
+function scalarExpression(type: string): string {
+  if (!["string", "uuid", "int", "float", "bigint", "boolean", "timestamp", "bytes"].includes(type))
+    throw new Error(`unsupported column type ${type}`);
+  return `s.${type}()`;
+}
+
+function typeExpression(type: unknown): string {
+  if (typeof type === "string") return scalarExpression(type);
+  const object = type as Record<string, unknown>;
+  if (Array.isArray(object.enum))
+    return `s.enum(${(object.enum as string[]).map((variant) => JSON.stringify(variant)).join(", ")})`;
+  if (object.json !== undefined)
+    return object.json === true ? "s.json()" : `s.json(${JSON.stringify(object.json)})`;
+  if (object.array !== undefined) return `s.array(${typeExpression(object.array)})`;
+  if (typeof object.type === "string") return scalarExpression(object.type);
+  throw new Error(`unsupported column type ${JSON.stringify(type)}`);
+}
+
+/**
+ * The Better Auth tables as `schema-better-auth/schema.ts`: `tables` (to
+ * spread into the app's `s.defineSchema({ ...betterAuth.tables, … })`) and
+ * `permissions` denying every client read and write (to spread into
+ * `definePermissions({ ...betterAuth.permissions, … })`): only the backend's
+ * adapter touches these tables. Each operation is `false` rather than left
+ * out, as the files have always held them.
+ */
+export function buildBetterAuthSchemaSource(args: {
+  tables: BetterAuthDBSchema;
+  getModelName: (model: string) => string;
+  getFieldName: ({ model, field }: { model: string; field: string }) => string;
+}): string {
+  const tables = buildBetterAuthAppTables(args);
+  const names = Object.keys(tables).sort();
+  const blocks = names.map((name) => {
+    const table = tables[name]!;
+    const columns = Object.entries(table.columns).map(
+      ([column, type]) => `      ${objectKey(column)}: ${columnExpression(type)},`,
+    );
+    const relations = Object.entries(table.relations ?? {}).map(([relation, target]) =>
+      "rel" in target
+        ? `      ${objectKey(relation)}: s.rel(${JSON.stringify(target.rel)}, ${JSON.stringify(target.column)}),`
+        : `      ${objectKey(relation)}: s.reverse(${JSON.stringify(target.reverse)}, ${JSON.stringify(target.relation)}),`,
+    );
+    return [
+      `  ${objectKey(name)}: s.table(`,
+      "    {",
+      ...columns,
+      "    },",
+      relations.length > 0 ? ["    {", ...relations, "    },"].join("\n") : "    {},",
+      "  ),",
+    ].join("\n");
+  });
+  const deny = "{ read: false, insert: false, update: false, delete: false }";
   return [
+    "// Generated by Better Auth's `generate` command through the Jazz adapter: rerun it",
+    "// rather than editing. Spread both exports into your schema.ts:",
+    "//   s.defineSchema({ ...betterAuth.tables, … })",
+    "//   definePermissions({ ...betterAuth.permissions, … })",
     'import { schema as s } from "jazz-tools";',
     "",
-    "export const schema = {",
-    ...blocks.flatMap((block, index) => (index === 0 ? [block] : ["", block])),
+    "export const tables = {",
+    ...blocks,
     "};",
     "",
-    "type AppSchema = s.Schema<typeof schema>;",
-    "// Never deployed on its own: the app that spreads `schema` ships the migrations.",
-    'export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });',
-    "export const wasmSchema = app.wasmSchema;",
-    "",
-    "export const permissions = s.definePermissions(app, ({ policy }) => {",
-    ...permissionsBlocks.flatMap((block, index) => (index === 0 ? [block] : ["", block])),
-    "});",
+    "// Only the backend's adapter reads and writes these tables.",
+    "export const permissions = {",
+    ...names.map((name) => `  ${objectKey(name)}: ${deny},`),
+    "} as const;",
     "",
   ].join("\n");
 }
 
-export function buildJazzSchemaSourceTextFromTables(args: {
+export function buildBetterAuthSchemaSourceFromTables(args: {
   tables: BetterAuthDBSchema;
   usePlural?: boolean;
 }): string {
-  const { tables, usePlural } = args;
-  const resolvers = createSchemaNameResolvers({ tables, usePlural });
-
-  return buildJazzSchemaSourceText({
-    tables,
-    getModelName: resolvers.getModelName,
-    getFieldName: resolvers.getFieldName,
-  });
+  const resolvers = createSchemaNameResolvers({ tables: args.tables, usePlural: args.usePlural });
+  return buildBetterAuthSchemaSource({ tables: args.tables, ...resolvers });
 }
 
+/**
+ * What the adapter's `createSchema` gives Better Auth's `generate` command:
+ * `schema-better-auth/schema.ts` (or `file`), to import from the app's
+ * schema.ts. Then `npx jazz-tools generate` writes the app's files.
+ */
 export function createJazzSchemaSourceFile(args: {
   file?: string;
   tables: BetterAuthDBSchema;
   getModelName: (model: string) => string;
   getFieldName: ({ model, field }: { model: string; field: string }) => string;
 }): DBAdapterSchemaCreation {
-  const { file, tables, getModelName, getFieldName } = args;
-
   return {
-    path: file ?? DEFAULT_SCHEMA_FILE_PATH,
+    path: args.file ?? DEFAULT_SCHEMA_FILE_PATH,
     overwrite: true,
-    code: buildJazzSchemaSourceText({
-      tables,
-      getModelName,
-      getFieldName,
-    }),
+    code: buildBetterAuthSchemaSource(args),
   };
 }

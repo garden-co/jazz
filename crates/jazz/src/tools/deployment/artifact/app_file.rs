@@ -7,7 +7,7 @@ use base64::Engine as _;
 
 use crate::tools::ObjectId;
 use crate::tools::public_schema::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, EnumCaseDescriptor, HistoryRetention,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, HistoryRetention, LegacyEnumCase,
     RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 
@@ -19,6 +19,11 @@ use super::{
 
 /// A refusal at a JSON path of the app file.
 pub type Refusal = (String, String);
+
+/// Why an `enum` given as an object of cases with fields is refused: Jazz
+/// had such columns declared but no store could hold them, and they were
+/// removed in 2.0.0-alpha.66.
+const PAYLOAD_ENUM_REFUSAL: &str = "enum cases with fields are not supported; use a string enum plus a nullable column per field, or a json column (see https://github.com/garden-co/jazz/issues/5758)";
 
 fn refuse(path: impl Into<String>, message: impl Into<String>) -> Refusal {
     (path.into(), message.into())
@@ -44,8 +49,10 @@ pub struct AppFile {
 // The keys each object of the file takes (besides `$comment`), which the
 // JSON Schema in docs/public/schemas/ must list too.
 pub const TOP_KEYS: &[&str] = &[
+    // Legacy (before alpha.66): `$schema` carries the version now.
     "format",
     "$schema",
+    "$generated",
     "tables",
     "history",
     "migrations",
@@ -165,6 +172,7 @@ pub fn read(root: &Json) -> Result<AppFile, Refusal> {
         .ok_or_else(|| refuse("(top)", "no `tables`"))?;
     let mut codegen = Codegen::default();
     let current = read_tables(tables_json, "tables", Some((&mut codegen, &mut warnings)))?;
+    refuse_current_enum_cases(&current)?;
     if let Some(transforms) = root.get("transforms") {
         for (name, spec) in object(transforms, "transforms")? {
             let path = format!("transforms.{name}");
@@ -241,7 +249,7 @@ pub fn read(root: &Json) -> Result<AppFile, Refusal> {
 
     if root.get("slices").is_some() {
         warnings.push(
-            "slices: schema slicing is gone in alpha.65, so `slices` is ignored; \
+            "slices: schema slicing is gone in alpha.66, so `slices` is ignored; \
              `jazz-tools upgrade` removes it"
                 .to_string(),
         );
@@ -260,6 +268,30 @@ pub fn read(root: &Json) -> Result<AppFile, Refusal> {
 fn is_array_index(key: &str) -> bool {
     key.parse::<u32>()
         .is_ok_and(|n| n < u32::MAX && n.to_string() == key)
+}
+
+/// The current tables may not declare an enum whose cases carry fields;
+/// an earlier version in `history`, and a migration from it, may (Jazz
+/// read them before 2.0.0-alpha.66), so such an app can migrate away.
+fn refuse_current_enum_cases(current: &Schema) -> Result<(), Refusal> {
+    fn declares(ty: &ColumnType) -> bool {
+        match ty {
+            ColumnType::LegacyEnumPayload { .. } => true,
+            ColumnType::Array { element } => declares(element),
+            _ => false,
+        }
+    }
+    for (table, schema) in current.iter() {
+        for column in &schema.columns.columns {
+            if declares(&column.column_type) {
+                return Err(refuse(
+                    format!("tables.{}.columns.{}", table.as_str(), column.name_str()),
+                    PAYLOAD_ENUM_REFUSAL,
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn read_tables(
@@ -456,8 +488,8 @@ fn read_tables(
         if let Some(fields) = table.get("tsOnly") {
             if let Some((_, warnings)) = codegen.as_mut() {
                 warnings.push(format!(
-                    "{path}.tsOnly: `tsOnly` (written before alpha.65) is ignored; \
-                     `jazz-tools upgrade` turns it into `computed` and `transforms`"
+                    "{path}.tsOnly: `tsOnly` (written before alpha.66) is ignored; \
+                     declare those fields in schema.ts with `s.computed(…)` or `.transform(…)`"
                 ));
             }
             for (field, kind) in object(fields, &format!("{path}.tsOnly"))? {
@@ -667,7 +699,8 @@ fn read_type(spec: &Json, path: &str) -> Result<(ColumnType, bool), Refusal> {
                         Json::Array(_) => ColumnType::Enum {
                             variants: names(value, &sub)?,
                         },
-                        Json::Object(cases) => ColumnType::EnumPayload {
+                        // Only history may hold one (see `refuse_current_enum_cases`).
+                        Json::Object(cases) => ColumnType::LegacyEnumPayload {
                             cases: cases
                                 .iter()
                                 .map(|(case, fields)| {
@@ -682,7 +715,7 @@ fn read_type(spec: &Json, path: &str) -> Result<(ColumnType, bool), Refusal> {
                                             )
                                         })
                                         .collect::<Result<_, _>>()?;
-                                    Ok(EnumCaseDescriptor {
+                                    Ok(LegacyEnumCase {
                                         name: case.clone(),
                                         fields,
                                     })
@@ -755,29 +788,6 @@ fn read_value(value: &Json, ty: &ColumnType, path: &str) -> Result<Value, Refusa
                 .map(|(i, item)| read_value(item, element, &format!("{path}[{i}]")))
                 .collect::<Result<_, _>>()?,
         ),
-        (ColumnType::EnumPayload { cases }, Json::Object(entries)) if entries.len() == 1 => {
-            let (case, fields) = &entries[0];
-            let descriptor = cases
-                .iter()
-                .find(|c| &c.name == case)
-                .ok_or_else(|| refuse(path, format!("unknown case `{case}`")))?;
-            let values = descriptor
-                .fields
-                .iter()
-                .map(|field| {
-                    let value = fields.get(field.name_str()).unwrap_or(&Json::Null);
-                    read_value(
-                        value,
-                        &field.column_type,
-                        &format!("{path}.{case}.{}", field.name_str()),
-                    )
-                })
-                .collect::<Result<_, _>>()?;
-            Value::Enum {
-                case: case.clone(),
-                values,
-            }
-        }
         _ => return Err(wrong()),
     })
 }
@@ -951,16 +961,10 @@ pub fn write(
     migrations: &[(Option<String>, Option<String>, &PublishMigrationRequest)],
     codegen: &Codegen,
 ) -> Result<Json, String> {
-    let mut top = vec![
-        (
-            "format".to_string(),
-            Json::Number(super::FORMAT.to_string()),
-        ),
-        (
-            "tables".to_string(),
-            write_tables(current, Some(codegen)).map_err(|e| format!("tables.{e}"))?,
-        ),
-    ];
+    let mut top = vec![(
+        "tables".to_string(),
+        write_tables(current, Some(codegen)).map_err(|e| format!("tables.{e}"))?,
+    )];
     if !history.is_empty() {
         top.push((
             "history".into(),
@@ -1189,7 +1193,13 @@ fn write_type(ty: &ColumnType) -> Result<Json, String> {
             "enum",
             Json::Array(variants.iter().map(Json::string).collect()),
         )]),
-        ColumnType::EnumPayload { cases } => Json::object(vec![(
+        ColumnType::Json { schema } => Json::object(vec![(
+            "json",
+            schema.as_ref().map_or(Json::Bool(true), from_serde),
+        )]),
+        ColumnType::Array { element } => Json::object(vec![("array", write_type(element)?)]),
+        // Written back as read, for the history that holds it.
+        ColumnType::LegacyEnumPayload { cases } => Json::object(vec![(
             "enum",
             Json::Object(
                 cases
@@ -1213,12 +1223,7 @@ fn write_type(ty: &ColumnType) -> Result<Json, String> {
                     .collect::<Result<_, String>>()?,
             ),
         )]),
-        ColumnType::Json { schema } => Json::object(vec![(
-            "json",
-            schema.as_ref().map_or(Json::Bool(true), from_serde),
-        )]),
-        ColumnType::Array { element } => Json::object(vec![("array", write_type(element)?)]),
-        ColumnType::ScalarEnum { .. } | ColumnType::CatalogueEnumPayload { .. } => {
+        ColumnType::ScalarEnum { .. } => {
             return Err(super::expr::unsupported("a catalogue-native enum"));
         }
         ColumnType::TransactionId => {
@@ -1316,25 +1321,6 @@ fn write_value(value: &Value, ty: &ColumnType) -> Result<Json, String> {
                 .map(|v| write_value(v, element))
                 .collect::<Result<_, _>>()?,
         ),
-        (Value::Enum { case, values }, ColumnType::EnumPayload { cases }) => {
-            let descriptor = cases
-                .iter()
-                .find(|c| &c.name == case)
-                .ok_or_else(|| super::expr::unsupported("an enum default of an unknown case"))?;
-            Json::Object(vec![(
-                case.clone(),
-                Json::Object(
-                    descriptor
-                        .fields
-                        .iter()
-                        .zip(values)
-                        .map(|(f, v)| {
-                            Ok((f.name_str().to_string(), write_value(v, &f.column_type)?))
-                        })
-                        .collect::<Result<_, String>>()?,
-                ),
-            )])
-        }
         (other, _) => return Err(super::expr::unsupported(&format!("the default {other:?}"))),
     })
 }

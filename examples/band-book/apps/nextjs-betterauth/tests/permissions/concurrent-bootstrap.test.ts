@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { app } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
 import { ensureDemoWorkspace, seedId } from "../../src/lib/bootstrap.js";
 import { redeemInvite } from "../../src/lib/invites.js";
 import { startAuthority } from "./authority.js";

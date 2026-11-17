@@ -1,8 +1,7 @@
 // #region schema-expo
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
 
-const schema = {
+export const schema = s.defineSchema({
   projects: s.table(
     {
       name: s.string(),
@@ -24,10 +23,29 @@ const schema = {
       project: s.rel("projects", "projectId"),
     },
   ),
-};
+});
 
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
-
-export type Todo = s.RowOf<typeof app.todos>;
 // #endregion schema-expo
+
+// #region permissions-basic-expo
+const { definePermissions, session } = schema;
+
+const ownedByMe = { owner_id: session.user };
+
+export const permissions = definePermissions({
+  projects: {
+    read: true,
+    insert: true,
+  },
+  todos: {
+    // Each user only sees their own rows.
+    read: ownedByMe,
+    // New rows must belong to the current user.
+    insert: ownedByMe,
+    // Users can only mutate their own incomplete todos.
+    updateIf: { ...ownedByMe, done: false },
+    updateTo: ownedByMe,
+    delete: { ...ownedByMe, done: false },
+  },
+});
+// #endregion permissions-basic-expo

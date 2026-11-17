@@ -1,6 +1,7 @@
 ---
 title: How Auth Works in Jazz
 description: "Learn how your backend decides who a user is, how the browser follows your auth, and what a session is."
+languageTabs: main-backend
 ---
 
 To authenticate users with Jazz, sign in your users with your auth library as usual. Provide an
@@ -19,8 +20,8 @@ backend already knows who is signed in, so it tells Jazz:
 ```ts title="jazz.server.ts"
 import { createJazz, sqlite } from "jazz-tools/backend";
 import { auth } from "./auth"; // your Better Auth instance, which can keep its tables in Jazz too
-import { app } from "./schema";
-import permissions from "./permissions";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const jazz = createJazz({
   app,
@@ -295,9 +296,10 @@ user your backend signed in; `identity.subject` is your own user ID.
 
 - **Ownership** compares `session.user`. Linked identities share one account, so this is
   what "rows this user owns" should use: `{ $createdBy: session.user }` or
-  `{ owner_id: session.user }`, also inside `exists` and `hopTo` rules.
+  `{ owner_id: session.user }`, also inside `exists` rules.
 - **Exact authorship** compares `session.identity`, issuer and subject included:
-  `{ "$createdBy.identity": session.identity }`. Jazz stamps `$createdBy` and `$updatedBy` with the
+  `{ "$createdBy.identity": session.identity }`.
+  Jazz stamps `$createdBy` and `$updatedBy` with the
   full author record, `{ account, identity }`, along with edit timestamps. This tells apart writes
   by the same account made through your auth (`jazz:backend`), through a device account's key
   (`urn:jazz:local-first`), or by your backend on the user's behalf without attribution
@@ -312,17 +314,20 @@ author into a string.
 
 ### Observe the current session
 
-| Binding              | Read the current session                                            |
-| -------------------- | ------------------------------------------------------------------- |
-| React / React Native | `const session = useSession()`                                      |
-| Vue                  | `const session = useSession()`; read `session.value`                |
-| Solid                | `const session = useSession()`; read `session()`                    |
-| Svelte               | `const session = getSession()`; read `session.current`              |
-| TypeScript           | `db.getAuthState().session`; subscribe with `db.onAuthChanged(...)` |
+The Jazz session's `user` is who is signed in, and it is what your policies see:
+`user.accountId` is `session.user`, and `user.identity` and `user.claims` are `session.identity` and
+`session.claims`. It is `null` while no one is signed in.
 
-Who is signed in on the device (rather than what a policy sees) comes from the Jazz session:
-`useJazzSession().user` in React, `getJazzSession()` in Svelte, `session.getSnapshot().user`
-without a framework.
+| Binding              | Read the signed-in user                                               |
+| -------------------- | --------------------------------------------------------------------- |
+| React / React Native | `const { user } = useJazzSession()`                                   |
+| Vue                  | `const { snapshot } = useJazzSession()`; read `snapshot.value.user`   |
+| Solid                | `const { snapshot } = useJazzSession()`; read `snapshot().user`       |
+| Svelte               | `const session = getJazzSession()`; read `$session.user`              |
+| TypeScript           | `session.getSnapshot().user`; subscribe with `session.subscribe(...)` |
+
+`user.kind` tells a device account (`"device"`, a guest) from a user your backend signed in
+(`"backend"`).
 
 Framework hooks must run inside the Jazz provider. Signed-out readers have no session account, so
 ownership checks against them fail closed; write an explicit anonymous-access policy when you want
@@ -337,21 +342,21 @@ column and base your policies on it:
 
 ```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
 
-export const app = s.defineApp(
-  { todos: s.table({ title: s.string(), owner_id: s.uuid() }, {}) },
-  { migrations },
-);
-```
+export const schema = s.defineSchema({
+  todos: s.table({
+    title: s.string(),
+    owner_id: s.uuid(),
+  }),
+});
 
-```ts title="permissions.ts"
-import { schema as s } from "jazz-tools";
-import { app } from "./schema";
+const { definePermissions, session } = schema;
 
-export default s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner_id: session.user });
-  policy.todos.allowInsert.where({ owner_id: session.user });
+export const permissions = definePermissions({
+  todos: {
+    read: { owner_id: session.user },
+    insert: { owner_id: session.user },
+  },
 });
 ```
 

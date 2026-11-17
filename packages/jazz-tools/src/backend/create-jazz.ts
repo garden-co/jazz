@@ -6,6 +6,7 @@ import type { Http2SecureServer, Http2Server } from "node:http2";
 import type { Duplex } from "node:stream";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import * as jazzNapi from "jazz-napi";
 import { JazzCore, type JazzCoreSocketEvent } from "jazz-napi";
 import { registerInProcessTransport } from "../runtime/in-process-transport.js";
 import { accountAppId, localFirstAccountId } from "../accounts/local-first.js";
@@ -39,15 +40,12 @@ import {
   encodeStreamRecord,
 } from "../runtime/native-runtime/http-stream-socket.js";
 import { resolveSchemaSource } from "../schema-source.js";
-import { shippedMigrations, shipsNoMigrations } from "../runtime/client-migrations.js";
-import { checkRunningApp } from "../dev/app-files.js";
-import { computeSchemaHash } from "../schema-hash.js";
-import {
-  mergePermissionsIntoWasmSchema,
-  type CompiledPermissionsMap,
-} from "../schema-permissions.js";
-import type { WasmSchema } from "../drivers/types.js";
-import { deployApp } from "../dev/catalogue.js";
+import { checkRunningBindings } from "../dev/app-files.js";
+import { loadBackendApp, provideCodegenNapi, type LoadedBackendApp } from "../dev/codegen-napi.js";
+import { BUNDLE_HEADER } from "./admission.js";
+import { boundApp } from "../typed-app.js";
+import type { CompiledPermissionsMap } from "../schema-permissions.js";
+import { publishLoadedDeployment } from "../dev/catalogue.js";
 import { DeploymentError } from "../dev/catalogue-api.js";
 import type { Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
@@ -59,6 +57,8 @@ import {
   type JazzClient,
 } from "./create-jazz-session.js";
 import type { BackendSchemaInput } from "./create-jazz-context.js";
+import { openThinSessionClient } from "./thin-session-client.js";
+import { asksThinResults, ThinRelay, type ThinTransactionClient } from "./thin-relay.js";
 import {
   BackendClientsUnavailable,
   backendClientVerifier,
@@ -443,9 +443,19 @@ export interface AuthenticatedUser extends JazzUser {
   expiresAt: number;
 }
 
+/**
+ * An app's `jazz.permissions.json`, as a backend imports it
+ * (`import permissions from "./jazz.permissions.json" with { type: "json" }`).
+ * Jazz's Rust loader reads and checks it against the app's bindings.
+ */
+export type AppPermissionsFile = ({ readonly $schema: string } | { readonly format: number }) &
+  Readonly<Record<string, unknown>>;
+
 export interface CreateJazzOptions {
+  /** The app, as `jazz.generated.ts` exports it. */
   app: BackendSchemaInput;
-  permissions: CompiledPermissionsMap;
+  /** The app's `jazz.permissions.json`, imported as JSON. */
+  permissions: AppPermissionsFile;
   store: JazzStore;
   /**
    * Decide who sent `request`, with your app's own session (a cookie, a
@@ -1126,22 +1136,25 @@ async function applyBundle(
   options: {
     appId: string;
     adminSecret: string;
-    app: BackendSchemaInput;
-    permissions: CompiledPermissionsMap;
+    /** What the Rust loader built from the app's bindings and jazz.permissions.json. */
+    loaded: LoadedBackendApp;
     allowDroppingHistory?: boolean;
+    /** A test harness's backend: print no warnings. */
+    quiet?: boolean;
   },
 ): Promise<string> {
   // Published, never activated: this backend's sessions are pinned to its
   // bundle, so deployments of the app serve side by side and a rollback is
   // publishing the older bundle again.
-  const deployed = await deployApp({
-    appId: options.appId,
-    serverUrl: origin,
-    adminSecret: options.adminSecret,
-    app: options.app,
-    permissions: options.permissions,
-    allowDroppingHistory: options.allowDroppingHistory,
-  }).catch((error: unknown) => {
+  const deployed = await publishLoadedDeployment(
+    {
+      appId: options.appId,
+      serverUrl: origin,
+      adminSecret: options.adminSecret,
+      allowDroppingHistory: options.allowDroppingHistory,
+    },
+    options.loaded,
+  ).catch((error: unknown) => {
     // A core without `/bundles` predates per-deployment permissions; it
     // must not be handed a deployment it would activate for every backend.
     if (error instanceof DeploymentError && (error.status === 404 || error.status === 405)) {
@@ -1155,6 +1168,13 @@ async function applyBundle(
   // An older core answers a publish without the bundle it made.
   if (!deployed.bundle) {
     throw new Error("createJazz: the core did not publish a permissions bundle; upgrade it");
+  }
+  // The loader's own warnings were printed when the permissions loaded; the
+  // rest (tables without policies) are the publish's.
+  if (!options.quiet) {
+    for (const warning of deployed.warnings ?? []) {
+      if (!options.loaded.warnings.includes(warning)) console.warn(`jazz: ${warning}`);
+    }
   }
   return deployed.bundle;
 }
@@ -1635,8 +1655,14 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
 
   /** Publish `next`'s bundle: what it is pinned by. Publishing one already published changes nothing. */
   const publish = async (next: CreateJazzOptions) => {
-    if (!testHarnessOptions.has(next)) await checkCommittedAppFiles(next);
-    return applyBundle(core.serverUrl, { ...next, appId, adminSecret: core.adminSecret });
+    await compiledPermissions(next);
+    return applyBundle(core.serverUrl, {
+      ...next,
+      loaded: compiled.get(next)!,
+      appId,
+      adminSecret: core.adminSecret,
+      quiet: testHarnessOptions.has(next),
+    });
   };
 
   /** Publish `next`'s bundle and open the backend's own session on it. */
@@ -1648,7 +1674,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     const session = await openJazzSession({
       appId,
       app: next.app,
-      permissions: next.permissions,
+      permissions: await compiledPermissions(next),
       serverUrl: core.serverUrl,
       driver: { type: "memory" },
       initial: { backendSecret: core.backendSecret },
@@ -2291,6 +2317,50 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     openedAt: number;
   }>();
 
+  /** Thin sessions' transaction clients running now. */
+  let thinClients = 0;
+
+  /**
+   * The client a thin session's transactions are served by (SPEC 8.14):
+   * in memory, linked to the core as the session, for the app's schema.
+   * Refused for a thin client built against another version of it, and
+   * `null` past the cap.
+   */
+  function openThinClient(
+    schema: Uint8Array,
+    link: ThinLink,
+  ): ThinTransactionClient | null | { refused: string } {
+    if (thinClients >= MAX_THIN_TRANSACTION_CLIENTS) return null;
+    // The session's own link: the socket the relay opens for it, with the
+    // prelude the backend admitted for it, as the session's own socket is
+    // opened (a guest vouched for an endpoint keeps that vouching).
+    const webSocket = inProcessWebSocket((_url, onEvent) =>
+      withPrelude(core.openSocket(link.headers, onEvent, link.access), link.prelude),
+    );
+    const client = openThinSessionClient({
+      appId,
+      schema,
+      serverUrl: core.serverUrl,
+      prelude: link.prelude,
+      trusted: link.trusted,
+      webSocket,
+    });
+    thinClients += 1;
+    let closed = false;
+    return {
+      serve: (request) => client.serve(request),
+      async close() {
+        if (closed) return;
+        closed = true;
+        try {
+          await client.close();
+        } finally {
+          thinClients -= 1;
+        }
+      },
+    };
+  }
+
   function openClientSession(
     request: Request,
     onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
@@ -2304,6 +2374,13 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     let ended = false;
     let userId: string | undefined;
     let trusted = false;
+    // A thin client's socket (its Hello asks for thin results): its
+    // transactions are served here (SPEC 8.14), the rest relayed.
+    let helloSeen = false;
+    let thin: ThinRelay | undefined;
+    // The prelude the core admitted the session's socket with: its own
+    // client connects with the same.
+    let thinLink: ThinLink | undefined;
     // Users `revokeUser` named while this session's admission ran.
     let admitting = true;
     const revokedWhileAdmitting = new Set<string>();
@@ -2317,6 +2394,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       ended = true;
       liveSessions.delete(live);
       stopExpiry?.();
+      thin?.end();
       socket?.close();
     };
     // A signed-in browser's session renewed in place (see
@@ -2405,6 +2483,12 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       }
       userId = admitted.userId;
       trusted = admitted.trusted;
+      thinLink = {
+        prelude: admitted.prelude,
+        access: admitted.access,
+        trusted: admitted.trusted,
+        headers: headerPairs(request.headers),
+      };
       stopExpiry?.();
       const admittedAt = Date.now();
       if (admitted.user) {
@@ -2476,6 +2560,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
             warnGuestsOffOnCore();
         }
         onEvent(error, event);
+        if (thin && event.kind === "message" && event.data) thin.fromCore(event.data);
         if (renewal && !renewal.told && event.kind === "message") tellRenewal(renewalAt);
       };
       socket = core.openSocket(headerPairs(request.headers), relay, admitted.access);
@@ -2517,7 +2602,25 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         ? chain
             .then(async (ok) => {
               if (!ok || ended || !socket) return false;
-              return socket.sendWithRoom ? socket.sendWithRoom(data) : socket.send(data);
+              const core = socket;
+              const toCore = (message: Uint8Array) =>
+                core.sendWithRoom ? core.sendWithRoom(message) : core.send(message);
+              if (!helloSeen) {
+                helloSeen = true;
+                if (asksThinResults(data) && thinLink)
+                  thin = new ThinRelay({
+                    openClient: (schema) => openThinClient(schema, thinLink!),
+                    toCore,
+                    toClient: (message) => onEvent(null, { kind: "message", data: message }),
+                    close: (code, reason) => {
+                      onEvent(null, { kind: "close", code, reason });
+                      end();
+                    },
+                  });
+              } else if (thin) {
+                return thin.fromClient(data);
+              }
+              return toCore(data);
             })
             .catch(() => {
               // A core that failed to take a message ends the session.
@@ -2626,10 +2729,21 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     // Between the client and this backend only: the core never sees it.
     const renewal = parsed[SESSION_RENEWAL_PRELUDE_FIELD] === 1;
     delete parsed[SESSION_RENEWAL_PRELUDE_FIELD];
-    const auth = (parsed.auth && typeof parsed.auth === "object" ? parsed.auth : parsed) as Record<
-      string,
-      unknown
-    >;
+    // Vouch only for an `auth` that carries exactly one client credential.
+    const vouchedAuth = (base: Record<string, unknown>) => {
+      const hasToken = base.jwt_token != null;
+      const hasSession = base.backend_session != null;
+      if (hasToken === hasSession)
+        throw new Error("createJazz: a guest prelude must carry exactly one credential");
+      return { ...base, backend_secret: core.backendSecret };
+    };
+    const separateAuth =
+      parsed.auth != null && typeof parsed.auth === "object" && !Array.isArray(parsed.auth);
+    const auth = (separateAuth ? parsed.auth : parsed) as Record<string, unknown>;
+    // Credentials are read from `auth` alone; top-level copies are dropped.
+    if (separateAuth) {
+      for (const field of PRELUDE_CREDENTIAL_FIELDS) delete parsed[field];
+    }
     const client = await backendClients.resolve(request);
     if (client === "refused") return UNVERIFIED_CREDENTIAL;
     if (client?.kind === "backend") {
@@ -2655,7 +2769,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     const others = ["backend_secret", "admin_secret", "backend_session"];
     // Browser worker transports send `jwt_token: null` alongside a backend
     // session; only a real token counts as one.
-    const token = auth.jwt_token ?? parsed.jwt_token;
+    const token = auth.jwt_token;
     if (token !== undefined && token !== null) {
       const localFirst =
         typeof token === "string" && parseJwtPayload(token)?.iss === LOCAL_FIRST_JWT_ISSUER;
@@ -2674,7 +2788,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       if (audience.endpoint === undefined) {
         // Its own token decides who it is; the backend's secret only vouches
         // for the bundle this socket is pinned to (see `pinnedSocket`).
-        const pinned = { ...parsed, auth: { ...auth, backend_secret: core.backendSecret } };
+        const pinned = { ...parsed, auth: vouchedAuth(auth) };
         return {
           prelude: new TextEncoder().encode(JSON.stringify(pinned)),
           userId: undefined,
@@ -2687,7 +2801,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       const vouched = {
         ...parsed,
         local_first_audience: audience.endpoint,
-        auth: { ...auth, backend_secret: core.backendSecret },
+        auth: vouchedAuth(auth),
       };
       // The backend's word on the endpoint needs backend access; the
       // guest's own token still decides who it is.
@@ -3097,7 +3211,14 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       new Uint8Array(0),
       "backend",
     );
-    return new Response(null, { status: response.status === 204 ? 204 : 502 });
+    if (response.status !== 204) return new Response(null, { status: 502 });
+    // The bundle this backend pins the client's socket to (see
+    // `pinnedSocket`): a client that evaluates its users' reads against its
+    // own permissions checks they are the ones published here (jazz#5808).
+    return new Response(null, {
+      status: 204,
+      headers: pin === undefined ? undefined : { [BUNDLE_HEADER]: pin },
+    });
   }
 
   /**
@@ -3565,7 +3686,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       return schemaOf.schema;
     },
     get permissions() {
-      return options.permissions;
+      return compiledPermissionsOf(options);
     },
     db: () => backend.db,
     dbAs: async (user) => backendDbForSession(backend, await sessionFor(user, "inspect `as`")),
@@ -3722,7 +3843,6 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
  */
 export function createJazz(options: CreateJazzOptions): Jazz {
   jazzSettings(options);
-  refuseNoMigrationsOnPersistentStore(options);
   return openFacade(options);
 }
 
@@ -3739,80 +3859,84 @@ export function createTestJazz(options: CreateJazzOptions): Jazz {
   return openFacade(options);
 }
 
-/** The options of `createTestJazz` calls, which skip {@link checkCommittedAppFiles}. */
+/** The options of `createTestJazz` calls, which skip {@link checkRunningBindings}. */
 const testHarnessOptions = new WeakSet<CreateJazzOptions>();
 
+/** What the Rust loader made of each options' bindings and permissions file, once checked. */
+const compiled = new WeakMap<CreateJazzOptions, LoadedBackendApp>();
+
+/** The checked permissions of options {@link compiledPermissions} has loaded. */
+function compiledPermissionsOf(options: CreateJazzOptions): CompiledPermissionsMap {
+  const loaded = compiled.get(options);
+  if (!loaded) throw new Error("createJazz: the app's permissions are not loaded yet");
+  return loaded.permissions;
+}
+
 /**
- * Refuse to start when the project's committed jazz.app.json or
- * jazz.permissions.json no longer match the app's TS, naming which, as
- * `validate --check` would: an edited schema.ts or permissions.ts that
- * wasn't regenerated. Files absent (an app that never ran validate), an app
- * on `{ migrations: "none" }`, or an app the files can't express yet start
- * as before.
+ * Check the app's bindings and permissions and compile the permissions with
+ * Jazz's Rust loader, as `jazz-tools generate` checks them: refused when the
+ * bindings were generated from another jazz.app.json than the project's
+ * (stale bindings), or when jazz.permissions.json doesn't hold for the
+ * app's schema. A deployed backend without jazz.app.json in reach checks
+ * only the permissions.
  */
-async function checkCommittedAppFiles(options: CreateJazzOptions): Promise<void> {
-  let declared;
+async function compiledPermissions(options: CreateJazzOptions): Promise<CompiledPermissionsMap> {
+  const cached = compiled.get(options);
+  if (cached) return cached.permissions;
+  const bound = boundAppOf(options.app);
+  // Jazz's loader through a static jazz-napi import, so bundlers and file
+  // tracers (Next.js, Vercel) ship the addon with the backend.
+  provideCodegenNapi(jazzNapi);
+  if (!testHarnessOptions.has(options)) await checkRunningBindings(bound.source);
+  const permissions = options.permissions as unknown;
+  // `$schema` names the file's version; a legacy (pre-alpha.66) file has `format`.
+  if (
+    !isRecord(permissions) ||
+    (typeof permissions.$schema !== "string" && typeof permissions.format !== "number")
+  ) {
+    throw new Error(
+      'createJazz: `permissions` must be the app\'s jazz.permissions.json, imported as JSON: `import permissions from "./jazz.permissions.json" with { type: "json" }`.',
+    );
+  }
+  let loaded;
   try {
-    declared = resolveSchemaSource(options.app);
-  } catch {
-    // Not an app: publishing it says so.
-    return;
+    loaded = await loadBackendApp(bound, JSON.stringify(permissions));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`createJazz: ${message}`, { cause: error });
   }
-  if (shipsNoMigrations(declared)) return;
-  const schema = mergePermissionsIntoWasmSchema(declared, {});
-  const current = await computeSchemaHash(schema);
-  const shipped = shippedMigrations(declared);
-  const versions = new Map<string, WasmSchema>();
-  for (const version of shipped?.schemas ?? []) {
-    versions.set(version.hash, (version.schema as { tables: WasmSchema }).tables);
-  }
-  versions.delete(current);
-  await checkRunningApp({
-    current,
-    schemas: [...versions.values(), schema],
-    migrations: (shipped?.migrations ?? []).map((edge) => ({
-      fromHash: edge.fromHash,
-      toHash: edge.toHash,
-      forward: edge.forward,
-    })),
-    permissions: options.permissions,
-    wasmSchema: declared,
-  });
+  for (const warning of loaded.warnings) console.warn(`jazz: ${warning}`);
+  compiled.set(options, loaded);
+  return loaded.permissions;
 }
 
-/**
- * The fix for an app on `{ migrations: "none" }` with a store that keeps its
- * data: what `createJazz` says when it refuses one.
- */
-export function noMigrationsOnPersistentStoreMessage(kind: string): string {
-  return (
-    `createJazz: defineApp(schema, { migrations: "none" }) ships no schema history, so this ${kind}() store ` +
-    "could not follow your first schema change. " +
-    'Add `import { migrations } from "./migrations"` to schema.ts, pass `{ migrations }` to defineApp, ' +
-    "then run `npx jazz-tools migrations create`: it records schema.ts as the app's first version in migrations/index.ts. " +
-    '"none" is only for memory() stores and tests. See https://jazz.tools/docs/schemas/migrations'
-  );
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/**
- * An app on `{ migrations: "none" }` ships no schema history: a store that
- * keeps its data (`sqlite()`, `vercel()`, `remote()`) would refuse the app at
- * its first schema change. Refused when `createJazz` is called, before
- * anything opens. `vercel()` is refused even outside a deployment, where it
- * runs its `local` store: it is the deployment's store that keeps the data.
- */
-function refuseNoMigrationsOnPersistentStore(options: CreateJazzOptions): void {
-  if (options.store.kind === "memory") return;
+/** What the generated bindings passed to `bindApp`, or a refusal naming where `app` comes from. */
+function boundAppOf(app: BackendSchemaInput) {
   let schema;
   try {
-    schema = resolveSchemaSource(options.app);
-  } catch {
-    // Not an app: opening the store says so.
-    return;
+    schema = resolveSchemaSource(app);
+  } catch (error) {
+    // A CommonJS-wrapped bindings module says so itself, with its fix.
+    const message = error instanceof Error ? error.message : "";
+    throw new Error(
+      message.includes("arrived as { default: … }")
+        ? `createJazz: ${message}`
+        : 'createJazz: `app` must be the app that jazz.generated.ts exports (`import { app } from "./jazz.generated"`).',
+      { cause: error },
+    );
   }
-  if (shipsNoMigrations(schema)) {
-    throw new Error(noMigrationsOnPersistentStoreMessage(options.store.kind));
+  const bound = boundApp(schema);
+  if (!bound) {
+    throw new Error(
+      'createJazz: `app` must be the app that jazz.generated.ts exports (`import { app } from "./jazz.generated"`); ' +
+        "run `npx jazz-tools generate` to generate it, or `npx jazz-tools upgrade` for an alpha.64 app.",
+    );
   }
+  return bound;
 }
 
 function openFacade(options: CreateJazzOptions): Jazz {
@@ -4572,6 +4696,21 @@ function reauthenticateBatch(): Buffer {
 const UNVERIFIED_CREDENTIAL = "unverified-credential";
 
 /**
+ * Prelude slots that carry a credential. When the client sends a distinct
+ * `auth` object, `admitPrelude` reads these from `auth` alone and drops any
+ * top-level copy, so a credential it checks is exactly the one forwarded to
+ * the core (`local_first_audience` is the backend's own word on a guest's
+ * endpoint, never the client's).
+ */
+const PRELUDE_CREDENTIAL_FIELDS = [
+  "jwt_token",
+  "backend_secret",
+  "admin_secret",
+  "backend_session",
+  "local_first_audience",
+] as const;
+
+/**
  * What a Jazz route answers (500) when the app's `authenticate` threw. The
  * error goes to the backend's log; the response carries only this code.
  */
@@ -4621,4 +4760,36 @@ function isLocalEndpoint(endpoint: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Thin sessions with transactions a backend serves at once, each with a client of its own. */
+const MAX_THIN_TRANSACTION_CLIENTS = 256;
+
+/** How a thin session's own client links to the core: as its socket was admitted. */
+interface ThinLink {
+  /** The prelude the backend admitted the socket with. */
+  prelude: Uint8Array;
+  access: BackendAccess;
+  /** A trusted backend client's socket, which names no session. */
+  trusted: boolean;
+  headers: string[][];
+}
+
+/** `socket`, sending `prelude` in place of the first message a client sends. */
+function withPrelude(socket: CoreSocket, prelude: Uint8Array): CoreSocket {
+  let first = true;
+  const replace = (data: Uint8Array) => {
+    if (!first) return data;
+    first = false;
+    return prelude;
+  };
+  return {
+    send: (data) => socket.send(replace(data)),
+    async sendWithRoom(data) {
+      const sent = replace(data);
+      return socket.sendWithRoom ? socket.sendWithRoom(sent) : socket.send(sent);
+    },
+    close: () => socket.close(),
+    ...(socket.opened ? { opened: socket.opened } : {}),
+  };
 }

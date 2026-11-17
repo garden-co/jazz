@@ -239,8 +239,28 @@ try {
     join(fixture, "permissions.ts"),
     `import {schema as s} from 'jazz-tools';\nimport {app} from './schema';\nexport default s.definePermissions(app,({policy})=>{policy.docs.allowRead.always();policy.docs.allowInsert.always();policy.docs.allowUpdate.always();policy.docs.allowDelete.always();});\n`,
   );
+  // The same app as files, which alpha.65 and later read instead.
+  writeFileSync(
+    join(fixture, "jazz.app.json"),
+    JSON.stringify({
+      format: 1,
+      tables: {
+        docs: { columns: { label: "string", body: "string", metadata: "json" } },
+        denied: { columns: { value: "string" } },
+      },
+    }),
+  );
+  writeFileSync(
+    join(fixture, "jazz.permissions.json"),
+    JSON.stringify({
+      format: 1,
+      tables: { docs: { read: "true", insert: "true", update: "true", delete: "true" } },
+    }),
+  );
   const cliJS = join(dirname(require.resolve("jazz-tools")), "cli.js");
-  await command(process.execPath, [cliJS, "validate", "--schema-dir", fixture], "validate.log");
+  // alpha.65 renamed `validate` to `generate`.
+  const check = existsSync(join(dirname(cliJS), "dev", "project.js")) ? "generate" : "validate";
+  await command(process.execPath, [cliJS, check, "--schema-dir", fixture], "validate.log");
   // Publishing twice proves a repeated deployment is a no-op.
   for (const attempt of [1, 2])
     await command(
