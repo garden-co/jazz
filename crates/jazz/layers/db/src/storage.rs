@@ -86,8 +86,31 @@ struct Hooks {
 
 #[derive(Clone)]
 struct Managed {
-    backend: Arc<dyn Backend>,
+    backend: SharedBackend,
     hooks: Arc<Mutex<Hooks>>,
+}
+
+/// A managed backend, shared by its store and the store's chunk cache,
+/// which the store's commit and rollback hooks (`Send`) hold. Native
+/// backends are `Send + Sync` ([`BackendThreading`]); a wasm32 host
+/// without threads has one thread, so nothing can send or share it
+/// elsewhere. With wasm threads this does not compile, rather than assume.
+#[derive(Clone)]
+struct SharedBackend(Arc<dyn Backend>);
+
+// SAFETY: wasm32 without the `atomics` target feature runs one thread.
+#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+unsafe impl Send for SharedBackend {}
+// SAFETY: as above.
+#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+unsafe impl Sync for SharedBackend {}
+
+impl std::ops::Deref for SharedBackend {
+    type Target = dyn Backend;
+
+    fn deref(&self) -> &(dyn Backend + 'static) {
+        &*self.0
+    }
 }
 
 impl Managed {
@@ -100,6 +123,34 @@ impl Managed {
             hooks.depth += 1;
             hooks.depth == 1
         };
+        // A body that panics (a native host may catch it) still leaves the
+        // scope: its depth goes back and, at the outermost scope, the
+        // rollback hook runs (the backend rolled it back), so the store is
+        // neither left open nor its chunk cache pinned.
+        struct Leave<'a> {
+            hooks: &'a Mutex<Hooks>,
+            outer: bool,
+            unwinding: bool,
+        }
+        impl Drop for Leave<'_> {
+            fn drop(&mut self) {
+                let Ok(mut hooks) = self.hooks.lock() else {
+                    return;
+                };
+                hooks.depth -= 1;
+                if self.unwinding
+                    && self.outer
+                    && let Some(hook) = hooks.rollback.as_mut()
+                {
+                    hook();
+                }
+            }
+        }
+        let mut leave = Leave {
+            hooks: &self.hooks,
+            outer,
+            unwinding: true,
+        };
         let mut keep = false;
         let result = self.backend.transaction(&mut || {
             keep = body();
@@ -110,8 +161,9 @@ impl Managed {
             }
             keep
         });
+        leave.unwinding = false;
+        drop(leave);
         let mut hooks = self.hooks.lock().expect("hooks");
-        hooks.depth -= 1;
         if outer
             && (!keep || result.is_err())
             && let Some(hook) = hooks.rollback.as_mut()
@@ -150,7 +202,7 @@ impl Storage {
     /// Run on a host's SQL ([`Backend`]).
     pub fn from_backend(backend: impl Backend + 'static) -> Self {
         Self::new(Owner::Managed(Managed {
-            backend: Arc::new(backend),
+            backend: SharedBackend(Arc::new(backend)),
             hooks: Arc::default(),
         }))
     }
@@ -201,6 +253,18 @@ impl Storage {
             }
             Owner::Managed(managed) => {
                 crate::values::open_tag_undo(self);
+                // Closes the scope's tag-undo log as undone if the body
+                // panics (the backend rolled it back).
+                struct Undo<'a>(Option<&'a Storage>);
+                impl Drop for Undo<'_> {
+                    fn drop(&mut self) {
+                        if let Some(storage) = self.0 {
+                            crate::values::close_tag_undo(storage, false, false);
+                            crate::values::note_rollback(storage.key());
+                        }
+                    }
+                }
+                let mut undo = Undo(Some(self));
                 let mut f = Some(f);
                 let mut value = None;
                 let mut chose_keep = false;
@@ -214,6 +278,7 @@ impl Storage {
                     chose_keep = keep;
                     keep
                 });
+                undo.0 = None;
                 let kept = matches!(scoped, Ok(true));
                 crate::values::close_tag_undo(self, kept, false);
                 if !kept {
@@ -300,8 +365,10 @@ impl Storage {
     }
 
     /// Run one statement; how many rows it changed.
+    /// Uncached on native SQLite, as rusqlite's own `execute`: one-off
+    /// statements (DDL, PRAGMAs) stay out of the statement cache.
     pub fn execute<P: Params>(&self, sql: &str, params: P) -> SqlResult<usize> {
-        self.prepare_cached(sql)?.execute(params)
+        self.prepare(sql)?.execute(params)
     }
 
     /// Run statements with no parameters and no results.
@@ -319,7 +386,8 @@ impl Storage {
         params: P,
         f: impl FnOnce(&Row<'_>) -> SqlResult<T>,
     ) -> SqlResult<T> {
-        self.prepare_cached(sql)?.query_row(params, f)
+        // Uncached on native SQLite, as rusqlite's own `query_row`.
+        self.prepare(sql)?.query_row(params, f)
     }
 
     /// Whether no transaction or scope is open.
@@ -751,13 +819,96 @@ impl From<rusqlite::Connection> for Storage {
     }
 }
 
+/// What a Durable Object's SQL bridge refuses, checked the same way by
+/// the bridge (jazz-wasm) and its emulation: transaction control in SQL
+/// text (`BEGIN`, `SAVEPOINT`, …: scopes are `transactionSync`), named
+/// parameters (`:name`, `@name`, `$name`), integers beyond ±(2^53−1)
+/// (JavaScript numbers), and reading the rows of a data-modifying
+/// statement (`… RETURNING`). `reading`: the statement's rows are read.
+pub fn durable_object_refusal(sql: &str, parameters: &[Value], reading: bool) -> SqlResult<()> {
+    const MAX_SAFE: i64 = (1 << 53) - 1;
+    let first = sql
+        .split(|c: char| c.is_whitespace() || c == ';')
+        .find(|word| !word.is_empty())
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    let refuse = |what: String| {
+        Err(backend_error(
+            1,
+            format!("{what} is not supported by Durable Object storage"),
+        ))
+    };
+    if matches!(
+        first.as_str(),
+        "BEGIN" | "COMMIT" | "END" | "ROLLBACK" | "SAVEPOINT" | "RELEASE"
+    ) {
+        return refuse(format!("transaction control in SQL ({first})"));
+    }
+    if reading && matches!(first.as_str(), "INSERT" | "UPDATE" | "DELETE" | "REPLACE") {
+        return refuse("reading a data-modifying statement's rows".to_owned());
+    }
+    if parameters
+        .iter()
+        .any(|value| matches!(value, Value::Integer(n) if !(-MAX_SAFE..=MAX_SAFE).contains(n)))
+    {
+        return refuse("an integer beyond ±(2^53−1)".to_owned());
+    }
+    // Parameter tokens outside strings, quoted identifiers and comments.
+    let bytes = sql.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            quote @ (b'\'' | b'"' | b'`') => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == quote {
+                        if bytes.get(i + 1) == Some(&quote) {
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            b'[' => {
+                while i < bytes.len() && bytes[i] != b']' {
+                    i += 1;
+                }
+            }
+            b'-' if bytes.get(i + 1) == Some(&b'-') => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b':' | b'@' | b'$'
+                if bytes
+                    .get(i + 1)
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_') =>
+            {
+                return refuse("a named SQL parameter".to_owned());
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
 /// Managed storage over a native connection, for tests: the engine sees
 /// the same owner a Durable Object host gives it, so it takes the managed
 /// paths (callback scopes only, nothing open between calls) while SQLite
-/// itself stays native. Like `ctx.storage.sql`, it refuses transaction
-/// control in SQL text, and reads each result out before returning it, so
-/// the engine may run more SQL while it walks the rows, as on a Durable
-/// Object.
+/// itself stays native. It refuses what the Durable Object bridge refuses
+/// ([`durable_object_refusal`], and integers beyond ±(2^53−1) in results).
+/// Unlike the bridge, whose cursor is lazy, it reads each result out before
+/// returning it; the engine may run more SQL while it walks rows either way.
 #[cfg(any(test, feature = "testing"))]
 pub mod managed_emulation {
     use super::{Backend, Cursor, SqlResult, Value};
@@ -794,25 +945,6 @@ pub mod managed_emulation {
         }
     }
 
-    fn refuse_transaction_control(sql: &str) -> SqlResult<()> {
-        let first = sql
-            .trim_start()
-            .split(|c: char| c.is_whitespace() || c == ';')
-            .next()
-            .unwrap_or("")
-            .to_ascii_uppercase();
-        if matches!(
-            first.as_str(),
-            "BEGIN" | "COMMIT" | "END" | "ROLLBACK" | "SAVEPOINT" | "RELEASE"
-        ) {
-            return Err(super::backend_error(
-                1,
-                format!("transaction control in SQL is not allowed on managed storage: {sql}"),
-            ));
-        }
-        Ok(())
-    }
-
     impl EmulatedObjectSql {
         /// A fresh in-memory database.
         pub fn open_in_memory() -> SqlResult<Self> {
@@ -828,7 +960,7 @@ pub mod managed_emulation {
 
     impl Backend for EmulatedObjectSql {
         fn query(&self, sql: &str, parameters: &[Value]) -> SqlResult<Box<dyn Cursor + '_>> {
-            refuse_transaction_control(sql)?;
+            super::durable_object_refusal(sql, parameters, true)?;
             let conn = self.conn.lock().expect("connection");
             let mut statement = conn.prepare_cached(sql)?;
             let columns: Vec<String> = statement
@@ -842,7 +974,19 @@ pub mod managed_emulation {
             while let Some(row) = rows.next()? {
                 let mut cells = Vec::with_capacity(n);
                 for i in 0..n {
-                    cells.push(Value::from(row.get_ref(i)?));
+                    let cell = Value::from(row.get_ref(i)?);
+                    // As the bridge: a JavaScript number holds no more.
+                    if let Value::Integer(n) = cell
+                        && !(-((1 << 53) - 1)..=(1 << 53) - 1).contains(&n)
+                    {
+                        return Err(super::backend_error(
+                            1,
+                            "an integer beyond ±(2^53−1) in a result is not supported by \
+                             Durable Object storage"
+                                .to_owned(),
+                        ));
+                    }
+                    cells.push(cell);
                 }
                 out.push(cells);
             }
@@ -854,7 +998,7 @@ pub mod managed_emulation {
         }
 
         fn execute(&self, sql: &str, parameters: &[Value]) -> SqlResult<usize> {
-            refuse_transaction_control(sql)?;
+            super::durable_object_refusal(sql, parameters, false)?;
             let conn = self.conn.lock().expect("connection");
             let mut statement = conn.prepare_cached(sql)?;
             statement.execute(rusqlite::params_from_iter(parameters.iter()))
@@ -868,13 +1012,13 @@ pub mod managed_emulation {
                     std::ffi::CString::new(part).map_err(|_| rusqlite::Error::InvalidQuery)?;
                 // SAFETY: SQLite only reads this NUL-terminated SQL string.
                 if unsafe { rusqlite::ffi::sqlite3_complete(complete.as_ptr()) } != 0 {
-                    refuse_transaction_control(part)?;
+                    super::durable_object_refusal(part, &[], false)?;
                     self.conn.lock().expect("connection").execute_batch(part)?;
                     start = end + 1;
                 }
             }
             if !script[start..].trim().is_empty() {
-                refuse_transaction_control(&script[start..])?;
+                super::durable_object_refusal(&script[start..], &[], false)?;
                 self.conn
                     .lock()
                     .expect("connection")
@@ -1163,15 +1307,76 @@ mod tests {
         }
     }
 
-    /// Managed storage, like a Durable Object's SQL, refuses transaction
-    /// control in SQL text: its only transactions are scopes.
+    /// Managed storage refuses what a Durable Object's SQL bridge refuses
+    /// ([`durable_object_refusal`]): transaction control in SQL text (its
+    /// only transactions are scopes), named parameters, integers beyond a
+    /// JavaScript number's exact range, and reading a write's rows.
     #[test]
-    fn managed_storage_refuses_transaction_control_in_sql() {
+    fn managed_storage_refuses_what_a_durable_object_refuses() {
         let storage = Storage::managed_emulation_in_memory().unwrap();
+        storage.execute_batch("CREATE TABLE t (v INTEGER)").unwrap();
         for sql in ["BEGIN", "SAVEPOINT s", "  release s", "COMMIT", "ROLLBACK"] {
             assert!(storage.execute_batch(sql).is_err(), "{sql}");
         }
+        assert!(
+            storage
+                .execute("INSERT INTO t VALUES (:v)", [1i64])
+                .is_err()
+        );
+        assert!(
+            storage
+                .execute("INSERT INTO t VALUES (?1)", [1i64 << 53])
+                .is_err()
+        );
+        assert!(
+            storage
+                .query_row("INSERT INTO t VALUES (1) RETURNING v", [], |r| r
+                    .get::<_, i64>(0))
+                .is_err()
+        );
+        // Names inside strings and comments are not parameters.
+        storage
+            .execute("INSERT INTO t VALUES (length(':v @w $x')) -- :y", [])
+            .unwrap();
+        storage
+            .execute_batch("UPDATE t SET v = 9007199254740993")
+            .unwrap();
+        assert!(
+            storage
+                .query_row("SELECT v FROM t", [], |r| r.get::<_, i64>(0))
+                .is_err(),
+            "a result beyond ±(2^53−1)"
+        );
         assert!(storage.is_managed());
         assert!(!Storage::open_in_memory().unwrap().is_managed());
+    }
+
+    /// A scope whose body panics, caught by its host, still leaves the
+    /// scope on managed storage: what it wrote is undone, nothing stays
+    /// open, the rollback hook ran, and later scopes commit as before.
+    #[test]
+    fn a_panicking_scope_leaves_managed_storage_usable() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let storage = Storage::managed_emulation_in_memory().unwrap();
+        storage.execute_batch("CREATE TABLE t (v INTEGER)").unwrap();
+        let rollbacks = Arc::new(AtomicUsize::new(0));
+        let counted = rollbacks.clone();
+        storage
+            .rollback_hook(Some(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }))
+            .unwrap();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = storage.scope("outer", |s| {
+                insert(s, 1)?;
+                s.scope("inner", |_| -> Result<(), Error> { panic!("injected") })
+            });
+        }));
+        assert!(panicked.is_err());
+        assert!(storage.is_autocommit());
+        assert_eq!(rollbacks.load(Ordering::SeqCst), 1);
+        assert_eq!(values(&storage), Vec::<i64>::new());
+        storage.scope("after", |s| insert(s, 2)).unwrap();
+        assert_eq!(values(&storage), [2]);
     }
 }
