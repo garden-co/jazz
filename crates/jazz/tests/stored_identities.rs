@@ -120,6 +120,14 @@ fn authority(schema: JazzSchema, node: u8) -> Db {
     db
 }
 
+/// An authority on a store file, so a test can reopen it under a newer
+/// schema (see [`common::reinstall`]).
+fn authority_at(schema: JazzSchema, node: u8, path: &Path) -> Db {
+    let db = open_at(schema, node, path);
+    db.set_authority();
+    db
+}
+
 fn open_at(schema: JazzSchema, node: u8, path: &Path) -> Db {
     block_on(Db::open_at(
         config(schema, node, AuthorSubject::SYSTEM),
@@ -275,7 +283,9 @@ fn a_reopened_authority_keeps_its_identities() {
 fn a_rename_keeps_the_identities() {
     let v1 = notes("notes", "text");
     let v2 = notes("tasks", "body");
-    let db = authority(v1.clone(), 1);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite");
+    let db = authority_at(v1.clone(), 1, &path);
     let table = db.table_identity("notes").unwrap();
     let column = db.column_identity("notes", "text").unwrap();
     let lens = rename(
@@ -286,7 +296,7 @@ fn a_rename_keeps_the_identities() {
             to: "body".into(),
         }],
     );
-    block_on(db.activate_schema_with_lenses(v2, &[lens])).unwrap();
+    let db = common::reinstall(db, &path, config(v2, 1, AuthorSubject::SYSTEM), vec![lens]);
     assert_eq!(db.table_identity("tasks").unwrap(), table);
     assert_eq!(db.column_identity("tasks", "body").unwrap(), column);
     assert_eq!(db.table_identity("notes").unwrap(), None);
@@ -349,7 +359,7 @@ fn a_version_only_the_replica_admitted_has_no_identity_until_the_authority_admit
     let ahead = block_on(client.register_schema_view(v2.clone())).unwrap();
     not_observed(ahead.table_identity("tasks"));
 
-    block_on(server.activate_schema_with_lenses(v2, &[lens])).unwrap();
+    block_on(server.admit_schema_with_lenses(v2, &[lens])).unwrap();
     pump(&server, &[&client]);
     assert_eq!(ahead.table_identity("tasks").unwrap(), table);
 }
@@ -443,15 +453,27 @@ fn a_tab_behind_a_worker_answers_with_the_authoritys_identities() {
 /// column: the identity and the values written before the drop are back.
 #[test]
 fn a_column_added_again_with_its_type_keeps_its_identity_and_values() {
-    let db = authority(notes("notes", "text"), 1);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite");
+    let db = authority_at(notes("notes", "text"), 1, &path);
     insert(
         &db,
         1,
         &[("text", Value::String("a".into())), ("rank", Value::I64(7))],
     );
     let rank = db.column_identity("notes", "rank").unwrap();
-    block_on(db.activate_schema(without_rank())).unwrap();
-    block_on(db.activate_schema(bigint_rank())).unwrap();
+    let db = common::reinstall(
+        db,
+        &path,
+        config(without_rank(), 1, AuthorSubject::SYSTEM),
+        vec![],
+    );
+    let db = common::reinstall(
+        db,
+        &path,
+        config(bigint_rank(), 1, AuthorSubject::SYSTEM),
+        vec![],
+    );
     assert_eq!(db.column_identity("notes", "rank").unwrap(), rank);
     assert_eq!(ranks(&db), [Some(Value::I64(7))]);
 }
@@ -470,12 +492,22 @@ fn a_column_added_again_with_another_type_is_a_new_column() {
         &[("text", Value::String("a".into())), ("rank", Value::I64(7))],
     );
     let rank = db.column_identity("notes", "rank").unwrap();
-    block_on(db.activate_schema(without_rank())).unwrap();
+    let db = common::reinstall(
+        db,
+        &path,
+        config(without_rank(), 1, AuthorSubject::SYSTEM),
+        vec![],
+    );
     drop(db);
     // Reopened, so only the file knows `rank` held integers.
     let db = open_at(without_rank(), 1, &path);
     db.set_authority();
-    block_on(db.activate_schema(text_rank())).unwrap();
+    let db = common::reinstall(
+        db,
+        &path,
+        config(text_rank(), 1, AuthorSubject::SYSTEM),
+        vec![],
+    );
     let text = db.column_identity("notes", "rank").unwrap();
     assert!(text.is_some());
     assert_ne!(text, rank);
@@ -556,11 +588,16 @@ fn a_column_re_added_with_another_type_while_apart_gets_its_own_stored_column() 
     {
         let client = open_at(notes("notes", "text"), 1, &path);
         let _link = link(&client, &server);
-        block_on(server.activate_schema(without_rank())).unwrap();
+        block_on(server.admit_schema_with_lenses(without_rank(), &[])).unwrap();
         pump(&server, &[&client]);
     }
     let client = open_at(without_rank(), 1, &path);
-    block_on(client.activate_schema(text_rank())).unwrap();
+    let client = common::reinstall(
+        client,
+        &path,
+        config(text_rank(), 1, AuthorSubject::SYSTEM),
+        vec![],
+    );
     insert(
         &client,
         1,
@@ -579,7 +616,7 @@ fn a_column_re_added_with_another_type_while_apart_gets_its_own_stored_column() 
         )))))],
         "local reads go on"
     );
-    block_on(server.activate_schema(bool_rank())).unwrap();
+    block_on(server.admit_schema_with_lenses(bool_rank(), &[])).unwrap();
 
     let _link = link(&client, &server);
     assert_eq!(remote_read_rejection(&client, &server), None);
@@ -604,14 +641,21 @@ fn ranked(table: &str, rank: Option<(ColumnType, jazz::tools::Value)>) -> JazzSc
 /// it, so the integers stored before are not its values.
 #[test]
 fn a_column_a_lens_adds_again_is_a_new_column() {
-    let db = authority(notes("notes", "text"), 1);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite");
+    let db = authority_at(notes("notes", "text"), 1, &path);
     insert(
         &db,
         1,
         &[("text", Value::String("a".into())), ("rank", Value::I64(7))],
     );
     let rank = db.column_identity("notes", "rank").unwrap();
-    block_on(db.activate_schema(without_rank())).unwrap();
+    let db = common::reinstall(
+        db,
+        &path,
+        config(without_rank(), 1, AuthorSubject::SYSTEM),
+        vec![],
+    );
     let lens = rename(
         &without_rank(),
         &bigint_rank(),
@@ -620,7 +664,12 @@ fn a_column_a_lens_adds_again_is_a_new_column() {
             default: Value::I64(5),
         }],
     );
-    block_on(db.activate_schema_with_lenses(bigint_rank(), &[lens])).unwrap();
+    let db = common::reinstall(
+        db,
+        &path,
+        config(bigint_rank(), 1, AuthorSubject::SYSTEM),
+        vec![lens],
+    );
     let added = db.column_identity("notes", "rank").unwrap();
     assert!(added.is_some());
     assert_ne!(added, rank);
@@ -631,24 +680,41 @@ fn a_column_a_lens_adds_again_is_a_new_column() {
 /// continues the stored column it had under the table's old name.
 #[test]
 fn a_column_added_again_after_its_table_is_renamed_keeps_its_identity_and_values() {
-    let db = authority(notes("notes", "text"), 1);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite");
+    let db = authority_at(notes("notes", "text"), 1, &path);
     insert(
         &db,
         1,
         &[("text", Value::String("a".into())), ("rank", Value::I64(7))],
     );
     let rank = db.column_identity("notes", "rank").unwrap();
-    block_on(db.activate_schema(without_rank())).unwrap();
+    let db = common::reinstall(
+        db,
+        &path,
+        config(without_rank(), 1, AuthorSubject::SYSTEM),
+        vec![],
+    );
     let tasks = ranked("tasks", None);
-    block_on(
-        db.activate_schema_with_lenses(tasks.clone(), &[rename(&without_rank(), &tasks, vec![])]),
-    )
-    .unwrap();
-    block_on(db.activate_schema(ranked(
-        "tasks",
-        Some((ColumnType::BigInt, jazz::tools::Value::BigInt(5))),
-    )))
-    .unwrap();
+    let db = common::reinstall(
+        db,
+        &path,
+        config(tasks.clone(), 1, AuthorSubject::SYSTEM),
+        vec![rename(&without_rank(), &tasks, vec![])],
+    );
+    let db = common::reinstall(
+        db,
+        &path,
+        config(
+            ranked(
+                "tasks",
+                Some((ColumnType::BigInt, jazz::tools::Value::BigInt(5))),
+            ),
+            1,
+            AuthorSubject::SYSTEM,
+        ),
+        vec![],
+    );
     assert_eq!(db.column_identity("tasks", "rank").unwrap(), rank);
     let prepared = db.prepare_query(&Query::from("tasks")).unwrap();
     let rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
@@ -684,8 +750,8 @@ fn a_replica_mirrors_a_column_added_again() {
     let _held = block_on(client.subscribe(&all, ReadOpts::default())).unwrap();
     pump(&server, &[&client]);
     let rank = server.column_identity("notes", "rank").unwrap();
-    block_on(server.activate_schema(without_rank())).unwrap();
-    block_on(server.activate_schema(bigint_rank())).unwrap();
+    block_on(server.admit_schema_with_lenses(without_rank(), &[])).unwrap();
+    block_on(server.admit_schema_with_lenses(bigint_rank(), &[])).unwrap();
     pump(&server, &[&client]);
     let view = block_on(client.register_schema_view(bigint_rank())).unwrap();
     assert_eq!(view.column_identity("notes", "rank").unwrap(), rank);
@@ -722,7 +788,8 @@ fn text(value: &str) -> Value {
 fn a_required_column_changed_in_place_without_a_default_is_refused() {
     let server = authority(notes("notes", "text"), 0);
     insert(&server, 1, &[("text", text("a")), ("rank", Value::I64(7))]);
-    let error = block_on(server.activate_schema(required_text_rank(None))).unwrap_err();
+    let error =
+        block_on(server.admit_schema_with_lenses(required_text_rank(None), &[])).unwrap_err();
     assert!(
         error
             .to_string()
@@ -767,7 +834,9 @@ fn a_required_column_changed_in_place_without_a_default_is_refused() {
 /// old version reading the values before; a replica mirrors all of it.
 #[test]
 fn a_required_column_changed_in_place_reads_its_default_in_existing_rows() {
-    let server = authority(notes("notes", "text"), 0);
+    let server_dir = tempfile::tempdir().unwrap();
+    let server_path = server_dir.path().join("server.sqlite");
+    let server = authority_at(notes("notes", "text"), 0, &server_path);
     for n in [1, 2] {
         insert(&server, n, &[("text", text("a")), ("rank", Value::I64(7))]);
     }
@@ -782,7 +851,15 @@ fn a_required_column_changed_in_place_reads_its_default_in_existing_rows() {
     let _held = block_on(client.subscribe(&all, ReadOpts::default())).unwrap();
     pump(&server, &[&client]);
 
-    block_on(server.activate_schema(required_text_rank(Some("none")))).unwrap();
+    // The server is redeployed with the change; the client reconnects.
+    drop(_link);
+    let server = common::reinstall(
+        server,
+        &server_path,
+        config(required_text_rank(Some("none")), 0, AuthorSubject::SYSTEM),
+        vec![],
+    );
+    let _link = link(&client, &server);
     assert_eq!(ranks(&server), [Some(text("none")), Some(text("none"))]);
     block_on(server.update(
         "notes",
@@ -847,7 +924,9 @@ fn task_rows(db: &Db) -> Vec<(String, Option<Value>)> {
 /// settles and reads back on both sides with nothing renamed.
 #[test]
 fn a_pending_write_under_a_retyped_column_lands_where_the_authority_stores_it() {
-    let server = authority(tasks(ColumnType::Boolean), 0);
+    let server_dir = tempfile::tempdir().unwrap();
+    let server_path = server_dir.path().join("server.sqlite");
+    let server = authority_at(tasks(ColumnType::Boolean), 0, &server_path);
     block_on(server.insert(
         "tasks",
         BTreeMap::from([
@@ -865,8 +944,12 @@ fn a_pending_write_under_a_retyped_column_lands_where_the_authority_stores_it() 
         &tasks(ColumnType::Text),
         vec![],
     );
-    block_on(server.activate_schema_with_lenses(tasks(ColumnType::Text), &[retype.clone()]))
-        .unwrap();
+    let server = common::reinstall(
+        server,
+        &server_path,
+        config(tasks(ColumnType::Text), 0, AuthorSubject::SYSTEM),
+        vec![retype.clone()],
+    );
     let client = block_on(Db::open(
         config(tasks(ColumnType::Text), 1, AuthorSubject::SYSTEM)
             .with_migrations(vec![tasks(ColumnType::Boolean)], vec![retype]),
@@ -1042,8 +1125,15 @@ fn a_replica_with_bundled_lenses_stores_a_renamed_column_where_the_authority_doe
             to: "body".into(),
         }],
     );
-    let server = authority(v1.clone(), 0);
-    block_on(server.activate_schema_with_lenses(v2.clone(), &[lens.clone()])).unwrap();
+    let server_dir = tempfile::tempdir().unwrap();
+    let server_path = server_dir.path().join("server.sqlite");
+    let server = authority_at(v1.clone(), 0, &server_path);
+    let server = common::reinstall(
+        server,
+        &server_path,
+        config(v2.clone(), 0, AuthorSubject::SYSTEM),
+        vec![lens.clone()],
+    );
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("client.sqlite");
@@ -1242,7 +1332,7 @@ fn a_fresh_client_at_a_compatible_revision_stores_where_the_authority_does() {
             ),
         ],
     );
-    block_on(server.activate_schema_with_lenses(v2.clone(), &[compatible(&v1, &v2)])).unwrap();
+    block_on(server.admit_schema_with_lenses(v2.clone(), &[compatible(&v1, &v2)])).unwrap();
 
     let client = block_on(Db::open(
         config(v2.clone(), 1, AuthorSubject::SYSTEM).with_migrations(vec![v1, v2], vec![]),
@@ -1280,9 +1370,16 @@ fn a_compatible_revision_after_a_lens_keeps_the_lenss_columns() {
     let v0 = notes_with(&[], false);
     let v1 = notes_with(&["tag"], false);
     let v2 = notes_with(&["tag"], true);
-    let server = authority(v0.clone(), 0);
+    let server_dir = tempfile::tempdir().unwrap();
+    let server_path = server_dir.path().join("server.sqlite");
+    let server = authority_at(v0.clone(), 0, &server_path);
     block_on(server.admit_schema_with_lenses(v1.clone(), &[adds(&v0, &v1, &["tag"])])).unwrap();
-    block_on(server.activate_schema_with_lenses(v2.clone(), &[compatible(&v1, &v2)])).unwrap();
+    let server = common::reinstall(
+        server,
+        &server_path,
+        config(v2.clone(), 0, AuthorSubject::SYSTEM),
+        vec![compatible(&v1, &v2)],
+    );
     insert(
         &server,
         1,
@@ -1330,7 +1427,7 @@ fn a_merge_whose_lenses_disagree_on_a_columns_lineage_is_refused() {
     let server = authority(v0.clone(), 0);
     block_on(server.admit_schema_with_lenses(a.clone(), &lenses[0..1])).unwrap();
     block_on(server.admit_schema_with_lenses(x.clone(), &lenses[1..2])).unwrap();
-    let refused = block_on(server.activate_schema_with_lenses(merged.clone(), &lenses[2..4]))
+    let refused = block_on(server.admit_schema_with_lenses(merged.clone(), &lenses[2..4]))
         .expect_err("a merge losing a branch's values");
     assert_eq!(refused.code, ErrorCode::Schema);
     assert!(
@@ -1382,7 +1479,7 @@ fn several_lenses_into_one_version_name_its_columns_alike_everywhere() {
     let server = authority(v0.clone(), 0);
     block_on(server.admit_schema_with_lenses(a.clone(), &lenses[0..1])).unwrap();
     block_on(server.admit_schema_with_lenses(wide.clone(), &lenses[1..2])).unwrap();
-    block_on(server.activate_schema_with_lenses(merged.clone(), &lenses[2..4])).unwrap();
+    block_on(server.admit_schema_with_lenses(merged.clone(), &lenses[2..4])).unwrap();
     let schemas = vec![v0, a, wide, merged.clone()];
     let dir = tempfile::tempdir().unwrap();
     let mut stored = Vec::new();

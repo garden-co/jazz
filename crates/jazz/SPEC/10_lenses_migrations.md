@@ -1267,6 +1267,13 @@ lenses and permission bundle ship with the binary, are admitted at startup
 production path (deploy, HTTP or admin endpoint, sync) activates a schema,
 bumps a revision or switches policies at runtime.
 
+Opening under a version newer than any the store admitted installs it: along
+the app's lenses when they lead to it (all or nothing), else named against the
+latest admitted version. Either way its declaration order becomes tag order
+(§10.8), and a version that drops a branch column of the one it follows is
+refused. Opening under an older admitted version (an older client, a server
+under its genesis) installs nothing.
+
 Admitting a schema never makes it current, and older clients keep their own
 local schema view: a client reads and writes by its version's names through
 the lenses (§10.5), whatever schema the backend opened under.

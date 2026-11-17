@@ -234,8 +234,8 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
     global_fate(&authority, &writer_v1, insert.mergeable_tx_id())
         .expect("authority accepts the v1 insert");
 
-    block_on(authority.activate_schema_with_lenses(v2.schema.clone(), &[lens]))
-        .expect("activate v2 rename lineage");
+    block_on(authority.admit_schema_with_lenses(v2.schema.clone(), &[lens]))
+        .expect("admit v2 rename lineage");
 
     let mallory = author(0xa2);
     let (non_owner_writer_v2, _mallory_link, _mallory_rows) =
