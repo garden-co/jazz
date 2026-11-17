@@ -572,6 +572,45 @@ fn comment(note: RowUuid, body: &str) -> Vec<u8> {
     jazz::binding_codec::encode_named_cells(&record).unwrap()
 }
 
+/// An optional relation's filter and order are checked when the read is
+/// prepared, as a required one's are, not only when a parent row is read
+/// (which a read with no parent rows never does). A client reading through
+/// the binding gets the refusal at once, with no rows needed.
+///
+/// ```text
+/// client ──all(notes + comments filtered on `nope`)──► binding ──✗ prepare
+/// ```
+#[test]
+fn an_optional_relations_filter_and_order_are_checked_at_prepare() {
+    let db = open(0xa2);
+    let read = |subquery: ArraySubquery| {
+        let query = Query::from("notes").array_subquery(subquery);
+        db.all(
+            postcard::to_allocvec(&query).unwrap(),
+            &json!({ "tier": "local-only" }),
+            None,
+            None,
+            None,
+        )
+        .and_then(|read| block_on(read).map_err(HostError::from))
+        .map(|_| ())
+    };
+    let comments = || ArraySubquery::new("comments", "comments", "note", "id");
+    for refused in [
+        read(comments().filter(jazz::query::eq(
+            jazz::query::col("nope"),
+            jazz::query::lit(jazz::records::Value::String("x".into())),
+        ))),
+        read(comments().order_by("nope", jazz::query::OrderDirection::Asc)),
+    ] {
+        match refused {
+            Err(HostError::Engine(error)) => assert_eq!(error.code, ErrorCode::Query, "{error}"),
+            other => panic!("expected a query refusal at prepare, got {other:?}"),
+        }
+    }
+    assert!(read(comments().order_by("body", jazz::query::OrderDirection::Asc)).is_ok());
+}
+
 #[test]
 fn a_relation_read_nests_each_relation_in_its_parents_cells() {
     let db = open(0xa1);
@@ -687,6 +726,96 @@ fn a_backend_writes_as_a_local_first_account_only_once_admitted() {
     argument(open(1).admit_local_first_session(&other_token, "app", &other_author));
     argument(backend.admit_local_first_session(&other_token, "app", &author));
     argument(backend.admit_local_first_session(&token, "other-app", &author));
+}
+
+/// A local-first account's proof for app `app` that expires `seconds` from
+/// now, and the canonical author it proves.
+fn local_first_proof_expiring(seed: u8, app: &str, seconds: u64) -> (String, String) {
+    use jazz::identity::{LOCAL_FIRST_ISSUER, mint_jazz_self_signed_token_at};
+    let (_, author) = local_first_proof(seed, app);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    // Issued in the past, so a short remaining lifetime needs no long ttl.
+    let token = mint_jazz_self_signed_token_at(
+        &[seed; 32],
+        LOCAL_FIRST_ISSUER,
+        app,
+        600,
+        now + seconds - 600,
+    )
+    .unwrap();
+    (token, author)
+}
+
+/// A backend admits each device account a request names (`forReqUser`), so
+/// its admissions must not pile up: an admission drops the ones whose proof
+/// has expired. Reads the admission count through a testing-only accessor,
+/// since an expired admission is otherwise indistinguishable from a dropped
+/// one (both refuse the author).
+///
+/// ```
+/// alice (2 s proof) ──admit──► backend   admitted: {alice}
+///                     … alice's proof expires …
+/// bob (600 s proof) ──admit──► backend   admitted: {bob}
+/// ```
+#[test]
+fn a_backend_drops_local_first_admissions_whose_proof_expired() {
+    let backend = authority();
+    let (alice_token, alice) = local_first_proof_expiring(7, "app", 2);
+    backend
+        .admit_local_first_session(&alice_token, "app", &alice)
+        .unwrap();
+    assert_eq!(backend.admitted_local_first_accounts(), 1);
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    let (bob_token, bob) = local_first_proof(8, "app");
+    backend
+        .admit_local_first_session(&bob_token, "app", &bob)
+        .unwrap();
+    assert_eq!(backend.admitted_local_first_accounts(), 1);
+    let as_alice = json!({ "author": alice.as_bytes() });
+    argument(backend.insert("notes", &title("alice, expired"), &as_alice));
+    let as_bob = json!({ "author": bob.as_bytes() });
+    assert!(
+        backend
+            .insert("notes", &title("bob"), &as_bob)
+            .unwrap()
+            .rejected
+            .is_none()
+    );
+}
+
+/// Two requests of one device account each admit it; the second's proof may
+/// expire sooner. A db the first request opened still writes as the account
+/// until the first proof expires: an admission keeps the longer-lived proof.
+///
+/// ```
+/// alice req 1 (600 s proof) ──admit──► backend
+/// alice req 2 (2 s proof)   ──admit──► backend   (keeps the 600 s proof)
+///                     … 2 s pass …
+/// alice req 1's db ──insert──► accepted
+/// ```
+#[test]
+fn a_later_admission_never_shortens_a_local_first_account_s_admission() {
+    let backend = authority();
+    let (long_token, alice) = local_first_proof(7, "app");
+    let (short_token, same_alice) = local_first_proof_expiring(7, "app", 2);
+    assert_eq!(alice, same_alice);
+    backend
+        .admit_local_first_session(&long_token, "app", &alice)
+        .unwrap();
+    backend
+        .admit_local_first_session(&short_token, "app", &alice)
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let as_alice = json!({ "author": alice.as_bytes() });
+    let write = backend
+        .insert("notes", &title("still alice"), &as_alice)
+        .unwrap();
+    assert!(write.rejected.is_none());
+    assert_eq!(titles(&backend), ["still alice"]);
 }
 
 #[test]

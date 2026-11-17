@@ -145,8 +145,8 @@ pub(crate) fn mirror_blob_store(
 }
 
 /// What the store in `data_dir` records, merged with the files earlier
-/// releases kept, without writing anything or minting: for tools that only
-/// read a store (the alpha.59 import's verify).
+/// releases kept, without writing anything or minting: for tools and
+/// tests that only read a store.
 pub fn read_store_identity(data_dir: &Path) -> Result<RecordedIdentity, String> {
     let path = data_dir.join(STORE_FILE);
     if !path.exists() {

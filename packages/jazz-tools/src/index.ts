@@ -131,7 +131,9 @@ export type {
   JazzSessionSnapshot,
   JazzSessionOperation,
   JazzUser,
+  LocalFirstUnavailable,
 } from "./session/jazz-session.js";
+export { NativeArtifactMismatchError } from "./runtime/native-artifact-compatibility.js";
 export { NoKeptDeviceAccountError } from "./session/no-kept-device-account-error.js";
 export { DeviceAccountNeedsStoreError } from "./accounts/process-store.js";
 

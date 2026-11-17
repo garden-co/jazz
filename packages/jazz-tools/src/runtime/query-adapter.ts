@@ -474,15 +474,6 @@ function conditionToRelPredicate(
       : {
           Literal: toRuntimeValue(cond.value, valueTypeForCondition),
         };
-  if (columnType.type === "Bytea" && ["gt", "gte", "lt", "lte"].includes(cond.op)) {
-    throw new Error(`BYTEA column "${column}" only supports eq/ne operators.`);
-  }
-  if (columnType.type === "Bytea" && cond.op === "contains") {
-    throw new Error(`BYTEA column "${column}" does not support contains filters.`);
-  }
-  if (columnType.type === "Json" && ["gt", "gte", "lt", "lte", "contains"].includes(cond.op)) {
-    throw new Error(`JSON column "${column}" only supports eq/ne/in/isNull operators.`);
-  }
   switch (cond.op) {
     case "eq":
       return { Cmp: { left: columnRef, op: "Eq", right: rightLiteral } };
@@ -754,8 +745,6 @@ function translateBuiltRelationToRelExpr(
         },
         relation,
         first.outputTable,
-        first.outputTable,
-        schema,
       ),
       outputTable: first.outputTable,
     };
@@ -790,24 +779,18 @@ function translateBuiltRelationToRelExpr(
       Project: { input: expr, columns: relationColumnsForTable(outputTable, outputScope, schema) },
     };
   }
-  expr = applyRelationWindow(expr, relation, outputTable, outputScope, schema);
+  expr = applyRelationWindow(expr, relation, outputScope);
 
   return { expr, outputTable };
 }
 
-function applyRelationWindow(
-  input: RelExpr,
-  relation: BuiltRelation,
-  table: string,
-  scope: string,
-  schema: WasmSchema,
-): RelExpr {
+function applyRelationWindow(input: RelExpr, relation: BuiltRelation, scope: string): RelExpr {
   let expr = input;
   if (relation.orderBy?.length) {
     expr = {
       OrderBy: {
         input: expr,
-        terms: toRuntimeOrderBy(relation.orderBy, schema, table).map(({ column, direction }) => ({
+        terms: toRuntimeOrderBy(relation.orderBy).map(({ column, direction }) => ({
           column: relColumn(column, scope),
           direction,
         })),
@@ -875,15 +858,6 @@ function translateBuilderToRelationIr(
   }
 
   if (Array.isArray(builder.orderBy) && builder.orderBy.length > 0) {
-    for (const [column] of builder.orderBy) {
-      const columnType = getColumnType(schema, relationTable, stripQualifier(column));
-      if (columnType?.type === "Bytea") {
-        throw new Error(`BYTEA column "${column}" cannot be used in orderBy().`);
-      }
-      if (columnType?.type === "Json") {
-        throw new Error(`JSON column "${column}" cannot be used in orderBy().`);
-      }
-    }
     relation = {
       OrderBy: {
         input: relation,
@@ -924,18 +898,9 @@ function usesNativeRelationFeatures(builder: ReturnType<typeof normalizeBuiltQue
 
 function toRuntimeOrderBy(
   orderBy: Array<[string, "asc" | "desc"]>,
-  schema: WasmSchema,
-  table: string,
 ): Array<{ column: string; direction: "Asc" | "Desc" }> {
   return orderBy.map(([column, direction]) => {
     const strippedColumn = stripQualifier(column);
-    const columnType = getColumnType(schema, table, strippedColumn);
-    if (columnType?.type === "Bytea") {
-      throw new Error(`BYTEA column "${column}" cannot be used in orderBy().`);
-    }
-    if (columnType?.type === "Json") {
-      throw new Error(`JSON column "${column}" cannot be used in orderBy().`);
-    }
     return {
       column: strippedColumn,
       direction: direction === "desc" ? "Desc" : "Asc",
@@ -1002,7 +967,7 @@ export function translateQuery(
     });
   }
 
-  const orderBy = toRuntimeOrderBy(builder.orderBy, schema, builder.table);
+  const orderBy = toRuntimeOrderBy(builder.orderBy);
   const clientLimit = typeof builder.limit === "number" ? builder.limit : undefined;
   const clientOffset = typeof builder.offset === "number" ? builder.offset : undefined;
   const query = {

@@ -68,14 +68,6 @@ struct Cli {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
-    /// Import an alpha.59 server data dir into a new one, from the dump that
-    /// `jazz-alpha59-alpha60-export` writes (`import`), and check the result
-    /// (`verify`). Run `jazz-tools alpha59-alpha60` for its usage.
-    #[command(name = "alpha59-alpha60")]
-    Alpha59Alpha60 {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
     /// With --check (for CI): check the committed jazz.app.json (and
     /// jazz.permissions.json) and fail when the bindings are stale, changing
     /// nothing. Writing them is `npx jazz-tools generate`'s, from schema.ts.
@@ -280,6 +272,43 @@ enum Commands {
         #[arg(long, env = "JAZZ_QUERY_CACHE_BUDGET_BYTES", value_parser = clap::value_parser!(u64))]
         query_cache_budget_bytes: Option<u64>,
 
+        /// Bytes of output one client session may leave unread beyond twice
+        /// its biggest tick before it is closed with a retryable
+        /// `Backpressure` error (the client reconnects and resumes).
+        /// Defaults to 64 MiB.
+        #[arg(long, env = "JAZZ_SESSION_BACKLOG_BYTES", value_parser = clap::value_parser!(u64).range(1..))]
+        session_backlog_bytes: Option<u64>,
+
+        /// Bytes of output one client session may leave unread at most,
+        /// however big its ticks. Defaults to 256 MiB.
+        #[arg(long, env = "JAZZ_SESSION_BACKLOG_MAX_BYTES", value_parser = clap::value_parser!(u64).range(1..))]
+        session_backlog_max_bytes: Option<u64>,
+
+        /// Best-effort budget for the unwritten output of all client
+        /// sessions together. Past it, sessions reading slower than the
+        /// minimum read rate for the stall grace are closed, biggest first;
+        /// sessions reading faster are left alone. Defaults to a quarter of
+        /// the memory limit, else 2 GiB.
+        #[arg(long, env = "JAZZ_EGRESS_BUDGET_BYTES", value_parser = clap::value_parser!(u64).range(1..))]
+        egress_budget_bytes: Option<u64>,
+
+        /// Seconds a client session may read slower than the minimum read
+        /// rate while its output waits before it is closed. Defaults to
+        /// 120.
+        #[arg(long, env = "JAZZ_SLOW_READER_TIMEOUT_SECS", value_parser = clap::value_parser!(u64).range(1..))]
+        slow_reader_timeout_secs: Option<u64>,
+
+        /// Bytes a second a client must read, on average, while its output
+        /// waits, to count as reading (for the slow-reader timeout and the
+        /// egress budget). Defaults to 1024.
+        #[arg(long, env = "JAZZ_SLOW_READER_MIN_BYTES_PER_SEC", value_parser = clap::value_parser!(u64).range(1..))]
+        slow_reader_min_bytes_per_sec: Option<u64>,
+
+        /// Seconds a client session must be behind that rate before the
+        /// egress budget may close it. Defaults to 10.
+        #[arg(long, env = "JAZZ_EGRESS_STALL_GRACE_SECS", value_parser = clap::value_parser!(u64).range(1..))]
+        egress_stall_grace_secs: Option<u64>,
+
         /// Internal testing hook: write the resolved listen port after binding.
         #[arg(long, env = "JAZZ_BOUND_PORT_FILE", hide = true)]
         bound_port_file: Option<String>,
@@ -474,9 +503,7 @@ fn main() {
 
 async fn run() {
     let cli = Cli::parse();
-    // alpha59-alpha60 prints its JSON summary on stdout, so its logs go to
-    // stderr.
-    init_tracing(matches!(cli.command, Commands::Alpha59Alpha60 { .. }));
+    init_tracing();
     if let Err(error) = validate_server_cli_options(&cli.command) {
         eprintln!("Server error: {error}");
         shutdown_tracing();
@@ -484,11 +511,6 @@ async fn run() {
     }
 
     match cli.command {
-        Commands::Alpha59Alpha60 { args } => {
-            let code = jazz_cli::alpha59_alpha60::main("jazz-tools alpha59-alpha60", args).await;
-            shutdown_tracing();
-            std::process::exit(code);
-        }
         Commands::Validate { .. } => finish_app_files(Err(
             "`jazz-tools validate` is renamed to `jazz-tools generate`: run `npx jazz-tools generate` (`jazz-tools generate --check` for CI)".into(),
         )),
@@ -533,6 +555,12 @@ async fn run() {
             memory_limit_bytes,
             stored_arrangements,
             query_cache_budget_bytes,
+            session_backlog_bytes,
+            session_backlog_max_bytes,
+            egress_budget_bytes,
+            slow_reader_timeout_secs,
+            slow_reader_min_bytes_per_sec,
+            egress_stall_grace_secs,
             bound_port_file,
             diagnostics_listen,
             diagnostics_token,
@@ -594,6 +622,12 @@ async fn run() {
                         .or_else(jazz_server::resources::detect_memory_limit_bytes),
                     stored_arrangements,
                     query_cache_budget_bytes,
+                    session_backlog_bytes,
+                    session_backlog_max_bytes,
+                    egress_budget_bytes,
+                    slow_reader_timeout_secs,
+                    egress_stall_grace_secs,
+                    slow_reader_min_bytes_per_sec,
                 },
             )
             .await
@@ -704,17 +738,11 @@ static OTEL_LOGGER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::logs::SdkLog
 static OTEL_METER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::metrics::SdkMeterProvider> =
     std::sync::OnceLock::new();
 
-fn init_tracing(to_stderr: bool) {
-    use tracing_subscriber::fmt::writer::BoxMakeWriter;
+fn init_tracing() {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let writer = if to_stderr {
-        BoxMakeWriter::new(std::io::stderr)
-    } else {
-        BoxMakeWriter::new(std::io::stdout)
-    };
-    let fmt_layer = tracing_subscriber::fmt::layer().with_writer(writer);
+    let fmt_layer = tracing_subscriber::fmt::layer();
 
     #[cfg(feature = "otel")]
     {

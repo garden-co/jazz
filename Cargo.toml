@@ -7,7 +7,6 @@ members = [
   "crates/jazz/layers/model",
   "crates/jazz/layers/protocol",
   "crates/jazz/layers/types",
-  "crates/jazz-alpha59-alpha60-dump",
   "crates/jazz-compression",
   "crates/jazz-text",
   "crates/wasm-tracing",
@@ -53,9 +52,6 @@ exclude = [
   # while packaging so it verifies with the crates that depend on it.
   "vendor/ruzstd",
   "vendor/sqlite-wasm-rs",
-  # The alpha59-alpha60 exporter and its test fixture, built inside an alpha.59
-  # checkout by their prepare.sh.
-  "dev/alpha59-alpha60",
 ]
 
 # The browser build's SQLite. A global patch, so rusqlite's wasm FFI and
@@ -88,7 +84,6 @@ jazz-otel = { version = "=2.0.0-alpha.66", path = "crates/jazz-otel" }
 jazz-native-transport = { version = "=2.0.0-alpha.66", path = "crates/jazz-native-transport" }
 jazz-server = { version = "=2.0.0-alpha.66", path = "crates/jazz-server" }
 jazz-app-support = { version = "=2.0.0-alpha.66", path = "crates/jazz-app" }
-jazz-alpha59-alpha60-dump = { version = "=2.0.0-alpha.66", path = "crates/jazz-alpha59-alpha60-dump" }
 rustc-hash = "2.1.1"
 divan = { package = "codspeed-divan-compat", version = "5.0.1" }
 

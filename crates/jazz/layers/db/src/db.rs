@@ -2,7 +2,7 @@
 
 use crate::values::CachedRow;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::task::{Poll, Waker};
@@ -187,6 +187,9 @@ impl PreparedQuery {
         self
     }
 }
+
+/// How many validated query shapes a db remembers before it starts over.
+const VALIDATED_SHAPES_MAX: usize = 4096;
 
 fn short(hash: jazz_types::sha256::Hash) -> [u8; 16] {
     hash.as_bytes()[..16].try_into().expect("16 bytes")
@@ -515,8 +518,9 @@ pub struct SubscriptionStream {
     /// A withheld opening, released as one reset of the current rows.
     gate: Option<sync::Gate>,
     group: Weak<RefCell<fanout::Group>>,
-    /// Why the server refused the remote read, once it has; reported once.
-    refused: Option<Rc<RefCell<Option<Error>>>>,
+    /// The remote read it follows: why the server refused it, once it
+    /// has, is reported once and ends the stream.
+    refused: Option<Rc<sync::ReadSignal>>,
     /// The remote attachment to release on drop.
     remote: Option<(
         Rc<Store>,
@@ -544,10 +548,9 @@ impl Drop for SubscriptionStream {
 
 impl SubscriptionStream {
     pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
-        let refused = self.refused.as_ref().and_then(|refused| {
-            refused
-                .borrow()
-                .as_ref()
+        let refused = self.refused.as_ref().and_then(|signal| {
+            signal
+                .refusal()
                 .map(|error| (error.code, error.message.clone(), error.to_string()))
         });
         if let Some((code, message, reason)) = refused {
@@ -573,8 +576,11 @@ impl SubscriptionStream {
             {
                 return None;
             }
-            let settled = gate.answered.get();
-            let global = settled && gate.global.get();
+            // Opened on an answer, or past its wait: either way it reports
+            // what the read was last confirmed as (an outage leaves that
+            // standing).
+            let settled = gate.signal.confirmed();
+            let global = settled && gate.signal.confirmed_globally();
             self.gate = None;
             self.queue.borrow_mut().clear();
             let group = self.group.upgrade()?;
@@ -642,6 +648,10 @@ pub struct RuntimeStats {
 
 struct Inner {
     conn: Connection,
+    /// Query shapes (with their binding) `prepare` has already validated
+    /// against this schema version: it validates each once. Cleared when
+    /// it reaches [`VALIDATED_SHAPES_MAX`].
+    validated_shapes: HashSet<([u8; 16], [u8; 16])>,
     /// One-way, owner-wide fence for new application mutations during close.
     mutation_admission_closed: bool,
     /// Enum variants a write may hold though its schema does not declare
@@ -827,6 +837,10 @@ struct Inner {
     trusted_rows: RefCell<BTreeMap<String, BTreeSet<[u8; 16]>>>,
     /// The open transaction's seq and the tables it wrote.
     tx: Option<(u64, BTreeSet<String>)>,
+    /// The identity the open callback transaction writes as. A write as
+    /// any other identity while it is open would join its commit, and
+    /// upload under its author and claims, so it is refused.
+    tx_identity: Option<WriteIdentity>,
     /// Set once connected upstream: this store is a replica.
     client: Option<sync::Client>,
     /// A replica whose store does not outlive it (a foreground over a
@@ -885,10 +899,6 @@ struct Inner {
     since_tick: Vec<(String, RowUuid, Vec<u8>)>,
     /// Ops of the open local transaction, for upload, by stored names.
     pub(crate) capture: Vec<StagedOp>,
-    /// The claims the open local transaction's session writes were staged
-    /// with: its upload carries these, not whatever its author's claims
-    /// are by the time it commits.
-    pub(crate) capture_claims: Option<BTreeMap<String, Value>>,
     /// Images a replica dropped since the last dispatch (evictions and
     /// rebases), for keyed invalidation.
     gone: RefCell<Vec<sync::Image>>,
@@ -2147,6 +2157,7 @@ impl Db {
             defer_fetches: false,
             inner: Rc::new(Store::new(Inner {
                 conn,
+                validated_shapes: HashSet::new(),
                 mutation_admission_closed: false,
                 kept_variants: BTreeMap::new(),
                 #[cfg(any(test, feature = "testing"))]
@@ -2221,6 +2232,7 @@ impl Db {
                 deferred: RefCell::new(None),
                 trusted_rows: RefCell::new(BTreeMap::new()),
                 tx: None,
+                tx_identity: None,
                 client: None,
                 non_durable: false,
                 reopenable: path.is_some(),
@@ -2240,7 +2252,6 @@ impl Db {
                 accepted: 0,
                 since_tick: Vec::new(),
                 capture: Vec::new(),
-                capture_claims: None,
                 gone: RefCell::new(Vec::new()),
                 migrations: config.migrations,
                 withheld: std::cell::Cell::new(withheld > 0),
@@ -3325,18 +3336,28 @@ impl Db {
         query: &Query,
         binding: BTreeMap<String, Value>,
     ) -> Result<PreparedQuery, Error> {
-        let inner = self.inner();
+        let mut inner = self.inner();
         let normalized = normalize_relation(query, &inner.schema)?;
         let query = normalized.as_ref().unwrap_or(query);
-        // Validate: tables, columns, parameters, supported forms. Read
-        // options are not known yet: validate the widest read (deleted rows
-        // included, so their metadata columns are accepted).
-        let session = Session::system();
-        Ctx::new(&inner.schema, None, &session, &binding).compile_query(query, true)?;
         let shape = jazz_types::sha256::hash(
             format!("{query:?}{:?}", inner.schema.jazz.version_id()).as_bytes(),
         );
         let bound = jazz_types::sha256::hash(format!("{binding:?}").as_bytes());
+        let key = (short(shape), short(bound));
+        if !inner.validated_shapes.contains(&key) {
+            // Validate: tables, columns, parameters, supported forms, and
+            // every relation as its reads will compile it. Read options are
+            // not known yet: validate the widest read (deleted rows
+            // included, so their metadata columns are accepted). Once per
+            // shape: reads, fanout and paging don't validate again.
+            let session = Session::system();
+            Ctx::new(&inner.schema, None, &session, &binding).compile_query(query, true)?;
+            Ctx::new(&inner.schema, None, &session, &binding).validate_prepared(query)?;
+            if inner.validated_shapes.len() >= VALIDATED_SHAPES_MAX {
+                inner.validated_shapes.clear();
+            }
+            inner.validated_shapes.insert(key);
+        }
         Ok(PreparedQuery {
             query: query.clone(),
             binding,
@@ -3484,22 +3505,19 @@ impl Db {
             },
             None => read,
         };
-        let remote = attached.map(|(_, flags)| flags);
+        let remote = attached.map(|(_, signal)| signal);
         let settled = match (&remote, client) {
-            (Some((answered, _, global)), _) => {
-                sync::SettledBy::Remote(answered.clone(), global.clone())
-            }
+            (Some(signal), _) => sync::SettledBy::Remote(signal.clone()),
             (None, true) => sync::SettledBy::Never,
             (None, false) => sync::SettledBy::Always(self.inner().authority),
         };
         let gate = match (&remote, self.link_hint()) {
-            (Some((answered, _, global)), Some(hint)) => {
+            (Some(signal), Some(hint)) => {
                 let deadline =
                     sync::remote_deadline(&opts, non_durable, sync::may_wait(hint.get()));
                 let live = hint.get().hint == RemoteLinkHint::Live;
                 deadline.map(|deadline| sync::Gate {
-                    answered: answered.clone(),
-                    global: global.clone(),
+                    signal: signal.clone(),
                     hint,
                     live,
                     deadline,
@@ -3531,7 +3549,7 @@ impl Db {
             dropped: inner.fan.dropped.clone(),
             gate,
             group,
-            refused: remote.as_ref().map(|(_, refused, _)| refused.clone()),
+            refused: remote.clone(),
             remote: remote.zip(reach).map(|(_, reach)| {
                 (
                     self.inner.clone(),
@@ -3711,6 +3729,15 @@ impl Db {
     /// upload: it is recorded for the authority, which decides its fate.
     fn write_op(&self, mut op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
         self.inner().require_mutation_admission()?;
+        // A write while a callback transaction is open joins its commit:
+        // only one made as that transaction's identity may (its own).
+        if let (Some(open), Some(identity)) = (self.inner().tx_identity, op.identity())
+            && identity != open
+        {
+            return Err(unsupported(
+                "a write as another identity while a transaction is open",
+            ));
+        }
         self.with_upload(|| {
             let table = op.table().to_owned();
             let (prior, mark) = {
@@ -3894,6 +3921,7 @@ impl Db {
             inner.changed.borrow_mut().clear();
             let seq = inner.fresh_seq();
             inner.tx = Some((seq, BTreeSet::new()));
+            inner.tx_identity = Some(identity);
         }
         // Until the unit commits or is rolled back below, dropping this
         // future (cancellation) or unwinding out of the callback rolls it
@@ -3913,10 +3941,8 @@ impl Db {
         let changed = {
             let mut inner = self.inner();
             let (seq, tables) = inner.tx.take().expect("open transaction");
-            captured = (
-                std::mem::take(&mut inner.capture),
-                inner.capture_claims.take(),
-            );
+            inner.tx_identity = None;
+            captured = std::mem::take(&mut inner.capture);
             prior = inner.seq;
             match &result {
                 Ok(_) => {
@@ -3938,9 +3964,10 @@ impl Db {
         let value = result?;
         let (seq, _) = changed.expect("committed");
         // The upload record joins the transaction's SQLite savepoint.
-        let (captured, claims) = captured;
-        let recorded =
-            self.record_stored_upload(captured, seq, sync::Kind::Mergeable, None, claims);
+        // A callback transaction writes as the database or attributed
+        // (`transaction_as`), never as a session, so no session claims
+        // travel with it.
+        let recorded = self.record_stored_upload(captured, seq, sync::Kind::Mergeable, None, None);
         if let Err(error) = recorded {
             guard.armed = false;
             self.inner().roll_back_callback_tx(Some(prior))?;
@@ -4866,8 +4893,8 @@ impl Inner {
     /// so it closes mutation admission.
     fn roll_back_callback_tx(&mut self, restore_seq: Option<u64>) -> Result<(), Error> {
         self.tx = None;
+        self.tx_identity = None;
         self.capture.clear();
-        self.capture_claims = None;
         self.writer = None;
         self.clear_derived();
         if let Some(seq) = restore_seq {
@@ -10654,6 +10681,7 @@ impl Db {
     }
 
     pub async fn commit_mergeable_handle(&self, id: OpenTransactionId) -> Result<TxReceipt, Error> {
+        self.refuse_commit_in_callback_tx()?;
         let batch = self.take_batch(id)?;
         if !matches!(batch.kind, BatchKind::Mergeable) {
             return Err(rejected(format!("transaction {id:?} is not mergeable")));
@@ -10672,6 +10700,7 @@ impl Db {
         &self,
         id: OpenTransactionId,
     ) -> Result<TxReceipt, Error> {
+        self.refuse_commit_in_callback_tx()?;
         let batch = self.take_batch(id)?;
         let BatchKind::Serializable {
             snapshot,
@@ -10831,8 +10860,23 @@ impl Db {
         self.with_upload(|| self.commit_ops_now(batch, kind))
     }
 
+    /// A transaction handle's commit while a callback transaction is open
+    /// would join that transaction's commit (and be undone with it), so it
+    /// is refused; the handle stays open, to commit once the callback
+    /// transaction has finished.
+    fn refuse_commit_in_callback_tx(&self) -> Result<(), Error> {
+        if self.inner().tx.is_some() {
+            return Err(unsupported(
+                "committing a transaction while a callback transaction is open",
+            ));
+        }
+        Ok(())
+    }
+
     fn commit_ops_now(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
         self.inner().require_mutation_admission()?;
+        // Its handle's commit refused this before taking the batch.
+        self.refuse_commit_in_callback_tx()?;
         let ops = &batch.ops;
         let (seq, prior, mark) = {
             let mut inner = self.inner();
