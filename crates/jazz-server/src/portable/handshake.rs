@@ -32,6 +32,8 @@ pub struct ConnectionSessionContext {
 }
 
 /// The peer's `Hello` and what both sides speak.
+#[derive(Clone, Debug)]
+#[must_use]
 pub struct NegotiatedHello {
     /// The peer's `Hello`.
     pub remote: WireHello,
@@ -74,6 +76,8 @@ pub fn negotiate_hello(
 }
 
 /// What an admitted connection is linked as.
+#[derive(Clone, Debug)]
+#[must_use]
 pub struct Link {
     /// The connection is a thin client's: one session reading finished
     /// results.
@@ -142,4 +146,99 @@ pub fn link(admission: &WebSocketAdmission, hello: &NegotiatedHello) -> Result<L
         session_context,
         server_hello,
     })
+}
+
+// Lower-level tests: the native route's tests exercise these through its
+// sockets; a Durable Object host reuses them directly.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::portable::admission::{
+        CommitUnitTrust, RequestedWebSocketLink, WebSocketCredential,
+    };
+    use std::collections::BTreeMap;
+
+    fn hello(features: WireFeatures) -> Vec<u8> {
+        let frame = encode_frame(&WireFrame::Hello(WireHello::current(
+            WirePeerRole::Client,
+            features,
+        )))
+        .unwrap();
+        crate::portable::websocket_codec::encode_ws_frame_batches(&[frame])
+            .unwrap()
+            .pop()
+            .unwrap()
+    }
+
+    fn admission(trust: CommitUnitTrust, link: RequestedWebSocketLink) -> WebSocketAdmission {
+        WebSocketAdmission {
+            identity: AuthorSubject::authenticated("https://idp.example", "alice").unwrap(),
+            claims: BTreeMap::new(),
+            trust,
+            credential: WebSocketCredential::Backend,
+            requested_link: link,
+            bundle: None,
+            revocation: None,
+        }
+    }
+
+    /// A thin client's `Hello` negotiates thin results; the server's `Hello`
+    /// comes back encoded for it.
+    #[test]
+    fn a_thin_hello_links_a_thin_connection() {
+        let negotiated = negotiate_hello(
+            &hello(current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS),
+            false,
+        )
+        .unwrap();
+        assert_ne!(negotiated.features & jazz::wire::FEATURE_THIN_RESULTS, 0);
+        let link = link(
+            &admission(
+                CommitUnitTrust::Session,
+                RequestedWebSocketLink::OrdinarySession,
+            ),
+            &negotiated,
+        )
+        .unwrap();
+        assert!(link.thin);
+        assert_eq!(link.link_admission, ServerLinkAdmission::OrdinarySession);
+        match jazz::wire::decode_frame(&link.server_hello).unwrap() {
+            WireFrame::Hello(hello) => assert_eq!(hello.role, WirePeerRole::Core),
+            other => panic!("expected the server's Hello, got {other:?}"),
+        }
+    }
+
+    /// A one-shot catalogue bootstrap is refused, whatever the Hello.
+    #[test]
+    fn a_catalogue_bootstrap_is_refused() {
+        let refused = negotiate_hello(&hello(current_wire_features()), true).unwrap_err();
+        assert_eq!(refused.code, WireErrorCode::UnsupportedFeature);
+    }
+
+    /// A thin connection serves one session: one that asked to relay for
+    /// other tabs is refused.
+    #[test]
+    fn a_thin_connection_cannot_relay_for_other_tabs() {
+        let negotiated = negotiate_hello(
+            &hello(
+                current_wire_features()
+                    | jazz::wire::FEATURE_THIN_RESULTS
+                    | jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY,
+            ),
+            false,
+        )
+        .unwrap();
+        let refused = link(
+            &admission(
+                CommitUnitTrust::Session,
+                RequestedWebSocketLink::ScopeIsolatedClientRelay,
+            ),
+            &negotiated,
+        )
+        .unwrap_err();
+        assert!(
+            refused.message.contains("cannot relay for other tabs"),
+            "{refused:?}"
+        );
+    }
 }

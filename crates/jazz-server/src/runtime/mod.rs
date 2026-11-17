@@ -156,6 +156,7 @@ pub enum NodeRole {
 
 pub use crate::portable::admission::{CommitUnitTrust, ServerLinkAdmission};
 
+#[doc(inline)]
 pub use crate::portable::handshake::ConnectionSessionContext;
 
 /// Opaque handle for one admitted session.
