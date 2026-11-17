@@ -191,14 +191,12 @@ deliveries have random IDs, so nobody can predict, and occupy in advance, the
 ID of another account's row.
 
 Secret-derived recovery root fixtures, for generations 0 and above, are in
-§2.9; the account sealing key fixture is in §2.12. The test file above pins
-the recovery derivation and the SHA-256 digest of every record kind's signed
-bytes, each rebuilt there from this document's formulas; those digests pin
-this document's reading, not an independent implementation's. The account
-sealing key fixture is computed from this document and is to be added to
-that file, and its vectors for records this document does not define (the
-reset-identity ID derivation, and records of earlier drafts that are no
-longer part of the protocol) are to be removed from it. An insert refused because a row with that ID already exists is
+§2.9; the account sealing key fixture is in §2.12.
+`crates/jazz-e2ee/tests/protocol_vectors.rs` pins the recovery derivation,
+the account sealing key derivation and the SHA-256 digest of every record
+kind's signed bytes, each rebuilt there from this document's formulas; those
+digests pin this document's reading, not an independent implementation's.
+An insert refused because a row with that ID already exists is
 reported to the writer exactly like a policy refusal.
 
 Canonical JSON fields of account successors (`membership`, `revision`,
@@ -461,7 +459,7 @@ still leave (R12), read the key records and deliver to each other (R14,
 R17), so encrypted rows of the space that the application keeps stay
 decryptable by its members wherever Jazz still lets them read those rows. This is intended: deleting the space row ends the
 space's administration, not its members' access to content that remains.
-The runtime makes no background creation or rotation for a space whose
+The runtime makes no automatic rotation for a space whose
 space row it sees deleted. An application that wants the members gone
 deletes their member rows in the same transaction as the space row (a delete
 is checked against the transaction's pre-state, R12). Restoring the space
@@ -664,11 +662,15 @@ accountId = session.user)` (`table_id` is T's catalogue identity, [core
   are readable iff member(session account). A delivery's envelope is sealed to
   its recipient account, so other members learn only that it was
   delivered, by whom, to whom and for which version.
-- R15. **Create.** Insert into `__e2ee_spaces` iff read(row) and
-  update(row). The server does not limit the number of roots of an address:
+- R15. **Create.** Insert into `__e2ee_spaces` iff member(session
+  account), read(row) and update(row). The server does not limit the number of roots of an address:
   clients decide which is the space's root (§3.2).
-- R16. **Rotate.** Insert into `__e2ee_space_successors` iff read(row) and
-  update(row).
+- R16. **Rotate.** Insert into `__e2ee_space_successors` iff
+  member(session account), read(row) and update(row). Once a space table's
+  read rule comes from the members table (R13), read(row) already implies
+  membership; the explicit condition also covers the first migration step,
+  when it does not yet ([migrations](E2EE_MIGRATIONS.md) §4.1), so a
+  session that is not a member never holds a space key it wrote itself.
 - R17. **Deliver.** Insert into `__e2ee_space_deliveries` iff
   member(session account) and member(`recipientAccountId`).
 - R18. Application tables keep their own read and write policies.
@@ -719,8 +721,9 @@ written; it cannot pass through read and update of the project, which need
 the member row itself. If the same transaction also carries the space root
 (§3.2), the root passes R15 once the member row has passed, so the project,
 its first member and its root can be one transaction. A project inserted
-without its creator's member row can get members only from an updater or a
-trusted backend; nobody can read it until then. Every other account is
+without its creator's member row can get members only from a trusted
+backend: an updater needs read(row), which needs a member row, so nobody
+can read or manage it until then. Every other account is
 added by an updater.
 
 - **Column entries.** A `columns` value is either a type string (`"title":
@@ -1209,8 +1212,6 @@ local-first account. Removal still serves its other purposes there (retiring
 an unused install, rotating away a device whose secret was never stored, such
 as a device that only held a link).
 
-Both revisions therefore count only valid approvals.
-
 ### 2.9 Recovery
 
 Recovery builds on the account backup that local-first accounts already have.
@@ -1525,9 +1526,7 @@ mechanism's envelope (`JE2E 01 ‖ len ‖ id ‖ u32be(version) ‖ verificatio
 
 The successor's `historyEpochId` is signed and bound into the `history`
 context (as its recipient field), so the version a `history` wrap opens
-cannot be substituted. The successor digest pinned in
-`crates/jazz-e2ee/tests/protocol_vectors.rs`, which predates
-`historyEpochId`, is to be regenerated.
+cannot be substituted.
 Deliveries are unsigned: the server authenticates their
 sender (`$createdBy`, R2), and a delivered key is accepted only after it
 authenticates against its version's marker and the chain (§3.3), which the
@@ -1558,11 +1557,6 @@ is created only:
   even after an earlier refusal on this device (below), except while this device has a creation of the
   space whose outcome is pending or unknown: it then reconciles that
   creation and returns its outcome instead of staging a second root;
-- **for members without one**: a member's runtime that sees member rows of
-  a space with no valid root (the account's own member rows are readable to
-  it, R12) creates the space after a random delay, in a transaction holding
-  only the root like `createSpace`, so that usually one updater does,
-  unless an earlier attempt was refused (below);
 - by a conversion sweep, in its first conversion transaction for the space
   ([migrations](E2EE_MIGRATIONS.md) §3.5), unless an earlier attempt was
   refused (below).
@@ -1584,7 +1578,7 @@ update the space row cannot create it.
   The SDK reports a publication error of stage `create` with code
   `space-create-refused`, naming the space, and the device stops
   automatic attempts for the space (below). When the transaction holds
-  only the root (`createSpace`, the background creation), a policy refusal
+  only the root (`createSpace`), a policy refusal
   of it is this outcome; a conflict or another failure of it is the next.
 - **Transaction failed otherwise**: the transaction that carried the root
   failed definitively for another reason: another of its rows was refused,
@@ -1603,15 +1597,17 @@ Whatever the outcome, a key whose root did not become the space's root
 follows §5.4 and is repaired as below.
 
 **After a refusal.** Once a creation is refused, the runtime's automatic
-paths (the first encrypted write, the background creation for members and
-a conversion sweep) stage no root for that space on this device while the
+paths (the first encrypted write and a conversion sweep) stage no root for that space on this device while the
 client runs: encrypted writes to the space fail with `space-pending`, and
 reads report it `space-pending` (§4.3), until a valid root exists. An
 explicit `createSpace(row)` always attempts. This is kept only in the
 memory of the running client; nothing about it is stored, so after a
-restart the next automatic path may try the space once more. An
-application that gives someone update rights on a space row calls
-`createSpace` if it wants the space created at once. Rotation follows the
+restart the next automatic path may try the space once more. A space is
+created only by someone who may update its row, through an encrypted write,
+a conversion or `createSpace`; a member who may not update the row reports
+the space `space-pending` until then. A session that is not a member is
+refused (R15) and reports `space-create-refused`; it would get no key
+anyway. Rotation follows the
 same rule (§3.5).
 
 Required tests: after a creation refused, an encrypted write fails
@@ -1642,15 +1638,15 @@ transaction that carried a root that was not accepted wrote nothing. Later
 transactions that encrypted under its key, which do not depend on the
 creation, may have been accepted by Jazz; their cells name an epoch that is
 not in the space's chain, so every other member reports them
-`invalid-ciphertext`. The device keeps the key, marked `refused` (§6.2),
-while it repairs its own rows:
+`invalid-ciphertext`. The device keeps the key for good, marked `refused`
+(§6.2): it is never used for a new write, and always opens the cells this
+device wrote under it. It repairs its own rows:
 
 - if its account is a member, the runtime obtains the space's real key (by
   delivery, §3.4, once a valid root exists), then repairs the rows it wrote
-  under the losing key (below) and then discards that key (§5.4);
+  under the losing key (below);
 - if it is not a member, or the session can no longer read the space row,
-  those rows stay unreadable to everyone else, and the key is discarded:
-  Jazz no longer serves the device the space's rows.
+  those rows stay unreadable to everyone else.
 
 **Repair** is an online background task of the runtime, built like the
 conversion sweep ([migrations](E2EE_MIGRATIONS.md) §3.5). It finds the
@@ -1670,39 +1666,21 @@ transactions are runtime publications, retried internally after a conflict
 (§7). It needs Jazz update permission on the rows: a row whose repair is
 refused is skipped and stays unreadable to others. It does not run offline.
 
-**Key retention.** A key marked `refused` is never selected for a new write
-(§5.2), but a transaction that sealed cells under it earlier may still be
-open: a callback or handle transaction that has staged them and not yet
-committed ([core hooks](E2EE_CORE_HOOKS.md) H2). The runtime counts, in
-memory, the open transactions that sealed under each unpublished or
-refused key; one leaves the count when it commits, rolls back or is
-abandoned. The losing key is kept, marked `refused`, until no such
-transaction is open and then a pass over the space's rows, begun after
-the last one closed and made while the real key is held, finds no cell
-naming the losing epoch other than in rows whose repair was refused. The
-pass reads the device's replica, which holds its own committed writes that
-are not yet accepted (pending, or of unknown outcome): their cells count as
-remaining and are repaired like any other, since a serializable snapshot
-includes the device's own unsettled commits; if such a write is refused
-later, the repair's read no longer matches and it re-reads. An unknown
-outcome is never treated as refused, and no write is replayed. Open
-transactions live in memory only, so one open at a restart was never
-committed and cannot publish; after a restart the replica alone decides. A
-conflict, an interruption or a restart before then keeps the key, and the
-next pass starts again from the rows themselves (no cursor is needed). Only
-then is the key discarded (§5.4).
+**When repair runs.** A pass runs once the real key is held, after a
+restart, and when one of the device's own writes under the losing key
+settles. It reads the device's replica, which includes its own committed
+writes not yet accepted, so those are repaired like any other row. Since
+the key is never deleted, nothing has to decide when repair is finished: a
+write still open or of unknown outcome is repaired by a later pass.
 
 Required tests: device A wrote row R under the losing key with value `old`;
 after the space's root is known, another member writes `new` to R under the
 real key; A's repair, which read `old`, conflicts, re-reads and leaves
 `new` untouched; a repair interrupted between batches keeps the key and
 finishes after a restart; a row whose repair is refused stays unreadable to
-others and the key is then discarded; a handle transaction that sealed a
-cell under the losing key stays open across a complete pass, the key is
-kept, the handle then commits, and the next pass repairs the row; a
-committed write under the losing key whose outcome is unknown at a restart
-keeps the key after the restart and is repaired, and a refusal of it lets
-the key be discarded.
+others and readable to its author; a handle transaction that sealed a cell
+under the losing key commits after a complete pass, and a later pass
+repairs the row.
 
 ### 3.3 Key chain and acquiring a key
 
@@ -1780,20 +1758,6 @@ recipientAccountEpochId, envelope}`, with a random ID, sealed to that
   device still holds; the device then re-reads. The authority accepts it
   only from a member to a member (R17). Two holders may both deliver; the
   second delivery costs storage only.
-- **Delivering with the member row.** A device that inserts another
-  account's member row and holds the current version (not an unpublished
-  key, §5.4) also stages, in the
-  same transaction, a delivery of the current version to that account, when
-  it knows the account's valid sealing key: the generated members API looks
-  it up online before staging ([core hooks](E2EE_CORE_HOOKS.md) H2). R17
-  accepts it on the member row the same transaction inserts, once that row
-  has passed its own check (Jazz's grounding rule). Offline, without a
-  sealing key, or for a member row written another way, it stages none and
-  ordinary delivery follows. Unless the transaction is serializable, this
-  delivery has no read set: if a `remove-device` successor supersedes the
-  account epoch it was sealed to before it is accepted, the space is marked
-  as needing rotation (§3.5), which is the safe direction. The usual
-  addition then waits for no other holder.
 - **Receiving.** A member's devices watch deliveries addressed to their
   account and acquire the key (§3.3). While its account lacks a version
   that it needs, a member's device reports the space `key-pending` (§4.3).
@@ -1823,10 +1787,9 @@ rotates between the holder's read and its commit is refused and redone
 against the new epoch; a member that receives a garbage delivery reports
 `invalid-delivery` naming the sender, writes nothing, and receives a working
 key after the next rotation; a delivery that fails with a provider error is
-not reported; a device that adds a member while holding the current version
-delivers to it in the same transaction, which is accepted in both insert
-orders;
-in an otherwise idle space, a member that resets after it was delivered the
+not reported; after a rotation, a member that already has a garbage
+delivery of the new version also receives the rotator's delivery; in an
+otherwise idle space, a member that resets after it was delivered the
 current version receives it again with no other write to a space table; a
 member whose account sealing key appears only after a holder's first lookup
 found none receives the version with no other write to a space table.
@@ -1843,8 +1806,9 @@ members other than itself that have a valid sealing key (§2.12, §3.4). The
 100 are chosen first among members that held the previous version (they
 are reading the space now), then among the others, each group in random
 order. Right after the rotation is accepted, the rotator's runtime delivers
-`K'` to the remaining members in ordinary delivery transactions of up to
-100 deliveries; members it does not reach (without a sealing key, or the
+`K'` to every remaining member in delivery transactions of up to 100
+deliveries, whether or not a delivery to it already exists (another
+member's delivery may not open); members it does not reach (without a sealing key, or the
 rotator went offline) receive `K'` later from any holder. Read-set
 validation refuses a second successor of the same predecessor, and a
 rotation whose members changed meanwhile; the loser re-reads.
@@ -1955,8 +1919,7 @@ documentation recommends that a removal UI call `db.encryption.rotate(space)`
 right after the delete; otherwise content written before the next updater's
 encrypted write stays under a key the removed account holds (§8). The
 removed account keeps every key it already held, which stay usable for
-content of their versions (§8). The space row's creator cannot be removed
-for good: it may add itself again (R12). Removing a device of an account is handled
+content of their versions (§8). Removing a device of an account is handled
 through the same mark: revoke its sign-in, then the space is rotated (§2.8).
 
 ### 3.6 New devices, recovery and account changes
@@ -2025,8 +1988,7 @@ is made or abandoned.
   each, so of the order of a few hundred kilobytes per rotation, and
   re-evaluates who lacks a key once per batch, at a cost proportional to
   the members.
-- Adding a member costs one delivery, usually in the adding transaction
-  (§3.4), otherwise by one holder; each holder
+- Adding a member costs one delivery, by one holder; each holder
   device re-evaluates at a cost proportional to the members. Two holders
   may deliver at once; the second delivery costs storage only.
 - Deliveries are never deleted (R1): the server stores one per member per
@@ -2039,8 +2001,10 @@ is made or abandoned.
 - A device watches the public account rows of every member of every space
   it belongs to (above); the design figure is 10,000 watched accounts per
   device.
-- Each policy check of an internal row is one or two indexed member lookups
-  on the server ([core hooks](E2EE_CORE_HOOKS.md) H7).
+- On the server, reading an internal row and inserting a delivery each cost
+  one or two indexed member lookups; inserting a root, successor or member
+  row also evaluates the space row's read rule and both update clauses
+  ([core hooks](E2EE_CORE_HOOKS.md) H7, Main risks).
 
 These are design figures, to be measured before landing ([core
 hooks](E2EE_CORE_HOOKS.md), Main risks). A later release may raise the
@@ -2294,10 +2258,7 @@ The creation's outcome decides the key's fate:
   itself also stops automatic creation of the space (§3.2). The key stays usable
   by this device for reading its own rows and for the repair of §3.2
   (obtaining the real key and rewriting the cells it wrote under this one),
-  and is never used for a new write. When the repair is complete (§3.2,
-  "Key retention"), or the session cannot read the space row, the epoch is
-  fenced in memory, leases are erased, and only the record matching this
-  device and exactly that root, epoch and signature is removed.
+  and is never used for a new write. The record is kept (§3.2).
 - **Unknown**: the mark is kept.
 
 After a restart the runtime reconciles each `unpublished` record by its
@@ -2480,8 +2441,8 @@ space: before it, the device has nothing to compare with (§8).
 - Access changes never remove held keys. Records are removed only by
   sign-out wipe, account change wipe, device removal, re-enrolment after
   `device-no-longer-active` (§2.4, "Floors": the account's device record,
-  held keys and floors), explicit deletion, and discard of a refused or lost space
-  creation (§5.4). A wiped store is never recreated by a late operation.
+  held keys and floors) and explicit deletion. A refused or lost creation's
+  key is kept (§3.2). A wiped store is never recreated by a late operation.
 - A held-key revision counter advances on every removal, so in-flight reads
   notice and retry (3 attempts).
 
@@ -2603,6 +2564,12 @@ Properties:
   by Jazz authorship (`$createdBy`) and by the markers and chains their keys
   must verify against. A delivered key is used only after
   it authenticates against its version's marker and the signed chain (§3.3).
+- **Removal excludes from later keys, if the server enforces permissions.**
+  Once an account has no member row and the space has rotated, honest
+  members' clients deliver it no later version, and the server refuses any
+  delivery to it (R17), so it cannot decrypt content written under later
+  versions. Member rows are not signed: this holds only while the server
+  enforces the derived policies (trust boundary above).
 - Unsupported or unverifiable evidence is never treated as invalid, and
   provider errors are never treated as proof of invalidity.
 - Error messages carry fixed text and public coordinates, never plaintext,
@@ -2623,6 +2590,23 @@ Limits:
   member (R12). An application cannot let members edit the space row
   without also letting them manage members; such fields belong in another
   table (§1.5).
+- **A member row written later re-adds the account.** Removal deletes the
+  member rows the remover sees. A member row inserted at the same time, or
+  written offline before the removal and synced after it, makes the account
+  a member again, and it receives later versions. Removal UIs should check
+  the member list after syncing.
+- **A device that had the recovery secret may keep it.** Removing a device
+  does not retire a recovery root, and a device already active that runs
+  restore writes nothing. To revoke the recovery secret, retire its
+  recovery root and register a new secret (§2.8, §2.9).
+- **A creation of unknown outcome keeps its key.** If neither the
+  transaction's outcome nor a root of the address can be learnt, writes
+  keep sealing under the unpublished key; other members report them
+  `invalid-ciphertext` until the outcome is known and the rows are repaired
+  (§3.2, §5.4).
+- **Busy large spaces may delay rotation.** A rotation's read set covers the
+  space's member rows, so in a space with frequent membership changes it may
+  conflict and retry until they pause (§3.5).
 - **Removal cannot erase copies.** A delivered key is never revoked. Keys,
   plaintext and ciphertext a former member already obtained remain with it,
   and old versions stay readable to whoever holds their keys.
@@ -2633,8 +2617,7 @@ Limits:
   skipped versions that no member still holds. Content that a later member
   must not see belongs in another space.
 - **Keys need a key holder's client online.** Nobody delivers keys but
-  members' clients (§3.4): a new member (unless the device that added it
-  held the key and delivered with the member row), a reset member, or a
+  members' clients (§3.4): a new member, a reset member, or a
   member who missed a rotation's delivery waits, `key-pending`, until a device of a
   member holding the key is online. A rotation delivers to at most 100
   current members in its own transaction and to the rest in later batches
@@ -2726,7 +2709,10 @@ Limits:
 - **Account reset needs no approval.** For an application that enables
   `allowAccountReset`, whoever can sign in as an app-authenticated account
   can reset it and then receive every space key it is a member of, with the
-  full history (§2.11). Members see a reset notice, after the fact. The account's
+  full history (§2.11). Members' runtimes emit an `account-reset` event,
+  after the fact. The setting is enforced by the server only (R5, R6):
+  clients do not check it, so a dishonest server can reset an account the
+  application has not allowed to reset, as it can add a member row. The account's
   own devices raise `device-no-longer-active` and must be approved again.
   Local-first accounts cannot reset: every generation's root must be signed
   by their identity (§2.4 step 1).
