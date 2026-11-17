@@ -208,6 +208,10 @@ impl Analyzer {
             let hi = successor(&lo);
             Some(PrefixTerm { exact, lo, hi })
         });
+        // The prefix slot already matches its whole-word term exactly.
+        if let Some(p) = &prefix {
+            terms.retain(|t| *t != p.exact);
+        }
         if terms.len() + usize::from(prefix.is_some()) > MAX_QUERY_TERMS {
             return Err(QueryError::TooManyTerms);
         }
@@ -298,13 +302,9 @@ fn words(text: &str) -> impl Iterator<Item = &str> {
                 Class::Mark | Class::Ignored => true,
                 Class::Word => !alone,
                 Class::Alone | Class::Separator => {
-                    // `word ' word`: one word.
-                    !alone
-                        && matches!(c, '\'' | '\u{2019}')
-                        && rest[end + c.len_utf8()..]
-                            .chars()
-                            .next()
-                            .is_some_and(|n| class(n) == Class::Word)
+                    let before = rest[start..end].chars().next_back();
+                    let after = rest[end + c.len_utf8()..].chars().next();
+                    !alone && joins(c, before, after)
                 }
             };
             if !continues {
@@ -315,6 +315,28 @@ fn words(text: &str) -> impl Iterator<Item = &str> {
         at += end;
         Some(&rest[start..end])
     })
+}
+
+/// Whether the separator `c` between `before` and `after` stays inside a
+/// word (UAX #29's MidLetter rules): an apostrophe (`'`, `’`) or a middle
+/// dot (`·`, Catalan `col·lecció`) between two word characters, and a
+/// geresh or gershayim (`׳`, `״`, or ASCII `'`, `"`) between two Hebrew
+/// letters (`צה״ל`, as WB7b and WB7c).
+fn joins(c: char, before: Option<char>, after: Option<char>) -> bool {
+    let word = |x: Option<char>| x.is_some_and(|x| class(x) == Class::Word);
+    let hebrew = |x: Option<char>| x.is_some_and(hebrew_letter);
+    match c {
+        '\'' | '\u{2019}' | '\u{00B7}' => word(before) && word(after),
+        '"' | '\u{05F3}' | '\u{05F4}' => hebrew(before) && hebrew(after),
+        _ => false,
+    }
+}
+
+/// UAX #29's Hebrew_Letter: the Hebrew letters and their presentation forms.
+fn hebrew_letter(c: char) -> bool {
+    matches!(c as u32,
+        0x05D0..=0x05EA | 0x05EF..=0x05F2 | 0xFB1D | 0xFB1F..=0xFB28 | 0xFB2A..=0xFB36
+        | 0xFB38..=0xFB3C | 0xFB3E | 0xFB40..=0xFB41 | 0xFB43..=0xFB44 | 0xFB46..=0xFB4F)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -342,16 +364,21 @@ fn class(c: char) -> Class {
 
 /// Steps 2 and 3: simple case folding, then `jazz-text/fold/1`, dropping
 /// combining diacritical marks, variation selectors and ignored characters,
-/// and `’` as `'`.
+/// `’` and the Hebrew geresh `׳` as `'`, and dropping the word-internal
+/// middle dot and gershayim (`·`, `״`, `"`), so `col·lecció` meets
+/// `collecció` and `צה״ל` meets `צה"ל` and `צהל`.
 fn fold(word: &str) -> String {
     let mut out = String::with_capacity(word.len());
     for c in word.chars() {
         let c = case_fold(c);
         let n = c as u32;
-        if dropped_mark(n) || class(c) == Class::Ignored {
+        if dropped_mark(n)
+            || class(c) == Class::Ignored
+            || matches!(c, '\u{00B7}' | '\u{05F4}' | '"')
+        {
             continue;
         }
-        if c == '\u{2019}' {
+        if matches!(c, '\u{2019}' | '\u{05F3}') {
             out.push('\'');
         } else if let Ok(n) = u16::try_from(n)
             && let Some(base) = fold_letter(n)
@@ -447,6 +474,14 @@ mod tests {
         assert_eq!(class('東'), Class::Alone);
         assert_eq!(class('\u{00AD}'), Class::Ignored);
         assert_eq!(class('\u{FEFF}'), Class::Ignored);
+        // The mid-letter marks are separators by class; `joins` keeps them
+        // inside a word only between letters.
+        for mid in ['\'', '"', '\u{00B7}', '\u{05F3}', '\u{05F4}', '\u{2019}'] {
+            assert_eq!(class(mid), Class::Separator, "U+{:04X}", mid as u32);
+        }
+        assert!(joins('\u{00B7}', Some('l'), Some('l')));
+        assert!(joins('"', Some('ה'), Some('ל')) && !joins('"', Some('a'), Some('b')));
+        assert!(!joins('\u{05F4}', Some('ל'), None));
         for sep in [
             '\u{0964}', '\u{060C}', '\u{05C3}', '\u{0589}', '\u{3000}', '_', '\u{2028}',
         ] {

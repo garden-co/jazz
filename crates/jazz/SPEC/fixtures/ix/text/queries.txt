@@ -43,6 +43,15 @@ query 1 6162  # "ab"
 prefix 6162 6162 6163  # "ab" "ab"
 
 analyzer jazz-text/1:en
+query 1 72756e2072756e  # "run run"
+prefix 72756e 72756e 72756f  # "run" "run"
+
+analyzer jazz-text/1:en
+query 1 6a617a7a2072756e6e696e672072756e  # "jazz running run"
+term 6a617a7a  # "jazz"
+prefix 72756e 72756e 72756f  # "run" "run"
+
+analyzer jazz-text/1:en
 query 0 6120622063206420652066206720682069206a206b206c206d206e206f2070207120722073207420752076207720782079207a20412042204320312032203320342035  # "a b c d e f g h i j k l m n o p q r s t u v w x y z A B C 1 2 3 4 5"
 term 61  # "a"
 term 62  # "b"
@@ -119,6 +128,16 @@ term 62  # "b"
 analyzer jazz-text/1:simple
 query 1 6162  # "ab"
 prefix 6162 6162 6163  # "ab" "ab"
+
+analyzer jazz-text/1:simple
+query 1 72756e2072756e  # "run run"
+prefix 72756e 72756e 72756f  # "run" "run"
+
+analyzer jazz-text/1:simple
+query 1 6a617a7a2072756e6e696e672072756e  # "jazz running run"
+term 6a617a7a  # "jazz"
+term 72756e6e696e67  # "running"
+prefix 72756e 72756e 72756f  # "run" "run"
 
 analyzer jazz-text/1:simple
 query 0 6120622063206420652066206720682069206a206b206c206d206e206f2070207120722073207420752076207720782079207a20412042204320312032203320342035  # "a b c d e f g h i j k l m n o p q r s t u v w x y z A B C 1 2 3 4 5"

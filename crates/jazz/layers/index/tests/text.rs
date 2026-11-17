@@ -438,6 +438,34 @@ fn impact_division_order_is_the_specs() {
     assert_eq!(impact(8, 7, 1, 29), 56);
 }
 
+/// Word-internal punctuation follows UAX #29's MidLetter rules: a middle
+/// dot between letters (Catalan) and a geresh or gershayim between Hebrew
+/// letters, in their Hebrew or ASCII forms, stay inside the word and fold
+/// away, so the spellings with and without them meet.
+#[test]
+fn mid_letter_punctuation_stays_inside_words() {
+    assert_eq!(terms(simple(), "col·lecció"), ["colleccio"]);
+    assert_eq!(terms(simple(), "col·lecció"), terms(simple(), "colleccio"));
+    assert_eq!(terms(simple(), "צה״ל צה\"ל צהל"), ["צהל", "צהל", "צהל"]);
+    assert_eq!(terms(simple(), "ג׳ירפה ג'ירפה"), ["ג'ירפה", "ג'ירפה"]);
+    // Only between letters: elsewhere they still separate.
+    assert_eq!(terms(simple(), "a·"), ["a"]);
+    assert_eq!(terms(simple(), "say \"hi\""), ["say", "hi"]);
+    assert_eq!(terms(simple(), "a\"b"), ["a", "b"]);
+    assert_eq!(terms(simple(), "שלום״"), ["שלום"]);
+}
+
+/// A whole-word term the prefix slot already matches is not also an exact
+/// slot: `run run` with a prefix binds the prefix alone.
+#[test]
+fn the_prefix_word_is_not_also_an_exact_term() {
+    let q = en().query("run run", true).unwrap();
+    assert!(q.terms.is_empty());
+    assert_eq!(q.prefix.unwrap().exact, "run");
+    let q = en().query("jazz running run", true).unwrap();
+    assert_eq!(q.terms, ["jazz"]);
+}
+
 // ---------------------------------------------------------------------------
 // Byte fixtures
 // ---------------------------------------------------------------------------
@@ -460,6 +488,7 @@ const TERM_CASES: &[&str] = &[
     "नमस्ते।दुनिया مرحبا،عالم שלום׃עולם x։y \u{feff}bom",
     "co\u{ad}operate fi\u{feff}ne می\u{200c}خواهم",
     "e\u{1ab0}x e\u{1dc0}x e\u{20d0}x e\u{fe20}x 葛\u{e0100}",
+    "col·lecció צה״ל צה\"ל ג׳ירפה a· say \"hi\"",
 ];
 
 const IMPACT_CASES: &[&[(u8, u16, &str)]] = &[
@@ -490,6 +519,8 @@ const QUERY_CASES: &[(&str, bool)] = &[
     ("   ", true),
     ("jazz b", true),
     ("ab", true),
+    ("run run", true),
+    ("jazz running run", true),
     (
         "a b c d e f g h i j k l m n o p q r s t u v w x y z A B C 1 2 3 4 5",
         false,
