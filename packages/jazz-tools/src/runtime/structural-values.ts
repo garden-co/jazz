@@ -31,10 +31,6 @@ export function structuralValuesEqual(left: Value | undefined, right: Value | un
       return valuesEqual(left.value, (right as typeof left).value);
     case "Row":
       return valuesEqual(left.value.values, (right as typeof left).value.values);
-    case "Enum": {
-      const other = (right as typeof left).value;
-      return left.value.case === other.case && valuesEqual(left.value.values, other.values);
-    }
   }
   const exhaustive: never = left;
   throw new Error(`Unsupported structural value: ${String(exhaustive)}`);

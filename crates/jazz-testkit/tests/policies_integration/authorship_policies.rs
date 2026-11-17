@@ -25,18 +25,6 @@ fn note_input(title: &str) -> HashMap<String, Value> {
     jazz::row_input!("title" => title)
 }
 
-fn provenance_values(title: &str, created_by: &str, updated_by: &str) -> Vec<Value> {
-    vec![
-        title.into(),
-        canonical_user_principal(created_by),
-        canonical_user_principal(updated_by),
-    ]
-}
-
-fn canonical_user_principal(user_id: &str) -> Value {
-    structured_author(user_id, None)
-}
-
 fn structured_author(user_id: &str, account: Option<jazz::account_registry::AccountId>) -> Value {
     Value::Row {
         id: None,
@@ -298,7 +286,8 @@ async fn created_by_policies_scope_crud_to_creators_inner() {
                 .await
                 .expect_err("Bob must not mutate Alice's note");
             assert!(
-                error.to_string().contains("authorization_denied"),
+                error.to_string().contains("authorization_denied")
+                    || error.to_string().contains("(permission_denied)"),
                 "{error}"
             );
         }
@@ -1049,7 +1038,12 @@ async fn backend_session_updates_leave_read_permissions_to_the_server_inner() {
     )));
     let alice = backend.for_session(session);
     let patch = vec![("title".to_owned(), Value::Text("Alice's edit".to_owned()))];
-    let refused = |error: String| assert!(error.contains("authorization_denied"), "{error}");
+    let refused = |error: String| {
+        assert!(
+            error.contains("authorization_denied") || error.contains("(permission_denied)"),
+            "{error}"
+        )
+    };
     let update = alice
         .update("notes", note_id, patch.clone())
         .expect("the backend stages Alice's update")

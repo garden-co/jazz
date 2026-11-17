@@ -24,7 +24,7 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import { useDb } from "jazz-tools/vue";
-import { app } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
 import Button from "./ui/Button.vue";
 import Dialog from "./ui/Dialog.vue";
 import { reportWriteError } from "../lib/write-errors.js";

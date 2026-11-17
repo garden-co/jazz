@@ -1,0 +1,23 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "rows": {
+      "columns": {
+        "text": "string"
+      },
+      "computed": {
+        "constant": {
+          "type": "int",
+          "from": []
+        },
+        "identity": {
+          "type": "uuid",
+          "from": [
+            "id"
+          ]
+        }
+      }
+    }
+  }
+}

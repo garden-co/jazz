@@ -1,6 +1,9 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "b7d2c77c1dbf0bf4e80a30da91e4d0a0e1bfd7f2936eabd88f76b4f082d0a0f9"
+  },
   "tables": {
     "bandInvites": {
       "read": "exists bands(id = this.bandId, ownerId = session.user)",

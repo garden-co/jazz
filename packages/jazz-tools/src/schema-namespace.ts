@@ -1,8 +1,6 @@
 /**
- * Schema builders shared by every public binding, including React Native.
+ * The schema DSL namespace, `import { schema as s } from "jazz-tools"`.
  *
- * An ES namespace, not an object: bundlers keep only the members an app uses
- * (a client that never calls `schema.definePermissions` doesn't ship the
- * permissions DSL).
+ * An ES namespace, not an object: bundlers keep only the members an app uses.
  */
 export * as schema from "./schema-builders.js";

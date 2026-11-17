@@ -1,0 +1,38 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "964aa7971ab771d7125e3017deb58d12b801368497109ac9c1f3d1f715689238"
+  },
+  "tables": {
+    "chatInvites": {
+      "read": "false",
+      "insert": "exists chats(id = this.chatId, $createdBy = session.user)",
+      "delete": "exists chats(id = this.chatId, $createdBy = session.user)"
+    },
+    "chatMembers": {
+      "read": {
+        "anyOf": [
+          "user_id = session.user",
+          "exists chats(id = this.chatId, $createdBy = session.user)"
+        ]
+      },
+      "insert": {
+        "allOf": [
+          "user_id = session.user",
+          "exists chats(id = this.chatId, $createdBy = session.user)"
+        ]
+      },
+      "delete": {
+        "anyOf": [
+          "user_id = session.user",
+          "exists chats(id = this.chatId, $createdBy = session.user)"
+        ]
+      }
+    },
+    "chats": {
+      "read": "exists chatMembers(chatId = this.id, user_id = session.user)",
+      "insert": "true"
+    }
+  }
+}

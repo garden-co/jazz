@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createPolicyTestApp, type PolicyTestApp } from "jazz-tools/testing";
 import { historyQuery, mergeHistoryPages } from "../src/components/RoomView";
-import { app } from "../schema";
-import permissions from "../permissions";
+import { app } from "../jazz.generated";
+import permissions from "../jazz.permissions.json" with { type: "json" };
 
 // The app writes a room with its creator's membership, and a sketch's canvas
 // with its message, in one transaction each: a policy `exists` check sees rows

@@ -24,6 +24,8 @@ pub struct Created {
     pub changed: bool,
     /// JSON paths of the TODOs the author must resolve, in file order.
     pub todos: Vec<String>,
+    /// Why nothing was written, when it isn't simply that nothing changed.
+    pub note: Option<String>,
 }
 
 /// Write the migration from the version `bindings` (the committed file in
@@ -41,6 +43,7 @@ pub fn create(
         app: text.to_string(),
         changed: false,
         todos: Vec::new(),
+        note: None,
     };
     let app = App::load(app_json).map_err(CodegenError::from_artifact)?;
     let Some(bindings) = bindings else {
@@ -58,6 +61,16 @@ pub fn create(
     }
     let from = &recorded.current_schema;
     let to = app.compiled.current_schema();
+    // Single-column indexes change the hash, not the version or the rows
+    // (#5494): there is nothing to migrate, as `bindings::staleness` says.
+    if bindings::differs_only_in_indexes(from, to) {
+        return Ok(Created {
+            note: Some(
+                "only single-column indexes changed: no migration needed; run `npx jazz-tools generate`".into(),
+            ),
+            ..unchanged()
+        });
+    }
     let version = SchemaHash::compute(from).to_string()[..12].to_string();
 
     let mut root = artifact::json::parse(app_json).map_err(CodegenError::new)?;
@@ -103,6 +116,7 @@ pub fn create(
         app: out,
         changed: true,
         todos,
+        note: None,
     })
 }
 
@@ -203,6 +217,36 @@ fn refuse_shared_column_changes(
     to: &TableSchema,
     renamed: &[(String, String)],
 ) -> Result<(), CodegenError> {
+    // A row's branch columns decide which branch it belongs to, so a
+    // deployment refuses any migration that changes them (#5967 review).
+    for branch in &from.branch_by {
+        if !to.branch_by.contains(branch) {
+            return Err(CodegenError::unsupported(format!(
+                "Removing `{}` from the branchBy of table `{table}` is not supported: a row's \
+                 branch columns decide which branch it belongs to, so a deployment refuses to \
+                 change them. Keep `{}` in branchBy.",
+                branch.as_str(),
+                branch.as_str()
+            )));
+        }
+        let column = |t: &TableSchema| {
+            t.columns
+                .columns
+                .iter()
+                .find(|c| &c.name == branch)
+                .cloned()
+        };
+        if let (Some(source), Some(target)) = (column(from), column(to))
+            && source.default != target.default
+        {
+            return Err(CodegenError::unsupported(format!(
+                "Changing the default of branch column `{table}.{}` is not supported: it decides \
+                 which branch existing rows belong to, so a deployment refuses to change it. Keep \
+                 its default as it was.",
+                branch.as_str()
+            )));
+        }
+    }
     for column in &to.columns.columns {
         let Some(source) = from.columns.columns.iter().find(|c| c.name == column.name) else {
             continue;
@@ -291,13 +335,84 @@ fn todo(text: String) -> Json {
     Json::String(format!("{} {text}", artifact::TODO_PREFIX))
 }
 
-/// The column steps for a table both versions have.
-fn table_steps(
+/// What a migration from one schema to another does, as `migrations create`
+/// decides it: every language renders its stub from this, so the decisions
+/// (which tables are renamed, which columns may be, which steps need a value
+/// only the author knows) are made once.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Diff {
+    /// Tables only the new schema has (and no rename explains), sorted.
+    pub create_tables: Vec<String>,
+    /// Tables only the old schema has (and no rename explains), sorted.
+    pub drop_tables: Vec<String>,
+    /// Tables renamed: a removed table identical, whatever its column
+    /// order, to exactly one added table, and the only one it matches.
+    pub rename_tables: Vec<TableRename>,
+    /// The tables both schemas have that differ, in the new schema's order.
+    pub migrate: Vec<TableDiff>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct TableRename {
+    pub from: String,
+    pub to: String,
+}
+
+/// How a table both schemas have changes.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDiff {
+    pub table: String,
+    /// The column steps, in the order they are written.
+    pub steps: Vec<ColumnStep>,
+    /// Kept columns gaining enum variants: they need no step.
+    pub added_variants: Vec<AddedVariants>,
+    /// When there are neither steps nor added variants, every row passes
+    /// unchanged: what changed instead (`"indexes"`, `"branchBy"`, …).
+    pub unchanged_rows: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct AddedVariants {
+    pub column: String,
+    pub variants: Vec<String>,
+}
+
+/// One column's step. `column` names it in the new schema (`Add`,
+/// `MaybeRenamed`) or the old one (`Drop`, `MaybeRenamedAway`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(tag = "step", rename_all = "camelCase")]
+pub enum ColumnStep {
+    /// Add the column; existing rows take its default (`null` when
+    /// optional without one). `needs_default`: required and without a
+    /// default, so only the author knows the value existing rows get.
+    #[serde(rename_all = "camelCase")]
+    Add { column: String, needs_default: bool },
+    /// Drop the column; older clients read it back as its default.
+    /// `needs_backwards_default`: required and without a default.
+    #[serde(rename_all = "camelCase")]
+    Drop {
+        column: String,
+        needs_backwards_default: bool,
+    },
+    /// An added column shaped like these removed ones: it may be one of
+    /// them renamed, which only the author knows.
+    MaybeRenamed {
+        column: String,
+        candidates: Vec<String>,
+    },
+    /// A removed column an added one may have been renamed from.
+    MaybeRenamedAway { column: String },
+}
+
+/// The steps for a table both versions have.
+fn table_diff(
     table: &str,
     from: &TableSchema,
     to: &TableSchema,
     renamed: &[(String, String)],
-) -> Result<Json, CodegenError> {
+) -> Result<TableDiff, CodegenError> {
     refuse_shared_column_changes(table, from, to, renamed)?;
     let has = |schema: &TableSchema, name: &str| {
         schema.columns.columns.iter().any(|c| c.name_str() == name)
@@ -314,14 +429,13 @@ fn table_steps(
         .iter()
         .filter(|c| !has(from, c.name_str()))
         .collect();
-    let mut steps: Vec<(String, Json)> = Vec::new();
+    let mut steps = Vec::new();
     let mut undecided: Vec<&str> = Vec::new();
 
     // An added column shaped like a removed one may be it renamed: adding
     // one and dropping the other would start every row empty, so the author
     // says which it is.
-    let mut renames: Vec<(String, Json)> = Vec::new();
-    let mut maybe_renamed: Vec<(String, Json)> = Vec::new();
+    let mut maybe_renamed_away = Vec::new();
     for column in &added {
         let candidates: Vec<&str> = removed
             .iter()
@@ -332,88 +446,40 @@ fn table_steps(
             continue;
         }
         undecided.push(column.name_str());
-        let of = candidates
-            .iter()
-            .map(|c| format!("`{c}`"))
-            .collect::<Vec<_>>()
-            .join(" or ");
-        renames.push((
-            column.name_str().to_string(),
-            todo(format!(
-                "added column `{}` may be a rename of {of}. To keep its values, replace this with \
-                 {{ \"renameFrom\": \"{}\" }}; to start it empty, with {{ \"add\": {}, \"default\": {} }}.",
-                column.name_str(),
-                candidates[0],
-                artifact::json::print(&type_spec(&column.column_type)?).trim_end(),
-                artifact::json::print(&default_of(column)?).trim_end(),
-            )),
-        ));
+        steps.push(ColumnStep::MaybeRenamed {
+            column: column.name_str().to_string(),
+            candidates: candidates.iter().map(|c| c.to_string()).collect(),
+        });
         for old in candidates {
             if undecided.contains(&old) {
                 continue;
             }
             undecided.push(old);
-            let source = removed
-                .iter()
-                .find(|r| r.name_str() == old)
-                .expect("a candidate");
-            maybe_renamed.push((
-                old.to_string(),
-                todo(format!(
-                    "removed column `{old}` may have been renamed. If a column is renamed from it, \
-                     delete this entry; otherwise replace it with {{ \"drop\": {}, \"backwardsDefault\": {} }}.",
-                    artifact::json::print(&type_spec(&source.column_type)?).trim_end(),
-                    artifact::json::print(&default_of(source)?).trim_end(),
-                )),
-            ));
+            maybe_renamed_away.push(ColumnStep::MaybeRenamedAway {
+                column: old.to_string(),
+            });
         }
     }
-    steps.extend(renames);
-
     for column in added.iter().filter(|c| !undecided.contains(&c.name_str())) {
-        let default = if column.nullable || column.default.is_some() {
-            // Existing rows take the column's declared default.
-            default_of(column)?
-        } else {
-            todo(format!(
-                "added required column `{}` needs the value existing rows get; replace this with it.",
-                column.name_str()
-            ))
-        };
-        steps.push((
-            column.name_str().to_string(),
-            Json::Object(vec![
-                ("add".into(), type_spec(&column.column_type)?),
-                ("default".into(), default),
-            ]),
-        ));
+        steps.push(ColumnStep::Add {
+            column: column.name_str().to_string(),
+            needs_default: !column.nullable && column.default.is_none(),
+        });
     }
     for column in removed
         .iter()
         .filter(|c| !undecided.contains(&c.name_str()))
     {
-        let default = if column.nullable || column.default.is_some() {
-            // Older clients read the dropped column back as its default.
-            default_of(column)?
-        } else {
-            todo(format!(
-                "removed required column `{}` needs the value clients on the older schema read; replace this with it.",
-                column.name_str()
-            ))
-        };
-        steps.push((
-            column.name_str().to_string(),
-            Json::Object(vec![
-                ("drop".into(), type_spec(&column.column_type)?),
-                ("backwardsDefault".into(), default),
-            ]),
-        ));
+        steps.push(ColumnStep::Drop {
+            column: column.name_str().to_string(),
+            needs_backwards_default: !column.nullable && column.default.is_none(),
+        });
     }
-    steps.extend(maybe_renamed);
+    steps.extend(maybe_renamed_away);
 
     // Kept columns gaining enum variants need no step: their rows pass
-    // unchanged. Say so beside the (possibly empty) lens.
-    let notes: Vec<String> = to
+    // unchanged.
+    let added_variants: Vec<AddedVariants> = to
         .columns
         .columns
         .iter()
@@ -423,20 +489,42 @@ fn table_steps(
                 .columns
                 .iter()
                 .find(|c| c.name == column.name)?;
-            let added = added_variants(&source.column_type, &column.column_type)?;
-            Some(format!(
-                "`{}` gains enum variant{} {}: existing rows are unchanged, so it needs no step.",
-                column.name_str(),
-                if added.len() == 1 { "" } else { "s" },
-                added
-                    .iter()
-                    .map(|v| format!("\"{v}\""))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ))
+            Some(AddedVariants {
+                column: column.name_str().to_string(),
+                variants: added_variants(&source.column_type, &column.column_type)?,
+            })
         })
         .collect();
-    if steps.is_empty() && notes.is_empty() {
+    let unchanged_rows = if steps.is_empty() && added_variants.is_empty() {
+        unchanged_rows_changes(from, to)
+    } else {
+        Vec::new()
+    };
+    Ok(TableDiff {
+        table: table.to_string(),
+        steps,
+        added_variants,
+        unchanged_rows,
+    })
+}
+
+/// A table's steps as `jazz.app.json` writes them, `"TODO: …"` where only
+/// the author can decide.
+fn table_steps_json(
+    from: &TableSchema,
+    to: &TableSchema,
+    diff: &TableDiff,
+) -> Result<Json, CodegenError> {
+    let column = |table: &TableSchema, name: &str| -> ColumnDescriptor {
+        table
+            .columns
+            .columns
+            .iter()
+            .find(|c| c.name_str() == name)
+            .cloned()
+            .expect("a column the diff names")
+    };
+    if !diff.unchanged_rows.is_empty() {
         // No column is added, dropped, retyped or made optional: every row
         // passes unchanged, so the table's lens is the identity. Say what
         // changed.
@@ -444,10 +532,105 @@ fn table_steps(
             "$comment",
             Json::string(format!(
                 "Rows pass unchanged: only {} changed.",
-                unchanged_rows_changes(from, to).join(", ")
+                diff.unchanged_rows.join(", ")
             )),
         )]));
     }
+    let mut steps = Vec::new();
+    for step in &diff.steps {
+        steps.push(match step {
+            ColumnStep::MaybeRenamed { column: name, candidates } => {
+                let column = column(to, name);
+                let of = candidates
+                    .iter()
+                    .map(|c| format!("`{c}`"))
+                    .collect::<Vec<_>>()
+                    .join(" or ");
+                (
+                    name.clone(),
+                    todo(format!(
+                        "added column `{name}` may be a rename of {of}. To keep its values, replace this with \
+                         {{ \"renameFrom\": \"{}\" }}; to start it empty, with {{ \"add\": {}, \"default\": {} }}.",
+                        candidates[0],
+                        artifact::json::print(&type_spec(&column.column_type)?).trim_end(),
+                        artifact::json::print(&default_of(&column)?).trim_end(),
+                    )),
+                )
+            }
+            ColumnStep::MaybeRenamedAway { column: name } => {
+                let source = column(from, name);
+                (
+                    name.clone(),
+                    todo(format!(
+                        "removed column `{name}` may have been renamed. If a column is renamed from it, \
+                         delete this entry; otherwise replace it with {{ \"drop\": {}, \"backwardsDefault\": {} }}.",
+                        artifact::json::print(&type_spec(&source.column_type)?).trim_end(),
+                        artifact::json::print(&default_of(&source)?).trim_end(),
+                    )),
+                )
+            }
+            ColumnStep::Add {
+                column: name,
+                needs_default,
+            } => {
+                let column = column(to, name);
+                let default = if *needs_default {
+                    todo(format!(
+                        "added required column `{name}` needs the value existing rows get; replace this with it."
+                    ))
+                } else {
+                    // Existing rows take the column's declared default.
+                    default_of(&column)?
+                };
+                (
+                    name.clone(),
+                    Json::Object(vec![
+                        ("add".into(), type_spec(&column.column_type)?),
+                        ("default".into(), default),
+                    ]),
+                )
+            }
+            ColumnStep::Drop {
+                column: name,
+                needs_backwards_default,
+            } => {
+                let column = column(from, name);
+                let default = if *needs_backwards_default {
+                    todo(format!(
+                        "removed required column `{name}` needs the value clients on the older schema read; replace this with it."
+                    ))
+                } else {
+                    // Older clients read the dropped column back as its default.
+                    default_of(&column)?
+                };
+                (
+                    name.clone(),
+                    Json::Object(vec![
+                        ("drop".into(), type_spec(&column.column_type)?),
+                        ("backwardsDefault".into(), default),
+                    ]),
+                )
+            }
+        });
+    }
+    // Say beside the (possibly empty) lens which columns gain enum variants.
+    let notes: Vec<String> = diff
+        .added_variants
+        .iter()
+        .map(|added| {
+            format!(
+                "`{}` gains enum variant{} {}: existing rows are unchanged, so it needs no step.",
+                added.column,
+                if added.variants.len() == 1 { "" } else { "s" },
+                added
+                    .variants
+                    .iter()
+                    .map(|v| format!("\"{v}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect();
     let mut out = Vec::new();
     if !notes.is_empty() {
         out.push(("$comment".to_string(), Json::string(notes.join(" "))));
@@ -505,9 +688,10 @@ fn unchanged_rows_changes(from: &TableSchema, to: &TableSchema) -> Vec<&'static 
     changes
 }
 
-/// The fields of the migration from `from` to `to`, after `name` and
-/// `from`: `createTables`, `dropTables`, `renameTables`, `migrate`.
-pub fn diff(from: &Schema, to: &Schema) -> Result<Vec<(String, Json)>, CodegenError> {
+/// What the migration from `from` to `to` does; see [`Diff`]. Refuses
+/// what no migration step does (a kept column's type or optionality
+/// changing, its reference moving to another table).
+pub fn diff_steps(from: &Schema, to: &Schema) -> Result<Diff, CodegenError> {
     let names = |schema: &Schema| -> Vec<String> {
         schema.keys().map(|t| t.as_str().to_string()).collect()
     };
@@ -549,16 +733,8 @@ pub fn diff(from: &Schema, to: &Schema) -> Result<Vec<(String, Json)>, CodegenEr
         .filter(|(_, new)| matches.iter().filter(|(_, n)| n == new).count() == 1)
         .cloned()
         .collect();
-    let create: Vec<&String> = added
-        .iter()
-        .filter(|t| !renames.iter().any(|(_, n)| n == *t))
-        .collect();
-    let drop: Vec<&String> = removed
-        .iter()
-        .filter(|t| !renames.iter().any(|(o, _)| o == *t))
-        .collect();
 
-    let mut migrate: Vec<(String, Json)> = Vec::new();
+    let mut migrate = Vec::new();
     for name in &to_names {
         let (Some(old), Some(new)) = (get(from, name), get(to, name)) else {
             continue;
@@ -566,34 +742,81 @@ pub fn diff(from: &Schema, to: &Schema) -> Result<Vec<(String, Json)>, CodegenEr
         if same_table(&old, &new) {
             continue;
         }
-        migrate.push((name.clone(), table_steps(name, &old, &new, &renames)?));
+        migrate.push(table_diff(name, &old, &new, &renames)?);
     }
+    Ok(Diff {
+        create_tables: added
+            .into_iter()
+            .filter(|t| !renames.iter().any(|(_, n)| n == t))
+            .collect(),
+        drop_tables: removed
+            .into_iter()
+            .filter(|t| !renames.iter().any(|(o, _)| o == t))
+            .collect(),
+        rename_tables: renames
+            .into_iter()
+            .map(|(from, to)| TableRename { from, to })
+            .collect(),
+        migrate,
+    })
+}
 
+/// [`diff_steps`] of two schemas in the engine's JSON form
+/// (`{ "tables": … }`), as JSON: what a language without the Rust types
+/// (the TS CLI) renders its stub from.
+pub fn diff_steps_json(from_json: &[u8], to_json: &[u8]) -> Result<String, CodegenError> {
+    let read = |json: &[u8]| {
+        serde_json::from_slice::<Schema>(json)
+            .map_err(|error| CodegenError::new(format!("not an engine schema: {error}")))
+    };
+    let steps = diff_steps(&read(from_json)?, &read(to_json)?)?;
+    Ok(serde_json::to_string(&steps).expect("plain data"))
+}
+
+/// The fields of the migration from `from` to `to`, after `name` and
+/// `from`: `createTables`, `dropTables`, `renameTables`, `migrate`.
+pub fn diff(from: &Schema, to: &Schema) -> Result<Vec<(String, Json)>, CodegenError> {
+    let steps = diff_steps(from, to)?;
+    let table = |schema: &Schema, name: &str| -> TableSchema {
+        schema
+            .iter()
+            .find(|(t, _)| t.as_str() == name)
+            .map(|(_, s)| s.clone())
+            .expect("a table the diff names")
+    };
     let mut fields = Vec::new();
-    if !create.is_empty() {
+    if !steps.create_tables.is_empty() {
         fields.push((
             "createTables".into(),
-            Json::Array(create.into_iter().map(Json::string).collect()),
+            Json::Array(steps.create_tables.iter().map(Json::string).collect()),
         ));
     }
-    if !drop.is_empty() {
+    if !steps.drop_tables.is_empty() {
         fields.push((
             "dropTables".into(),
-            Json::Array(drop.into_iter().map(Json::string).collect()),
+            Json::Array(steps.drop_tables.iter().map(Json::string).collect()),
         ));
     }
-    if !renames.is_empty() {
+    if !steps.rename_tables.is_empty() {
         fields.push((
             "renameTables".into(),
             Json::Object(
-                renames
-                    .into_iter()
-                    .map(|(old, new)| (new, Json::String(old)))
+                steps
+                    .rename_tables
+                    .iter()
+                    .map(|rename| (rename.to.clone(), Json::String(rename.from.clone())))
                     .collect(),
             ),
         ));
     }
-    if !migrate.is_empty() {
+    if !steps.migrate.is_empty() {
+        let mut migrate = Vec::new();
+        for diff in &steps.migrate {
+            migrate.push((
+                diff.table.clone(),
+                table_steps_json(&table(from, &diff.table), &table(to, &diff.table), diff)?,
+            ));
+        }
         fields.push(("migrate".into(), Json::Object(migrate)));
     }
     if fields.is_empty() {

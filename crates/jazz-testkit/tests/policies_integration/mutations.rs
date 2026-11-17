@@ -135,7 +135,7 @@ async fn rebac_update_denied_by_using_policy_inner() {
         .await
         .expect_err("the server must reject Bob's update under UPDATE USING");
     assert!(
-        error.to_string().ends_with("authorization_denied"),
+        error.to_string().contains("(permission_denied)"),
         "expected an authority policy rejection, got {error}"
     );
 

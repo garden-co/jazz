@@ -80,7 +80,7 @@ and cleans up temporary files and stubbed globals after each test.
 
 ```sh
 pnpm test          # everything (via turbo)
-cargo test -p jazz --no-default-features --features testing,transport-compression-zstd   # rust core only
+cargo test -p jazz-core --no-default-features --features testing,transport-compression-zstd   # rust core only
 ```
 
 ### Better Auth adapter test fixtures
@@ -153,11 +153,11 @@ cache configuration, shard, timing, and direct exit status.
 cargo install cargo-nextest --locked
 node dev/gates/run-rust-tests.mjs --shard-index 1 --shard-count 2 -- \
   --workspace --lib --bins --tests \
-  --features jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test
+  --features jazz-core/testing,jazz-core/transport-compression-zstd,jazz-server/test,jazz-tools/test,jazz-app-support/test-relay
 
 # No Devbox or Nextest required: preserves Cargo selection and adds an overall
 # timeout, but cannot attribute a hang to an individual test.
-node dev/gates/run-rust-tests.mjs --timeout-seconds 900 -- -p jazz
+node dev/gates/run-rust-tests.mjs --timeout-seconds 900 -- -p jazz-core
 ```
 
 The Nextest `jazz` profile reports a test slow after 60 seconds and terminates
@@ -182,7 +182,7 @@ When a snapshot doesn't match, the test fails and insta records the new value. T
 cargo install cargo-insta
 
 # Run the failing tests
-cargo test -p jazz --no-default-features --features testing,transport-compression-zstd
+cargo test -p jazz-core --no-default-features --features testing,transport-compression-zstd
 
 # Review each pending change interactively — shows a diff, asks accept/reject
 cargo insta review

@@ -1,8 +1,7 @@
 import { schema as s } from "jazz-tools";
-import { schema as betterAuthSchema } from "./schema-better-auth/schema";
-import { migrations } from "./migrations";
+import { tables as betterAuthSchema } from "./schema-better-auth/schema";
 
-const schema = {
+export const schema = s.defineSchema({
   ...betterAuthSchema,
   profiles: s.table(
     {
@@ -107,16 +106,4 @@ const schema = {
     },
     { canvas: s.rel("canvases", "canvasId"), room: s.rel("rooms", "roomId") },
   ),
-};
-
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
-export type Profile = s.RowOf<typeof app.profiles>;
-export type Room = s.RowOf<typeof app.rooms>;
-export type RoomMember = s.RowOf<typeof app.roomMembers>;
-export type JoinRequest = s.RowOf<typeof app.joinRequests>;
-export type ReadMarker = s.RowOf<typeof app.readMarkers>;
-export type Message = s.RowOf<typeof app.messages>;
-export type Reaction = s.RowOf<typeof app.reactions>;
-export type Canvas = s.RowOf<typeof app.canvases>;
-export type Stroke = s.RowOf<typeof app.strokes>;
+});

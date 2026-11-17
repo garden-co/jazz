@@ -2,7 +2,7 @@
 
 import { Button, EmptyState, Grid, HStack, VStack } from "@astryxdesign/core";
 import { useAll } from "jazz-tools/react";
-import { app } from "../../schema";
+import { app } from "../../jazz.generated";
 import { formatCount } from "../components/list";
 import { PageHeader, PageSection, Stat } from "../components/page";
 import { roleDescriptions } from "../roles";

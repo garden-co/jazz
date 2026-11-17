@@ -103,7 +103,14 @@ function assertCiSuiteUsesOnlySharedCorrectnessPartitions(model) {
   const aggregateRuns = (aggregate.steps ?? []).filter(({ run }) => typeof run === "string");
   assert.deepEqual(
     aggregateRuns.map(({ run }) => run.trim()),
-    ['test "${WORKSPACE_RESULT}" = success\n' + 'test "${STORAGE_COMPAT_RESULT}" = success'],
+    [
+      'test "${WORKSPACE_RESULT}" = success\n' +
+        'test "${STORAGE_COMPAT_RESULT}" = success\n' +
+        'test "${JAZZ_FFI_BINDINGS_RESULT}" = success\n' +
+        'test "${CRATES_PACKAGE_RESULT}" = success\n' +
+        'test "${KOTLIN_RESULT}" = success\n' +
+        'test "${KOTLIN_ANDROID_RESULT}" = success',
+    ],
     "the Rust aggregate may check partition statuses, but must not add a correctness command",
   );
 
@@ -172,18 +179,62 @@ test("crate publication selector tests are a reachable lint partition contract",
   const selectorTest = lint.find(({ label }) => label === "crate publication selector contract");
   assert.deepEqual(selectorTest, {
     label: "crate publication selector contract",
-    executable: "bash",
-    args: ["dev/scripts/publish-crates-alpha.test.sh"],
+    executable: "node",
+    args: ["--test", "dev/scripts/check-lockstep-versions.test.mjs"],
   });
 
   const withoutSelectorTest = lint.filter(
     ({ label }) => label !== "crate publication selector contract",
   );
   assert.equal(
-    withoutSelectorTest.some(({ args }) => args.includes("publish-crates-alpha.test.sh")),
+    withoutSelectorTest.some(({ args }) =>
+      args.includes("dev/scripts/check-lockstep-versions.test.mjs"),
+    ),
     false,
     "a removed selector test would leave the lint CI partition without its publish admission receipt",
   );
+});
+
+test("CI lint runs the published API crates' rustdoc with warnings denied, jazz-core alone, and jazz-app-support's endpoint", () => {
+  const lint = planFor({ partition: "lint" });
+  const rustdoc = lint.filter(
+    ({ executable, args }) => executable === "cargo" && args[0] === "doc",
+  );
+  assert.deepEqual(rustdoc, [
+    {
+      label: "Rust API rustdoc",
+      executable: "cargo",
+      args: [
+        "doc",
+        "--no-deps",
+        "-p",
+        "jazz-app-support",
+        "-p",
+        "jazz-codegen",
+        "-p",
+        "jazz-ffi",
+        "-p",
+        "jazz-native-transport",
+        "-p",
+        "jazz-core",
+        "-p",
+        "jazz-server",
+      ],
+      env: { RUSTDOCFLAGS: "-D warnings" },
+    },
+    {
+      label: "jazz-core rustdoc",
+      executable: "cargo",
+      args: ["doc", "--no-deps", "-p", "jazz-core"],
+      env: { RUSTDOCFLAGS: "-D warnings" },
+    },
+    {
+      label: "jazz-app-support rustdoc (unstable-endpoint)",
+      executable: "cargo",
+      args: ["doc", "-p", "jazz-app-support", "--no-deps", "--features", "unstable-endpoint"],
+      env: { RUSTDOCFLAGS: "-D warnings" },
+    },
+  ]);
 });
 
 test("focused mode is explicitly smaller and cannot be mistaken for CI-equivalent", () => {

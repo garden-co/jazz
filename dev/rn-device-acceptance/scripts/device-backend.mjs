@@ -5,6 +5,7 @@
 // the device never talks to Core directly (a core admits only its backend).
 import { createServer } from "node:http";
 import { acceptDeviceAccounts, createJazz, remote } from "jazz-tools/backend";
+import { testApp } from "jazz-tools/testing";
 import { schemaSource } from "../src/scope-fixture.ts";
 
 const coreUrl = process.env.JAZZ_DEVICE_CORE_URL;
@@ -16,16 +17,64 @@ if (!coreUrl || !appId || !secret) {
   );
 }
 
-/** The fixture's schema carries its policies; createJazz takes them apart. */
+// createJazz takes the app as its bindings give it and the permissions as
+// `jazz.permissions.json`. The device attaches the fixture's own schema, so
+// both are derived from it here rather than written twice: the backend then
+// serves exactly the schema version the device opens. Only the shapes the
+// fixture uses are translated; anything else stops the harness by name.
+const COLUMN_TYPES = { Text: "string", Boolean: "boolean", Integer: "int" };
+
+function columnType({ column_type: { type }, nullable, name }) {
+  const spelled = COLUMN_TYPES[type];
+  if (!spelled) throw new Error(`device backend: fixture column ${name} has type ${type}`);
+  return nullable ? `${spelled}?` : spelled;
+}
+
+function policy(expr, where) {
+  if (expr === null) return null;
+  if (expr.type === "True") return "true";
+  if (
+    expr.type === "Cmp" &&
+    expr.op === "Eq" &&
+    expr.column === "$createdBy.account" &&
+    expr.value?.type === "SessionRef" &&
+    expr.value.path?.length === 1 &&
+    expr.value.path[0] === "user"
+  ) {
+    return "$createdBy.account = session.user";
+  }
+  throw new Error(`device backend: fixture ${where} policy ${JSON.stringify(expr)}`);
+}
+
+/** One operation's rule: its `using`, or for an insert its `with_check`. */
+function rule(operation, { using, with_check }, where) {
+  const read = policy(using, `${where}.${operation}`);
+  const check = policy(with_check, `${where}.${operation}`);
+  if (read !== null && check !== null && read !== check) {
+    throw new Error(`device backend: fixture ${where}.${operation} checks differ`);
+  }
+  return read ?? check;
+}
+
 function appAndPermissions(source) {
   const { tables } = JSON.parse(source);
-  const app = {};
-  const permissions = {};
-  for (const [name, { policies, ...table }] of Object.entries(tables)) {
-    app[name] = table;
-    if (policies) permissions[name] = policies;
+  const app = { format: 1, tables: {} };
+  const permissions = { format: 1, tables: {} };
+  for (const [name, { columns, policies }] of Object.entries(tables)) {
+    app.tables[name] = {
+      columns: Object.fromEntries(columns.map((column) => [column.name, columnType(column)])),
+    };
+    if (!policies) continue;
+    permissions.tables[name] = Object.fromEntries(
+      ["select", "insert", "update", "delete"]
+        .filter((operation) => policies[operation])
+        .map((operation) => [
+          operation === "select" ? "read" : operation,
+          rule(operation, policies[operation], name),
+        ]),
+    );
   }
-  return { app, permissions };
+  return { app: testApp(app), permissions };
 }
 
 const { app, permissions } = appAndPermissions(schemaSource);

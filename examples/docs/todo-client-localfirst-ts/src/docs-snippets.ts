@@ -1,11 +1,6 @@
-import {
-  PersistedWriteRejectedError,
-  ReadTier,
-  schema as s,
-  type Db,
-  type RowAuthor,
-} from "jazz-tools";
-import { app } from "../schema.js";
+import { PersistedWriteRejectedError, ReadTier, type Db, type RowAuthor } from "jazz-tools";
+import { app } from "../jazz.generated.js";
+import { app as requiredReferences } from "./recipes/required-references/jazz.generated.js";
 
 const EXAMPLE_PROJECT_ID = "00000000-0000-0000-0000-000000000000";
 const EXAMPLE_OWNER_ID = "local:example-owner";
@@ -219,14 +214,6 @@ export async function readProjectsWithTodos(db: Db) {
 // #endregion reading-reverse-relation-ts
 
 // #region reading-require-includes-ts
-const requiredReferences = s.defineApp(
-  {
-    customers: s.table({ name: s.string() }, { orders: s.reverse("orders", "customer") }),
-    orders: s.table({ customerId: s.uuid() }, { customer: s.rel("customers", "customerId") }),
-  },
-  { migrations: "none" },
-);
-
 export async function readOrdersWithRequiredCustomer(db: Db) {
   return db.all(requiredReferences.orders.include({ customer: true }).requireIncludes());
 }

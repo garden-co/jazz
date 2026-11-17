@@ -1,783 +1,284 @@
-import { assertMigrationMatchesCanonicalBundle } from "./catalogue.js";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile, mkdir, copyFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
-import { schema as s, migration as m } from "../index.js";
-import { wasmSchemasEqual, structuralSchemaHash } from "./schema-utils.js";
-import { renderMigrationStub, UNFILLED_STUB_TODO } from "./migrations.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { schema as s } from "../schema-namespace.js";
+import { migration as m } from "../migration-namespace.js";
 
-describe("migration stub generation", () => {
-  it("generates additive table witnesses with bare, nullable, and referenced UUIDs", () => {
-    const from = {
-      users: s.table({ name: s.string() }, {}),
-    };
-    const to = {
-      ...from,
-      records: s.table(
-        {
-          externalId: s.uuid(),
-          previousId: s.uuid().optional(),
-          ownerId: s.uuid(),
-          reviewerId: s.uuid().optional(),
-        },
-        { owner: s.rel("users", "ownerId"), reviewer: s.rel("users", "reviewerId") },
-      ),
-    };
-    const source = renderMigrationStub({
-      fromHash: "aaaaaaaaaaaa",
-      toHash: "bbbbbbbbbbbb",
-      fromSchema: s.defineApp(from, { migrations: "none" }).wasmSchema,
-      toSchema: s.defineApp(to, { migrations: "none" }).wasmSchema,
-    });
+// Migration files import "jazz-tools"; the DSL is all they need (the package
+// root also loads the native runtime).
+vi.mock("jazz-tools", async () => ({
+  ...(await import("../schema-namespace.js")),
+  ...(await import("../migration-namespace.js")),
+}));
+import {
+  createMigration,
+  loadMigrationHistory,
+  snapshotFromVersion,
+  snapshotToVersion,
+  type ModuleLoader,
+} from "./migrations.js";
+import { loadAppFiles } from "./codegen-napi.js";
+import type { ReadableTable } from "../schema-dsl/readable-app.js";
+import { readableSchema } from "../schema-dsl/define-schema.js";
 
-    expect(source).toContain('"externalId": s.uuid(),');
-    expect(source).toContain('"previousId": s.uuid().optional(),');
-    expect(source).toContain('"ownerId": s.uuid(),');
-    expect(source).toContain('"reviewerId": s.uuid().optional(),');
+const FIXTURE = join(import.meta.dirname, "fixtures", "migrations-history");
+const MIGRATION_FILE = "20261104T192647-remove-better-auth-issuer-8acd8a85eef5-c95f3dba1806.ts";
 
-    expect(source).toContain('"owner": s.rel("users", "ownerId")');
-    expect(source).toContain('"reviewer": s.rel("users", "reviewerId")');
+const loadModule: ModuleLoader = (file) => import(/* @vite-ignore */ file);
 
-    // The generated stub is executable JavaScript: run it through the public
-    // migration builder to verify the additive-table migration is usable.
-    const migration = new Function(
-      "s",
-      "m",
-      source
-        .replace('import { schema as s, migration as m } from "jazz-tools";', "")
-        .replace("export default", "return"),
-    )(s, m);
-    expect(migration.forward).toEqual([{ table: "records", added: true, operations: [] }]);
-  });
-  it("executes a generated UUID reference addition as an explicit identity lens", () => {
-    const users = s.table({ name: s.string() }, {});
-    const columns = {
-      ownerId: s.uuid(),
-      reviewerId: s.uuid().optional(),
-      memberIds: s.array(s.uuid()),
-    };
-    const from = { users, records: s.table(columns, {}) };
-    const to = {
-      users,
-      records: s.table(columns, {
-        owner: s.rel("users", "ownerId"),
-        reviewer: s.rel("users", "reviewerId"),
-        members: s.rel("users", "memberIds"),
-      }),
-    };
-    const source = renderMigrationStub({
-      fromHash: "aaaaaaaaaaaa",
-      toHash: "bbbbbbbbbbbb",
-      fromSchema: s.defineApp(from, { migrations: "none" }).wasmSchema,
-      toSchema: s.defineApp(to, { migrations: "none" }).wasmSchema,
-    });
-    expect(source).not.toContain("TODO");
-    const migration = new Function(
-      "s",
-      "m",
-      source
-        .replace('import { schema as s, migration as m } from "jazz-tools";', "")
-        .replace("export default", "return"),
-    )(s, m);
-    expect(migration.forward).toEqual([{ table: "records", operations: [] }]);
-    expect(Object.keys(migration.from)).toEqual(["records", "users"]);
-    expect(Object.keys(migration.to)).toEqual(["records", "users"]);
-    expect(m.defineMigration({ from, to }).forward).toEqual([{ table: "records", operations: [] }]);
-    expect(
-      m.defineMigration({
-        from: to,
-        to: {
-          users,
-          records: s.table(columns, {
-            author: s.rel("users", "ownerId"),
-            reviewer: s.rel("users", "reviewerId"),
-            members: s.rel("users", "memberIds"),
-          }),
-        },
-      }).forward,
-    ).toEqual([]);
-    expect(() => (m.defineMigration as (config: any) => unknown)({ from: to, to: from })).toThrow(
-      "same reference target",
+const dirs: string[] = [];
+afterEach(async () => {
+  await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+async function tempDir(): Promise<string> {
+  // Inside the package, so the migration files resolve "jazz-tools" as the app's would.
+  const base = join(import.meta.dirname, "..", "..", "node_modules", ".cache");
+  await mkdir(base, { recursive: true });
+  const dir = await mkdtemp(join(base, "jazz-migrations-"));
+  dirs.push(dir);
+  return dir;
+}
+
+async function fixtureApp(): Promise<{ tables: Record<string, ReadableTable>; text: string }> {
+  const text = await readFile(join(FIXTURE, "jazz.app.json"), "utf8");
+  return { tables: JSON.parse(text).tables, text };
+}
+
+async function fixtureMigrations(withFromSnapshot: boolean): Promise<string> {
+  const dir = join(await tempDir(), "migrations");
+  await mkdir(join(dir, "snapshots"), { recursive: true });
+  await copyFile(join(FIXTURE, `${MIGRATION_FILE}.fixture`), join(dir, MIGRATION_FILE));
+  if (withFromSnapshot)
+    await copyFile(
+      join(FIXTURE, "snapshots", "8acd8a85eef5.json"),
+      join(dir, "snapshots", "8acd8a85eef5.json"),
     );
+  return dir;
+}
+
+describe("snapshots", () => {
+  it("round-trips a .64 snapshot through the readable form with the same hash", async () => {
+    const snapshot = JSON.parse(
+      await readFile(join(FIXTURE, "snapshots", "8acd8a85eef5.json"), "utf8"),
+    );
+    const version = await snapshotToVersion(snapshot);
+    const back = await snapshotFromVersion(version.tables);
+    expect(back.hash.slice(0, 12)).toBe("8acd8a85eef5");
   });
-  it("composes reference additions with explicit column operations and rejects unsupported changes", () => {
-    const users = s.table({ name: s.string() }, {});
-    const from = { users, records: s.table({ ownerId: s.uuid(), title: s.string() }, {}) };
-    const to = {
-      users,
-      records: s.table(
-        { ownerId: s.uuid(), title: s.string(), note: s.string().optional() },
-        { owner: s.rel("users", "ownerId") },
-      ),
+
+  // A history version is written by Rust's `versionTables`, as
+  // `jazz.app.json`'s writer prints one: every column option, index,
+  // branchBy and retention comes back as written and hashes the same.
+  it("writes a history version as jazz.app.json's writer does", async () => {
+    const tables = {
+      todos: {
+        columns: {
+          title: { type: "string", default: "x" },
+          big: { type: "bigint", default: "1234" },
+          when: { type: "timestamp", default: 5 },
+          blob: { type: "bytes", default: "AAE=" },
+          meta: { json: { type: "object" }, default: { a: 1 } },
+          tags: { array: "string", default: ["a"] },
+          views: { type: "int", default: 0, merge: "counter" },
+          owner: { type: "uuid", optional: true, references: "users" },
+          status: { enum: ["a", "b"], default: "a" },
+          ratio: { type: "float", default: 1.5 },
+          flag: "boolean?",
+          branch: { type: "string", default: "main" },
+        },
+        indexes: ["title", ["title", "when"]],
+        branchBy: ["branch"],
+      },
+      users: { columns: { name: "string" }, history: "latest" },
+    } as unknown as Parameters<typeof snapshotFromVersion>[0];
+    const snapshot = await snapshotFromVersion(tables);
+    const version = await snapshotToVersion(snapshot.schema);
+    expect(version.tables).toEqual(tables);
+    expect((await snapshotFromVersion(version.tables)).hash).toBe(snapshot.hash);
+  });
+
+  it("hashes the current tables as main's jazz.app.json does", async () => {
+    const { tables } = await fixtureApp();
+    const current = await snapshotFromVersion(tables);
+    expect(current.hash.slice(0, 12)).toBe("c95f3dba1806");
+    // Relations are kept on the snapshot, as .64 wrote them.
+    expect(current.schema.better_auth_account?.relations).toEqual({
+      user: { kind: "forward", table: "better_auth_user", column: "userId" },
+    });
+  });
+});
+
+describe("defineMigration", () => {
+  it("loads a real .64 stub unchanged", async () => {
+    const dir = await fixtureMigrations(false);
+    const loaded = (await loadModule(join(dir, MIGRATION_FILE))).default as {
+      fromHash: string;
+      toHash: string;
+      steps: unknown;
     };
+    expect(loaded.fromHash).toBe("8acd8a85eef5");
+    expect(loaded.toHash).toBe("c95f3dba1806");
+    expect(loaded.steps).toEqual({
+      migrate: { better_auth_account: { issuer: { drop: "string", backwardsDefault: "" } } },
+    });
+  });
+
+  it("writes add, drop, rename and table steps in readable form", () => {
     const migration = m.defineMigration({
-      from,
-      to,
-      migrate: { records: { note: m.add.string({ default: null }) } },
-    });
-    expect(migration.forward).toEqual([
-      {
-        table: "records",
-        operations: [{ type: "introduce", column: "note", sqlType: "TEXT", value: null }],
+      migrate: {
+        todos: {
+          due: m.add.timestamp({ default: new Date(5) }),
+          title: m.renameFrom("name"),
+          legacy: m.drop.int({ backwardsDefault: 0 }),
+        },
       },
-    ]);
-    // Exercise runtime validation too: generated modules do not run the type checker.
-    const define = m.defineMigration as (config: any) => unknown;
-    expect(() => define({ from, to })).toThrow("unchanged column shapes");
-    expect(() =>
-      define({
-        from,
-        to: {
-          users,
-          records: s.table(
-            { ownerId: s.uuid().optional(), title: s.string() },
-            { owner: s.rel("users", "ownerId") },
-          ),
-        },
-      }),
-    ).toThrow("same reference target");
-    expect(() =>
-      define({
-        from,
-        to: {
-          users,
-          records: s.table(
-            { ownerId: s.uuid(), title: s.int() },
-            { owner: s.rel("users", "ownerId") },
-          ),
-        },
-      }),
-    ).toThrow("unchanged column shapes");
-    expect(() =>
-      define({
-        from,
-        to: {
-          records: s.table(
-            { ownerId: s.uuid(), title: s.string() },
-            { owner: s.rel("missing", "ownerId") },
-          ),
-        },
-      }),
-    ).toThrow("requires target table");
-    expect(() =>
-      define({
-        from: to,
-        to: {
-          users,
-          others: users,
-          records: s.table(
-            { ownerId: s.uuid(), title: s.string(), note: s.string().optional() },
-            { owner: s.rel("others", "ownerId") },
-          ),
-        },
-      }),
-    ).toThrow("same reference target");
-    expect(() =>
-      define({
-        from,
-        to: {
-          users,
-          records: s.table(
-            { authorId: s.uuid(), title: s.string() },
-            { owner: s.rel("users", "authorId") },
-          ),
-        },
-        migrate: { records: { authorId: m.renameFrom("ownerId") } },
-      }),
-    ).toThrow("same reference target");
-  });
-
-  it("compares unchanged nested bigint defaults and rejects concurrent default or merge changes", () => {
-    const users = s.table({ name: s.string() }, {});
-    const before = {
-      users,
-      records: s.table(
-        { ownerId: s.uuid(), counters: s.array(s.bigint()).default([1n]), score: s.int() },
-        {},
-      ),
-    };
-    const after = {
-      users,
-      records: s.table(
-        { ownerId: s.uuid(), counters: s.array(s.bigint()).default([1n]), score: s.int() },
-        { owner: s.rel("users", "ownerId") },
-      ),
-    };
-    expect(m.defineMigration({ from: before, to: after }).forward).toEqual([
-      { table: "records", operations: [] },
-    ]);
-    const define = m.defineMigration as (config: any) => unknown;
-    expect(() =>
-      define({
-        from: before,
-        to: {
-          users,
-          records: s.table(
-            { ownerId: s.uuid(), counters: s.array(s.bigint()).default([2n]), score: s.int() },
-            { owner: s.rel("users", "ownerId") },
-          ),
-        },
-      }),
-    ).toThrow("unchanged column shapes");
-    expect(() =>
-      define({
-        from: before,
-        to: {
-          users,
-          records: s.table(
-            {
-              ownerId: s.uuid(),
-              counters: s.array(s.bigint()).default([1n]),
-              score: s.int().merge("counter"),
-            },
-            { owner: s.rel("users", "ownerId") },
-          ),
-        },
-      }),
-    ).toThrow("unchanged column shapes");
-  });
-
-  it("roundtrips every supported structural default in generated reference witnesses", async () => {
-    const id = "11111111-1111-4111-8111-111111111111";
-    const columns = {
-      ownerId: s.uuid().default(id),
-      title: s.string().default('quote"\\\n${globalThis.injected = true}'),
-      enabled: s.boolean().default(false),
-      count: s.int().default(-2),
-      score: s.float().default(-0),
-      big: s.bigint().default(9223372036854775807n),
-      time: s.timestamp().default(new Date("2026-01-01T00:00:00Z")),
-      bytes: s.bytes().default(new Uint8Array([0, 128, 255])),
-      nested: s.array(s.array(s.bigint())).default([[1n, -2n], []]),
-      times: s.array(s.array(s.timestamp())).default([[new Date(1234)]]),
-      json: s
-        .json({
-          type: "object",
-          properties: Object.fromEntries([
-            ["__proto__", { type: "object" as const }],
-            ["\uE000", { type: "string" as const }],
-            ["\u{10000}", { type: "string" as const }],
-          ]),
-        })
-        .default('{ "__proto__": {"safe":true}, "quote": "x" }'),
-      status: s.enum("draft", "done").default("draft"),
-      missing: s.string().optional().default(null),
-      refs: s.array(s.uuid()).default([id]),
-    };
-    const users = s.table({ name: s.string().default("anonymous") }, {});
-    const from = s.defineApp(
-      { users, records: s.table(columns, {}) },
-      { migrations: "none" },
-    ).wasmSchema;
-    const to = s.defineApp(
-      {
-        users,
-        records: s.table(columns, { owner: s.rel("users", "ownerId") }),
-      },
-      { migrations: "none" },
-    ).wasmSchema;
-    const source = renderMigrationStub({
+      renameTables: { lists: m.renameTableFrom("projects") },
+      createTables: { tags: true },
       fromHash: "aaaaaaaaaaaa",
       toHash: "bbbbbbbbbbbb",
-      fromSchema: from,
-      toSchema: to,
+      from: {
+        todos: s.table({ name: s.string(), legacy: s.int() }, {}),
+        projects: s.table({ name: s.string() }, {}),
+      },
+      to: {
+        todos: s.table({ title: s.string(), due: s.timestamp() }, {}),
+        lists: s.table({ name: s.string() }, {}),
+        tags: s.table({ label: s.string() }, {}),
+      },
     });
-    const migration = new Function(
-      "s",
-      "m",
-      source
-        .replace('import { schema as s, migration as m } from "jazz-tools";', "")
-        .replace("export default", "return"),
-    )(s, m);
-    for (const [actual, expected] of [
-      [s.defineApp(migration.from, { migrations: "none" }).wasmSchema, from],
-      [s.defineApp(migration.to, { migrations: "none" }).wasmSchema, to],
-    ]) {
-      expect(wasmSchemasEqual(actual!, expected!)).toBe(true);
-      expect(structuralSchemaHash(actual!)).toBe(structuralSchemaHash(expected!));
-      expect(actual).toEqual(expected);
-    }
-    expect(migration.forward).toEqual([{ table: "records", operations: [] }]);
-    const root = await mkdtemp(join(tmpdir(), "jazz-default-witness-types-"));
-    try {
-      await writeFile(join(root, "package.json"), '{"type":"module"}');
-      await writeFile(join(root, "migration.ts"), source);
-      await writeFile(
-        join(root, "tsconfig.json"),
+    expect(migration.steps).toEqual({
+      createTables: ["tags"],
+      renameTables: { lists: "projects" },
+      migrate: {
+        todos: {
+          due: { add: "timestamp", default: 5 },
+          title: { renameFrom: "name" },
+          legacy: { drop: "int", backwardsDefault: 0 },
+        },
+      },
+    });
+  });
+});
+
+describe("loadMigrationHistory", () => {
+  for (const withFromSnapshot of [true, false]) {
+    it(`gives main's history and migrations (${withFromSnapshot ? "from a snapshot" : "derived from the witness"})`, async () => {
+      const { tables, text } = await fixtureApp();
+      const migrationsDir = await fixtureMigrations(withFromSnapshot);
+      const loaded = await loadMigrationHistory({
+        migrationsDir,
+        currentTables: tables,
+        loadModule,
+      });
+      const main = JSON.parse(text);
+      expect(loaded.migrations).toEqual(main.migrations);
+      expect(Object.keys(loaded.history)).toEqual(Object.keys(main.history));
+      // The same version: Rust loads the app and finds the same hashes.
+      const app = JSON.stringify({ format: 1, tables, ...loaded });
+      const files = (await loadAppFiles(
         JSON.stringify({
-          extends: new URL("../../tsconfig.tests.json", import.meta.url).pathname,
-          compilerOptions: {
-            rootDir: "/",
-            typeRoots: [new URL("../../node_modules/@types", import.meta.url).pathname],
-          },
-          include: [join(root, "migration.ts")],
-          exclude: [],
+          format: 1,
+          tables,
+          history: loaded.history,
+          migrations: loaded.migrations,
         }),
-      );
-      await promisify(execFile)(process.execPath, [
-        new URL("../../node_modules/typescript/bin/tsc", import.meta.url).pathname,
-        "--project",
-        join(root, "tsconfig.json"),
-      ]).catch((error: { stdout?: string; stderr?: string }) => {
-        throw new Error(
-          `Generated witness typecheck failed:\n${error.stdout ?? ""}${error.stderr ?? ""}`,
-        );
-      });
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  }, 30000);
-
-  it("rejects timestamp defaults that Date cannot represent exactly", () => {
-    for (const value of [0.5, 8640000000000001]) {
-      const fromSchema = s.defineApp(
-        { users: s.table({ name: s.string() }, {}) },
-        { migrations: "none" },
-      ).wasmSchema;
-      const toSchema = s.defineApp(
-        {
-          users: s.table({ name: s.string() }, {}),
-          records: s.table({ time: s.timestamp().default(value) }, {}),
-        },
-        { migrations: "none" },
-      ).wasmSchema;
-      expect(() =>
-        renderMigrationStub({
-          fromHash: "aaaaaaaaaaaa",
-          toHash: "bbbbbbbbbbbb",
-          fromSchema,
-          toSchema,
+        '{"format":1,"tables":{}}',
+      )) as { current: string };
+      expect(files.current).toBe(loaded.current);
+      void app;
+      const mainLoaded = (await loadAppFiles(text, '{"format":1,"tables":{}}')) as {
+        bundle: string;
+      };
+      const ours = (await loadAppFiles(
+        JSON.stringify({
+          format: 1,
+          tables,
+          history: loaded.history,
+          migrations: loaded.migrations,
         }),
-      ).toThrow("Cannot render migration timestamp default exactly");
-    }
-  });
-
-  it("fills a required column it adds or drops from the column's declared default", () => {
-    const from = { records: s.table({ title: s.string(), rank: s.string().default("low") }, {}) };
-    const to = { records: s.table({ title: s.string(), points: s.int().default(1) }, {}) };
-    const source = renderMigrationStub({
-      fromHash: "aaaaaaaaaaaa",
-      toHash: "bbbbbbbbbbbb",
-      fromSchema: s.defineApp(from, { migrations: "none" }).wasmSchema,
-      toSchema: s.defineApp(to, { migrations: "none" }).wasmSchema,
+        '{"format":1,"tables":{}}',
+      )) as { bundle: string };
+      expect(ours.bundle).toBe(mainLoaded.bundle);
     });
+  }
 
-    expect(source).toContain('"points": m.add.int({ default: 1 }),');
-    expect(source).toContain('"rank": m.drop.string({ backwardsDefault: "low" }),');
-    expect(source).not.toContain("needs an explicit");
-    const migration = new Function(
-      "s",
-      "m",
-      source
-        .replace('import { schema as s, migration as m } from "jazz-tools";', "")
-        .replace("export default", "return"),
-    )(s, m);
-    expect(() =>
-      assertMigrationMatchesCanonicalBundle(migration, {
-        fromHash: "aaaaaaaaaaaa",
-        toHash: "bbbbbbbbbbbb",
-        fromSchema: s.defineApp(from, { migrations: "none" }).wasmSchema,
-        toSchema: s.defineApp(to, { migrations: "none" }).wasmSchema,
-      }),
-    ).not.toThrow();
-  });
-
-  it("adds and drops a plain uuid column with m.add.uuid and m.drop.uuid", () => {
-    const stub = (from: Record<string, any>, to: Record<string, any>) => {
-      const source = renderMigrationStub({
-        fromHash: "aaaaaaaaaaaa",
-        toHash: "bbbbbbbbbbbb",
-        fromSchema: s.defineApp(from, { migrations: "none" }).wasmSchema,
-        toSchema: s.defineApp(to, { migrations: "none" }).wasmSchema,
-      });
-      expect(source).not.toContain("TODO_TABLE");
-      const migration = new Function(
-        "s",
-        "m",
-        source
-          .replace('import { schema as s, migration as m } from "jazz-tools";', "")
-          .replace("export default", "return"),
-      )(s, m);
-      return { source, migration };
-    };
-    const without = { records: s.table({ title: s.string() }, {}) };
-    const withId = { records: s.table({ title: s.string(), externalId: s.uuid().optional() }, {}) };
-
-    const added = stub(without, withId);
-    expect(added.source).toContain('"externalId": m.add.uuid({ default: null }),');
-    expect(added.migration.forward[0].operations).toEqual([
-      { type: "introduce", column: "externalId", sqlType: "UUID", value: null },
-    ]);
-
-    const dropped = stub(withId, without);
-    expect(dropped.source).toContain('"externalId": m.drop.uuid({ backwardsDefault: null }),');
-  });
-
-  it("leaves a possible rename to the author instead of adding and dropping", () => {
-    const from = { records: s.table({ title: s.string().optional(), done: s.boolean() }, {}) };
-    const to = {
-      records: s.table(
-        { heading: s.string().optional(), done: s.boolean(), notes: s.string().optional() },
-        {},
-      ),
-    };
-    const source = renderMigrationStub({
-      fromHash: "aaaaaaaaaaaa",
-      toHash: "bbbbbbbbbbbb",
-      fromSchema: s.defineApp(from, { migrations: "none" }).wasmSchema,
-      toSchema: s.defineApp(to, { migrations: "none" }).wasmSchema,
+  it("has no history without migrations", async () => {
+    const { tables } = await fixtureApp();
+    const loaded = await loadMigrationHistory({
+      migrationsDir: join(await tempDir(), "missing"),
+      currentTables: tables,
+      loadModule,
     });
-    // Either added column could be "title" renamed; adding them and
-    // dropping "title" would start every row empty.
-    for (const added of ["heading", "notes"])
-      expect(source).toContain(
-        `// TODO: Added column "${added}" may be a rename of "title": to keep its values, give it the step m.renameFrom("title")`,
-      );
-    // No step is written for any of the three: the hints name m.add and
-    // m.drop only in prose.
-    expect(source).not.toMatch(/m\.add\.\w/);
-    expect(source).not.toMatch(/m\.drop\.\w/);
-    const migrate = source.slice(source.indexOf("migrate:"), source.indexOf("fromHash:"));
-    expect(migrate.split("\n").filter((line) => UNFILLED_STUB_TODO.test(line))).toHaveLength(2);
+    expect(loaded).toMatchObject({ history: {}, migrations: [] });
   });
+});
 
-  it("preserves default-only schema changes without transforming existing rows", () => {
-    const definitions = [s.string(), s.string().default("before"), s.string().default("after")];
-    for (const before of definitions)
-      for (const after of definitions) {
-        const from = { records: s.table({ title: before }, {}) };
-        const to = { records: s.table({ title: after }, {}) };
-        const migration = m.defineMigration({ from, to });
-        expect(migration.forward).toEqual([]);
-        expect(m.defineMigration({ from, to, migrate: {} }).forward).toEqual([]);
-        expect(() =>
-          assertMigrationMatchesCanonicalBundle(migration, {
-            fromHash: "aaaaaaaaaaaa",
-            toHash: "bbbbbbbbbbbb",
-            fromSchema: s.defineApp(from, { migrations: "none" }).wasmSchema,
-            toSchema: s.defineApp(to, { migrations: "none" }).wasmSchema,
-          }),
-        ).not.toThrow();
-        if (before !== after)
-          expect(
-            wasmSchemasEqual(
-              s.defineApp(from, { migrations: "none" }).wasmSchema,
-              s.defineApp(to, { migrations: "none" }).wasmSchema,
-            ),
-          ).toBe(false);
-      }
+describe("createMigration", () => {
+  const v1 = s.defineSchema({
+    todos: s.table({ title: s.string(), done: s.boolean() }, {}),
   });
+  const v2 = s.defineSchema({
+    todos: s.table({ title: s.string(), done: s.boolean(), note: s.string() }, {}),
+  });
+  const tablesOf = (schema: unknown) => readableSchema(schema)!.tables;
 
-  it("compares canonical defaults across equivalent builder input representations", () => {
-    const from = {
-      records: s.table(
-        {
-          time: s.timestamp().default(new Date(1234)),
-          big: s.bigint().default(42n),
-          bytes: s.bytes().default(new Uint8Array([1, 2])),
-          json: s.json().default({ key: "value" }),
-          nested: s.array(s.timestamp()).default([new Date(1234)]),
-        },
-        {},
-      ),
-    };
-    const to = {
-      records: s.table(
-        {
-          time: s.timestamp().default(1234),
-          // Exercise JS inputs accepted by the shared runtime converters.
-          big: s.bigint().default(42 as unknown as bigint),
-          bytes: s.bytes().default([1, 2] as unknown as Uint8Array),
-          json: s.json().default('{"key":"value"}'),
-          nested: s.array(s.timestamp()).default([1234 as unknown as Date]),
-        },
-        {},
-      ),
-    };
-    expect(m.defineMigration({ from, to }).forward).toEqual([]);
+  it("snapshots first, then writes a stub that loads back into the history", async () => {
+    const migrationsDir = join(await tempDir(), "migrations");
+    const now = new Date(Date.UTC(2026, 10, 16, 4, 0, 0));
+    const first = await createMigration({
+      migrationsDir,
+      currentTables: tablesOf(v1),
+      loadModule,
+      now,
+    });
+    expect(first).toMatchObject({ changed: true, initial: true });
     expect(
-      wasmSchemasEqual(
-        s.defineApp(from, { migrations: "none" }).wasmSchema,
-        s.defineApp(to, { migrations: "none" }).wasmSchema,
-      ),
-    ).toBe(true);
-  });
+      await createMigration({ migrationsDir, currentTables: tablesOf(v1), loadModule, now }),
+    ).toEqual({ changed: false });
 
-  it("accepts server JSON metadata object ordering but preserves array and default-text identity", () => {
-    const users = s.table({ name: s.string() }, {});
-    const columns = (serverOrder: boolean) => ({
-      ownerId: s.uuid(),
-      data: s
-        .json(
-          serverOrder
-            ? {
-                additionalProperties: false,
-                properties: { a: { type: "number" }, z: { type: "string" } },
-                type: "object",
-              }
-            : {
-                type: "object",
-                properties: { z: { type: "string" }, a: { type: "number" } },
-                additionalProperties: false,
-              },
-        )
-        .default({ z: "value", a: 1 }),
-      nested: s
-        .array(
-          s.json(
-            serverOrder
-              ? { additionalProperties: false, type: "object" }
-              : { type: "object", additionalProperties: false },
-          ),
-        )
-        .default([{}]),
+    const second = await createMigration({
+      migrationsDir,
+      currentTables: tablesOf(v2),
+      name: "Add note",
+      loadModule,
+      now,
     });
-    const from = { users, records: s.table(columns(false), {}) };
-    const to = { users, records: s.table(columns(true), { owner: s.rel("users", "ownerId") }) };
-    const migration = m.defineMigration({ from, to });
-    const canonicalFrom = s.defineApp(
-      { users, records: s.table(columns(true), {}) },
-      { migrations: "none" },
-    ).wasmSchema;
-    const canonicalTo = s.defineApp(to, { migrations: "none" }).wasmSchema;
-    expect(() =>
-      assertMigrationMatchesCanonicalBundle(migration, {
-        fromHash: "aaaaaaaaaaaa",
-        toHash: "bbbbbbbbbbbb",
-        fromSchema: canonicalFrom,
-        toSchema: canonicalTo,
+    expect(second).toMatchObject({ changed: true, migrationRequired: true });
+    expect(second.file).toMatch(/^20261116T040001-add-note-[0-9a-f]{12}-[0-9a-f]{12}\.ts$/);
+    expect(second.todos?.length).toBe(1);
+    const stubPath = join(migrationsDir, second.file!);
+    const stub = await readFile(stubPath, "utf8");
+    // Fill in the TODO as an author would.
+    await writeFile(
+      stubPath,
+      stub.replace(
+        '// TODO: Added required column "note" needs an explicit default.',
+        'note: m.add.string({ default: "" }),',
+      ),
+    );
+    expect((await readdir(join(migrationsDir, "snapshots"))).length).toBe(2);
+
+    const history = await loadMigrationHistory({
+      migrationsDir,
+      currentTables: tablesOf(v2),
+      loadModule,
+    });
+    expect(history.migrations).toEqual([
+      {
+        from: second.fromHash!.slice(0, 12),
+        migrate: { todos: { note: { add: "string", default: "" } } },
+      },
+    ]);
+    await loadAppFiles(
+      JSON.stringify({
+        format: 1,
+        tables: tablesOf(v2),
+        history: history.history,
+        migrations: history.migrations,
       }),
-    ).not.toThrow();
-    expect(migration.forward).toEqual([{ table: "records", operations: [] }]);
-    const first = s.defineApp(
-      {
-        records: s.table({ data: s.json({ enum: ["a", "b"] }).default('"a"') }, {}),
-      },
-      { migrations: "none" },
-    ).wasmSchema;
-    const reordered = s.defineApp(
-      {
-        records: s.table({ data: s.json({ enum: ["b", "a"] }).default('"a"') }, {}),
-      },
-      { migrations: "none" },
-    ).wasmSchema;
-    expect(wasmSchemasEqual(first, reordered)).toBe(false);
-    const changedText = s.defineApp(
-      {
-        records: s.table({ data: s.json({ enum: ["a", "b"] }).default(' "a" ') }, {}),
-      },
-      { migrations: "none" },
-    ).wasmSchema;
-    expect(wasmSchemasEqual(first, changedText)).toBe(false);
-  });
-
-  it("exports snapshots and creates relation migrations with lossless bigint and bytes defaults", async () => {
-    const { compileSchema, createMigration } = await import("./catalogue-project.js");
-    const root = await mkdtemp(join(tmpdir(), "jazz-default-snapshots-"));
-    const migrationsDir = join(root, "migrations");
-    const schemaPath = join(root, "schema.ts");
-    const source = (
-      relation: boolean,
-    ) => `import { schema as s } from ${JSON.stringify(new URL("../index.ts", import.meta.url).pathname)};
-export const app = s.defineApp({
-  users: s.table({ name: s.string() }, {}),
-  records: s.table({ ownerId: s.uuid(), big: s.bigint().default(9223372036854775807n), bytes: s.bytes().default(new Uint8Array([0,128,255])), nested: s.array(s.bigint()).default([-9223372036854775808n]) }, ${relation ? '{ owner: s.rel("users", "ownerId") }' : "{}"})
-}, { migrations: "none" });`;
-    try {
-      await writeFile(join(root, "package.json"), '{"type":"module"}');
-      await writeFile(schemaPath, source(false));
-      const before = await compileSchema({ schemaDir: root, migrationsDir: join(root, "exports") });
-      const exported = JSON.parse(await readFile(before.snapshotPath!, "utf8"));
-      expect(wasmSchemasEqual(exported, before.schema)).toBe(true);
-      const initial = await compileSchema({ schemaDir: root, migrationsDir });
-      expect(
-        wasmSchemasEqual(JSON.parse(await readFile(initial.snapshotPath!, "utf8")), before.schema),
-      ).toBe(true);
-      await writeFile(schemaPath, source(true));
-      const generated = await createMigration({ schemaDir: root, migrationsDir });
-      expect(generated.status).toBe("generated");
-      if (generated.status !== "generated") throw new Error("Expected migration file");
-      const code = await readFile(generated.filePath, "utf8");
-      const migration = new Function(
-        "s",
-        "m",
-        code
-          .replace('import { schema as s, migration as m } from "jazz-tools";', "")
-          .replace("export default", "return"),
-      )(s, m);
-      expect(
-        wasmSchemasEqual(
-          s.defineApp(migration.from, { migrations: "none" }).wasmSchema,
-          before.schema,
-        ),
-      ).toBe(true);
-      const after = await compileSchema({ schemaDir: root, migrationsDir });
-      expect(
-        wasmSchemasEqual(
-          s.defineApp(migration.to, { migrations: "none" }).wasmSchema,
-          after.schema,
-        ),
-      ).toBe(true);
-      expect(migration.forward).toEqual([{ table: "records", operations: [] }]);
-      expect(await createMigration({ schemaDir: root, migrationsDir })).toEqual({
-        status: "unchanged",
-      });
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  }, 30000);
-
-  it("loads and deploys the generated relation migration", async () => {
-    const { computeSchemaHash, deploy } = await import("./catalogue.js");
-    const { loadDefinedMigration } = await import("./catalogue-project.js");
-    const users = s
-      .table({ name: s.string(), peerId: s.uuid() }, { peer: s.rel("peers", "peerId") })
-      .indexOnly(["name"])
-      .branchBy("name");
-    const peers = s.table({ userId: s.uuid() }, { user: s.rel("users", "userId") });
-    const columns = {
-      ownerId: s.uuid(),
-      memberIds: s.array(s.uuid()).optional(),
-      title: s.string().default("draft"),
-      large: s.bigint().default(9007199254740993n),
-      nested: s.array(s.bigint()).default([9223372036854775807n]),
-    };
-    const fromSchema = s.defineApp(
-      { users, peers, records: s.table(columns, {}) },
-      { migrations: "none" },
-    ).wasmSchema;
-    const toSchema = s.defineApp(
-      {
-        users,
-        peers,
-        records: s.table(columns, {
-          owner: s.rel("users", "ownerId"),
-          members: s.rel("users", "memberIds"),
-        }),
-      },
-      { migrations: "none" },
-    ).wasmSchema;
-    const fromHash = await computeSchemaHash(fromSchema),
-      toHash = await computeSchemaHash(toSchema);
-    const root = await mkdtemp(join(tmpdir(), "jazz-reference-migration-"));
-    let body: any;
-    try {
-      await writeFile(join(root, "package.json"), '{"type":"module"}');
-      const source = renderMigrationStub({ fromHash, toHash, fromSchema, toSchema });
-      await writeFile(
-        join(root, `references-${fromHash.slice(0, 12)}-${toHash.slice(0, 12)}.ts`),
-        source.replace(
-          '"jazz-tools"',
-          JSON.stringify(new URL("../index.ts", import.meta.url).pathname),
-        ),
-      );
-      vi.stubGlobal(
-        "fetch",
-        vi.fn(async (input: string, init?: RequestInit) => {
-          if (input.endsWith("/migrations/graph"))
-            return Response.json({
-              schemas: [fromHash],
-              migrations: [],
-              latestBundleSchemaHash: fromHash,
-            });
-          if (input.endsWith(`/schema/${fromHash}`))
-            return new Response(
-              JSON.stringify({ schema: { tables: fromSchema }, publishedAt: 0 }, (_, value) =>
-                typeof value === "bigint" ? value.toString() : value,
-              ),
-            );
-          if (input.endsWith(`/schema/${toHash}`))
-            return new Response(
-              JSON.stringify({ schema: { tables: toSchema }, publishedAt: 0 }, (_, value) =>
-                typeof value === "bigint" ? value.toString() : value,
-              ),
-            );
-          if (input.endsWith("/admin/bundles")) {
-            body = JSON.parse(String(init?.body));
-            return Response.json({
-              changed: true,
-              published: { schemas: [toHash], migrations: [{ fromHash, toHash }] },
-            });
-          }
-          throw new Error(`Unexpected fetch: ${input}`);
-        }),
-      );
-      const path = join(root, `references-${fromHash.slice(0, 12)}-${toHash.slice(0, 12)}.ts`);
-      for (const replacement of ["", '.default("altered")']) {
-        await writeFile(
-          path,
-          source
-            .replaceAll('.default("draft")', replacement)
-            .replace(
-              '"jazz-tools"',
-              JSON.stringify(new URL("../index.ts", import.meta.url).pathname),
-            ),
-        );
-        await expect(
-          deploy({
-            appId: "test-app",
-            serverUrl: "http://localhost:1625",
-            adminSecret: "test-secret",
-            schema: toSchema,
-            permissions: {},
-            migration: await loadDefinedMigration(path),
-          }),
-        ).rejects.toThrow("does not match");
-        expect(body).toBeUndefined();
-      }
-      await writeFile(
-        path,
-        source.replace(
-          '"jazz-tools"',
-          JSON.stringify(new URL("../index.ts", import.meta.url).pathname),
-        ),
-      );
-      const result = await deploy({
-        appId: "test-app",
-        serverUrl: "http://localhost:1625",
-        adminSecret: "test-secret",
-        schema: toSchema,
-        permissions: {},
-        migration: await loadDefinedMigration(path),
-      });
-      expect(result.changed).toBe(true);
-      expect(body.migrations[0].forward).toEqual([{ table: "records", operations: [] }]);
-      expect(body.migrations[0].fromHash).toBe(fromHash);
-      expect(body.migrations[0].toHash).toBe(toHash);
-    } finally {
-      vi.unstubAllGlobals();
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("names the file and points at the new namespace when a legacy migration fails to load", async () => {
-    const { loadDefinedMigration } = await import("./catalogue-project.js");
-    const fromHash = "a".repeat(64);
-    const toHash = "b".repeat(64);
-    const root = await mkdtemp(join(tmpdir(), "jazz-legacy-migration-"));
-    const fileName = `legacy-${fromHash.slice(0, 12)}-${toHash.slice(0, 12)}.ts`;
-    try {
-      await writeFile(join(root, "package.json"), '{"type":"module"}');
-      await writeFile(
-        join(root, fileName),
-        `import { schema as s } from ${JSON.stringify(new URL("../index.ts", import.meta.url).pathname)};
-export default s.defineMigration({
-  migrate: { todos: { notes: s.add.string({ default: null }) } },
-  fromHash: "${fromHash.slice(0, 12)}",
-  toHash: "${toHash.slice(0, 12)}",
-  from: { todos: s.table({ title: s.string() }, {}) },
-  to: { todos: s.table({ title: s.string(), notes: s.string().optional() }, {}) },
-});`,
-      );
-      const load = loadDefinedMigration(join(root, fileName));
-      await expect(load).rejects.toThrow(`Failed to load migration ${fileName}:`);
-      await expect(load).rejects.toThrow("The migration DSL moved to `migration as m`");
-    } finally {
-      vi.unstubAllGlobals();
-      await rm(root, { recursive: true, force: true });
-    }
+      '{"format":1,"tables":{}}',
+    );
   });
 });

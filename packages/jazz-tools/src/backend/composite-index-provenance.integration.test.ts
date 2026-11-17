@@ -1,23 +1,23 @@
 import { expect, it } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/index.js";
 import { createJazz, memory } from "./index.js";
 
 // A room's newest page (roomId = ? ORDER BY $createdAt DESC LIMIT n) can be
 // served from a composite index ending in `$createdAt`. The engine accepts
-// the TypeScript declaration and the page reads newest first. (That the plan
+// the declaration and the page reads newest first. (That the plan
 // uses the index without sorting is pinned in crates/jazz/tests/composite_indexes.rs.)
-const app = s.defineApp(
-  {
-    messages: s
-      .table({ roomId: s.string(), text: s.string() }, {})
-      .compositeIndex(["roomId", "$createdAt"]),
+const app = testApp({
+  tables: {
+    messages: {
+      columns: { roomId: "string", text: "string" },
+      indexes: [["roomId", "$createdAt"]],
+    },
   },
-  { migrations: "none" },
-);
-const permissions = s.definePermissions(app, ({ policy }) => {
-  policy.messages.allowRead.always();
-  policy.messages.allowInsert.always();
 });
+const permissions = {
+  format: 1,
+  tables: { messages: { read: "true", insert: "true" } },
+};
 
 it("serves a room's newest page from a composite index on (roomId, $createdAt)", async () => {
   const jazz = await createJazz({ app, permissions, store: memory() }).ready();

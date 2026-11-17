@@ -111,8 +111,8 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
-import { useAll, useDb, useSession } from "jazz-tools/vue";
-import { app } from "../schema.js";
+import { useAll, useDb, useJazzSession } from "jazz-tools/vue";
+import { app } from "../jazz.generated.js";
 import { MapController } from "./lib/map-controller";
 import { findNearestStop } from "./lib/nearest-stop";
 import { useRoute } from "./lib/routes";
@@ -132,8 +132,8 @@ import Icon from "./components/ui/Icon.vue";
 import Sheet from "./components/ui/Sheet.vue";
 
 const db = useDb();
-const session = useSession();
-const userId = computed(() => session.value?.user ?? null);
+const { snapshot } = useJazzSession();
+const userId = computed(() => snapshot.value.user?.accountId ?? null);
 const { route, goToBand } = useRoute();
 
 // Writes the server rejects later (a permission changed, a conflict) end up

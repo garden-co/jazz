@@ -1,8 +1,7 @@
 import { schema as s } from "jazz-tools";
-import { schema as betterAuthSchema } from "./schema-better-auth/schema";
-import { migrations } from "./migrations";
+import { tables as betterAuthSchema } from "./schema-better-auth/schema";
 
-const schema = {
+export const schema = s.defineSchema({
   ...betterAuthSchema,
 
   // Written once by the bootstrap route. Links the Better Auth user (known from
@@ -133,13 +132,95 @@ const schema = {
       { conversation: s.rel("conversations", "conversationId"), turn: s.rel("turns", "turnId") },
     )
     .indexOnly(["conversationId"]),
-};
+});
 
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
-export type Conversation = s.RowOf<typeof app.conversations>;
-export type Turn = s.RowOf<typeof app.turns>;
-/** Turns as the UI reads them: with Jazz's own creation time (`$createdAt`). */
-export type TimedTurn = Turn & { $createdAt: Date };
-export type ToolCall = s.RowOf<typeof app.toolCalls>;
-export type Attachment = s.RowOf<typeof app.attachments>;
+const { definePermissions, allowedTo, session, anyOf, allOf } = schema;
+
+// A workspace belongs to one Jazz account: rows carry their owner's account.
+const mine = { ownerAccount: session.user };
+
+/**
+ * The browser may start conversations, write the user's own turns and attach
+ * audio to them. Only the server (backend authority) writes assistant turns,
+ * tool calls and the seeded booking data, so a client can never forge an
+ * agent reply.
+ */
+export const permissions = definePermissions({
+  artists: {
+    read: mine,
+  },
+  attachments: {
+    read: (attachment) => allowedTo.read(attachment.conversation),
+    insert: (attachment) =>
+      allOf(
+        attachment.conversation.where(mine),
+        attachment.turn.where({ conversationId: attachment.conversationId, role: "user" }),
+      ),
+  },
+  // Better Auth's rows are written only by the backend.
+  better_auth_account: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_jwks: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_session: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_user: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  better_auth_verification: {
+    read: false,
+    insert: false,
+    update: false,
+    delete: false,
+  },
+  calendarEvents: {
+    read: mine,
+  },
+  // A conversation may only name an artist from the same workspace: the agent
+  // reads that artist's data with backend authority.
+  conversations: {
+    read: mine,
+    insert: (conversation) => allOf(mine, conversation.artist.where(mine)),
+    updateIf: mine,
+    updateTo: (conversation) => allOf(mine, conversation.artist.where(mine)),
+    delete: mine,
+  },
+  profiles: {
+    read: { accountId: session.user },
+  },
+  songs: {
+    read: mine,
+  },
+  toolCalls: {
+    read: (toolCall) => allowedTo.read(toolCall.conversation),
+  },
+  turns: {
+    read: (turn) => allowedTo.read(turn.conversation),
+    insert: (turn) =>
+      allOf(
+        { role: "user", status: "complete" },
+        turn.conversation.where(mine),
+        // A turn continues its conversation: its parent, if any, is a turn of
+        // the same conversation.
+        anyOf({ parentId: null }, turn.parent.where({ conversationId: turn.conversationId })),
+      ),
+  },
+  venues: {
+    read: mine,
+  },
+});

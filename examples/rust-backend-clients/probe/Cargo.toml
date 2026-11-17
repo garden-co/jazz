@@ -1,0 +1,11 @@
+[package]
+name = "rust-backend-client-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Probes jazz-app-support's backend-client contract against a TypeScript main backend (tests/backend-client.test.ts)"
+
+[dependencies]
+jazz-app-support = { path = "../../../crates/jazz-app" }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

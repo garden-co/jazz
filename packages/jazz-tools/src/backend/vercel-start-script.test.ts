@@ -13,7 +13,32 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { DOWNLOAD_CORE, startScript } from "./vercel-store.js";
+import { DOWNLOAD_CORE, newerVersion, startScript } from "./vercel-store.js";
+import { VERSION_ORDER } from "./fixtures/version-order.js";
+
+// The start script's own version order, run in bash: it decides which core
+// a Drive runs, so it must agree with newerVersion.
+describe("vercel() core version order", () => {
+  it("newerVersion orders release candidates before their release", () => {
+    for (const [a, b, expected] of VERSION_ORDER) {
+      expect([a, b, newerVersion(a, b)]).toEqual([a, b, expected]);
+    }
+  });
+
+  it("orders release candidates before their release, as newerVersion does", () => {
+    const script = startScript("2.0.0", "https://example.invalid/core.tgz", {
+      issuer: "https://oidc.example",
+      audience: "aud",
+      subject: "sub",
+    });
+    const newer = script.match(/^newer\(\) \{\n[\s\S]*?\n\}$/m)?.[0];
+    expect(newer).toBeDefined();
+    for (const [a, b, expected] of VERSION_ORDER) {
+      const result = spawnSync("bash", ["-c", `${newer}\nnewer "$1" "$2"`, "newer", a, b]);
+      expect([a, b, result.status === 0]).toEqual([a, b, expected]);
+    }
+  });
+});
 
 // The downloader the start script runs, in this machine's Node: a 4xx is
 // permanent, a 5xx or a network error transient.

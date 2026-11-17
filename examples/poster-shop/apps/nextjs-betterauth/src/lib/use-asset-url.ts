@@ -2,7 +2,7 @@
 
 import { useDb, useOne } from "jazz-tools/react";
 import { useEffect, useState } from "react";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 
 /** Bytes are read back in bounded pages, never as one whole-column read. */
 export const ASSET_PAGE_BYTES = 256 * 1024;
