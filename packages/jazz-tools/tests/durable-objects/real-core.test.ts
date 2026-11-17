@@ -2,24 +2,15 @@
 // in local workerd: publication, writes and reads through the backend, and
 // the object's data across a workerd restart. The core never holds a
 // transaction open, so nothing here opens one on it.
-import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createJazz, durableObjects, type Jazz } from "../../src/backend/index.js";
 import { testApp } from "../../src/testing/index.js";
 import { bundleWorker } from "./bundle.js";
+import { hostBuilt } from "./host.js";
 import { startDurableObjectCore, type DurableObjectCore } from "./harness.js";
-
-// jazz-wasm's Durable Object build (`pnpm --filter jazz-wasm build:durable-object`).
-const hostBuilt = existsSync(
-  join(
-    dirname(createRequire(import.meta.url).resolve("jazz-wasm/package.json")),
-    "durable-object/pkg",
-  ),
-);
 
 const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
 const permissions = { format: 1, tables: { notes: { read: "true", insert: "true" } } };
