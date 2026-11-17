@@ -149,7 +149,8 @@ export type JazzStore =
  * A SQLite core in this process, kept in the directory `path`. It generates
  * its app id on first start and keeps it in its own file, `<path>/jazz.sqlite`,
  * with the rest of its identity, so a copy of that file is the same store
- * (`jazz-alpha59-alpha60-import` records an alpha.59 app's id there). To
+ * (alpha.65's `jazz-alpha59-alpha60-import` leaves an alpha.59 app's id in
+ * `<path>/app-id`, which the first open takes over). To
  * open a copy beside the original, detach it first: `jazz-tools store detach`. Large
  * values' bytes go to `blobs`, by default `files()` in `<path>/blobs`.
  *
@@ -186,7 +187,7 @@ export function memory(options?: { appId?: never }): Extract<JazzStore, { kind: 
 function refuseStoreAppId(store: string, options: unknown): void {
   if (typeof options === "object" && options !== null && "appId" in options) {
     throw new Error(
-      `${store}(): appId is not an option: the store keeps its own app id. To keep an alpha.59 app's id, import its data with \`jazz-alpha59-alpha60-import import --app-id\`.`,
+      `${store}(): appId is not an option: the store keeps its own app id. To keep an alpha.59 app's id, import its data with \`jazz-alpha59-alpha60-import import --app-id\` from the v2.0.0-alpha.65 release.`,
     );
   }
 }

@@ -198,7 +198,7 @@ The published crates are exactly the dependency closure of `jazz-app-support`,
 `node dev/scripts/publish-crates.mjs --list` prints them in publish order:
 
 ```
-jazz-alpha59-alpha60-dump  jazz-ruzstd  jazz-compression  jazz-text  jazz-types
+jazz-ruzstd  jazz-compression  jazz-text  jazz-types
 jazz-model  jazz-protocol  jazz-db  jazz-core  jazz-native-transport  jazz-app-support
 jazz-codegen  jazz-ffi  jazz-otel  jazz-server  jazz-tools  jazz-wasm-tracing
 ```
@@ -250,7 +250,7 @@ crates are published with a short-lived token the first time:
    Token. Use the scope `publish-new`, an expiry of 1 day, and crate scopes
    for exactly the new crates. Store it as the `CRATES_IO_BOOTSTRAP_TOKEN`
    secret of the `publish` environment (Settings → Environments → publish).
-   Don't paste it anywhere else. The new crates are: jazz-alpha59-alpha60-dump,
+   Don't paste it anywhere else. The new crates are:
    jazz-ruzstd, jazz-compression, jazz-text, jazz-types, jazz-model,
    jazz-protocol, jazz-db, jazz-core, jazz-native-transport, jazz-app-support,
    jazz-codegen, jazz-ffi, jazz-otel, jazz-server.
