@@ -6682,6 +6682,8 @@ mod specialised_index_tests {
         ];
         let written = serde_json::json!({
             "encoding": "jazz-ix-decl/1",
+            "columns": "a declaration is hashed with its columns' stored names (SPEC 20.4), \
+                        so a rename-only migration changes no hash",
             "cases": cases.iter().map(|(about, index)| serde_json::json!({
                 "about": about,
                 "declaration": index,

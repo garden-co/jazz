@@ -279,7 +279,9 @@ impl SpecialisedIndex {
 
 impl SpecialisedIndex {
     /// The SHA-256 of [`Self::canonical_bytes`]: what a search names the
-    /// declaration it was written against by (SPEC 20.4).
+    /// declaration it was written against by (SPEC 20.4). Nodes hash a
+    /// declaration whose columns carry their stored names (the store maps
+    /// them), so a rename-only migration changes no hash.
     pub fn declaration_hash(&self) -> [u8; 32] {
         *jazz_types::sha256::hash(&self.canonical_bytes()).as_bytes()
     }

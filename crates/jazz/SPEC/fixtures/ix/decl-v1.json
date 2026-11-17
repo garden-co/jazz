@@ -54,5 +54,6 @@
       "sha256_hex": "ef0fd10bbb4aaf5d39d678716d6fc9b68c07962b992e9b2cfde21e98d62950a5"
     }
   ],
+  "columns": "a declaration is hashed with its columns' stored names (SPEC 20.4), so a rename-only migration changes no hash",
   "encoding": "jazz-ix-decl/1"
 }

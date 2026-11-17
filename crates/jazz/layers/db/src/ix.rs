@@ -537,13 +537,42 @@ fn framework_exists(conn: &Connection) -> Result<bool, Error> {
 /// declaration with each column under its stored name, so a column
 /// rename that keeps the stored column keeps the index.
 fn stored_decl_bytes(index: &Index) -> Vec<u8> {
-    let logical = index.decl.kind.columns();
-    let mut decl = index.decl.clone();
-    decl.kind = index.decl.kind.map_columns(|name| {
-        let at = logical.iter().position(|c| *c == name).expect("own column");
-        index.columns[at].stored.clone()
+    index.stored_decl().canonical_bytes()
+}
+
+/// `decl` with its columns named as `table` stores them (`None` when it
+/// names a column `table` lacks). Declarations are compared, hashed and
+/// recorded in this form (SPEC 20.4), so a migration that only renames an
+/// indexed column changes none of them.
+pub(crate) fn stored_declaration(
+    table: &Table,
+    decl: &SpecialisedIndex,
+) -> Option<SpecialisedIndex> {
+    let mut missing = false;
+    let kind = decl.kind.map_columns(|name| match table.column(name) {
+        Some(column) => column.stored.clone(),
+        None => {
+            missing = true;
+            name.to_owned()
+        }
     });
-    decl.canonical_bytes()
+    (!missing).then(|| SpecialisedIndex {
+        kind,
+        ..decl.clone()
+    })
+}
+
+impl Index {
+    /// This index's declaration with its columns' stored names.
+    fn stored_decl(&self) -> SpecialisedIndex {
+        let logical = self.decl.kind.columns();
+        let mut decl = self.decl.clone();
+        decl.kind = self.decl.kind.map_columns(|name| {
+            let at = logical.iter().position(|c| *c == name).expect("own column");
+            self.columns[at].stored.clone()
+        });
+        decl
+    }
 }
 
 /// The three queue triggers on stored table `tbl` for `indexes` (dropped
@@ -909,15 +938,16 @@ pub(crate) fn with_declaration(query: &Query, schema: &Schema) -> Option<Query> 
     if search.decl.is_some() {
         return None;
     }
-    let decl = schema
+    let declared = schema
         .jazz
         .tables()
         .iter()
         .find(|table| table.name == query.table)?
         .specialised_indexes
         .iter()
-        .find(|index| index.name == search.index)?
-        .declaration_hash();
+        .find(|index| index.name == search.index)?;
+    let table = schema.tables.values().find(|t| t.name == query.table)?;
+    let decl = stored_declaration(table, declared)?.declaration_hash();
     let mut query = query.clone();
     for predicate in &mut query.filters {
         if let Predicate::Search(search) = predicate {
@@ -931,7 +961,7 @@ pub(crate) fn with_declaration(query: &Query, schema: &Schema) -> Option<Query> 
 /// this node maintains is refused: it is never scored differently.
 pub(crate) fn check_declaration(index: &Index, search: &IndexSearch) -> Result<(), Error> {
     match search.decl {
-        Some(decl) if decl != index.decl.declaration_hash() => Err(typed(
+        Some(decl) if decl != index.stored_decl().declaration_hash() => Err(typed(
             ErrorCode::Query,
             Reason::IndexDeclarationMismatch,
             format!(

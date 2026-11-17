@@ -1070,6 +1070,61 @@ fn a_search_under_another_declaration_of_its_index_is_refused() {
     );
 }
 
+/// A declaration is hashed with its columns' stored names (SPEC 20.4): a
+/// migration that only renames an indexed column changes no declaration,
+/// so a client still on the old name searches the authority as before.
+///
+/// ```
+/// bob (v1: search over title) ──Read(search)──► server (v2: title → heading)
+///                                               └─ same stored column: answered
+/// ```
+#[test]
+fn a_rename_only_migration_keeps_the_declaration() {
+    let with = |column: &str| {
+        compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("notes")
+                        .column(column, ColumnType::Text)
+                        .policies(allow_all_policies())
+                        .text_index("search", [(column, 1)], "jazz-text/1:en", false),
+                )
+                .build(),
+        )
+    };
+    let (v1, v2) = (with("title"), with("heading"));
+    let rename = jazz::protocol::MigrationLens::new(
+        v1.version_id(),
+        v2.version_id(),
+        vec![jazz::protocol::TableLens {
+            source_table: "notes".into(),
+            target_table: "notes".into(),
+            ops: vec![jazz::protocol::LensOp::RenameColumn {
+                from: "title".into(),
+                to: "heading".into(),
+            }],
+        }],
+    )
+    .unwrap();
+    let server = authority(v1.clone());
+    block_on(server.activate_schema_with_lenses(v2, &[rename])).unwrap();
+    block_on(server.insert(
+        "notes",
+        BTreeMap::from([("heading".to_owned(), Value::String("Garden plans".into()))]),
+        InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(ids(&server, &search("garden")), [1]);
+
+    let bob = client(1, v1);
+    let _link = search_link(&bob, &server);
+    assert_eq!(remote_refusal(&server, &bob, &search("garden")), None);
+    assert_eq!(ids(&bob, &search("garden")), [1], "answered and synced");
+}
+
 /// An index the authority's schema dropped is as unknown to it as one
 /// never declared, whatever an older client's schema still says.
 #[test]
