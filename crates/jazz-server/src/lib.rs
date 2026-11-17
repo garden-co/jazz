@@ -130,11 +130,16 @@ impl BlobOptions {
                     self.s3_prefix,
                 )?;
                 if self.s3_role_from_workload {
-                    let s3::S3Credentials::WebIdentity { token, .. } = &mut options.credentials
-                    else {
-                        return Err("s3 role from workload needs AWS_ROLE_ARN".to_owned());
+                    // The workload's role wins over any keys also set, as
+                    // it did before the default chain put keys first.
+                    let role_arn = std::env::var("AWS_ROLE_ARN")
+                        .ok()
+                        .filter(|arn| !arn.is_empty())
+                        .ok_or("s3 role from workload needs AWS_ROLE_ARN")?;
+                    options.credentials = s3::S3Credentials::WebIdentity {
+                        role_arn,
+                        token: s3::WebIdentityToken::Workload,
                     };
-                    *token = s3::WebIdentityToken::Workload;
                 }
                 options.environment = self.environment;
                 Ok(BlobStore::S3(options))

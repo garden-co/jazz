@@ -669,6 +669,35 @@ export type BrowserInspectorControlEvent =
       workerTerminated?: true;
     };
 
+/**
+ * What a SharedWorker's upstream link means for the tabs relaying through it.
+ * It is state, not a stream of events: a tab applies it the same way whether
+ * it arrived when the tab attached or later.
+ */
+export type BrowserWorkerLinkFate = {
+  /**
+   * Live reachability of the worker's upstream server. Tabs use it to decide
+   * whether a local-first read's first load may wait for a remote answer.
+   */
+  state: RemoteLinkState;
+  /** The upstream link as the tabs report it in their sync status. */
+  link: LinkStatus;
+  /**
+   * The upstream failure remote waits fail on now (an `authority_changed`
+   * refusal, say), or null while there is none. This is deliberately not a
+   * mutation rejection: writes stay pending, and the tab only fails its
+   * Global and Remote waits and remote subscriptions. While `retrying`, the
+   * worker keeps reconnecting through it, so writes' Global waits and remote
+   * subscriptions wait for it (#3923).
+   */
+  failure: { error: BrowserRelayError; retrying: boolean } | null;
+  /**
+   * Why the server refused the worker's credential, until it accepts one.
+   * Tabs stay attached meanwhile, so any of them can supply a new one.
+   */
+  authFailure: string | null;
+};
+
 export type BrowserFollowerPortEvent =
   | { type: "inspector-query-result"; id: number; value?: unknown; error?: BrowserRelayError }
   | { type: "runtime-pong"; connectionId: string; nonce: number }
@@ -680,11 +709,11 @@ export type BrowserFollowerPortEvent =
    */
   | { type: "transport-state"; explicitlyDisconnected: boolean }
   /**
-   * Live reachability of the worker's upstream server. Tabs use `state` to
-   * decide whether a local-first read's first load may wait for a remote
-   * answer, and report `link` as their sync status; older tabs ignore it.
+   * The worker's upstream link, as one latched value: sent to each tab when
+   * it attaches and again whenever any part changes, so a tab that attaches
+   * late learns the same as one attached all along.
    */
-  | { type: "remote-link"; state: RemoteLinkState; link?: LinkStatus }
+  | { type: "link-fate"; fate: BrowserWorkerLinkFate }
   | {
       type: "result";
       id: number;
@@ -700,8 +729,6 @@ export type BrowserFollowerPortEvent =
        */
       pendingUploads?: number;
     }
-  | { type: "auth-failure"; reason: string }
-  | { type: "auth-restored" }
   | { type: "mutation-error"; event: MutationErrorEvent }
   /**
    * The worker could not write its store to IndexedDB (storage full, most
@@ -710,21 +737,6 @@ export type BrowserFollowerPortEvent =
    * the tab rejects their `local` waits.
    */
   | { type: "storage-failure"; message: string | null }
-  /**
-   * A failure of the worker-owned upstream server transport. This is
-   * deliberately not a mutation rejection: the follower records it only to
-   * reject its active remote waits and subscriptions, or, while the worker
-   * keeps reconnecting, its remote reads.
-   */
-  | {
-      type: "transport-error";
-      error: BrowserRelayError;
-      /**
-       * The worker keeps reconnecting through the error, so writes' Global
-       * waits and remote subscriptions wait for it (#3923).
-       */
-      retrying?: boolean;
-    }
   | { type: "storage-reset"; resetId: number }
   | { type: "storage-invalidated" }
   | { type: "relay-trace"; entries: BrowserRelayTrace[] }

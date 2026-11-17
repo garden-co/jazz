@@ -4550,7 +4550,8 @@ impl Inner {
             .iter()
         {
             let row = RowUuid::from_bytes(found.id);
-            let can = readable(
+            // Just read, nothing written since: an existing row.
+            let can = readable_existing(
                 self,
                 &follow.policies,
                 table,
@@ -15341,6 +15342,22 @@ fn readable(
     };
     let table = owned_table(policies, table)?;
     inner.check_in(policies, table, row, key, author, Operation::Select)
+}
+
+/// [`readable`] for a row the caller just read from this store, at `key`.
+fn readable_existing(
+    inner: &Inner,
+    policies: &Schema,
+    table: &str,
+    row: RowUuid,
+    key: &[u8],
+    identity: Option<AuthorSubject>,
+) -> Result<bool, Error> {
+    let Some(author) = identity else {
+        return Ok(true);
+    };
+    let table = owned_table(policies, table)?;
+    inner.check_in_existing(policies, table, row, key, author, Operation::Select)
 }
 
 /// The current schema's table stored as `stored`.
