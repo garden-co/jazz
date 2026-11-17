@@ -38,8 +38,8 @@ if [ -n "${SW_BIN:-}" ]; then
   [ -n "$TID" ] && [ -n "$SID" ] && echo "PASS swift A writes show+task" || { echo "FAIL swift A add"; fails=$((fails+1)); }
   n=$(JAZZ_ENDPOINT=$EP JAZZ_APP_ID=$APP_ID JAZZ_BEARER=$TA timeout 120 $SW_BIN --show-id "$SID" list 2>&1 | tee /tmp/sw-a.out | grep -c "Secret"); sed 's/^/  [sw A list] /' /tmp/sw-a.out
   [ "$n" -ge 1 ] && echo "PASS swift A reads her task (new process, remote)" || { echo "FAIL swift A read"; fails=$((fails+1)); }
-  n=$(JAZZ_ENDPOINT=$EP JAZZ_APP_ID=$APP_ID JAZZ_BEARER=$TB timeout 120 $SW_BIN --show-id "$SID" list 2>&1 | tee /tmp/sw-b.out | grep -c "Secret"); sed 's/^/  [sw B list] /' /tmp/sw-b.out
-  [ "$n" = 0 ] && echo "PASS swift B reads none of A's tasks" || { echo "FAIL swift B read"; fails=$((fails+1)); }
+  JAZZ_ENDPOINT=$EP JAZZ_APP_ID=$APP_ID JAZZ_BEARER=$TB timeout 120 $SW_BIN --show-id "$SID" list > /tmp/sw-b.out 2>&1; brc=$?; n=$(grep -c "Secret" /tmp/sw-b.out); sed 's/^/  [sw B list] /' /tmp/sw-b.out
+  [ "$brc" = 0 ] && [ "$n" = 0 ] && [ -n "$SID" ] && echo "PASS swift B reads none of A's tasks" || { echo "FAIL swift B read (exit $brc, matches $n)"; fails=$((fails+1)); }
   JAZZ_ENDPOINT=$EP JAZZ_APP_ID=$APP_ID JAZZ_BEARER=$TB timeout 120 $SW_BIN --show-id "$SID" add "Sneaky" > /tmp/sw-bw.out 2>&1; rc=$?; sed 's/^/  [sw B add] /' /tmp/sw-bw.out
   [ $rc = 1 ] && grep -q "permission denied" /tmp/sw-bw.out && echo "PASS swift B write refused" || { echo "FAIL swift B write exit $rc"; fails=$((fails+1)); }
 fi
