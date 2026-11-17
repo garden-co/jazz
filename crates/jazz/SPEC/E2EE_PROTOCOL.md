@@ -24,7 +24,8 @@ is no longer a member marks the space as needing a new key. Only sessions
 that may read and update the space row change its members, create the space
 or rotate its key, so the space row's update rule is the rule for managing
 its members. There are two exceptions for membership: the account that
-created the space row may always add itself, and any member may leave. The
+creates the space row may add itself in the same transaction, and any
+member may leave. The
 first release supports up to 1,000 members per space (§3.8).
 Encryption keeps content unreadable outside Jazz's permissions; it
 adds no access rule of its own (§8).
@@ -322,13 +323,10 @@ replay. "Before `p`" always means strictly earlier position.
   account and remove any member. Membership administration cannot be
   separated from editing the space row, so fields that members other than
   the managers may change belong in another table (§1.5).
-- **Space creator.** The account that created the space row (its
-  `$createdBy.account`), if the row was created at or after its space
-  table's `creatorSince` time (§1.5). It may add itself as a member at any
-  time, even without update permission and even after it was removed (R12),
-  so it is a permanent owner of the space's membership. A row created
-  before that time, such as one that existed before its table became a
-  space table, has no space creator.
+- **Space creator.** The account that creates the space row (its
+  `$createdBy.account`). It may add itself as a member in the transaction
+  that inserts the space row, and at no other time (R12). After that it is
+  a member like any other: removing it removes it.
 - **Key version.** A space's key history is a chain: the root version, then
   one per **rotation** (a successor). Each version has an epoch ID and a
   random 32-byte key, and wraps the previous version's key, so the newest key
@@ -582,9 +580,8 @@ Both are evaluated by the authority at the operation's commit, against its
 state then. **member(a)** means: the members table has a row with the
 checked row's `scopeId` and `identifier` and `accountId = a` (an `Exists`
 over the members table, correlated with the checked row). **creator(row)**
-means: the space row exists, not deleted, as the checking transaction sees
-it, its `$createdBy.account` is the session account, and its `$createdAt`
-is at or after the space table's `creatorSince` (§1.5) (an `Exists` over
+means: the checking transaction itself inserts the space row, and the
+row's `$createdBy.account` is the session account (an `Exists` over
 the space table reached through the same `(scopeId, identifier)` link; it
 reads the space row as raw evidence and does not apply the space table's
 read policy).
@@ -623,35 +620,16 @@ read policy).
   not read the members table: once the space row has passed its own insert
   check it is evidence, and the creator's member row passes on it.
 
-  **The creator is a permanent owner.** `$createdBy` never changes, so the
-  space row's creator can add itself at any time: after it was removed, and
-  whether or not it may update the space row. Removing the creator's member
-  rows therefore does not exclude it for good. It may add only itself by
-  this clause, never another account. An application that needs a creator
-  who can be removed creates its space rows, with their first member rows,
-  from a trusted backend: the space row's creator is then not a client
-  account, and only updaters add members.
-
-  **Only rows created since `creatorSince`.** Every row has a
-  `$createdBy`, including rows that existed before encryption was switched
-  on. Without the time condition, switching encryption on would make the
-  account that once created each existing row its permanent owner, even an
-  account the application had since taken off it. So the clause covers
-  only rows created at or after the space table's `creatorSince` (§1.5).
-  `$createdAt` is maintained by the engine: no update changes it, a deleted
-  row's ID cannot be inserted again, and a restore revives the same row
-  with its creation time. It comes from the creating client's clock, so a
-  client can only date its own new rows: an earlier time loses it the
-  clause, and a later one gains it nothing it did not already have. A
-  creator whose clock is behind `creatorSince` when it creates a row is
-  refused the clause for that row. A new space row has no member yet, so
-  nobody can read it and there is no updater to add the creator: the
-  transaction that carries the creator's member row is refused, and only a
-  trusted backend can add the first member of that row. When the client
-  holds the space row (staged in the same transaction, or in its replica)
-  it checks this before submission and fails the write
-  `space-row-before-creator-since` instead of a policy refusal
-  ([core hooks](E2EE_CORE_HOOKS.md) H2).
+  **Only in the creating transaction.** The creator clause holds only
+  while the space row is being inserted: in a later transaction the row is
+  no longer the checking transaction's own insert, and the clause is false.
+  So a removed creator cannot add itself back, and switching encryption on
+  for a table gives the creators of its existing rows nothing: those rows
+  were inserted by earlier transactions. Only updaters, or a trusted
+  backend, add members to existing rows. The clause depends on no clock. An
+  application must insert the creator's member row in the same transaction
+  as the space row. Core has no such check today; it gains one
+  (`InsertedByThisTransaction`, [core hooks](E2EE_CORE_HOOKS.md) H7).
 
   Required tests: a fresh space row and its creator's member row in one
   transaction are accepted, in both insert orders, in mergeable,
@@ -660,15 +638,15 @@ read policy).
   clause removed) is refused, pinning the grounding rule; a session that is
   neither the creator nor an updater adding itself to an existing space is
   refused; the creator adding another account by the creator clause alone
-  is refused; a removed creator re-adding itself is accepted (the
-  documented consequence); a member that may not update the space row
+  is refused; the creator adding itself in a later transaction than the
+  space row's insert is refused, also right after the insert and also
+  after being removed; a member that may not update the space row
   deletes its own member rows, including when a further read conjunct
   (R13) hides the space row from it, and is accepted; such a member deleting
   another account's member row is refused; an updater deleting its own
-  member row is accepted; the creator of a space row created before
-  `creatorSince` adding itself is refused, and an updater adding it is
-  accepted; a restored space row keeps its creation time, and with it the
-  creator clause's answer.
+  member row is accepted; the creator of a row that existed before its
+  table became a space table adding itself is refused, and an updater
+  adding it is accepted; a restored space row does not admit its creator.
 
 - R13. **Space row read rule.** Every space table that any encrypted table
   with at least one encrypted column names as its `scope` has a read
@@ -708,9 +686,8 @@ accountId = session.user)` (`table_id` is T's catalogue identity, [core
 
 An encrypted table's `encryption` entry names its space: `space` is the
 column holding the space row's ID (`id` for a table whose rows are their own
-spaces), and `scope` is the space table. Nothing else is declared in the
-table's entry (the space table's `creatorSince` is set at the top level,
-below). In `jazz.permissions.json`, the space table's read rule
+spaces), and `scope` is the space table. Nothing else is declared in
+`jazz.app.json`. In `jazz.permissions.json`, the space table's read rule
 comes from the members table (R13), and its update rule decides who changes
 members, creates and rotates:
 
@@ -741,11 +718,10 @@ R12). The member row then passes R12's creator clause on the project as
 written; it cannot pass through read and update of the project, which need
 the member row itself. If the same transaction also carries the space root
 (§3.2), the root passes R15 once the member row has passed, so the project,
-its first member and its root can be one transaction. The creator remains a
-permanent owner of projects created since `creatorSince` (R12, §1.5): an
-application that must be able to remove a
-project's creator creates projects and their first member rows from a
-trusted backend. Every other account is added by an updater.
+its first member and its root can be one transaction. A project inserted
+without its creator's member row can get members only from an updater or a
+trusted backend; nobody can read it until then. Every other account is
+added by an updater.
 
 - **Column entries.** A `columns` value is either a type string (`"title":
 "string"`) or, during a schema conversion, an object with `type` and the
@@ -774,21 +750,6 @@ trusted backend. Every other account is added by an updater.
   `$createdBy.account = session.user`): such a member row cannot ground it
   (R12). The deploy warns when it can see an insert rule of a space table
   that reads `__e2ee_members` for the row being inserted.
-- **Creator start time.** The top-level `encryption` object gives each
-  space table a `creatorSince` time (ISO 8601, UTC, with milliseconds). The
-  creator clause (R12) covers only that table's rows created at or after
-  it. `jazz-tools` writes the current time when a table first becomes a
-  space table (first named as a `scope`), so rows that existed before then
-  give their creators no right to add themselves
-  ([migrations](E2EE_MIGRATIONS.md) §4.1). Rows created after the tool ran
-  and before the deploy that makes the table a space table do have a
-  creator with the clause; at that deploy the server warns, with their
-  number, when the table holds rows created at or after `creatorSince`, and
-  documentation says to regenerate the time just before deploying. The
-  deploy refuses a space table without one. It refuses a change that moves it earlier than the deployed
-  time, which would give existing rows' creators the clause. It allows a
-  change that moves it later, with a warning: creators of rows in between
-  lose the clause.
 - **Space row update rule = managing members.** Whoever may update a space
   row may add any account to the space, remove any member, create the space
   and rotate its key (R12, R15, R16). In the example above only the
@@ -803,20 +764,14 @@ trusted backend. Every other account is added by an updater.
   reader, manages members. It cannot decide breadth in general and does not
   claim to.
 
-Application-wide encryption settings live in a top-level
-`encryption` object (optional until the app has a space table) of `jazz.app.json`, beside `tables`: `allowAccountReset`
-(boolean, default `false`, §2.11), `creatorSince` (one time per space
-table, above) and `mechanisms` (selection and allow-list, §0). Like the per-table entries, it is client and deploy
+Application-wide encryption settings live in an optional top-level
+`encryption` object of `jazz.app.json`, beside `tables`: `allowAccountReset`
+(boolean, default `false`, §2.11) and `mechanisms` (selection and
+allow-list, §0). Like the per-table entries, it is client and deploy
 metadata, outside the schema hash, carried in the deploy request:
 
 ```json
-{
-  "encryption": {
-    "allowAccountReset": true,
-    "creatorSince": { "projects": "2026-11-17T09:30:00.000Z" }
-  },
-  "tables": { … }
-}
+{ "encryption": { "allowAccountReset": true }, "tables": { … } }
 ```
 
 ## 2. Account and device lifecycle
@@ -2045,18 +2000,11 @@ hooks](E2EE_CORE_HOOKS.md) H2). It sees the member rows of every space its
 account is a member of (it watches them) and otherwise loads them before
 staging, without acquiring any key (offline, from what its replica holds).
 When the same transaction inserts the space row, the count starts from that
-transaction's staged rows, with nothing to load. A row for the session's
-own account, when the account has no member row in the space, can be
-accepted only by R12's creator clause (a session that is not a member
-fails read(row), R13), and is outside the limit: it is not
-counted or loaded. Such a session reads only its own member rows (R12), so
-a creator adding itself back to a full space is not refused; once its row
-is accepted, its device sees the whole member set and reports an excess as
-below. The server does
+transaction's staged rows, with nothing to load. The server does
 not enforce the limit: Jazz policies can test only whether a matching row
 exists (`Exists`) and cannot count rows, and this design adds no check
 outside policies (§1.4). So concurrent or offline additions by several
-updaters, a creator re-adding itself, a trusted backend that writes member
+updaters, a trusted backend that writes member
 rows without the E2EE runtime, or a modified client can exceed it. The limit
 is a supported-size safeguard, not a capacity guarantee. Every member's runtime that sees more than 1,000 member accounts
 in a space emits a `space-over-member-limit` encryption event `{space,
@@ -2069,9 +2017,7 @@ staged twice in one transaction count once; a member removed and another
 added in one transaction at 1,000 is accepted; a rolled-back transaction's
 staged rows do not count for the retry; a creator's first member row
 loads nothing, acquires no key and prepares no root, also in a binding with
-a synchronous callback; a removed creator re-adding itself to
-a full space is not refused, and its device then reports
-`space-over-member-limit`.
+a synchronous callback.
 
 **What a device watches.** Per space its account is a member of: the
 space's member rows (at most 1,000), its roots and successors (one per
@@ -2628,27 +2574,26 @@ reconciled by its transaction identity.
 
 Refusal codes:
 
-| Code                             | Refusal                                                                                                                                                                                                                                         |
-| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `account-has-history`            | Bootstrap found existing account evidence (§2.3).                                                                                                                                                                                               |
-| `device-identity-conflict`       | A device request or key row exists with different keys (§2.2).                                                                                                                                                                                  |
-| `device-keys-mismatch`           | The device's keys do not match its accepted request.                                                                                                                                                                                            |
-| `no-device-request`              | Bootstrap or reset found no request (or more than one) for this device (§2.3, §2.11).                                                                                                                                                           |
-| `reset-device-active`            | An account reset by a device that is still active in the current generation (§2.11).                                                                                                                                                            |
-| `device-not-active`              | The acting device is not an active device of the account.                                                                                                                                                                                       |
-| `device-removed`                 | The device was removed and needs a new device ID.                                                                                                                                                                                               |
-| `stale-challenge`                | The challenge is unknown, for another device, or not of the current account epoch (§2.5).                                                                                                                                                       |
-| `approval-closed`                | The approval handle was closed or belongs to another operation.                                                                                                                                                                                 |
-| `invalid-possession-proof`       | The requesting device's possession proof failed (§2.5).                                                                                                                                                                                         |
-| `target-not-active`              | The device or recovery root to remove or retire is not active (§2.8).                                                                                                                                                                           |
-| `unsupported-recipient`          | A recipient device, recovery root or account has no key of the selected mechanism (§0, §2.12).                                                                                                                                                  |
-| `account-reset-not-allowed`      | An account reset by a local-first session, or where the application has not enabled `allowAccountReset` (§2.11).                                                                                                                                |
-| `space-pending`                  | An encrypted write to a space that has no valid root, after this device's creation of it was refused while the client runs (§3.2).                                                                                                              |
-| `space-create-refused`           | The authority refused the root itself, staged with a write or by `createSpace` (§3.2); only that transaction fails, and the device stops automatic creation of the space.                                                                       |
-| `rotation-needs-key`             | A rotation by a device that holds no authenticated key of the current version (§3.5), or a recovery rotation by one that holds no version at all.                                                                                               |
-| `space-row-before-creator-since` | A member row for the session's own account that only the creator clause could accept, for a space row created before its table's `creatorSince` (for example on a device whose clock is behind), refused by the client before submission (R12). |
-| `space-member-limit`             | A member row that would give the space more than 1,000 member accounts, refused by the client before submission (§3.8).                                                                                                                         |
-| `local-first-identity-mismatch`  | A local-first root written with an identity whose key does not derive the account ID (§2.3).                                                                                                                                                    |
+| Code                            | Refusal                                                                                                                                                                   |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `account-has-history`           | Bootstrap found existing account evidence (§2.3).                                                                                                                         |
+| `device-identity-conflict`      | A device request or key row exists with different keys (§2.2).                                                                                                            |
+| `device-keys-mismatch`          | The device's keys do not match its accepted request.                                                                                                                      |
+| `no-device-request`             | Bootstrap or reset found no request (or more than one) for this device (§2.3, §2.11).                                                                                     |
+| `reset-device-active`           | An account reset by a device that is still active in the current generation (§2.11).                                                                                      |
+| `device-not-active`             | The acting device is not an active device of the account.                                                                                                                 |
+| `device-removed`                | The device was removed and needs a new device ID.                                                                                                                         |
+| `stale-challenge`               | The challenge is unknown, for another device, or not of the current account epoch (§2.5).                                                                                 |
+| `approval-closed`               | The approval handle was closed or belongs to another operation.                                                                                                           |
+| `invalid-possession-proof`      | The requesting device's possession proof failed (§2.5).                                                                                                                   |
+| `target-not-active`             | The device or recovery root to remove or retire is not active (§2.8).                                                                                                     |
+| `unsupported-recipient`         | A recipient device, recovery root or account has no key of the selected mechanism (§0, §2.12).                                                                            |
+| `account-reset-not-allowed`     | An account reset by a local-first session, or where the application has not enabled `allowAccountReset` (§2.11).                                                          |
+| `space-pending`                 | An encrypted write to a space that has no valid root, after this device's creation of it was refused while the client runs (§3.2).                                        |
+| `space-create-refused`          | The authority refused the root itself, staged with a write or by `createSpace` (§3.2); only that transaction fails, and the device stops automatic creation of the space. |
+| `rotation-needs-key`            | A rotation by a device that holds no authenticated key of the current version (§3.5), or a recovery rotation by one that holds no version at all.                         |
+| `space-member-limit`            | A member row that would give the space more than 1,000 member accounts, refused by the client before submission (§3.8).                                                   |
+| `local-first-identity-mismatch` | A local-first root written with an identity whose key does not derive the account ID (§2.3).                                                                              |
 
 ## 8. Security properties and limits
 
@@ -2656,7 +2601,8 @@ Refusal codes:
 member rows, from which the space row's read rule must come (R13), the
 space row's update rule, which is the rule for who manages members (anyone
 who may update the space row may add any account, §1.5), and the space
-row's creator, who may always add itself (R12). E2EE protects content against
+row's creator, who may add itself in the transaction that creates the
+row (R12). E2EE protects content against
 ciphertext leaking outside Jazz: a leaked database or backup, a copied
 replica, or an operator who reads storage. It does not protect against a
 server, an operator or a permission bug that adds a member row (that
@@ -2704,17 +2650,6 @@ Limits:
   member (R12). An application cannot let members edit the space row
   without also letting them manage members; such fields belong in another
   table (§1.5).
-- **The space row's creator is a permanent owner.** Its member row passes
-  R12's creator clause, which needs no update permission, so the creator
-  can add itself back at any time after being removed and then receives
-  every key, the history included. Removing it only until it re-adds itself
-  is not exclusion. Applications that must be able to remove a space's
-  creator create the space row and its first member row from a trusted
-  backend (§1.5). Only rows created at or after the space table's
-  `creatorSince` have such a creator (§1.5), so switching encryption on
-  gives the creators of rows created before that time no right to add
-  themselves. Rows created between the tool run that wrote the time and the
-  deploy do have one; the deploy warns when there are any (§1.5).
 - **Removal cannot erase copies.** A delivered key is never revoked. Keys,
   plaintext and ciphertext a former member already obtained remain with it,
   and old versions stay readable to whoever holds their keys.

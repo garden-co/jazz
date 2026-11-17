@@ -373,14 +373,9 @@ app therefore moves in two deploys:
    warns). The app then writes the member rows: for each space row, one row
    per account that should keep reading it, typically from its own
    membership data, from a client of an updater or a trusted backend.
-   Declaring the space table also records its `creatorSince` time (spec
-   §1.5): the creators of rows that exist now gain no right to add
-   themselves, and only rows created from then on have a creator who may
-   (spec R12). `jazz-tools` writes the time when it is run, so regenerate
-   it just before this deploy: rows created in production between the two
-   still have a creator who may add itself, and the deploy warns, with
-   their number, when the table holds such rows. Apart from those,
-   encryption makes nobody a permanent owner of an existing row. A space supports at
+   The creators of existing rows gain no right to add themselves: the
+   creator clause holds only in the transaction that inserts the space row
+   (spec R12). A space supports at
    most 1,000 member accounts (spec §3.8): a space row that more accounts
    read today needs a narrower readership or another space table before it
    can be encrypted. The client refuses member rows beyond the limit; a
@@ -389,7 +384,8 @@ app therefore moves in two deploys:
 2. Change the space table's read rule to `exists __e2ee_members(...)` (spec
    §1.5) and add the encrypted columns. Accounts without a member row lose
    read access to the space row at this deploy. From then on, a client that
-   creates a space row adds its own first member row by the creator clause
+   creates a space row adds its own first member row, in the same
+   transaction, by the creator clause
    (spec §1.5, R12), and the space table's insert rule must not need a
    member row of the new row.
 
