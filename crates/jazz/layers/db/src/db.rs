@@ -1150,6 +1150,164 @@ struct RelationRun<'q> {
     /// Each relation is then read once per run, so there is nothing to
     /// cache for it.
     batch: bool,
+    /// A live result's relation statements, kept across its runs
+    /// ([`Inner::nest_relations_kept`]); `None` for any other read.
+    kept: Option<&'q mut RelationPlans>,
+    /// The relation columns from the root down to the level being nested:
+    /// with the relation's own column, what names its kept statement.
+    path: Vec<String>,
+}
+
+/// A live result's compiled relation statements, kept across its runs: a
+/// re-run (or a later chunk of parents) rebinds only the parents' list
+/// instead of compiling the relation again. Keyed by the relation's path
+/// from the root (one result's query names one relation per path), its
+/// parents' shape and whether they bind as blobs; `None` where the
+/// children are too wide to batch.
+///
+/// A statement is compiled from the schema, the reader's sessions, the
+/// relation and the store's enum tags; it is kept only while all of them
+/// are as they were ([`PlanStamp`]).
+#[derive(Default)]
+pub(crate) struct RelationPlans {
+    stamp: Option<PlanStamp>,
+    by: HashMap<(String, bool, bool), Option<(Compiled, usize)>>,
+    /// Statements reused (for [`FanoutStats::kept_plans`]).
+    pub(crate) hits: u64,
+}
+
+impl RelationPlans {
+    /// Drop every kept statement (the result's schema or claims changed).
+    pub(crate) fn clear(&mut self) {
+        self.stamp = None;
+        self.by.clear();
+    }
+}
+
+/// What a kept statement was compiled under. The schema is held, not just
+/// its address, so a schema built later cannot pass for it.
+pub(crate) struct PlanStamp {
+    schema: Rc<Schema>,
+    sessions: (Option<Session>, Session),
+    withheld: bool,
+    settled_only: bool,
+    include_deleted: bool,
+    history_origin: Option<[u8; 16]>,
+    tags: u64,
+}
+
+/// What a statement compiled now would be compiled under
+/// ([`Inner::plan_inputs`]): compared with a kept [`PlanStamp`] where it
+/// stands, and copied into one only when they differ.
+pub(crate) struct PlanInputs<'a> {
+    schema: &'a Rc<Schema>,
+    sessions: &'a (Option<Session>, Session),
+    withheld: bool,
+    settled_only: bool,
+    include_deleted: bool,
+    history_origin: Option<[u8; 16]>,
+    tags: u64,
+}
+
+impl PlanStamp {
+    fn holds(&self, now: &PlanInputs<'_>) -> bool {
+        Rc::ptr_eq(&self.schema, now.schema)
+            && same_sessions(&self.sessions, now.sessions)
+            && self.withheld == now.withheld
+            && self.settled_only == now.settled_only
+            && self.include_deleted == now.include_deleted
+            && self.history_origin == now.history_origin
+            && self.tags == now.tags
+    }
+
+    /// Whether the statements kept under `kept` are still what `now`
+    /// compiles. If not, `kept` becomes `now`'s stamp and the caller drops
+    /// its statements.
+    pub(crate) fn keep(kept: &mut Option<PlanStamp>, now: &PlanInputs<'_>) -> bool {
+        if kept.as_ref().is_some_and(|kept| kept.holds(now)) {
+            return true;
+        }
+        *kept = Some(PlanStamp {
+            schema: now.schema.clone(),
+            sessions: now.sessions.clone(),
+            withheld: now.withheld,
+            settled_only: now.settled_only,
+            include_deleted: now.include_deleted,
+            history_origin: now.history_origin,
+            tags: now.tags,
+        });
+        false
+    }
+}
+
+/// Whether two reads authorize as the same identity with the same claims:
+/// what a compiled read binds of its sessions.
+fn same_sessions(a: &(Option<Session>, Session), b: &(Option<Session>, Session)) -> bool {
+    let same = |a: &Session, b: &Session| {
+        a.system == b.system
+            && a.issuer == b.issuer
+            && a.subject == b.subject
+            && a.account == b.account
+            && a.claims == b.claims
+    };
+    match (&a.0, &b.0) {
+        (None, None) => {}
+        (Some(x), Some(y)) if same(x, y) => {}
+        _ => return false,
+    }
+    same(&a.1, &b.1)
+}
+
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static PLAN_ORACLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether every kept statement is compared with one compiled afresh.
+pub(crate) fn plan_oracle() -> bool {
+    #[cfg(any(test, feature = "testing"))]
+    {
+        PLAN_ORACLE.with(std::cell::Cell::get)
+    }
+    #[cfg(not(any(test, feature = "testing")))]
+    {
+        false
+    }
+}
+
+/// Tests only: compare every kept statement (a relation's or a re-check's)
+/// with one compiled afresh, on this thread, and panic where they differ.
+#[cfg(any(test, feature = "testing"))]
+pub fn set_plan_oracle_for_test(on: bool) {
+    PLAN_ORACLE.with(|cell| cell.set(on));
+}
+
+/// Whether two compiles of one read are the same statement.
+pub(crate) fn same_compiled(a: &Compiled, b: &Compiled) -> bool {
+    a.sql == b.sql
+        && a.params == b.params
+        && a.tables == b.tables
+        && a.aggregate == b.aggregate
+        && a.joined == b.joined
+        && a.versioned == b.versioned
+        && a.union == b.union
+        && a.writer == b.writer
+        && a.partial == b.partial
+        && a.projection.len() == b.projection.len()
+        && a.projection.iter().zip(&b.projection).all(|(x, y)| {
+            x.0 == y.0
+                && x.1 == y.1
+                // An enum cell's tags are the store's own entry for the
+                // stored column (`TagRegistry::column`), which every
+                // compile under one schema hands out: the same column is
+                // the same `Rc`, and equal tags in another one would be
+                // another column's.
+                && match (&x.2, &y.2) {
+                    (None, None) => true,
+                    (Some(p), Some(q)) => Rc::ptr_eq(p, q),
+                    _ => false,
+                }
+        })
 }
 
 impl<'q> RelationRun<'q> {
@@ -1168,6 +1326,8 @@ impl<'q> RelationRun<'q> {
             cells: HashMap::new(),
             children: HashMap::new(),
             batch: relation_batch(),
+            kept: None,
+            path: Vec::new(),
         }
     }
 
@@ -5519,6 +5679,57 @@ impl Inner {
         read: &ReadSpec,
         roots: Vec<CurrentRow>,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.nest_relations_in(prepared, identity, read, roots, None)
+    }
+
+    /// [`Self::nest_relations`] for a live result that keeps its relation
+    /// statements in `plans` across runs. They are used only for a read
+    /// with no branch view and no cut, and dropped first when what they
+    /// were compiled under changed ([`PlanStamp`]). `prepared` may be the
+    /// result's own query, narrowed at its root, or with relations pruned
+    /// by a scoped re-nest: a kept statement is named by its relation's
+    /// path, and a scoped re-nest prunes only optional relations (a level
+    /// whose dropped relation is required is read whole), so the children
+    /// statement on a path, which reads only the required nested
+    /// relations, is the same with or without the pruning.
+    pub(crate) fn nest_relations_kept(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+        roots: Vec<CurrentRow>,
+        plans: &mut RelationPlans,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.nest_relations_in(prepared, identity, read, roots, Some(plans))
+    }
+
+    /// What a statement compiled now for `prepared`, read as `sessions`
+    /// through `read` (no view, no cut), is compiled under.
+    pub(crate) fn plan_inputs<'a>(
+        &'a self,
+        prepared: &'a PreparedQuery,
+        sessions: &'a (Option<Session>, Session),
+        read: &ReadSpec,
+    ) -> PlanInputs<'a> {
+        PlanInputs {
+            schema: prepared.schema.as_ref().unwrap_or(&self.owner),
+            sessions,
+            withheld: self.withheld.get(),
+            settled_only: read.settled_only,
+            include_deleted: read.include_deleted,
+            history_origin: self.history_origin(),
+            tags: crate::values::tag_epoch(),
+        }
+    }
+
+    fn nest_relations_in(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+        roots: Vec<CurrentRow>,
+        plans: Option<&mut RelationPlans>,
+    ) -> Result<Vec<CurrentRow>, Error> {
         if prepared.query.array_subqueries.is_empty() {
             return Ok(roots);
         }
@@ -5534,6 +5745,18 @@ impl Inner {
             read
         };
         let mut run = RelationRun::new(self, prepared, identity, read);
+        if let Some(plans) = plans
+            && read.view.is_none()
+            && read.cut.is_none()
+        {
+            if !PlanStamp::keep(
+                &mut plans.stamp,
+                &self.plan_inputs(prepared, &run.sessions, read),
+            ) {
+                plans.by.clear();
+            }
+            run.kept = Some(plans);
+        }
         self.nest(
             &mut run,
             &prepared.query.table,
@@ -5954,9 +6177,7 @@ impl Inner {
                 batchable = false;
                 break;
             };
-            let Some((compiled, _)) = run
-                .ctx(self)
-                .compile_children_batch(array, elements, list, blobs)?
+            let Some((compiled, _)) = self.children_batch(run, array, elements, list, blobs)?
             else {
                 // The children's width does not depend on the chunk.
                 debug_assert_eq!(n, 0);
@@ -5979,7 +6200,11 @@ impl Inner {
                 .map(|parent| self.relation(run, array, parent))
                 .collect();
         }
-        let nodes = self.nest(run, &array.table, &array.nested_arrays, rows)?;
+        // The levels below this one are on its path.
+        run.path.push(array.column_name.clone());
+        let nodes = self.nest(run, &array.table, &array.nested_arrays, rows);
+        run.path.pop();
+        let nodes = nodes?;
         let mut groups: Vec<Vec<ResultNode>> = (0..values.len()).map(|_| Vec::new()).collect();
         for (at, node) in keys.into_iter().zip(nodes) {
             groups[at].push(node);
@@ -6007,6 +6232,64 @@ impl Inner {
                 }
             })
             .collect())
+    }
+
+    /// The batched children statement of `array` for the parents' JSON
+    /// `list` ([`Ctx::compile_children_batch`]): a live result's kept one
+    /// with `list` bound in, else compiled (and kept, for a live result).
+    fn children_batch(
+        &self,
+        run: &mut RelationRun<'_>,
+        array: &crate::query::ArraySubquery,
+        elements: bool,
+        list: Sql,
+        blobs: bool,
+    ) -> Result<Option<(Compiled, usize)>, Error> {
+        if run.kept.is_none() {
+            return run
+                .ctx(self)
+                .compile_children_batch(array, elements, list, blobs);
+        }
+        let mut path = run.path.join("\u{1f}");
+        path.push('\u{1f}');
+        path.push_str(&array.column_name);
+        let key = (path, elements, blobs);
+        let kept = run
+            .kept
+            .as_ref()
+            .and_then(|plans| plans.by.get(&key).cloned());
+        let Some(kept) = kept else {
+            let fresh = run
+                .ctx(self)
+                .compile_children_batch(array, elements, list, blobs)?;
+            if let Some(plans) = run.kept.as_mut() {
+                plans.by.insert(key, fresh.clone());
+            }
+            return Ok(fresh);
+        };
+        if let Some(plans) = run.kept.as_mut() {
+            plans.hits += 1;
+        }
+        let kept = kept.map(|(mut compiled, at)| {
+            compiled.params[at] = list.clone();
+            (compiled, at)
+        });
+        if plan_oracle() {
+            let fresh = run
+                .ctx(self)
+                .compile_children_batch(array, elements, list, blobs)?;
+            let same = match (&kept, &fresh) {
+                (None, None) => true,
+                (Some((a, i)), Some((b, j))) => i == j && same_compiled(a, b),
+                _ => false,
+            };
+            assert!(
+                same,
+                "a kept relation statement differs from a fresh one: {}",
+                key.0.replace('\u{1f}', ".")
+            );
+        }
+        Ok(kept)
     }
 
     /// The value of row `id` that `array` correlates its children with

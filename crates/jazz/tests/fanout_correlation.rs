@@ -55,6 +55,8 @@ pub(crate) fn open_as(schema: JazzSchema, node: u8, author: AuthorSubject) -> St
     // Every in-place refresh is also checked against a full run, inside
     // the engine (declared types included, which no snapshot shows).
     jazz::db::set_fanout_oracle_for_test(true);
+    // Every kept statement is also compared with one compiled afresh.
+    jazz::db::set_plan_oracle_for_test(true);
     let dir = tempfile::tempdir().unwrap();
     let path: PathBuf = dir.path().join("store.sqlite");
     let config = DbConfig::new(
@@ -1547,6 +1549,8 @@ fn refreshed(
         reran: after.reran - before.reran,
         uncorrelated: after.uncorrelated - before.uncorrelated,
         unevidenced: after.unevidenced - before.unevidenced,
+        kept_plans: after.kept_plans - before.kept_plans,
+        kept_root_plans: after.kept_root_plans - before.kept_root_plans,
     };
     (delta, reported)
 }

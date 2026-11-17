@@ -75,6 +75,8 @@ mod history_reads;
 mod host_tables;
 #[path = "../include_live.rs"]
 mod include_live;
+#[path = "../kept_plans.rs"]
+mod kept_plans;
 #[path = "../large_value_append.rs"]
 mod large_value_append;
 #[path = "../large_value_chunk_store.rs"]
