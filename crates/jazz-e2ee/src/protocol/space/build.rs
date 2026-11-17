@@ -11,6 +11,12 @@
 //! need an account key take the authenticated [`AccountKey`], and writers
 //! that need a space key take it from the authenticated [`SpaceKeys`] of
 //! that space's chain, never raw key bytes.
+//!
+//! The builders return records only: they write nothing and read nothing
+//! beyond their arguments. The caller inserts the records in one ledger
+//! transaction whose read set covers the evidence they were built from, as
+//! each builder states, so that read-set validation (§0 item 5) refuses
+//! the transaction if that evidence changed before it commits.
 
 use zeroize::Zeroizing;
 
@@ -183,6 +189,11 @@ impl core::fmt::Debug for RootRecords {
 /// epochId), K₀)`, sealed to the account's sealing key of its current epoch.
 /// Whether the address already has a valid root is the caller's to read
 /// (§3.2); the authority decides whether the account may create it (R15).
+///
+/// Returns the records only. The caller inserts the root, in the same
+/// transaction as the space row or later (§3.2, §5.4), and keeps the key
+/// as an `unpublished` held key until the root is accepted as the space's
+/// root.
 pub fn space_root(
     writer: &SpaceWriter<'_>,
     address: &SpaceAddress,
@@ -248,6 +259,17 @@ impl core::fmt::Debug for RotationRecords {
 /// [`DELIVERY_BATCH`], once the rotation is accepted. Without the current
 /// version's key it is `rotation-needs-key`; more than [`DELIVERY_BATCH`]
 /// recipients is an invalid input, refused before anything is generated.
+///
+/// Returns the records only. The caller inserts the successor and its
+/// deliveries in one serializable ledger transaction whose read set
+/// includes, at the cut `chain` was replayed from (§3.5): the space's chain
+/// (its roots and successors), the space's member rows, and the public
+/// account rows of each member in `recipients` (built from that read, with
+/// [`rotation_recipients`](super::members::rotation_recipients)).
+/// Read-set validation then refuses a second successor of the same
+/// predecessor, a rotation whose members changed meanwhile, and deliveries
+/// to an account that rotated after the cut; the caller re-reads and
+/// builds again.
 pub fn rotate(
     writer: &SpaceWriter<'_>,
     chain: &SpaceChain,
@@ -270,6 +292,11 @@ pub fn rotate(
 /// one, up to and including the predecessor, are skipped. `recipients` is
 /// the rotation's own batch, as for [`rotate`]. With no held version of the
 /// space it is `rotation-needs-key`.
+///
+/// Returns the records only. The caller inserts them as for [`rotate`]: in
+/// one serializable ledger transaction whose read set includes the space's
+/// chain, its member rows and the public account rows of each member in
+/// `recipients`, at the cut `chain` was replayed from (§3.5).
 pub fn recover_rotation(
     writer: &SpaceWriter<'_>,
     chain: &SpaceChain,
@@ -348,7 +375,7 @@ fn successor(
     };
     let mut deliveries = Vec::with_capacity(recipients.len());
     for recipient in recipients {
-        if recipient.account_id == writer.account_id {
+        if recipient.account_id() == writer.account_id {
             continue;
         }
         deliveries.push(deliver(writer, &new_version, recipient, rng)?);
@@ -366,14 +393,26 @@ fn successor(
 /// recipientAccountEpochId]), keyEpochId), K)`, sealed to the recipient's
 /// first valid sealing key record of its current epoch (§2.12). A record of
 /// another mechanism than the selected one is "recipient unsupported".
+/// `recipient` comes only from
+/// [`AccountDirectory::recipient`](super::ledger::AccountDirectory::recipient),
+/// and its record must name the recipient's account and epoch.
+///
+/// Returns the record only. The caller inserts it in a ledger transaction
+/// whose read set includes the recipient's public account rows and the
+/// space's member rows at the cut `recipient` was read at (§3.4), so the
+/// delivery is refused if the recipient's account rotated or the space's
+/// members changed after that cut, and the caller re-reads. Within a
+/// rotation (§3.5), the same applies to each later delivery transaction.
 pub fn deliver(
     writer: &SpaceWriter<'_>,
     version: &HeldVersion<'_>,
     recipient: &Recipient,
     rng: &mut dyn RandomSource,
 ) -> ProtocolResult<SpaceDelivery> {
-    let record = &recipient.sealing_key.row;
-    if record.account_id != recipient.account_id || record.epoch_id != recipient.account_epoch_id {
+    let record = &recipient.sealing_key().row;
+    if record.account_id != recipient.account_id()
+        || record.epoch_id != recipient.account_epoch_id()
+    {
         return Err(ProtocolError::InconsistentEvidence);
     }
     let mut delivery = SpaceDelivery {
@@ -382,8 +421,8 @@ pub fn deliver(
         identifier: version.scope.address.identifier.clone(),
         key_epoch_id: version.epoch_id.to_owned(),
         sender_account_id: writer.account_id.to_owned(),
-        recipient_account_id: recipient.account_id.clone(),
-        recipient_account_epoch_id: recipient.account_epoch_id.clone(),
+        recipient_account_id: recipient.account_id().to_owned(),
+        recipient_account_epoch_id: recipient.account_epoch_id().to_owned(),
         envelope: Vec::new(),
     };
     let context = delivery.seal_context(version.application, version.scope)?;

@@ -23,9 +23,13 @@ pub mod ledger;
 pub mod members;
 
 pub use chain::{InvalidSpaceRoot, LostRoot, SpaceChain, SpaceRoots, SpaceVersion, Unresolved};
-pub use keys::{Acquisition, HeldVersion, InvalidDelivery, KeyCheck, SpaceKeys, acquire};
+pub use keys::{
+    Acquisition, BrokenHistory, HeldVersion, InvalidDelivery, KeyCheck, SpaceKeys, acquire,
+};
 pub use ledger::{AccountDirectory, AuthorCheck, Recipient, SpaceLedger};
-pub use members::{Lacking, RotationMark, RotationRecipients, VersionEnvelope};
+pub use members::{
+    Lacking, LackingMembers, RotationMark, RotationRecipients, UnsupportedMember, VersionEnvelope,
+};
 
 use super::json;
 use super::position::{Accepted, RowId};

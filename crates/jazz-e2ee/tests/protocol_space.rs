@@ -2,10 +2,12 @@
 //! roots of its address, the chain rule, acquiring keys, who lacks a
 //! version, the needs-rotation mark and the space record builders.
 //!
-//! Every test builds records with the crate's own builders and accepts
-//! them on one sequence of positions; the server's policies (R12–R17) are
-//! not modelled, so every write a test makes is one the authority would
-//! accept.
+//! Tests build records with the crate's own builders and accept them on
+//! one sequence of positions. The server's policies (R12–R17) are not
+//! modelled: most writes are ones the authority would accept, but some
+//! tests also accept rows the authority or a correct client would never
+//! write (tampered signatures, forged signers, damaged envelopes, rows
+//! from another space) to check that replay refuses them.
 
 mod common;
 
@@ -30,10 +32,10 @@ use jazz_e2ee::protocol::space::members::{
     self, DELIVERY_BATCH, EnvelopeSource, lacking, rotation_mark, rotation_recipients,
 };
 use jazz_e2ee::protocol::space::{
-    AccountDirectory, InvalidSpaceRoot, KeyCheck, Recipient, SpaceChain, SpaceKeys, SpaceLedger,
-    acquire,
+    AccountDirectory, BrokenHistory, InvalidSpaceRoot, KeyCheck, Recipient, SpaceChain, SpaceKeys,
+    SpaceLedger, acquire,
 };
-use jazz_e2ee::protocol::{Accepted, Position, derive, ids, signing};
+use jazz_e2ee::protocol::{Accepted, Position, ProtocolResult, derive, ids, signing};
 use jazz_e2ee::registry::Registry;
 
 const BUILTIN: Mechanism<'static> = key_seal::MECHANISM;
@@ -61,6 +63,7 @@ fn lacking_of(world: &World) -> Vec<(String, Vec<String>)> {
     let chain = read.chain(world).unwrap();
     lacking(&chain, &read.space, &read.directory(world))
         .unwrap()
+        .lacking
         .into_iter()
         .map(|entry| (entry.account_id, entry.epoch_ids))
         .collect()
@@ -507,7 +510,9 @@ fn a_reset_member_receives_the_current_version_again() {
     assert_eq!(world.space, space_rows, "no space table changed");
     let read = world.read();
     let chain = read.chain(&world).unwrap();
-    let missing = lacking(&chain, &read.space, &read.directory(&world)).unwrap();
+    let missing = lacking(&chain, &read.space, &read.directory(&world))
+        .unwrap()
+        .lacking;
     assert_eq!(missing.len(), 1);
     assert_eq!(missing[0].account_id, BOB);
     assert_eq!(missing[0].generation, Some(1));
@@ -1032,7 +1037,7 @@ fn rotation_recipients_prefer_previous_holders_and_cap_the_first_batch() {
     assert_eq!(recipients.waiting, [CAROL]);
     let mut first_two: Vec<_> = recipients.first[..2]
         .iter()
-        .map(|recipient| recipient.account_id.as_str())
+        .map(|recipient| recipient.account_id())
         .collect();
     first_two.sort();
     let mut expected: Vec<_> = holders.iter().map(|holder| holder.as_str()).collect();
@@ -1043,7 +1048,7 @@ fn rotation_recipients_prefer_previous_holders_and_cap_the_first_batch() {
             .first
             .iter()
             .chain(&recipients.rest)
-            .all(|recipient| recipient.account_id != ALICE)
+            .all(|recipient| recipient.account_id() != ALICE)
     );
 }
 
@@ -1364,6 +1369,7 @@ fn a_chain_ledger_and_directory_of_different_reads_are_inconsistent_evidence() {
     assert!(
         lacking(&new_chain, &new.space, &new_directory)
             .unwrap()
+            .lacking
             .is_empty()
     );
     let recipients = rotation_recipients(
@@ -1461,6 +1467,7 @@ fn a_row_beyond_the_cut_is_inconsistent_evidence() {
     assert_eq!(
         lacking(&chain, &read.space, &directory)
             .unwrap()
+            .lacking
             .into_iter()
             .map(|entry| (entry.account_id, entry.epoch_ids))
             .collect::<Vec<_>>(),
@@ -1488,7 +1495,12 @@ fn duplicate_rows_are_inconsistent_evidence_for_the_member_helpers() {
     let read = world.read();
     let chain = read.chain(&world).unwrap();
     let directory = read.directory(&world);
-    assert!(lacking(&chain, &read.space, &directory).unwrap().is_empty());
+    assert!(
+        lacking(&chain, &read.space, &directory)
+            .unwrap()
+            .lacking
+            .is_empty()
+    );
 
     let mut twice_delivered = read.space.clone();
     let repeated = twice_delivered.deliveries[0].clone();
@@ -1613,14 +1625,14 @@ fn a_rotation_delivers_to_the_first_batch_then_to_the_rest() {
         };
         let mut rest_accounts: Vec<String> = rest
             .iter()
-            .map(|recipient| recipient.account_id.clone())
+            .map(|recipient| recipient.account_id().to_owned())
             .collect();
         rest_accounts.sort();
         assert_eq!(lacking_new(&world), rest_accounts);
 
         // A member of the first batch delivers the new version to one of
         // the rest, and that delivery does not open: holders cannot see it.
-        let garbled = rest[0].account_id.clone();
+        let garbled = rest[0].account_id().to_owned();
         let holder = others
             .iter()
             .find(|account| !rest_accounts.contains(account))
@@ -1767,7 +1779,10 @@ enum Damage {
 /// A successor whose signature verifies but whose history link or marker
 /// is wrong extends the chain (the signature covers what it is given), yet
 /// no key of it is accepted: not from the author's own envelope, not from
-/// a delivery (reported as invalid), not as a held key (§3.3).
+/// a delivery, not as a held key (§3.3). A wrong marker makes the delivery
+/// invalid; a wrong history link is the successor's fault, reported as a
+/// broken history naming it and its author, never as an invalid delivery
+/// (§3.4).
 #[test]
 fn a_signed_successor_with_a_wrong_history_or_marker_gives_no_key() {
     for (seed, damage) in [
@@ -1806,6 +1821,7 @@ fn a_signed_successor_with_a_wrong_history_or_marker_gives_no_key() {
             }
         }
         resign(&world, ALICE, successor);
+        let successor_id = successor.id.clone();
         let v1 = world.accept_rotation(rotation);
         let chain = world.read().chain(&world).unwrap();
         assert_eq!(chain.current().unwrap().epoch_id, v1, "{damage:?}");
@@ -1813,9 +1829,28 @@ fn a_signed_successor_with_a_wrong_history_or_marker_gives_no_key() {
         let bob = world.acquire(BOB);
         assert!(bob.keys.holds(&v0), "{damage:?}");
         assert!(!bob.keys.holds(&v1), "{damage:?}");
-        assert_eq!(bob.invalid_deliveries.len(), 1, "{damage:?}");
-        assert_eq!(bob.invalid_deliveries[0].key_epoch_id, v1);
-        assert!(!world.acquire(ALICE).keys.holds(&v1), "{damage:?}");
+        let alice = world.acquire(ALICE);
+        assert!(!alice.keys.holds(&v1), "{damage:?}");
+        if matches!(damage, Damage::MarkerNotZero) {
+            assert_eq!(bob.invalid_deliveries.len(), 1, "{damage:?}");
+            assert_eq!(bob.invalid_deliveries[0].key_epoch_id, v1);
+            assert!(bob.broken_history.is_empty(), "{damage:?}");
+            assert!(alice.broken_history.is_empty(), "{damage:?}");
+        } else {
+            assert!(bob.invalid_deliveries.is_empty(), "{damage:?}");
+            let broken = BrokenHistory {
+                space: address(),
+                key_epoch_id: v1.clone(),
+                successor_id: successor_id.clone(),
+                author_account_id: ALICE.to_owned(),
+            };
+            assert_eq!(
+                bob.broken_history,
+                std::slice::from_ref(&broken),
+                "{damage:?}"
+            );
+            assert_eq!(alice.broken_history, [broken], "{damage:?}");
+        }
         let mut keys = SpaceKeys::new(&chain);
         assert_eq!(
             keys.authenticate(&chain, &world.shared.registry, &v1, &k1)
@@ -2113,7 +2148,7 @@ fn sealing_key_records_at_one_position_are_ordered_by_id() {
     let read = world.read();
     let directory = read.directory(&world);
     let recipient = directory.recipient(BOB, BUILTIN).unwrap().unwrap();
-    assert_eq!(recipient.sealing_key.row.id, ids[0]);
+    assert_eq!(recipient.sealing_key().row.id, ids[0]);
     let valid: Vec<_> = directory
         .sealing_keys(BOB)
         .unwrap()
@@ -2127,4 +2162,362 @@ fn sealing_key_records_at_one_position_are_ordered_by_id() {
     world.deliver(ALICE, BOB, &v0);
     let chain = world.read().chain(&world).unwrap();
     assert!(world.acquire(BOB).has_current(&chain));
+}
+
+/// The member helpers over a read made with `registry`, at the world's
+/// current cut, with every account's ledger except `left_out`.
+struct Helpers {
+    lacking: ProtocolResult<members::LackingMembers>,
+    mark: ProtocolResult<members::RotationMark>,
+    recipients: ProtocolResult<members::RotationRecipients>,
+}
+
+fn helpers(world: &World, registry: &Registry, left_out: Option<&str>) -> Helpers {
+    let read = world.read();
+    let ledgers: Vec<_> = read
+        .ledgers
+        .iter()
+        .filter(|ledger| Some(ledger.account_id.as_str()) != left_out)
+        .cloned()
+        .collect();
+    let directory =
+        AccountDirectory::new(&ledgers, &world.shared.domain, registry, read.space.through)
+            .unwrap();
+    let chain = SpaceChain::replay(&read.space, &directory)
+        .unwrap()
+        .unwrap();
+    let mut rng = TestRandom(1);
+    Helpers {
+        lacking: lacking(&chain, &read.space, &directory),
+        mark: rotation_mark(&chain, &read.space, &directory),
+        recipients: rotation_recipients(&chain, &read.space, &directory, ALICE, BUILTIN, &mut rng),
+    }
+}
+
+/// A member whose account history needs a capability this client lacks
+/// (here, Bob's devices sign with a mechanism the reader does not have) is
+/// skipped and reported as unsupported, never as invalid; the others are
+/// still served: Carol lacks the version, is a rotation recipient and
+/// receives it. Bob holds the current version under an account epoch a
+/// device removal superseded: a client that can read Bob's history marks
+/// the space, and one that cannot reports Bob and does not set the mark, so
+/// it does not rotate on every write while newer clients keep delivering
+/// to him. A member whose account rows the caller left out of the read is
+/// still inconsistent evidence (§3.4, "A member this client cannot
+/// evaluate").
+///
+/// ```text
+/// alice ──root──► space            members: alice, bob, carol
+/// alice ──delivery(v0)──► bob      bob removes a device (other-sign)
+/// reader (built-ins) ── lacking: carol; unsupported: bob; mark: unset
+/// alice ──delivery(v0)──► carol
+/// ```
+#[test]
+fn a_member_whose_history_this_client_cannot_read_is_skipped_and_reported() {
+    let (registry, _) = custom_registry(OTHER_SEAL);
+    let mut world = World::with_registry(64, registry);
+    world.account(ALICE);
+    world.account_with(
+        BOB,
+        MechanismConfig {
+            signature: OTHER_SIGN.into(),
+            ..MechanismConfig::default()
+        },
+    );
+    world.account(CAROL);
+    for account in [ALICE, BOB, CAROL] {
+        world.add_member(account);
+    }
+    world.create(ALICE);
+    let v0 = world.current();
+    world.deliver(ALICE, BOB, &v0);
+    let phone = world.approve_device(BOB);
+    world.remove_device(BOB, &phone.id);
+
+    // A reader with Bob's signing mechanism evaluates him: the removal
+    // marks the space.
+    let full = helpers(&world, &world.shared.registry, None);
+    assert!(full.mark.unwrap().needs_rotation());
+    let lacks = full.lacking.unwrap();
+    assert!(lacks.unsupported.is_empty());
+    assert_eq!(lacks.lacking.len(), 1);
+    assert_eq!(lacks.lacking[0].account_id, CAROL);
+
+    // A reader without it skips Bob and serves Carol.
+    let builtin = Registry::builtin();
+    let unsupported = vec![members::UnsupportedMember {
+        account_id: BOB.to_owned(),
+        capability: UnsupportedCapability::SigningMechanism,
+    }];
+    let partial = helpers(&world, &builtin, None);
+    let lacks = partial.lacking.unwrap();
+    assert_eq!(
+        lacks
+            .lacking
+            .iter()
+            .map(|entry| (entry.account_id.as_str(), entry.epoch_ids.clone()))
+            .collect::<Vec<_>>(),
+        [(CAROL, vec![v0.clone()])]
+    );
+    assert_eq!(lacks.unsupported, unsupported);
+    let recipients = partial.recipients.unwrap();
+    assert_eq!(
+        recipients
+            .first
+            .iter()
+            .map(|recipient| recipient.account_id())
+            .collect::<Vec<_>>(),
+        [CAROL]
+    );
+    assert!(recipients.waiting.is_empty());
+    assert_eq!(recipients.unsupported, unsupported);
+    let mark = partial.mark.unwrap();
+    assert!(!mark.needs_rotation());
+    assert_eq!(mark.unsupported, unsupported);
+
+    world.deliver(ALICE, CAROL, &v0);
+    let chain = world.read().chain(&world).unwrap();
+    assert!(world.acquire(CAROL).has_current(&chain));
+    let lacks = helpers(&world, &builtin, None).lacking.unwrap();
+    assert!(lacks.lacking.is_empty());
+    assert_eq!(lacks.unsupported, unsupported);
+
+    // Carol's account rows left out of the read: inconsistent evidence,
+    // not a member to skip.
+    let missing = helpers(&world, &builtin, Some(CAROL));
+    let inconsistent = Some(ProtocolError::InconsistentEvidence);
+    assert_eq!(missing.lacking.err(), inconsistent);
+    assert_eq!(missing.mark.err(), inconsistent);
+    assert_eq!(missing.recipients.err(), inconsistent);
+}
+
+/// A read filtered for one account (the space's roots and successors, that
+/// account's member rows and the deliveries addressed to it) serves that
+/// account's acquisition and the chain replay, and nothing else: another
+/// account's acquisition and every helper that needs the whole space
+/// refuse it as inconsistent evidence (§3.3, §3.4).
+#[test]
+fn a_read_for_one_account_serves_only_that_accounts_acquisition() {
+    let mut world = space(65, &[ALICE, BOB]);
+    let v0 = world.current();
+    world.deliver(ALICE, BOB, &v0);
+    let whole = world.read();
+    assert_eq!(whole.space.filtered_for(), None);
+    let mut bobs = SpaceLedger::one_account(address(), whole.space.through, BOB);
+    assert_eq!(bobs.filtered_for(), Some(BOB));
+    bobs.roots = whole.space.roots.clone();
+    bobs.successors = whole.space.successors.clone();
+    bobs.members = whole
+        .space
+        .members
+        .iter()
+        .filter(|member| member.row.account_id == BOB)
+        .cloned()
+        .collect();
+    bobs.deliveries = whole
+        .space
+        .deliveries
+        .iter()
+        .filter(|delivery| delivery.row.recipient_account_id == BOB)
+        .cloned()
+        .collect();
+    let directory = whole.directory(&world);
+    let chain = SpaceChain::replay(&bobs, &directory).unwrap().unwrap();
+    assert_eq!(chain, whole.chain(&world).unwrap());
+
+    let registry = &world.shared.registry;
+    let bob = world.own(BOB);
+    assert!(
+        acquire(&chain, &bobs, &bob.epoch_keys, registry)
+            .unwrap()
+            .has_current(&chain)
+    );
+    let alice = world.own(ALICE);
+    let inconsistent = Some(ProtocolError::InconsistentEvidence);
+    assert_eq!(
+        acquire(&chain, &bobs, &alice.epoch_keys, registry).err(),
+        inconsistent
+    );
+    let mut rng = TestRandom(65);
+    assert_eq!(members::holders(&chain, &bobs, 0).err(), inconsistent);
+    assert_eq!(
+        members::envelopes(&chain, &bobs, 0, false).err(),
+        inconsistent
+    );
+    assert_eq!(lacking(&chain, &bobs, &directory).err(), inconsistent);
+    assert_eq!(rotation_mark(&chain, &bobs, &directory).err(), inconsistent);
+    assert_eq!(
+        rotation_recipients(&chain, &bobs, &directory, ALICE, BUILTIN, &mut rng).err(),
+        inconsistent
+    );
+    // The whole space's read serves every helper.
+    assert!(lacking(&chain, &whole.space, &directory).is_ok());
+    assert!(
+        acquire(&chain, &whole.space, &alice.epoch_keys, registry)
+            .unwrap()
+            .has_current(&chain)
+    );
+}
+
+/// A key that opens and passes its own version's marker but whose history
+/// fails further back is not accepted, and is not reported against the
+/// member that delivered it: the fault is the earlier successor's, reported
+/// as a broken history naming that successor, its version and its author
+/// (§3.3, §3.4).
+///
+/// ```text
+/// alice ──successor v1 (history to v0 later broken)──► space
+/// carol ──successor v2 + delivery(v2)──► bob
+/// bob opens v2 ✓, v2's marker ✓, v2 → v1 ✓, v1 → v0 ✗
+///     no invalid delivery naming carol; broken history: v1 by alice
+/// ```
+#[test]
+fn a_broken_history_further_back_is_not_reported_against_the_sender() {
+    let mut world = space(66, &[ALICE, BOB, CAROL]);
+    let v0 = world.current();
+    world.deliver(ALICE, BOB, &v0);
+    world.deliver(ALICE, CAROL, &v0);
+    let v1 = world.rotate(ALICE);
+    let v2 = world.rotate(CAROL);
+    let chain = world.read().chain(&world).unwrap();
+    assert_eq!(chain.current().unwrap().epoch_id, v2);
+    assert!(world.acquire(BOB).has_current(&chain));
+
+    // Alice's successor's history link no longer opens; she signs it again.
+    let index = world
+        .space
+        .successors
+        .iter()
+        .position(|successor| successor.row.epoch_id == v1)
+        .unwrap();
+    let mut damaged = world.space.successors[index].row.clone();
+    let last = damaged.history.len() - 1;
+    damaged.history[last] ^= 1;
+    resign(&world, ALICE, &mut damaged);
+    world.space.successors[index].row = damaged.clone();
+    let chain = world.read().chain(&world).unwrap();
+    assert_eq!(chain.current().unwrap().epoch_id, v2);
+
+    let bob = world.acquire(BOB);
+    assert!(bob.keys.holds(&v0));
+    assert!(!bob.keys.holds(&v1));
+    assert!(!bob.keys.holds(&v2));
+    assert!(
+        bob.invalid_deliveries.is_empty(),
+        "neither carol's delivery of v2 nor alice's of v1 is at fault"
+    );
+    assert_eq!(
+        bob.broken_history,
+        [BrokenHistory {
+            space: address(),
+            key_epoch_id: v1,
+            successor_id: damaged.id,
+            author_account_id: ALICE.to_owned(),
+        }]
+    );
+}
+
+/// An invalid root with a lower ID, accepted at the same position as a
+/// valid root, does not displace it: ties are broken by ID among valid
+/// roots only (§3.2).
+#[test]
+fn an_invalid_root_with_a_lower_id_at_the_same_position_does_not_displace_a_valid_one() {
+    let mut world = World::new(67);
+    world.account(ALICE);
+    world.add_member(ALICE);
+    let device = world.accounts[ALICE].device.clone();
+    let valid = world.build_root(ROW, ALICE, &device).unwrap().root;
+    let mut invalid = world.build_root(ROW, ALICE, &device).unwrap().root;
+    // The lowest well-formed ID; the signature no longer covers the row.
+    invalid.id = "00000000-0000-4000-8000-000000000000".to_owned();
+    assert!(invalid.id < valid.id);
+    let at = world.next();
+    world.space.roots.push(Accepted::new(at, invalid.clone()));
+    world.space.roots.push(Accepted::new(at, valid.clone()));
+    let chain = world.read().chain(&world).unwrap();
+    assert_eq!(chain.root.row.id, valid.id);
+    assert_eq!(chain.lost.len(), 1);
+    assert_eq!(chain.lost[0].root_id, invalid.id);
+    assert_eq!(
+        chain.lost[0].invalid,
+        Some(InvalidSpaceRoot::SignatureInvalid)
+    );
+    assert!(world.acquire(ALICE).has_current(&chain));
+}
+
+/// An invalid successor with a lower ID, accepted at the same position as
+/// a valid successor of the same version, does not displace it: the next
+/// version is the first valid successor (§3.3).
+#[test]
+fn an_invalid_successor_with_a_lower_id_at_the_same_position_does_not_displace_a_valid_one() {
+    let mut world = space(68, &[ALICE, BOB]);
+    let v0 = world.current();
+    let valid = world
+        .build_rotation(ALICE, false)
+        .unwrap()
+        .records
+        .successor;
+    let mut invalid = world
+        .build_rotation(ALICE, false)
+        .unwrap()
+        .records
+        .successor;
+    invalid.id = "00000000-0000-4000-8000-000000000000".to_owned();
+    assert!(invalid.id < valid.id);
+    let at = world.next();
+    world
+        .space
+        .successors
+        .push(Accepted::new(at, invalid.clone()));
+    world
+        .space
+        .successors
+        .push(Accepted::new(at, valid.clone()));
+    let chain = world.read().chain(&world).unwrap();
+    let epochs: Vec<_> = chain.versions.iter().map(|v| v.epoch_id.clone()).collect();
+    assert_eq!(epochs, [v0, valid.epoch_id.clone()]);
+    assert_eq!(
+        chain.versions[1].successor.as_ref().unwrap().row.id,
+        valid.id
+    );
+}
+
+/// A delivery accepted at exactly the root's position is skipped for
+/// acquiring and for who lacks a version, but counts for key holders and
+/// for the needs-rotation mark, the safe direction (§3.3, §3.4).
+#[test]
+fn a_delivery_at_the_roots_position_counts_for_holders_but_not_for_acquiring() {
+    let mut world = space(69, &[ALICE, BOB]);
+    let v0 = world.current();
+    let chain = world.read().chain(&world).unwrap();
+    let early = world.build_delivery(ALICE, BOB, &v0).unwrap();
+    world
+        .space
+        .deliveries
+        .push(Accepted::new(chain.root.position, early.clone()));
+
+    let bob = world.acquire(BOB);
+    assert!(!bob.has_current(&chain));
+    assert!(bob.invalid_deliveries.is_empty());
+    assert_eq!(lacking_of(&world), [(BOB.to_owned(), vec![v0.clone()])]);
+    let read = world.read();
+    let chain = read.chain(&world).unwrap();
+    assert_eq!(
+        members::holders(&chain, &read.space, 0).unwrap(),
+        [ALICE.to_owned(), BOB.to_owned()].into()
+    );
+    let ids = |after_root| {
+        members::envelopes(&chain, &read.space, 0, after_root)
+            .unwrap()
+            .into_iter()
+            .map(|envelope| envelope.record_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(false), [chain.root.row.id.clone(), early.id.clone()]);
+    assert_eq!(ids(true), std::slice::from_ref(&chain.root.row.id));
+
+    world.remove_member(BOB);
+    let mark = mark_of(&world);
+    assert!(mark.needs_rotation());
+    assert_eq!(mark.former_members, [BOB]);
 }

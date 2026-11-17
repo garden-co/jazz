@@ -5,7 +5,10 @@
 //! Every ledger must come from the same read: one cut for all. An account
 //! whose public ledger the caller did not supply is
 //! [`ProtocolError::InconsistentEvidence`]: evidence the replay needs was
-//! left out, which is never read as "not active" or "no key".
+//! left out, which is never read as "not active" or "no key". An account
+//! whose history needs a capability this client lacks is
+//! [`ProtocolError::Unsupported`]; the member helpers skip and report such
+//! a member rather than fail for the whole space (§3.4).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,6 +29,15 @@ use super::super::signing;
 /// The rows of one space at cut `through`: its member rows as the read sees
 /// them, and its roots, successors and deliveries (R12, R14). Rows naming
 /// another address are ignored by replay.
+///
+/// A read is of one of two kinds, fixed when it is made and not changed
+/// afterwards: a read of the **whole space** (every member row and every
+/// delivery of the address), or a read filtered for **one account** (the
+/// roots and successors, with that account's own member rows and the
+/// deliveries addressed to it, R12, R14). Replaying the chain and acquiring
+/// keys accept either; who holds or lacks a version, the needs-rotation
+/// mark and a rotation's recipients need the whole space and refuse a
+/// one-account read as [`ProtocolError::InconsistentEvidence`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpaceLedger {
     pub address: SpaceAddress,
@@ -34,11 +46,18 @@ pub struct SpaceLedger {
     pub roots: Vec<Accepted<SpaceRoot>>,
     pub successors: Vec<Accepted<SpaceSuccessor>>,
     pub deliveries: Vec<Accepted<SpaceDelivery>>,
+    kind: ReadKind,
+}
+
+/// What a space read covers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReadKind {
+    WholeSpace,
+    OneAccount(String),
 }
 
 impl SpaceLedger {
-    /// An empty read of `address` at `through`.
-    pub fn new(address: SpaceAddress, through: Position) -> Self {
+    fn empty(address: SpaceAddress, through: Position, kind: ReadKind) -> Self {
         Self {
             address,
             through,
@@ -46,6 +65,43 @@ impl SpaceLedger {
             roots: Vec::new(),
             successors: Vec::new(),
             deliveries: Vec::new(),
+            kind,
+        }
+    }
+
+    /// An empty read of the whole space at `address` at `through`: the
+    /// caller fills in every row of the address the read returned.
+    pub fn whole_space(address: SpaceAddress, through: Position) -> Self {
+        Self::empty(address, through, ReadKind::WholeSpace)
+    }
+
+    /// An empty read of `address` at `through` filtered for `account_id`:
+    /// the roots and successors, and that account's member rows and the
+    /// deliveries addressed to it. Only acquisition by a device of that
+    /// account and the chain replay take it.
+    pub fn one_account(address: SpaceAddress, through: Position, account_id: &str) -> Self {
+        Self::empty(
+            address,
+            through,
+            ReadKind::OneAccount(account_id.to_owned()),
+        )
+    }
+
+    /// The account a one-account read was filtered for; `None` for a read
+    /// of the whole space.
+    pub fn filtered_for(&self) -> Option<&str> {
+        match &self.kind {
+            ReadKind::WholeSpace => None,
+            ReadKind::OneAccount(account_id) => Some(account_id),
+        }
+    }
+
+    /// Fails with [`ProtocolError::InconsistentEvidence`] unless this is a
+    /// read of the whole space.
+    pub(crate) fn require_whole_space(&self) -> ProtocolResult<()> {
+        match self.kind {
+            ReadKind::WholeSpace => Ok(()),
+            ReadKind::OneAccount(_) => Err(ProtocolError::InconsistentEvidence),
         }
     }
 
@@ -261,11 +317,35 @@ pub enum AuthorCheck {
 }
 
 /// A member account's current epoch and the sealing key record a delivery
-/// to it is sealed to (§2.12, §3.4).
+/// to it is sealed to (§2.12, §3.4). Built only by
+/// [`AccountDirectory::recipient`], from the account's replayed public
+/// history, so a delivery is never sealed to a record the caller assembled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recipient {
-    pub account_id: String,
-    pub account_epoch_id: String,
-    pub generation: u64,
-    pub sealing_key: Accepted<AccountSealingKey>,
+    account_id: String,
+    account_epoch_id: String,
+    generation: u64,
+    sealing_key: Accepted<AccountSealingKey>,
+}
+
+impl Recipient {
+    pub fn account_id(&self) -> &str {
+        &self.account_id
+    }
+
+    /// The account's current epoch at the read, which the delivery names.
+    pub fn account_epoch_id(&self) -> &str {
+        &self.account_epoch_id
+    }
+
+    /// The account's current generation (§2.11).
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The first valid sealing key record of the current epoch and the
+    /// selected mechanism (§2.12).
+    pub fn sealing_key(&self) -> &Accepted<AccountSealingKey> {
+        &self.sealing_key
+    }
 }

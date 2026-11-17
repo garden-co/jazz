@@ -10,12 +10,19 @@
 //! marker verifies.
 //!
 //! A candidate that provably fails to open or authenticate (malformed, or
-//! failed authentication, or a marker other than `Z32`) is skipped; a
-//! delivery that does is reported as an invalid delivery. A candidate
-//! naming an account epoch the device cannot reach (another generation),
-//! a delivery at or before the root's position, and a candidate of a
-//! mechanism this reader does not route (unregistered or not allowed) are
-//! skipped and not reported. A provider failure fails the operation.
+//! failed authentication, or a marker other than `Z32`) is skipped. A
+//! delivery is reported as an invalid delivery only for its own fault: its
+//! envelope does not open, or the key it opens fails its own version's
+//! marker (§3.4). A key that opens and passes its own marker but whose
+//! history fails further back is not accepted either, and is reported as a
+//! broken history naming the successor whose link fails, never against the
+//! delivery's sender: the fault is in the chain. A candidate naming an
+//! account epoch the device cannot reach (another generation), a delivery
+//! at or before the root's position, and a candidate of a mechanism this
+//! reader does not route (unregistered or not allowed) are skipped and not
+//! reported. A provider failure fails the operation. Once a version is
+//! held, no further candidate of it is opened, so later bad deliveries of
+//! it are not reported.
 
 use std::collections::BTreeMap;
 
@@ -28,7 +35,7 @@ use super::super::account::AccountEpochKeys;
 use super::super::derive;
 use super::super::domain::AccountDomain;
 use super::super::error::{ProtocolError, ProtocolResult};
-use super::super::records::space::SpaceScope;
+use super::super::records::space::{SpaceAddress, SpaceScope};
 use super::chain::SpaceChain;
 use super::ledger::SpaceLedger;
 
@@ -135,19 +142,34 @@ fn version_marker(
     marker(registry, key, &context, envelope)
 }
 
+/// What authenticating one key against the chain showed.
+enum PathCheck {
+    /// Every key the path reaches, by depth.
+    Ok(PathKeys),
+    /// The key fails its own version's marker.
+    Invalid,
+    /// The key passes its own version's marker, but the `history` link of
+    /// the successor of the version at this depth, or the marker of the
+    /// key it opens, fails: a fault of the chain, not of the candidate.
+    BrokenHistory(usize),
+    /// A marker or history link is of a mechanism this reader does not
+    /// route.
+    Unsupported,
+}
+
 /// Authenticates `key` as the key of the version at `depth`: its marker,
 /// then each `history` link back to the root, each opened key checked by
-/// its version's marker. Returns every key the path reaches, by depth.
+/// its version's marker.
 fn authenticate(
     chain: &SpaceChain,
     registry: &Registry,
     depth: usize,
     key: Zeroizing<[u8; 32]>,
-) -> ProtocolResult<Outcome<PathKeys>> {
+) -> ProtocolResult<PathCheck> {
     match version_marker(chain, registry, depth, &key)? {
         Outcome::Ok(()) => {}
-        Outcome::Invalid => return Ok(Outcome::Invalid),
-        Outcome::Unsupported => return Ok(Outcome::Unsupported),
+        Outcome::Invalid => return Ok(PathCheck::Invalid),
+        Outcome::Unsupported => return Ok(PathCheck::Unsupported),
     }
     let mut keys = vec![(depth, key)];
     let mut at = depth;
@@ -161,30 +183,47 @@ fn authenticate(
         let later = &keys.last().expect("the later key is held").1;
         let opened = match unwrap(registry, later, &context, &successor.history)? {
             Outcome::Ok(opened) => opened,
-            Outcome::Invalid => return Ok(Outcome::Invalid),
-            Outcome::Unsupported => return Ok(Outcome::Unsupported),
+            Outcome::Invalid => return Ok(PathCheck::BrokenHistory(at)),
+            Outcome::Unsupported => return Ok(PathCheck::Unsupported),
         };
         match version_marker(chain, registry, previous, &opened)? {
             Outcome::Ok(()) => {}
-            Outcome::Invalid => return Ok(Outcome::Invalid),
-            Outcome::Unsupported => return Ok(Outcome::Unsupported),
+            Outcome::Invalid => return Ok(PathCheck::BrokenHistory(at)),
+            Outcome::Unsupported => return Ok(PathCheck::Unsupported),
         }
         keys.push((previous, opened));
         at = previous;
     }
-    Ok(Outcome::Ok(keys))
+    Ok(PathCheck::Ok(keys))
 }
 
-/// A delivery to this account that provably failed to open or
-/// authenticate (§3.4). Each of the recipient's devices emits one
-/// `invalid-delivery` encryption event `{space, sender, recipient,
-/// keyEpochId}` per delivery; nothing is written.
+/// A delivery to this account whose envelope provably failed to open, or
+/// whose opened key failed its own version's marker (§3.4). Each of the
+/// recipient's devices emits one `invalid-delivery` encryption event
+/// `{space, sender, recipient, keyEpochId}` per delivery; nothing is
+/// written. A key that fails only a history link further back is a
+/// [`BrokenHistory`], never an invalid delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvalidDelivery {
     pub delivery_id: String,
     pub sender_account_id: String,
     pub recipient_account_id: String,
     pub key_epoch_id: String,
+}
+
+/// A key of the space that opened and passed its own version's marker, but
+/// whose `history` fails further back (§3.3, §3.4): the `history` link of
+/// the successor named here does not unwrap, or unwraps a key that fails
+/// its version's marker. The key is not accepted. The fault is in that
+/// successor, so it is reported against the successor's author, not
+/// against whoever delivered the key; the runtime emits it as an event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokenHistory {
+    pub space: SpaceAddress,
+    /// The version the failing successor opened (its `epochId`).
+    pub key_epoch_id: String,
+    pub successor_id: String,
+    pub author_account_id: String,
 }
 
 /// Authenticated keys of one space, by depth in its chain. Built only by
@@ -353,12 +392,12 @@ impl SpaceKeys {
         self.extend(chain);
         Ok(
             match authenticate(chain, registry, depth, Zeroizing::new(*key))? {
-                Outcome::Ok(keys) => {
+                PathCheck::Ok(keys) => {
                     self.insert(keys);
                     KeyCheck::Accepted
                 }
-                Outcome::Invalid => KeyCheck::Invalid,
-                Outcome::Unsupported => KeyCheck::Unsupported,
+                PathCheck::Invalid | PathCheck::BrokenHistory(_) => KeyCheck::Invalid,
+                PathCheck::Unsupported => KeyCheck::Unsupported,
             },
         )
     }
@@ -383,9 +422,12 @@ pub struct Acquisition {
     /// Every key accepted, including earlier versions the history links
     /// reach: all become held keys (§4.2).
     pub keys: SpaceKeys,
-    /// Deliveries to this account that provably failed (§3.4), by
-    /// position then ID.
+    /// Deliveries to this account that provably failed for their own
+    /// fault (§3.4), by version (current first), then position and ID.
     pub invalid_deliveries: Vec<InvalidDelivery>,
+    /// Successors whose `history` link failed under a key that opened and
+    /// passed its own marker, once each, in the order found.
+    pub broken_history: Vec<BrokenHistory>,
     /// Row IDs of candidates (roots, successors or deliveries) skipped
     /// because an envelope, marker or history link is of a mechanism this
     /// reader does not route. They are not reported as invalid deliveries.
@@ -408,7 +450,15 @@ impl Acquisition {
 /// newer key do not reach. `own` are the account epoch keys of the device's
 /// own account, current generation (§2.12); `ledger` holds the deliveries
 /// addressed to that account and must be the read `chain` was replayed
-/// from. Over an unresolved chain, only its resolved versions are acquired.
+/// from, either of the whole space or filtered for this account (a read
+/// filtered for another account is
+/// [`ProtocolError::InconsistentEvidence`]). Over an unresolved chain, only
+/// its resolved versions are acquired.
+///
+/// Once a version's key is held, no further candidate of it is opened: the
+/// first candidate that authenticates ends the search for that version,
+/// and later deliveries of it, good or bad, are neither opened nor
+/// reported.
 pub fn acquire(
     chain: &SpaceChain,
     ledger: &SpaceLedger,
@@ -417,10 +467,33 @@ pub fn acquire(
 ) -> ProtocolResult<Acquisition> {
     chain.check_read(ledger, None)?;
     let account_id = own.account_id();
+    if ledger
+        .filtered_for()
+        .is_some_and(|filtered| filtered != account_id)
+    {
+        return Err(ProtocolError::InconsistentEvidence);
+    }
     let root_position = chain.root.position;
     let mut keys = SpaceKeys::new(chain);
     let mut invalid_deliveries = Vec::new();
+    let mut broken_history = Vec::new();
     let mut unsupported = Vec::new();
+    let mut broken = |depth: usize| {
+        let successor = &chain.versions[depth]
+            .successor
+            .as_ref()
+            .expect("a version with a history link has a successor")
+            .row;
+        let report = BrokenHistory {
+            space: chain.address().clone(),
+            key_epoch_id: successor.epoch_id.clone(),
+            successor_id: successor.id.clone(),
+            author_account_id: successor.author_account_id.clone(),
+        };
+        if !broken_history.contains(&report) {
+            broken_history.push(report);
+        }
+    };
     for depth in (0..chain.versions.len()).rev() {
         if keys.keys.contains_key(&depth) {
             continue;
@@ -450,12 +523,13 @@ pub fn acquire(
                 ),
             };
             match try_candidate(chain, registry, depth, epoch_key, &context, envelope)? {
-                Outcome::Ok(found) => {
+                PathCheck::Ok(found) => {
                     keys.insert(found);
                     continue;
                 }
-                Outcome::Invalid => {}
-                Outcome::Unsupported => unsupported.push(record_id.clone()),
+                PathCheck::Invalid => {}
+                PathCheck::BrokenHistory(at) => broken(at),
+                PathCheck::Unsupported => unsupported.push(record_id.clone()),
             }
         }
         for delivery in ledger.deliveries_of(&version.epoch_id) {
@@ -470,26 +544,30 @@ pub fn acquire(
                 Ok(context) if row.validate(&chain.scope).is_ok() => {
                     try_candidate(chain, registry, depth, epoch_key, &context, &row.envelope)?
                 }
-                _ => Outcome::Invalid,
+                _ => PathCheck::Invalid,
             };
             match outcome {
-                Outcome::Ok(found) => {
+                PathCheck::Ok(found) => {
                     keys.insert(found);
                     break;
                 }
-                Outcome::Invalid => invalid_deliveries.push(InvalidDelivery {
+                // The delivery is not at fault: its key passed its own
+                // version's marker.
+                PathCheck::BrokenHistory(at) => broken(at),
+                PathCheck::Invalid => invalid_deliveries.push(InvalidDelivery {
                     delivery_id: row.id.clone(),
                     sender_account_id: row.sender_account_id.clone(),
                     recipient_account_id: row.recipient_account_id.clone(),
                     key_epoch_id: row.key_epoch_id.clone(),
                 }),
-                Outcome::Unsupported => unsupported.push(row.id.clone()),
+                PathCheck::Unsupported => unsupported.push(row.id.clone()),
             }
         }
     }
     Ok(Acquisition {
         keys,
         invalid_deliveries,
+        broken_history,
         unsupported,
     })
 }
@@ -502,10 +580,10 @@ fn try_candidate(
     epoch_key: &[u8; 32],
     context: &[u8],
     envelope: &[u8],
-) -> ProtocolResult<Outcome<PathKeys>> {
+) -> ProtocolResult<PathCheck> {
     match open_account_envelope(registry, epoch_key, context, envelope)? {
         Outcome::Ok(key) => authenticate(chain, registry, depth, key),
-        Outcome::Invalid => Ok(Outcome::Invalid),
-        Outcome::Unsupported => Ok(Outcome::Unsupported),
+        Outcome::Invalid => Ok(PathCheck::Invalid),
+        Outcome::Unsupported => Ok(PathCheck::Unsupported),
     }
 }

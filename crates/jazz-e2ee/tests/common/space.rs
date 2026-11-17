@@ -113,7 +113,7 @@ impl World {
                 domain: env.domain,
             },
             accounts: BTreeMap::new(),
-            space: SpaceLedger::new(address(), Position(0)),
+            space: SpaceLedger::whole_space(address(), Position(0)),
             rng: TestRandom(seed),
             next: 1,
         }
