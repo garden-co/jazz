@@ -537,7 +537,9 @@ fn retired_recovery_root_no_longer_approves() {
     let mut current = stale.records.public.clone();
     current.id = ids::random_v4(&mut rng).unwrap();
     current.epoch_id = state.epoch_id().to_owned();
-    let bytes = current.signed_bytes(&env.application()).unwrap();
+    let bytes = current
+        .signed_bytes(&env.application(), &replacement.keys())
+        .unwrap();
     let signer = env.registry.signer(signature::MECHANISM).unwrap();
     current.signature = signing::sign(signer, &replacement.signing, &bytes).unwrap();
     current.recovery_signature = Some(signing::sign(signer, &recovery.signing, &bytes).unwrap());
@@ -743,10 +745,10 @@ fn intrinsic_contradictions_fail_replay() {
     );
 }
 
-/// An approval whose recipient has no published keys is a contradiction
-/// once its signature verifies.
+/// An approval signs its device's keys (§2.5), so one whose device has no
+/// published keys cannot be verified: it is skipped, and replay goes on.
 #[test]
-fn approval_without_recipient_keys_is_a_contradiction() {
+fn approval_without_recipient_keys_is_skipped() {
     let env = Env::new(ALICE);
     let mut rng = TestRandom(15);
     let laptop = env.device(&mut rng);
@@ -760,9 +762,77 @@ fn approval_without_recipient_keys_is_a_contradiction() {
         .public
         .keys
         .retain(|row| row.row.device_id != phone.id);
+    let state = ledger.replay(&env).current().unwrap().unwrap();
+    assert!(!state.is_active(&phone.id));
+    assert!(state.is_active(&laptop.id));
+}
+
+/// A server that shows a client another keys row for an approved device
+/// (its own keys under the device's ID) gains nothing: the approval signed
+/// the device's real keys, so it no longer verifies and the device is not
+/// active in that client's replay. Nothing is sealed to the substituted
+/// keys, and nothing signed with them is accepted.
+#[test]
+fn substituted_device_keys_do_not_activate_the_approved_device() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(16);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mallory = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    assert!(ledger.state(&env).is_active(&phone.id));
+
+    let mut substituted = ledger.public.clone();
+    for row in &mut substituted.keys {
+        if row.row.device_id == phone.id {
+            row.row.keys = mallory.keys();
+        }
+    }
+    let replay =
+        jazz_e2ee::protocol::account::AccountReplay::new(&substituted, &env.domain, &env.registry)
+            .unwrap();
+    let state = replay.current().unwrap().unwrap();
+    assert!(!state.is_active(&phone.id));
+    assert!(state.is_active(&laptop.id));
+    assert_eq!(state.active.len(), 1);
+}
+
+/// An `app` root is unsigned, so before first contact a client cannot tell
+/// its device's keys from substituted ones (§8). After it, the floor holds
+/// the root device's keys, and a later read showing other keys for that
+/// device is refused as `root-not-mine`.
+#[test]
+fn a_floor_refuses_substituted_root_device_keys() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(17);
+    let laptop = env.device(&mut rng);
+    let mallory = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    let through = ledger.public.through;
+    let state = ledger.state(&env);
+    let floor = state.floor(through, None);
+    assert_eq!(floor.root_keys, laptop.keys());
+    state.check_floor(through, &floor).unwrap();
+
+    let mut substituted = ledger.public.clone();
+    for row in &mut substituted.keys {
+        if row.row.device_id == laptop.id {
+            row.row.keys = mallory.keys();
+        }
+    }
+    let replay =
+        jazz_e2ee::protocol::account::AccountReplay::new(&substituted, &env.domain, &env.registry)
+            .unwrap();
+    let state = replay.current().unwrap().unwrap();
     assert_eq!(
-        ledger.replay(&env).current().unwrap_err(),
-        ProtocolError::Intrinsic(IntrinsicContradiction::MissingRecipientKey)
+        state.check_floor(through, &floor).unwrap_err(),
+        ProtocolError::RootNotMine
     );
 }
 
@@ -1141,7 +1211,7 @@ fn private_evidence_is_bound_to_its_state() {
     let mut public = ledger.public.clone();
     let row = &mut public.approvals[0].row;
     row.id = ids::random_v4(&mut rng).unwrap();
-    let bytes = row.signed_bytes(&env.application()).unwrap();
+    let bytes = row.signed_bytes(&env.application(), &phone.keys()).unwrap();
     row.signature = signing::sign(&signature::Builtin, &laptop.signing, &bytes).unwrap();
     let replay =
         jazz_e2ee::protocol::account::AccountReplay::new(&public, &env.domain, &env.registry)

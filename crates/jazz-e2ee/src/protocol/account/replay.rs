@@ -123,6 +123,11 @@ impl AccountState {
             through,
             generation: self.generation,
             root_id: self.root.row.id.clone(),
+            root_keys: self
+                .keys
+                .get(&self.root.row.device_id)
+                .cloned()
+                .expect("a state has its root device's keys"),
             epoch_id: epoch.epoch_id.clone(),
             epoch_position: epoch.position,
             active_device: own_device
@@ -139,8 +144,9 @@ impl AccountState {
     ///    generation, or, at the floor's generation, the floor's epoch
     ///    missing from the chain) is [`ProtocolError::StaleState`].
     /// 2. A chain whose root of the floor's generation is not the floor's
-    ///    root is [`ProtocolError::RootNotMine`]: the root this device
-    ///    verified was replaced.
+    ///    root, or whose root device keys differ from the floor's, is
+    ///    [`ProtocolError::RootNotMine`]: the root this device verified, or
+    ///    its device's keys, were replaced.
     /// 3. When the floor records this device as active and it is not
     ///    active in this state (it was removed, or the account moved to a
     ///    generation it is not part of), the outcome is
@@ -157,7 +163,10 @@ impl AccountState {
         let root = usize::try_from(floor.generation)
             .ok()
             .and_then(|generation| self.roots.get(generation));
-        if root.is_none_or(|root| root.row.id != floor.root_id) {
+        if root.is_none_or(|root| {
+            root.row.id != floor.root_id
+                || self.keys.get(&root.row.device_id) != Some(&floor.root_keys)
+        }) {
             return Err(ProtocolError::RootNotMine);
         }
         if self.generation == floor.generation
@@ -202,6 +211,10 @@ pub struct AccountFloor {
     pub generation: u64,
     /// The canonical root of `generation`.
     pub root_id: String,
+    /// That root's device keys as this device verified them. An `app` root
+    /// is unsigned, so this is what catches a later substitution of its
+    /// device's keys row after first contact (§2.4, "Floors").
+    pub root_keys: KeyColumns,
     pub epoch_id: String,
     pub epoch_position: Position,
     /// This device, if the floor is of its own account and it was active.
@@ -909,7 +922,14 @@ impl Run<'_, '_> {
         if approval.validate().is_err() {
             return Ok(false);
         }
-        let Ok(bytes) = approval.signed_bytes(&self.replay.application) else {
+        // The approval signs the approved device's published keys (§2.5):
+        // a device with no keys row, or a keys row other than the one the
+        // signer saw, cannot verify. Such an approval is skipped, never a
+        // contradiction, so a row nobody can verify never stops replay.
+        let Some(device_keys) = self.keys.get(&approval.device_id) else {
+            return Ok(false);
+        };
+        let Ok(bytes) = approval.signed_bytes(&self.replay.application, device_keys) else {
             return Ok(false);
         };
         match (&approval.recovery_root_id, &approval.recovery_signature) {
@@ -945,15 +965,7 @@ impl Run<'_, '_> {
                 }
             }
         }
-        if !self.verify_device(&approval.signer_id, &bytes, &approval.signature)? {
-            return Ok(false);
-        }
-        if !self.keys.contains_key(&approval.device_id) {
-            return Err(ProtocolError::Intrinsic(
-                IntrinsicContradiction::MissingRecipientKey,
-            ));
-        }
-        Ok(true)
+        self.verify_device(&approval.signer_id, &bytes, &approval.signature)
     }
 }
 

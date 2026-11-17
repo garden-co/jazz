@@ -928,10 +928,17 @@ Replay of an account (`replayOrderedAccount`) is over public rows at one cut:
    after the epoch's position are applied in batches of equal position. An
    approval is accepted iff its signer was active _before the batch_, its
    recipient is not removed, its signature over the public approval bytes
-   (§2.5) verifies, and it is not a non-recovery approval carrying a
-   `recoverySignature`. A recovery approval (§2.9) is accepted regardless of
-   the signer's membership. A false verification skips the row; a signer
-   failure propagates. A missing recipient key is an intrinsic contradiction.
+   (§2.5), which cover the recipient's published keys, verifies, and it is
+   not a non-recovery approval carrying a `recoverySignature`. A recovery
+   approval (§2.9) is accepted regardless of the signer's membership. A
+   false verification skips the row; a signer failure propagates. An
+   approval whose recipient has no published keys cannot be verified and is
+   skipped, like a false verification. A keys row other than the one the
+   signer approved (a substitution) therefore leaves the device inactive:
+   only keys some approval or a signed root vouches for are ever used to
+   seal to a device or to verify its signature. The one exception is the
+   root device of an `app` account, which nothing signs (§2.3); the floor
+   records its keys (below).
 3. **Successors.** Visited one position at a time, in position order. A
    candidate is **valid** unless its account or predecessor differs, it is
    not strictly after the current epoch position, its epoch was already
@@ -989,11 +996,12 @@ first observation the device trusts what it sees (§8).
 
 **Floors.** After it verifies an account state, a device persists, in its
 private store, the account's **floor**: the read's cut, the generation, the
-canonical root of that generation, and the current epoch with its position.
+canonical root of that generation with its device's keys, and the current
+epoch with its position.
 A later read is refused with `stale-state` if its cut is earlier, its
 generation lower, or (same generation) the floor's epoch is not in its
 chain; it is `root-not-mine` if the chain's root of the floor's generation is
-not the floor's root. A floor of the device's own account also records
+not the floor's root, or its device's keys are not the floor's. A floor of the device's own account also records
 whether the device was active. If it was, and the device is not active in
 the newer state (it was removed, or the account moved to a generation it is
 not part of), the outcome is `device-no-longer-active`. A device that was
@@ -1059,7 +1067,11 @@ signature}`
      signed over `ctx{application: D, policy:
 "jazz.e2ee.public-device-approval.v1", scope: "account", identifier:
 account, table: "__e2ee_public_device_approvals", row: approvalId, column:
-"approval-signature:" ‖ signerId, epoch, recipient: deviceId}`;
+"approval-signature:" ‖ signerId, epoch, recipient: deviceId} ‖
+frame[env(signingMechanism, signingPublicKey), env(mechanism, publicKey)]`,
+with the requester's key columns from its request. The approval thereby
+vouches for the device's keys, not only for its ID: the keys row (R4) is
+unsigned, and only the server ties it to the request;
    - delivery `{id: challengeId, envelope: E = seal(requester.pub,
 P("delivery"), K), verification: wrap(K, P("delivery-verification") ‖
 frame[E], Z32)}`.
@@ -2439,8 +2451,8 @@ held keys.
 
 The runtime persists, next to the held-key documents of each scope `Dₐ(self)`,
 a **floor** for every account whose state it has verified: the cut,
-generation, canonical root of that generation, and current epoch with its
-position (§2.4, "Floors"), for the device's own account and for every
+generation, canonical root of that generation and its device's keys, and
+current epoch with its position (§2.4, "Floors"), for the device's own account and for every
 account it replays (authors, delivery recipients). Spaces have no floor: a
 space's state comes from the server, which E2EE does not protect against
 (§8).
@@ -2518,7 +2530,7 @@ names the table, column, space and pending count.
 | Encryption failed           | `encryption-failed`                                                                                                                                                                              | Fail the write                                                                                      | Submit plaintext                                                                               |
 | Provider failure            | The mechanism's `CryptoFailure` (distinct from `InvalidCiphertext`, `InvalidInput`, `NoKeyForMechanism` and a `false` verification), and a writer's failure to read back output it just produced | Fail the operation loudly; preserve the error                                                       | Report it as key unavailable, corrupted ciphertext or an invalid proof; try the next candidate |
 | Unsupported capability      | `ledger-version`, `signing-mechanism`, `signing-version`                                                                                                                                         | Leave the dependent state unresolved                                                                | Treat the record as invalid                                                                    |
-| Intrinsic contradiction     | `conflicting-roots`, `conflicting-device-keys`, `missing-root-key`, `missing-recipient-key`, `missing-signer-key`                                                                                | Fail current replay; skip only a candidate decided at a fixed signed cutoff                         | Pick one of the conflicting rows                                                               |
+| Intrinsic contradiction     | `conflicting-roots`, `conflicting-device-keys`, `missing-root-key`, `missing-signer-key`                                                                                | Fail current replay; skip only a candidate decided at a fixed signed cutoff                         | Pick one of the conflicting rows                                                               |
 | Unknown publication outcome | Publication outcome `unknown`                                                                                                                                                                    | Reconcile the original operation by its record IDs                                                  | Resubmit blindly or replay a callback or source                                                |
 | Recovery failures           | `recovery-cancelled`, `recovery-material-unusable`, `recovery-root-mismatch`, `recovery-delivery-missing`, `recovery-delivery-unusable`                                                          | Only candidate failures permit trying another delivery                                              | Attach private material to the error                                                           |
 | Unsupported shape           | An unsupported-query error naming the operation                                                                                                                                                  | Name the operation                                                                                  | Fall back to a scan                                                                            |
@@ -2535,9 +2547,10 @@ account key is ignored by that device and reported (§2.12).
 
 The missing-key contradictions: `missing-root-key` (an accepted account
 root names a device with no published device keys, §1.2),
-`missing-signer-key` (a signer that is active at a signed record's
-position has none) and `missing-recipient-key` (an approval approves a
-device that has none). Replay cannot verify such records and fails closed.
+and `missing-signer-key` (a signer that is active at a signed record's
+position has none). Replay cannot verify such records and fails closed. An
+approval whose device has no keys is not a contradiction: it cannot be
+verified, and is skipped (§2.4 step 2).
 
 Serialization and transaction conflicts are retried internally only by
 operations that are safe to repeat because they re-read their evidence and
@@ -2744,7 +2757,10 @@ Limits:
   protect it. An app account has nothing a client can check its root
   against: whoever can write as the account, the server included, can write
   its first root and sealing keys, and a server can show a different root
-  (another device and key) to clients that have not seen the account before.
+  (another device and key), or other keys for its root device, to clients
+  that have not seen the account before. Every other device's keys are
+  signed into its approval (§2.5), so substituting them is detected by
+  every client.
   Members delivering to that account then seal to that key. The
   account's own devices raise `root-not-mine` when they see a root other
   than the one they verified (§2.4), but only from their first observation

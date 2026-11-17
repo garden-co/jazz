@@ -669,7 +669,7 @@ fn approval_records(
         recovery_root_id: recovery.map(|keys| keys.root_id.clone()),
         recovery_signature: None,
     };
-    let public_bytes = public.signed_bytes(&application)?;
+    let public_bytes = public.signed_bytes(&application, &requester.keys)?;
     public.signature = writer.sign(&approver.signing, &public_bytes)?;
     if let Some(recovery) = recovery {
         public.recovery_signature = Some(writer.sign(&recovery.signing, &public_bytes)?);
