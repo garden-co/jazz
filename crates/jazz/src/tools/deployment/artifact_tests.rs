@@ -2670,7 +2670,7 @@ fn specialised_indexes_round_trip_through_the_app_file() {
             { "name": "similar", "vector": "embedding", "metric": "cosine" }
         ])
     );
-    let validator = jsonschema::validator_for(&json_schema("jazz.app.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&json_schema("jazz.app.v1.json")).unwrap();
     assert!(validator.is_valid(&app));
     let loaded = load(written.app.as_bytes(), written.permissions.as_bytes()).unwrap();
     let mut read = loaded.current_schema()[&TableName::from("todos")]

@@ -148,7 +148,7 @@
         },
         "indexes": {
           "type": "array",
-          "description": "A column name is a single-column index (listing any makes them the only ones); an array of names is a composite index.",
+          "description": "A column name is a single-column index (listing any makes them the only ones); an array of names is a composite index; an object with `name` and exactly one of `text`, `vector` or `geo` is a specialised index.",
           "items": {
             "anyOf": [
               {
@@ -160,6 +160,15 @@
                   "type": "string"
                 },
                 "minItems": 1
+              },
+              {
+                "$ref": "#/$defs/textIndex"
+              },
+              {
+                "$ref": "#/$defs/vectorIndex"
+              },
+              {
+                "$ref": "#/$defs/geoIndex"
               }
             ]
           }
@@ -424,6 +433,122 @@
           }
         }
       ]
+    },
+    "textIndex": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "text", "analyzer"],
+      "description": "Word search, e.g. { \"name\": \"search\", \"text\": { \"title\": 4, \"body\": 1 }, \"analyzer\": \"jazz-text/1:en\", \"prefix\": true }",
+      "properties": {
+        "$comment": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "maxLength": 32,
+          "description": "Unique among the table's text, vector and geo indexes."
+        },
+        "text": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "String column → its weight, or { weight, length } with the field's reference length in terms (default 32; about 256 suits long text).",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 15
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["weight"],
+                "properties": {
+                  "weight": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 15
+                  },
+                  "length": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4096
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "analyzer": {
+          "enum": ["jazz-text/1:en", "jazz-text/1:simple"]
+        },
+        "prefix": {
+          "type": "boolean",
+          "description": "The last query word also matches as a prefix."
+        },
+        "serverOnly": {
+          "type": "boolean",
+          "description": "Not supported yet: an index declaring it is refused."
+        }
+      }
+    },
+    "vectorIndex": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "vector", "metric"],
+      "description": "Nearest-neighbour search, e.g. { \"name\": \"similar\", \"vector\": \"embedding\", \"metric\": \"cosine\" }",
+      "properties": {
+        "$comment": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "maxLength": 32,
+          "description": "Unique among the table's text, vector and geo indexes."
+        },
+        "vector": {
+          "type": "string",
+          "description": "A vector column."
+        },
+        "metric": {
+          "enum": ["cosine", "l2", "dot"]
+        },
+        "ann": {
+          "const": "exact",
+          "description": "Exact search, the only kind supported yet."
+        },
+        "serverOnly": {
+          "type": "boolean",
+          "description": "Not supported yet: an index declaring it is refused."
+        }
+      }
+    },
+    "geoIndex": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "geo"],
+      "description": "Points on the Earth, e.g. { \"name\": \"place\", \"geo\": \"location\" }",
+      "properties": {
+        "$comment": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "maxLength": 32,
+          "description": "Unique among the table's text, vector and geo indexes."
+        },
+        "geo": {
+          "type": "string",
+          "description": "A point column."
+        },
+        "serverOnly": {
+          "type": "boolean",
+          "description": "Not supported yet: an index declaring it is refused."
+        }
+      }
     }
   }
 }
