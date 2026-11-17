@@ -5920,6 +5920,7 @@ const REJECTION_CODES_BY_REASON: Readonly<Record<NativeCoreErrorReason, string>>
   index_building: "write_rejected",
   vector_search_unbounded: "write_rejected",
   vector_candidates_over_cap: "write_rejected",
+  index_declaration_mismatch: "write_rejected",
 };
 
 /** A rejected wait's code, from the core reason every binding carries on it. */

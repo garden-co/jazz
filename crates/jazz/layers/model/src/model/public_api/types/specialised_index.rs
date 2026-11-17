@@ -277,6 +277,14 @@ impl SpecialisedIndex {
     }
 }
 
+impl SpecialisedIndex {
+    /// The SHA-256 of [`Self::canonical_bytes`]: what a search names the
+    /// declaration it was written against by (SPEC 20.4).
+    pub fn declaration_hash(&self) -> [u8; 32] {
+        *jazz_types::sha256::hash(&self.canonical_bytes()).as_bytes()
+    }
+}
+
 /// Whether `name` is a valid specialised index name.
 pub fn is_specialised_index_name(name: &str) -> bool {
     let mut chars = name.chars();

@@ -609,6 +609,7 @@ impl Query {
         self.filters.push(Predicate::Search(IndexSearch {
             index: index.into(),
             op,
+            decl: None,
         }));
         self
     }

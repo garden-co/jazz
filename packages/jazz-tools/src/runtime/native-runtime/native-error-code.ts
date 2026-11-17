@@ -80,7 +80,8 @@ export type NativeCoreErrorReason =
   | "index_search_unsupported_upstream"
   | "index_building"
   | "vector_search_unbounded"
-  | "vector_candidates_over_cap";
+  | "vector_candidates_over_cap"
+  | "index_declaration_mismatch";
 
 /** Every reason this build knows; a test checks it against the engine's `Reason::ALL`. */
 export const NATIVE_CORE_ERROR_REASONS: ReadonlySet<string> = new Set<NativeCoreErrorReason>([
@@ -101,6 +102,7 @@ export const NATIVE_CORE_ERROR_REASONS: ReadonlySet<string> = new Set<NativeCore
   "index_building",
   "vector_search_unbounded",
   "vector_candidates_over_cap",
+  "index_declaration_mismatch",
 ]);
 
 /** The core `Reason` a thrown value carries, or `undefined` when it has none this build knows. */

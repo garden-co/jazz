@@ -514,11 +514,13 @@ pub enum Reason {
     VectorSearchUnbounded,
     /// A Rust-scored search with more than `VECTOR_EXACT_MAX` candidate rows (code `Query`, SPEC 20.5).
     VectorCandidatesOverCap,
+    /// A search written against another declaration of the index than the one the node maintains (code `Query`, SPEC 20.4).
+    IndexDeclarationMismatch,
 }
 
 impl Reason {
     /// Every reason, in declaration order.
-    pub const ALL: [Reason; 17] = [
+    pub const ALL: [Reason; 18] = [
         Reason::AuthorizationDenied,
         Reason::ClientClockTooFarAhead,
         Reason::SerializationConflict,
@@ -536,6 +538,7 @@ impl Reason {
         Reason::IndexBuilding,
         Reason::VectorSearchUnbounded,
         Reason::VectorCandidatesOverCap,
+        Reason::IndexDeclarationMismatch,
     ];
 
     /// The stable, snake_case name of this reason.
@@ -563,6 +566,7 @@ impl Reason {
             Reason::IndexBuilding => "index_building",
             Reason::VectorSearchUnbounded => "vector_search_unbounded",
             Reason::VectorCandidatesOverCap => "vector_candidates_over_cap",
+            Reason::IndexDeclarationMismatch => "index_declaration_mismatch",
         }
     }
 

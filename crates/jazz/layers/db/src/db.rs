@@ -3176,6 +3176,10 @@ impl Db {
         let inner = self.inner();
         let normalized = normalize_relation(query, &inner.schema)?;
         let query = normalized.as_ref().unwrap_or(query);
+        // A search names the declaration it was written against (SPEC 20.4):
+        // the preparing schema's, unless the query already carries one.
+        let declared = crate::ix::with_declaration(query, &inner.schema);
+        let query = declared.as_ref().unwrap_or(query);
         // Validate: tables, columns, parameters, supported forms. Read
         // options are not known yet: validate the widest read (deleted rows
         // included, so their metadata columns are accepted).
@@ -5194,6 +5198,14 @@ impl Inner {
         let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
         let table = schema.table(&prepared.query.table)?;
         let index = crate::ix::index_for(&self.conn, table, search)?;
+        // The search is planned under the declaration it names, or else the
+        // reading schema's; the maintained index must have that declaration.
+        let named = crate::ix::with_declaration(&prepared.query, schema);
+        let search = named
+            .as_ref()
+            .and_then(crate::ix::search_of)
+            .unwrap_or(search);
+        crate::ix::check_declaration(&index, search)?;
         if crate::ix::has_queued(&self.conn)? {
             crate::values::in_savepoint(&self.conn, "jazz_ix_drain", || {
                 crate::ix::drain(&self.conn)

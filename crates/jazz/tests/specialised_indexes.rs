@@ -455,6 +455,7 @@ fn misplaced_or_mismatched_searches_are_refused_by_name() {
         jazz::query::Predicate::Search(jazz::query::IndexSearch {
             index: "search".into(),
             op: text("garden"),
+            decl: None,
         }),
     )));
     assert!(refused(nested).contains("valid only as a top-level filter"));
@@ -895,4 +896,88 @@ fn a_live_any_search_moves_a_row_up_when_it_gains_a_term() {
     );
     block_on(db.tick()).unwrap();
     assert_eq!(ids(&db, &search_any("garden soup")), [3, 1, 2]);
+}
+
+/// Links `bob` to `server` over an in-process link, which offers every
+/// feature of this build (index search included).
+fn search_link(bob: &Db, server: &Db) -> jazz::db::Upstream {
+    let (up, down) = jazz::db::duplex();
+    let link = block_on(bob.connect_upstream(up));
+    server.accept_subscriber(down, alice()).unwrap();
+    link
+}
+
+/// The messages a `Remote` subscription of `query` on `bob` is refused with.
+fn remote_refusal(server: &Db, bob: &Db, query: &Query) -> Option<String> {
+    let prepared = bob.prepare_query(query).unwrap();
+    let remote = ReadOpts {
+        tier: jazz::db::ReadTier::Remote,
+        ..ReadOpts::default()
+    };
+    let mut stream = block_on(bob.subscribe(&prepared, remote)).unwrap();
+    pump(server, &[bob]);
+    let mut refusal = None;
+    while let Some(event) = stream.try_next_event() {
+        if let SubscriptionEvent::Rejected { message, .. } = event {
+            refusal = Some(message);
+        }
+    }
+    refusal
+}
+
+/// A search names the declaration it was written against (SPEC 20.4). Bob's
+/// app declares `search` over title (2) and body (1); the authority has
+/// moved on to a version declaring it over the title alone. Bob's search of
+/// his own replica uses his declaration; sent to the authority, it is
+/// refused (`index_declaration_mismatch`), never scored under the
+/// authority's other declaration.
+///
+/// ```
+/// bob (v1: title 2, body 1) ──Read(search, decl v1)──► server (v2: title 1)
+///                                                       └─✗ declaration differs
+/// ```
+#[test]
+fn a_search_under_another_declaration_of_its_index_is_refused() {
+    let v1 = schema_with(Indexes::Both, false);
+    let v2 = schema_with(Indexes::TitleOnly, false);
+    let server = authority(v2);
+    block_on(server.admit_schema_with_lenses(v1.clone(), &[])).unwrap();
+    insert(
+        &server,
+        1,
+        note("Garden plans", Some("beans"), "home", &[0.0, 0.0]),
+    );
+    let bob = client(1, v1);
+    let _link = search_link(&bob, &server);
+    let all = bob.prepare_query(&Query::from("notes")).unwrap();
+    let _all = block_on(bob.subscribe(&all, ReadOpts::default())).unwrap();
+    pump(&server, &[&bob]);
+    assert_eq!(ids(&bob, &search("beans")), [1], "his own declaration");
+
+    let refusal = remote_refusal(&server, &bob, &search("garden"));
+    assert!(
+        refusal
+            .as_deref()
+            .is_some_and(|m| m.contains("index `notes.search` changed")),
+        "{refusal:?}"
+    );
+}
+
+/// An index the authority's schema dropped is as unknown to it as one
+/// never declared, whatever an older client's schema still says.
+#[test]
+fn a_search_through_an_index_the_authority_dropped_is_unknown() {
+    let v1 = schema_with(Indexes::Both, false);
+    let server = authority(schema_with(Indexes::None, false));
+    block_on(server.admit_schema_with_lenses(v1.clone(), &[])).unwrap();
+    insert(&server, 1, note("Garden plans", None, "home", &[0.0, 0.0]));
+    let bob = client(1, v1);
+    let _link = search_link(&bob, &server);
+    let refusal = remote_refusal(&server, &bob, &search("garden"));
+    assert!(
+        refusal
+            .as_deref()
+            .is_some_and(|m| m.contains("table notes has no specialised index `search`")),
+        "{refusal:?}"
+    );
 }

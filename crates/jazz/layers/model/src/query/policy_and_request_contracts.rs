@@ -635,6 +635,13 @@ pub struct IndexSearch {
     pub index: String,
     /// What it asks the index.
     pub op: IndexOp,
+    /// The SHA-256 of the index's `jazz-ix-decl/1` declaration bytes as the
+    /// querying node declares it (SPEC 20.4). `None` is filled in when the
+    /// query is prepared, from the preparing schema; a node whose maintained
+    /// index has another declaration refuses the search
+    /// (`IndexDeclarationMismatch`) rather than score it differently.
+    #[serde(default)]
+    pub decl: Option<[u8; 32]>,
 }
 
 /// What a search asks its index.

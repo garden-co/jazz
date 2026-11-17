@@ -244,6 +244,8 @@ fn search_error(table: &str, index: &str, detail: impl std::fmt::Display) -> Err
 
 /// One maintained index.
 pub(crate) struct Index {
+    /// The logical table name, for errors.
+    pub table: String,
     /// The stored table it indexes.
     pub stored: String,
     pub decl: SpecialisedIndex,
@@ -373,6 +375,7 @@ pub(crate) fn reconcile(conn: &Connection, schema: &Schema, replica: bool) -> Re
             desired.insert(
                 (table.stored.clone(), decl.name.clone()),
                 Rc::new(Index {
+                    table: table.name.clone(),
                     stored: table.stored.clone(),
                     prefix: prefix(&table.stored, &decl.name),
                     decl: decl.clone(),
@@ -862,11 +865,56 @@ pub(crate) fn index_for(
         .get(&(table.name.clone(), search.index.clone()))
     {
         Some(decl) if decl.server_only => Err(server_only(&table.name, &search.index)),
-        _ => Err(search_error(
-            &table.name,
-            &search.index,
-            "this store does not maintain the index (its schema predates it)",
+        // Declared by the reading schema but not by this store's current
+        // one (dropped since): as unknown as an index never declared.
+        _ => Err(crate::values::query_error(
+            crate::query::QueryError::UnknownIndex {
+                table: table.name.clone(),
+                index: search.index.clone(),
+            },
         )),
+    }
+}
+
+/// `query` with its search naming the declaration `schema` gives its index
+/// (SPEC 20.4), when it names none yet; `None` when nothing changes.
+pub(crate) fn with_declaration(query: &Query, schema: &Schema) -> Option<Query> {
+    let search = search_of(query)?;
+    if search.decl.is_some() {
+        return None;
+    }
+    let decl = schema
+        .jazz
+        .tables()
+        .iter()
+        .find(|table| table.name == query.table)?
+        .specialised_indexes
+        .iter()
+        .find(|index| index.name == search.index)?
+        .declaration_hash();
+    let mut query = query.clone();
+    for predicate in &mut query.filters {
+        if let Predicate::Search(search) = predicate {
+            search.decl = Some(decl);
+        }
+    }
+    Some(query)
+}
+
+/// A search written against another declaration of `index` than the one
+/// this node maintains is refused: it is never scored differently.
+pub(crate) fn check_declaration(index: &Index, search: &IndexSearch) -> Result<(), Error> {
+    match search.decl {
+        Some(decl) if decl != index.decl.declaration_hash() => Err(typed(
+            ErrorCode::Query,
+            Reason::IndexDeclarationMismatch,
+            format!(
+                "index `{}.{}` changed: this node declares it otherwise than the query does; \
+                 upgrade the app",
+                index.table, index.decl.name
+            ),
+        )),
+        _ => Ok(()),
     }
 }
 
