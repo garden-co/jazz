@@ -470,7 +470,7 @@ impl Jazz {
         opts: ReadOpts,
     ) -> Result<Subscription<T>> {
         let query = query.into_untyped()?;
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::channel(subscription::SUBSCRIPTION_ITEMS);
         let implementations = self.info.implementations.clone();
         self.with_client(move |client| async move {
             let stream = client.subscribe_with_opts(query, opts).await?;
