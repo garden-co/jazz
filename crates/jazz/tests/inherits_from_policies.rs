@@ -938,6 +938,38 @@ fn an_existing_project_s_creator_is_added_by_an_updater() {
     }
 }
 
+/// Deletes are judged on the unit's pre-state: an updater deletes its own
+/// member row and another member's in one unit, in either order. Judged as
+/// the unit goes, the second delete would read a project the first one
+/// already hid from it.
+///
+/// ```text
+/// alice (admin, member) ──{ delete alice's row, delete bob's row }──► ✓
+///                          both read the members as before the unit
+/// ```
+#[test]
+#[ignore = "needs pre-state delete checks from main"]
+fn an_updater_removes_itself_and_another_member_in_one_unit() {
+    for via in EVERY_VIA {
+        for own_first in [true, false] {
+            let world = World::new(true);
+            let project = id(0x10);
+            world.seed_project(project);
+            world.seed_admin(project, alice());
+            let own = world.seed_member(project, alice());
+            let other = world.seed_member(project, bob());
+            let mut writes = vec![Write::Delete(MEMBERS, own), Write::Delete(MEMBERS, other)];
+            if !own_first {
+                writes.reverse();
+            }
+            world
+                .commit(alice(), via, &writes)
+                .unwrap_or_else(|e| panic!("{via:?} own first {own_first}: {e:?}"));
+            assert!(world.members_of(project).is_empty(), "{via:?}");
+        }
+    }
+}
+
 /// A member who may not update the project deleting its own row and
 /// another's is refused in either order: its own delete is allowed (anyone
 /// leaves), the other's never is, and neither is judged on what the other
@@ -1358,4 +1390,96 @@ fn the_creator_clause_names_the_branch_the_unit_inserted() {
         );
         unit_on(a).unwrap_or_else(|e| panic!("{others} others: P@A was: {e:?}"));
     }
+}
+
+/// A delete's policy reads the deleted row as it stood before the unit
+/// (SPEC 7: `USING` reads committed state): an earlier write of the same
+/// unit to that row cannot grant the delete. A row the unit itself inserted
+/// has no earlier version and is judged as the unit left it.
+#[test]
+#[ignore = "needs pre-state delete checks from main"]
+fn a_delete_judges_the_row_as_it_stood_before_the_unit() {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("docs")
+                    .column("owner", ColumnType::Uuid)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(session_eq("owner", &["user"])),
+                    ),
+            )
+            .build(),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        schema,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x99; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    let as_alice = || WriteIdentity::Session(alice());
+    let owned_by = |who| BTreeMap::from([("owner".to_owned(), account(who))]);
+
+    // Bob owns the row before the unit; Alice makes herself the owner and
+    // then deletes it in the same unit: refused.
+    let row = id(0x77);
+    block_on(db.insert("docs", owned_by(bob()), insert_options(row))).unwrap();
+    let tx = OpenTransactionId::new();
+    block_on(db.begin_mergeable(tx)).unwrap();
+    let staged = db.tx_ref(tx);
+    block_on(staged.upsert(
+        "docs",
+        row,
+        owned_by(alice()),
+        UpsertOptions {
+            identity: as_alice(),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let deleted = block_on(staged.delete(
+        "docs",
+        row,
+        DeleteOptions {
+            identity: as_alice(),
+            ..Default::default()
+        },
+    ));
+    let _ = db.abandon_transaction_handle(tx);
+    assert!(
+        deleted.is_err(),
+        "the delete is judged on the Bob-owned row, not Alice's staged one"
+    );
+
+    // A row Alice inserts and deletes in one unit has no earlier version:
+    // judged as the unit left it, the delete is accepted.
+    let fresh = id(0x78);
+    let tx = OpenTransactionId::new();
+    block_on(db.begin_mergeable(tx)).unwrap();
+    let staged = db.tx_ref(tx);
+    block_on(staged.insert(
+        "docs",
+        owned_by(alice()),
+        InsertOptions {
+            row_id: Some(fresh),
+            identity: as_alice(),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let deleted = block_on(staged.delete(
+        "docs",
+        fresh,
+        DeleteOptions {
+            identity: as_alice(),
+            ..Default::default()
+        },
+    ));
+    let _ = db.abandon_transaction_handle(tx);
+    assert!(deleted.is_ok(), "{deleted:?}");
 }
