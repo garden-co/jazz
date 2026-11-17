@@ -199,3 +199,24 @@ fn a_transaction_handles_stage_is_refused_on_managed_storage() {
     block_on(db.insert("seats", seat("B", false), row(2))).unwrap();
     assert_eq!(seats(&db).len(), 1);
 }
+
+/// A write that fails partway is undone whole on managed storage: its
+/// scope rolls back through the host's transaction, so nothing it wrote
+/// before failing (the large value's chunks) is left behind.
+///
+/// ```text
+/// insert 1 (300 KiB) ── insert 1 again (another 300 KiB) → refused ── same nodes as before
+/// ```
+#[test]
+fn a_failing_write_leaves_nothing_on_managed_storage() {
+    let db = open_on(EmulatedObjectSql::open_in_memory().unwrap());
+    let mut first = seat("A", false);
+    first.insert("notes".to_owned(), Value::String(text(1, LARGE)));
+    block_on(db.insert("seats", first, row(1))).unwrap();
+    let nodes = db.large_value_nodes_for_test().unwrap();
+    let mut again = seat("B", false);
+    again.insert("notes".to_owned(), Value::String(text(2, LARGE)));
+    assert!(block_on(db.insert("seats", again, row(1))).is_err());
+    assert_eq!(db.large_value_nodes_for_test().unwrap(), nodes);
+    assert_eq!(seats(&db).len(), 1);
+}

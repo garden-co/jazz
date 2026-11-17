@@ -605,6 +605,39 @@ fn many_versions_with_small_edits_share_one_epoch() {
     assert_eq!(db.large_value_epochs_for_test().unwrap().0, 1);
 }
 
+/// SQLite rolling back by itself (a full disk, an I/O error) a transaction
+/// that appended to a committed chunked value leaves the committed value
+/// readable: the rolled-back append's edits are gone, the committed ones
+/// stay. On an in-memory store the chunk cache is the only copy of the
+/// value's epoch, so the rollback must not drop the committed epoch the
+/// append extended.
+///
+/// ```text
+/// insert 300 KiB ── append ×3 (committed) ── tx { append; SQLite rolls back } ── read
+/// ```
+#[test]
+fn sqlite_rolling_back_an_append_keeps_the_committed_value() {
+    let db = db();
+    let mut expected = text(36, LARGE);
+    insert(&db, 1, &expected, b"");
+    for n in 0..3 {
+        let more = format!("[{n}]");
+        block_on(db.append_value("docs", row(1), "body", more.clone().into_bytes())).unwrap();
+        expected.push_str(&more);
+    }
+    let failed: Result<((), _), _> = block_on(db.transaction(async |_| {
+        db.append_value("docs", row(1), "body", b"[lost]".to_vec())
+            .await?;
+        db.rollback_sqlite_transaction_for_test();
+        Err(jazz::db::Error::new(
+            jazz::db::ErrorCode::Storage,
+            "disk I/O error".to_owned(),
+        ))
+    }));
+    assert!(failed.is_err());
+    assert_eq!(body(&db, 1), expected);
+}
+
 #[test]
 fn an_inline_value_grown_past_the_threshold_is_chunked() {
     let db = db();
