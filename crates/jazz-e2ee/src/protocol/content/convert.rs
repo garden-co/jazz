@@ -23,7 +23,9 @@ use crate::records::{self, EqualityValue, RecordKind, read_stored_record};
 use crate::registry::{Registry, Suite};
 
 use super::super::error::ProtocolError;
-use super::cells::{CellInput, Opened, PlaintextValues, SealedCell, open_traced, seal_one};
+use super::cells::{
+    CellInput, Opened, PlaintextValues, SealedCell, decrypted_equality_value, open_traced, seal_one,
+};
 use super::equality::{QueryPlan, QueryTokens, TableTarget, plan_equality};
 use super::held::{HeldKeys, WriteKey};
 use super::{CLEARED_MARKER, ContentError, ContentResult, EncryptedColumn, RowTarget};
@@ -72,13 +74,15 @@ pub enum Backfill {
     /// The cell's token, under its own epoch, for `__e2ee_eq_<column>`.
     Token { epoch_id: String, token: Vec<u8> },
     /// The cell gives no token here (empty, cleared, sealed under another
-    /// space, missing or unreadable): the outcome of opening it.
+    /// space, missing or unreadable): the outcome of opening it. A
+    /// plaintext that is not a value of the column is `invalid-ciphertext`.
     Skip(Opened),
 }
 
 /// Tag backfill of one cell (§4.3): decrypts it and computes its token
 /// under the cell's own epoch and key, writing nothing else. A cell sealed
-/// under another space, or one that does not open, gets no token.
+/// under another space, one that does not open, or one whose plaintext is
+/// not a value of the column, gets no token.
 #[allow(clippy::too_many_arguments)]
 pub fn backfill_token(
     registry: &Registry,
@@ -98,7 +102,10 @@ pub fn backfill_token(
     };
     let depth = space.depth_of(&epoch_id).expect("the key opened its epoch");
     let key = space.key_at(depth).expect("the key opened its epoch");
-    let value = values.equality_value(column, plain)?;
+    let value = match decrypted_equality_value(values, column, plain)? {
+        Ok(value) => value.expect("the column has an index"),
+        Err(code) => return Ok(Backfill::Skip(Opened::Unreadable(code))),
+    };
     let token = records::equality_token_of(
         tagger,
         key,
@@ -124,9 +131,13 @@ pub struct RehomeCell<'a> {
 pub enum Converted {
     /// The value sealed under the target space into the target column.
     Cell(SealedCell),
-    /// A streamed value: the runtime re-encrypts it in bounded memory with
-    /// a [`StreamResealer`](super::cells::StreamResealer) into the target
-    /// column under the target space.
+    /// A streamed value, planned without opening it: the runtime opens
+    /// and verifies it under the old space when it performs the write,
+    /// re-encrypting it in bounded memory with a
+    /// [`StreamResealer`](super::cells::StreamResealer) into the target
+    /// column under the target space. If it fails to open or verify then,
+    /// the runtime writes nothing of the row, so the row still converts
+    /// whole or not at all.
     Stream {
         source_column: String,
         target_column: String,
@@ -143,8 +154,9 @@ pub enum Rehome {
     /// Every cell, converted. The caller writes the targets and clears
     /// each source to [`CLEARED_MARKER`] in one row write.
     Converted(Vec<Converted>),
-    /// A source cell this device cannot open under the old space: the row
-    /// is not converted; other rows are unaffected.
+    /// A source cell this device cannot open under the old space, or
+    /// whose plaintext is not a value of the target column: the row is not
+    /// converted; other rows are unaffected.
     Unconvertible { column_id: String, opened: Opened },
 }
 
@@ -201,9 +213,14 @@ pub fn rehome_row(
                 });
             }
         };
-        let equality = match cell.target.equality {
-            Some(_) => Some(values.equality_value(&cell.target, &plain)?),
-            None => None,
+        let equality = match decrypted_equality_value(values, &cell.target, &plain)? {
+            Ok(equality) => equality,
+            Err(code) => {
+                return Ok(Rehome::Unconvertible {
+                    column_id: cell.source.column_id.to_owned(),
+                    opened: Opened::Unreadable(code),
+                });
+            }
         };
         let input = CellInput {
             column: cell.target,

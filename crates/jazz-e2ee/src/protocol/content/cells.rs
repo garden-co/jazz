@@ -89,6 +89,36 @@ pub trait PlaintextValues {
     ) -> ContentResult<EqualityValueBuf>;
 }
 
+/// The equality value a decrypted `plaintext` is tagged with, or `None`
+/// for a column without an index. A plaintext that does not decode to a
+/// value of the column's index is a bad value some writer stored:
+/// `invalid-ciphertext` for that cell alone, so a sweep skips and reports
+/// it and carries on with the rest. A provider failure, or inconsistent
+/// evidence, stays an error.
+pub(crate) fn decrypted_equality_value(
+    values: &dyn PlaintextValues,
+    column: &EncryptedColumn<'_>,
+    plaintext: &[u8],
+) -> ContentResult<Result<Option<EqualityValueBuf>, DataError>> {
+    let Some(index) = column.equality else {
+        return Ok(Ok(None));
+    };
+    let value = match values.equality_value(column, plaintext) {
+        Ok(value) => value,
+        Err(error)
+            if error.is_provider_failure()
+                || error == ContentError::Protocol(ProtocolError::InconsistentEvidence) =>
+        {
+            return Err(error);
+        }
+        Err(_) => return Ok(Err(DataError::InvalidCiphertext)),
+    };
+    if index.encode(&value.as_value()).is_err() {
+        return Ok(Err(DataError::InvalidCiphertext));
+    }
+    Ok(Ok(Some(value)))
+}
+
 /// One encrypted cell of a write: its column, Jazz's native encoding of
 /// the value, and, for an equality-indexed column, the logical value its
 /// token hashes.

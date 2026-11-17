@@ -556,6 +556,107 @@ fn one_bad_cell_never_stops_the_repair_of_the_rest() {
     );
 }
 
+/// Seals `value` in `column` of `row_id` under Alice's current write key,
+/// tagged with `tag` whatever the value is: as any writer could.
+fn alice_writes_raw(
+    repairing: &Repairing,
+    row_id: &str,
+    column: EncryptedColumn<'_>,
+    value: &[u8],
+    tag: &str,
+) -> Vec<u8> {
+    let domain = shared(&repairing.world);
+    let address = space(ROW);
+    let suite = repairing
+        .world
+        .shared
+        .registry
+        .select(&MechanismConfig::default())
+        .unwrap();
+    seal_cells(
+        &suite,
+        &write_key(&repairing.alice, &address),
+        &row(&domain, &address, row_id),
+        &[CellInput {
+            column,
+            value,
+            equality: Some(EqualityValue::Text(tag)),
+        }],
+        &mut TestRandom(4),
+    )
+    .unwrap()
+    .cells
+    .remove(0)
+    .stored
+}
+
+#[test]
+fn a_plaintext_that_is_not_a_value_of_its_column_is_skipped_and_the_rest_repaired() {
+    let mut repairing = Repairing::new(13);
+    let good = repairing.alice_writes(ROW_1, &[(title(), "t"), (notes(), "n")]);
+    // Not UTF-8: no text value, so no token can be computed for it.
+    let bad = alice_writes_raw(&repairing, ROW_2, title(), &[0xff, 0xfe], "x");
+    let other = repairing.alice_writes(ROW_2, &[(notes(), "m")]);
+    repairing.settle();
+    let r1 = [
+        (title().column_id, stored_of(&good, &title())),
+        (notes().column_id, stored_of(&good, &notes())),
+    ];
+    let r2 = [
+        (title().column_id, &bad[..]),
+        (notes().column_id, stored_of(&other, &notes())),
+    ];
+    let plan = repairing
+        .plan(
+            &repairing.alice,
+            &[
+                RepairRow {
+                    row_id: ROW_1,
+                    space_identifier: ROW,
+                    cells: &r1,
+                },
+                RepairRow {
+                    row_id: ROW_2,
+                    space_identifier: ROW,
+                    cells: &r2,
+                },
+            ],
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(rewritten(&plan, ROW_1).len(), 2);
+    assert!(plan.rows[0].skipped.is_empty());
+    let second = rewritten(&plan, ROW_2);
+    assert_eq!(
+        second
+            .iter()
+            .map(|cell| cell.column_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![notes().column_id]
+    );
+    assert_eq!(
+        plan.rows[1].skipped,
+        vec![(title().column_id.to_owned(), DataError::InvalidCiphertext)]
+    );
+    // The rewritten cells open under the real key.
+    let domain = shared(&repairing.world);
+    let address = space(ROW);
+    assert_eq!(
+        value(
+            open_cell(
+                &repairing.world.shared.registry,
+                &repairing.alice,
+                &row(&domain, &address, ROW_2),
+                &notes(),
+                &second[0].stored,
+                false,
+            )
+            .unwrap()
+        ),
+        b"m"
+    );
+}
+
 #[test]
 fn repair_needs_a_settled_losing_key_and_the_real_key() {
     let mut repairing = Repairing::new(7);
@@ -711,6 +812,29 @@ fn tag_backfill_uses_each_cells_own_epoch() {
     assert_eq!(
         backfill(&held, &title(), b""),
         Ok(Backfill::Skip(Opened::Empty))
+    );
+    // A plaintext that is not a value of the column: that cell alone.
+    let suite = registry.select(&MechanismConfig::default()).unwrap();
+    let bad = seal_cells(
+        &suite,
+        &write_key(&held, &address),
+        &target,
+        &[CellInput {
+            column: title(),
+            value: &[0xff],
+            equality: Some(EqualityValue::Text("x")),
+        }],
+        &mut TestRandom(5),
+    )
+    .unwrap()
+    .cells
+    .remove(0)
+    .stored;
+    assert_eq!(
+        backfill(&held, &title(), &bad),
+        Ok(Backfill::Skip(Opened::Unreadable(
+            DataError::InvalidCiphertext
+        )))
     );
     assert_eq!(
         backfill(&held, &notes(), &cells[0].stored),

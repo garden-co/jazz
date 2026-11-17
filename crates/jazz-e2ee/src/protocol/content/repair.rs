@@ -9,9 +9,10 @@
 //! only, and writes the rewritten cells in the same transaction, so that
 //! read-set validation refuses it if any row changed after its cut; it then
 //! re-reads and plans again. Rows of other spaces, and cells that do not
-//! open under the losing key, are left as they are and reported; one such
-//! cell never stops the repair of the rest. A provider failure fails the
-//! plan.
+//! open under the losing key or whose plaintext is not a value of the
+//! column, are left as they are and reported; one such cell never stops
+//! the repair of the rest. A provider failure, or inconsistent evidence,
+//! fails the plan.
 
 use crate::error::Error;
 use crate::random::RandomSource;
@@ -21,7 +22,8 @@ use crate::registry::{Registry, Suite};
 use super::super::domain::SharedDomain;
 use super::super::error::ProtocolError;
 use super::cells::{
-    CellInput, PlaintextValues, SealedCell, classify_short, decrypt_with, seal_one,
+    CellInput, PlaintextValues, SealedCell, classify_short, decrypt_with, decrypted_equality_value,
+    seal_one,
 };
 use super::held::{HeldKeys, KeyMark};
 use super::{ContentResult, DataError, EncryptedColumn, RowTarget};
@@ -44,10 +46,12 @@ pub struct RepairRow<'a> {
 pub enum Rewrite {
     /// A cell re-encrypted under the target version, with its token.
     Cell(SealedCell),
-    /// A streamed value under the losing epoch: the runtime re-encrypts it
-    /// in bounded memory with a
+    /// A streamed value under the losing epoch, planned without opening
+    /// it: the runtime opens and verifies it under the losing key when it
+    /// performs the rewrite, re-encrypting it in bounded memory with a
     /// [`StreamResealer`](super::cells::StreamResealer) under the target
-    /// version.
+    /// version. A stream that fails to open or verify then is not written
+    /// and is reported like a skipped cell; the row's other rewrites stand.
     Stream { column_id: String },
 }
 
@@ -59,8 +63,9 @@ pub struct RowRepair {
     /// rewritten.
     pub other_space: bool,
     pub rewrites: Vec<Rewrite>,
-    /// Cells naming the losing epoch that do not open under its key; they
-    /// stay as they are.
+    /// Cells naming the losing epoch that do not open under its key, or
+    /// whose plaintext is not a value of the column; they stay as they
+    /// are.
     pub skipped: Vec<(String, DataError)>,
 }
 
@@ -194,9 +199,12 @@ pub fn plan_repair(
                     continue;
                 }
             };
-            let equality = match column.equality {
-                Some(_) => Some(target.values.equality_value(column, &plain)?),
-                None => None,
+            let equality = match decrypted_equality_value(target.values, column, &plain)? {
+                Ok(equality) => equality,
+                Err(code) => {
+                    repair.skipped.push((column.column_id.to_owned(), code));
+                    continue;
+                }
             };
             let input = CellInput {
                 column: *column,
