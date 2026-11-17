@@ -57,6 +57,41 @@ describe("createDb in-memory driver", () => {
     await expect(db.all(largeValues.documents.orderBy("done"))).resolves.toEqual([]);
   });
 
+  it("checks gather start and step filters in the engine too", async () => {
+    const tree = testApp({
+      tables: {
+        nodes: {
+          columns: { meta: { json: true }, parent_id: "uuid?" },
+          relations: { parent: { rel: "nodes", column: "parent_id" } },
+        },
+      },
+    });
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-operator-checks-gather-test")),
+      driver: { type: "memory" },
+    });
+    const start = tree.nodes.gather({
+      start: { meta: { gt: 1 } } as never,
+      step: ({ current }) => tree.nodes.where({ id: current }).hopTo("parent"),
+      maxDepth: 3,
+    });
+    const step = tree.nodes.gather({
+      start: {},
+      step: ({ current }) =>
+        tree.nodes.where({ id: current, meta: { gt: 1 } } as never).hopTo("parent"),
+      maxDepth: 3,
+    });
+    for (const query of [start, step]) {
+      expect(await refusedCode(db.all(query as never))).toBe("query");
+    }
+    const fine = tree.nodes.gather({
+      start: { meta: { eq: 1 } } as never,
+      step: ({ current }) => tree.nodes.where({ id: current }).hopTo("parent"),
+      maxDepth: 3,
+    });
+    expect(await refusedCode(db.all(fine as never))).toBe("accepted");
+  });
+
   it("checks a hop's seed filter in the engine too", async () => {
     const seeded = testApp({
       tables: {

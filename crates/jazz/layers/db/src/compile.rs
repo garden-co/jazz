@@ -1518,8 +1518,51 @@ impl<'a> Ctx<'a> {
         let Ok(table) = self.table(name) else {
             return Ok(());
         };
-        check_operators(table, &query.filters, &query.order_by)?;
+        match &query.flat_join {
+            None => check_operators(table, &query.filters, &query.order_by)?,
+            Some(flat) => {
+                let mut sources: Vec<(&str, &'a Table)> = vec![(
+                    flat.root_alias.as_deref().unwrap_or(query.table.as_str()),
+                    table,
+                )];
+                for source in &flat.sources {
+                    let name = crate::schema::history::history_source_table(&source.table)
+                        .unwrap_or(&source.table);
+                    let joined = self.table(name)?;
+                    sources.push((
+                        source.alias.as_deref().unwrap_or(source.table.as_str()),
+                        joined,
+                    ));
+                }
+                // `alias.column`, or a bare name the root or else exactly
+                // one joined table has.
+                // The alias may hold dots (`history.posts`); the column
+                // follows the last one.
+                let lookup = |name: &str| match name.rsplit_once('.') {
+                    Some((alias, column)) => sources
+                        .iter()
+                        .find(|(name, _)| *name == alias)
+                        .and_then(|(_, table)| table.column(column)),
+                    None => table.column(name).or_else(|| {
+                        let mut found = sources[1..].iter().filter_map(|(_, t)| t.column(name));
+                        let first = found.next();
+                        if found.next().is_some() { None } else { first }
+                    }),
+                };
+                check_operators_by(&lookup, &query.filters, &query.order_by)?;
+            }
+        }
         self.check_joins(&query.joins)?;
+        for reachable in &query.reachable {
+            let access = self.table(&reachable.access_table)?;
+            check_operators(access, &reachable.access_filters, &[])?;
+            let edge = self.table(&reachable.edge_table)?;
+            check_operators(edge, &reachable.edge_filters, &[])?;
+            if let Some(seed) = &reachable.seed {
+                let seeds = self.table(&seed.table)?;
+                check_operators(seeds, &seed.filters, &[])?;
+            }
+        }
         if let Some(plan) = crate::db::union_plan(query, self.schema)? {
             for (_, arm) in &plan.arms {
                 self.validate_rules(arm)?;
@@ -3314,10 +3357,20 @@ fn check_operators(
     filters: &[Predicate],
     order_by: &[crate::query::OrderBy],
 ) -> Result<(), Error> {
+    check_operators_by(&|column| table.column(column), filters, order_by)
+}
+
+/// [`check_operators`], with `lookup` finding the column a name in the
+/// query refers to (a flat join's names reach several tables).
+fn check_operators_by<'t>(
+    lookup: &dyn Fn(&str) -> Option<&'t crate::values::Column>,
+    filters: &[Predicate],
+    order_by: &[crate::query::OrderBy],
+) -> Result<(), Error> {
     // `None`: the column supports everything; `Some(kind)`: it is one of
     // the restricted kinds.
     let restricted = |column: &str| {
-        let declared = table.column(column)?;
+        let declared = lookup(column)?;
         match type_kind(&declared.ty) {
             Kind::Bytes => Some("bytes"),
             Kind::Array => None,

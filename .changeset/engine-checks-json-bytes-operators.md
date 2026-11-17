@@ -2,7 +2,7 @@
 "jazz-tools": patch
 ---
 
-Query operators on JSON and bytes columns are now checked by the engine when a query is prepared, for every client (TS, thin client, Swift/Kotlin/Go), wherever a query names a column: filters, `orderBy`, includes, union arms and a union's `orderBy`, hop seeds and history reads. JSON and bytes columns refuse `gt`, `gte`, `lt` and `lte` and can't be used in `orderBy`; JSON columns also refuse `contains`. Other column types keep everything the engine supports, and bytes columns keep `contains`, which TS used to refuse.
+Query operators on JSON and bytes columns are now checked by the engine when a query is prepared, for every client (TS, thin client, Swift/Kotlin/Go), in its filters and `orderBy`, includes, union arms and a union's `orderBy`, hop seeds and nested joins, `gather` start and step filters, flat joins and history reads (aggregates aren't checked yet). JSON and bytes columns refuse `gt`, `gte`, `lt` and `lte` and can't be used in `orderBy`; JSON columns also refuse `contains`. Other column types keep everything the engine supports, and bytes columns keep `contains`, which TS used to refuse.
 
 What TS code sees:
 

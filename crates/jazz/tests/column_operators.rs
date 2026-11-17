@@ -37,6 +37,7 @@ fn open_db() -> Db {
     let parts = RowDescriptor::new(vec![
         ColumnDescriptor::new("thing", ColumnType::Uuid),
         ColumnDescriptor::new("meta", ColumnType::Json { schema: None }),
+        ColumnDescriptor::new("pmeta", ColumnType::Json { schema: None }),
     ]);
     let schema = compile_schema(&Schema::from([
         (
@@ -230,4 +231,66 @@ fn unions_joins_and_history_are_checked_too() {
             .filter(q::gt(q::col("label"), text("a"))),
     )
     .expect("a supported history read");
+}
+
+/// Gather (reachability) filters on its access, edge and seed tables, flat
+/// joins (a joined column by `alias.column`, or by a bare name only the
+/// joined table has), and joins nested in a join are checked too.
+#[test]
+fn gathers_flat_joins_and_nested_joins_are_checked_too() {
+    let db = open_db();
+    let refused = |query: Query, expected: &str| {
+        let message = refusal(&db, query);
+        assert!(message.contains(expected), "{message}");
+    };
+    let json_gt = || q::gt(q::col("meta"), text("a"));
+    let gather = |access: Vec<q::Predicate>, edge: Vec<q::Predicate>| {
+        Query::from("things").reachable_via_with_access_filters(
+            "parts",
+            "thing",
+            "thing",
+            q::col("id"),
+            access,
+            "parts",
+            "thing",
+            "thing",
+            edge,
+        )
+    };
+    refused(
+        gather(vec![json_gt()], vec![]),
+        "JSON column \"meta\" does not support \"gt\"",
+    );
+    refused(
+        gather(vec![], vec![json_gt()]),
+        "JSON column \"meta\" does not support \"gt\"",
+    );
+    let mut seeded = gather(vec![], vec![]).seeded_by("parts", "thing", "sub", "thing");
+    seeded.reachable[0]
+        .seed
+        .as_mut()
+        .expect("a seed")
+        .filters
+        .push(json_gt());
+    refused(seeded, "JSON column \"meta\" does not support \"gt\"");
+
+    let flat = || Query::from("things").flat_join("parts", "things.id", "parts.thing");
+    refused(
+        flat().filter(q::gt(q::col("parts.meta"), text("a"))),
+        "JSON column \"parts.meta\" does not support \"gt\"",
+    );
+    refused(
+        flat().filter(q::contains(q::col("pmeta"), text("a"))),
+        "JSON column \"pmeta\" does not support \"contains\"",
+    );
+    db.prepare_query(&flat().filter(q::gt(q::col("things.label"), text("a"))))
+        .expect("a flat join on supported operators");
+
+    let mut nested = Query::from("things").join_via("parts", "thing", []);
+    let inner = Query::from("things")
+        .join_via("parts", "thing", [json_gt()])
+        .joins
+        .remove(0);
+    nested.joins[0].nested_joins.push(inner);
+    refused(nested, "JSON column \"meta\" does not support \"gt\"");
 }
