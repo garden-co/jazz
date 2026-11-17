@@ -504,12 +504,17 @@ version:
    (U+0300–U+036F, U+1AB0–U+1AFF, U+1DC0–U+1DFF, U+20D0–U+20FF,
    U+FE20–U+FE2F), Hebrew points and cantillation (U+0591–U+05BD, U+05BF,
    U+05C1–U+05C2, U+05C4–U+05C5, U+05C7), Arabic harakat (U+064B–U+065F,
-   U+0670) and variation selectors are dropped, so precomposed and
+   U+0670), the Arabic tatweel (U+0640), Quranic annotation marks
+   (U+0610–U+061A, U+06D6–U+06DC, U+06DF–U+06E4, U+06E7–U+06E8,
+   U+06EA–U+06ED, U+08CA–U+08FF) and variation selectors are dropped, so precomposed and
    decomposed, and pointed and unpointed, spellings meet (`צהָל` is `צהל`,
    `مَرْحَبًا` is `مرحبا`), as are ignored characters and the
    word-internal `·`, `״` and `"`. `’` and `׳` become `'`. So
    `col·lecció` meets `colleccio`, and `צה״ל` and `צה"ל` meet `צהל`.
-   Other characters are unchanged.
+   Other characters are unchanged; in particular the Arabic alef forms
+   (`ٱ`, `أ`, `إ`, `آ`) are not normalised to `ا`, so `أحمد` and `احمد`, or
+   Quranic `ٱلرحمن` and `الرحمن`, are different terms (out of scope for
+   `jazz-text/1`).
 4. For `en`, stem with the Snowball English (Porter 2) algorithm of Snowball
    v3.2.0 (`algorithms/english.sbl`), which also strips possessives (`'s`,
    `s'`).
