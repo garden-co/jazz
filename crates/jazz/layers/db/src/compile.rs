@@ -1494,6 +1494,39 @@ impl<'a> Ctx<'a> {
         Ok(())
     }
 
+    /// Checks `query`'s array relations as reads of them would compile them
+    /// ([`Ctx::compile_children`]): parent and child columns, filters and
+    /// order, nested relations too. An optional relation is compiled only
+    /// per parent row, so without this a bad filter or order would pass
+    /// `prepare` and fail at read time. For `prepare` only: reads don't run
+    /// it.
+    pub fn validate_relations(mut self, query: &Query) -> Result<(), Error> {
+        // History reads (`history.<table>`) take no relations.
+        if query.array_subqueries.is_empty() {
+            return Ok(());
+        }
+        let table = self.table(&query.table)?;
+        for array in &query.array_subqueries {
+            self.check_array(table, array)?;
+        }
+        Ok(())
+    }
+
+    fn check_array(&mut self, parent: &'a Table, array: &ArraySubquery) -> Result<(), Error> {
+        let child = self.table(&array.table)?;
+        column_sql(child, "c", &array.inner_column)?;
+        column_sql(parent, "p", &array.outer_column)?;
+        projection(child, array.select.as_deref())?;
+        for filter in &array.filters {
+            self.predicate(filter, child, "c")?;
+        }
+        self.order_terms(child, "c", &array.order_by)?;
+        for nested in &array.nested_arrays {
+            self.check_array(child, nested)?;
+        }
+        Ok(())
+    }
+
     /// One array relation for one parent row.
     /// The rows `array` relates to `parent`, with the index of the bound
     /// parameter that carries `parent` (`None` when it is not bound: NaN
