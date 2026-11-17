@@ -575,7 +575,12 @@ platform's `sin`/`cos` (which may differ in the last bit between targets).
 
 `cell` (encoding `jazz-ix-geo-z62/1`) interleaves
 `u = floor((lng + 180) / 360 · 2³¹)` and `v = floor((lat + 90) / 180 · 2³¹)`,
-each clamped to `2³¹ − 1`: `u` in the even bits, `v` in the odd bits.
+each evaluated exactly (as over the reals, not as a sequence of rounded
+operations) and clamped to `2³¹ − 1`: `u` in the even bits, `v` in the odd
+bits. Exactness makes the cell independent of evaluation order; a rounded
+evaluation differs next to grid boundaries. `SPEC/fixtures/ix/geo/points-v1.json`
+pins cells and unit vectors, written by an independent Python reference
+(`generate.py` beside it).
 
 **Cover.** A region is covered by aligned quadtree blocks: snap to the finest
 level at which the region spans at most 64 blocks per side, keep the blocks
