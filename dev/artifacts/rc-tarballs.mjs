@@ -19,7 +19,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
-const rcVersion = /^2\.0\.0-alpha\.[0-9]+-rc\.[0-9]+$/;
+const rcVersion = /^2\.0\.0-alpha\.[0-9]+(\.[0-9]+)?-rc\.[0-9]+$/;
 const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
 const writeJson = (path, value) => writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
 const subdirs = (dir) =>

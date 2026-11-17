@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { APP_ID_ENV_VARS, SERVER_URL_ENV_VARS } from "./cli.js";
 import { describe, expect, it } from "vitest";
@@ -134,15 +134,27 @@ describe("bin integration", () => {
     expect(await fileExists(join(srcDir, "jazz.app.json"))).toBe(true);
   });
 
-  it("points an alpha.65 app (jazz.app.json, no schema.ts) at upgrade", async () => {
-    const { root } = await createWorkspace();
-    await writeAppFiles(root);
+  it.each([["generate"], ["generate", "--check"], ["migrations", "create", "--name", "x"]])(
+    "points a JSON-only app (jazz.app.json, no schema.ts) at upgrade: %s",
+    async (...command) => {
+      const { root } = await createWorkspace();
+      await writeAppFiles(root);
+      const before = await readFile(join(root, "jazz.app.json"), "utf8");
 
-    const result = runBin(["generate", "--schema-dir", root]);
+      const result = runBin([...command, "--schema-dir", root]);
 
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("npx jazz-tools upgrade");
-  });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "TS is the source in alpha.66: this app has jazz.app.json but no schema.ts. " +
+          "Run `npx jazz-tools upgrade` to write schema.ts from it (it keeps the schema hashes and bundle id), " +
+          "then edit schema.ts beside your app's manifest (package.json, Cargo.toml, go.mod, Package.swift, build.gradle, …) " +
+          "and run `npx jazz-tools generate`.",
+      );
+      expect(await readFile(join(root, "jazz.app.json"), "utf8")).toBe(before);
+      expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(false);
+      expect(await fileExists(join(root, "migrations"))).toBe(false);
+    },
+  );
 
   it("fails when no schema.ts can be found", async () => {
     const { root } = await createWorkspace();

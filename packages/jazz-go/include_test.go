@@ -110,3 +110,31 @@ func TestHooksRunOnIncludedRows(t *testing.T) {
 		t.Fatalf("%+v", row)
 	}
 }
+
+// A Relation's Select includes only some of the related row's columns,
+// and a Select's struct may have a field for the included relation.
+func TestIncludeSelectedColumns(t *testing.T) {
+	type project struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	type titled struct {
+		ID      string   `json:"id"`
+		Title   string   `json:"title"`
+		Project *project `json:"project"`
+	}
+	type todoRow struct{}
+	type projectRow struct{}
+	title := NewColumn[todoRow, string]("title")
+	name := NewColumn[projectRow, string]("name")
+	rel := NewRelation[todoRow, projectRow]("project")
+	q := Select[titled](NewQuery[todoRow]("todos").Include(rel.Select(name)), title)
+	got, _ := json.Marshal(q)
+	want := `{"table":"todos","select":["title"],"include":[{"relation":"project","query":{"select":["name"]}}]}`
+	if string(got) != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+	if err := checkSelect[titled]("todos", q.readable()); err != nil {
+		t.Fatal(err)
+	}
+}

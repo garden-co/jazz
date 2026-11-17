@@ -40,6 +40,18 @@ func (r Relation[R, T]) With(child *Query[T]) Include[R] {
 	return Include[R]{relation: r.name, child: &c}
 }
 
+// Select includes only cols (and id) of the related rows, as TS's
+// include({ rel: table.select(…) }): the row's field for the relation is
+// then a struct of yours whose json tags name them (with Select on the
+// outer query too).
+func (r Relation[R, T]) Select(cols ...Named[T]) Include[R] {
+	items := make([]any, len(cols))
+	for i, c := range cols {
+		items[i] = c.selectItem()
+	}
+	return Include[R]{relation: r.name, child: &queryJSON{Select: items}}
+}
+
 // Include includes the related rows, and in each of them incs.
 func (r Relation[R, T]) Include(incs ...Includer[T]) Include[R] {
 	return r.With(NewQuery[T]("").Include(incs...))
@@ -112,8 +124,9 @@ func JSONAt[R, V any](c Column[R, V], pointer string) Part[R] {
 }
 
 // Select is q reading only cols (and id), into rows of P: a struct you
-// define whose json tags name the selected columns. A field of P that is
-// neither id nor selected is refused when the query runs.
+// define whose json tags name the selected columns and any included
+// relations. A field of P that is none of these is refused when the query
+// runs.
 func Select[P, R any](q *Query[R], cols ...Named[R]) *Query[P] {
 	p := &Query[P]{table: q.table, raw: q.toJSON().cloneParts(), afterHop: q.afterHop}
 	p.selected = []string{}

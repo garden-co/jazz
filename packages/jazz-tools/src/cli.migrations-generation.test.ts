@@ -119,7 +119,10 @@ describe("migrations create", () => {
     expect(await stubs(root)).toEqual([]);
   });
 
-  it("needs no stub to add enum variants, and refuses dropping one", async () => {
+  // Whether a stub is needed is Rust's `schemasAreCompatible`: the rule a
+  // deployment connects versions by. Rows of an enum gaining variants pass
+  // unchanged, but the deployment needs the (empty) migration to reach them.
+  it("writes an empty stub to add enum variants, and refuses dropping one", async () => {
     const root = await baseline({
       todos: 's.table({ title: s.string(), status: s.enum("todo", "done") }, {})',
     });
@@ -127,13 +130,83 @@ describe("migrations create", () => {
       todos: 's.table({ title: s.string(), status: s.enum("todo", "done", "archived") }, {})',
     });
     const added = await createAppMigration({ cwd: root, name: "archived" });
-    expect(added.file).toBeUndefined();
-    expect(await stubs(root)).toEqual([]);
+    expect(added.file).toMatch(/archived/);
+    expect(added.todos).toEqual([]);
+    await generateApp({ cwd: root });
+    const app = JSON.parse(await readFile(join(root, "jazz.app.json"), "utf8"));
+    expect(app.migrations).toHaveLength(1);
 
     await writeSchema(root, {
       todos: 's.table({ title: s.string(), status: s.enum("todo", "archived") }, {})',
     });
     await expect(createAppMigration({ cwd: root, name: "drop-done" })).rejects.toThrow(/status/);
+  });
+
+  it("writes a stub when a table gains branchBy, not for a default outside it", async () => {
+    const notes = (options: { branchBy: boolean; titleDefault: string }) =>
+      `s.table({ title: s.string().default(${JSON.stringify(options.titleDefault)}), ` +
+      `branch: s.string().default("main") }, {})` +
+      (options.branchBy ? '.branchBy("branch")' : "");
+    const root = await baseline({ notes: notes({ branchBy: false, titleDefault: "x" }) });
+
+    await writeSchema(root, { notes: notes({ branchBy: false, titleDefault: "y" }) });
+    const titleDefault = await createAppMigration({ cwd: root, name: "title-default" });
+    expect(titleDefault.file).toBeUndefined();
+    expect(titleDefault.snapshot).toBeDefined();
+
+    await writeSchema(root, { notes: notes({ branchBy: true, titleDefault: "y" }) });
+    const branched = await createAppMigration({ cwd: root, name: "branch-by" });
+    expect(branched.file).toMatch(/branch-by/);
+    expect(await stubs(root)).toHaveLength(1);
+  });
+
+  // Rust's diff (jazz-napi `migrationDiff`) decides the steps; TS only renders them.
+  it("refuses moving a kept column's reference to another table", async () => {
+    const tables = (target: string) => ({
+      lists: "s.table({ name: s.string() }, {})",
+      boards: "s.table({ name: s.string() }, {})",
+      todos: `s.table({ title: s.string(), parent: s.uuid() }, { parentRel: s.rel(${JSON.stringify(target)}, "parent") })`,
+    });
+    const root = await baseline(tables("lists"));
+    await writeSchema(root, tables("boards"));
+    await expect(createAppMigration({ cwd: root, name: "move-parent" })).rejects.toThrow(
+      /Moving the reference of column `todos.parent` from lists to boards is not supported yet/,
+    );
+    expect(await stubs(root)).toEqual([]);
+  });
+
+  it("says what changed when rows pass unchanged, and the stub loads", async () => {
+    const root = await baseline({
+      notes: 's.table({ title: s.string(), branch: s.string().default("main") }, {})',
+    });
+    await writeSchema(root, {
+      notes:
+        's.table({ title: s.string(), branch: s.string().default("main") }, {}).branchBy("branch")',
+    });
+    const created = await createAppMigration({ cwd: root, name: "branch-by" });
+    const stub = await stubText(root, created.file);
+    expect(stub).toContain("// Rows pass unchanged: only branchBy changed.");
+    expect(created.todos).toEqual([]);
+    await generateApp({ cwd: root });
+    const app = JSON.parse(await readFile(join(root, "jazz.app.json"), "utf8"));
+    expect(app.migrations).toHaveLength(1);
+  });
+
+  // A deployment refuses to change a row's branch columns, so create refuses first.
+  it("refuses removing branchBy or changing a branch column's default", async () => {
+    const notes = (branchBy: boolean, branchDefault: string) =>
+      `s.table({ title: s.string(), branch: s.string().default(${JSON.stringify(branchDefault)}) }, {})` +
+      (branchBy ? '.branchBy("branch")' : "");
+    const root = await baseline({ notes: notes(true, "main") });
+    await writeSchema(root, { notes: notes(false, "main") });
+    await expect(createAppMigration({ cwd: root, name: "unbranch" })).rejects.toThrow(
+      /Removing `branch` from the branchBy of table `notes` is not supported/,
+    );
+    await writeSchema(root, { notes: notes(true, "draft") });
+    await expect(createAppMigration({ cwd: root, name: "draft" })).rejects.toThrow(
+      /Changing the default of branch column `notes.branch` is not supported/,
+    );
+    expect(await stubs(root)).toEqual([]);
   });
 
   it("writes createTables and dropTables for added and removed tables", async () => {

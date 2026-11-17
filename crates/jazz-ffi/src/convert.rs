@@ -6,6 +6,7 @@
 //! any JSON; bytes → base64 string; array → JSON array; optional → null.
 
 use base64::Engine as _;
+use jazz_app_support::jazz::query::where_condition::{WhereValueRole, decode_where_condition};
 use jazz_app_support::jazz::query::{self as q, OrderDirection, Predicate};
 use jazz_app_support::jazz::records::Value as CoreValue;
 use jazz_app_support::jazz::tools::{
@@ -763,70 +764,23 @@ pub(crate) fn predicate(
     condition: &Json,
     path: &str,
 ) -> Result<Predicate> {
-    let name = condition
-        .get("column")
-        .and_then(Json::as_str)
-        .ok_or_else(|| refused(format!("{path} needs a \"column\"")))?;
-    let op = condition
-        .get("op")
-        .and_then(Json::as_str)
-        .ok_or_else(|| refused(format!("{path} needs an \"op\"")))?;
-    let column = column(table, table_name, name)?;
-    let value = condition.get("value");
+    let decoded =
+        decode_where_condition(condition).map_err(|error| refused(format!("{path}: {error}")))?;
+    let column = column(table, table_name, decoded.column)?;
     let path = format!("{path}.value");
-    let literal = || -> Result<q::Operand> {
-        let value = value.ok_or_else(|| refused(format!("{path} is missing")))?;
-        if value.is_null() {
-            return Err(refused(format!(
-                "{path} is null: use \"isNull\" or \"isNotNull\""
-            )));
-        }
-        Ok(lit(to_value(value, &column.column_type, false, &path)?))
-    };
-    let compare = |compare: fn(q::Operand, q::Operand) -> Predicate| -> Result<Predicate> {
-        Ok(compare(q::col(column.name), literal()?))
-    };
-    Ok(match op {
-        "eq" => compare(q::eq)?,
-        "ne" => compare(q::ne)?,
-        "lt" => compare(q::lt)?,
-        "lte" => compare(q::lte)?,
-        "gt" => compare(q::gt)?,
-        "gte" => compare(q::gte)?,
-        "in" => {
-            let values = value
-                .and_then(Json::as_array)
-                .ok_or_else(|| refused(format!("{path} must be an array for \"in\"")))?;
-            let operands = values
-                .iter()
-                .enumerate()
-                .map(|(at, value)| {
-                    Ok(lit(to_value(
-                        value,
-                        &column.column_type,
-                        false,
-                        &format!("{path}[{at}]"),
-                    )?))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            q::in_list(q::col(column.name), operands)
-        }
-        "contains" => {
-            let value = value.ok_or_else(|| refused(format!("{path} is missing")))?;
-            let part = match column.column_type.as_ref() {
-                ColumnType::Text => to_value(value, &ColumnType::Text, false, &path)?,
-                ColumnType::Array { element } => to_value(value, element, false, &path)?,
-                _ => {
-                    return Err(refused(format!(
-                        "\"contains\" needs a string or array column; {name} is neither"
-                    )));
-                }
-            };
-            q::contains(q::col(column.name), lit(part))
-        }
-        "isNull" => q::is_null(q::col(column.name)),
-        "isNotNull" => q::not(q::is_null(q::col(column.name))),
-        other => return Err(refused(format!("{path}: unknown op {other:?}"))),
+    decoded.to_predicate(q::col(column.name), |value, role| {
+        let column_type = match (role, column.column_type.as_ref()) {
+            (WhereValueRole::Whole, column_type) => column_type,
+            (WhereValueRole::ContainsPart, ColumnType::Text) => &ColumnType::Text,
+            (WhereValueRole::ContainsPart, ColumnType::Array { element }) => element,
+            (WhereValueRole::ContainsPart, _) => {
+                return Err(refused(format!(
+                    "\"contains\" needs a string or array column; {} is neither",
+                    column.name
+                )));
+            }
+        };
+        Ok(lit(to_value(value, column_type, false, &path)?))
     })
 }
 

@@ -49,12 +49,13 @@ pub mod options;
 pub mod slow;
 #[cfg(feature = "sql-trace")]
 mod sql_trace;
+pub mod thin_transactions;
 pub mod values;
 
 #[cfg(feature = "testing")]
-pub use db::sync::pruned_txs_lookups_for_test;
+pub use db::sync::{decode_session_read_cells_for_test, pruned_txs_lookups_for_test};
 #[cfg(feature = "testing")]
-pub use large::full_materializations_for_test;
+pub use large::{cell_ranges_for_test, full_materializations_for_test};
 
 /// Structured read results.
 pub mod result_tree {

@@ -74,7 +74,7 @@ function expectGolden(
   // Snapshots `generate` writes are stamped with the time: compare them by hash.
   const files = Object.fromEntries(
     Object.entries(projectFiles(dir)).map(([path, text]) => [
-      path.replace(/(migrations\/snapshots\/)\d{8}T\d{6}-/, "$1<stamp>-"),
+      path.replace(/(migrations\/snapshots\/)\d{8}T\d{6}-/, "$1STAMP-"),
       text,
     ]),
   );
@@ -248,6 +248,28 @@ describe("jazz-tools upgrade: conversions", () => {
     expect(files).toContain("src/jazz_app.rs");
   });
 
+  it("writes a JSON-only app with transforms and computed fields, keeping the hashes and bundle id", async () => {
+    const dir = fixture("json-only");
+    // crates/jazz-app's tasks app: a transformed column (`isoDate`), computed fields, no permissions.
+    const tasks = readFileSync(
+      join(FIXTURES, "../../../../../crates/jazz-app/tests/fixtures/tasks/jazz.app.json"),
+      "utf8",
+    );
+    writeFileSync(join(dir, "jazz.app.json"), tasks);
+    rmSync(join(dir, "jazz.permissions.json"));
+    const before = await artifactIdentity(
+      tasks,
+      '{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json", "tables": {} }\n',
+    );
+    await upgrade(dir);
+    expect(await identityOf(dir)).toEqual(before);
+    const schema = readFileSync(join(dir, "schema.ts"), "utf8");
+    expect(schema).toContain('.transform("isoDate", s.string())');
+    const app = JSON.parse(readFileSync(join(dir, "jazz.app.json"), "utf8"));
+    expect(app.transforms).toEqual({ isoDate: { stored: "timestamp", view: "string" } });
+    expect(Object.keys(app.tables.tasks.computed)).toEqual(["urgent", "titleLen"]);
+  });
+
   it("reports the environment reads of the old permissions and marks them in the printed ones", async () => {
     const dir = fixture("env-permissions");
     // As set where the app last ran `validate`: the check runs it again.
@@ -341,6 +363,31 @@ describe("jazz-tools upgrade: conversions", () => {
     expect(planted(report.typeErrors)).toHaveLength(0);
     expect(formatReport(report)).toContain(
       "the project had before the conversion too (not upgrade's, and not counted)",
+    );
+  });
+
+  it("types a printed helper's enum parameter as the enum, so the typecheck passes (adopter eval t3)", async () => {
+    const dir = fixture("roles");
+    const before = await identityOf(dir);
+    const report = await upgradeProject({ dir, generate: testGenerate });
+    expect(await identityOf(dir)).toEqual(before);
+    const schema = readFileSync(join(dir, "schema.ts"), "utf8");
+    expect(schema).toMatch(/role: "admin" \| "editor" \| "viewer"/);
+    expect(schema).not.toContain('s.Value<"string">');
+    // Errors the app had before (its own server deps) are reported apart; upgrade adds none.
+    expect(report.typeErrors).toEqual([]);
+  });
+
+  it("renames a bare `import { schema }` from jazz-tools to `s` rather than refusing (adopter eval t6)", async () => {
+    const dir = fixture("bare-schema");
+    const before = await identityOf(dir);
+    const report = await upgrade(dir);
+    expect(await identityOf(dir)).toEqual(before);
+    const schema = readFileSync(join(dir, "schema.ts"), "utf8");
+    expect(schema).toContain('import { schema as s } from "jazz-tools";');
+    expect(schema).toContain("export const schema = s.defineSchema(");
+    expect(report.rewrites.join("\n")).toContain(
+      "`import { schema }` from jazz-tools → `import { schema as s }`",
     );
   });
 

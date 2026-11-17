@@ -1,5 +1,7 @@
 # StagePlan: Kotlin CLI
 
+> **Experimental:** client only, backends are TypeScript. See [Language Support](https://jazz.tools/docs/reference/language-support#jazz-environment-kotlin).
+
 StagePlan as a Kotlin/JVM command-line app: an **end user** of StagePlan's backend, through the
 backend's Jazz endpoint, over `jazz-kotlin`. (Kotlin is for apps: StagePlan's main backend runs in TypeScript.) Its `schema.ts` re-exports
 `../react-localfirst`'s, and `npx jazz-tools generate` writes `jazz.app.json` and

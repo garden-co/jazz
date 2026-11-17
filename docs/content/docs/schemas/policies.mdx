@@ -298,7 +298,10 @@ adding an allow rule to silence the warning:
 
 ```ts title="schema.ts"
 export const schema = s.defineSchema({
-  auditLog: s.table({ ownerId: s.uuid(), action: s.string() }),
+  auditLog: s.table({
+    ownerId: s.uuid(),
+    action: s.string(),
+  }),
 });
 
 const { definePermissions, session } = schema;
@@ -504,7 +507,11 @@ Untyped claims accept any path. To have TypeScript check them, declare their sha
 ```ts title="schema.ts"
 export const schema = s.defineSchema(
   {
-    projects: s.table({ name: s.string(), orgId: s.string(), teamId: s.string() }),
+    projects: s.table({
+      name: s.string(),
+      orgId: s.string(),
+      teamId: s.string(),
+    }),
   },
   { claims: s.claims<{ role: "manager" | "member"; org: string; teams: string[] }>() },
 );
@@ -657,7 +664,9 @@ has not accepted yet. Rows a transaction writes cannot grant each other access i
 each one has to be allowed by rows that already exist or that the transaction writes and are
 themselves allowed. Every write must also still be allowed by the state the whole transaction
 leaves behind, so demoting your own membership from admin in the same transaction as creating a
-document that requires admin is rejected. The order in which you make the writes doesn't matter.
+document that requires admin is rejected. The order in which you make the writes doesn't matter. See
+[Know when permissions are checked](/docs/writing/transactions#know-when-permissions-are-checked)
+for when a transaction's writes are checked and more examples.
 
 Importing many rows whose permissions rest on rows that already exist (for example, thousands of
 folders under existing parents) is checked once per row. A transaction whose rows mostly depend on
@@ -674,8 +683,13 @@ filter again. For example, a doctor may read the patients they have an appointme
 
 ```ts title="schema.ts"
 export const schema = s.defineSchema({
-  doctors: s.table({ userId: s.string(), name: s.string() }),
-  patients: s.table({ name: s.string() }),
+  doctors: s.table({
+    userId: s.string(),
+    name: s.string(),
+  }),
+  patients: s.table({
+    name: s.string(),
+  }),
   appointments: s.table(
     { doctorId: s.uuid(), patientId: s.uuid(), at: s.timestamp() },
     {
@@ -891,7 +905,10 @@ them; `generate` does. For example, with folders and files:
 
 ```ts title="schema.ts"
 export const schema = s.defineSchema({
-  folders: s.table({ name: s.string(), ownerId: s.uuid() }),
+  folders: s.table({
+    name: s.string(),
+    ownerId: s.uuid(),
+  }),
   files: s.table(
     { name: s.string(), folderId: s.uuid() },
     {
@@ -989,7 +1006,7 @@ These results are advice, not permission enforcement. A result can become stale,
 means Jazz could not give a definite answer. The authority still makes the final decision when the
 read or write reaches it.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#dry-run-permissions-ts
@@ -1000,15 +1017,27 @@ read or write reaches it.
       ../examples/docs/todo-effect/src/docs-snippets.ts#dry-run-permissions-effect
     </include>
   </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#dry-run-permissions-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#dry-run-permissions-swift
+    </include>
+
+  </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-permission-advice-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#reading-permission-advice-kotlin
     </include>
 
   </Tab>
   <Tab value="Go">
     <include cwd lang="go">
-      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#dry-run-permissions-go
+      ../examples/docs/todo-client-go/snippets_test.go#dry-run-permissions-go
     </include>
 
   </Tab>

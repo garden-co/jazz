@@ -1,12 +1,15 @@
 # todo-server-rs
 
+> [!WARNING]
+> **Experimental: client only; backends are TypeScript.** See [Language Support](https://jazz.tools/docs/reference/language-support#jazz-environment-rust).
+
 An Axum REST + SSE service over a Jazz app, written in Rust with the `jazz-app-support` crate. It is a **backend client** of the app's TypeScript main backend (`createJazz`): it syncs through the main backend's `/jazz` with a machine credential (an OIDC token) that the main backend trusts through `trustWorkload`. It uses SQLite storage and the native WebSocket transport, with no Node, NAPI or WASM.
 
 ## What it demonstrates
 
-- **The app is its files.** `jazz.app.json` declares the tables (and their history and migrations), and `jazz.permissions.json` declares who may do what. `src/jazz_app.rs` holds the typed bindings that `jazz-tools generate` generates from `jazz.app.json`. All three are committed, and there is no schema code to run.
+- **The app is authored in `schema.ts`.** It declares the tables and relations (`s.defineSchema`) and who may do what (`definePermissions`). `npx jazz-tools generate` writes `jazz.app.json` (the tables, with their history and migrations), `jazz.permissions.json` and `src/jazz_app.rs`, the typed bindings. All of them are committed. The service reads only the generated files: nothing runs `schema.ts` at runtime, and there is no Node in the service.
 - **Typed bindings.** `jazz_app::Todo`, `NewTodo` and `TodoUpdate`, plus `todos::query()`, `todos::done().eq(false)` and `todos::todos_via_parent().of(id)`.
-- **A `Send + Clone` handle.** `jazz_app::open(config)` returns a `jazz_app_support::Jazz`. The handle lives directly in Axum's router state, while the client runs on a thread of its own.
+- **A `Send + Clone` handle.** `jazz_app::open(config)` returns a `jazz_app::Jazz` (the bindings re-export everything `jazz-app-support` exports). The handle lives directly in Axum's router state, while the client runs on a thread of its own.
 - **Running as a backend client**, as TypeScript's `createJazzClient` does:
   - It connects to the main backend's `/jazz` with `Config::credential`.
   - The main backend decides what the credential is trusted as. A **scoped** client acts as one user, under the app's permissions. A **trusted** client acts as the system.
@@ -16,22 +19,22 @@ An Axum REST + SSE service over a Jazz app, written in Rust with the `jazz-app-s
 
 ## Schema
 
-From `jazz.app.json`:
+From `schema.ts`:
 
 - **projects**: name
 - **todos**: title, done, description (optional), parent (a todo, optional), project (optional)
 
-`jazz.permissions.json` lets everyone read and write todos. Account admission does not replace table permissions.
+Its permissions (`jazz.permissions.json` once generated) let everyone read and write todos. Account admission does not replace table permissions.
 
 ## Changing the schema
 
 ```bash
-# Edit the tables in jazz.app.json, then:
+# Edit schema.ts, then:
 npx jazz-tools migrations create --name <name>   # resolve any "TODO: …" it writes
-npx jazz-tools generate                          # checks the files, regenerates src/jazz_app.rs
+npx jazz-tools generate                          # writes jazz.app.json, jazz.permissions.json and src/jazz_app.rs
 ```
 
-Commit `jazz.app.json` and `src/jazz_app.rs`. In CI, `npx jazz-tools generate --check` refuses stale files, and so does this example's `bindings_are_current` test. To generate the bindings at build time instead of committing them, call `jazz_codegen::rust::build()` from a `build.rs` and `include!` its output (see that function's docs).
+`npx jazz-tools generate` runs `schema.ts` with its own copy of `jazz-tools`, so the crate needs no `package.json`. It finds `Cargo.toml` beside `schema.ts` and writes the Rust bindings. Run it with `npx`: the standalone `jazz-tools` binary refuses to write beside a `schema.ts`, though its `generate --check` still checks the committed files and bindings (not that they are fresh from the TypeScript). Commit `schema.ts`, `migrations/`, `jazz.app.json`, `jazz.permissions.json` and `src/jazz_app.rs`. Don't edit the generated files. In CI, `npx jazz-tools generate --check` refuses stale files, and so does this example's `bindings_are_current` test. To generate the bindings at build time instead of committing them, call `jazz_codegen::rust::build()` from a `build.rs` and `include!` its output (see that function's docs). It reads the generated `jazz.app.json`, so run `npx jazz-tools generate` after editing `schema.ts` either way.
 
 ## Running locally
 

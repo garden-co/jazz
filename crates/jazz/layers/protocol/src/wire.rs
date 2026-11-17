@@ -510,6 +510,13 @@ pub fn is_channel_credit_frame(bytes: &[u8]) -> bool {
     bytes.first() == Some(&3)
 }
 
+/// Whether encoded frame bytes are a [`WireFrame::Error`], judged by its
+/// pinned postcard-v1 enum tag (1) alone. Lets a receiver tell a server's
+/// refusal it cannot decode (a code it does not know) from other bytes.
+pub fn is_wire_error_frame(bytes: &[u8]) -> bool {
+    bytes.first() == Some(&1)
+}
+
 /// Decode a thin frame joined from [`crate::thin::ThinPart`]s, which may be
 /// over a wire frame but not over [`crate::thin::MAX_THIN_MESSAGE_BYTES`].
 pub fn decode_postcard_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {

@@ -58,13 +58,20 @@ If your app declares computed fields or transforms, the bindings also declare a 
 interface. `jazzapp.Open(ctx, cfg, computed)` takes your implementation, so a missing method is a
 compile error.
 
+A [mergeable text](/docs/writing/text) column (`merge: "text"`, `"markdown"` or `"html"`) gets an
+edit method. For the text page's `notes.body`, that's
+`jazzapp.Notes.EditBody(ctx, db, id, jazz.Splice(pos, deleteLen, insert))`. Its positions are
+**UTF-8 byte offsets**, as Go indexes a `string` (`strings.Index`, slicing), where TypeScript counts
+UTF-16 code units. An offset inside a character is refused, not rounded, and so is a `jazz.Range`
+of a text column that would split one.
+
 ## Open the app as an end user
 
 Sign in with a token from your auth provider. Jazz asks your function for a fresh one whenever it
 needs it:
 
 <include cwd lang="go" meta='title="main.go"'>
-  ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#context-setup-go-client
+  ../examples/docs/todo-client-go/snippets_test.go#context-setup-go-client
 </include>
 
 Or use a local-first account kept on this device, created on first open:
@@ -99,11 +106,16 @@ The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) p
 for each example. `examples/stage-plan/apps/go-cli` in the repository is a complete StagePlan
 command-line app.
 
+A Go service can also connect to your main backend as a backend client, with a machine credential
+(trusted, acting for users with `ForUser`, or scoped): see [Backend Client](/docs/setup/backend-client).
+
 ## Not supported yet
 
 - running your main backend in Go (publishing permissions, serving `/jazz`): run it in TypeScript
   with `createJazz`;
-- connecting as a backend client with a machine credential (trusted or scoped, `forUser`): see
-  [Backend Client](/docs/setup/backend-client);
+- guest (anonymous) users: a Go app signs in with your app's own sign-in (`jazz.Token`) or a device
+  account (`jazz.DeviceAccount`), and has no guest mode;
+- nested rows, catalogue enums and transaction-id columns: `npx jazz-tools generate` refuses Go
+  bindings for an app that declares them;
 - non-finite doubles (`NaN`, `±Inf`): Jazz carries them as `null`, so a nullable `float` column reads
   them as `nil`, and reading a non-nullable one fails with a `*jazz.Error` that names the column.
