@@ -897,7 +897,7 @@ pub fn local_first_audience(
 /// The registry namespace a local-first founder's account id derives from:
 /// the audience its proof was verified against, read as an app id.
 pub fn local_first_founding_app(audience: &str) -> AppId {
-    AppId::from_string(audience).unwrap_or_else(|_| AppId::from_name(audience))
+    crate::portable::accounts::local_first_founding_app(audience)
 }
 
 /// Extract session from headers with priority resolution.
