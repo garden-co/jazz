@@ -6,6 +6,10 @@
 //! [`ProtocolError::AccountKeyUnavailable`]; a provably invalid optional
 //! proof only drops its approval. Every other failure (a provider failure, an
 //! unregistered mechanism) stops the operation.
+//!
+//! An authenticated key is also checked against the account's own sealing
+//! key records (§2.12): a valid record that does not derive from the epoch
+//! key it names is `conflicting-account-key`, and acquisition fails closed.
 
 use std::collections::BTreeSet;
 
@@ -363,6 +367,14 @@ impl AccountKeyEvidence<'_> {
     /// predecessor's marker and revision completeness. With
     /// `delivery_approval`, the key must also have come through that
     /// approval's delivery, authenticated with its delivery marker.
+    ///
+    /// Once the key authenticates, the device checks that every valid
+    /// sealing key record of an epoch of its generation derives from that
+    /// epoch's key, for each mechanism its registry has (§2.12): a record
+    /// that does not is the intrinsic contradiction
+    /// `conflicting-account-key`, since only the account's own devices can
+    /// write a valid one. Acquisition fails with it rather than trying
+    /// another candidate: the key is the account's, and the record is wrong.
     pub fn authenticate(
         &self,
         key: &[u8; 32],
@@ -371,7 +383,7 @@ impl AccountKeyEvidence<'_> {
         let chain = self.chain()?;
         let current = chain.last().expect("a state has its root epoch");
         self.confirm(current, key)?;
-        let mut later_key = Zeroizing::new(*key);
+        let mut reached = vec![(current.epoch_id.to_owned(), Zeroizing::new(*key))];
         for index in (1..chain.len()).rev() {
             let successor = chain[index]
                 .successor
@@ -385,7 +397,8 @@ impl AccountKeyEvidence<'_> {
                 "history",
                 "",
             )?;
-            let previous_key = unwrap(self.registry(), &later_key, &context, &successor.history)?
+            let later_key = &reached.last().expect("the later key is held").1;
+            let previous_key = unwrap(self.registry(), later_key, &context, &successor.history)?
                 .ok_or(ProtocolError::AccountKeyUnavailable)?;
             self.confirm(previous, &previous_key)?;
             let authenticated =
@@ -397,7 +410,7 @@ impl AccountKeyEvidence<'_> {
             if revision != authenticated {
                 return Err(ProtocolError::AccountKeyUnavailable);
             }
-            later_key = previous_key;
+            reached.push((previous.epoch_id.to_owned(), previous_key));
         }
         let approval_ids = self.authenticated(current, key, false, None)?;
         if let Some(approval_id) = delivery_approval
@@ -407,6 +420,8 @@ impl AccountKeyEvidence<'_> {
         {
             return Err(ProtocolError::AccountKeyUnavailable);
         }
+        reached.reverse();
+        self.check_sealing_keys(&self.epoch_keys_of(reached))?;
         Ok(AuthenticatedAccountKey {
             epoch_id: current.epoch_id.to_owned(),
             approval_ids,
@@ -417,7 +432,9 @@ impl AccountKeyEvidence<'_> {
     /// authenticated current `key` through each successor's `history` back
     /// to the root, each confirmed by its epoch's marker (§2.7). A key of
     /// another epoch than the current one is
-    /// [`ProtocolError::AccountKeyUnavailable`].
+    /// [`ProtocolError::AccountKeyUnavailable`]. The sealing key records
+    /// are checked against the keys reached, as in
+    /// [`authenticate`](Self::authenticate).
     pub fn epoch_keys(&self, key: &AccountKey) -> ProtocolResult<AccountEpochKeys> {
         let chain = self.chain()?;
         let current = chain.last().expect("a state has its root epoch");
@@ -446,12 +463,29 @@ impl AccountKeyEvidence<'_> {
             keys.push((previous.epoch_id.to_owned(), previous_key));
         }
         keys.reverse();
-        Ok(AccountEpochKeys {
+        let keys = self.epoch_keys_of(keys);
+        self.check_sealing_keys(&keys)?;
+        Ok(keys)
+    }
+
+    /// The epoch keys of this account's current generation, root epoch
+    /// first.
+    fn epoch_keys_of(&self, keys: Vec<(String, Zeroizing<[u8; 32]>)>) -> AccountEpochKeys {
+        AccountEpochKeys {
             account_id: self.account_id().to_owned(),
             generation: self.state.generation,
             root_id: self.state.root.row.id.clone(),
             keys,
-        })
+        }
+    }
+
+    /// The derivation check of a device of the account (§2.12) over the
+    /// valid sealing key records of its current chain.
+    fn check_sealing_keys(&self, keys: &AccountEpochKeys) -> ProtocolResult<()> {
+        match self.replay.sealing_keys()? {
+            Some(sealing) => sealing.check_derived(self.registry(), keys),
+            None => Ok(()),
+        }
     }
 
     /// Opens one candidate and authenticates it. `Ok(None)` when the

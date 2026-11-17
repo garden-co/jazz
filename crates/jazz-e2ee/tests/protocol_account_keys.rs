@@ -6,7 +6,7 @@
 mod common;
 
 use common::TestRandom;
-use common::mechanisms::{OTHER_SEAL, custom_registry, sealing_with};
+use common::mechanisms::{OTHER_SEAL, UNROUTED_SEAL, custom_registry, sealing_with};
 use common::protocol::{ALICE, Env, Ledger};
 use jazz_e2ee::envelope::Mechanism;
 use jazz_e2ee::mechanisms::key_seal;
@@ -27,13 +27,25 @@ fn crafted(
     public_key: Vec<u8>,
     rng: &mut TestRandom,
 ) -> AccountSealingKey {
+    crafted_with(env, signer, epoch_id, BUILTIN, public_key, rng)
+}
+
+/// [`crafted`], for `mechanism`.
+fn crafted_with(
+    env: &Env,
+    signer: &LocalDevice,
+    epoch_id: &str,
+    mechanism: Mechanism<'_>,
+    public_key: Vec<u8>,
+    rng: &mut TestRandom,
+) -> AccountSealingKey {
     let mut record = AccountSealingKey {
         id: ids::random_v4(rng).unwrap(),
         account_id: env.account.clone(),
         epoch_id: epoch_id.to_owned(),
         signer_id: signer.id.clone(),
-        mechanism: BUILTIN.id.to_owned(),
-        version: BUILTIN.version,
+        mechanism: mechanism.id.to_owned(),
+        version: mechanism.version,
         public_key,
         signature: Vec::new(),
     };
@@ -467,4 +479,124 @@ fn epoch_keys_reach_every_epoch_of_the_generation() {
     assert_eq!(keys.generation(), 0);
     let rendered = format!("{keys:?}");
     assert!(!rendered.contains(&format!("{:?}", root_key)));
+}
+
+/// An active device of the account publishes, during a mechanism
+/// migration, a later record of the new mechanism that does not derive
+/// from the epoch key. The record is valid (only the account's own devices
+/// can write one), so every device of the account that acquires its key
+/// finds the contradiction and fails closed with `conflicting-account-key`
+/// rather than accept a key whose published sealing key is wrong (§2.12).
+///
+/// ```text
+/// laptop ──root + builtin record──► ledger
+/// phone  ──approved──► ledger
+/// phone  ──later other-seal record (not derived from K)──► ledger
+/// laptop, phone ──acquire K──✗ conflicting-account-key
+/// ```
+#[test]
+fn acquiring_the_account_key_checks_its_sealing_key_records_derive() {
+    let (registry, _) = custom_registry(OTHER_SEAL);
+    let env = Env::with(registry.clone(), Default::default(), ALICE);
+    let mut rng = TestRandom(13);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    assert!(ledger.acquire(&env, &laptop).is_ok());
+    assert!(ledger.acquire(&env, &phone).is_ok());
+
+    let epoch = ledger.state(&env).epoch_id().to_owned();
+    let other = registry.key_sealer(OTHER_SEAL).unwrap();
+    let wrong = derive::account_sealing_key_pair(other, &[9; 32])
+        .unwrap()
+        .public
+        .bytes;
+    let record = crafted_with(&env, &phone, &epoch, OTHER_SEAL, wrong, &mut rng);
+    let at = ledger.next();
+    ledger
+        .public
+        .account_keys
+        .push(Accepted::new(at, record.clone()));
+    let sealing = ledger.replay(&env).sealing_keys().unwrap().unwrap();
+    assert!(sealing.is_valid(&record.id), "a later publication by phone");
+
+    let conflicting = ProtocolError::Intrinsic(IntrinsicContradiction::ConflictingAccountKey);
+    for device in [&laptop, &phone] {
+        assert_eq!(ledger.acquire(&env, device).err(), Some(conflicting));
+    }
+}
+
+/// A record whose signer had no signing key published strictly before it
+/// is not valid (§2.12), even when it is otherwise the co-published
+/// record of a bootstrap whose device's keys were accepted with the root.
+#[test]
+fn a_record_whose_signer_had_no_signing_key_before_it_is_not_valid() {
+    let (env, mut ledger, _, _) = bootstrapped(14);
+    let root_at = ledger.public.roots[0].position;
+    assert_eq!(valid_ids(&env, &ledger), [record_id(&ledger, 0)]);
+    // The device's keys accepted in the root's own transaction: the root
+    // still counts, but the record has no signing key before it.
+    ledger.public.keys[0].position = root_at;
+    assert!(ledger.replay(&env).current().unwrap().is_some());
+    assert!(valid_ids(&env, &ledger).is_empty());
+}
+
+/// A record of a sealing mechanism this client does not have is skipped:
+/// the derivation check cannot derive it and leaves it unchecked,
+/// acquiring the account key still succeeds, and a sender of the built-in
+/// mechanism still seals to the built-in record (§2.12).
+#[test]
+fn a_record_of_an_unsupported_sealing_mechanism_is_skipped() {
+    let (env, mut ledger, laptop, mut rng) = bootstrapped(15);
+    let epoch = ledger.state(&env).epoch_id().to_owned();
+    let unknown = crafted_with(&env, &laptop, &epoch, UNROUTED_SEAL, vec![3; 32], &mut rng);
+    let at = ledger.next();
+    ledger
+        .public
+        .account_keys
+        .push(Accepted::new(at, unknown.clone()));
+    let sealing = ledger.replay(&env).sealing_keys().unwrap().unwrap();
+    assert!(sealing.is_valid(&unknown.id));
+    assert_eq!(
+        sealing.current(BUILTIN).map(|record| &record.row.id),
+        Some(&record_id(&ledger, 0))
+    );
+    assert!(sealing.current(UNROUTED_SEAL).is_some());
+    let keys = epoch_keys(&env, &ledger, &laptop);
+    sealing.check_derived(&env.registry, &keys).unwrap();
+}
+
+/// At a reset's position, only the new root's device signs the new
+/// generation's record: not the device of the earlier generation, and not
+/// a device of no standing, even after it is approved (§2.12).
+#[test]
+fn record_at_a_reset_signed_by_another_device_is_not_valid() {
+    let (env, mut ledger, laptop, mut rng) = bootstrapped(16);
+    let tablet = env.device(&mut rng);
+    let stranger = env.device(&mut rng);
+    ledger.request(&tablet, &mut rng);
+    ledger.request(&stranger, &mut rng);
+    let (reset_at, key) = ledger.root(&env, &tablet, 1, &mut rng);
+    let epoch = ledger.state(&env).epoch_id().to_owned();
+    let mut forged = Vec::new();
+    for signer in [&laptop, &stranger] {
+        let record = crafted(&env, signer, &epoch, derived(&key), &mut rng);
+        forged.push(record.id.clone());
+        ledger
+            .public
+            .account_keys
+            .push(Accepted::new(reset_at, record));
+    }
+    assert_eq!(valid_ids(&env, &ledger), [record_id(&ledger, 1)]);
+
+    ledger.approve(&env, &tablet, &stranger, &mut rng);
+    assert!(ledger.state(&env).is_active(&stranger.id));
+    let valid = valid_ids(&env, &ledger);
+    for id in &forged {
+        assert!(!valid.contains(id), "{id}");
+    }
 }

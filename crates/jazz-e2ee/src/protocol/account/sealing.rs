@@ -87,7 +87,9 @@ impl SealingKeys {
     /// does not is the intrinsic contradiction `conflicting-account-key`,
     /// since only the account's own devices can write a valid record. A
     /// record of a key sealing mechanism this registry does not have cannot
-    /// be derived here, and is left unchecked.
+    /// be derived here, and is left unchecked. Account key authentication
+    /// ([`AccountKeyEvidence`](super::AccountKeyEvidence)) runs it on every
+    /// key it accepts.
     pub fn check_derived(
         &self,
         registry: &Registry,
