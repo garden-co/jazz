@@ -5,7 +5,8 @@
 //! A write seals every supplied encrypted cell, and its equality token,
 //! under one [`WriteKey`]: a held key is enough, nothing else is checked
 //! (§5.1). A read opens a stored value with the held key of the epoch it
-//! names, of any mark, and classifies everything it cannot return: the two
+//! names, of any mark (only a key of the space's own root decides that a
+//! value is invalid), and classifies everything it cannot return: the two
 //! short values with fixed meanings, malformed and unauthentic records
 //! (`invalid-ciphertext`), unrouted mechanisms (`unsupported-format`), and
 //! versions the device does not hold ([`Opened::Missing`], which the
@@ -431,11 +432,14 @@ pub(crate) fn classify_short(stored: &[u8], converting: bool) -> Option<Opened> 
 /// declaration names a conversion for the column (§4.1, cleared marker).
 ///
 /// A stream record in a column that may not stream is
-/// `unsupported-format` (large-value format). When the row's space holds
-/// no key of the epoch, the held keys of other spaces are tried: a value
-/// that authenticates under one is [`Opened::StaleSpace`]. Otherwise an
-/// epoch an acquisition showed is not in the space's chain is
-/// `invalid-ciphertext`, and any other is [`Opened::Missing`].
+/// `unsupported-format` (large-value format). Only a key of the row's
+/// space's own root decides that a value is invalid; a key of another root
+/// of the address (such as this device's refused creation) only opens the
+/// values sealed under it. When no such key of the epoch is held, the held
+/// keys of other spaces are tried: a value that authenticates under one is
+/// [`Opened::StaleSpace`]. Otherwise an epoch an acquisition showed is not
+/// in the space's chain is `invalid-ciphertext`, and any other is
+/// [`Opened::Missing`].
 pub fn open_cell(
     registry: &Registry,
     held: &HeldKeys,
@@ -469,16 +473,30 @@ pub(crate) fn open_traced<'k>(
     }
     let epoch_id = record.epoch_id;
     let own = held.keys_of(row.space, epoch_id);
-    if !own.is_empty() {
-        let opened = try_keys(registry, &own, row, column, record.kind, epoch_id, stored)?
-            .expect("candidates were given");
-        return Ok(match opened {
-            Ok((value, index)) => (
+    let candidates: Vec<_> = own.iter().map(|(space, key, _)| (*space, *key)).collect();
+    match try_keys(
+        registry,
+        &candidates,
+        row,
+        column,
+        record.kind,
+        epoch_id,
+        stored,
+    )? {
+        Some(Ok((value, index))) => {
+            return Ok((
                 Opened::Value(value),
                 Some((own[index].0, epoch_id.to_owned())),
-            ),
-            Err(code) => (Opened::Unreadable(code), None),
-        });
+            ));
+        }
+        Some(Err(code))
+            if code == DataError::UnsupportedFormat || own.iter().any(|(_, _, own)| *own) =>
+        {
+            return Ok((Opened::Unreadable(code), None));
+        }
+        // Only keys of another root of the address, which do not open the
+        // cell: they decide nothing, and the root's own key is missing.
+        Some(Err(_)) | None => {}
     }
     let elsewhere = held.keys_elsewhere(row.space, epoch_id);
     if let Some(opened) = try_keys(
@@ -600,11 +618,12 @@ pub struct StreamValueReader<'r> {
     /// The stream mechanism's encoding, until its header can be routed.
     pending: Vec<u8>,
     routed: bool,
-    /// The epoch the value names, and whether every candidate key is of
-    /// another space: if none of those opens it, the row's own key is
+    /// The epoch the value names, and whether a candidate key is the row's
+    /// own root's (or the epoch is known not to be in the space's chain):
+    /// otherwise, if none of the candidates opens it, the row's own key is
     /// missing, not the value invalid (§4.2, as for a cell).
     epoch_id: String,
-    foreign: bool,
+    decided: bool,
 }
 
 impl core::fmt::Debug for StreamValueReader<'_> {
@@ -648,9 +667,9 @@ impl<'r> StreamValueReader<'r> {
     /// Starts reading a stored stream of `column` in `row`, given at least
     /// its routing (`prefix`, from the start of the stored value). The keys
     /// are chosen as for [`open_cell`]: the row's own space's keys of the
-    /// epoch, else other spaces' (the value is then stale), else the epoch
-    /// is missing or known absent. A column that may not stream is
-    /// `unsupported-format`.
+    /// epoch; without one of its own root, also other spaces' (the value
+    /// is then stale), and if none opens it the epoch is missing or known
+    /// absent. A column that may not stream is `unsupported-format`.
     pub fn open(
         registry: &'r Registry,
         held: &HeldKeys,
@@ -669,15 +688,22 @@ impl<'r> StreamValueReader<'r> {
         };
         let epoch_id = routing.epoch_id.as_str();
         let own = held.keys_of(row.space, epoch_id);
-        let (keys, stale) = if own.is_empty() {
-            (held.keys_elsewhere(row.space, epoch_id), true)
-        } else {
-            (own, false)
-        };
+        let decides = own.iter().any(|(_, _, own)| *own);
+        let mut keys: Vec<_> = own
+            .into_iter()
+            .map(|(space, key, _)| (space, key, false))
+            .collect();
+        if !decides {
+            keys.extend(
+                held.keys_elsewhere(row.space, epoch_id)
+                    .into_iter()
+                    .map(|(space, key)| (space, key, true)),
+            );
+        }
+        let absent = held
+            .known(row.space)
+            .is_some_and(|known| known.is_absent(epoch_id));
         if keys.is_empty() {
-            let absent = held
-                .known(row.space)
-                .is_some_and(|known| known.is_absent(epoch_id));
             return Ok(StreamOpen::Unreadable(if absent {
                 Opened::Unreadable(DataError::InvalidCiphertext)
             } else {
@@ -688,7 +714,7 @@ impl<'r> StreamValueReader<'r> {
         }
         let candidates = keys
             .into_iter()
-            .map(|(space, key)| {
+            .map(|(space, key, stale)| {
                 let target = row.in_space(space.address());
                 let context = records::stream_context(
                     &target.cell(column.column_id, epoch_id),
@@ -708,7 +734,7 @@ impl<'r> StreamValueReader<'r> {
             pending: Vec::new(),
             routed: false,
             epoch_id: routing.epoch_id.clone(),
-            foreign: stale,
+            decided: decides || absent,
         };
         let mut initial = Zeroizing::new(Vec::new());
         match reader.update(&prefix[routing.consumed..], &mut initial) {
@@ -793,15 +819,16 @@ impl<'r> StreamValueReader<'r> {
         Ok(())
     }
 
-    /// Every candidate failed: another space's keys deciding nothing, the
-    /// row's own key is missing; otherwise the value is invalid.
+    /// Every candidate failed: keys of other roots or spaces deciding
+    /// nothing, the row's own key is missing; otherwise the value is
+    /// invalid.
     fn none_opens(&self) -> ContentError {
-        if self.foreign {
+        if self.decided {
+            ContentError::Data(DataError::InvalidCiphertext)
+        } else {
             ContentError::Missing {
                 epoch_id: self.epoch_id.clone(),
             }
-        } else {
-            ContentError::Data(DataError::InvalidCiphertext)
         }
     }
 

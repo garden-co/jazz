@@ -706,6 +706,85 @@ fn a_wrong_key_of_the_cells_epoch_does_not_block_the_right_one() {
     );
 }
 
+/// Random bytes for a root with the given epoch, as [`root_random`].
+fn root_random_with_epoch(key: u8, id: u8, epoch_id: &str) -> Vec<u8> {
+    let hex: String = epoch_id.chars().filter(|c| *c != '-').collect();
+    let epoch = (0..16).map(|at| u8::from_str_radix(&hex[2 * at..2 * at + 2], 16).unwrap());
+    let mut random = vec![key; 32];
+    random.extend([id; 16]);
+    random.extend(epoch);
+    random.extend(TestRandom(u64::from(key) + 1).bytes(512));
+    random
+}
+
+/// A refused creation whose epoch the space's real root also names (an
+/// updater may reuse a public epoch ID): the refused key still opens this
+/// device's own cells, but decides nothing about the space's: their key is
+/// missing, not held, and is acquired; once held, it decides.
+#[test]
+fn a_refused_roots_key_never_decides_the_spaces_cells() {
+    let world = world(25);
+    let address = space(ROW);
+    let chain = chain_of(&world, ROW);
+    let epoch = chain.root.row.epoch_id.clone();
+    let lost = root_from(&world, ROW, root_random_with_epoch(7, 8, &epoch));
+    assert_eq!(lost.root.epoch_id, epoch);
+    assert_ne!(lost.root.id, chain.root.row.id);
+    let domain = shared(&world);
+    let target = row(&domain, &address, ROW_1);
+    let real = held_of(&world, ALICE, ROW);
+    let (theirs, _) = seal_title(&world, &write_key(&real, &address), &target, "theirs");
+    let stream = seal_stream(
+        &world,
+        &write_key(&real, &address),
+        &target,
+        b"a streamed value",
+        64,
+    );
+    let mut device = HeldKeys::new();
+    device.hold(creation(&world, &lost, "tx-lost")).unwrap();
+    let (mine, _) = seal_title(&world, &write_key(&device, &address), &target, "mine");
+    device
+        .space_mut(&lost.root.id)
+        .unwrap()
+        .settle(CreationFate::NotAccepted, None);
+    let registry = &world.shared.registry;
+    let open = |held: &HeldKeys, stored: &[u8]| {
+        open_cell(registry, held, &target, &title(), stored, false).unwrap()
+    };
+    let missing = Opened::Missing {
+        epoch_id: epoch.clone(),
+    };
+    assert_eq!(value(open(&device, &mine)), b"mine");
+    assert_eq!(open(&device, &theirs), missing);
+    assert!(!device.holds(&address, &epoch));
+    assert!(matches!(
+        StreamValueReader::open(registry, &device, &target, &blob(), &stream).unwrap(),
+        StreamOpen::Unreadable(Opened::Missing { epoch_id }) if epoch_id == epoch
+    ));
+    // The acquisition's read names the real root: the key is pending, not
+    // held, and the cell stays missing.
+    assert_eq!(
+        device
+            .settle_missing(&address, &epoch, Some(&chain), true)
+            .unwrap(),
+        MissingKey::Report(DataError::KeyPending)
+    );
+    assert_eq!(open(&device, &theirs), missing);
+    // Once the real key is held it decides, and the refused key still
+    // opens this device's own cells.
+    device.hold(acquire_held(&world, ALICE, ROW)).unwrap();
+    assert!(device.holds(&address, &epoch));
+    assert_eq!(value(open(&device, &theirs)), b"theirs");
+    assert_eq!(value(open(&device, &mine)), b"mine");
+    let mut damaged = theirs.clone();
+    *damaged.last_mut().unwrap() ^= 1;
+    assert_eq!(
+        open(&device, &damaged),
+        Opened::Unreadable(DataError::InvalidCiphertext)
+    );
+}
+
 #[test]
 fn a_write_uses_the_deepest_key_and_old_cells_stay_readable() {
     let mut world = world(13);

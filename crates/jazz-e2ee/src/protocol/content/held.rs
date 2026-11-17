@@ -14,7 +14,9 @@
 //!   depth (§5.2, §5.4).
 //! - A read uses any held key of the epoch its cell names, of any mark
 //!   (§4.2, §3.2): a refused key always opens the cells this device wrote
-//!   under it.
+//!   under it. Only a key of the address's own root (the root of the chain
+//!   the device last read, or before any read a key that is not `refused`)
+//!   decides that a cell is invalid, or counts as holding its version.
 //! - What an acquisition shows about a version a read needs settles into a
 //!   data error (§4.2, §4.3); an epoch the acquisition shows is not in the
 //!   space's chain is remembered until the chain the device knows advances
@@ -522,19 +524,33 @@ impl HeldKeys {
         }
     }
 
-    /// The held keys of `epoch_id` under `address`, in root ID order: any
-    /// mark opens a cell (§4.2). Normally one; two roots of one address
-    /// may name the same epoch, and only the right key authenticates.
+    /// Whether the held key of `space` at `depth` is a key of its address's
+    /// own root, which alone may decide that a cell is invalid and counts as
+    /// holding the version (§4.2, §4.3): once the device has read the
+    /// address's chain, a key of that chain's root; before, any key not
+    /// `refused`. A key of another root may still open a cell this device
+    /// wrote under it.
+    fn decides(&self, space: &HeldSpace, depth: usize) -> bool {
+        match self.known.get(space.address()) {
+            Some(known) => known.root_id == space.root.id,
+            None => space.mark(depth) != Some(&KeyMark::Refused),
+        }
+    }
+
+    /// The held keys of `epoch_id` under `address`, in root ID order, each
+    /// with whether it decides a cell ([`Self::decides`]): any mark opens a
+    /// cell (§4.2). Normally one; two roots of one address may name the
+    /// same epoch, and only the right key authenticates.
     pub(crate) fn keys_of<'k>(
         &'k self,
         address: &SpaceAddress,
         epoch_id: &str,
-    ) -> Vec<(&'k HeldSpace, &'k [u8; 32])> {
+    ) -> Vec<(&'k HeldSpace, &'k [u8; 32], bool)> {
         self.roots_of(address)
             .into_iter()
             .filter_map(|space| {
                 let depth = space.depth_of(epoch_id)?;
-                Some((space, space.key_at(depth)?))
+                Some((space, space.key_at(depth)?, self.decides(space, depth)))
             })
             .collect()
     }
@@ -586,11 +602,14 @@ impl HeldKeys {
             .collect()
     }
 
+    /// Whether this device holds the key of `epoch_id` of the address's own
+    /// root ([`Self::decides`]): a key of another root that names the same
+    /// epoch is not that version's key, and does not stop its acquisition.
     pub fn holds(&self, address: &SpaceAddress, epoch_id: &str) -> bool {
         self.roots_of(address).iter().any(|space| {
             space
                 .depth_of(epoch_id)
-                .is_some_and(|depth| space.keys.contains_key(&depth))
+                .is_some_and(|depth| space.keys.contains_key(&depth) && self.decides(space, depth))
         })
     }
 
