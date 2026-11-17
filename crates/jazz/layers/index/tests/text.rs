@@ -13,7 +13,8 @@ use std::path::PathBuf;
 
 use jazz_index::text::{
     ANALYZER_VERSION, ANALYZERS, Analyzer, AnalyzerError, DEFAULT_FIELD_LENGTH, ENCODING,
-    MAX_FIELD_LENGTH, MAX_TERM_BYTES, PrefixTerm, QueryError, QueryTerms, impact, row_impacts,
+    MAX_FIELD_LENGTH, MAX_FIELD_TERMS, MAX_QUERY_BYTES, MAX_QUERY_TERMS, MAX_TERM_BYTES,
+    MIN_PREFIX_CHARS, PrefixTerm, QueryError, QueryTerms, impact, row_impacts,
 };
 
 fn en() -> Analyzer {
@@ -52,7 +53,7 @@ fn analyzers_parse_and_unknown_ones_are_not_supported_yet() {
     }
 }
 
-/// Words are cut by `jazz-text`'s plain units: punctuation, symbols, emoji
+/// Words are cut at separators: punctuation, symbols, emoji
 /// and spaces separate words and are dropped; apostrophes between letters
 /// stay inside a word, and `en` strips possessives.
 #[test]
@@ -306,6 +307,137 @@ fn prefix_range_holds_exactly_the_terms_starting_with_it() {
     }
 }
 
+/// Punctuation and spaces of every script separate words, under `simple`
+/// as under `en`: the danda, the Arabic comma, the Hebrew sof pasuq, the
+/// Armenian full stop. A byte order mark is not a letter.
+#[test]
+fn punctuation_of_every_script_separates_words() {
+    assert_eq!(
+        terms(simple(), "नमस्ते।दुनिया مرحبا،عالم שלום׃עולם x։y"),
+        ["नमस्ते", "दुनिया", "مرحبا", "عالم", "שלום", "עולם", "x", "y"]
+    );
+    assert_eq!(terms(simple(), "\u{feff}jazz"), ["jazz"]);
+    assert_eq!(
+        terms(simple(), "a\u{3000}b\u{2028}c\u{85}d"),
+        ["a", "b", "c", "d"]
+    );
+}
+
+/// Soft hyphens, byte order marks and zero-width joiners inside a word are
+/// ignored: the word stays whole and its term has none of them.
+#[test]
+fn invisible_characters_inside_words_are_ignored() {
+    assert_eq!(terms(simple(), "co\u{ad}operate"), ["cooperate"]);
+    assert_eq!(terms(simple(), "fi\u{feff}ne"), ["fine"]);
+    assert_eq!(terms(simple(), "می\u{200c}خواهم"), ["میخواهم"]);
+    assert_eq!(
+        terms(en(), "hy\u{ad}phen\u{ad}ation"),
+        terms(en(), "hyphenation")
+    );
+}
+
+/// Combining marks of every combining-diacritics block fold away, so the
+/// marked and unmarked spellings meet.
+#[test]
+fn every_combining_diacritics_block_folds_away() {
+    for mark in [
+        '\u{0301}', '\u{1AB0}', '\u{1DC0}', '\u{20D0}', '\u{FE20}', '\u{FE0F}',
+    ] {
+        assert_eq!(
+            terms(simple(), &format!("e{mark}x")),
+            ["ex"],
+            "U+{:04X}",
+            mark as u32
+        );
+    }
+}
+
+/// Search text over 1 KiB is refused before it is analyzed, and so is text
+/// with more than 32 distinct terms (repeats count once); the dedupe is not
+/// quadratic.
+#[test]
+fn queries_are_capped_at_1_kib_and_32_terms() {
+    let long = "jazz ".repeat(205);
+    assert_eq!(long.len(), 1025);
+    assert_eq!(
+        en().query(&long, false),
+        Err(QueryError::TooLong { bytes: 1025 })
+    );
+    assert_eq!(
+        en().query(&long[..MAX_QUERY_BYTES], false).unwrap().terms,
+        ["jazz"]
+    );
+    let words: Vec<String> = (0..MAX_QUERY_TERMS + 1).map(|i| format!("w{i}")).collect();
+    assert_eq!(
+        simple()
+            .query(&words[..MAX_QUERY_TERMS].join(" "), false)
+            .unwrap()
+            .terms
+            .len(),
+        32
+    );
+    assert_eq!(
+        simple().query(&words.join(" "), false),
+        Err(QueryError::TooManyTerms)
+    );
+    // 32 terms and a prefix are 33 slots.
+    assert_eq!(
+        simple().query(&words.join(" "), true),
+        Err(QueryError::TooManyTerms)
+    );
+    assert_eq!(
+        simple()
+            .query(&words[..32].join(" "), true)
+            .unwrap()
+            .terms
+            .len(),
+        31
+    );
+    assert_eq!((MAX_QUERY_BYTES, MAX_QUERY_TERMS), (1024, 32));
+}
+
+/// A prefix needs two characters: a one-character last word is an exact
+/// term, so typing `jazz b` does not match every term starting with `b`.
+#[test]
+fn a_one_character_prefix_is_an_exact_term() {
+    assert_eq!(MIN_PREFIX_CHARS, 2);
+    let q = simple().query("jazz b", true).unwrap();
+    assert_eq!(
+        (q.terms, q.prefix),
+        (vec!["jazz".to_owned(), "b".to_owned()], None)
+    );
+    let q = simple().query("東京", true).unwrap();
+    assert_eq!(
+        (q.terms, q.prefix),
+        (vec!["東".to_owned(), "京".to_owned()], None)
+    );
+    let p = simple().query("ab", true).unwrap().prefix.unwrap();
+    assert_eq!((p.lo.as_str(), p.hi.as_deref()), ("ab", Some("ac")));
+}
+
+/// A field is indexed by its first 65 536 terms: later words get no
+/// postings and do not count toward its length, and the value is still
+/// indexed, never refused.
+#[test]
+fn fields_are_indexed_by_their_first_65536_terms() {
+    assert_eq!(MAX_FIELD_TERMS, 65_536);
+    let field = format!("{}tail", "jazz ".repeat(MAX_FIELD_TERMS));
+    let row = row_impacts(&en(), &[(1, 32, &field)]);
+    assert_eq!(row.len(), 1);
+    assert_eq!(row["jazz"], impact(1, 32, MAX_FIELD_TERMS, MAX_FIELD_TERMS));
+    // `terms` itself is not capped.
+    assert_eq!(en().terms(&field).len(), MAX_FIELD_TERMS + 1);
+}
+
+/// The formula's operations happen in SPEC order: `0.75 * L / R` is
+/// `(0.75 * L) / R`, which differs in the last bit from `0.75 * (L / R)` at
+/// these points, enough to move the floor.
+#[test]
+fn impact_division_order_is_the_specs() {
+    assert_eq!(impact(1, 7, 1, 29), 7);
+    assert_eq!(impact(8, 7, 1, 29), 56);
+}
+
 // ---------------------------------------------------------------------------
 // Byte fixtures
 // ---------------------------------------------------------------------------
@@ -325,6 +457,9 @@ const TERM_CASES: &[&str] = &[
     "generously connections communication universities interval skies dying",
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "\u{301}x \u{200d} tab\tnew\nline\u{a0}nbsp",
+    "नमस्ते।दुनिया مرحبا،عالم שלום׃עולם x։y \u{feff}bom",
+    "co\u{ad}operate fi\u{feff}ne می\u{200c}خواهم",
+    "e\u{1ab0}x e\u{1dc0}x e\u{20d0}x e\u{fe20}x 葛\u{e0100}",
 ];
 
 const IMPACT_CASES: &[&[(u8, u16, &str)]] = &[
@@ -353,6 +488,16 @@ const QUERY_CASES: &[(&str, bool)] = &[
     ("東京", true),
     ("🎷 — !!", false),
     ("   ", true),
+    ("jazz b", true),
+    ("ab", true),
+    (
+        "a b c d e f g h i j k l m n o p q r s t u v w x y z A B C 1 2 3 4 5",
+        false,
+    ),
+    (
+        "a b c d e f g h i j k l m n o p q r s t u v w x y z 1 2 3 4 5 6 7",
+        false,
+    ),
 ];
 
 fn hex(s: &str) -> String {
@@ -416,7 +561,7 @@ fn render_queries() -> String {
     let mut out = String::from(
         "# jazz-ix-text/1 query terms (SPEC 20.5, 20.10.1). Per case: `analyzer`,\n\
          # `query <prefix 0|1> <utf8 hex>`, then `term <utf8 hex>` per exact slot and\n\
-         # `prefix <exact hex> <lo hex> <hi hex or ->`, or `error empty`.\n",
+         # `prefix <exact hex> <lo hex> <hi hex or ->`, or `error <empty|too-long|too-many-terms>`.\n",
     );
     for name in ANALYZERS {
         let a = Analyzer::parse(name).unwrap();
@@ -430,6 +575,8 @@ fn render_queries() -> String {
             .unwrap();
             match a.query(text, *prefix) {
                 Err(QueryError::Empty) => out.push_str("error empty\n"),
+                Err(QueryError::TooLong { .. }) => out.push_str("error too-long\n"),
+                Err(QueryError::TooManyTerms) => out.push_str("error too-many-terms\n"),
                 Ok(q) => {
                     for t in &q.terms {
                         writeln!(out, "term {}  # {t:?}", hex(t)).unwrap();

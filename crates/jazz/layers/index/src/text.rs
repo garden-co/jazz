@@ -10,7 +10,7 @@
 mod porter2;
 mod tables;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// The text kind's shadow-row encoding (SPEC 20.2): `__terms` holds UTF-8
@@ -27,6 +27,23 @@ pub const ANALYZERS: &[&str] = &["jazz-text/1:en", "jazz-text/1:simple"];
 
 /// Terms longer than this many bytes are dropped (SPEC 20.10.1, step 5).
 pub const MAX_TERM_BYTES: usize = 64;
+
+/// A field is indexed by its first this many terms; the rest of it is not
+/// analyzed (SPEC 20.10.1). This bounds one write's postings; a value is
+/// never refused for its length (`INV-IX-7`).
+pub const MAX_FIELD_TERMS: usize = 65_536;
+
+/// The longest search text, in UTF-8 bytes (SPEC 20.4); longer is
+/// [`QueryError::TooLong`], before any analysis.
+pub const MAX_QUERY_BYTES: usize = 1024;
+
+/// The most slots a search may bind (distinct terms, plus the prefix);
+/// more is [`QueryError::TooManyTerms`] (SPEC 20.4).
+pub const MAX_QUERY_TERMS: usize = 32;
+
+/// The fewest characters a prefix slot has; a shorter last word is an
+/// exact term instead (SPEC 20.10.1).
+pub const MIN_PREFIX_CHARS: usize = 2;
 
 /// A text analyzer, `jazz-text/1:<lang>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -67,12 +84,24 @@ pub enum QueryError {
     /// No terms are left after analysis (only punctuation, emoji or
     /// whitespace, or only words over [`MAX_TERM_BYTES`]).
     Empty,
+    /// The text is longer than [`MAX_QUERY_BYTES`].
+    TooLong { bytes: usize },
+    /// The text analyzes to more than [`MAX_QUERY_TERMS`] distinct slots.
+    TooManyTerms,
 }
 
 impl fmt::Display for QueryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             QueryError::Empty => f.write_str("the search text has no words to search for"),
+            QueryError::TooLong { bytes } => write!(
+                f,
+                "the search text is {bytes} bytes; at most {MAX_QUERY_BYTES} are supported"
+            ),
+            QueryError::TooManyTerms => write!(
+                f,
+                "the search text has more than {MAX_QUERY_TERMS} distinct words"
+            ),
         }
     }
 }
@@ -135,25 +164,40 @@ impl Analyzer {
         format!("{ENCODING} {}", self.name())
     }
 
-    /// The terms of `text`, in order, with repeats (SPEC 20.10.1).
+    /// The terms of `text`, in order, with repeats (SPEC 20.10.1). Unlike
+    /// [`row_impacts`], this does not stop at [`MAX_FIELD_TERMS`].
     pub fn terms(&self, text: &str) -> Vec<String> {
-        words(text)
-            .filter_map(|word| self.term(&fold(word)))
-            .collect()
+        self.term_iter(text).collect()
+    }
+
+    fn term_iter<'a>(&'a self, text: &'a str) -> impl Iterator<Item = String> + 'a {
+        words(text).filter_map(|word| self.term(&fold(word)))
     }
 
     /// The terms a search for `text` binds. With `prefix`, the last word
     /// becomes [`QueryTerms::prefix`] instead of a term; pass `prefix` only
     /// for an index declared with `"prefix": true`.
     pub fn query(&self, text: &str, prefix: bool) -> Result<QueryTerms, QueryError> {
+        if text.len() > MAX_QUERY_BYTES {
+            return Err(QueryError::TooLong { bytes: text.len() });
+        }
         let mut folded: Vec<String> = words(text).map(fold).filter(|w| !w.is_empty()).collect();
-        let last = if prefix { folded.pop() } else { None };
+        let mut last = if prefix { folded.pop() } else { None };
+        // A one-character last word would match too many terms as a prefix:
+        // it is an exact term.
+        if let Some(word) = last.take_if(|w| w.chars().count() < MIN_PREFIX_CHARS) {
+            folded.push(word);
+        }
         let mut terms: Vec<String> = Vec::new();
+        let mut seen = BTreeSet::new();
         for word in &folded {
             if let Some(term) = self.term(word)
-                && !terms.contains(&term)
+                && seen.insert(term.clone())
             {
                 terms.push(term);
+                if terms.len() > MAX_QUERY_TERMS {
+                    return Err(QueryError::TooManyTerms);
+                }
             }
         }
         let prefix = last.and_then(|lo| {
@@ -164,6 +208,9 @@ impl Analyzer {
             let hi = successor(&lo);
             Some(PrefixTerm { exact, lo, hi })
         });
+        if terms.len() + usize::from(prefix.is_some()) > MAX_QUERY_TERMS {
+            return Err(QueryError::TooManyTerms);
+        }
         if terms.is_empty() && prefix.is_none() {
             return Err(QueryError::Empty);
         }
@@ -190,17 +237,18 @@ pub const MAX_FIELD_LENGTH: u16 = 4096;
 /// of the term's impact there, capped at 255 (SPEC 20.10.1). `fields` are
 /// `(weight, length, value)` as declared: weight 1–15, reference length
 /// 1–[`MAX_FIELD_LENGTH`] ([`DEFAULT_FIELD_LENGTH`] when the declaration
-/// gives none). Null fields are left out.
+/// gives none). Null fields are left out. Each field contributes its first
+/// [`MAX_FIELD_TERMS`] terms, and its length counts only those.
 pub fn row_impacts(analyzer: &Analyzer, fields: &[(u8, u16, &str)]) -> BTreeMap<String, u8> {
     // Impacts are non-negative, so saturating at 255 as they add up is the
     // capped sum.
     let mut row: BTreeMap<String, u8> = BTreeMap::new();
     for &(weight, reference, value) in fields {
-        let terms = analyzer.terms(value);
-        let length = terms.len();
+        let mut length = 0;
         let mut freq: BTreeMap<String, usize> = BTreeMap::new();
-        for term in terms {
+        for term in analyzer.term_iter(value).take(MAX_FIELD_TERMS) {
             *freq.entry(term).or_default() += 1;
+            length += 1;
         }
         for (term, f) in freq {
             let sum = row.entry(term).or_default();
@@ -223,58 +271,84 @@ pub fn impact(weight: u8, reference: u16, f: usize, length: usize) -> u8 {
     x.floor().min(255.0) as u8
 }
 
-/// Step 1: the words of `text`. `jazz-text`'s plain units, keeping word
-/// runs and the standalone letters (ideographs, kana, Thai, ...), with word
-/// runs joined across a single apostrophe (`'` or `’`) between them, so
-/// `don't` and `Anselm's` stay one word.
+/// Step 1: the words of `text`, by the frozen classes of
+/// [`tables::CLASSES`]: runs of word characters (letters, digits, marks and
+/// ignored characters), and each standalone letter (an ideograph, a kana or
+/// Thai letter, ...) with the marks after it. Separators (punctuation,
+/// spaces, symbols, controls) end words and are dropped. Two runs with a
+/// single `'` or `’` between them are one word, so `don't` and `Anselm's`
+/// stay whole. Lazy, so a capped field analyzes only what it keeps.
 fn words(text: &str) -> impl Iterator<Item = &str> {
-    let mut units = jazz_text::plain_units(text).peekable();
     let mut at = 0;
     std::iter::from_fn(move || {
-        loop {
-            let unit = units.next()?;
-            let start = at;
-            at += unit.len();
-            if jazz_text::is_word_unit(unit) {
-                // `word ' word ' word ...`
-                loop {
-                    let mut ahead = units.clone();
-                    match (ahead.next(), ahead.next()) {
-                        (Some(apostrophe @ ("'" | "\u{2019}")), Some(next))
-                            if jazz_text::is_word_unit(next) =>
-                        {
-                            units = ahead;
-                            at += apostrophe.len() + next.len();
-                        }
-                        _ => break,
-                    }
+        let rest = &text[at..];
+        let mut chars = rest.char_indices();
+        // Skip to the first character that starts a word.
+        let (start, first) = loop {
+            let (i, c) = chars.next()?;
+            match class(c) {
+                Class::Word | Class::Mark | Class::Alone => break (i, c),
+                Class::Separator | Class::Ignored => {}
+            }
+        };
+        let alone = class(first) == Class::Alone;
+        let mut end = start + first.len_utf8();
+        while let Some(c) = rest[end..].chars().next() {
+            let continues = match class(c) {
+                Class::Mark | Class::Ignored => true,
+                Class::Word => !alone,
+                Class::Alone | Class::Separator => {
+                    // `word ' word`: one word.
+                    !alone
+                        && matches!(c, '\'' | '\u{2019}')
+                        && rest[end + c.len_utf8()..]
+                            .chars()
+                            .next()
+                            .is_some_and(|n| class(n) == Class::Word)
                 }
-                return Some(&text[start..at]);
+            };
+            if !continues {
+                break;
             }
-            if unit.chars().next().is_some_and(standalone_letter) {
-                return Some(unit);
-            }
+            end += c.len_utf8();
         }
+        at += end;
+        Some(&rest[start..end])
     })
 }
 
-fn standalone_letter(c: char) -> bool {
-    in_ranges(tables::STANDALONE_LETTERS, c as u32)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Class {
+    Separator,
+    Word,
+    Mark,
+    Alone,
+    Ignored,
 }
 
-fn in_ranges(ranges: &[(u32, u32)], c: u32) -> bool {
-    let i = ranges.partition_point(|&(lo, _)| lo <= c);
-    i > 0 && c <= ranges[i - 1].1
+fn class(c: char) -> Class {
+    let n = c as u32;
+    let runs = tables::CLASSES;
+    // The table starts at U+0000, so `i >= 1`.
+    let i = runs.partition_point(|&run| run >> 3 <= n);
+    match runs[i - 1] & 7 {
+        1 => Class::Word,
+        2 => Class::Mark,
+        3 => Class::Alone,
+        4 => Class::Ignored,
+        _ => Class::Separator,
+    }
 }
 
 /// Steps 2 and 3: simple case folding, then `jazz-text/fold/1`, dropping
-/// combining diacritical marks and variation selectors, and `’` as `'`.
+/// combining diacritical marks, variation selectors and ignored characters,
+/// and `’` as `'`.
 fn fold(word: &str) -> String {
     let mut out = String::with_capacity(word.len());
     for c in word.chars() {
         let c = case_fold(c);
         let n = c as u32;
-        if dropped_mark(n) {
+        if dropped_mark(n) || class(c) == Class::Ignored {
             continue;
         }
         if c == '\u{2019}' {
@@ -351,15 +425,32 @@ fn successor(s: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Every standalone letter is a character `jazz-text` does not keep in
-    /// word runs: the generator's copy of `jazz-text`'s table matches it.
+    /// The segmentation classes are frozen with `jazz-text/1`: the class of
+    /// every code point, hashed (FNV-1a over the class numbers in code point
+    /// order, surrogates skipped), equals the digest `gen_tables.py` prints
+    /// from its own classification, and the counts per class are pinned. Any change to the table is a new analyzer version.
     #[test]
-    fn standalone_letters_are_cut_alone_by_jazz_text() {
-        for &(lo, hi) in tables::STANDALONE_LETTERS {
-            for n in lo..=hi {
-                let s = char::from_u32(n).unwrap().to_string();
-                assert!(!jazz_text::is_word_unit(&s), "U+{n:04X}");
-            }
+    fn segmentation_classes_are_pinned() {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut counts = [0usize; 5];
+        for c in (0..=0x10_FFFF).filter_map(char::from_u32) {
+            let k = class(c) as u64;
+            counts[k as usize] += 1;
+            hash ^= k;
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        assert_eq!(counts, [148_001, 863_203, 209, 100_646, 5]);
+        assert_eq!(hash, 0x9a95_fb3a_ee2f_648a);
+        // Spot checks, one per class and the separators the review found.
+        assert_eq!(class('a'), Class::Word);
+        assert_eq!(class('\u{0E31}'), Class::Mark);
+        assert_eq!(class('東'), Class::Alone);
+        assert_eq!(class('\u{00AD}'), Class::Ignored);
+        assert_eq!(class('\u{FEFF}'), Class::Ignored);
+        for sep in [
+            '\u{0964}', '\u{060C}', '\u{05C3}', '\u{0589}', '\u{3000}', '_', '\u{2028}',
+        ] {
+            assert_eq!(class(sep), Class::Separator, "U+{:04X}", sep as u32);
         }
     }
 
@@ -371,8 +462,8 @@ mod tests {
         let runs = tables::CASE_FOLD;
         assert!(runs.windows(2).all(|w| last(&w[0]) < first(&w[1])));
         assert!(tables::FOLD_ONE.windows(2).all(|w| w[0].0 < w[1].0));
-        let st = tables::STANDALONE_LETTERS;
-        assert!(st.windows(2).all(|w| w[0].1 < w[1].0));
+        assert_eq!(tables::CLASSES[0] >> 3, 0);
+        assert!(tables::CLASSES.windows(2).all(|w| w[0] >> 3 < w[1] >> 3));
     }
 
     /// Folding is idempotent: a folded word folds to itself, so query text

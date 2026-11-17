@@ -5,9 +5,6 @@
 //!   holder of a newer value can find again, with no history: each carries
 //!   the text around it (W3C text quote selectors). Tools and LLMs can author
 //!   them from the current value alone.
-//! - [`plain_units`]: the units a plain-text merge never splits (words,
-//!   numbers, and every other character with its marks), which the text
-//!   index's analyzer (SPEC 20.10.1) also cuts words with.
 //!
 //!   Positions count UTF-16 code units (JavaScript, Kotlin), and the `_utf8`
 //!   methods take and return UTF-8 byte offsets (`str` indices) instead, as
@@ -19,12 +16,10 @@
 mod anchor;
 mod merge;
 mod range;
-mod units;
 
 pub use anchor::{Anchor, CONTEXT_UNITS, Resolved, Side};
 pub use merge::{MERGE_WORK_BUDGET, merge3, merge3_within, try_merge3, try_merge3_within};
 pub use range::{Range, ResolvedRange};
-pub use units::{PlainUnits, is_word_unit, plain_units};
 
 /// A UTF-8 byte offset given to a `_utf8` method that is not on a char
 /// boundary of the text: inside a code point, or past its end.
