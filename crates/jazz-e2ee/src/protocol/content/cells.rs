@@ -624,6 +624,8 @@ pub struct StreamValueReader<'r> {
     /// missing, not the value invalid (§4.2, as for a cell).
     epoch_id: String,
     decided: bool,
+    /// Whether a record authenticated, narrowing the candidates to its key.
+    authenticated: bool,
 }
 
 impl core::fmt::Debug for StreamValueReader<'_> {
@@ -735,6 +737,7 @@ impl<'r> StreamValueReader<'r> {
             routed: false,
             epoch_id: routing.epoch_id.clone(),
             decided: decides || absent,
+            authenticated: false,
         };
         let mut initial = Zeroizing::new(Vec::new());
         match reader.update(&prefix[routing.consumed..], &mut initial) {
@@ -747,11 +750,14 @@ impl<'r> StreamValueReader<'r> {
         }
     }
 
-    /// The other space the value was sealed under, once the candidates
-    /// have narrowed to one of another space: the row is `stale-space`.
+    /// The other space the value was sealed under, once a record has
+    /// authenticated under a key of another space: the row is
+    /// `stale-space`. Before a record authenticated it is `None`, as a key
+    /// of another space proves nothing; [`Self::finish`] gives it for the
+    /// whole value, a value with no plaintext included.
     pub fn stale_space(&self) -> Option<&SpaceAddress> {
         match self.candidates.as_slice() {
-            [only] => only.stale.as_ref(),
+            [only] if self.authenticated => only.stale.as_ref(),
             _ => None,
         }
     }
@@ -810,6 +816,7 @@ impl<'r> StreamValueReader<'r> {
         if let Some((kept, plain)) = produced {
             let candidate = live.swap_remove(kept);
             live = vec![candidate];
+            self.authenticated = true;
             out.extend_from_slice(&plain);
         }
         self.candidates = live;
@@ -833,15 +840,16 @@ impl<'r> StreamValueReader<'r> {
     }
 
     /// Succeeds only if the whole value, including its last record,
-    /// authenticated under one candidate key.
-    pub fn finish(self) -> ContentResult<()> {
+    /// authenticated under one candidate key; gives the other space that
+    /// key is of, if any: the row is then `stale-space`.
+    pub fn finish(self) -> ContentResult<Option<SpaceAddress>> {
         if !self.routed {
             return Err(ContentError::Data(DataError::InvalidCiphertext));
         }
         let missing = self.none_opens();
         for candidate in self.candidates {
             match candidate.reader.expect("routed").finish() {
-                Ok(()) => return Ok(()),
+                Ok(()) => return Ok(candidate.stale),
                 Err(Error::InvalidCiphertext) => {}
                 Err(error) => return Err(error.into()),
             }

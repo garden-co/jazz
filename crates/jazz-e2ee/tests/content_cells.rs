@@ -1467,3 +1467,74 @@ fn a_write_uses_only_the_known_roots_keys() {
     accepted.observe_chain(&chain);
     assert_eq!(write_key(&accepted, &address).root_id(), space_root);
 }
+
+/// A stream is reported stale only once a record authenticated under one
+/// key of another space; before that, a key of another space proves
+/// nothing, and the value may turn out to be missing.
+#[test]
+fn a_stream_is_stale_only_once_a_record_authenticates() {
+    let mut world = world(28);
+    world.add_member_of(OTHER_ROW, ALICE);
+    world.create_of(OTHER_ROW, ALICE);
+    let mut held = held_of(&world, ALICE, ROW);
+    held.hold(acquire_held(&world, ALICE, OTHER_ROW)).unwrap();
+    let domain = shared(&world);
+    let (here, there) = (space(ROW), space(OTHER_ROW));
+    let target = row(&domain, &here, ROW_1);
+    let registry = &world.shared.registry;
+    let key = write_key(&held, &there);
+    let plaintext = TestRandom(28).bytes(20_000);
+    // Sealed for another row of the other space: no key opens it here.
+    let unopenable = seal_stream(&world, &key, &row(&domain, &there, ROW_2), &plaintext, 4096);
+    let StreamOpen::Reader { mut reader, .. } =
+        StreamValueReader::open(registry, &held, &target, &blob(), &unopenable[..69]).unwrap()
+    else {
+        panic!("a reader");
+    };
+    assert_eq!(reader.stale_space(), None, "nothing authenticated yet");
+    assert_eq!(
+        reader.update(&unopenable[69..], &mut Vec::new()),
+        Err(ContentError::Missing {
+            epoch_id: key.epoch_id().to_owned()
+        })
+    );
+    // Sealed while the row was in the other space: stale once a record
+    // authenticated.
+    let moved = seal_stream(&world, &key, &row(&domain, &there, ROW_1), &plaintext, 4096);
+    let StreamOpen::Reader { mut reader, .. } =
+        StreamValueReader::open(registry, &held, &target, &blob(), &moved[..69]).unwrap()
+    else {
+        panic!("a reader");
+    };
+    assert_eq!(reader.stale_space(), None);
+    let mut out = Vec::new();
+    reader.update(&moved[69..], &mut out).unwrap();
+    assert_eq!(reader.stale_space(), Some(&there));
+    assert_eq!(reader.finish().unwrap(), Some(there.clone()));
+    assert_eq!(out, plaintext);
+    // A value with no plaintext, with two keys of other spaces naming its
+    // epoch: only its end shows which one it was sealed under.
+    let third = root_from(
+        &world,
+        THIRD_ROW,
+        root_random_with_epoch(9, 9, key.epoch_id()),
+    );
+    held.hold(creation(&world, &third, "tx-third")).unwrap();
+    let key = write_key(&held, &there);
+    let empty = seal_stream(&world, &key, &row(&domain, &there, ROW_1), b"", 1);
+    let StreamOpen::Reader { mut reader, .. } =
+        StreamValueReader::open(registry, &held, &target, &blob(), &empty[..69]).unwrap()
+    else {
+        panic!("a reader");
+    };
+    assert!(
+        format!("{reader:?}").contains("candidates: 2"),
+        "{reader:?}"
+    );
+    reader.update(&empty[69..], &mut out).unwrap();
+    assert_eq!(reader.stale_space(), None);
+    assert_eq!(reader.finish().unwrap(), Some(there));
+}
+
+/// A third space, for values sealed under neither side of a move.
+const THIRD_ROW: &str = "038f2e3d-4c5b-7a69-8877-665544332233";
