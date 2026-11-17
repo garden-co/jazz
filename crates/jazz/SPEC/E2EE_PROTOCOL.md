@@ -2187,7 +2187,8 @@ declared type. Changing any of these otherwise makes old cells unreadable.
 Plaintext is Jazz's native encoding of the single value.
 
 **Short values.** A stored encrypted value is never ciphertext when it is
-shorter than a cell record (47 payload bytes). Two such values have fixed
+shorter than the smallest cell record: 78 bytes in all, the 31-byte common
+envelope header of `jazz.e2ee.cell-record` v1 and a 47-byte payload. Two such values have fixed
 meanings and are never reported as malformed:
 
 - The **empty byte string** means "never written": the row predates the
@@ -2228,7 +2229,11 @@ large-value format carries the stream mechanism's header once.
   per read. When an acquisition shows that an epoch is not in the space's
   chain, the device remembers that until the chain it knows advances, and
   reports cells of that epoch `invalid-ciphertext` without acquiring again;
-  otherwise a live query pays the acquisition again on each refresh.
+  otherwise a live query pays the acquisition again on each refresh. A cell
+  whose epoch could lie beyond the point where the chain is unresolved (§3.3)
+  has no data-error code of its own: it is reported with the unresolved
+  chain, as an unsupported capability (§7), never as `invalid-ciphertext`.
+- A member of a space that has no valid root yet reports it `space-pending`.
 - When the acquisition obtains no key for a needed version and the account
   is a member (§3.4), the read returns the rows its held keys decrypt,
   leaves the space's other rows out and reports the space once as
@@ -2285,14 +2290,17 @@ of the results.
 ### 4.4 Strict reads
 
 Reads inside a transaction, mutation pre-image reads and authority reads are
-strict: any bad cell fails the read, so a write never rests on skipped rows.
+strict: any outcome that would leave a row out fails the read, so a write
+never rests on skipped rows. Rows returned with a report (`empty-cell`,
+`stale-space`) are returned as in any read.
 
 ### 4.5 Equality-filtered queries
 
 Encrypted predicates must be `eq` (or a complete enum `match`) on a column
 declared with an equality index, together with a plaintext `eq` on the space
 column. Tags are per key version: a query computes one token per held
-version, and the physical predicate becomes `__e2ee_eq_<column> IN tokens`
+version, under the selected equality mechanism only, and the physical
+predicate becomes `__e2ee_eq_<column> IN tokens`
 (the server can link those tokens to one another, §8). Limit and offset are
 applied after each candidate is decrypted and its authenticated value
 compared. If the version set changes during the query it is retried (shared
@@ -2406,7 +2414,9 @@ a second root for a space while it holds an unpublished key for it.
 
 The creation's outcome decides the key's fate:
 
-- **Accepted, and the space's root** (§3.2): the mark is cleared.
+- **Accepted, and the space's root** (§3.2): the mark is cleared. Until a
+  valid root of the address is readable, the device cannot tell, so the
+  mark stays `unpublished`.
 - **Not accepted** (the root was refused, or its transaction failed
   otherwise, at Local or Global, or was cancelled before possible
   submission, §3.2), or **accepted but lost** to an earlier valid root: the

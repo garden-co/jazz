@@ -159,7 +159,9 @@ re-encrypt are per column; re-home is per entry:
 
 The read hook (H3) applies the rule per row and column. A present plaintext
 source is returned as the value; a present encrypted source is decrypted with
-its own context (the old type, or the old space for a re-home). Rows are never
+its own context (the old type, or the old space for a re-home). An encrypted
+source holding the empty value counts as present, and a re-home of it stays
+empty. Rows are never
 dropped for being unconverted, so a half-converted table reads as one table.
 
 Equality queries (H4) on a converting column must not send the searched value
@@ -180,7 +182,9 @@ false candidates but cannot add omitted ones, so the source predicate must
 reach **every** source value that converts to the searched value. That is
 possible only in two cases:
 
-- **Identity conversions**: a re-home, and a re-encrypt without `convert`.
+- **Identity conversions**: a re-home, and a re-encrypt without `convert`
+  (a decrypt conversion has no source tokens: its source rows are found as
+  for an untagged source, below).
   The source value equals the target value, so `sourceTokens` are the
   searched value's tokens under the source context.
 - **A declared bounded reverse mapping**: a re-encrypt whose `convert` names
