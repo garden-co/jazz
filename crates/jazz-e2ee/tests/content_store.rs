@@ -8,7 +8,10 @@ mod content_support;
 use std::sync::atomic::Ordering;
 
 use common::TestRandom;
-use common::mechanisms::{FLAKY_WRAP, flaky_registry};
+use common::mechanisms::{
+    FLAKY_SEAL, FLAKY_WRAP, UNROUTED_SEAL, custom_registry, flaky_registry, relabelled,
+    sealing_with,
+};
 use common::space::*;
 use content_support::*;
 use jazz_e2ee::agility::{MechanismConfig, PublicKey};
@@ -715,6 +718,18 @@ fn a_lineage_that_fails_skips_the_document() {
         lineage_reason(&world, owner_alice, resign_lineage(&world, forked)),
         Rejection::NotAChain
     );
+    // A chain that comes back to an epoch it already used.
+    let mut looped = document.lineage.clone();
+    let mut back = looped.successors[0].clone();
+    back.id = "30000000-0000-4000-8000-000000000000".into();
+    back.predecessor = back.epoch_id.clone();
+    back.history_epoch_id = back.epoch_id.clone();
+    back.epoch_id = looped.root.epoch_id.clone();
+    looped.successors.push(back);
+    assert_eq!(
+        lineage_reason(&world, owner_alice, resign_lineage(&world, looped)),
+        Rejection::NotAChain
+    );
     let mut broken_root = document.lineage.clone();
     broken_root.root.verification.clear();
     assert_eq!(
@@ -785,6 +800,85 @@ fn a_provider_failure_fails_the_load() {
     assert_eq!(
         owner(&world, ALICE).load(&document).unwrap_err(),
         ProtocolError::ProviderFailure
+    );
+}
+
+#[test]
+fn a_provider_failure_opening_a_held_key_envelope_fails_the_load() {
+    let (registry, seal_fails) = custom_registry(FLAKY_SEAL);
+    let mut world = World::with_registry(7, registry);
+    world.account_with(ALICE, sealing_with(FLAKY_SEAL));
+    world.add_member(ALICE);
+    world.create(ALICE);
+    let space = acquire_held(&world, ALICE, ROW);
+    let document = decode_document(&stored(&world, &space)).unwrap();
+    assert!(
+        owner(&world, ALICE)
+            .load(&document)
+            .unwrap()
+            .space
+            .is_some()
+    );
+    // The envelope's own mechanism fails, not the marker's: never a
+    // skipped record.
+    seal_fails.store(true, Ordering::SeqCst);
+    assert_eq!(
+        owner(&world, ALICE).load(&document).unwrap_err(),
+        ProtocolError::ProviderFailure
+    );
+}
+
+#[test]
+fn a_key_record_of_a_mechanism_this_reader_does_not_route_is_unsupported() {
+    // An envelope of an unrouted sealing mechanism.
+    let (world, space, _) = alice_holding(8);
+    let owner_alice = owner(&world, ALICE);
+    let document = owner_alice
+        .seal_document(&space, 0, &mut TestRandom(4))
+        .unwrap();
+    let good = document.keys[1].clone();
+    let mut unrouted = good.clone();
+    unrouted.envelope = relabelled(key_seal::MECHANISM, UNROUTED_SEAL, &unrouted.envelope);
+    assert_eq!(
+        key_rejections(
+            &world,
+            &document.lineage,
+            vec![resign_key(&world, unrouted), good]
+        ),
+        vec![Some(Rejection::Unsupported), None]
+    );
+
+    // A marker of a key-wrap mechanism this reader does not route: the
+    // space was made with one this reader's registry lacks.
+    let (registry, _, _) = flaky_registry();
+    let mut world = World::with_registry(9, registry);
+    world.account_with(
+        ALICE,
+        MechanismConfig {
+            key_wrap: FLAKY_WRAP.into(),
+            ..MechanismConfig::default()
+        },
+    );
+    world.add_member(ALICE);
+    world.create(ALICE);
+    let space = acquire_held(&world, ALICE, ROW);
+    let document = decode_document(&stored(&world, &space)).unwrap();
+    let builtin = Registry::builtin();
+    let reader = StoreOwner {
+        registry: &builtin,
+        ..owner(&world, ALICE)
+    };
+    let loaded = reader.load(&document).unwrap();
+    assert!(loaded.space.is_none());
+    assert_eq!(
+        loaded.rejected,
+        vec![Rejected {
+            record: RejectedRecord::Key {
+                index: 0,
+                epoch_id: Some(space.root().epoch_id.clone()),
+            },
+            reason: Rejection::Unsupported,
+        }]
     );
 }
 

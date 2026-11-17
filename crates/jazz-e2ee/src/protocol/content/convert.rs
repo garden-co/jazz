@@ -32,7 +32,8 @@ use super::{CLEARED_MARKER, ContentError, ContentResult, EncryptedColumn, RowTar
 pub const MAX_REVERSE_VALUES: usize = 16;
 
 /// Whether an encrypted source holds a value: it is absent only when it is
-/// the cleared marker (§3.2; a real cell record is at least 47 bytes).
+/// the cleared marker (§3.2; a real cell record is at least 78 bytes in
+/// all, protocol §4.1). The empty value counts as present (§3.3).
 pub fn encrypted_source_present(stored: &[u8]) -> bool {
     stored != CLEARED_MARKER
 }

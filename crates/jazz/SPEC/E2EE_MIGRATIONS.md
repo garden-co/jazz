@@ -96,9 +96,9 @@ A conversion names a **source** column (the old form) and a **target** column
 | Re-home    | Encrypted columns under the old space | New encrypted columns under the new space |
 
 The source is **absent** when it is null (plaintext) or the cleared marker
-(encrypted; a real cell record is at least 47 bytes). The target is absent
-when it is null (plaintext), empty or the cleared marker (encrypted). One rule
-decides a row's value:
+(encrypted; a real cell record is at least 78 bytes in all, spec §4.1). The
+target is absent when it is null (plaintext), empty or the cleared marker
+(encrypted). One rule decides a row's value:
 
 > **If the source is present, it is the value; otherwise the target is.**
 

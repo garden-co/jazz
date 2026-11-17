@@ -323,6 +323,13 @@ fn the_source_decides_whenever_it_is_present() {
     assert_eq!(value_side(false, false), Side::Neither);
     assert!(!encrypted_source_present(&CLEARED_MARKER));
     assert!(encrypted_source_present(&[0; 78]));
+    // An empty source is present: "never written" is the source's value,
+    // so a stale target never shows through it (migrations §3.3).
+    assert!(encrypted_source_present(b""));
+    assert_eq!(
+        value_side(encrypted_source_present(b""), true),
+        Side::Source
+    );
     assert!(!encrypted_target_present(&CLEARED_MARKER));
     assert!(!encrypted_target_present(b""));
     assert!(encrypted_target_present(&[0; 78]));
