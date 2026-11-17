@@ -27,6 +27,8 @@ pub enum InvalidSpaceRoot {
     NotActive,
     /// The signature does not verify under the device's signing key.
     SignatureInvalid,
+    /// The creator's account history is an intrinsic contradiction (§7).
+    AccountBroken,
 }
 
 /// A root of the address that is not the space's root: a **lost
@@ -155,6 +157,7 @@ fn check_root(
             AuthorCheck::NoAccountRoot => Some(InvalidSpaceRoot::NoAccountRoot),
             AuthorCheck::NotActive => Some(InvalidSpaceRoot::NotActive),
             AuthorCheck::SignatureInvalid => Some(InvalidSpaceRoot::SignatureInvalid),
+            AuthorCheck::AccountBroken(_) => Some(InvalidSpaceRoot::AccountBroken),
         },
     )
 }

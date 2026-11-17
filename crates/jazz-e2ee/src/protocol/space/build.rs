@@ -237,7 +237,10 @@ impl core::fmt::Debug for RootRecords {
 /// Returns the records only. The caller inserts the root, in the same
 /// transaction as the space row or later (§3.2, §5.4), and keeps the key
 /// as an `unpublished` held key until the root is accepted as the space's
-/// root.
+/// root. Its read set includes the author's own public account rows at the
+/// cut `author` was built from, so a device removal of the author's account
+/// before the commit refuses it rather than leaving `accountEnvelope`
+/// sealed to a superseded epoch (which would mark the space, §3.5).
 pub fn space_root(
     writer: &SpaceWriter<'_>,
     address: &SpaceAddress,
@@ -310,9 +313,11 @@ impl core::fmt::Debug for RotationRecords {
 /// Returns the records only. The caller inserts the successor and its
 /// deliveries in one serializable ledger transaction whose read set
 /// includes, at the cut `chain` was replayed from (§3.5): the space's chain
-/// (its roots and successors), the space's member rows, and the public
-/// account rows of each member in `recipients` (built from that read, with
-/// [`rotation_recipients`](super::members::rotation_recipients)).
+/// (its roots and successors), the space's member rows, the public account
+/// rows of each member in `recipients` (built from that read, with
+/// [`rotation_recipients`](super::members::rotation_recipients)), and the
+/// author's own public account rows, to which its `accountEnvelope` is
+/// sealed.
 /// Read-set validation then refuses a second successor of the same
 /// predecessor, a rotation whose members changed meanwhile, and deliveries
 /// to an account that rotated after the cut; the caller re-reads and
@@ -343,8 +348,9 @@ pub fn rotate(
 ///
 /// Returns the records only. The caller inserts them as for [`rotate`]: in
 /// one serializable ledger transaction whose read set includes the space's
-/// chain, its member rows and the public account rows of each member in
-/// `recipients`, at the cut `chain` was replayed from (§3.5).
+/// chain, its member rows, the public account rows of each member in
+/// `recipients` and the author's own, at the cut `chain` was replayed from
+/// (§3.5).
 pub fn recover_rotation(
     writer: &SpaceWriter<'_>,
     chain: &SpaceChain,

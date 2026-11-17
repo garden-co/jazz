@@ -24,7 +24,9 @@ use jazz_e2ee::mechanisms::{key_envelope, key_seal};
 use jazz_e2ee::protocol::account::PublicAccountLedger;
 use jazz_e2ee::protocol::account::build::{self as account_build, LocalDevice, RotationTarget};
 use jazz_e2ee::protocol::derive::{RecoveryKeys, RecoverySecret};
-use jazz_e2ee::protocol::error::{ProtocolError, RefusalCode, UnsupportedCapability};
+use jazz_e2ee::protocol::error::{
+    IntrinsicContradiction, ProtocolError, RefusalCode, UnsupportedCapability,
+};
 use jazz_e2ee::protocol::records::space::{SpaceAddress, SpaceDelivery};
 use jazz_e2ee::protocol::space::build::{self, Author};
 use jazz_e2ee::protocol::space::chain::select_root;
@@ -2062,8 +2064,10 @@ fn provider_failures_at_markers_history_and_signatures_fail_the_operation() {
 
 /// A device removal in an account generation that a reset has since
 /// replaced still marks the space: the removal is looked for in that
-/// generation's chain as it stood at the reset (§3.5). A reset alone does
-/// not mark it.
+/// generation's chain as it stood at the reset (§3.5). A reset alone marks
+/// it too: the version was sealed to the reset generation, whose devices
+/// can still open it, and a reset is what an account does when its devices
+/// are lost.
 #[test]
 fn a_removal_before_a_reset_keeps_the_mark() {
     let mut world = space(60, &[ALICE, BOB]);
@@ -2085,6 +2089,14 @@ fn a_removal_before_a_reset_keeps_the_mark() {
     let v0 = world.current();
     world.deliver(ALICE, BOB, &v0);
     world.reset(BOB);
+    let mark = mark_of(&world);
+    assert!(mark.needs_rotation());
+    assert!(mark.superseded.is_empty());
+    assert_eq!(mark.reset.len(), 1);
+    assert_eq!(mark.reset[0].account_id, BOB);
+
+    // Rotating answers it: the new version goes to Bob's new generation.
+    world.rotate(ALICE);
     assert!(!mark_of(&world).needs_rotation());
 }
 
@@ -2815,4 +2827,76 @@ fn a_recipient_or_author_from_another_read_is_inconsistent_evidence() {
     assert!(!new.space.is_member(CAROL));
     let to_carol = directory.recipient(CAROL, BUILTIN).unwrap().unwrap();
     assert!(build::deliver(&writer, &chain, &version, &to_carol, &mut rng).is_ok());
+}
+
+/// Empties `account`'s device-keys rows: its root then names a device with no
+/// keys, an intrinsic contradiction of that account's own history
+/// (`missing-root-key`, §7).
+fn break_account(world: &mut World, account: &str) {
+    world
+        .accounts
+        .get_mut(account)
+        .unwrap()
+        .ledger
+        .public
+        .keys
+        .clear();
+}
+
+/// One member whose own account history contradicts itself (here, its root
+/// has no device keys) never stops the space (§3.4, "A member this client
+/// cannot evaluate"): it is skipped and reported as broken, the other
+/// members are still served, and because nobody can tell which of its
+/// devices can open what it holds, it sets the needs-rotation mark. A
+/// successor it signed, even one built correctly before its history broke,
+/// is not accepted, and the chain still replays.
+#[test]
+fn a_member_with_a_broken_account_history_is_skipped_and_marks_the_space() {
+    let mut world = World::new(66);
+    for account in [ALICE, BOB, CAROL] {
+        world.account(account);
+        world.add_member(account);
+    }
+    world.create(ALICE);
+    let v0 = world.current();
+    world.deliver(ALICE, BOB, &v0);
+    let junk = world.build_rotation(BOB, false).unwrap();
+
+    break_account(&mut world, BOB);
+    let registry = world.shared.registry.clone();
+    let broken = vec![members::BrokenMember {
+        account_id: BOB.to_owned(),
+        contradiction: IntrinsicContradiction::MissingRootKey,
+    }];
+    let found = helpers(&world, &registry, None);
+    let lacks = found.lacking.unwrap();
+    assert_eq!(
+        lacks
+            .lacking
+            .iter()
+            .map(|entry| entry.account_id.as_str())
+            .collect::<Vec<_>>(),
+        [CAROL]
+    );
+    assert_eq!(lacks.broken, broken);
+    let recipients = found.recipients.unwrap();
+    assert_eq!(
+        recipients
+            .first
+            .iter()
+            .map(|recipient| recipient.account_id())
+            .collect::<Vec<_>>(),
+        [CAROL]
+    );
+    assert_eq!(recipients.broken, broken);
+    let mark = found.mark.unwrap();
+    assert!(mark.needs_rotation());
+    assert_eq!(mark.broken, broken);
+
+    world.accept_rotation(junk);
+    let chain = world.read().chain(&world).unwrap();
+    assert_eq!(chain.versions.len(), 1);
+    assert_eq!(world.current(), v0);
+    world.deliver(ALICE, CAROL, &v0);
+    assert!(world.acquire(CAROL).has_current(&chain));
 }

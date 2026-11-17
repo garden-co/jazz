@@ -267,7 +267,16 @@ impl<'a> AccountDirectory<'a> {
         bytes: &[u8],
         signature: &[u8],
     ) -> ProtocolResult<AuthorCheck> {
-        let Some(state) = self.state_at(account_id, position)? else {
+        // An author whose own account history contradicts itself cannot be
+        // verified: its record is skipped, never a reason to stop the
+        // space's replay (§3.4, "A member this client cannot evaluate").
+        let state = match self.state_at(account_id, position) {
+            Err(ProtocolError::Intrinsic(contradiction)) => {
+                return Ok(AuthorCheck::AccountBroken(contradiction));
+            }
+            other => other?,
+        };
+        let Some(state) = state else {
             return Ok(AuthorCheck::NoAccountRoot);
         };
         if !state.is_active_in(device_id, epoch_id) {
@@ -350,6 +359,9 @@ pub enum AuthorCheck {
     NotActive,
     /// The signature does not verify under the device's signing key.
     SignatureInvalid,
+    /// The author's account history is an intrinsic contradiction (§7):
+    /// nothing it signed can be verified.
+    AccountBroken(IntrinsicContradiction),
 }
 
 /// A member account's current epoch and the sealing key record a delivery

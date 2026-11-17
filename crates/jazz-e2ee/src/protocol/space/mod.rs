@@ -29,7 +29,8 @@ pub use keys::{
 };
 pub use ledger::{AccountDirectory, AuthorCheck, Recipient, SpaceLedger};
 pub use members::{
-    Lacking, LackingMembers, RotationMark, RotationRecipients, UnsupportedMember, VersionEnvelope,
+    BrokenMember, Lacking, LackingMembers, RotationMark, RotationRecipients, UnsupportedMember,
+    VersionEnvelope,
 };
 
 use super::json;

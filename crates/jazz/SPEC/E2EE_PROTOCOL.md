@@ -1824,8 +1824,13 @@ keyEpochId}`, once per delivery and device. Nothing is written: holders
   (§3.5): clients that can evaluate the member still do, and counting it
   would make an older client rotate on every write. One such member never
   stops deliveries or rotations for the rest of the space. A member whose
-  account rows are missing from the read is a caller error
-  (inconsistent evidence), not unsupported.
+  own account history is an intrinsic contradiction (§7; for example a
+  root whose device has no keys) is skipped and reported the same way, and
+  nothing it signed is accepted; unlike an unsupported member it counts
+  towards the needs-rotation mark (§3.5), since no client can tell which of
+  its devices can open what it holds. A member whose account rows are
+  missing from the read is a caller error (inconsistent evidence), not
+  unsupported.
 - **Not a member.** A device whose account has no member row for the space
   (its own member rows are readable to it, R12) reports what it cannot
   decrypt `key-unavailable`: nobody will deliver to it.
@@ -1852,8 +1857,8 @@ current version (it acquires it first, §3.3; if it cannot, `rotate` fails
 `rotation-needs-key`, and so does a recovery rotation by a device that holds
 no version at all). It generates a new epoch and
 `K'`, and inserts, in one ledger transaction that read the chain, the
-space's member rows and the chosen members' public account rows at its
-cut, one successor whose `predecessor` and `historyEpochId` are both the
+space's member rows, the chosen members' public account rows and its own
+account's public rows at its cut, one successor whose `predecessor` and `historyEpochId` are both the
 current version, and one delivery of `K'` to each of at most 100 current
 members other than itself that have a valid sealing key (§2.12, §3.4). The
 100 are chosen first among members that held the previous version (they
@@ -1879,7 +1884,11 @@ superseded, so that a removed device can open it. "Later" means anywhere
 after that epoch in the account's chain, even with other successors in
 between. For an epoch of an earlier generation (the account was reset since),
 the removal is looked for in that generation's chain as it stood when the
-reset happened. The mark is derived from tables every member can read (members,
+reset happened; and such an envelope marks the space even without a
+removal, since the reset generation's devices (which a reset presumes lost)
+can still open it. A rotation answers it by delivering to the account's new
+generation. An account whose own history contradicts itself (§3.4, "A
+member this client cannot evaluate") also marks it. The mark is derived from tables every member can read (members,
 roots, successors, deliveries and the public account successors, R10, R12,
 R14); nobody writes it and nobody can forget it.
 

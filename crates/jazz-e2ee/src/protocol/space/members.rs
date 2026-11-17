@@ -24,7 +24,9 @@ use crate::envelope::Mechanism;
 use crate::random::RandomSource;
 
 use super::super::account::{AccountReplay, AccountState};
-use super::super::error::{ProtocolError, ProtocolResult, UnsupportedCapability};
+use super::super::error::{
+    IntrinsicContradiction, ProtocolError, ProtocolResult, UnsupportedCapability,
+};
 use super::super::position::Position;
 use super::super::records::account::AccountAction;
 use super::chain::SpaceChain;
@@ -39,24 +41,48 @@ pub struct UnsupportedMember {
     pub capability: UnsupportedCapability,
 }
 
-/// Runs `evaluate` for one account; an unsupported capability becomes the
-/// account's [`UnsupportedMember`] report, and every other failure fails
-/// the operation. An account whose ledger the caller left out fails with
+/// A member, or an account an envelope names, whose public account history
+/// is an intrinsic contradiction (§7), for example a root without its
+/// device's keys: skipped and reported, so that one broken account never
+/// stops deliveries or rotations for the rest of the space (§3.4). Its
+/// envelopes of the current version set the needs-rotation mark (§3.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokenMember {
+    pub account_id: String,
+    pub contradiction: IntrinsicContradiction,
+}
+
+/// Why one account was skipped.
+enum Skipped {
+    Unsupported(UnsupportedMember),
+    Broken(BrokenMember),
+}
+
+/// Runs `evaluate` for one account; an unsupported capability or an
+/// intrinsic contradiction in the account's own history becomes that
+/// account's report, and every other failure fails the operation. An
+/// account whose ledger the caller left out fails with
 /// [`ProtocolError::InconsistentEvidence`] before anything is evaluated.
 fn evaluate<T>(
     accounts: &AccountDirectory<'_>,
     account_id: &str,
     evaluate: impl FnOnce() -> ProtocolResult<T>,
-) -> ProtocolResult<Result<T, UnsupportedMember>> {
+) -> ProtocolResult<Result<T, Skipped>> {
     if !accounts.has_ledger(account_id) {
         return Err(ProtocolError::InconsistentEvidence);
     }
     match evaluate() {
         Ok(value) => Ok(Ok(value)),
-        Err(ProtocolError::Unsupported(capability)) => Ok(Err(UnsupportedMember {
+        Err(ProtocolError::Unsupported(capability)) => {
+            Ok(Err(Skipped::Unsupported(UnsupportedMember {
+                account_id: account_id.to_owned(),
+                capability,
+            })))
+        }
+        Err(ProtocolError::Intrinsic(contradiction)) => Ok(Err(Skipped::Broken(BrokenMember {
             account_id: account_id.to_owned(),
-            capability,
-        })),
+            contradiction,
+        }))),
         Err(error) => Err(error),
     }
 }
@@ -191,6 +217,8 @@ pub struct LackingMembers {
     /// Members whose account history needs a capability this client lacks:
     /// skipped, reported as unsupported.
     pub unsupported: Vec<UnsupportedMember>,
+    /// Members whose account history contradicts itself: skipped, reported.
+    pub broken: Vec<BrokenMember>,
 }
 
 /// Every member that lacks a version concerned by delivery (§3.4): the
@@ -218,11 +246,16 @@ pub fn lacking(
     }
     let mut out = Vec::new();
     let mut unsupported = Vec::new();
+    let mut broken = Vec::new();
     for account in ledger.member_accounts() {
         let state = match evaluate(accounts, &account, || accounts.current(&account))? {
             Ok(state) => state,
-            Err(member) => {
+            Err(Skipped::Unsupported(member)) => {
                 unsupported.push(member);
+                continue;
+            }
+            Err(Skipped::Broken(member)) => {
+                broken.push(member);
                 continue;
             }
         };
@@ -251,6 +284,7 @@ pub fn lacking(
     Ok(LackingMembers {
         lacking: out,
         unsupported,
+        broken,
     })
 }
 
@@ -275,19 +309,30 @@ pub struct RotationMark {
     pub former_members: Vec<String>,
     /// Envelopes of the current version a device removal superseded.
     pub superseded: Vec<SupersededEnvelope>,
+    /// Envelopes of the current version sealed to an account epoch of a
+    /// generation the account has since reset (§2.11): that generation's
+    /// devices, lost or not, can still open them.
+    pub reset: Vec<VersionEnvelope>,
     /// Accounts an envelope of the current version names whose history
     /// needs a capability this client lacks. Reported, and otherwise
     /// ignored: they never set the mark here, or a client that cannot read
     /// them would rotate again each time newer clients deliver to them.
     /// Clients that can evaluate them still mark the space.
     pub unsupported: Vec<UnsupportedMember>,
+    /// Accounts an envelope of the current version names whose history
+    /// contradicts itself. Nobody can tell which of their devices can open
+    /// it, so they set the mark: the safe direction.
+    pub broken: Vec<BrokenMember>,
 }
 
 impl RotationMark {
     /// Whether the space needs rotation. [`RotationMark::unsupported`] does
-    /// not count.
+    /// not count; [`RotationMark::broken`] does.
     pub fn needs_rotation(&self) -> bool {
-        !self.former_members.is_empty() || !self.superseded.is_empty()
+        !self.former_members.is_empty()
+            || !self.superseded.is_empty()
+            || !self.reset.is_empty()
+            || !self.broken.is_empty()
     }
 }
 
@@ -316,61 +361,90 @@ pub fn rotation_mark(
         .map(|envelope| envelope.account_id.clone())
         .collect();
     let mut superseded = Vec::new();
+    let mut reset = Vec::new();
     let mut unsupported: Vec<UnsupportedMember> = Vec::new();
+    let mut broken: Vec<BrokenMember> = Vec::new();
     for envelope in found {
         let account_id = envelope.account_id.clone();
         let removal = evaluate(accounts, &account_id, || {
-            removal_after(accounts.replay(&account_id)?, &envelope.account_epoch_id)
+            supersession(accounts.replay(&account_id)?, &envelope.account_epoch_id)
         })?;
         let removal = match removal {
             Ok(removal) => removal,
-            Err(member) => {
+            Err(Skipped::Unsupported(member)) => {
                 if !unsupported.contains(&member) {
                     unsupported.push(member);
                 }
                 continue;
             }
+            Err(Skipped::Broken(member)) => {
+                if !broken.contains(&member) {
+                    broken.push(member);
+                }
+                continue;
+            }
         };
-        if let Some((successor_id, removed_device_id)) = removal {
-            superseded.push(SupersededEnvelope {
-                envelope,
-                successor_id,
-                removed_device_id,
-            });
+        match removal {
+            Some(Supersession::Removal(successor_id, removed_device_id)) => {
+                superseded.push(SupersededEnvelope {
+                    envelope,
+                    successor_id,
+                    removed_device_id,
+                });
+            }
+            Some(Supersession::Reset) => reset.push(envelope),
+            None => {}
         }
     }
     Ok(RotationMark {
         epoch_id: chain.versions[depth].epoch_id.clone(),
         former_members: former_members.into_iter().collect(),
         superseded,
+        reset,
         unsupported,
+        broken,
     })
 }
 
-/// The first accepted `remove-device` successor after `epoch_id` in the
-/// account's chain that contains it: the current generation's chain, or,
-/// for an epoch of an earlier generation, that generation's chain as it
-/// stood when the next generation began (§2.11). `None` when no removal
-/// follows the epoch, or the epoch is in none of the account's chains.
-fn removal_after(
+/// Why an envelope's account epoch no longer confines it to the account's
+/// active devices.
+enum Supersession {
+    /// The first accepted `remove-device` successor after the epoch, and the
+    /// device it removed.
+    Removal(String, String),
+    /// The epoch belongs to a generation the account has since reset.
+    Reset,
+}
+
+/// What superseded `epoch_id` in the account's chains (§3.5): the first
+/// accepted `remove-device` successor after it, in the current generation's
+/// chain or, for an epoch of an earlier generation, in that generation's
+/// chain as it stood at the reset; failing that, for an earlier generation,
+/// the reset that ended it (§2.11). `None` when nothing superseded it, or the epoch is in
+/// none of the account's chains.
+fn supersession(
     replay: &AccountReplay<'_>,
     epoch_id: &str,
-) -> ProtocolResult<Option<(String, String)>> {
+) -> ProtocolResult<Option<Supersession>> {
     let through = replay.ledger().through;
     let Some(current) = replay.as_of(Position(through.0.saturating_add(1)))? else {
         return Ok(None);
     };
     if let Some(found) = removal_in(&current, epoch_id) {
-        return Ok(found);
+        return Ok(found.map(|(successor, device)| Supersession::Removal(successor, device)));
     }
     // Each earlier generation's chain, as of the canonical root of the
-    // generation after it.
+    // generation after it: an epoch found there was ended by that reset.
     for next in current.roots.iter().skip(1) {
         let Some(earlier) = replay.as_of(next.position)? else {
             continue;
         };
-        if let Some(found) = removal_in(&earlier, epoch_id) {
-            return Ok(found);
+        match removal_in(&earlier, epoch_id) {
+            Some(Some((successor, device))) => {
+                return Ok(Some(Supersession::Removal(successor, device)));
+            }
+            Some(None) => return Ok(Some(Supersession::Reset)),
+            None => {}
         }
     }
     Ok(None)
@@ -423,6 +497,9 @@ pub struct RotationRecipients {
     /// skipped and reported as unsupported; a holder that can read them
     /// delivers to them later.
     pub unsupported: Vec<UnsupportedMember>,
+    /// Members whose account history contradicts itself: skipped and
+    /// reported; nothing can be sealed to them.
+    pub broken: Vec<BrokenMember>,
 }
 
 /// Chooses the recipients of a rotation by `rotator` (§3.5): every current
@@ -447,6 +524,7 @@ pub fn rotation_recipients(
     let mut others = Vec::new();
     let mut waiting = Vec::new();
     let mut unsupported = Vec::new();
+    let mut broken = Vec::new();
     for account in ledger.member_accounts() {
         if account == rotator {
             continue;
@@ -454,7 +532,8 @@ pub fn rotation_recipients(
         match evaluate(accounts, &account, || {
             accounts.recipient(&account, mechanism)
         })? {
-            Err(member) => unsupported.push(member),
+            Err(Skipped::Unsupported(member)) => unsupported.push(member),
+            Err(Skipped::Broken(member)) => broken.push(member),
             Ok(None) => waiting.push(account),
             Ok(Some(recipient)) if held.contains(&account) => holding.push(recipient),
             Ok(Some(recipient)) => others.push(recipient),
@@ -473,6 +552,7 @@ pub fn rotation_recipients(
         rest,
         waiting,
         unsupported,
+        broken,
     })
 }
 
