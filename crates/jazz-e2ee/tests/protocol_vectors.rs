@@ -418,6 +418,10 @@ const SIGNED_DIGESTS: &[(&str, &str)] = &[
         "c01ed5f6fff94f24cb96f1086ae0ae6baf1ec5d091dec258b037754d30342e45",
     ),
     (
+        "challenge signature",
+        "27f260092a435e90a2bc8de9480beaee2a60f5c33561992090d3d96e4696a86a",
+    ),
+    (
         "public successor",
         "f0645b2c559531b74252c093ebc2e486e1fe73ceb3b95d69148d903efbdcc03a",
     ),
@@ -609,6 +613,37 @@ fn signed_bytes() {
             D1,
         ),
     ));
+    cases.push((
+        "challenge signature",
+        challenge_signed_bytes(&da, ALICE, challenge, D1, &keys(), b"sealed").unwrap(),
+        append(
+            p(&format!("challenge-signature:{D1}")),
+            &[
+                &env("jazz.sodium.sign", &[0x22; 32]),
+                &env("jazz.wrap.hpke-x25519", &[0x11; 32]),
+                b"sealed",
+            ],
+        ),
+    ));
+    // The approval code: six digits from the first four bytes of the
+    // digest of its bytes (§2.5).
+    let code_bytes = append(
+        p("approval-code"),
+        &[
+            &env("jazz.sodium.sign", &[0x22; 32]),
+            &env("jazz.wrap.hpke-x25519", &[0x11; 32]),
+        ],
+    );
+    let digest = sodium_sha256(&code_bytes);
+    let expected_code = format!(
+        "{:06}",
+        u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) % 1_000_000
+    );
+    assert_eq!(
+        approval_code(&da, ALICE, challenge, &keys()).unwrap(),
+        expected_code
+    );
+    assert_eq!(expected_code, "201514");
     let membership = json::encode_id_list([D1]).unwrap();
     let public_successor = PublicAccountSuccessor {
         id: R1.into(),

@@ -241,7 +241,7 @@ fn removal_rotates_and_excludes_the_device() {
     // new epoch is skipped.
     let writer = env.writer();
     assert_eq!(
-        build::challenge(&writer, &state, &laptop.id, &phone.request(), &mut rng).unwrap_err(),
+        build::challenge(&writer, &state, &laptop, &phone.request(), &mut rng).unwrap_err(),
         refused(RefusalCode::DeviceRemoved)
     );
     assert_eq!(
@@ -965,11 +965,10 @@ fn approval_handshake_refusals() {
     let writer = env.writer();
     let state = ledger.state(&env);
     assert_eq!(
-        build::challenge(&writer, &state, &tablet.id, &phone.request(), &mut rng).unwrap_err(),
+        build::challenge(&writer, &state, &tablet, &phone.request(), &mut rng).unwrap_err(),
         refused(RefusalCode::DeviceNotActive)
     );
-    let challenge =
-        build::challenge(&writer, &state, &laptop.id, &phone.request(), &mut rng).unwrap();
+    let challenge = build::challenge(&writer, &state, &laptop, &phone.request(), &mut rng).unwrap();
     assert_eq!(
         build::respond(&writer, &state, &tablet, &challenge.challenge, &mut rng).unwrap_err(),
         refused(RefusalCode::StaleChallenge)
@@ -1043,8 +1042,7 @@ fn debug_output_never_contains_secrets() {
         .push(Accepted::new(at, root.root.clone()));
     let state = ledger.state(&env);
 
-    let challenge =
-        build::challenge(&writer, &state, &laptop.id, &phone.request(), &mut rng).unwrap();
+    let challenge = build::challenge(&writer, &state, &laptop, &phone.request(), &mut rng).unwrap();
     for rendered in [format!("{challenge:?}"), format!("{challenge:#?}")] {
         debug_free_of(&rendered, &challenge.secret);
     }
@@ -2012,4 +2010,178 @@ fn when_both_devices_request_removal_one_remains() {
         .unwrap_err(),
         refused(RefusalCode::SelfRemoval)
     );
+}
+
+/// A server that shows the approver other keys for a pending device (its
+/// own, under the device's ID) gets a challenge signed over those keys. The
+/// real device refuses it (`invalid-challenge`), and the comparison codes
+/// the two devices show differ, so the user does not approve (§2.5, §8).
+#[test]
+fn a_challenge_over_substituted_requester_keys_is_refused_and_codes_differ() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(31);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mallory = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    let real = ledger.state(&env);
+
+    // The approver's view: phone's keys row and request carry mallory's keys.
+    let mut shown = ledger.public.clone();
+    for row in &mut shown.keys {
+        if row.row.device_id == phone.id {
+            row.row.keys = mallory.keys();
+        }
+    }
+    let replay =
+        jazz_e2ee::protocol::account::AccountReplay::new(&shown, &env.domain, &env.registry)
+            .unwrap();
+    let shown_state = replay.current().unwrap().unwrap();
+    let fake_request = jazz_e2ee::protocol::records::account::DeviceRequest {
+        id: phone.id.clone(),
+        keys: mallory.keys(),
+    };
+    let writer = env.writer();
+    let challenge =
+        build::challenge(&writer, &shown_state, &laptop, &fake_request, &mut rng).unwrap();
+    assert_eq!(
+        build::respond(&writer, &real, &phone, &challenge.challenge, &mut rng).unwrap_err(),
+        refused(RefusalCode::InvalidChallenge)
+    );
+    let coordinates = challenge.challenge.coordinates();
+    let on_approver = jazz_e2ee::protocol::records::account::approval_code(
+        &env.application(),
+        ALICE,
+        coordinates,
+        &fake_request.keys,
+    )
+    .unwrap();
+    let on_phone = jazz_e2ee::protocol::records::account::approval_code(
+        &env.application(),
+        ALICE,
+        coordinates,
+        &phone.keys(),
+    )
+    .unwrap();
+    assert_ne!(on_approver, on_phone);
+}
+
+/// In an honest approval both devices show the same six-digit code, and a
+/// challenge whose signature fails, or that a device without standing
+/// signed, is refused by the requester.
+#[test]
+fn honest_codes_match_and_bad_challenges_are_refused() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(32);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let stranger = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.request(&stranger, &mut rng);
+    let state = ledger.state(&env);
+    let writer = env.writer();
+    let challenge = build::challenge(&writer, &state, &laptop, &phone.request(), &mut rng)
+        .unwrap()
+        .challenge;
+    let coordinates = challenge.coordinates();
+    let code = |keys: &jazz_e2ee::protocol::records::KeyColumns| {
+        jazz_e2ee::protocol::records::account::approval_code(
+            &env.application(),
+            ALICE,
+            coordinates,
+            keys,
+        )
+        .unwrap()
+    };
+    let request = phone.request();
+    let on_approver = code(&request.keys);
+    assert_eq!(on_approver, code(&phone.keys()));
+    assert_eq!(on_approver.len(), 6);
+    assert!(on_approver.bytes().all(|byte| byte.is_ascii_digit()));
+    build::respond(&writer, &state, &phone, &challenge, &mut rng).unwrap();
+
+    let mut tampered = challenge.clone();
+    let last = tampered.signature.len() - 1;
+    tampered.signature[last] ^= 1;
+    assert_eq!(
+        build::respond(&writer, &state, &phone, &tampered, &mut rng).unwrap_err(),
+        refused(RefusalCode::InvalidChallenge)
+    );
+    let mut by_stranger = challenge;
+    by_stranger.signer_id = stranger.id.clone();
+    let bytes = jazz_e2ee::protocol::records::account::challenge_signed_bytes(
+        &env.application(),
+        ALICE,
+        by_stranger.coordinates(),
+        &stranger.id,
+        &phone.keys(),
+        &by_stranger.envelope,
+    )
+    .unwrap();
+    by_stranger.signature = signing::sign(&signature::Builtin, &stranger.signing, &bytes).unwrap();
+    assert_eq!(
+        build::respond(&writer, &state, &phone, &by_stranger, &mut rng).unwrap_err(),
+        refused(RefusalCode::InvalidChallenge)
+    );
+}
+
+/// Private verification requires the challenge to be signed, over the
+/// requester's keys, by the approval's signer: a challenge signed by another
+/// active device leaves the approval unverified.
+#[test]
+fn private_verification_requires_the_approvers_challenge_signature() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(33);
+    let laptop = env.device(&mut rng);
+    let tablet = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&tablet, &mut rng);
+    ledger.approve(&env, &laptop, &tablet, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    let count = |ledger: &Ledger| {
+        let replay = ledger.replay(&env);
+        let state = replay.current().unwrap().unwrap();
+        verify_private(&replay, &state, &ledger.private)
+            .unwrap()
+            .approvals()
+            .len()
+    };
+    assert_eq!(count(&ledger), 2, "the tablet's and the phone's approvals");
+
+    let mut resigned = ledger.clone();
+    let challenge = &mut resigned.private.challenges.last_mut().unwrap().row;
+    challenge.signer_id = tablet.id.clone();
+    let bytes = jazz_e2ee::protocol::records::account::challenge_signed_bytes(
+        &env.application(),
+        ALICE,
+        challenge.coordinates(),
+        &tablet.id,
+        &phone.keys(),
+        &challenge.envelope,
+    )
+    .unwrap();
+    challenge.signature = signing::sign(&signature::Builtin, &tablet.signing, &bytes).unwrap();
+    assert_eq!(count(&resigned), 1, "only the tablet's approval verifies");
+
+    let mut tampered = ledger.clone();
+    let signature = &mut tampered
+        .private
+        .challenges
+        .last_mut()
+        .unwrap()
+        .row
+        .signature;
+    let last = signature.len() - 1;
+    signature[last] ^= 1;
+    assert_eq!(count(&tampered), 1);
 }
