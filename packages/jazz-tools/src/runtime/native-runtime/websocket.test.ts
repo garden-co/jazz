@@ -1292,6 +1292,52 @@ describe("websocket frame carrier", () => {
     expect(errors).toEqual([{ code: "auth_failed", retry: "after_auth", message: "expired" }]);
   });
 
+  // The HTTP stream hands a backend's last message and its close over in one
+  // read, so the close event comes before the message is handled. A refusal
+  // in that message (jazz.revokeUser's) must still read as a refusal, not as
+  // a dropped connection the link retries.
+  it("reports a refusal that arrives in the same tick as the close before the close", async () => {
+    const run = (frames: Uint8Array[]) => {
+      let socket: MessageWebSocket | undefined;
+      const errors: Array<{ code: string }> = [];
+      const terminals: Array<{ code: string }> = [];
+      const carrier = new WebSocketCarrier({
+        endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+        peerIdentity: new Uint8Array(16),
+        onFrame: () => {},
+        onError: (error) => errors.push(error),
+        onTerminal: (error) => terminals.push(error),
+        WebSocket: class extends MessageWebSocket {
+          constructor(url: string) {
+            super(url, (created) => {
+              socket = created;
+            });
+          }
+        },
+      });
+      // Refused before hello, readiness rejects: nothing here waits on it.
+      carrier.ready().catch(() => {});
+      socket!.emitMessage(encodeWebSocketFrameBatch(frames));
+      socket!.emitClose({ code: 1008, reason: "session revoked" });
+      return { errors, terminals };
+    };
+    const revoked = encodeWireError(3, 0, "session revoked: revokeUser");
+
+    // Admitted, then revoked: the refusal comes first, then the close.
+    const admitted = run([encodeServerHello(1n), revoked]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(admitted.errors.map((error) => error.code)).toEqual(["auth_failed", "websocket_closed"]);
+    expect(admitted.terminals.map((error) => error.code)).toEqual(["websocket_closed"]);
+
+    // Refused at sign-in (a stream reopened after the revoke): the refusal
+    // is what ends the carrier.
+    const refused = run([revoked]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(refused.terminals).toEqual([
+      { code: "auth_failed", retry: "never", message: "session revoked: revokeUser" },
+    ]);
+  });
+
   it("passes the parts of a split sync message on, whatever bytes follow their marker", async () => {
     let socket: MessageWebSocket | undefined;
     const frames: Uint8Array[] = [];
