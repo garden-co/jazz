@@ -825,14 +825,23 @@ catalogue.
   identity; a version only the replica admitted has none until the authority
   admits it too.
 
-Each `CatalogueVersion` decodes on its own. A version this build cannot
-read (a column type or schema key from a newer Jazz) does not fail the
-message: the replica skips it, with its `CatalogueCell`s, and reports it with
-`Reason::SchemaVersionUnsupported` (`Db::unsupported_schema_versions`); the
-versions it can read are taken as below, and the link stays up. The skipped
-version's bytes are kept as they arrived, so a relay that skips one does not
-re-encode it differently. Reads under that version are not possible on this
-build; reads under the others are unaffected. The wire is unchanged.
+Each `CatalogueVersion` decodes on its own. A version whose public schema
+names a variant this build does not know (a column type or other enum case
+from a newer Jazz) does not fail the message: the replica skips it, with its
+`CatalogueCell`s, and reports it with `Reason::SchemaVersionUnsupported`
+(`Db::unsupported_schema_versions`); the versions it can read are taken as
+below, and the link stays up. Rows written under a skipped version still
+arrive, with the columns of the versions the replica knows. A version that is
+corrupt (malformed JSON, truncated bytes, a wrong type for a known key, or a
+known shape that does not compile) still fails the message, as before. A key
+this build does not know is ignored, as before. A skipped version's id cannot
+be checked against its contents (`INV-LENS-1`); it is never admitted. The
+wire is unchanged.
+
+A relay serves only the versions it can read: it skips the others as any
+replica does and does not pass them on. A relay must therefore be at least
+as new as the app's schema; a client on a version its relay cannot read
+gets that version from no one.
 
 The replica admits each version under the authority's stored names, renaming
 tables and columns it had named otherwise while it did not know them (for

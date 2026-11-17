@@ -1778,7 +1778,7 @@ pub struct CatalogueVersion {
 /// A catalogue version's schema as received. Its bytes are exactly a
 /// [`crate::protocol::SchemaVersion`]'s (the version id, then its public
 /// schema JSON), but each version decodes on its own: one this build cannot
-/// read (a column type or schema key it does not know, from a newer
+/// read (a column type or other variant it does not know, from a newer
 /// authority) is `Unsupported`, and the rest of the catalogue still applies
 /// (the receiver skips it with [`crate::options::Reason::SchemaVersionUnsupported`])
 /// instead of the whole message failing to decode and the link with it.
@@ -1826,23 +1826,49 @@ impl Serialize for CatalogueSchema {
 
 impl<'de> Deserialize<'de> for CatalogueSchema {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
         let CatalogueSchemaWire {
             id,
             public_schema_json,
         } = CatalogueSchemaWire::deserialize(deserializer)?;
-        Ok(
-            match jazz_model::model::public_schema_convert::decode_public_schema_json(
-                &public_schema_json,
-            ) {
-                Ok(schema) => Self::Known(crate::protocol::SchemaVersion { id, schema }),
-                Err(error) => Self::Unsupported {
+        let source = match serde_json::from_slice::<jazz_model::model::public_schema::Schema>(
+            &public_schema_json,
+        ) {
+            Ok(source) => source,
+            // A shape this build has no variant or field for: a newer
+            // Jazz's schema, skipped on its own. Its id cannot be checked
+            // against its contents (`INV-LENS-1`), since this build cannot
+            // compute it; the version is never admitted, so nothing relies
+            // on it.
+            Err(error) if is_newer_shape(&error) => {
+                return Ok(Self::Unsupported {
                     id,
                     json: public_schema_json,
-                    error,
-                },
-            },
-        )
+                    error: error.to_string(),
+                });
+            }
+            // Anything else (bad JSON, truncated bytes, a wrong type for a
+            // known key) is a corrupt version: it fails the message, as it
+            // always has.
+            Err(error) => {
+                return Err(D::Error::custom(format!("decode public schema: {error}")));
+            }
+        };
+        // A known shape that does not compile is corrupt too, not newer.
+        let schema = jazz_model::model::public_schema_convert::convert_public_schema(&source)
+            .map_err(|error| D::Error::custom(format!("compile public schema: {error}")))?;
+        Ok(Self::Known(crate::protocol::SchemaVersion { id, schema }))
     }
+}
+
+/// Whether a public schema JSON decode failed only on a variant or field
+/// this build does not know: what a newer Jazz's schema looks like here.
+fn is_newer_shape(error: &serde_json::Error) -> bool {
+    if error.classify() != serde_json::error::Category::Data {
+        return false;
+    }
+    let message = error.to_string();
+    message.starts_with("unknown variant") || message.starts_with("unknown field")
 }
 
 /// A stored column a lens fills (see `crate::names::LensCell`): a copy
@@ -15963,6 +15989,42 @@ fn pruned_txs_created(conn: &rusqlite::Connection, known: &std::cell::Cell<Optio
 
 #[cfg(test)]
 mod tests {
+    /// A known catalogue version's bytes are what they were before versions
+    /// decoded one by one (pinned from `main`, where `CatalogueVersion`
+    /// held a `SchemaVersion`), and decode back to `Known`.
+    #[test]
+    fn a_known_catalogue_versions_bytes_are_unchanged() {
+        let json = br#"{"tables":{"notes":{"columns":[{"name":"title","column_type":{"type":"Text"},"nullable":false}],"policies":{"select":{"using":{"type":"True"},"with_check":null},"insert":{"using":null,"with_check":{"type":"True"}},"update":{"using":{"type":"True"},"with_check":{"type":"True"}},"delete":{"using":{"type":"True"},"with_check":null}}}}}"#;
+        let schema =
+            jazz_model::model::public_schema_convert::decode_public_schema_json(json).unwrap();
+        let version = super::CatalogueVersion {
+            schema: super::CatalogueSchema::Known(crate::protocol::SchemaVersion::new(schema)),
+            names: vec![(
+                "notes".into(),
+                "notes".into(),
+                vec![("title".into(), "title".into())],
+            )],
+        };
+        let golden = concat!(
+            "10da442a8fd3d15524aedf5ca236ddbfcace027b227461626c6573223a7b226e6f746573223a7b22",
+            "636f6c756d6e73223a5b7b226e616d65223a227469746c65222c22636f6c756d6e5f74797065223a",
+            "7b2274797065223a2254657874227d2c226e756c6c61626c65223a66616c73657d5d2c22706f6c69",
+            "63696573223a7b2273656c656374223a7b227573696e67223a7b2274797065223a2254727565227d",
+            "2c22776974685f636865636b223a6e756c6c7d2c22696e73657274223a7b227573696e67223a6e75",
+            "6c6c2c22776974685f636865636b223a7b2274797065223a2254727565227d7d2c22757064617465",
+            "223a7b227573696e67223a7b2274797065223a2254727565227d2c22776974685f636865636b223a",
+            "7b2274797065223a2254727565227d7d2c2264656c657465223a7b227573696e67223a7b22747970",
+            "65223a2254727565227d2c22776974685f636865636b223a6e756c6c7d7d7d7d7d01056e6f746573",
+            "056e6f74657301057469746c65057469746c65",
+        );
+        let bytes = postcard::to_allocvec(&version).unwrap();
+        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, golden);
+        let decoded: super::CatalogueVersion = postcard::from_bytes(&bytes).unwrap();
+        assert!(matches!(decoded.schema, super::CatalogueSchema::Known(_)));
+        assert_eq!(decoded, version);
+    }
+
     /// Pulls a chunk store fails while a wait is on share that wait; each
     /// failed round doubles the next wait, up to the longest, however many
     /// rounds fail.
