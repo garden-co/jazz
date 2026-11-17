@@ -140,6 +140,8 @@ export type JazzStore =
       readonly backendCredential: BackendCredential;
       /** The app's secret, when `remote()` was given one: agent tokens are signed with a key derived from it. */
       readonly secret?: string;
+      /** What runs the core, when a store other than `remote()` made this one (`durableObjects()`). */
+      readonly host?: "durable-objects";
     }
   | {
       readonly kind: "vercel";
@@ -246,6 +248,56 @@ export function remote(
     backendCredential,
     ...(secret === undefined ? {} : { secret }),
   };
+}
+
+/** The shortest core secret a Durable Object core accepts. */
+const DURABLE_OBJECT_SECRET_MIN_LENGTH = 32;
+
+/**
+ * A core running in a Cloudflare Durable Object: one SQLite-backed object per
+ * app, in a Worker you deploy that exports `JazzCore` and forwards requests to
+ * it with `routeJazzRequest` (both from `jazz-tools/durable-object`). `url` is
+ * that Worker's origin (e.g. `https://my-app-jazz.example.workers.dev`),
+ * `appId` its `JAZZ_APP_ID` and `secret` its `JAZZ_CORE_SECRET`: a random
+ * string of at least 32 characters that stays the same across deployments.
+ *
+ * The core admits only this backend, which holds the secret; browsers keep
+ * talking to your backend. A Durable Object core doesn't run thin-client
+ * transactions (your backend runs them, as with any core) and has no
+ * HTTP-stream fallback for the backend's own sockets.
+ */
+export function durableObjects(options: {
+  url: string;
+  appId: string;
+  secret: string;
+}): Extract<JazzStore, { kind: "remote" }> {
+  const { url, appId, secret } = options ?? ({} as typeof options);
+  let origin: URL | undefined;
+  try {
+    origin = new URL(url);
+  } catch {
+    // Refused below.
+  }
+  if (
+    !origin ||
+    (origin.protocol !== "https:" && origin.protocol !== "http:") ||
+    origin.pathname.replace(/\/+$/, "") !== "" ||
+    origin.search ||
+    origin.hash
+  ) {
+    throw new Error(
+      `durableObjects(): url must be the Worker's origin, like "https://my-app-jazz.example.workers.dev"; got ${JSON.stringify(url)}`,
+    );
+  }
+  if (typeof appId !== "string" || !appId.trim()) {
+    throw new Error("durableObjects(): appId must be the Worker's JAZZ_APP_ID (it is empty)");
+  }
+  if (typeof secret !== "string" || secret.length < DURABLE_OBJECT_SECRET_MIN_LENGTH) {
+    throw new Error(
+      `durableObjects(): secret must be the Worker's JAZZ_CORE_SECRET, a random string of at least ${DURABLE_OBJECT_SECRET_MIN_LENGTH} characters`,
+    );
+  }
+  return { ...remote({ url: origin.origin, appId, secret }), host: "durable-objects" };
 }
 
 /**
@@ -1615,6 +1667,8 @@ function runningStore(store: JazzStore): JazzStore {
 function storeOpenedLine(store: Exclude<JazzStore, { kind: "vercel" }>): string {
   if (store.kind === "sqlite") return `jazz: store sqlite at ${store.path}`;
   if (store.kind === "memory") return "jazz: store memory (its data lasts as long as this process)";
+  if (store.host === "durable-objects")
+    return `jazz: store durableObjects at ${store.url} (app ${store.appId})`;
   return `jazz: store remote at ${store.url} (app ${store.appId})`;
 }
 
