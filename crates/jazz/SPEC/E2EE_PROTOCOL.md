@@ -1126,7 +1126,12 @@ When authenticating account epoch key `K`:
 
 Stage `account-rotation`; action `remove-device` (target: an active device) or
 `retire-recovery-root` (target: an active recovery root). The author is active
-and holds the current key `K`. A fresh epoch key `K'` and epoch ID are always
+and holds the current key `K`, authenticated (§2.6) against a state with
+exactly the public approvals of the current epoch that the rotation's state
+has: a key authenticated at an earlier read, before an approval that has
+since been accepted, is re-authenticated first (the rotation refuses it
+until then), since a private `revision` without that approval could not be
+verified by any device. A fresh epoch key `K'` and epoch ID are always
 generated. Let `S(column, recipient) = ctx{application: D, policy:
 "jazz.e2ee.account-successor.v1", scope: "account", identifier: account, table:
 "__e2ee_account_successors", row: successorId, column, epoch: newEpoch,

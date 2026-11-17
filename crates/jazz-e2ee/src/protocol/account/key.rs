@@ -36,6 +36,12 @@ pub struct AuthenticatedAccountKey {
     /// Private approvals of the current epoch whose markers authenticate
     /// under the key and whose signers have authenticated lineage.
     pub approval_ids: BTreeSet<String>,
+    /// The public approvals of the current epoch that the state it was
+    /// authenticated against accepted. A key authenticated before a later
+    /// approval landed is stale for writing: a rotation built from it would
+    /// list a private revision without that approval, which no device can
+    /// then verify (§2.8).
+    pub public_approval_ids: BTreeSet<String>,
 }
 
 /// An account key with what authenticated it, obtainable only by
@@ -356,6 +362,7 @@ impl AccountKeyEvidence<'_> {
         Ok(AuthenticatedAccountKey {
             epoch_id: current.epoch_id.to_owned(),
             approval_ids,
+            public_approval_ids: self.state.current_approval_ids(),
         })
     }
 

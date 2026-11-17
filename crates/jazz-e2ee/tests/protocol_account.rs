@@ -1509,3 +1509,40 @@ fn every_epoch_publishes_its_sealing_key() {
         &reset_key,
     );
 }
+
+/// A rotation from an account key authenticated before a later approval of
+/// the same epoch is refused: its private revision would miss that approval,
+/// and no device could verify the new epoch. Authenticated again, the key
+/// rotates, and every remaining device acquires the new key.
+#[test]
+fn a_key_from_before_a_later_approval_cannot_rotate() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(18);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let tablet = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    let stale = ledger.acquire(&env, &laptop).unwrap();
+
+    ledger.request(&tablet, &mut rng);
+    ledger.approve(&env, &laptop, &tablet, &mut rng);
+    let state = ledger.state(&env);
+    assert!(state.is_active(&tablet.id));
+    let target = RotationTarget::RemoveDevice(phone.id.clone());
+    assert_eq!(
+        build::rotate(&env.writer(), &state, &laptop, &stale, &target, &mut rng).unwrap_err(),
+        ProtocolError::AccountKeyUnavailable
+    );
+
+    ledger.rotate(&env, &laptop, target, &mut rng);
+    let state = ledger.state(&env);
+    assert!(!state.is_active(&phone.id));
+    let laptop_key = ledger.acquire(&env, &laptop).unwrap();
+    let tablet_key = ledger.acquire(&env, &tablet).unwrap();
+    assert_eq!(laptop_key.epoch_id(), state.epoch_id());
+    assert_eq!(laptop_key.key(), tablet_key.key());
+}

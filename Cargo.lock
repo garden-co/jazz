@@ -2386,7 +2386,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-e2ee"
-version = "2.0.0-alpha.65"
+version = "2.0.0-alpha.66"
 dependencies = [
  "aead-stream",
  "blake2",

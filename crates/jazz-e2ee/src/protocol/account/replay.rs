@@ -102,6 +102,16 @@ impl AccountState {
         self.is_active(device_id) && self.epoch_id() == epoch_id
     }
 
+    /// IDs of the public approvals of the current epoch this state accepted.
+    pub fn current_approval_ids(&self) -> BTreeSet<String> {
+        let epoch = self.epoch_id();
+        self.approvals
+            .iter()
+            .filter(|approval| approval.row.epoch_id == epoch)
+            .map(|approval| approval.row.id.clone())
+            .collect()
+    }
+
     pub fn is_removed(&self, device_id: &str) -> bool {
         self.removed.contains(device_id)
     }

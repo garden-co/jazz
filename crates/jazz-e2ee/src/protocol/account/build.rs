@@ -494,9 +494,14 @@ impl core::fmt::Debug for Challenge {
     }
 }
 
-/// Fails unless `key` authenticated the current epoch of `state`.
+/// Fails unless `key` authenticated the current epoch of `state`, against a
+/// state with the same accepted approvals: a key authenticated at an earlier
+/// read, before an approval this state includes, is refused and must be
+/// authenticated again (a rotation from it would brick the account).
 fn current_key<'k>(state: &AccountState, key: &'k AccountKey) -> ProtocolResult<&'k [u8; 32]> {
-    if key.epoch_id() == state.epoch_id() {
+    if key.epoch_id() == state.epoch_id()
+        && key.authenticated().public_approval_ids == state.current_approval_ids()
+    {
         Ok(key.key())
     } else {
         Err(ProtocolError::AccountKeyUnavailable)
