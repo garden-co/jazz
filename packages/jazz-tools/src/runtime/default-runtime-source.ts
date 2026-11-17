@@ -179,12 +179,14 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     schema,
     migrations,
     onAuthFailure,
+    onAuthRestored,
     foregroundNodeLease,
   }: RuntimeClientContext<DbConfig>): JazzClient {
     setGlobalWasmLogLevel(config.logLevel);
 
     const runtimeOptions: ConnectRuntimeOptions = {
       onAuthFailure,
+      onAuthRestored,
     };
 
     const session = sessionFromConfig(config);

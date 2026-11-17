@@ -21,6 +21,8 @@ export interface RuntimeClientContext<RuntimeConfig extends DbConfig = DbConfig>
   /** The migrations the app defining `schema` ships (see {@link ClientMigrations}). */
   migrations?: ClientMigrations;
   onAuthFailure: (reason: AuthFailureReason) => void;
+  /** The server admitted the client's link (again): an earlier refusal no longer holds. */
+  onAuthRestored?: () => void;
   /**
    * Browser-only identity leased by the durable SharedWorker before the
    * synchronous foreground client is constructed.
