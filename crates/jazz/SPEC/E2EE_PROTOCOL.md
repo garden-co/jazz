@@ -944,8 +944,8 @@ Replay of an account (`replayOrderedAccount`) is over public rows at one cut:
    not strictly after the current epoch position, its epoch was already
    used, it is malformed, its public `revision` differs from the recomputed
    one, its signer was not active before it, its target is not an active
-   device (removal) or not a valid, earlier, unretired recovery root
-   (retirement), its signature fails, or its `membership` is not exactly the
+   device other than its signer (removal) or not a valid, earlier,
+   unretired recovery root (retirement), its signature fails, or its `membership` is not exactly the
    active set minus the target. Rows at one position were written in one
    transaction, which only the account itself or the server can produce;
    their order is undefined. So a valid candidate is accepted only if it is
@@ -1069,9 +1069,9 @@ signature}`
 account, table: "__e2ee_public_device_approvals", row: approvalId, column:
 "approval-signature:" ‖ signerId, epoch, recipient: deviceId} ‖
 frame[env(signingMechanism, signingPublicKey), env(mechanism, publicKey)]`,
-with the requester's key columns from its request. The approval thereby
-vouches for the device's keys, not only for its ID: the keys row (R4) is
-unsigned, and only the server ties it to the request;
+     with the requester's key columns from its request. The approval thereby
+     vouches for the device's keys, not only for its ID: the keys row (R4) is
+     unsigned, and only the server ties it to the request;
    - delivery `{id: challengeId, envelope: E = seal(requester.pub,
 P("delivery"), K), verification: wrap(K, P("delivery-verification") ‖
 frame[E], Z32)}`.
@@ -1124,8 +1124,13 @@ When authenticating account epoch key `K`:
 
 ### 2.8 Removing a device and rotating the account
 
-Stage `account-rotation`; action `remove-device` (target: an active device) or
-`retire-recovery-root` (target: an active recovery root). The author is active
+Stage `account-rotation`; action `remove-device` (target: an active device
+other than the author) or `retire-recovery-root` (target: an active recovery
+root). A device never removes itself (`self-removal`): the author generates
+`K'`, so a device removing itself would keep the new epoch's key, and every
+space key later sealed to the account at that epoch. Another active device
+removes it, and the account's last device cannot be removed (signing out
+and wiping the device is the way to stop using it). The author is active
 and holds the current key `K`, authenticated (§2.6) against a state with
 exactly the public approvals of the current epoch that the rotation's state
 has: a key authenticated at an earlier read, before an approval that has
@@ -2535,7 +2540,7 @@ names the table, column, space and pending count.
 | Encryption failed           | `encryption-failed`                                                                                                                                                                              | Fail the write                                                                                      | Submit plaintext                                                                               |
 | Provider failure            | The mechanism's `CryptoFailure` (distinct from `InvalidCiphertext`, `InvalidInput`, `NoKeyForMechanism` and a `false` verification), and a writer's failure to read back output it just produced | Fail the operation loudly; preserve the error                                                       | Report it as key unavailable, corrupted ciphertext or an invalid proof; try the next candidate |
 | Unsupported capability      | `ledger-version`, `signing-mechanism`, `signing-version`                                                                                                                                         | Leave the dependent state unresolved                                                                | Treat the record as invalid                                                                    |
-| Intrinsic contradiction     | `conflicting-roots`, `conflicting-device-keys`, `missing-root-key`, `missing-signer-key`                                                                                | Fail current replay; skip only a candidate decided at a fixed signed cutoff                         | Pick one of the conflicting rows                                                               |
+| Intrinsic contradiction     | `conflicting-roots`, `conflicting-device-keys`, `missing-root-key`, `missing-signer-key`                                                                                                         | Fail current replay; skip only a candidate decided at a fixed signed cutoff                         | Pick one of the conflicting rows                                                               |
 | Unknown publication outcome | Publication outcome `unknown`                                                                                                                                                                    | Reconcile the original operation by its record IDs                                                  | Resubmit blindly or replay a callback or source                                                |
 | Recovery failures           | `recovery-cancelled`, `recovery-material-unusable`, `recovery-root-mismatch`, `recovery-delivery-missing`, `recovery-delivery-unusable`                                                          | Only candidate failures permit trying another delivery                                              | Attach private material to the error                                                           |
 | Unsupported shape           | An unsupported-query error naming the operation                                                                                                                                                  | Name the operation                                                                                  | Fall back to a scan                                                                            |
@@ -2581,6 +2586,7 @@ Refusal codes:
 | `approval-closed`               | The approval handle was closed or belongs to another operation.                                                                                                           |
 | `invalid-possession-proof`      | The requesting device's possession proof failed (§2.5).                                                                                                                   |
 | `target-not-active`             | The device or recovery root to remove or retire is not active (§2.8).                                                                                                     |
+| `self-removal`                  | A device tried to remove itself; another active device must remove it (§2.8).                                                                                             |
 | `unsupported-recipient`         | A recipient device, recovery root or account has no key of the selected mechanism (§0, §2.12).                                                                            |
 | `account-reset-not-allowed`     | An account reset by a local-first session, or where the application has not enabled `allowAccountReset` (§2.11).                                                          |
 | `space-pending`                 | An encrypted write to a space that has no valid root, after this device's creation of it was refused while the client runs (§3.2).                                        |
@@ -2799,6 +2805,12 @@ Limits:
 - **Removing a device of a local-first account does not exclude it.** A
   device that still holds the account secret is the account (§2.8); the
   remedy for a lost or stolen local-first device is a new account.
+- **A stolen active device can remove the owner's other devices.** Any
+  active device may remove any other, so whoever holds one can remove the
+  owner's devices first and keep the account's new keys. A device cannot
+  remove itself, so a removal always comes from a device that stays. For an
+  app account the remedy is to revoke the stolen device's sign-in and then
+  remove it; for a local-first account, a new account.
 - **Local-first recovery is as strong as the account secret.** The E2EE
   recovery key of a local-first account is derived from its account secret
   (§2.9), so whoever holds that secret (any device that stores it, a script

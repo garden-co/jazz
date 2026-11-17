@@ -105,6 +105,8 @@ pub enum RefusalCode {
     ApprovalClosed,
     InvalidPossessionProof,
     TargetNotActive,
+    /// A device cannot remove itself (§2.8): another device does it.
+    SelfRemoval,
     UnsupportedRecipient,
     AccountResetNotAllowed,
     SpacePending,
@@ -127,6 +129,7 @@ impl RefusalCode {
             Self::ApprovalClosed => "approval-closed",
             Self::InvalidPossessionProof => "invalid-possession-proof",
             Self::TargetNotActive => "target-not-active",
+            Self::SelfRemoval => "self-removal",
             Self::UnsupportedRecipient => "unsupported-recipient",
             Self::AccountResetNotAllowed => "account-reset-not-allowed",
             Self::SpacePending => "space-pending",

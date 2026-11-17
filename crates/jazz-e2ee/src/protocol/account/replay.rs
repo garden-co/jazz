@@ -581,7 +581,8 @@ impl<'a> AccountReplay<'a> {
         let mut expected = members.active.clone();
         match successor.action {
             AccountAction::RemoveDevice => {
-                if !expected.remove(&target) {
+                // A device never removes itself: it generated the new key.
+                if target == successor.signer_id || !expected.remove(&target) {
                     return Ok(None);
                 }
                 // In an app account, removing a device retires every still

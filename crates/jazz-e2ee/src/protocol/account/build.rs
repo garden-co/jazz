@@ -852,8 +852,9 @@ impl core::fmt::Debug for RotationRecords {
 /// authenticated with the key, the public one the public approvals replay
 /// accepted in it. Recovery roots whose key is not of the selected sealing
 /// mechanism get no delivery (§0, mechanism agility) and do not block the
-/// rotation. The new epoch's sealing key record is signed by the author,
-/// also when it removes itself.
+/// rotation. The new epoch's sealing key record is signed by the author. A
+/// device never removes itself (`self-removal`): it generated `K'`, so it
+/// would keep the new epoch's key.
 pub fn rotate(
     writer: &AccountWriter<'_>,
     state: &AccountState,
@@ -870,6 +871,11 @@ pub fn rotate(
     let mut members = state.active.clone();
     let (action, removed, retired) = match target {
         RotationTarget::RemoveDevice(device) => {
+            // The author generates K'; a device removing itself would keep
+            // it, and every space key later delivered to the account.
+            if *device == author.id {
+                return refuse(RefusalCode::SelfRemoval);
+            }
             if !members.remove(device) {
                 return refuse(RefusalCode::TargetNotActive);
             }

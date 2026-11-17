@@ -93,6 +93,7 @@ impl Env {
 
 /// One account's public and private rows, with the next position to accept
 /// at.
+#[derive(Clone)]
 pub struct Ledger {
     pub public: PublicAccountLedger,
     pub private: PrivateAccountLedger,
