@@ -200,6 +200,7 @@ pub(crate) fn stable_plans(conn: &Connection) -> Result<(), Error> {
 /// A store's file opened and admitted, before a [`Db`] is opened on it:
 /// [`StoreFile::open`] then [`Db::open_file`] is [`Db::open_at`].
 pub struct StoreFile {
+    pub(crate) operation: futures::lock::Mutex<()>,
     pub(crate) conn: DbConnection,
     pub(crate) path: Option<(PathBuf, Option<&'static str>)>,
 }
@@ -209,6 +210,8 @@ impl StoreFile {
         &self,
         f: impl AsyncFnOnce(&DbConnection) -> Result<T, Error>,
     ) -> Result<T, Error> {
+        let _operation = self.operation.lock().await;
+        self.conn.settle().await?;
         f(&self.conn).await
     }
 
@@ -216,10 +219,15 @@ impl StoreFile {
     pub async fn worker(worker: impl crate::backend::WorkerSql + 'static) -> Result<Self, Error> {
         let conn = DbConnection::worker(worker);
         crate::format::admit(&mut conn.sql()).await?;
-        Ok(Self { conn, path: None })
+        Ok(Self {
+            operation: Default::default(),
+            conn,
+            path: None,
+        })
     }
     /// Wait for the worker to drain and close before releasing its actor generation.
     pub async fn close_worker(&self) -> Result<(), Error> {
+        let _operation = self.operation.lock().await;
         self.conn.close_worker().await
     }
 
@@ -280,6 +288,7 @@ impl StoreFile {
         ))
         .map_err(storage)?;
         Ok(Self {
+            operation: Default::default(),
             conn: conn.into(),
             path: Some((path.to_path_buf(), options.vfs)),
         })
@@ -291,6 +300,7 @@ impl StoreFile {
         let conn = Connection::open_in_memory().map_err(storage)?;
         jazz_sql::inline(crate::format::admit(&mut NativeSql(&conn)))?;
         Ok(Self {
+            operation: Default::default(),
             conn: conn.into(),
             path: None,
         })
@@ -305,6 +315,7 @@ impl StoreFile {
             Connection::open_with_flags(shared_memory_uri(name), uri_flags()).map_err(storage)?;
         jazz_sql::inline(crate::format::admit(&mut NativeSql(&conn)))?;
         Ok(Self {
+            operation: Default::default(),
             conn: conn.into(),
             path: None,
         })
@@ -492,11 +503,13 @@ impl HostTables for StoreFile {
         &self,
         f: &mut dyn FnMut(&Connection) -> Result<(), Error>,
     ) -> Result<(), Error> {
-        self.with_connection(async |conn| {
-            let native = conn.native()?;
-            in_savepoint(conn, "host_write", || f(native))
-        })
-        .await
+        let operation = self.operation.lock().await;
+        self.conn.settle().await?;
+        let native = self.conn.native()?;
+        // Native callbacks run synchronously and may deliberately re-enter
+        // this file's host APIs. There is no await after releasing the lease.
+        drop(operation);
+        in_savepoint(&self.conn, "host_write", || f(native))
     }
 }
 
@@ -671,6 +684,36 @@ async fn prefix_scan(
 #[cfg(test)]
 mod tests {
     use rusqlite::{Connection, StatementStatus};
+
+    /// Alice's host read waits for Bob's complete write, not just its SQL
+    /// statement. This internal test uses the private async callback because
+    /// public native host callbacks cannot suspend.
+    #[test]
+    fn store_file_serializes_complete_host_operations() {
+        use super::*;
+        use std::future::Future;
+        use std::task::{Context, Waker};
+        let file = StoreFile::memory().unwrap();
+        let table = HostTable::new("serial_host");
+        let mut write = Box::pin(file.with_connection(async |conn| {
+            crate::values::in_savepoint_async(conn, "host_write", async || {
+                jazz_sql::put_many_in_transaction(
+                    &mut conn.sql(),
+                    table,
+                    &[(b"alice".to_vec(), b"pending".to_vec())],
+                )
+                .await?;
+                std::future::pending::<Result<(), Error>>().await
+            })
+            .await
+        }));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(write.as_mut().poll(&mut cx).is_pending());
+        let mut read = Box::pin(file.host_get(table, b"alice"));
+        assert!(read.as_mut().poll(&mut cx).is_pending());
+        drop(write);
+        assert_eq!(futures::executor::block_on(read).unwrap(), None);
+    }
 
     /// Reprepares of a cached `LIMIT ?` read run `runs` times on `conn`.
     fn reprepares(conn: &Connection, runs: i64) -> i32 {

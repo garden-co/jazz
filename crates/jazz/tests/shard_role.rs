@@ -523,3 +523,51 @@ fn a_reopened_shard_waits_out_its_offset_bound() {
     assert_eq!(at, hlc(NOW + HLC_MAX_OFFSET_MS + 1), "at its clock");
     assert!(newest(&db) > closed, "nothing lands at or below the close");
 }
+
+/// Alice's shard commands wait while Bob owns the connection for host SQL.
+/// bob: host write -> pending -> drop
+/// alice: observe/hold/fix/release -> wait -> complete
+#[test]
+fn shard_commands_wait_for_an_active_store_operation() {
+    use jazz::host::HostTable;
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    for operation in ["observe", "hold", "fix", "release"] {
+        let (db, _) = shard(1);
+        let role = db.shard();
+        let commit = CommitRef {
+            node: [2; 16],
+            tx: 1,
+        };
+        let held = if matches!(operation, "fix" | "release") {
+            block_on(role.hold(commit, &[])).unwrap()
+        } else {
+            0
+        };
+        let mut bob = Box::pin(db.host_put_then_wait_for_test(
+            HostTable::new("shard_wait"),
+            b"bob",
+            b"pending",
+            std::future::pending(),
+        ));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(bob.as_mut().poll(&mut cx).is_pending());
+        let mut alice = Box::pin(async {
+            match operation {
+                "observe" => role.observe(held).await.map(|_| ()),
+                "hold" => role.hold(commit, &[]).await.map(|_| ()),
+                "fix" => role.fix(commit, held).await,
+                _ => role.release(commit).await,
+            }
+        });
+        assert!(alice.as_mut().poll(&mut cx).is_pending());
+        drop(bob);
+        block_on(alice).unwrap();
+        if operation == "release" {
+            assert_eq!(role.lowest_hold(), None);
+        }
+        insert(&db, "alice");
+        assert_eq!(titles(&db), vec!["alice"]);
+    }
+}

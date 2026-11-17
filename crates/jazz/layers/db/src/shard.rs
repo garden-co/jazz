@@ -462,7 +462,8 @@ impl ShardRole<'_> {
     /// that: returns the position observed, which the caller observes again
     /// once the clock has caught up.
     pub async fn observe(&self, position: u64) -> Result<u64, Error> {
-        let inner = self.db.inner.ready().await;
+        let _operation = self.db.inner.operation.lock().await;
+        let inner = self.db.inner.ready().await?;
         self.require(inner)?;
         let observed = position.min(hlc(inner
             .shard
@@ -501,7 +502,8 @@ impl ShardRole<'_> {
     /// cross-shard commits holding each other's rows on two shards would
     /// otherwise wait on each other.
     pub async fn hold(&self, commit: CommitRef, rows: &[HeldRow]) -> Result<u64, Error> {
-        let inner = self.db.inner.ready().await;
+        let _operation = self.db.inner.operation.lock().await;
+        let inner = self.db.inner.ready().await?;
         self.require(inner)?;
         if let Some(at) = inner.shard.borrow().held(commit) {
             return Ok(at);
@@ -550,7 +552,8 @@ impl ShardRole<'_> {
     /// hold here. Commits the store accepted since the hold may sit above
     /// it; none sits in what it served as settled. The part must be held.
     pub async fn fix(&self, commit: CommitRef, position: u64) -> Result<(), Error> {
-        let inner = self.db.inner.ready().await;
+        let _operation = self.db.inner.operation.lock().await;
+        let inner = self.db.inner.ready().await?;
         self.require(inner)?;
         let Some(held) = inner.shard.borrow().held(commit) else {
             return Err(Error::new(
@@ -579,7 +582,8 @@ impl ShardRole<'_> {
     /// Drop the part `commit`'s hold without it landing: its cross-shard
     /// commit was refused. Releasing a part not held does nothing.
     pub async fn release(&self, commit: CommitRef) -> Result<(), Error> {
-        let inner = self.db.inner.ready().await;
+        let _operation = self.db.inner.operation.lock().await;
+        let inner = self.db.inner.ready().await?;
         self.require(inner)?;
         if inner.shard.borrow().held(commit).is_none() {
             return Ok(());

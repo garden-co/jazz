@@ -806,6 +806,13 @@ impl Default for FileOptions {
 }
 
 /// Jazz's `Db` over SQLite.
+///
+/// Dropping a future while SQL is suspended invalidates all handles sharing
+/// this database. Fallible storage operations then return a Storage error;
+/// APIs without an error return retain their fail-fast behavior. Close/drop
+/// the handles and reopen before doing more work. Cancellation does not prove
+/// that the interrupted command rolled back. Waiting for the operation lock
+/// or external data does not itself invalidate the database.
 pub struct Db {
     inner: Rc<Store>,
     /// `Some` for a schema-view handle: operations run under this schema.
@@ -1393,7 +1400,7 @@ impl Db {
     /// Open on a file [`crate::host::StoreFile::open`] admitted, whose host
     /// tables may already have been read or written.
     pub async fn open_file(config: DbConfig, file: crate::host::StoreFile) -> Result<Self, Error> {
-        let crate::host::StoreFile { conn, path } = file;
+        let crate::host::StoreFile { conn, path, .. } = file;
         Self::open_on(
             config,
             conn,
@@ -1411,6 +1418,7 @@ impl Db {
         change: crate::catalogue::CatalogueChange,
     ) -> Result<Self, (Error, crate::host::StoreFile)> {
         let opening = crate::host::StoreFile {
+            operation: Default::default(),
             conn: file.conn.initialization_handle(),
             path: file.path.clone(),
         };
@@ -1433,7 +1441,7 @@ impl Db {
         &self,
         f: impl AsyncFnOnce(&crate::host::DbConnection) -> Result<T, Error>,
     ) -> Result<T, Error> {
-        let inner = self.inner.acquire().await;
+        let inner = self.inner.acquire().await?;
         f(&inner.conn).await
     }
 
@@ -1464,7 +1472,7 @@ impl Db {
         let db = Self::open_named(config, conn, path).await?;
         db.admit_along_migrations(&target).await?;
         {
-            let inner = db.inner().await;
+            let inner = db.inner().await?;
             let owner = Rc::new(inner.named(&target));
             inner.owner.replace(owner);
             inner.reset_everything().await;
@@ -1481,14 +1489,14 @@ impl Db {
     /// (SPEC 10.7); whether they did.
     async fn admit_along_migrations(&self, schema: &JazzSchema) -> Result<bool, Error> {
         let steps = {
-            let inner = self.inner().await;
+            let inner = self.inner().await?;
             migration_path(&inner.migrations.borrow(), schema, |version| {
                 inner.names.borrow().get(version).is_some()
             })
         };
         let along = !steps.is_empty();
         if !along {
-            let inner = self.inner().await;
+            let inner = self.inner().await?;
             if let Some(error) = outside_migrations(&inner.migrations.borrow(), schema, |version| {
                 inner.names.borrow().get(version).is_some()
             }) {
@@ -1498,7 +1506,7 @@ impl Db {
         for (schema, lenses) in steps {
             if self
                 .inner()
-                .await
+                .await?
                 .names
                 .borrow()
                 .get(&schema.version_id())
@@ -1746,7 +1754,7 @@ impl Db {
             }),
         };
         {
-            let inner = db.inner.ready().await;
+            let inner = db.inner.ready().await?;
             // The newest schema is current: its declaration order is tag
             // order.
             if newest {
@@ -1804,7 +1812,7 @@ impl Db {
     /// to be taken: for a host that could not deliver it before (no
     /// listener yet). Does nothing unless refusals are tracked.
     pub async fn requeue_rejected_transactions(&self) -> Result<(), Error> {
-        let inner = self.inner.acquire().await;
+        let inner = self.inner.acquire().await?;
         if self.inner.upstream_rejections.borrow().is_none() {
             return Ok(());
         }
@@ -1832,12 +1840,12 @@ impl Db {
     /// oldest first (INV-TX-9). Kept only while
     /// [`Db::track_upstream_rejections`] is on, until discarded.
     pub async fn rejected_transactions(&self) -> Result<Vec<RejectedTransaction>, Error> {
-        self.inner.acquire().await.rejected_transactions().await
+        self.inner.acquire().await?.rejected_transactions().await
     }
 
     /// Drop a refused commit's payload once its refusal was reported.
     pub async fn discard_rejected_transaction(&self, seq: u64) -> Result<(), Error> {
-        self.inner.acquire().await.discard_rejected(seq).await
+        self.inner.acquire().await?.discard_rejected(seq).await
     }
 
     /// The uploads the authority refused since the last call, by the node
@@ -1863,7 +1871,11 @@ impl Db {
     /// now mints it when it first serves its catalogue, as before.
     pub async fn set_authority(&self) {
         let _operation = self.inner.operation.lock().await;
-        let inner = self.inner.ready().await;
+        let inner = self
+            .inner
+            .ready()
+            .await
+            .expect("database unavailable; reopen the database");
         inner.authority.set(true);
         if inner.publishes_catalogue() {
             // A storage failure here surfaces again, with its error, from
@@ -1898,7 +1910,7 @@ impl Db {
     ) -> Result<OriginWrite, Error> {
         let (node, tx) = (sync::origin_node(author, *key.node.as_bytes()), key.time.0);
         {
-            let inner = self.inner.ready().await;
+            let inner = self.inner.ready().await?;
             if inner.tx.borrow().is_some() {
                 return Err(unsupported(
                     "a write as another writer's commit inside a transaction",
@@ -1910,10 +1922,10 @@ impl Db {
                 OriginFate::Rejected(error) => return Err(error),
             }
         }
-        self.inner.ready().await.next_origin.set(Some((node, tx)));
+        self.inner.ready().await?.next_origin.set(Some((node, tx)));
         let written = write().await;
         // Read by each attempt of the write's commit.
-        self.inner.ready().await.next_origin.set(None);
+        self.inner.ready().await?.next_origin.set(None);
         written.map(OriginWrite::Written)
     }
 
@@ -1963,7 +1975,7 @@ impl Db {
     ) -> Result<Option<uuid::Uuid>, Error> {
         let _operation = self.inner.operation.lock().await;
         let active_schema = self.operation_schema();
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         let schema = active_schema.clone();
         let version = schema.jazz.version_id();
         let namespace = inner.namespace().await?;
@@ -1994,7 +2006,7 @@ impl Db {
     }
 
     /// Storage access after undoing another transaction handle's cached SQL overlay.
-    async fn inner(&self) -> &Store {
+    async fn inner(&self) -> Result<&Store, Error> {
         self.inner.ready().await
     }
 
@@ -2016,7 +2028,10 @@ impl Db {
         if self.inner.as_ref().claims.borrow().get(&identity) == Some(&claims) {
             return false;
         }
-        let inner = self.inner().await;
+        let inner = self
+            .inner()
+            .await
+            .expect("database unavailable; reopen the database");
         inner.claims.borrow_mut().insert(identity, claims);
         inner.refresh_identity(identity).await;
         true
@@ -2029,7 +2044,7 @@ impl Db {
         }
         self.sync_tick().await?;
         {
-            let inner = self.inner.acquire().await;
+            let inner = self.inner.acquire().await?;
             inner.fan.borrow_mut().collect();
             inner.reclaim_large_values(RECLAIM_NODES_PER_TICK).await?;
         }
@@ -2122,7 +2137,7 @@ impl Db {
             return Ok(None);
         }
         if chunks.clear_failed() {
-            let inner = self.inner().await;
+            let inner = self.inner().await?;
             inner.retry_awaiting().await;
             inner.retry_store_failed_pulls();
         }
@@ -2220,7 +2235,7 @@ impl Db {
         // were refused for them run again, and want what they still lack
         // in this batch.
         if fetches && chunks.outstanding().is_none() && chunks.clear_failed() {
-            let inner = self.inner().await;
+            let inner = self.inner().await?;
             inner.retry_awaiting().await;
             inner.retry_store_failed_pulls();
         }
@@ -2236,7 +2251,7 @@ impl Db {
         let mut io = crate::chunk_store::ChunkIo::unleased(fetch);
         io.lease = Some(lease);
         if chunks.offload_store().is_some() {
-            let inner = self.inner().await;
+            let inner = self.inner().await?;
             if !inner.conn.sql().transaction_open() {
                 io.puts =
                     crate::values::in_savepoint_async(&inner.conn, "jazz_lv_offload", async || {
@@ -2289,7 +2304,7 @@ impl Db {
                 .await;
         }
         {
-            let inner = self.inner.acquire().await;
+            let inner = self.inner.acquire().await?;
             if !io.puts.is_empty() {
                 crate::values::in_savepoint_async(&inner.conn, "jazz_lv_offloaded", async || {
                     for ((key, _), put) in io.puts.iter().zip(put) {
@@ -2351,7 +2366,10 @@ impl Db {
         }
         chunks.landed(wanted);
         {
-            let schema_inner = self.inner().await;
+            let schema_inner = self
+                .inner()
+                .await
+                .expect("database unavailable; reopen the database");
             schema_inner.retry_awaiting().await
         };
     }
@@ -2541,7 +2559,7 @@ impl Db {
     #[doc(hidden)]
     pub async fn large_value_nodes_for_test(&self) -> Result<(u64, u64), Error> {
         let _operation = self.inner.operation.lock().await;
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         inner
             .conn
             .sql()
@@ -2561,7 +2579,7 @@ impl Db {
     pub async fn offloaded_large_value_nodes_for_test(&self) -> Result<u64, Error> {
         let _operation = self.inner.operation.lock().await;
         self.inner()
-            .await
+            .await?
             .conn
             .sql()
             .query_one(
@@ -2584,7 +2602,7 @@ impl Db {
     pub async fn large_value_epochs_for_test(&self) -> Result<(u64, u64), Error> {
         let _operation = self.inner.operation.lock().await;
         self.inner()
-            .await
+            .await?
             .conn
             .sql()
             .query_one(
@@ -2630,7 +2648,7 @@ impl Db {
         identity: Option<AuthorSubject>,
     ) -> Result<(String, String), Error> {
         let _operation = self.inner.operation.lock().await;
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         let compiled = inner.compile(prepared, identity, &ReadSpec::default())?;
         let plan: Vec<String> = inner
             .conn
@@ -2669,7 +2687,7 @@ impl Db {
     ) -> Result<(usize, Vec<(RowUuid, Vec<bool>)>), Error> {
         let _operation = self.inner.operation.lock().await;
         let active_schema = self.operation_schema();
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         let table = active_schema.table(table)?;
         if !table.branch_by.is_empty() {
             return Err(unsupported("explain for a table with branches"));
@@ -2795,7 +2813,7 @@ impl Db {
         let _operation = self.inner.operation.lock().await;
         let active_schema = self.operation_schema();
         let ids = grounded.iter().map(|id| *id.0.as_bytes()).collect();
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         let stored = active_schema.table(table)?.stored.clone();
         let overlay = CutOverlay::Grounded(Arc::new(BTreeMap::from([(stored, ids)])));
         inner
@@ -2815,7 +2833,7 @@ impl Db {
     ) -> Result<String, Error> {
         let _operation = self.inner.operation.lock().await;
         let active_schema = self.operation_schema();
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         let stored = active_schema.table(table)?.stored.clone();
         let overlay = CutOverlay::Except {
             table: stored,
@@ -2868,7 +2886,7 @@ impl Db {
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.fetching(async || {
-            let inner = self.inner().await;
+            let inner = self.inner().await?;
             inner
                 .run(prepared, None, &ReadSpec::of(&opts, inner).await?)
                 .await
@@ -2885,7 +2903,7 @@ impl Db {
     ) -> Result<Vec<CurrentRow>, Error> {
         let _operation = self.inner.operation.lock().await;
         self.inner()
-            .await
+            .await?
             .nest_relations(prepared, None, &ReadSpec::default(), roots)
             .await
     }
@@ -2893,7 +2911,7 @@ impl Db {
     pub async fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
         let _operation = self.inner.operation.lock().await;
         self.inner()
-            .await
+            .await?
             .run(prepared, None, &ReadSpec::default())
             .await
     }
@@ -2905,7 +2923,7 @@ impl Db {
         identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
         let _operation = self.inner.operation.lock().await;
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         inner
             .run(prepared, Some(identity), &ReadSpec::of(&opts, inner).await?)
             .await
@@ -2917,7 +2935,7 @@ impl Db {
         opts: ReadOpts,
     ) -> Result<ResultTree, Error> {
         let _operation = self.inner.operation.lock().await;
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         let read = ReadSpec::of(&opts, inner).await?;
         let roots = inner.run(prepared, None, &read).await?;
         let mut tree = Vec::with_capacity(roots.len());
@@ -2969,9 +2987,9 @@ impl Db {
         opts: ReadOpts,
     ) -> Result<SubscriptionStream, Error> {
         let _operation = self.inner.operation.lock().await;
-        let read = ReadSpec::of(&opts, self.inner().await).await?;
+        let read = ReadSpec::of(&opts, self.inner().await?).await?;
         let client = self.is_client();
-        let non_durable = self.inner().await.non_durable.get();
+        let non_durable = self.inner().await?.non_durable.get();
         // A branch view's head (and live base) is kept current upstream,
         // over a frozen base too: only a snapshot is wholly this store's.
         let reach = client
@@ -3001,7 +3019,7 @@ impl Db {
                 sync::SettledBy::Remote(answered.clone(), global.clone())
             }
             (None, true) => sync::SettledBy::Never,
-            (None, false) => sync::SettledBy::Always(self.inner().await.authority.get()),
+            (None, false) => sync::SettledBy::Always(self.inner().await?.authority.get()),
         };
         let gate = match (&remote, self.link_hint()) {
             (Some((answered, _, global)), Some(hint)) => {
@@ -3020,7 +3038,7 @@ impl Db {
             _ => None,
         };
         let include_deleted = read.include_deleted;
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         let (queue, group) = match inner
             .subscribe_member(prepared, identity, read, settled)
             .await
@@ -3068,7 +3086,7 @@ impl Db {
     ) -> Result<Option<(u64, String, u64, String)>, Error> {
         let _operation = self.inner.operation.lock().await;
         let active_schema = self.operation_schema();
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         let schema = active_schema.clone();
         let Some(table) = schema.table(table).ok().or_else(|| schema.by_stored(table)) else {
             return Ok(None);
@@ -3114,6 +3132,7 @@ impl Db {
         let _operation = self.inner.operation.lock().await;
         self.inner()
             .await
+            .expect("database unavailable; reopen the database")
             .conn
             .sql()
             .query_one(
@@ -3142,7 +3161,10 @@ impl Db {
     /// Deliver the rows written since the last dispatch to the groups they
     /// wake (keyed invalidation; see `fanout`).
     async fn notify(&self) {
-        let inner = self.inner().await;
+        let inner = self
+            .inner()
+            .await
+            .expect("database unavailable; reopen the database");
         let changes = std::mem::take(&mut *inner.changed.borrow_mut());
         if !inner.sessions.borrow().is_empty() {
             inner
@@ -3239,7 +3261,7 @@ impl Db {
         self.with_upload(async || {
             let table = op.layout.source.name.clone();
             let (prior, mark) = {
-                let inner = self.inner().await;
+                let inner = self.inner().await?;
                 let mark = inner.changed.borrow().len();
                 (inner.seq.get(), mark)
             };
@@ -3266,7 +3288,7 @@ impl Db {
             // handle names the row's current version, which may be the
             // newest commit's own seq, so recording it would upload a
             // second commit under that commit's transaction id.
-            let committed = notify || self.inner().await.tx.borrow().is_some();
+            let committed = notify || self.inner().await?.tx.borrow().is_some();
             // The upload record joins the write's SQLite transaction: if it
             // fails, `with_upload` rolls both back, and nobody has been told.
             if committed
@@ -3274,7 +3296,7 @@ impl Db {
                     .record_upload(&[op], handle.tx, sync::Kind::Mergeable, None)
                     .await
             {
-                let inner = self.inner().await;
+                let inner = self.inner().await?;
                 inner.seq.set(prior);
                 inner.changed.borrow_mut().truncate(mark);
                 return Err(error);
@@ -3291,16 +3313,16 @@ impl Db {
     /// transaction (outside an open Jazz transaction, which already is).
     async fn with_upload<R>(&self, f: impl AsyncFnOnce() -> Result<R, Error>) -> Result<R, Error> {
         let wrap = {
-            let inner = self.inner.ready().await;
+            let inner = self.inner.ready().await?;
             inner.client.borrow().is_some() && inner.tx.borrow().is_none()
         };
         if !wrap {
             return f().await;
         }
-        begin_savepoint(&self.inner.ready().await.conn, "upload_local").await?;
+        begin_savepoint(&self.inner.ready().await?.conn, "upload_local").await?;
         let result = f().await;
         end_savepoint(
-            &self.inner.ready().await.conn,
+            &self.inner.ready().await?.conn,
             "upload_local",
             result.is_ok(),
         )
@@ -3318,7 +3340,7 @@ impl Db {
         apply: impl AsyncFnOnce(&Store, u64, Option<([u8; 16], u64)>) -> Result<WriteHandle, Error>,
     ) -> Result<(bool, WriteHandle), Error> {
         let standalone = {
-            let inner = self.inner().await;
+            let inner = self.inner().await?;
             let (seq, standalone) = match &*inner.tx.borrow() {
                 Some((seq, _)) => (*seq, false),
                 None => (inner.fresh_seq(), true),
@@ -3425,7 +3447,7 @@ impl Db {
         callback: impl AsyncFnOnce(&mut MergeableTx<'_>) -> Result<T, Error>,
     ) -> Result<(T, TxReceipt), Error> {
         {
-            let inner = self.inner().await;
+            let inner = self.inner().await?;
             if inner.tx.borrow().is_some() {
                 return Err(unsupported("nested transactions"));
             }
@@ -3439,7 +3461,7 @@ impl Db {
         let captured;
         let prior;
         let changed = {
-            let inner = self.inner().await;
+            let inner = self.inner().await?;
             let (seq, tables) = inner.tx.take().expect("open transaction");
             captured = inner.capture.take();
             prior = inner.seq.get();
@@ -3465,12 +3487,12 @@ impl Db {
             .record_stored_upload(captured, seq, sync::Kind::Mergeable, None, None)
             .await;
         if let Err(error) = recorded {
-            let inner = self.inner().await;
+            let inner = self.inner().await?;
             inner.seq.set(prior);
             inner.abandon_savepoint("tx").await?;
             return Err(error);
         }
-        end_savepoint(&self.inner.ready().await.conn, "tx", true).await?;
+        end_savepoint(&self.inner.ready().await?.conn, "tx", true).await?;
         self.notify().await;
         Ok((value, TxReceipt(seq)))
     }
@@ -3491,7 +3513,7 @@ impl Db {
     ) -> Result<(), Error> {
         let _operation = self.inner.operation.lock().await;
         self.inner()
-            .await
+            .await?
             .publications
             .borrow_mut()
             .push(publication);
@@ -3506,7 +3528,7 @@ impl Db {
     ) -> Result<(), Error> {
         let publication = self
             .inner()
-            .await
+            .await?
             .publications
             .borrow()
             .iter()
@@ -3585,7 +3607,7 @@ impl Db {
     ) -> Result<(), Error> {
         let _operation = self.inner.operation.lock().await;
         let saved = {
-            let inner = self.inner().await;
+            let inner = self.inner().await?;
             (
                 inner.physical.borrow().clone(),
                 inner.names.borrow().clone(),
@@ -3593,9 +3615,9 @@ impl Db {
                 inner.owner.borrow().clone(),
             )
         };
-        begin_savepoint(&self.inner().await.conn, "jazz_catalogue").await?;
+        begin_savepoint(&self.inner().await?.conn, "jazz_catalogue").await?;
         let applied = (async {
-            crate::catalogue::put(&mut self.inner().await.conn.sql(), &change.put).await?;
+            crate::catalogue::put(&mut self.inner().await?.conn.sql(), &change.put).await?;
             for (schema, lenses) in change.admit {
                 self.admit(schema, &lenses, None).await?;
             }
@@ -3606,10 +3628,10 @@ impl Db {
         })
         .await;
         let ended =
-            end_savepoint(&self.inner().await.conn, "jazz_catalogue", applied.is_ok()).await;
+            end_savepoint(&self.inner().await?.conn, "jazz_catalogue", applied.is_ok()).await;
         let result = applied.and(ended);
         if result.is_err() {
-            let inner = self.inner().await;
+            let inner = self.inner().await?;
             let (physical, names, admitted, owner) = saved;
             inner.physical.replace(physical);
             inner.names.replace(names);
@@ -3651,7 +3673,7 @@ impl Db {
     /// The store's catalogue: every schema, lens and permissions revision
     /// it keeps (see [`crate::catalogue`]).
     pub async fn catalogue(&self) -> Result<crate::catalogue::CatalogueRows, Error> {
-        let inner = self.inner.acquire().await;
+        let inner = self.inner.acquire().await?;
         crate::catalogue::read(&mut inner.conn.sql()).await
     }
 
@@ -3665,7 +3687,7 @@ impl Db {
     ) -> Result<(), Error> {
         let make_current = current.is_some();
         {
-            let inner = self.inner().await;
+            let inner = self.inner().await?;
             let version = schema.version_id();
             let mut defaults = BTreeMap::new();
             let mut copies = BTreeMap::new();
@@ -3767,7 +3789,7 @@ impl Db {
                 inner.admitted.borrow_mut().push((version, schema));
             }
         }
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         inner.reset_everything().await;
         // Clients store rows by these names: they learn the new version
         // before its rows.
@@ -8942,7 +8964,7 @@ impl Db {
         let Some(bundle) = bundle else {
             return Ok(self.governed_view(version));
         };
-        let inner = self.inner.ready().await;
+        let inner = self.inner.ready().await?;
         let Some((_, governing)) = inner.bundle(bundle).await? else {
             return Ok(None);
         };
@@ -8996,7 +9018,7 @@ impl Db {
         // admits it, not named against the current one.
         self.admit_along_migrations(&schema).await?;
         let logical = {
-            let inner = self.inner.ready().await;
+            let inner = self.inner.ready().await?;
             let version = schema.version_id();
             if let Some((_, admitted)) = inner
                 .admitted
@@ -9061,7 +9083,7 @@ impl Db {
         let schema = self
             .inner
             .ready()
-            .await
+            .await?
             .views
             .borrow()
             .get(&id)
@@ -9110,25 +9132,20 @@ impl Store {
         self.owner.borrow().version
     }
 
-    async fn acquire(&self) -> StoreOperation<'_> {
+    async fn acquire(&self) -> Result<StoreOperation<'_>, Error> {
         let lease = self.operation.lock().await;
-        self.ready().await;
-        StoreOperation {
+        self.ready().await?;
+        Ok(StoreOperation {
             store: self,
             _lease: lease,
-        }
+        })
     }
     /// Finish cancelled SQL and discard a cached transaction overlay before
     /// accessing storage. This does not acquire the operation lease.
-    async fn ready(&self) -> &Self {
-        self.conn
-            .settle()
-            .await
-            .expect("settling cancelled storage work");
-        self.settle_overlay()
-            .await
-            .expect("rolling back a transaction overlay");
-        self
+    async fn ready(&self) -> Result<&Self, Error> {
+        self.conn.settle().await?;
+        self.settle_overlay().await?;
+        Ok(self)
     }
 }
 
@@ -9769,7 +9786,7 @@ impl Db {
     pub async fn begin_serializable(&self, id: OpenTransactionId) -> Result<(), Error> {
         let _operation = self.inner.operation.lock().await;
         let (snapshot, own) = {
-            let inner = self.inner.ready().await;
+            let inner = self.inner.ready().await?;
             let snapshot = match &*inner.client.borrow() {
                 Some(client) => Pos::at(client.known),
                 None => inner.frontier(),
@@ -9919,9 +9936,9 @@ impl Db {
             // changed since the snapshot: the authority gets that commit
             // first, so it would refuse this one too.
             // An own commit unsettled at begin counts wherever it landed.
-            let landed = self.inner().await.own_landings(own).await?;
+            let landed = self.inner().await?.own_landings(own).await?;
             {
-                let inner = self.inner().await;
+                let inner = self.inner().await?;
                 for prepared in &batch.ops {
                     let op = &prepared.op;
                     if let Some(row) = op.row()
@@ -9941,7 +9958,7 @@ impl Db {
                 }
             }
             if own.is_empty() {
-                let inner = self.inner().await;
+                let inner = self.inner().await?;
                 for prepared in &batch.ops {
                     let op = &prepared.op;
                     if let Some(row) = op.row()
@@ -9964,7 +9981,7 @@ impl Db {
             // settled it at) may only have settled: the authority decides
             // that one.
             {
-                let inner = self.inner().await;
+                let inner = self.inner().await?;
                 for read in reads {
                     let spec = ReadSpec {
                         include_deleted: read.include_deleted,
@@ -9989,7 +10006,7 @@ impl Db {
                 }
             }
             let reads = {
-                let inner = self.inner().await;
+                let inner = self.inner().await?;
                 let reads = reads
                     .iter()
                     .map(|read| {
@@ -10029,7 +10046,7 @@ impl Db {
                 .await;
         }
         {
-            let inner = self.inner().await;
+            let inner = self.inner().await?;
             for prepared in &batch.ops {
                 let op = &prepared.op;
                 if let Some(row) = op.row()
@@ -10059,7 +10076,7 @@ impl Db {
     }
 
     async fn commit_ops(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
-        crate::db::large_ops::renew_upload_leases(self.inner().await, &batch.uploads).await?;
+        crate::db::large_ops::renew_upload_leases(self.inner().await?, &batch.uploads).await?;
         self.with_upload(async || self.commit_ops_now(batch, kind).await)
             .await
     }
@@ -10067,7 +10084,7 @@ impl Db {
     async fn commit_ops_now(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
         let ops = &batch.ops;
         let (seq, prior, mark) = {
-            let inner = self.inner().await;
+            let inner = self.inner().await?;
             let seq = inner.fresh_seq();
             begin_savepoint(&inner.conn, "commit_batch").await?;
             let mark = inner.changed.borrow().len();
@@ -10102,7 +10119,7 @@ impl Db {
         // through views of several versions.
         let recorded = self.record_upload(ops, seq, kind, None).await;
         if let Err(error) = recorded {
-            let inner = self.inner().await;
+            let inner = self.inner().await?;
             inner.seq.set(prior);
             inner.changed.borrow_mut().truncate(mark);
             return Err(error);
@@ -10287,7 +10304,7 @@ impl Db {
         if !grown {
             return self.in_overlay(id, None, read).await;
         }
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         self.check_batch(id, &token)?;
         let (ops, edits, token, snapshot) = {
             let batches = self.inner.batches.borrow();
@@ -10390,7 +10407,10 @@ impl Db {
         if !error.is_apply_time_rejection() {
             return error;
         }
-        let inner = self.inner().await;
+        let inner = self
+            .inner()
+            .await
+            .expect("database unavailable; reopen the database");
         let snapshot = self
             .inner
             .batches
@@ -10509,7 +10529,7 @@ impl Db {
         ) {
             return Ok(());
         }
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         self.check_batch(id, &token)?;
         let snapshot = self
             .inner
@@ -11030,6 +11050,81 @@ fn migration_path(
 
 #[cfg(all(test, feature = "sqlite"))]
 mod async_row_tests {
+    /// Cancelling Alice's SQL invalidates every handle; Bob cannot receive a
+    /// successful write receipt inside her abandoned savepoint. Reopening the
+    /// file restores service. This internal test injects native SQL suspension,
+    /// which public constructors deliberately do not expose.
+    #[test]
+    fn cancelled_sql_requires_reopening_before_another_write() {
+        use crate::tools::{ColumnType, TablePolicies};
+        use crate::values::TransactionConnection;
+        use jazz_model::model::public_schema::{SchemaBuilder, TableSchemaBuilder};
+        use std::future::Future;
+        use std::sync::atomic::AtomicUsize;
+        use std::task::{Context, Waker};
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("notes")
+                        .column("body", ColumnType::Text)
+                        .policies(
+                            TablePolicies::new()
+                                .with_select(PolicyExpr::True)
+                                .with_insert(PolicyExpr::True),
+                        ),
+                )
+                .build(),
+        )
+        .unwrap();
+        let config = || {
+            DbConfig::new(
+                schema.clone(),
+                DbIdentity {
+                    node: crate::ids::NodeUuid::from_bytes([71; 16]),
+                    author: AuthorSubject::SYSTEM,
+                },
+            )
+        };
+        let path =
+            std::env::temp_dir().join(format!("jazz-cancel-{}.sqlite", uuid::Uuid::new_v4()));
+        let mut conn: crate::host::OwnedConnection = Connection::open(&path).unwrap().into();
+        conn.sql_suspensions = Some(Arc::new(AtomicUsize::new(0)));
+        let db = block_on(async {
+            crate::format::admit(&mut conn.sql()).await.unwrap();
+            Db::open_on(config(), conn.into(), None).await.unwrap()
+        });
+        let other = block_on(db.register_schema_view(schema.clone())).unwrap();
+        let query = db.prepare_query(&Query::from("notes")).unwrap();
+        let cells = |body: &str| BTreeMap::from([("body".into(), Value::String(body.into()))]);
+        let mut alice = Box::pin(db.insert("notes", cells("alice"), Default::default()));
+        let mut cx = Context::from_waker(Waker::noop());
+        loop {
+            assert!(alice.as_mut().poll(&mut cx).is_pending());
+            if db.inner.conn.transaction_open() {
+                break;
+            }
+        }
+        drop(alice);
+        let error = block_on(other.insert("notes", cells("bob"), Default::default())).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Storage);
+        assert!(error.message.contains("reopen"));
+        assert_eq!(
+            block_on(db.read(&query)).unwrap_err().code,
+            ErrorCode::Storage
+        );
+        assert_eq!(block_on(db.tick()).unwrap_err().code, ErrorCode::Storage);
+        // Closing the worker lane remains possible even after invalidation.
+        block_on(db.close_worker()).unwrap();
+        drop(other);
+        drop(db);
+        let db = block_on(Db::open_at(config(), &path, FileOptions::default())).unwrap();
+        assert!(block_on(db.read(&query)).unwrap().is_empty());
+        block_on(db.insert("notes", cells("bob"), Default::default())).unwrap();
+        assert_eq!(block_on(db.read(&query)).unwrap().len(), 1);
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
     /// Alice polls her subscriptions while Bob's writes and claim refreshes
     /// suspend in SQL. Both projected and hidden sort keys keep their results
     /// readable, then deliver the completed update. This lower-level test uses
@@ -11410,6 +11505,7 @@ mod async_row_tests {
             let rows = db
                 .inner()
                 .await
+                .unwrap()
                 .execute_sql(
                     &mut sql,
                     &compiled.sql,

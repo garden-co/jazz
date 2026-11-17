@@ -7741,7 +7741,11 @@ impl Db {
     pub async fn connect_upstream(&self, transport: Box<dyn Transport>) -> Upstream {
         let _operation = self.inner.operation.lock().await;
         self.become_replica_locked().await;
-        let inner = self.inner.ready().await;
+        let inner = self
+            .inner
+            .ready()
+            .await
+            .expect("database unavailable; reopen the database");
         let reask = {
             let mut client_state = inner.client.borrow_mut();
             let client = client_state.as_mut().expect("client");
@@ -7933,7 +7937,7 @@ impl Db {
             },
             ..ReadOpts::default()
         };
-        let mut read = ReadSpec::of(&opts, self.inner.ready().await).await?;
+        let mut read = ReadSpec::of(&opts, self.inner.ready().await?).await?;
         read.position = Position::Current;
         // A frozen view is this store's own state, not the server's to judge.
         if read.frozen() {
@@ -7985,7 +7989,7 @@ impl Db {
         };
         let mut previous = Vec::new();
         loop {
-            let inner = self.inner.ready().await;
+            let inner = self.inner.ready().await?;
             // Ordering by a value whose chunks are not here yet: the rows
             // are reconciled by a later answer.
             let rows = match inner.run(&prepared, None, &read).await {
@@ -8045,7 +8049,7 @@ impl Db {
                 }
             }
 
-            let inner = self.inner.ready().await;
+            let inner = self.inner.ready().await?;
             if !evict.is_empty() {
                 let rows: Vec<[u8; 16]> = evict.iter().map(|(row, _)| *row.0.as_bytes()).collect();
                 inner.forget_watermarks_holding(&table, &rows).await?;
@@ -8102,7 +8106,11 @@ impl Db {
     }
 
     async fn become_replica_locked(&self) {
-        let inner = self.inner.ready().await;
+        let inner = self
+            .inner
+            .ready()
+            .await
+            .expect("database unavailable; reopen the database");
         if inner.client.borrow().is_some() {
             return;
         }
@@ -8130,7 +8138,11 @@ impl Db {
     pub async fn set_remote_link_hint(&self, hint: RemoteLinkHint) {
         let _operation = self.inner.operation.lock().await;
         self.become_replica_locked().await;
-        let inner = self.inner.ready().await;
+        let inner = self
+            .inner
+            .ready()
+            .await
+            .expect("database unavailable; reopen the database");
         let client_state = inner.client.borrow();
         let client = client_state.as_ref().expect("client");
         let link = client.hint.get();
@@ -8161,7 +8173,7 @@ impl Db {
         relayed: Option<Relayed>,
     ) -> Result<(), Error> {
         let ops = {
-            let inner = self.inner.ready().await;
+            let inner = self.inner.ready().await?;
             if inner.client.borrow().is_none() {
                 return Ok(());
             }
@@ -8189,7 +8201,7 @@ impl Db {
         relayed: Option<Relayed>,
         retention: Option<&BTreeSet<String>>,
     ) -> Result<(), Error> {
-        let inner = self.inner.ready().await;
+        let inner = self.inner.ready().await?;
         if inner.client.borrow().is_none() {
             return Ok(());
         }
@@ -8417,7 +8429,7 @@ impl Db {
         tx: u64,
         retention: Option<&BTreeSet<String>>,
     ) -> Result<(), Error> {
-        let inner = self.inner.ready().await;
+        let inner = self.inner.ready().await?;
         let mut rows = HashSet::new();
         if let Some(client) = inner.client.borrow_mut().as_mut() {
             rows.extend(
@@ -8481,7 +8493,11 @@ impl Db {
             Rc<StdCell<bool>>,
         ),
     )> {
-        let inner = self.inner.ready().await;
+        let inner = self
+            .inner
+            .ready()
+            .await
+            .expect("database unavailable; reopen the database");
         inner.client.borrow().as_ref()?;
         let (query, include_deleted, view) = upstream_read(&prepared.query, include_deleted, view);
         let attached = inner
@@ -8688,7 +8704,7 @@ impl Db {
             may_wait(link) && !(live && link.hint != RemoteLinkHint::Live)
         };
         {
-            let inner = self.inner.ready().await;
+            let inner = self.inner.ready().await?;
             if tier == ReadTier::Remote {
                 inner.check_not_stranded()?;
             }
@@ -8796,7 +8812,7 @@ impl Db {
                     // Track admission before suspending so cancellation releases it.
                     request.asked = Some((id, connection));
                     let query = remote_query(&prepared.query).into_owned();
-                    let inner = self.inner.acquire().await;
+                    let inner = self.inner.acquire().await?;
                     let since = inner
                         .register_once_read(
                             id,
@@ -8834,7 +8850,7 @@ impl Db {
     /// named individually and stay readable here and at the authority.
     pub async fn capture_snapshot(&self) -> Result<SnapshotRef, Error> {
         let (node, captured) = {
-            let inner = self.inner.acquire().await;
+            let inner = self.inner.acquire().await?;
             let node = inner.identity.node;
             let client_state = inner.client.borrow();
             let Some(client) = client_state.as_ref() else {
@@ -8864,7 +8880,7 @@ impl Db {
             }
         })
         .await;
-        let inner = self.inner.acquire().await;
+        let inner = self.inner.acquire().await?;
         let client_state = inner.client.borrow();
         let client = client_state.as_ref().expect("client");
         Ok(SnapshotRef {
@@ -8949,7 +8965,7 @@ impl Db {
             return Ok(());
         }
         let pending: Vec<u64> = {
-            let inner = self.inner.acquire().await;
+            let inner = self.inner.acquire().await?;
             let client_state = inner.client.borrow();
             let client = client_state.as_ref().expect("client");
             client.pending.iter().map(|p| p.tx).collect()
@@ -9157,7 +9173,11 @@ impl Db {
         };
         let op = match action {
             PermissionAdviceAction::Read { table, row } => {
-                let inner = self.inner.ready().await;
+                let inner = self
+                    .inner
+                    .ready()
+                    .await
+                    .expect("database unavailable; reopen the database");
                 let id = row.0.as_bytes().to_vec();
                 let images = match inner
                     .images_where(&table, false, "id = ?1", jazz_sql::params![&id])
@@ -9194,7 +9214,10 @@ impl Db {
                 StagedOp::Delete(table, row, Default::default())
             }
         };
-        let inner = self.inner().await;
+        let inner = self
+            .inner()
+            .await
+            .expect("database unavailable; reopen the database");
         let seq = inner.seq.get() + 1;
         if begin_savepoint(&inner.conn, "advise").await.is_err() {
             return PermissionAdvice::Unknown;
@@ -9225,14 +9248,19 @@ impl Db {
     /// Client half of a tick: apply what the server sent, rebase if a
     /// pending transaction settled or an overlaid row changed, then send.
     async fn client_tick(&self) -> Result<(), Error> {
-        if self.inner.ready().await.client.borrow().is_none() {
+        if self.inner.ready().await?.client.borrow().is_none() {
             return Ok(());
         }
         // Everything one tick applies commits together.
-        begin_savepoint(&self.inner.ready().await.conn, "sync_tick").await?;
+        begin_savepoint(&self.inner.ready().await?.conn, "sync_tick").await?;
         let mut rejections = Vec::new();
         let applied = self.client_apply(&mut rejections).await;
-        end_savepoint(&self.inner.ready().await.conn, "sync_tick", applied.is_ok()).await?;
+        end_savepoint(
+            &self.inner.ready().await?.conn,
+            "sync_tick",
+            applied.is_ok(),
+        )
+        .await?;
         applied?;
         // Publish only after the savepoint commits. Failure or cancellation
         // drops local notifications without exposing them to the host.
@@ -9241,14 +9269,14 @@ impl Db {
         }
         self.notify().await;
         let arrived = {
-            let inner = self.inner.ready().await;
+            let inner = self.inner.ready().await?;
             let mut client_state = inner.client.borrow_mut();
             let client = client_state.as_mut().expect("client");
             std::mem::take(&mut client.arrived)
         };
         if arrived {
             {
-                let schema_inner = self.inner.ready().await;
+                let schema_inner = self.inner.ready().await?;
                 schema_inner.retry_awaiting().await
             };
         }
@@ -9266,7 +9294,7 @@ impl Db {
         let mut changed: Option<HashSet<RowKey>> = Some(HashSet::new());
         let mut answered_remotes = Vec::new();
         {
-            let inner = self.inner.ready().await;
+            let inner = self.inner.ready().await?;
             let forget = {
                 let mut client_state = inner.client.borrow_mut();
                 let Some(client) = client_state.as_mut() else {
@@ -9959,11 +9987,11 @@ impl Db {
         }
         if rebase {
             self.rebase(changed, None).await?;
-            self.inner.ready().await.reconcile_unsettled().await?;
+            self.inner.ready().await?.reconcile_unsettled().await?;
         }
         // Results whose position moved read as of the new one.
         {
-            let inner = self.inner.ready().await;
+            let inner = self.inner.ready().await?;
             if std::mem::take(
                 &mut inner
                     .client
@@ -9984,7 +10012,7 @@ impl Db {
             self.evict_unanswered(query, binding, include_deleted, &view, &listed, through)
                 .await?;
             if let Some(watermark) = watermark {
-                let inner = self.inner.ready().await;
+                let inner = self.inner.ready().await?;
                 if inner
                     .client
                     .borrow()
@@ -10001,7 +10029,7 @@ impl Db {
                 }
             }
         }
-        let inner = self.inner.ready().await;
+        let inner = self.inner.ready().await?;
         let known = {
             let mut client_state = inner.client.borrow_mut();
             let client = client_state.as_mut().expect("client");
@@ -10016,7 +10044,7 @@ impl Db {
     }
 
     async fn client_send(&self) -> Result<(), Error> {
-        let inner = self.inner.ready().await;
+        let inner = self.inner.ready().await?;
         let demand = inner.chunks.take_demand();
         let (mut out, reads, wanted) = {
             let mut client_state = inner.client.borrow_mut();
@@ -10194,7 +10222,7 @@ impl Db {
         changed: Option<HashSet<RowKey>>,
         retention: Option<&BTreeSet<String>>,
     ) -> Result<(), Error> {
-        let inner = self.inner.ready().await;
+        let inner = self.inner.ready().await?;
         let (baseline, mut pending) = {
             let mut client_state = inner.client.borrow_mut();
             let Some(client) = client_state.as_mut() else {
@@ -11309,7 +11337,7 @@ impl Db {
         bundle: Option<&crate::catalogue::BundleId>,
     ) -> Result<(), Error> {
         self.check_serves(identity)?;
-        let inner = self.inner.ready().await;
+        let inner = self.inner.ready().await?;
         if let Some(bundle) = bundle
             && inner.bundle(bundle).await?.is_none()
         {
@@ -11383,7 +11411,7 @@ impl Db {
         let _operation = self.inner.operation.lock().await;
         self.check_session_pin_locked(identity, bundle.as_ref())
             .await?;
-        let inner = self.inner.ready().await;
+        let inner = self.inner.ready().await?;
         // One relay tier only (SPEC 9 §9.5).
         debug_assert!(
             !inner.non_durable.get(),
@@ -11532,7 +11560,7 @@ impl Db {
     /// Serve one session's inbound messages for this tick.
     async fn serve_session(&self, index: usize) -> Result<(), Error> {
         let (inbound, failed): (Vec<SyncMessage>, bool) = {
-            let inner = self.inner.ready().await;
+            let inner = self.inner.ready().await?;
             let session = &mut inner.sessions.borrow_mut()[index];
             if !session.open {
                 return Ok(());
@@ -11563,7 +11591,7 @@ impl Db {
         // Relayed reads the upstream answered (or can no longer answer)
         // are served from this store first, in the order they came.
         self.inner.as_ref().relayed_refusals(index);
-        let (relayed, answers) = self.inner.ready().await.relayed_fetches_ready(index);
+        let (relayed, answers) = self.inner.ready().await?.relayed_fetches_ready(index);
         // The upstream's answers list their results' rows: cached rows
         // they left out are not served as the reader's (INV-SYNC-14).
         for (query, binding, include_deleted, view, listed, through) in answers {
@@ -11573,12 +11601,12 @@ impl Db {
         for message in relayed.into_iter().rev() {
             inbound.push_front(message);
         }
-        if let Some(pulls) = self.inner.ready().await.parked_pulls_ready(index).await? {
+        if let Some(pulls) = self.inner.ready().await?.parked_pulls_ready(index).await? {
             inbound.push_front(SyncMessage::ChunkRequests { pulls });
         }
         // Pulls an earlier answer deferred, once what it sent has drained.
         {
-            let inner = self.inner.ready().await;
+            let inner = self.inner.ready().await?;
             let session = &mut inner.sessions.borrow_mut()[index];
             if session.outbox.is_empty() && !session.deferred_pulls.is_empty() {
                 let pulls = std::mem::take(&mut session.deferred_pulls);
@@ -11600,7 +11628,7 @@ impl Db {
                 continue;
             }
             if let SyncMessage::Read { id, .. } = &message {
-                self.inner.ready().await.sessions.borrow_mut()[index]
+                self.inner.ready().await?.sessions.borrow_mut()[index]
                     .backlog_reads
                     .1
                     .remove(id);
@@ -11614,7 +11642,7 @@ impl Db {
                 && self
                     .inner
                     .ready()
-                    .await
+                    .await?
                     .commit_waits(crate::db::shard::CommitRef::from(id), ops)
                     .await?
             {
@@ -11624,7 +11652,7 @@ impl Db {
             }
             if let SyncMessage::PushChunks { nodes } = &message {
                 let bytes: usize = nodes.iter().map(|node| node.bytes.len()).sum();
-                let inner = self.inner.ready().await;
+                let inner = self.inner.ready().await?;
                 let policy = inner.staging.get();
                 let session = &mut inner.sessions.borrow_mut()[index];
                 if session.ingress.0.elapsed() >= std::time::Duration::from_millis(policy.window_ms)
@@ -11652,10 +11680,10 @@ impl Db {
             // So does a commit naming stored tables or columns it does not
             // hold yet: a version it has not admitted wrote it.
             let refuses = matches!(message, SyncMessage::Commit { .. })
-                && self.inner.ready().await.knows_deployed();
+                && self.inner.ready().await?.knows_deployed();
             let unheld = matches!(&message, SyncMessage::Commit { ops, .. } if !self.inner.as_ref().holds_names(ops));
             if !refuses && !matches!(message, SyncMessage::Join { .. }) {
-                let inner = self.inner.ready().await;
+                let inner = self.inner.ready().await?;
                 if inner.session_unadmitted(index) || unheld {
                     inbound.push_front(message);
                     held.extend(inbound);
@@ -11681,14 +11709,14 @@ impl Db {
             .then(|| message.clone());
             // A message served while the chunk store fetches the nodes it
             // needs is served again once they arrive.
-            let again = (fetch.is_none() && self.inner.ready().await.chunks.store().is_some())
+            let again = (fetch.is_none() && self.inner.ready().await?.chunks.store().is_some())
                 .then(|| message.clone());
             match (self.serve(index, message).await, read) {
                 (Ok(()), _) => {}
                 (Err(error), _)
                     if crate::large::is_missing(&error)
                         && again.is_some()
-                        && self.inner.ready().await.chunks.has_fetch() =>
+                        && self.inner.ready().await?.chunks.has_fetch() =>
                 {
                     held.push_back(again.expect("a copy"));
                 }
@@ -11700,7 +11728,7 @@ impl Db {
                         && fetch.is_some()
                         && self.awaiting_chunks() =>
                 {
-                    self.inner.ready().await.sessions.borrow_mut()[index]
+                    self.inner.ready().await?.sessions.borrow_mut()[index]
                         .fetched_upstream
                         .insert(id);
                     let fetch = fetch.expect("a fetch");
@@ -11708,7 +11736,7 @@ impl Db {
                     held.push_back(fetch);
                 }
                 (Err(error), Some(id)) => {
-                    self.inner.ready().await.sessions.borrow_mut()[index]
+                    self.inner.ready().await?.sessions.borrow_mut()[index]
                         .outbox
                         .push(SyncMessage::Refused {
                             id,
@@ -11719,7 +11747,7 @@ impl Db {
                 (Err(error), None) => return Err(error),
             }
         }
-        let inner = self.inner.ready().await;
+        let inner = self.inner.ready().await?;
         if !held.is_empty() {
             inner.sessions.borrow_mut()[index].backlog = held;
         }
@@ -11803,7 +11831,11 @@ impl Db {
             return None;
         };
         {
-            let inner = self.inner.ready().await;
+            let inner = self
+                .inner
+                .ready()
+                .await
+                .expect("database unavailable; reopen the database");
             let owner = inner.owner.borrow().clone();
             let cache = &mut inner.sessions.borrow_mut()[index].backlog_reads;
             if !cache.0.as_ref().is_some_and(|at| Rc::ptr_eq(at, &owner)) {
@@ -11814,7 +11846,11 @@ impl Db {
             }
         }
         let (identity, policy, claims) = {
-            let inner = self.inner.ready().await;
+            let inner = self
+                .inner
+                .ready()
+                .await
+                .expect("database unavailable; reopen the database");
             let session = &inner.sessions.borrow()[index];
             (
                 session.identity,
@@ -11835,13 +11871,18 @@ impl Db {
                 self.inner
                     .ready()
                     .await
+                    .expect("database unavailable; reopen the database")
                     .read_dependencies(&prepared, policy)
                     .ok()
             })
             .await;
         // An unadmitted version may be admitted without the owner schema
         // changing: what it resolved to then is not kept.
-        let inner = self.inner.ready().await;
+        let inner = self
+            .inner
+            .ready()
+            .await
+            .expect("database unavailable; reopen the database");
         if !inner.session_unadmitted(index) {
             inner.sessions.borrow_mut()[index]
                 .backlog_reads
@@ -11855,11 +11896,11 @@ impl Db {
     /// in arrival order), let fan-out run, then send each session the
     /// images its subscriptions and commits touched, as of now.
     async fn server_tick(&self) -> Result<(), Error> {
-        let sessions = self.inner.ready().await.sessions.borrow().len();
+        let sessions = self.inner.ready().await?.sessions.borrow().len();
         if sessions == 0 {
             return Ok(());
         }
-        crate::large::expire_receipts(&mut self.inner.ready().await.conn.sql(), now_ms()).await?;
+        crate::large::expire_receipts(&mut self.inner.ready().await?.conn.sql(), now_ms()).await?;
         for index in 0..sessions {
             // What one session sent that the server cannot serve (or a
             // storage failure serving it) ends that session alone: the
@@ -11873,7 +11914,7 @@ impl Db {
             }
         }
         self.notify().await;
-        let inner = self.inner.ready().await;
+        let inner = self.inner.ready().await?;
         let through = inner.served_through();
         let relaying = inner.relays_upstream();
         let mut cache: HashMap<(String, RowUuid, Pos), Vec<Image>> = HashMap::new();
@@ -13091,7 +13132,7 @@ impl Db {
     async fn serve_due_first_loads(&self, index: usize) -> Result<(), Error> {
         let now = Instant::now();
         let due: Vec<(u64, FirstLoadWait)> = {
-            let inner = self.inner.ready().await;
+            let inner = self.inner.ready().await?;
             let unanswerable = inner
                 .client
                 .borrow()
@@ -13110,7 +13151,7 @@ impl Db {
         };
         for (id, wait) in due {
             let policy = {
-                let inner = self.inner.ready().await;
+                let inner = self.inner.ready().await?;
                 // Answered and sent meanwhile: it already lists the
                 // upstream's result.
                 if !matches!(
@@ -13122,7 +13163,7 @@ impl Db {
                 inner.session_policy(index)
             };
             let db = self.session_db(index).await;
-            let inner = db.inner().await;
+            let inner = db.inner().await?;
             let authority = inner.authority.get();
             let (queue, group) = inner
                 .subscribe_member(
@@ -13166,7 +13207,13 @@ impl Db {
     }
 
     async fn session_db(&self, index: usize) -> Db {
-        let view = self.inner.ready().await.session_schema(index).await;
+        let view = self
+            .inner
+            .ready()
+            .await
+            .expect("database unavailable; reopen the database")
+            .session_schema(index)
+            .await;
         Db {
             inner: self.inner.clone(),
             view,
@@ -13176,7 +13223,7 @@ impl Db {
 
     async fn serve(&self, index: usize, message: SyncMessage) -> Result<(), Error> {
         let (identity, claims) = {
-            let inner = self.inner.ready().await;
+            let inner = self.inner.ready().await?;
             let session = &inner.sessions.borrow()[index];
             (session.identity, session.claims.clone())
         };
@@ -13187,12 +13234,12 @@ impl Db {
         let previous = self
             .inner
             .ready()
-            .await
+            .await?
             .claims
             .borrow_mut()
             .insert(identity, claims.clone());
         let result = self.serve_as(index, message, Some(claims)).await;
-        let inner = self.inner.ready().await;
+        let inner = self.inner.ready().await?;
         match previous {
             Some(previous) => inner.claims.borrow_mut().insert(identity, previous),
             None => inner.claims.borrow_mut().remove(&identity),
@@ -13231,6 +13278,7 @@ impl Db {
             .inner
             .ready()
             .await
+            .expect("database unavailable; reopen the database")
             .claims
             .borrow_mut()
             .insert(author, claims);
@@ -13248,14 +13296,14 @@ impl Db {
         message: SyncMessage,
         claims: Option<BTreeMap<String, Value>>,
     ) -> Result<(), Error> {
-        let identity = self.inner.ready().await.sessions.borrow()[index].identity;
+        let identity = self.inner.ready().await?.sessions.borrow()[index].identity;
         // A subscription's group keeps the session's claims for later runs.
         let with_claims = |prepared: PreparedQuery| match &claims {
             Some(claims) => prepared.with_identity_claims(identity, claims.clone()),
             None => prepared,
         };
-        let policy = self.inner.ready().await.session_policy(index);
-        let policies = self.inner.ready().await.session_policies(index);
+        let policy = self.inner.ready().await?.session_policy(index);
+        let policies = self.inner.ready().await?.session_policies(index);
         // Queries and held rows name tables and columns as the client's
         // schema version does; commits by stored names (see below).
         let db = self.session_db(index).await;
@@ -13288,7 +13336,7 @@ impl Db {
                     // A session's read is served as this store holds it.
                     ReadSpec {
                         position: Position::Current,
-                        ..ReadSpec::of(&opts, db.inner().await).await?
+                        ..ReadSpec::of(&opts, db.inner().await?).await?
                     }
                 };
                 let resume_read = viewed.clone();
@@ -13309,7 +13357,7 @@ impl Db {
                 // forwarded to it.
                 let upstream = db
                     .inner()
-                    .await
+                    .await?
                     .client
                     .borrow()
                     .as_ref()
@@ -13327,7 +13375,7 @@ impl Db {
                 if relayed.is_some()
                     && let Some(until) = wait.and_then(wait_until)
                 {
-                    self.inner.ready().await.sessions.borrow_mut()[index]
+                    self.inner.ready().await?.sessions.borrow_mut()[index]
                         .first_load
                         .insert(
                             id,
@@ -13338,7 +13386,7 @@ impl Db {
                             },
                         );
                 }
-                let inner = db.inner().await;
+                let inner = db.inner().await?;
                 let support = Rc::new(inner.support_of(
                     prepared.source_schema(&inner.owner.borrow()),
                     &prepared.query,
@@ -13430,7 +13478,7 @@ impl Db {
             // whole (or as an eviction), as the replica lacks the version
             // the delta was made over.
             SyncMessage::ResendWhole { rows } => {
-                let inner = self.inner.ready().await;
+                let inner = self.inner.ready().await?;
                 let identity = inner.sessions.borrow()[index].identity;
                 // A seq names a version this session's own commit produced:
                 // any other is not the session's to ask for (it may be one
@@ -13456,7 +13504,7 @@ impl Db {
             // Declares the version the client reads by, and owes the
             // `Welcome` with the catalogue the client lacks.
             SyncMessage::Join { version, known } => {
-                let inner = self.inner.ready().await;
+                let inner = self.inner.ready().await?;
                 let session = &mut inner.sessions.borrow_mut()[index];
                 session.version = Some(crate::ids::SchemaVersionId::from_bytes(version));
                 session.schema = None;
@@ -13466,7 +13514,7 @@ impl Db {
                 session.welcome_owed = true;
             }
             SyncMessage::Unsubscribe { id } => {
-                let inner = self.inner.ready().await;
+                let inner = self.inner.ready().await?;
                 inner.sessions.borrow_mut()[index].support.remove(&id);
                 inner.sessions.borrow_mut()[index].first_load.remove(&id);
                 inner.sessions.borrow_mut()[index].resume.remove(&id);
@@ -13525,7 +13573,7 @@ impl Db {
                     {
                         self.inner
                             .ready()
-                            .await
+                            .await?
                             .check_acts_pinned(index, policy, who)
                             .await
                             .map(|()| who)
@@ -13546,7 +13594,7 @@ impl Db {
                     }
                     Err(_) => PermissionAdvice::Denied,
                 };
-                self.inner.ready().await.sessions.borrow_mut()[index]
+                self.inner.ready().await?.sessions.borrow_mut()[index]
                     .outbox
                     .push(SyncMessage::CheckAllowedResult { id, result });
             }
@@ -13578,7 +13626,7 @@ impl Db {
                 let (relay, refresh) = if matches!(*view, ReadViewSourceSpec::Snapshot { .. }) {
                     (None, false)
                 } else {
-                    let inner = self.inner.ready().await;
+                    let inner = self.inner.ready().await?;
                     let answered = inner.sessions.borrow_mut()[index]
                         .fetched_upstream
                         .remove(&id);
@@ -13594,7 +13642,7 @@ impl Db {
                 };
                 if refresh {
                     let prepared = db.prepare_query_bound(&query, binding.clone())?;
-                    let inner = self.inner.ready().await;
+                    let inner = self.inner.ready().await?;
                     let upstream = {
                         let mut client_state = inner.client.borrow_mut();
                         let client = client_state.as_mut().expect("client");
@@ -13628,7 +13676,7 @@ impl Db {
                 }
                 if let Some(strict) = relay {
                     let prepared = db.prepare_query_bound(&query, binding.clone())?;
-                    let inner = self.inner.ready().await;
+                    let inner = self.inner.ready().await?;
                     let upstream = {
                         let mut client_state = inner.client.borrow_mut();
                         let client = client_state.as_mut().expect("client");
@@ -13682,7 +13730,7 @@ impl Db {
                     return Ok(());
                 }
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
-                let inner = db.inner().await;
+                let inner = db.inner().await?;
                 // A history read ships versions of its source table.
                 let history = history_source_table(&query.table);
                 let table = active_schema
@@ -13945,14 +13993,19 @@ impl Db {
                 // send one only as a node its identity writes as. A
                 // trusted link (a relay forwarding its sessions' commits)
                 // may send any.
-                let identity = self.inner.ready().await.sessions.borrow()[index].identity;
+                let identity = self.inner.ready().await?.sessions.borrow()[index].identity;
                 // No session commits as a thin client's writer node: those
                 // are the server's, derived per author (`origin_node`).
                 if policy.is_some()
                     && (is_origin_node(node)
-                        || !self.inner.ready().await.claim_node(node, &identity).await?)
+                        || !self
+                            .inner
+                            .ready()
+                            .await?
+                            .claim_node(node, &identity)
+                            .await?)
                 {
-                    let inner = self.inner.ready().await;
+                    let inner = self.inner.ready().await?;
                     let through = inner.served_through();
                     inner.sessions.borrow_mut()[index]
                         .outbox
@@ -13978,9 +14031,9 @@ impl Db {
                 // A resend after a reconnect gets the recorded fate, or for
                 // a latest-only commit whose entry was dropped, the accepted
                 // fate it had (SPEC 4 §4.9).
-                let known = match self.inner.ready().await.applied_fate(node, tx).await? {
+                let known = match self.inner.ready().await?.applied_fate(node, tx).await? {
                     None if {
-                        let schema_inner = self.inner.ready().await;
+                        let schema_inner = self.inner.ready().await?;
                         schema_inner.dropped(node, tx, &ops).await
                     }? =>
                     {
@@ -13993,7 +14046,7 @@ impl Db {
                 // gateway may hold it again for the resend).
                 if resent {
                     let part = crate::db::shard::CommitRef { node, tx };
-                    let inner = self.inner.ready().await;
+                    let inner = self.inner.ready().await?;
                     inner.forget_hold(part).await?;
                     inner.shard.borrow_mut().landed(part);
                 }
@@ -14001,10 +14054,13 @@ impl Db {
                 // deployed is refused at once, loudly: the app that wrote
                 // it was released ahead of its schema (INV-SYNC-52).
                 if known.is_none()
-                    && (self.inner.ready().await.session_unadmitted(index)
-                        || !self.inner.ready().await.holds_names(&ops))
+                    && (self.inner.ready().await?.session_unadmitted(index)
+                        || !self.inner.ready().await?.holds_names(&ops))
                 {
-                    self.inner.ready().await.refuse_undeployed_commit(index, id);
+                    self.inner
+                        .ready()
+                        .await?
+                        .refuse_undeployed_commit(index, id);
                     return Ok(());
                 }
                 // What the commit prunes goes by the version its session
@@ -14013,7 +14069,7 @@ impl Db {
                 // sessions' commits, which prune by the link's version (a
                 // known limit: a relay serves one deployment's schema).
                 let retention = {
-                    let inner = self.inner.ready().await;
+                    let inner = self.inner.ready().await?;
                     inner.retention_of(
                         inner
                             .written_version(index)
@@ -14027,25 +14083,24 @@ impl Db {
                         // waiting for rows it could not install): they ship as
                         // they are, unless newer versions do.
                         Some(result) => {
-                            let landed = match (
-                                &result,
-                                self.inner.ready().await.settled(node, tx).await?,
-                            ) {
-                                (Ok(()), Some(Some(at))) => Some(at),
-                                // Dropped: its rows ship as they are now.
-                                (Ok(()), None) => {
-                                    let inner = self.inner.ready().await;
-                                    Some(Pos::at(inner.served_through()))
-                                }
-                                _ => None,
-                            };
+                            let landed =
+                                match (&result, self.inner.ready().await?.settled(node, tx).await?)
+                                {
+                                    (Ok(()), Some(Some(at))) => Some(at),
+                                    // Dropped: its rows ship as they are now.
+                                    (Ok(()), None) => {
+                                        let inner = self.inner.ready().await?;
+                                        Some(Pos::at(inner.served_through()))
+                                    }
+                                    _ => None,
+                                };
                             let rows = match landed {
                                 Some(at) => (async {
                                     let ops = ops
                                         .into_iter()
                                         .map(from_wire)
                                         .collect::<Result<Vec<_>, _>>()?;
-                                    self.inner.ready().await.resent_rows(&ops, at).await
+                                    self.inner.ready().await?.resent_rows(&ops, at).await
                                 })
                                 .await
                                 .unwrap_or_default(),
@@ -14059,6 +14114,7 @@ impl Db {
                             self.inner
                                 .ready()
                                 .await
+                                .expect("database unavailable; reopen the database")
                                 .check_acts_pinned(index, policy, who)
                                 .await
                                 .map_err(|error| (error, Vec::new()))?;
@@ -14102,12 +14158,12 @@ impl Db {
                             // arrive, not refused.
                             Err((error, _))
                                 if crate::large::is_missing(&error)
-                                    && self.inner.ready().await.chunks.has_fetch() =>
+                                    && self.inner.ready().await?.chunks.has_fetch() =>
                             {
                                 return Err(error);
                             }
                             Err((error, rows)) => {
-                                let inner = self.inner.ready().await;
+                                let inner = self.inner.ready().await?;
                                 // Read back by the names the current schema
                                 // gives what the commit named by stored ones.
                                 let error = Error {
@@ -14124,7 +14180,7 @@ impl Db {
                 }
                 .await;
                 let (result, rows, echoable) = decided?;
-                let inner = self.inner.ready().await;
+                let inner = self.inner.ready().await?;
                 // An accepted commit's fate carries the seq it landed at (a
                 // resend gets the recorded one), so the replica learns it.
                 // Where it landed: this store's own position (the
@@ -14251,7 +14307,7 @@ impl Db {
                     deferred,
                     store_failed,
                 } = db.answer_pulls(policy, pulls).await?;
-                let inner = self.inner.ready().await;
+                let inner = self.inner.ready().await?;
                 let session = &mut inner.sessions.borrow_mut()[index];
                 session.outbox.extend(replies);
                 session.parked_pulls.extend(parked);
@@ -14259,7 +14315,7 @@ impl Db {
                 session.store_failed_pulls.extend(store_failed);
             }
             SyncMessage::PushChunks { nodes } => {
-                let inner = self.inner.ready().await;
+                let inner = self.inner.ready().await?;
                 let max_age = i64::try_from(inner.staging.get().max_age_ms).unwrap_or(i64::MAX);
                 let expires = now_ms().saturating_add(max_age);
                 // A relay pushes what its sessions push on to its upstream,
@@ -14352,7 +14408,7 @@ impl Db {
                 }
             }
         }
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         for op in &mut ops {
             let deltas = std::mem::take(&mut op.deltas);
             for delta in deltas {
@@ -14426,7 +14482,7 @@ impl Db {
         pulls: Vec<WirePull>,
     ) -> Result<Answered, Error> {
         let policies = self.view_policies();
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         let mut replies = Vec::new();
         let mut parked = Vec::new();
         let mut deferred = Vec::new();
@@ -14563,7 +14619,7 @@ impl Db {
     ) -> Result<BTreeSet<[u8; 32]>, Error> {
         let active_schema = self.operation_schema();
         let policies = self.view_policies();
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         let mut roots = BTreeSet::new();
         for op in ops {
             let Some(proof) = &op.access_proof else {
@@ -14613,7 +14669,11 @@ impl Db {
         // bound) is held there: the commit stores, relays and orders at the
         // bounded clock, so a far-ahead writer's commits never order past
         // every later write, here or after a restart (INV-SYNC-50).
-        let clock = self.inner().await.bounded_hlc(clock);
+        let clock = self
+            .inner()
+            .await
+            .expect("database unavailable; reopen the database")
+            .bounded_hlc(clock);
         // Each base by the op it travels on; the ops apply without them.
         let bases: Vec<(usize, WireBase)> = ops
             .iter()
@@ -14657,6 +14717,7 @@ impl Db {
                 .inner
                 .ready()
                 .await
+                .expect("database unavailable; reopen the database")
                 .relayed_serializable(snapshot, reads, own)
                 .map_err(|e| (e, Vec::new()))?,
             unchanged => {
@@ -14673,7 +14734,10 @@ impl Db {
             // Reads are validated by the policies the session read by: its
             // bundle's when it is pinned to one, not the store's current ones.
             let policies = self.view_policies();
-            let inner = self.inner().await;
+            let inner = self
+                .inner()
+                .await
+                .expect("database unavailable; reopen the database");
             // The sender's own commits its snapshot included, by local seq
             // and where each settled here (earlier on this connection, so
             // before this one).
@@ -14765,7 +14829,10 @@ impl Db {
         // Admit stored identities once before conflict checks and execution.
         // Conflict helpers consume the same prepared operations as apply.
         let prepared = {
-            let inner = self.inner().await;
+            let inner = self
+                .inner()
+                .await
+                .expect("database unavailable; reopen the database");
             let prepared = ops
                 .iter()
                 .cloned()
@@ -14776,9 +14843,16 @@ impl Db {
                 Err(error) => return Err((error, mentioned(inner).await)),
             }
         };
-        let by_row = self.inner().await.row_ops(&ops);
+        let by_row = self
+            .inner()
+            .await
+            .expect("database unavailable; reopen the database")
+            .row_ops(&ops);
         let (bases, mut built, landed) = {
-            let inner = self.inner().await;
+            let inner = self
+                .inner()
+                .await
+                .expect("database unavailable; reopen the database");
             let resolved = if let Err(error) = inner.check_bases(&prepared, &by_row, &bases) {
                 Err(error)
             } else if relay {
@@ -14809,7 +14883,10 @@ impl Db {
         // inference: a write over the version its writer built on, or an
         // insert of a row there was none of, left it as its writer holds it.
         let previous = {
-            let inner = self.inner().await;
+            let inner = self
+                .inner()
+                .await
+                .expect("database unavailable; reopen the database");
             let mut previous = HashMap::new();
             for (table, row) in by_row.keys() {
                 let versions = inner
@@ -14824,7 +14901,10 @@ impl Db {
         };
         let merged: HashSet<RowKey>;
         let (seq, mark, prior) = {
-            let inner = self.inner().await;
+            let inner = self
+                .inner()
+                .await
+                .expect("database unavailable; reopen the database");
             // A cross-shard part lands where all its parts do: at the
             // position its gateway fixed, under commits this shard accepted
             // since its hold. None of those wrote its rows: they waited
@@ -14974,12 +15054,12 @@ impl Db {
                 } else {
                     Ok(())
                 }?;
-                self.inner.ready().await.written_rows(&ops, seq).await
+                self.inner.ready().await?.written_rows(&ops, seq).await
             })
             .await?;
             {
                 if !relay {
-                    let inner = self.inner.ready().await;
+                    let inner = self.inner.ready().await?;
                     inner
                         .record_bases(&prepared, &by_row, &built, seq, &rows)
                         .await?;
@@ -14989,7 +15069,10 @@ impl Db {
             }
         })
         .await;
-        let inner = self.inner().await;
+        let inner = self
+            .inner()
+            .await
+            .expect("database unavailable; reopen the database");
         match finished {
             Ok(rows) => {
                 end_savepoint(&inner.conn, "upload", true)
@@ -15039,7 +15122,7 @@ impl Db {
         let ready = self
             .inner
             .ready()
-            .await
+            .await?
             .client
             .borrow_mut()
             .as_mut()
@@ -15365,7 +15448,7 @@ impl Db {
         // A branch view's head is current over a frozen base too: only a
         // snapshot read is wholly this store's.
         let frozen = matches!(opts.read_view.source, ReadViewSourceSpec::Snapshot { .. });
-        let non_durable = self.inner().await.non_durable.get();
+        let non_durable = self.inner().await?.non_durable.get();
         let mut fetched = None;
         if self.is_client()
             && let Some(reach) = remote_reach(&opts, non_durable, frozen)
@@ -15392,7 +15475,7 @@ impl Db {
             ..opts
         };
         let read = async || {
-            let inner = self.inner().await;
+            let inner = self.inner().await?;
             let mut spec = ReadSpec::of(&opts, inner).await?;
             if let Some(at) = fetched
                 && spec.position == Position::Known
@@ -15527,7 +15610,11 @@ impl Db {
     /// stored view, or its upstream's once that answers).
     pub async fn set_non_durable_client(&self) {
         let _operation = self.inner.operation.lock().await;
-        let inner = self.inner.ready().await;
+        let inner = self
+            .inner
+            .ready()
+            .await
+            .expect("database unavailable; reopen the database");
         debug_assert!(
             inner.sessions.borrow().is_empty(),
             "a non-durable client serves no sessions"

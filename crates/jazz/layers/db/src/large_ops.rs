@@ -796,7 +796,7 @@ impl Db {
     ) -> Result<Vec<u8>, Error> {
         let prepared = PreparedCell::new(self.operation_schema(), table, row, column)?;
         self.fetching(async || {
-            let schema_inner = self.inner().await;
+            let schema_inner = self.inner().await?;
             schema_inner
                 .read_range(&prepared, range.clone(), false)
                 .await
@@ -818,7 +818,7 @@ impl Db {
         let schema = self.operation_schema();
         let table = schema.table(table)?;
         self.fetching(async || {
-            let inner = self.inner().await;
+            let inner = self.inner().await?;
             inner
                 .value_delta(
                     table,
@@ -845,7 +845,7 @@ impl Db {
         let prepared = PreparedCell::new(self.operation_schema(), table, row, column)?;
         let bytes = self
             .fetching(async || {
-                let schema_inner = self.inner().await;
+                let schema_inner = self.inner().await?;
                 schema_inner
                     .read_range(&prepared, range.clone(), true)
                     .await
@@ -873,7 +873,7 @@ impl Db {
         prepared: &PreparedCell,
         pointer: &str,
     ) -> Result<Option<serde_json::Value>, Error> {
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         let reader = inner.reader();
         let (col, cell) = inner.physical_cell(prepared, reader).await?;
         if crate::large::kind(&col) != lv::LargeValueKind::Json {
@@ -950,7 +950,7 @@ impl Db {
         let table = &prepared.query.query.table;
         let column = &prepared.column.name;
         let value = {
-            let inner = self.inner().await;
+            let inner = self.inner().await?;
             let edited = (async {
                 let (col, cell) = inner
                     .physical_cell(prepared, identity_of(opts.identity))
@@ -977,7 +977,7 @@ impl Db {
                 .await
         }
         .await;
-        self.inner().await.clear_derived();
+        self.inner().await?.clear_derived();
         result
     }
 
@@ -1011,14 +1011,14 @@ impl Db {
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
         let lowered = {
-            let inner = self.inner().await;
+            let inner = self.inner().await?;
             let identity = identity_of(opts.identity);
             inner
                 .lower_large_mutations(&mut patch, mutations, identity)
                 .await
         };
         if let Err(error) = lowered {
-            self.inner().await.clear_derived();
+            self.inner().await?.clear_derived();
             return Err(error);
         }
         // The outer edit already owns chunk-fetch retries and the operation lease.
@@ -1029,7 +1029,7 @@ impl Db {
                 .await
         }
         .await;
-        self.inner().await.clear_derived();
+        self.inner().await?.clear_derived();
         result
     }
 
@@ -1182,7 +1182,7 @@ impl Db {
     ) -> Result<(), Error> {
         let _operation = self.inner.operation.lock().await;
         self.check_streaming_upload(upload)?;
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         let now = streaming_now_ms();
         if upload.preparation.is_none() {
             return Err(closed());
@@ -1225,7 +1225,7 @@ impl Db {
         let _operation = self.inner.operation.lock().await;
         self.check_streaming_upload(&mut upload)?;
         upload.preparation.take();
-        crate::large::end_upload(&mut self.inner().await.conn.sql(), &upload.id).await
+        crate::large::end_upload(&mut self.inner().await?.conn.sql(), &upload.id).await
     }
 
     fn check_streaming_upload(&self, upload: &mut StreamingValueUpload) -> Result<(), Error> {
@@ -1319,7 +1319,7 @@ impl Db {
             })
             .await;
         let _operation = self.inner.operation.lock().await;
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         crate::large::end_upload(&mut inner.conn.sql(), &upload.id).await?;
         result
     }
@@ -1347,7 +1347,7 @@ impl Db {
             ));
         }
         let value = {
-            let inner = self.inner().await;
+            let inner = self.inner().await?;
             let now = streaming_now_ms();
             let alive = if upload.initialized {
                 crate::large::touch_upload(&mut inner.conn.sql(), &upload.id, now).await?
@@ -1390,7 +1390,7 @@ impl Db {
         // descriptor of chunks the store then reclaims.
         let (logical, large) = if value.byte_length <= crate::large::inline_max(&col) as u64 {
             let bytes = {
-                let inner = self.inner().await;
+                let inner = self.inner().await?;
                 crate::large::value_bytes(&mut inner.conn.sql(), &inner.chunks, &value).await?
             };
             (logical_value(value.kind, bytes)?, None)
@@ -1411,7 +1411,7 @@ impl Db {
     /// many uploads ended.
     pub async fn evict_expired_staged_large_values(&self) -> Result<usize, Error> {
         let _operation = self.inner.operation.lock().await;
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         let now = streaming_now_ms();
         let max_age = i64::try_from(inner.staging.get().max_age_ms).unwrap_or(i64::MAX);
         inner.release_dropped_uploads().await?;

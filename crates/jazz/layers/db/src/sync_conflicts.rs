@@ -824,7 +824,7 @@ impl Db {
         branch: Option<&BranchSelector>,
     ) -> Result<Vec<WriteConflict>, Error> {
         let active_schema = self.operation_schema();
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         let stored = active_schema.stored_table(table)?.to_owned();
         let key = branch.map_or_else(Vec::new, |branch| crate::values::branch_key(&branch.values));
         inner.row_write_conflicts(&stored, row, &key).await
@@ -843,7 +843,7 @@ impl Db {
         column: &str,
     ) -> Result<Option<Value>, Error> {
         let active_schema = self.operation_schema();
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         let schema_table = active_schema.table(table)?;
         let stored = schema_table.stored.clone();
         let stored_column = schema_table.stored_name(column).to_owned();
@@ -873,7 +873,7 @@ impl Db {
     /// (SPEC 4 §4.3).
     #[cfg(feature = "testing")]
     pub async fn as_sent_versions_for_test(&self) -> Result<u64, Error> {
-        self.inner().await.as_sent_versions().await
+        self.inner().await?.as_sent_versions().await
     }
 
     /// The `(_clock, _writer)` of every history version of `table`'s unbranched row
@@ -885,7 +885,7 @@ impl Db {
         row: RowUuid,
     ) -> Result<Vec<(i64, Vec<u8>)>, Error> {
         let active_schema = self.operation_schema();
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         let schema_table = active_schema.table(table)?;
         let sql = format!(
             "SELECT _clock, _writer FROM {} WHERE id = ?1 AND _branch = ?2 ORDER BY _clock, _writer",
@@ -914,7 +914,7 @@ impl Db {
         column: &str,
     ) -> Result<u64, Error> {
         let active_schema = self.operation_schema();
-        let inner = self.inner().await;
+        let inner = self.inner().await?;
         let schema_table = active_schema.table(table)?;
         let sql = format!(
             "SELECT length(CAST({} AS BLOB)) FROM {} WHERE id = ?1 AND _branch = ?2",

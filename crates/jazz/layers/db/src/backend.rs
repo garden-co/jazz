@@ -32,6 +32,8 @@ pub struct WorkerRows {
 /// even when their waiter is dropped; state is published before each reply.
 /// Closing drains/releases Jazz's storage resources. Shared providers leave
 /// final database closure to their host, which keeps the runtime alive.
+/// Dropping a SQL waiter invalidates its Jazz connection. Before reopening on
+/// the same host database, close/drain the old worker and release its transaction.
 pub trait WorkerSql {
     fn query<'a>(
         &'a self,
@@ -86,7 +88,43 @@ struct ConnectionState {
     cleanup: RefCell<Vec<String>>,
     poisoned: Flag<bool>,
 }
+/// A dropped SQL waiter cannot tell which effects the provider completed.
+/// Its database must be reopened; rolling back SQL alone cannot restore Rust state.
+struct SqlExecution<'a> {
+    poisoned: &'a Flag<bool>,
+    complete: bool,
+}
+impl Drop for SqlExecution<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.poisoned.set(true);
+        }
+    }
+}
+impl SqlExecution<'_> {
+    fn finish<T>(mut self, result: T) -> T {
+        self.complete = true;
+        result
+    }
+}
+
 impl DbConnection {
+    pub(crate) fn check_usable(&self) -> Result<(), Error> {
+        if self.shared.poisoned.get() {
+            return Err(Error::new(
+                ErrorCode::Storage,
+                "database execution was interrupted or cleanup failed; reopen the database",
+            ));
+        }
+        Ok(())
+    }
+    fn execution(&self) -> Result<SqlExecution<'_>, Error> {
+        self.check_usable()?;
+        Ok(SqlExecution {
+            poisoned: &self.shared.poisoned,
+            complete: false,
+        })
+    }
     /// Configure Jazz-owned native SQLite; a worker's host owns its connection settings.
     pub(crate) fn stable_plans(&self) -> Result<(), Error> {
         #[cfg(feature = "sqlite")]
@@ -191,6 +229,7 @@ impl DbConnection {
         }
     }
     async fn raw_script(&self, sql: &str) -> Result<(), Error> {
+        let execution = self.execution()?;
         let before = self.transaction_open();
         let result = match &self.shared.backend {
             #[cfg(feature = "sqlite")]
@@ -198,9 +237,10 @@ impl DbConnection {
             Backend::Worker(worker) => worker.execute_script(sql).await,
         };
         self.observed(before, result.is_err());
-        result
+        execution.finish(result)
     }
     async fn end_savepoint_raw(&self, name: &str, keep: bool) -> Result<(), Error> {
+        let execution = self.execution()?;
         let before = self.transaction_open();
         let result = match &self.shared.backend {
             #[cfg(feature = "sqlite")]
@@ -215,15 +255,10 @@ impl DbConnection {
             Backend::Worker(worker) => worker.end_savepoint(name, keep).await,
         };
         self.observed(before, result.is_err());
-        result
+        execution.finish(result)
     }
     pub(crate) async fn settle(&self) -> Result<(), Error> {
-        if self.shared.poisoned.get() {
-            return Err(Error::new(
-                ErrorCode::Storage,
-                "connection cleanup failed; reopen the database",
-            ));
-        }
+        self.check_usable()?;
         loop {
             let name = self.shared.cleanup.borrow().last().cloned();
             let Some(name) = name else {
@@ -294,7 +329,8 @@ impl TransactionConnection for DbConnection {
     }
     async fn begin_savepoint(&self, name: &str) -> Result<(), Error> {
         self.settle().await?;
-        match &self.shared.backend {
+        let execution = self.execution()?;
+        let result = match &self.shared.backend {
             #[cfg(feature = "sqlite")]
             Backend::Native(native) => native
                 .sql()
@@ -302,7 +338,8 @@ impl TransactionConnection for DbConnection {
                 .await
                 .map_err(Error::from),
             Backend::Worker(worker) => worker.begin_savepoint(name).await,
-        }
+        };
+        execution.finish(result)
     }
     async fn end_savepoint(&self, name: &str, keep: bool) -> Result<(), Error> {
         self.settle().await?;
@@ -436,6 +473,7 @@ impl Sql for ConnectionSql<'_> {
                 .map_err(Error::from),
             ConnectionSource::Owned(owner) => {
                 owner.settle().await?;
+                let execution = owner.execution()?;
                 let before = owner.transaction_open();
                 let result = match &owner.shared.backend {
                     #[cfg(feature = "sqlite")]
@@ -445,7 +483,7 @@ impl Sql for ConnectionSql<'_> {
                     Backend::Worker(worker) => worker.execute(sql, params).await,
                 };
                 owner.observed(before, result.is_err());
-                result
+                execution.finish(result)
             }
         }
     }
@@ -471,6 +509,7 @@ impl Sql for ConnectionSql<'_> {
             }
             ConnectionSource::Owned(owner) => {
                 owner.settle().await?;
+                let execution = owner.execution()?;
                 let before = owner.transaction_open();
                 let result = match &owner.shared.backend {
                     #[cfg(feature = "sqlite")]
@@ -490,7 +529,7 @@ impl Sql for ConnectionSql<'_> {
                     },
                 };
                 owner.observed(before, result.is_err());
-                result
+                execution.finish(result)
             }
         }
     }
@@ -528,7 +567,9 @@ impl jazz_sql::Connection for ConnectionSql<'_> {
                 match &owner.shared.backend {
                     #[cfg(feature = "sqlite")]
                     Backend::Native(native) => {
-                        native.sql().total_changes().await.map_err(Error::from)
+                        let execution = owner.execution()?;
+                        let result = native.sql().total_changes().await.map_err(Error::from);
+                        execution.finish(result)
                     }
                     Backend::Worker(_) => {
                         self.query_one("SELECT total_changes()", &[], |row| row.get(0))
@@ -536,6 +577,93 @@ impl jazz_sql::Connection for ConnectionSql<'_> {
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    struct Worker(Rc<Flag<usize>>);
+    impl WorkerSql for Worker {
+        fn query<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a [Param<'a>],
+        ) -> LocalBoxFuture<'a, Result<WorkerRows, Error>> {
+            Box::pin(async {
+                self.0.set(self.0.get() + 1);
+                std::future::pending().await
+            })
+        }
+        fn execute<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a [Param<'a>],
+        ) -> LocalBoxFuture<'a, Result<usize, Error>> {
+            Box::pin(async {
+                self.0.set(self.0.get() + 1);
+                std::future::pending().await
+            })
+        }
+        fn execute_script<'a>(&'a self, _: &'a str) -> LocalBoxFuture<'a, Result<(), Error>> {
+            Box::pin(async {
+                self.0.set(self.0.get() + 1);
+                std::future::pending().await
+            })
+        }
+        fn transaction_open(&self) -> bool {
+            false
+        }
+        fn parameter_limit(&self) -> Result<usize, Error> {
+            Ok(999)
+        }
+        fn request_close(&self) {}
+        fn close(&self) -> LocalBoxFuture<'_, Result<(), Error>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// Alice drops a worker reply after its command was admitted; Bob's next
+    /// command must be refused without reaching that worker. This boundary test
+    /// covers SQL and transaction commands independently of the database engine.
+    #[test]
+    fn dropping_any_worker_sql_reply_invalidates_the_connection() {
+        for operation in ["query", "execute", "script", "begin", "end", "changes"] {
+            let calls = Rc::new(Flag::new(0));
+            let conn = DbConnection::worker(Worker(calls.clone()));
+            let mut alice = Box::pin(async {
+                match operation {
+                    "query" => {
+                        conn.sql()
+                            .query("SELECT 1", &[], |_| Ok(ControlFlow::Continue(())))
+                            .await
+                    }
+                    "execute" => conn.sql().execute("INSERT", &[]).await.map(|_| ()),
+                    "script" => conn.sql().execute_script("SCRIPT").await,
+                    "begin" => conn.begin_savepoint("test").await,
+                    "end" => conn.end_savepoint("test", true).await,
+                    _ => jazz_sql::Connection::total_changes(&mut conn.sql())
+                        .await
+                        .map(|_| ()),
+                }
+            });
+            assert!(
+                alice
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+            assert_eq!(calls.get(), 1);
+            drop(alice);
+            let error = futures::executor::block_on(conn.sql().execute_script("BOB")).unwrap_err();
+            assert_eq!(error.code, ErrorCode::Storage);
+            assert!(error.message.contains("reopen"));
+            assert_eq!(calls.get(), 1);
+            futures::executor::block_on(conn.close_worker()).unwrap();
         }
     }
 }
