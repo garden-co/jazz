@@ -5923,6 +5923,8 @@ const REJECTION_CODES_BY_REASON: Readonly<Record<NativeCoreErrorReason, string>>
   schema_version_not_deployed: "write_rejected",
   // A refused subscriber, never a write's fate.
   identity_mismatch: "write_rejected",
+  // A skipped catalogue version, never a write's fate.
+  schema_version_unsupported: "write_rejected",
 };
 
 /** A rejected wait's code, from the core reason every binding carries on it. */

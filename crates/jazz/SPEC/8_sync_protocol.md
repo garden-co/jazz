@@ -825,6 +825,15 @@ catalogue.
   identity; a version only the replica admitted has none until the authority
   admits it too.
 
+Each `CatalogueVersion` decodes on its own. A version this build cannot
+read (a column type or schema key from a newer Jazz) does not fail the
+message: the replica skips it, with its `CatalogueCell`s, and reports it with
+`Reason::SchemaVersionUnsupported` (`Db::unsupported_schema_versions`); the
+versions it can read are taken as below, and the link stays up. The skipped
+version's bytes are kept as they arrived, so a relay that skips one does not
+re-encode it differently. Reads under that version are not possible on this
+build; reads under the others are unaffected. The wire is unchanged.
+
 The replica admits each version under the authority's stored names, renaming
 tables and columns it had named otherwise while it did not know them (for
 example, a table created offline under a newer local schema). It then runs the

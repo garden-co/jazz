@@ -29,6 +29,8 @@ mod bundle_permissions;
 mod callback_transaction_cancellation;
 #[path = "../catalogue_rows.rs"]
 mod catalogue_rows;
+#[path = "../catalogue_unsupported_versions.rs"]
+mod catalogue_unsupported_versions;
 #[path = "../claims_change.rs"]
 mod claims_change;
 #[path = "../claims_registry_refresh.rs"]
