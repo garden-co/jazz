@@ -2239,7 +2239,7 @@ fn relation_is_empty(child: &CurrentRow, index: usize) -> bool {
 
 /// The narrowest type both relation types' values fit: nullable if either
 /// is, record fields widened pairwise.
-fn widen(a: &ValueType, b: &ValueType) -> Result<ValueType, Error> {
+pub(crate) fn widen(a: &ValueType, b: &ValueType) -> Result<ValueType, Error> {
     if a == b {
         return Ok(a.clone());
     }
@@ -2288,7 +2288,7 @@ fn widen(a: &ValueType, b: &ValueType) -> Result<ValueType, Error> {
 }
 
 /// `value` re-encoded as `ty`, a type [`widen`] produced from its own.
-fn coerce(value: &Value, ty: &ValueType) -> Result<Value, Error> {
+pub(crate) fn coerce(value: &Value, ty: &ValueType) -> Result<Value, Error> {
     Ok(match (value, ty) {
         (Value::Nullable(None), _) => Value::Nullable(None),
         (Value::Nullable(Some(inner)), ValueType::Nullable(t)) => {
