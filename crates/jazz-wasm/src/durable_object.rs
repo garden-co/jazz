@@ -709,6 +709,35 @@ mod smoke {
         serde_json::to_string(&schema).expect("schema JSON")
     }
 
+    /// The deploy request `createJazz` sends for `schema` (public schema
+    /// JSON carrying its permissions as table policies): its structure,
+    /// and its policies as the bundle's permissions.
+    #[wasm_bindgen(js_name = testDeployRequest)]
+    pub fn test_deploy_request(schema: &str) -> String {
+        use jazz_server::portable::deployment::{DeployRequest, DeploySchema};
+        let source: jazz::tools::public_schema::Schema =
+            serde_json::from_str(schema).expect("schema JSON");
+        let mut structural = source.clone();
+        for table in structural.values_mut() {
+            table.policies = TablePolicies::default();
+        }
+        let hash = jazz::tools::public_schema::SchemaHash::compute(&structural).to_string();
+        let request = DeployRequest {
+            target_schema_hash: hash.clone(),
+            schemas: vec![DeploySchema {
+                hash,
+                schema: structural,
+            }],
+            migrations: Vec::new(),
+            permissions: source
+                .iter()
+                .map(|(name, table)| (*name, table.policies.clone()))
+                .collect(),
+            allow_dropping_history: false,
+        };
+        serde_json::to_string(&request).expect("deploy request JSON")
+    }
+
     /// The system identity, as a prelude names its peer.
     #[wasm_bindgen(js_name = testSystemIdentity)]
     pub fn test_system_identity() -> String {
@@ -905,6 +934,8 @@ mod core_host {
     use jazz_server::portable::admission::{
         admit_by_core_secret, UpgradeCredential, WebSocketPrelude,
     };
+    use jazz_server::portable::catalogue::{CatalogueIndex, DeploymentResponse};
+    use jazz_server::portable::deployment::{self, DeployError, DeployRequest};
     use jazz_server::portable::handshake::{link, negotiate_hello};
     use jazz_server::portable::websocket_codec::{
         decode_ws_encoded_frame_batch, encode_ws_frame_batches, ws_foreign_version_refusal,
@@ -923,8 +954,47 @@ mod core_host {
         thin: bool,
         /// Split thin requests being joined.
         assembler: jazz::thin::ThinAssembler,
-        /// Input its session's budget had no room for yet, oldest first.
+        /// Input its session's budget had no room for yet, oldest first,
+        /// and its bytes: a Durable Object cannot stop reading a socket, so
+        /// the object holds it, up to [`HELD_LIMIT`].
         held: VecDeque<Held>,
+        held_bytes: usize,
+        /// Why the socket ends: its error frame goes out with its output.
+        failed: Option<jazz::wire::WireError>,
+    }
+
+    /// The most input a socket may have held for room (twice a session's
+    /// ingress budget, 2 × 8 MiB): a peer sending faster than the engine
+    /// takes it is ended with `Backpressure` (it reconnects later) instead
+    /// of growing the object's memory toward the isolate's limit.
+    const HELD_LIMIT: usize = 16 * 1024 * 1024;
+
+    impl Socket {
+        fn hold(&mut self, input: Held, bytes: usize) {
+            self.held.push_back(input);
+            self.held_bytes += bytes;
+            if self.held_bytes > HELD_LIMIT && self.failed.is_none() {
+                self.held.clear();
+                self.held_bytes = 0;
+                self.failed = Some(jazz::wire::WireError::new(
+                    jazz::wire::WireErrorCode::Backpressure,
+                    jazz::wire::WireRetry::Later,
+                    "the connection sent more than the core could take: reconnect later",
+                ));
+            }
+        }
+
+        fn fail(&mut self, message: impl std::fmt::Display) {
+            self.held.clear();
+            self.held_bytes = 0;
+            self.failed.get_or_insert_with(|| {
+                jazz::wire::WireError::new(
+                    jazz::wire::WireErrorCode::MalformedFrame,
+                    jazz::wire::WireRetry::Never,
+                    message.to_string(),
+                )
+            });
+        }
     }
 
     enum Held {
@@ -1082,6 +1152,8 @@ mod core_host {
                     thin: link.thin,
                     assembler: jazz::thin::ThinAssembler::default(),
                     held: VecDeque::new(),
+                    held_bytes: 0,
+                    failed: None,
                 },
             );
             let hello = encode_ws_frame_batches(&[link.server_hello])
@@ -1095,94 +1167,34 @@ mod core_host {
         }
 
         /// Take a message `socket` delivered (a batch of encoded frames).
-        /// An error ends the connection (send `output` first).
+        /// A malformed message, or input past what the socket may hold,
+        /// ends that socket alone: its error frame comes with its `output`.
         pub fn receive(&mut self, socket: u32, message: &[u8]) -> Result<(), JsValue> {
             let Some(state) = self.sockets.get_mut(&socket) else {
                 return Err(js("unknown socket"));
             };
-            let frames = decode_ws_encoded_frame_batch(message).map_err(js)?;
-            if !state.thin {
-                state.held.push_back(Held::Frames(frames, message.len()));
-            } else {
-                for frame in frames {
-                    let len = frame.len();
-                    let request = match jazz::wire::decode_frame(&frame).map_err(js)? {
-                        jazz::wire::WireFrame::ThinRequest(request) => Some((request, len, false)),
-                        jazz::wire::WireFrame::ThinPart(part) => {
-                            let total = part.total().map_err(js)?;
-                            match state.assembler.push(part).map_err(js)? {
-                                Some(joined) => {
-                                    match jazz::wire::decode_postcard_frame(&joined).map_err(js)? {
-                                        jazz::wire::WireFrame::ThinRequest(request) => {
-                                            Some((request, total, true))
-                                        }
-                                        _ => return Err(js("a split thin frame is not a request")),
-                                    }
-                                }
-                                None => None,
-                            }
-                        }
-                        _ => return Err(js("a thin connection sends only thin requests")),
-                    };
-                    if let Some((request, bytes, split)) = request {
-                        state.held.push_back(Held::Thin(request, bytes, split));
-                    }
-                }
-            }
-            self.admit_held(socket)
-        }
-
-        fn admit_held(&mut self, socket: u32) -> Result<(), JsValue> {
-            let Some(core) = self.core.as_mut() else {
+            if state.failed.is_some() {
                 return Ok(());
-            };
-            let Some(state) = self.sockets.get_mut(&socket) else {
-                return Ok(());
-            };
-            while let Some(next) = state.held.pop_front() {
-                let admitted = match next {
-                    Held::Frames(frames, bytes) => {
-                        let retry = Held::Frames(frames.clone(), bytes);
-                        (
-                            core.receive_frames(state.session, frames, bytes)
-                                .map_err(js)?,
-                            retry,
-                        )
-                    }
-                    Held::Thin(request, bytes, split) => {
-                        let retry = Held::Thin(request.clone(), bytes, split);
-                        (
-                            core.receive_thin_request(state.session, request, bytes, split)
-                                .map_err(js)?,
-                            retry,
-                        )
-                    }
-                };
-                if !admitted.0 {
-                    state.held.push_front(admitted.1);
-                    break;
-                }
             }
+            if let Err(error) = Self::read(state, message) {
+                state.fail(error);
+            }
+            self.admit_held(socket);
             Ok(())
         }
 
-        /// Run the engine, admitting input held for room as room frees,
-        /// until it wants no further tick. Take every socket's `output`
-        /// after it (output taken can make the core want another tick:
-        /// call `tick` again while `wantsTick`).
-        pub fn tick(&mut self) -> Result<(), JsValue> {
-            loop {
-                let Some(core) = self.core.as_mut() else {
-                    return Ok(());
-                };
-                core.tick();
-                let sockets: Vec<u32> = self.sockets.keys().copied().collect();
-                for socket in sockets {
-                    self.admit_held(socket)?;
-                }
-                if !self.core.as_ref().is_some_and(ServerCore::inbound_pending) {
-                    return Ok(());
-                }
+        /// Ticks the engine once, admitting input held for room as room
+        /// frees. Take every socket's `output` after it, and tick again
+        /// while `wantsTick`: a host returns to its event loop between
+        /// ticks, so output goes out as it is made.
+        pub fn tick(&mut self) {
+            let Some(core) = self.core.as_mut() else {
+                return;
+            };
+            core.tick();
+            let sockets: Vec<u32> = self.sockets.keys().copied().collect();
+            for socket in sockets {
+                self.admit_held(socket);
             }
         }
 
@@ -1209,6 +1221,7 @@ mod core_host {
             };
             let mut batches = Vec::new();
             let mut ended = false;
+            let failed = state.failed.clone();
             let taken = match self.core.as_mut() {
                 Some(core) => core.take_output(state.session),
                 None => Vec::new(),
@@ -1225,6 +1238,10 @@ mod core_host {
                         ended = true;
                     }
                 }
+            }
+            if let Some(error) = failed {
+                batches.push(js_sys::Uint8Array::from(error_frame(&error).as_slice()));
+                ended = true;
             }
             if ended {
                 self.close(socket);
@@ -1248,6 +1265,75 @@ mod core_host {
     }
 
     impl DurableObjectCore {
+        /// Decode `message` into the socket's held input.
+        fn read(state: &mut Socket, message: &[u8]) -> Result<(), String> {
+            let frames = decode_ws_encoded_frame_batch(message).map_err(|e| e.to_string())?;
+            if !state.thin {
+                state.hold(Held::Frames(frames, message.len()), message.len());
+                return Ok(());
+            }
+            for frame in frames {
+                let len = frame.len();
+                let request = match jazz::wire::decode_frame(&frame).map_err(|e| e.to_string())? {
+                    jazz::wire::WireFrame::ThinRequest(request) => Some((request, len, false)),
+                    jazz::wire::WireFrame::ThinPart(part) => {
+                        let total = part.total()?;
+                        match state.assembler.push(part)? {
+                            Some(joined) => match jazz::wire::decode_postcard_frame(&joined)
+                                .map_err(|e| e.to_string())?
+                            {
+                                jazz::wire::WireFrame::ThinRequest(request) => {
+                                    Some((request, total, true))
+                                }
+                                _ => return Err("a split thin frame is not a request".to_owned()),
+                            },
+                            None => None,
+                        }
+                    }
+                    _ => return Err("a thin connection sends only thin requests".to_owned()),
+                };
+                if let Some((request, bytes, split)) = request {
+                    state.hold(Held::Thin(request, bytes, split), bytes);
+                }
+            }
+            Ok(())
+        }
+
+        /// Hand the engine what `socket` holds, oldest first, while its
+        /// session's budget has room. An input the engine refuses (a thin
+        /// request over the most one takes) ends that socket alone.
+        fn admit_held(&mut self, socket: u32) {
+            let Some(core) = self.core.as_mut() else {
+                return;
+            };
+            let Some(state) = self.sockets.get_mut(&socket) else {
+                return;
+            };
+            while let Some(next) = state.held.pop_front() {
+                let (admitted, bytes) = match &next {
+                    Held::Frames(frames, bytes) => (
+                        core.receive_frames(state.session, frames.clone(), *bytes),
+                        *bytes,
+                    ),
+                    Held::Thin(request, bytes, split) => (
+                        core.receive_thin_request(state.session, request.clone(), *bytes, *split),
+                        *bytes,
+                    ),
+                };
+                match admitted {
+                    Ok(true) => state.held_bytes -= bytes,
+                    Ok(false) => {
+                        state.held.push_front(next);
+                        break;
+                    }
+                    Err(error) => {
+                        state.fail(error);
+                        break;
+                    }
+                }
+            }
+        }
+
         /// Open the core if a schema is known: the store's published
         /// catalogue (the engine then serves its current revision), else
         /// `configured` (a public schema's JSON). Without either, the core
@@ -1394,7 +1480,6 @@ mod core_host {
             body: &[u8],
         ) -> HttpAnswer {
             use jazz::tools::transport_error::ErrorResponse;
-            let _ = body;
             let checked = match (method, route) {
                 ("POST", "backend/admit") => credentials.backend(&self.secret),
                 ("GET", "admin/migrations/graph" | "admin/bundles") | ("POST", "admin/bundles") => {
@@ -1413,13 +1498,127 @@ mod core_host {
                     status: 204,
                     body: String::new(),
                 },
-                _ => refusal(
-                    501,
-                    ErrorResponse::internal(
-                        "publication is not supported on a Durable Object core yet",
-                    ),
-                ),
+                ("GET", "admin/migrations/graph") => match self.catalogue_index() {
+                    Ok(index) => answer(200, index.migration_graph()),
+                    Err(error) => refusal(500, ErrorResponse::internal(error)),
+                },
+                ("GET", "admin/bundles") => match self.catalogue_index() {
+                    Ok(index) => answer(200, published_bundles(&index)),
+                    Err(error) => refusal(500, ErrorResponse::internal(error)),
+                },
+                _ => {
+                    let request = match serde_json::from_slice::<DeployRequest>(body) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            return refusal(400, ErrorResponse::bad_request(error.to_string()));
+                        }
+                    };
+                    match self.deploy(request) {
+                        Ok(response) => answer(200, response),
+                        Err(error) => answer(error.status.as_u16(), error.body),
+                    }
+                }
             }
+        }
+    }
+
+    /// The published-bundles answer, as native's `GET admin/bundles`:
+    /// oldest first, the last what a backend booting now pins to.
+    fn published_bundles(index: &CatalogueIndex) -> serde_json::Value {
+        let bundles = index
+            .published_bundles()
+            .iter()
+            .map(|bundle| {
+                serde_json::json!({
+                    "bundle": bundle.id.to_string(),
+                    "schemaHash": bundle.schema.to_string(),
+                    "publishedAt": bundle.published_at,
+                    "permissions": bundle
+                        .permissions
+                        .iter()
+                        .map(|(table, policies)| (table.to_string(), policies))
+                        .collect::<HashMap<_, _>>(),
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({ "bundles": bundles })
+    }
+
+    impl DurableObjectCore {
+        /// The store's catalogue: the open core's, else read from the
+        /// store itself (nothing published yet, or only a configured
+        /// schema).
+        fn catalogue_rows(&self) -> Result<jazz::catalogue::CatalogueRows, String> {
+            match &self.core {
+                Some(core) => core.db().catalogue().map_err(|error| error.to_string()),
+                None => {
+                    let file = jazz::host::StoreFile::from_storage(durable_object_storage(
+                        self.storage.clone(),
+                    ))
+                    .map_err(|error| error.to_string())?;
+                    jazz::host::HostTables::catalogue(&file).map_err(|error| error.to_string())
+                }
+            }
+        }
+
+        fn catalogue_index(&self) -> Result<CatalogueIndex, String> {
+            Ok(CatalogueIndex::from_rows(&self.catalogue_rows()?, None))
+        }
+
+        /// Publish `request`, as native's `POST admin/bundles`: validate it
+        /// against the store's catalogue, open the core on its first schema
+        /// if none runs yet, and apply its rows and admissions in one
+        /// transaction. A bundle new to the store ends the sessions pinned
+        /// to others (they reconnect and pin again). The object serves one
+        /// request at a time, so the catalogue cannot move between
+        /// validating and applying.
+        fn deploy(&mut self, request: DeployRequest) -> Result<DeploymentResponse, DeployError> {
+            let index = self.catalogue_index().map_err(DeployError::internal)?;
+            let now = js_sys::Date::now() as u64;
+            let deployment = deployment::prepare(&index, request, now)?;
+            if !deployment.staged.response.changed {
+                // Nothing to commit; the core's view of the catalogue may
+                // be behind the store's, as on native: reload it.
+                if let Some(core) = &mut self.core {
+                    core.reload_catalogue().map_err(DeployError::internal)?;
+                }
+                return Ok(deployment.staged.response);
+            }
+            let new_bundle = deployment.staged.new_bundle();
+            if self.core.is_none() {
+                let genesis = deployment.genesis()?;
+                // Apply on a scratch store first, as native does, so a
+                // deployment the catalogue refuses never opens the app's
+                // store on its schema.
+                let scratch = jazz::host::StoreFile::memory().map_err(DeployError::internal)?;
+                let mut probe = ServerCore::open(genesis.clone(), scratch, false, None)
+                    .map_err(DeployError::internal)?;
+                let probed = probe
+                    .db()
+                    .catalogue()
+                    .map_err(DeployError::internal)
+                    .and_then(|rows| deployment.catalogue_change(&rows))
+                    .and_then(|change| {
+                        probe
+                            .apply_catalogue(change, None)
+                            .map_err(DeployError::from)
+                    });
+                probe.close();
+                probed?;
+                let file = jazz::host::StoreFile::from_storage(durable_object_storage(
+                    self.storage.clone(),
+                ))
+                .map_err(DeployError::internal)?;
+                self.core = Some(
+                    ServerCore::open(genesis, file, false, Some(self.app_id.clone()))
+                        .map_err(DeployError::internal)?,
+                );
+            }
+            let core = self.core.as_mut().expect("opened above");
+            let rows = core.db().catalogue().map_err(DeployError::internal)?;
+            let change = deployment.catalogue_change(&rows)?;
+            core.apply_catalogue(change, new_bundle)?;
+            Ok(deployment.staged.response)
         }
     }
 

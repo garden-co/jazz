@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use web_time::Instant;
 
-use jazz::catalogue::CatalogueRows;
+use jazz::catalogue::{CatalogueChange, CatalogueRows};
 use jazz::db::{
     Db, DbConfig, DbIdentity, SubscriberId, SyncMessage, Transport, TransportError, block_on,
 };
@@ -48,8 +48,6 @@ use tokio::sync::mpsc as tokio_mpsc;
 // What only the native host uses (`host`, through `use super::*`).
 #[cfg(feature = "native")]
 use crate::kv::{HostKv, HostSql};
-#[cfg(feature = "native")]
-use jazz::catalogue::CatalogueChange;
 #[cfg(feature = "native")]
 use jazz::db::{FileOptions, LensEffects};
 #[cfg(feature = "native")]
@@ -1136,6 +1134,59 @@ impl Owner {
         Ok(())
     }
 
+    /// Apply `change` to the store's catalogue in one transaction, and with
+    /// `supersedes` (a bundle the change publishes new to this store) end
+    /// every session pinned to another bundle (see
+    /// `ServerRuntimeHandle::apply_catalogue`). How many sessions ended,
+    /// which they did even when a later step failed, and the outcome.
+    fn apply_catalogue(
+        &mut self,
+        change: CatalogueChange,
+        supersedes: Option<jazz::catalogue::BundleId>,
+    ) -> (usize, Result<(), CatalogueApplyError>) {
+        let mut ended = 0;
+        let result = (|| {
+            if change.activate.is_some() {
+                return Err(CatalogueApplyError::Rejected(
+                    "a server never makes a schema current: sessions pin bundles".to_owned(),
+                ));
+            }
+            block_on(self.db.apply_catalogue(change)).map_err(|error| {
+                if error.code == jazz::db::ErrorCode::Storage {
+                    CatalogueApplyError::Failed(error.to_string())
+                } else {
+                    CatalogueApplyError::Rejected(error.to_string())
+                }
+            })?;
+            if let Some(published) = supersedes {
+                ended = self.end_pinned_sessions(
+                    &|bundle| *bundle != published,
+                    &superseded_error(&published),
+                );
+                if ended > 0 {
+                    tracing::info!(
+                        bundle = %published,
+                        ended,
+                        "new permissions bundle: sessions pinned to others reconnect"
+                    );
+                }
+            }
+            #[cfg(all(test, feature = "native"))]
+            if std::mem::take(&mut self.fail_next_reload) {
+                // As a reload that failed partway: the runtime's
+                // view of the catalogue is no longer the store's.
+                self.catalogue = Catalogue::default();
+                return Err(CatalogueApplyError::Failed(
+                    "injected catalogue reload failure".to_owned(),
+                ));
+            }
+            self.reload_catalogue()
+                .map_err(CatalogueApplyError::Failed)?;
+            Ok(())
+        })();
+        (ended, result)
+    }
+
     /// Log the query shapes that ran slow since the last report, when one
     /// is due. Each one held the store's only writer for its whole run,
     /// delaying every session, so the line says how long, what SQLite did,
@@ -1488,7 +1539,6 @@ impl Owner {
 /// ends: reconnect later. `NotReady` with `Later` is the close every client
 /// already answers by reconnecting with backoff, so new permissions need no
 /// new wire code; the message says why.
-#[cfg(feature = "native")]
 fn superseded_error(published: &jazz::catalogue::BundleId) -> jazz::wire::WireError {
     jazz::wire::WireError::new(
         WireErrorCode::NotReady,

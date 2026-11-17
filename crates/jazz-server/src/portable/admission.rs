@@ -275,3 +275,115 @@ pub fn admit_by_core_secret(
         revocation: None,
     })
 }
+
+// Lower-level tests: a Durable Object host admits through this function
+// directly (its socket tests run in workerd, outside cargo test).
+#[cfg(test)]
+mod core_secret_tests {
+    use super::*;
+
+    const SECRET: &str = "s3cr3t-0123456789-0123456789-0123456789";
+
+    fn prelude(auth: serde_json::Value, peer: &AuthorSubject) -> WebSocketPrelude {
+        serde_json::from_value(serde_json::json!({
+            "peer_identity": peer.canonical(),
+            "auth": auth,
+        }))
+        .unwrap()
+    }
+
+    fn alice() -> AuthorSubject {
+        AuthorSubject::authenticated("https://idp.example", "alice").unwrap()
+    }
+
+    fn upgrade<'a>(credential: &'a str, access: &'a str) -> Option<UpgradeCredential<'a>> {
+        Some(UpgradeCredential { credential, access })
+    }
+
+    /// The core secret on the upgrade admits the backend as a trusted
+    /// backend link, or with admin access as an authority link; a wrong
+    /// secret of the same length, or none at all, is refused.
+    #[test]
+    fn the_upgrade_credential_decides_the_link() {
+        let system = prelude(serde_json::json!({}), &AuthorSubject::SYSTEM);
+        let backend = admit_by_core_secret(&system, upgrade(SECRET, "backend"), SECRET).unwrap();
+        assert_eq!(backend.trust, CommitUnitTrust::TrustedBackend);
+        assert_eq!(backend.credential, WebSocketCredential::Backend);
+        let admin = admit_by_core_secret(&system, upgrade(SECRET, "admin"), SECRET).unwrap();
+        assert_eq!(admin.trust, CommitUnitTrust::TrustedAuthority);
+        assert_eq!(admin.credential, WebSocketCredential::Admin);
+
+        let wrong = SECRET.replace('s', "x");
+        assert_eq!(wrong.len(), SECRET.len());
+        let refused = admit_by_core_secret(&system, upgrade(&wrong, "backend"), SECRET);
+        assert_eq!(refused.unwrap_err(), "Invalid backend secret");
+        assert!(admit_by_core_secret(&system, upgrade(SECRET, "owner"), SECRET).is_err());
+        let refused = admit_by_core_secret(&system, None, SECRET).unwrap_err();
+        assert!(
+            refused.contains("admits only its app's backend"),
+            "{refused}"
+        );
+    }
+
+    /// Without an upgrade credential, the prelude's secrets admit as the
+    /// same roles; a wrong one is refused as such.
+    #[test]
+    fn the_prelude_secrets_decide_the_link_without_an_upgrade_credential() {
+        let as_backend = prelude(
+            serde_json::json!({ "backend_secret": SECRET }),
+            &AuthorSubject::SYSTEM,
+        );
+        let backend = admit_by_core_secret(&as_backend, None, SECRET).unwrap();
+        assert_eq!(backend.trust, CommitUnitTrust::TrustedBackend);
+        let as_admin = prelude(
+            serde_json::json!({ "admin_secret": SECRET }),
+            &AuthorSubject::SYSTEM,
+        );
+        assert_eq!(
+            admit_by_core_secret(&as_admin, None, SECRET).unwrap().trust,
+            CommitUnitTrust::TrustedAuthority
+        );
+        let wrong = prelude(
+            serde_json::json!({ "backend_secret": "x".repeat(SECRET.len()) }),
+            &AuthorSubject::SYSTEM,
+        );
+        assert_eq!(
+            admit_by_core_secret(&wrong, None, SECRET).unwrap_err(),
+            "Invalid backend secret"
+        );
+    }
+
+    /// A user session the backend states is served as that user, under the
+    /// user's policies, and only for the peer the prelude names; a guest's
+    /// own local-first proof is not verified here and is refused.
+    #[test]
+    fn a_backend_stated_session_is_its_user_and_must_be_its_peer() {
+        let stated = serde_json::json!({
+            "backend_session": { "issuer": "https://idp.example", "user_id": "alice", "claims": { "team": "eng" } }
+        });
+        let admitted = admit_by_core_secret(
+            &prelude(stated.clone(), &alice()),
+            upgrade(SECRET, "backend"),
+            SECRET,
+        )
+        .unwrap();
+        assert_eq!(admitted.trust, CommitUnitTrust::Session);
+        assert_eq!(admitted.trust.served_as(admitted.identity), alice());
+        assert!(
+            !admitted.claims.is_empty(),
+            "the session's policy claims are bound"
+        );
+
+        let bob = AuthorSubject::authenticated("https://idp.example", "bob").unwrap();
+        let refused =
+            admit_by_core_secret(&prelude(stated, &bob), upgrade(SECRET, "backend"), SECRET);
+        assert!(refused.unwrap_err().contains("peer_identity must match"));
+
+        let guest = prelude(serde_json::json!({ "jwt_token": "a.b.c" }), &alice());
+        let refused = admit_by_core_secret(&guest, upgrade(SECRET, "backend"), SECRET).unwrap_err();
+        assert!(
+            refused.contains("local-first proof is not verified"),
+            "{refused}"
+        );
+    }
+}
