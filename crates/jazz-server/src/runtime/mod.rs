@@ -2391,25 +2391,18 @@ impl Owner {
     /// Tests: the core holds nothing open between the pieces of work it
     /// serves, so that it also runs where storage cannot keep a
     /// transaction open across calls (Durable Objects' `transactionSync`).
-    /// Thin-client transactions are the one exception while the core still
-    /// runs them: their handles, and the overlay of the last one staged.
     /// A violation aborts the test process: the store loop catches panics
     /// and restarts the runtime, which a test could miss.
     #[cfg(test)]
     fn assert_holds_nothing(&self, after: &str) {
         let held = self.db.held_for_test();
-        let thin = self.open_thin_transactions();
-        let allowed = held.open_batches == thin
-            && !held.callback_transaction
-            && (thin > 0 || (!held.overlay && !held.sqlite_transaction));
-        if !allowed {
+        if !held.is_nothing() {
             // Straight to stderr: the test harness captures `eprintln!`,
             // and an abort loses what it captured.
             use std::io::Write as _;
             let _ = writeln!(
                 std::io::stderr(),
-                "the core holds {held:?} after {after}, with {thin} thin-client \
-                 transactions open: it must hold nothing between calls"
+                "the core holds {held:?} after {after}: it must hold nothing between calls"
             );
             std::process::abort();
         }

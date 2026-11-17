@@ -363,14 +363,6 @@ impl Owner {
         ending.len()
     }
 
-    /// Thin-client transactions open on this core, across its sessions:
-    /// the only thing it may hold between the calls it serves, until the
-    /// core stops running them (the app's backend runs them instead).
-    #[cfg(test)]
-    pub(super) fn open_thin_transactions(&self) -> usize {
-        self.thin.values().map(|thin| thin.transactions.len()).sum()
-    }
-
     pub(super) fn close_thin_session(&mut self, session: ServerSession) {
         // Dropping the streams ends the subscriptions.
         if let Some(thin) = self.thin.remove(&session) {
