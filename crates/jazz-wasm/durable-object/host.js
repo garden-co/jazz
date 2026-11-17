@@ -111,8 +111,7 @@ export function jazzCoreClass(wasm) {
     }
 
     open() {
-      if (this.core !== null && this.instance !== instance) this.drop();
-      if (this.core === null) {
+      if (this.current() === null) {
         this.core = this.guard(() =>
           wasm.DurableObjectCore.open(
             this.ctx.storage,
@@ -122,6 +121,16 @@ export function jazzCoreClass(wasm) {
         );
         this.instance = instance;
       }
+      return this.core;
+    }
+
+    /**
+     * The core, if it is on the current wasm instance: one made on an
+     * instance replaced since (after a panic in any object of this
+     * isolate) is dropped, never called.
+     */
+    current() {
+      if (this.core !== null && this.instance !== instance) this.drop();
       return this.core;
     }
 
@@ -207,7 +216,7 @@ export function jazzCoreClass(wasm) {
         clearTimeout(handshake);
         // A core replaced since (after a panic) numbers its own sockets:
         // only the core this socket was accepted by is told.
-        if (socket !== null && this.core === core) {
+        if (socket !== null && this.current() === core) {
           // What the socket's session still had, its error frame included.
           try {
             for (const batch of this.guard(() => core.output(socket)).batches) {
@@ -216,7 +225,7 @@ export function jazzCoreClass(wasm) {
           } catch {}
           this.sockets.delete(socket);
           try {
-            if (this.core === core) core.close(socket);
+            if (this.current() === core) core.close(socket);
           } catch {}
         }
         socket = null;
@@ -238,7 +247,7 @@ export function jazzCoreClass(wasm) {
           }
           const message = await bytes(data);
           if (message === null) return end(1003, "wire frames are binary");
-          if (this.core !== core) return end(1011, "the core restarted");
+          if (this.current() !== core) return end(1011, "the core restarted");
           if (socket === null) {
             const accepted = this.guard(() => core.accept(prelude, message, credential, access));
             for (const frame of accepted.frames) server.send(frame);
@@ -270,7 +279,7 @@ export function jazzCoreClass(wasm) {
      * are open, an alarm keeps the core's idle tick.
      */
     flush() {
-      const core = this.core;
+      const core = this.current();
       if (core === null) return;
       try {
         this.guard(() => core.tick());
@@ -289,11 +298,11 @@ export function jazzCoreClass(wasm) {
           // This socket is gone; the others are still served.
           this.sockets.delete(socket);
           try {
-            core.close(socket);
+            if (this.current() === core) core.close(socket);
           } catch {}
         }
       }
-      if (this.core !== null && core.wantsTick() && !this.flushQueued) {
+      if (this.current() === core && core.wantsTick() && !this.flushQueued) {
         this.flushQueued = true;
         setTimeout(() => {
           this.flushQueued = false;
@@ -309,7 +318,7 @@ export function jazzCoreClass(wasm) {
     /** The core's idle tick: time-based engine work, while sockets are open. */
     async alarm() {
       this.alarmSet = false;
-      if (this.core !== null && this.sockets.size > 0) this.flush();
+      if (this.current() !== null && this.sockets.size > 0) this.flush();
     }
   };
 }
