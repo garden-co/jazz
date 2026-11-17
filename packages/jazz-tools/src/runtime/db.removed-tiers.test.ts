@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from "vitest";
-import { schema as s } from "../schema-namespace.js";
+import { testApp } from "../testing/test-app.js";
 import { createDb } from "./default-create-db.js";
 import type { Db, QueryOptions } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
@@ -15,7 +15,7 @@ const removedReadTiers = [
   ["core", 'The "core" read tier was removed'],
 ] as const;
 
-const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
+const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
 
 let db: Db | undefined;
 

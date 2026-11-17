@@ -1,7 +1,8 @@
 import { Data, Effect, Option, Schedule, Stream } from "effect";
-import { schema as s, ReadTier, type RowAuthor } from "jazz-tools";
+import { ReadTier, type RowAuthor } from "jazz-tools";
 import { Jazz } from "jazz-tools/effect";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
+import { app as requiredReferences } from "./recipes/required-references/jazz.generated.js";
 
 const EXAMPLE_PROJECT_ID = "00000000-0000-0000-0000-000000000000";
 const EXAMPLE_OWNER_ID = "00000000-0000-0000-0000-00000000000a";
@@ -224,14 +225,6 @@ export const readProjectsWithTodos = Effect.gen(function* () {
 // #endregion reading-reverse-relation-effect
 
 // #region reading-require-includes-effect
-const requiredReferences = s.defineApp(
-  {
-    customers: s.table({ name: s.string() }, { orders: s.reverse("orders", "customer") }),
-    orders: s.table({ customerId: s.uuid() }, { customer: s.rel("customers", "customerId") }),
-  },
-  { migrations: "none" },
-);
-
 export const readOrdersWithRequiredCustomer = Effect.gen(function* () {
   const jazz = yield* Jazz;
   return yield* jazz.all(requiredReferences.orders.include({ customer: true }).requireIncludes());

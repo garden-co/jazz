@@ -1,7 +1,6 @@
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
 
-const schema = {
+export const schema = s.defineSchema({
   // Branches are application data. Jazz assigns no lifecycle semantics to them.
   scenarios: s.table(
     {
@@ -28,9 +27,24 @@ const schema = {
       { scenario: s.rel("scenarios", "scenario_id") },
     )
     .branchBy("scenario_id"),
-};
+});
 
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
-export type Scenario = s.RowOf<typeof app.scenarios>;
-export type Task = s.RowOf<typeof app.tasks>;
+const { definePermissions } = schema;
+
+// Tasks can only be changed while their scenario (branch) is still open.
+const isOpen = { status: "open" } as const;
+
+export const permissions = definePermissions({
+  scenarios: {
+    read: true,
+    insert: true,
+    update: true,
+    delete: true,
+  },
+  tasks: {
+    read: true,
+    insert: (task) => task.scenario.where(isOpen),
+    update: (task) => task.scenario.where(isOpen),
+    delete: (task) => task.scenario.where(isOpen),
+  },
+});

@@ -800,6 +800,73 @@ fn upload_status_has_pinned_bytes_and_answers() {
     fixture.close(foreground);
 }
 
+fn upload_status(fixture: &Fixture, foreground: u64) -> serde_json::Value {
+    let ForegroundDbCommandResponse::UploadStatus { status_json } =
+        fixture.execute(foreground, ForegroundDbCommandRequest::UploadStatus)
+    else {
+        panic!("an upload status");
+    };
+    serde_json::from_str(&status_json).unwrap()
+}
+
+#[test]
+fn upload_status_counts_a_write_held_by_both_stores_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("alice.sqlite"), "alice", 0x12);
+    let foreground = fixture.open(&capability);
+    fixture.insert_todo(foreground, [0xa1; 16], "local only");
+    // Before any tick the commit is the foreground's alone.
+    assert_eq!(upload_status(&fixture, foreground)["pending"], 1);
+    fixture.tick(foreground);
+    // Now the relay store holds it too: one write, not two.
+    assert_eq!(
+        upload_status(&fixture, foreground)["pending"],
+        1,
+        "counted once"
+    );
+    assert_eq!(
+        fixture.execute(foreground, ForegroundDbCommandRequest::PendingUploadCount),
+        ForegroundDbCommandResponse::PendingUploadCount { count: 1 },
+    );
+    fixture.close(foreground);
+}
+
+/// ```text
+/// process 1: foreground ──insert(t1)──► relay store ──✗ no server
+/// process 2: a new foreground of the same store
+///   pending: 1 (the store recovered the commit; the new foreground never
+///   wrote it)
+/// ```
+#[test]
+fn pending_uploads_count_a_write_the_store_recovered_after_a_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("alice.sqlite");
+    {
+        let first = Fixture::new();
+        let capability = first.admit(&path, "alice", 0x13);
+        let foreground = first.open(&capability);
+        first.insert_todo(foreground, [0xa2; 16], "never synced");
+        let other = first.open(&capability);
+        first.wait_for_row(other, (RowUuid::from_bytes([0xa2; 16]), "never synced"));
+        first.close(foreground);
+        first.close(other);
+    }
+    let second = Fixture::new();
+    let capability = second.admit(&path, "alice", 0x13);
+    let foreground = second.open(&capability);
+    second.tick(foreground);
+    let status = upload_status(&second, foreground);
+    assert_eq!(status["pending"], 1, "the recovered commit is counted");
+    assert!(status["oldestPendingAt"].as_u64().is_some_and(|at| at > 0));
+    assert_eq!(
+        second.execute(foreground, ForegroundDbCommandRequest::PendingUploadCount),
+        ForegroundDbCommandResponse::PendingUploadCount { count: 1 },
+        "the count older hosts read agrees"
+    );
+    second.close(foreground);
+}
+
 #[test]
 fn slow_query_commands_have_pinned_bytes_and_answer() {
     // Appended commands and answers: existing ordinals stay fixed.

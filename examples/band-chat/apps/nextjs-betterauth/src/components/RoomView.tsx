@@ -25,7 +25,7 @@ import {
   Timestamp,
   VStack,
 } from "@astryxdesign/core";
-import { app, type Reaction, type ReadMarker } from "../../schema";
+import { app, type Reaction, type ReadMarker } from "../../jazz.generated";
 import { ProfileAvatar, useDirectory } from "../lib/profiles";
 import { Attachment } from "./Attachment";
 import { Composer } from "./Composer";

@@ -1,5 +1,8 @@
-import type { PublishedBundle, TablePolicies, WasmSchema } from "jazz-tools";
+import type { PublishedBundle, WasmSchema } from "jazz-tools";
 import { createContext, useContext, useMemo, type PropsWithChildren } from "react";
+
+// jazz-tools no longer exports TablePolicies from its root: a table's policies, as a schema carries them.
+type TablePolicies = NonNullable<WasmSchema[string]["policies"]>;
 
 // "backend": served by an app's backend at `<basePath>/inspect/`, reading through its Inspector API.
 export type InspectorRuntime = "standalone" | "overlay" | "backend";

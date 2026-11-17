@@ -18,7 +18,7 @@ import { useDb } from "jazz-tools/react";
 import NextLink from "next/link";
 import { useRouter } from "next/navigation";
 import { Fragment, useEffect, useRef, useState } from "react";
-import { app, type Cart, type ShippingMethod } from "@/schema";
+import { app, type Cart, type CartShippingMethod as ShippingMethod } from "@/jazz.generated";
 import { useCart } from "@/src/store/cart";
 import { SHIPPING, formatMoney, shippingCents } from "@/src/store/pricing";
 import { OrderSummary } from "./OrderSummary";

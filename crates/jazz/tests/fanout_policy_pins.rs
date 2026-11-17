@@ -191,6 +191,26 @@ fn reran(db: &Db) -> u64 {
     db.fanout_stats().reran
 }
 
+/// Groups refreshed during `write` by either path (a full re-run, or a
+/// re-check and re-nest of the rows the write reached), with every result
+/// checked after it: what the filter decides is whether a group wakes,
+/// not how it refreshes.
+fn refreshes(
+    db: &Db,
+    lives: &mut [Live],
+    what: &str,
+    write: impl FnOnce(),
+) -> (u64, Vec<Snapshot>) {
+    let count = |db: &Db| {
+        let stats = db.fanout_stats();
+        stats.reran + stats.rechecked
+    };
+    let before = count(db);
+    write();
+    let now = check(db, lives, what);
+    (count(db) - before, now)
+}
+
 /// Re-runs during `write`, with every result checked after it.
 fn reruns(db: &Db, lives: &mut [Live], what: &str, write: impl FnOnce()) -> (u64, Vec<Snapshot>) {
     let before = reran(db);
@@ -550,11 +570,11 @@ fn another_persons_membership_skips_unless_it_shares_a_room() {
     let mut world = seed(&db);
     let mut lives = lives_of(&db, &[0]);
     let opened = check(&db, &mut lives, "subscribe");
-    let (woke, _) = reruns(&db, &mut lives, "person 2 joins room 3", || {
+    let (woke, _) = refreshes(&db, &mut lives, "person 2 joins room 3", || {
         join(&db, &mut world, 3, 2);
     });
     assert_eq!(woke, 0, "room 3 is not alice's: her results skip it");
-    let (woke, now) = reruns(&db, &mut lives, "person 2 joins room 0", || {
+    let (woke, now) = refreshes(&db, &mut lives, "person 2 joins room 0", || {
         join(&db, &mut world, 0, 2);
     });
     assert_eq!(woke, 2, "room 0 is alice's: both rosters change");
@@ -565,7 +585,7 @@ fn another_persons_membership_skips_unless_it_shares_a_room() {
         .find(|(_, (r, p))| *r == 0 && *p == 0)
         .unwrap()
         .0;
-    let (woke, _) = reruns(&db, &mut lives, "alice pins room 0", || {
+    let (woke, _) = refreshes(&db, &mut lives, "alice pins room 0", || {
         update(
             &db,
             "members",

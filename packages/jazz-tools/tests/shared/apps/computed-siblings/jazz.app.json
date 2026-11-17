@@ -1,0 +1,44 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "rows": {
+      "columns": {
+        "score": {
+          "type": "int",
+          "default": 5
+        },
+        "text": {
+          "type": "string",
+          "default": "hello"
+        }
+      },
+      "computed": {
+        "toString": {
+          "type": "string",
+          "from": []
+        },
+        "valueOf": {
+          "type": "string",
+          "from": []
+        },
+        "tag": {
+          "type": "string",
+          "from": [
+            "id",
+            "score",
+            "text"
+          ]
+        },
+        "original": {
+          "type": "boolean",
+          "from": [
+            "id",
+            "score",
+            "text"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/test-app.js";
 import { createJazz, memory } from "./index.js";
 import {
   STREAM_RECORD_MESSAGE,
@@ -18,10 +18,8 @@ vi.mock("ws", () => {
   });
 });
 
-const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" });
-const permissions = s.definePermissions(app, ({ policy }) => {
-  policy.todos.allowRead.always();
-});
+const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
+const permissions = { format: 1, tables: { todos: { read: "true" } } };
 
 let previous: string | undefined;
 beforeEach(() => {

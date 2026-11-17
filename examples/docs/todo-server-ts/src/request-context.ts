@@ -1,5 +1,5 @@
 import type { Jazz } from "jazz-tools/backend";
-import { app as schemaApp } from "../schema.js";
+import { app as schemaApp } from "../jazz.generated.js";
 
 declare const jazz: Jazz;
 

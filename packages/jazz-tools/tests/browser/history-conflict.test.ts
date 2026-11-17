@@ -12,10 +12,11 @@
 import { describe, it, expect, afterEach, beforeAll, afterAll } from "vitest";
 import type { Db, TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
-import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
-import { deploy } from "../../src/dev/catalogue.js";
+import { app } from "./apps/history-conflict/jazz.generated.js";
+import permissions from "./apps/history-conflict/jazz.permissions.json";
 import {
+  deploy,
   getJazzServerInfo,
   startJazzApp,
   stopJazzServer,
@@ -35,14 +36,8 @@ import {
 // Schema
 // ---------------------------------------------------------------------------
 
-const schema: WasmSchema = {
-  todos: {
-    columns: [
-      { name: "title", column_type: { type: "Text" }, nullable: false },
-      { name: "done", column_type: { type: "Boolean" }, nullable: false },
-    ],
-  },
-};
+// apps/history-conflict: todos { title, done }, which every client may read and write.
+const schema: WasmSchema = app.wasmSchema;
 
 interface Todo {
   id: string;
@@ -78,19 +73,8 @@ describe("History & Conflict Management", () => {
   // Cases use fresh clients and distinct row IDs; the deployed schema is shared.
   beforeAll(async () => {
     const core = await getJazzServerInfo(uniqueDbName("history-conflict-app"));
-    const permissions: CompiledPermissionsMap = {
-      todos: {
-        select: { using: { type: "True" } },
-        insert: { with_check: { type: "True" } },
-        update: {
-          using: { type: "True" },
-          with_check: { type: "True" },
-        },
-        delete: { using: { type: "True" } },
-      },
-    };
-    await deploy({ ...core, schema, permissions });
-    testingServer = await startJazzApp(core, { schema, permissions });
+    await deploy({ ...core, app, permissions: permissions });
+    testingServer = await startJazzApp(core, { schema: app, permissions });
   });
 
   /**

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "tasks": {
+      "columns": {
+        "title": "string",
+        "score": { "type": "int", "default": 0 },
+        "dueAt": { "type": "timestamp", "optional": true, "transform": "isoDate" }
+      },
+      "computed": {
+        "priority": { "type": { "enum": ["low", "high"] }, "from": ["score"] },
+        "label": { "type": "string?", "from": ["title", "dueAt"] }
+      }
+    },
+    "people": {
+      "columns": { "name": "string", "email": { "type": "string", "transform": "lowercase" } }
+    }
+  },
+  "transforms": {
+    "isoDate": { "stored": "timestamp", "view": "string" },
+    "lowercase": { "stored": "string", "view": "string" }
+  }
+}

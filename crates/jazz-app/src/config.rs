@@ -2,27 +2,52 @@ use std::path::PathBuf;
 
 use jazz::tools::AppId;
 
+use crate::auth::Auth;
+
 /// How to open an app.
 ///
 /// ```no_run
-/// # async fn open() -> jazz_app::Result<()> {
-/// use jazz_app::{AppFiles, Backend, Config, Storage};
-/// let config = Config::new(jazz_app::AppId::from_name("todos"))
+/// # async fn open() -> jazz_app_support::Result<()> {
+/// use jazz_app_support::{AppFiles, Backend, Config, Storage};
+/// let config = Config::new(jazz_app_support::AppId::from_name("todos"))
 ///     .server("http://localhost:1625")
 ///     .storage(Storage::Dir("./todo-data".into()))
 ///     .backend(Backend::new("<backend secret>", "<admin secret>", "todo-service"));
-/// let jazz = jazz_app::Jazz::open(AppFiles::read(".")?, config).await?;
+/// let jazz = jazz_app_support::Jazz::open(AppFiles::read(".")?, config).await?;
+/// # Ok(()) }
+/// ```
+///
+/// An end user's client connects to the app's Jazz endpoint (its backend's
+/// `createJazz` handler) as a browser does, never to the core:
+///
+/// ```no_run
+/// # async fn open() -> jazz_app_support::Result<()> {
+/// use jazz_app_support::{AppFiles, Auth, Config, DeviceKey, Storage};
+/// let key = DeviceKey::generate()?; // keep it: it is the account
+/// let config = Config::new(jazz_app_support::AppId::from_name("todos"))
+///     .server("https://todos.example/jazz")
+///     .storage(Storage::Dir("./todo-data".into()))
+///     .user(Auth::Device(key));
+/// let jazz = jazz_app_support::Jazz::open(AppFiles::read(".")?, config).await?;
+/// let session = jazz.session().expect("an end user's session");
 /// # Ok(()) }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Config {
     pub app_id: AppId,
-    /// The sync server, e.g. `http://localhost:1625`. Without one the app
-    /// runs locally only.
+    /// The sync server: the core (`http://localhost:1625`) for a backend,
+    /// the app's Jazz endpoint (`https://app.example/jazz`) for an end user.
+    /// Without one the app runs locally only.
     pub server_url: Option<String>,
     pub storage: Storage,
     /// Open as the app's backend.
     pub backend: Option<Backend>,
+    /// Open as an end user of the app, signed in with this.
+    pub user: Option<Auth>,
+    /// Lets an end user's credentials travel over plain `http://` to a
+    /// host other than this machine (a dev server on the LAN). Off: they
+    /// go over `https://`, or to `localhost`.
+    pub allow_insecure_http: bool,
 }
 
 impl Config {
@@ -33,6 +58,8 @@ impl Config {
             server_url: None,
             storage: Storage::Memory,
             backend: None,
+            user: None,
+            allow_insecure_http: false,
         }
     }
 
@@ -49,6 +76,52 @@ impl Config {
     pub fn backend(mut self, backend: Backend) -> Self {
         self.backend = Some(backend);
         self
+    }
+
+    pub fn user(mut self, auth: Auth) -> Self {
+        self.user = Some(auth);
+        self
+    }
+
+    /// Opens as a backend client of the app's main backend
+    /// (`Config::server` is its `/jazz`), proving itself with this machine
+    /// credential, as TypeScript's `createJazzClient({ credential })`: see
+    /// [`crate::BackendClientKind`]. The provider is asked for a fresh token
+    /// for every connection and request, so short-lived tokens just work.
+    ///
+    /// The app files must carry the app's `jazz.permissions.json`, the one
+    /// its main backend publishes: a trusted client evaluates the reads of
+    /// the users it acts for ([`crate::Jazz::for_user`]) by them.
+    pub fn credential(self, provider: impl crate::auth::TokenProvider + 'static) -> Self {
+        let Auth::Bearer(bearer) = Auth::bearer(provider) else {
+            unreachable!("Auth::bearer is a bearer")
+        };
+        self.user(Auth::Credential(bearer))
+    }
+
+    /// See [`Config::allow_insecure_http`].
+    pub fn allow_insecure_http(mut self) -> Self {
+        self.allow_insecure_http = true;
+        self
+    }
+
+    /// Whether an end user's credentials would cross the network in plain
+    /// text: `http://` or `ws://` to a host other than this machine.
+    pub(crate) fn sends_credentials_in_plain_text(&self) -> bool {
+        let Some(url) = self.server_url.as_deref() else {
+            return false;
+        };
+        let Ok(url) = reqwest::Url::parse(url) else {
+            return false;
+        };
+        let host = url.host_str().unwrap_or_default();
+        let loopback = host == "localhost"
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
+        matches!(url.scheme(), "http" | "ws") && !loopback
     }
 }
 
@@ -108,5 +181,36 @@ impl std::fmt::Debug for Backend {
             .field("user_id", &self.user_id)
             .field("allow_dropping_history", &self.allow_dropping_history)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credentials_cross_the_network_in_plain_text_only_off_this_machine() {
+        let plain = |url: &str| {
+            Config::new(AppId::random())
+                .server(url)
+                .sends_credentials_in_plain_text()
+        };
+        for url in [
+            "http://app.example/jazz",
+            "ws://app.example/jazz",
+            "ws://10.0.0.2:4000/jazz",
+        ] {
+            assert!(plain(url), "{url}");
+        }
+        for url in [
+            "https://app.example/jazz",
+            "wss://app.example/jazz",
+            "http://localhost:3000/jazz",
+            "ws://localhost:3000/jazz",
+            "http://127.0.0.1:3000/jazz",
+            "ws://[::1]:3000/jazz",
+        ] {
+            assert!(!plain(url), "{url}");
+        }
     }
 }

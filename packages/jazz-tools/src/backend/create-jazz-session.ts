@@ -23,6 +23,14 @@ import { prepareAccountManager, type AccountStore } from "../accounts/persistenc
 import type { AccountHandle } from "../accounts/state.js";
 import { authSecretSeedForMinting } from "../runtime/auth-secret-codec.js";
 import { resolveSchemaSource } from "../schema-source.js";
+import * as jazzNapi from "jazz-napi";
+import {
+  enginePermissions,
+  isPermissionsFile,
+  loadBackendAppFor,
+  provideCodegenNapi,
+  type PermissionsFile,
+} from "../dev/codegen-napi.js";
 import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
@@ -72,7 +80,8 @@ export type JazzClientConfig = Omit<
   /** The app id an existing local-first app's users were created under. */
   scope?: string;
   app: BackendSchemaInput;
-  permissions: NonNullable<BackendContextConfig["permissions"]>;
+  /** The app's `jazz.permissions.json` (or the engine's policies a load returned). */
+  permissions: PermissionsFile | NonNullable<BackendContextConfig["permissions"]>;
   serverUrl: string;
   store?: AccountStore;
   /** Start as a device account (a guest of the main backend). */
@@ -91,9 +100,16 @@ export type JazzClientConfig = Omit<
 };
 
 /** @internal `createJazz`'s own session config: it may admit itself with the core's backend secret. */
-type OpenJazzSessionConfig = Omit<JazzClientConfig, "initial"> & {
+type OpenJazzSessionConfig = Omit<JazzClientConfig, "initial" | "permissions"> & {
+  /** The engine's policies, compiled from the app's jazz.permissions.json. */
+  permissions: NonNullable<BackendContextConfig["permissions"]>;
   /** `"local-first"`: the session core's name for a device account. */
   initial?: "local-first" | BackendAuth;
+  /**
+   * The bundle id `app` and the jazz.permissions.json this client was given
+   * make; unknown when it was given compiled engine policies.
+   */
+  permissionsBundle?: string;
 };
 
 export interface JazzClient extends SharedJazzClient {
@@ -111,6 +127,15 @@ export interface JazzClient extends SharedJazzClient {
    * the user's), so a policy that reads claims sees what you pass, `{}` when
    * you pass none. A trusted machine already has backend authority, so this
    * grants it nothing it lacks.
+   *
+   * The user's reads are evaluated by this client, against the permissions
+   * it was opened with, so they must be the ones the main backend publishes.
+   * When opened with a jazz.permissions.json, it checks that: on a main
+   * backend that names its bundle, a client whose app and permissions make
+   * another bundle throws (`code: "bundle_mismatch"`, naming both bundle
+   * ids) rather than read with stale or laxer policies. A main backend from
+   * before this check names none, and a client opened with compiled engine
+   * policies has no bundle to compare; neither is checked.
    *
    * Throws a {@link NoJazzAccountError} (`code: "no_account"`) for a user
    * who has no account yet: the main backend's `jazz.createAccountFor`
@@ -297,10 +322,23 @@ export async function createJazzClient(input: JazzClientConfig): Promise<Backend
   // The session core's name for a device account.
   const initial = input.initial === "device" ? ("local-first" as const) : undefined;
   let core!: SessionCore<JazzClient>;
-  const session = await createStartedJazzSession({ ...input, initial }, async (config) => {
-    core = await openJazzSession(config);
-    return core;
-  });
+  // A jazz.permissions.json is checked against the app's bindings by the Rust loader.
+  // Through a static jazz-napi import, so bundlers and file tracers ship it.
+  provideCodegenNapi(jazzNapi);
+  // From a jazz.permissions.json, also the bundle id it makes with the app,
+  // which `forUser` checks against the bundle the main backend publishes.
+  const loaded = isPermissionsFile(input.permissions)
+    ? await loadBackendAppFor(input.app, input.permissions)
+    : undefined;
+  const permissions =
+    loaded?.permissions ?? (await enginePermissions(input.app, input.permissions));
+  const session = await createStartedJazzSession(
+    { ...input, permissions, initial, permissionsBundle: loaded?.bundle },
+    async (config) => {
+      core = await openJazzSession(config);
+      return core;
+    },
+  );
   const keeps = input.driver.type !== "memory";
   const close = async (options?: BackendClientCloseOptions) => {
     await closeAfterUploads(core, keeps, options);
@@ -475,13 +513,15 @@ export async function openJazzSession(
   // machine is admitted as a backend, a scoped one signs in as its user.
   let initial = config.initial;
   let signInAsUser = false;
+  // The bundle the main backend pins this trusted client's socket to.
+  let servedBundle: string | undefined;
   if (transport) {
     try {
-      await admitBackendSecret(
+      ({ bundle: servedBundle } = await admitBackendSecret(
         `${registry.slice(0, -"/accounts".length)}/backend/admit`,
         BACKEND_CLIENT_STAND_IN_SECRET,
         { fetch: transport.fetch },
-      );
+      ));
       initial = { backendSecret: BACKEND_CLIENT_STAND_IN_SECRET };
     } catch (error) {
       const status = (error as { status?: number }).status;
@@ -579,6 +619,23 @@ export async function openJazzSession(
             ? notTrusted("on the main backend, use jazz.forReqUser(request)")
             : async (userId: string, options?: { claims?: Record<string, unknown> }) => {
                 assertActive();
+                // A user's reads are evaluated here, against this client's
+                // permissions: refuse when they aren't the ones the main
+                // backend published (jazz#5808). Unchecked when either side
+                // names no bundle: an older main backend, or compiled
+                // engine policies instead of a jazz.permissions.json.
+                if (
+                  servedBundle !== undefined &&
+                  config.permissionsBundle !== undefined &&
+                  servedBundle !== config.permissionsBundle
+                ) {
+                  throw Object.assign(
+                    new Error(
+                      `forUser: this client's permissions (bundle ${config.permissionsBundle}) are not the ones the main backend publishes (bundle ${servedBundle}). Open it with the app's current jazz.app.json bindings and jazz.permissions.json.`,
+                    ),
+                    { code: "bundle_mismatch" },
+                  );
+                }
                 if (typeof userId !== "string" || userId === "")
                   throw new Error(
                     "forUser: pass the user's id, as the main backend's authenticate names it",

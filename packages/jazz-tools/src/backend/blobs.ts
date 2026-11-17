@@ -43,9 +43,12 @@ export function files(options: { dir?: string } = {}): Extract<BlobStore, { kind
  * Large-value bytes in an S3-compatible bucket: AWS S3 (on Vercel, the
  * Marketplace's AWS integration sets `S3_BUCKET_NAME`, `AWS_REGION` and
  * `AWS_ROLE_ARN`, and the core assumes that role with the function's own
- * OIDC token), Cloudflare R2 or MinIO. Elsewhere the core reads
- * `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, or `AWS_ROLE_ARN` with
- * `AWS_WEB_IDENTITY_TOKEN_FILE`. Every chunk is put with its SHA-256, so
+ * OIDC token), Cloudflare R2 or MinIO. Elsewhere the core finds
+ * credentials as the AWS SDKs do: `AWS_ACCESS_KEY_ID` and
+ * `AWS_SECRET_ACCESS_KEY`, then `AWS_ROLE_ARN` with
+ * `AWS_WEB_IDENTITY_TOKEN_FILE`, then the role ECS, Fargate, EKS Pod
+ * Identity or Lambda attaches to the container, then an EC2 instance
+ * profile (IMDSv2). Every chunk is put with its SHA-256, so
  * the bucket itself rejects corrupted uploads.
  *
  * Each store keeps its objects under a prefix of its own (it deletes the

@@ -1,40 +1,37 @@
-import { computeSchemaHash } from "../schema-hash.js";
+import { boundApp } from "../typed-app.js";
 import { fetchPublishedBundles } from "../dev/catalogue-api.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { anyOf, definePermissions } from "../permissions/index.js";
-import { schema as s, migration as m } from "../index.js";
-import { appMigrations } from "./client-migrations.js";
 import {
   createPolicyTestApp,
   deploy,
   type LocalJazzServerHandle,
   startLocalJazzServer,
+  testApp,
+  testPermissions,
 } from "./index.js";
 import { LOCAL_FIRST_JWT_ISSUER } from "../runtime/client-session.js";
 import { settlePolicySeed, settlePolicySeedForSessionReads } from "./policy-test-app.js";
 
 const tempRoots: string[] = [];
 const localServers = new Set<LocalJazzServerHandle>();
-const testSchema = {
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-      ownerId: s.uuid().optional(),
-    },
-    {},
-  ),
-};
-type TestSchema = s.Schema<typeof testSchema>;
-const testApp: s.App<TestSchema> = s.defineApp(testSchema, { migrations: "none" });
-const testPermissions = definePermissions(testApp, ({ policy, session }) => {
-  policy.todos.allowRead.where(anyOf([{ ownerId: session.user }, { ownerId: { isNull: true } }]));
-  policy.todos.allowInsert.where({ ownerId: session.user });
+const todosApp = testApp({
+  tables: { todos: { columns: { title: "string", done: "boolean", ownerId: "uuid?" } } },
 });
+const todosPermissions = {
+  format: 1,
+  tables: {
+    todos: {
+      read: { anyOf: ["ownerId = session.user", "ownerId = null"] },
+      insert: "ownerId = session.user",
+    },
+  },
+};
+/** The engine's form of {@link todosPermissions}, for a deployment. */
+const todosEnginePermissions = testPermissions(todosApp, todosPermissions);
 
 afterEach(async () => {
   await Promise.all(
@@ -225,15 +222,15 @@ describe("startLocalJazzServer", () => {
           "X-Jazz-Admin-Secret": adminSecret,
         },
         body: JSON.stringify({
-          targetSchemaHash: await computeSchemaHash(testApp.wasmSchema),
+          targetSchemaHash: boundApp(todosApp.wasmSchema)!.schema.current,
           schemas: [
             {
-              hash: await computeSchemaHash(testApp.wasmSchema),
-              schema: { tables: testApp.wasmSchema },
+              hash: boundApp(todosApp.wasmSchema)!.schema.current,
+              schema: { tables: todosApp.wasmSchema },
             },
           ],
           migrations: [],
-          permissions: testPermissions,
+          permissions: todosEnginePermissions,
         }),
       });
 
@@ -261,15 +258,15 @@ describe("startLocalJazzServer", () => {
           "X-Jazz-Admin-Secret": "wrong-admin-secret",
         },
         body: JSON.stringify({
-          targetSchemaHash: await computeSchemaHash(testApp.wasmSchema),
+          targetSchemaHash: boundApp(todosApp.wasmSchema)!.schema.current,
           schemas: [
             {
-              hash: await computeSchemaHash(testApp.wasmSchema),
-              schema: { tables: testApp.wasmSchema },
+              hash: boundApp(todosApp.wasmSchema)!.schema.current,
+              schema: { tables: todosApp.wasmSchema },
             },
           ],
           migrations: [],
-          permissions: testPermissions,
+          permissions: todosEnginePermissions,
         }),
       });
 
@@ -306,8 +303,8 @@ describe("deploy", () => {
         serverUrl: server.url,
         appId: "00000000-0000-0000-0000-000000000001",
         adminSecret,
-        schema: testApp,
-        permissions: testPermissions,
+        app: todosApp,
+        permissions: todosPermissions,
       });
 
       expect(result.schema.hash).toBeTruthy();
@@ -332,8 +329,8 @@ describe("deploy", () => {
         serverUrl: "http://127.0.0.1:9",
         appId: "00000000-0000-0000-0000-000000000001",
         adminSecret: "admin-secret",
-        schema: testApp,
-        permissions: testPermissions,
+        app: todosApp,
+        permissions: todosPermissions,
       }),
     ).rejects.toThrow();
   }, 10_000);
@@ -379,11 +376,11 @@ describe("createPolicyTestApp", () => {
   });
 
   it("creates a test app from an app definition and compiled permissions", async () => {
-    const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
+    const policyTestApp = await createPolicyTestApp(todosApp, todosPermissions, expect);
 
     try {
       const seeded = await policyTestApp.seed((db) => {
-        return db.insert(testApp.todos, {
+        return db.insert(todosApp.todos, {
           title: "Ship the direct app API",
           done: false,
           ownerId: "00000000-0000-4000-8000-000000000001",
@@ -405,10 +402,10 @@ describe("createPolicyTestApp", () => {
         authMode: "external",
       });
 
-      await expect(alice.all(testApp.todos.where({ id: seeded.id }))).resolves.toEqual([
+      await expect(alice.all(todosApp.todos.where({ id: seeded.id }))).resolves.toEqual([
         expect.objectContaining({ id: seeded.id }),
       ]);
-      await expect(bob.all(testApp.todos.where({ id: seeded.id }))).resolves.toEqual([]);
+      await expect(bob.all(todosApp.todos.where({ id: seeded.id }))).resolves.toEqual([]);
     } finally {
       await policyTestApp.shutdown();
     }
@@ -420,7 +417,7 @@ describe("createPolicyTestApp", () => {
   it("takes the clients' slow-query threshold", async () => {
     const reports = async (slowQueryThresholdMs: number) => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-      const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect, {
+      const policyTestApp = await createPolicyTestApp(todosApp, todosPermissions, expect, {
         slowQueryThresholdMs,
       });
       try {
@@ -431,7 +428,7 @@ describe("createPolicyTestApp", () => {
           claims: {},
           authMode: "external",
         });
-        for (let i = 0; i < 3; i++) await alice.all(testApp.todos.where({ done: false }));
+        for (let i = 0; i < 3; i++) await alice.all(todosApp.todos.where({ done: false }));
         return warn.mock.calls.filter(([line]) => String(line).startsWith("[jazz] slow query"))
           .length;
       } finally {
@@ -449,24 +446,23 @@ describe("createPolicyTestApp", () => {
   // opening with the lenses the app ships, disagreed with it about the app's
   // first version (alpha.61 adopter round, E11).
   it("serves an app that ships a migration", async () => {
-    const notesV1 = { notes: s.table({ title: s.string(), owner_id: s.uuid() }, {}) };
-    const notesV2 = {
-      notes: s.table({ title: s.string(), owner_id: s.uuid(), body: s.string().optional() }, {}),
+    const app = testApp({
+      tables: { notes: { columns: { title: "string", owner_id: "uuid", body: "string?" } } },
+      history: {
+        "7b326c6b70fa": {
+          tables: { notes: { columns: { title: "string", owner_id: "uuid" } } },
+        },
+      },
+      migrations: [
+        {
+          from: "7b326c6b70fa",
+          migrate: { notes: { body: { add: "string", default: null } } },
+        },
+      ],
+    });
+    const permissions = {
+      tables: { notes: { read: "owner_id = session.user", insert: "owner_id = session.user" } },
     };
-    const migration = m.defineMigration({
-      fromHash: await computeSchemaHash(s.defineApp(notesV1, { migrations: "none" }).wasmSchema),
-      toHash: await computeSchemaHash(s.defineApp(notesV2, { migrations: "none" }).wasmSchema),
-      from: notesV1,
-      to: notesV2,
-      migrate: { notes: { body: m.add.string({ default: null }) } },
-    });
-    const app = s.defineApp(notesV2, {
-      migrations: await appMigrations(notesV1, { to: notesV2, migration }),
-    });
-    const permissions = definePermissions(app, ({ policy, session }) => {
-      policy.notes.allowRead.where({ owner_id: session.user });
-      policy.notes.allowInsert.where({ owner_id: session.user });
-    });
     const policyTestApp = await createPolicyTestApp(app, permissions, expect);
 
     try {
@@ -498,20 +494,15 @@ describe("createPolicyTestApp", () => {
   // timed out waiting for query coverage until createPolicyTestApp
   // published the app's history as createJazz does.
   it("answers a local-first session on an app that ships two schema versions", async () => {
-    const before = { notes: s.table({ text: s.string() }, {}) };
-    const after = { ...before, tags: s.table({ label: s.string() }, {}) };
-    const migration = m.defineMigration({
-      from: before,
-      to: after,
-      createTables: { tags: true },
+    const app = testApp({
+      tables: {
+        notes: { columns: { text: "string" } },
+        tags: { columns: { label: "string" } },
+      },
+      history: { e0ccddc46dd7: { tables: { notes: { columns: { text: "string" } } } } },
+      migrations: [{ from: "e0ccddc46dd7", createTables: ["tags"] }],
     });
-    const app = s.defineApp(after, {
-      migrations: await appMigrations(before, { to: after, migration }),
-    });
-    const permissions = definePermissions(app, ({ policy }) => {
-      policy.notes.allowRead.always();
-      policy.tags.allowRead.always();
-    });
+    const permissions = { tables: { notes: { read: "true" }, tags: { read: "true" } } };
     const policyTestApp = await createPolicyTestApp(app, permissions, expect);
 
     try {
@@ -524,13 +515,13 @@ describe("createPolicyTestApp", () => {
   }, 10_000);
 
   it("rejects a seed callback that returns the inserted row instead of the write", async () => {
-    const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
+    const policyTestApp = await createPolicyTestApp(todosApp, todosPermissions, expect);
 
     try {
       await expect(
         policyTestApp.seed(
           // @ts-expect-error: returning `.value` is the mistake the runtime check catches.
-          (db) => db.insert(testApp.todos, { title: "unwrapped", done: false }).value,
+          (db) => db.insert(todosApp.todos, { title: "unwrapped", done: false }).value,
         ),
       ).rejects.toThrow(/must return the write result itself/);
     } finally {
@@ -539,26 +530,26 @@ describe("createPolicyTestApp", () => {
   }, 10_000);
 
   it("limits backend SYSTEM bootstrap to the configured authority credential", async () => {
-    const noCredential = await createPolicyTestApp(testApp, testPermissions, expect, {
+    const noCredential = await createPolicyTestApp(todosApp, todosPermissions, expect, {
       clientBackendSecret: null,
     });
     try {
       await expect(
         noCredential.seed((db) =>
-          db.insert(testApp.todos, { title: "no credential", done: false }),
+          db.insert(todosApp.todos, { title: "no credential", done: false }),
         ),
       ).rejects.toThrow(/backendSecret required/);
     } finally {
       await noCredential.shutdown();
     }
 
-    const wrongCredential = await createPolicyTestApp(testApp, testPermissions, expect, {
+    const wrongCredential = await createPolicyTestApp(todosApp, todosPermissions, expect, {
       clientBackendSecret: "wrong-backend-secret",
     });
     try {
       await expect(
         wrongCredential.seed((db) =>
-          db.insert(testApp.todos, { title: "wrong credential", done: false }),
+          db.insert(todosApp.todos, { title: "wrong credential", done: false }),
         ),
       ).rejects.toThrow(/authorization|credential|backend|rejected/i);
     } finally {
@@ -567,25 +558,26 @@ describe("createPolicyTestApp", () => {
   }, 10_000);
 
   it("runs policies as a local-first guest session without an explicit issuer", async () => {
-    const guestSchema = {
-      products: s.table({ title: s.string() }, {}),
-      staffNotes: s.table({ body: s.string() }, {}),
-      carts: s.table({ item: s.string(), ownerId: s.uuid() }, {}),
+    const guestApp = testApp({
+      tables: {
+        carts: { columns: { item: "string", ownerId: "uuid" } },
+        products: { columns: { title: "string" } },
+        staffNotes: { columns: { body: "string" } },
+      },
+    });
+    const guestPermissions = {
+      tables: {
+        carts: {
+          read: "ownerId = session.user",
+          insert: { allOf: ["ownerId = session.user", "session.authMode = 'local-first'"] },
+        },
+        products: {
+          read: "session.authMode in ['local-first', 'external']",
+          insert: "session.authMode = 'external'",
+        },
+        staffNotes: { read: "session.authMode = 'external'" },
+      },
     };
-    const guestApp: s.App<s.Schema<typeof guestSchema>> = s.defineApp(guestSchema, {
-      migrations: "none",
-    });
-    const guestPermissions = definePermissions(guestApp, ({ policy, session, allOf }) => {
-      policy.products.allowRead.where(
-        session.where({ authMode: { in: ["local-first", "external"] } }),
-      );
-      policy.products.allowInsert.where(session.where({ authMode: "external" }));
-      policy.staffNotes.allowRead.where(session.where({ authMode: "external" }));
-      policy.carts.allowRead.where({ ownerId: session.user });
-      policy.carts.allowInsert.where(
-        allOf([{ ownerId: session.user }, session.where({ authMode: "local-first" })]),
-      );
-    });
     const policyTestApp = await createPolicyTestApp(guestApp, guestPermissions, expect);
 
     try {
@@ -628,16 +620,12 @@ describe("createPolicyTestApp", () => {
   }, 20_000);
 
   it("keeps an explicit external issuer as a trusted forSession actor", async () => {
-    const actorSchema = {
-      carts: s.table({ item: s.string(), ownerId: s.uuid() }, {}),
+    const actorApp = testApp({
+      tables: { carts: { columns: { item: "string", ownerId: "uuid" } } },
+    });
+    const actorPermissions = {
+      tables: { carts: { read: "ownerId = session.user", insert: "ownerId = session.user" } },
     };
-    const actorApp: s.App<s.Schema<typeof actorSchema>> = s.defineApp(actorSchema, {
-      migrations: "none",
-    });
-    const actorPermissions = definePermissions(actorApp, ({ policy, session }) => {
-      policy.carts.allowRead.where({ ownerId: session.user });
-      policy.carts.allowInsert.where({ ownerId: session.user });
-    });
     const policyTestApp = await createPolicyTestApp(actorApp, actorPermissions, expect);
 
     try {
@@ -667,7 +655,7 @@ describe("createPolicyTestApp", () => {
   }, 20_000);
 
   it("rejects an explicit account for a self-signed local-first guest", async () => {
-    const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
+    const policyTestApp = await createPolicyTestApp(todosApp, todosPermissions, expect);
 
     try {
       expect(() =>
@@ -684,7 +672,7 @@ describe("createPolicyTestApp", () => {
   }, 10_000);
 
   it("treats the reserved local-first issuer as a self-signed guest", async () => {
-    const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
+    const policyTestApp = await createPolicyTestApp(todosApp, todosPermissions, expect);
 
     try {
       const withIssuer = policyTestApp.sessionFor({
@@ -721,7 +709,7 @@ describe("createPolicyTestApp", () => {
   }, 10_000);
 
   it("rejects custom claims for a self-signed local-first guest", async () => {
-    const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
+    const policyTestApp = await createPolicyTestApp(todosApp, todosPermissions, expect);
 
     try {
       expect(() =>
@@ -740,12 +728,16 @@ describe("createPolicyTestApp", () => {
     // Every session write installs that session's claims before it is
     // admitted. The first upsert stays suspended on the owner, so the second
     // write's claims must queue behind it instead of re-entering it.
-    const upsertPermissions = definePermissions(testApp, ({ policy, session }) => {
-      policy.todos.allowRead.where({ ownerId: session.user });
-      policy.todos.allowInsert.where({ ownerId: session.user });
-      policy.todos.allowUpdate.where({ ownerId: session.user });
-    });
-    const policyTestApp = await createPolicyTestApp(testApp, upsertPermissions, expect);
+    const upsertPermissions = {
+      tables: {
+        todos: {
+          read: "ownerId = session.user",
+          insert: "ownerId = session.user",
+          update: "ownerId = session.user",
+        },
+      },
+    };
+    const policyTestApp = await createPolicyTestApp(todosApp, upsertPermissions, expect);
 
     try {
       const ownerId = "00000000-0000-4000-8000-000000000001";
@@ -759,15 +751,15 @@ describe("createPolicyTestApp", () => {
       const id = "00000000-0000-4000-8000-0000000000a1";
 
       await Promise.all([
-        alice.upsert(testApp.todos, id, { title: "first", done: false, ownerId }).wait({
+        alice.upsert(todosApp.todos, id, { title: "first", done: false, ownerId }).wait({
           tier: "global",
         }),
-        alice.upsert(testApp.todos, id, { title: "second", done: false, ownerId }).wait({
+        alice.upsert(todosApp.todos, id, { title: "second", done: false, ownerId }).wait({
           tier: "global",
         }),
       ]);
 
-      await expect(alice.all(testApp.todos.where({ id }))).resolves.toEqual([
+      await expect(alice.all(todosApp.todos.where({ id }))).resolves.toEqual([
         expect.objectContaining({ id, title: "second" }),
       ]);
     } finally {
@@ -776,7 +768,7 @@ describe("createPolicyTestApp", () => {
   }, 10_000);
 
   it("exposes expectAllowed and expectDenied on session-scoped test dbs", async () => {
-    const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
+    const policyTestApp = await createPolicyTestApp(todosApp, todosPermissions, expect);
 
     try {
       const alice = policyTestApp.as({
@@ -795,7 +787,7 @@ describe("createPolicyTestApp", () => {
       });
 
       alice.expectAllowed((db) => {
-        db.insert(testApp.todos, {
+        db.insert(todosApp.todos, {
           title: "Alice can insert her own todo",
           done: false,
           ownerId: "00000000-0000-4000-8000-000000000001",
@@ -803,15 +795,15 @@ describe("createPolicyTestApp", () => {
       });
 
       await bob.expectDenied((db) => {
-        return db.insert(testApp.todos, {
+        return db.insert(todosApp.todos, {
           title: "Bob cannot insert Alice's todo",
           done: false,
           ownerId: "00000000-0000-4000-8000-000000000001",
         });
       });
 
-      await expect(alice.all(testApp.todos)).resolves.toEqual([]);
-      await expect(bob.all(testApp.todos)).resolves.toEqual([]);
+      await expect(alice.all(todosApp.todos)).resolves.toEqual([]);
+      await expect(bob.all(todosApp.todos)).resolves.toEqual([]);
     } finally {
       await policyTestApp.shutdown();
     }
@@ -819,10 +811,9 @@ describe("createPolicyTestApp", () => {
 });
 
 describe("expectDenied", () => {
-  const owned = definePermissions(testApp, ({ policy, session }) => {
-    policy.todos.allowRead.where({ ownerId: session.user });
-    policy.todos.allowUpdate.where({ ownerId: session.user });
-  });
+  const owned = {
+    tables: { todos: { read: "ownerId = session.user", update: "ownerId = session.user" } },
+  };
   const session = (user_id: string, account_id: string) =>
     ({
       issuer: "https://policy-test.example",
@@ -833,10 +824,10 @@ describe("expectDenied", () => {
     }) as const;
 
   it("counts an update the server denies, because the user may not read the row", async () => {
-    const policyTestApp = await createPolicyTestApp(testApp, owned, expect);
+    const policyTestApp = await createPolicyTestApp(todosApp, owned, expect);
     try {
       const todo = await policyTestApp.seed((db) =>
-        db.insert(testApp.todos, {
+        db.insert(todosApp.todos, {
           title: "Alice's",
           done: false,
           ownerId: "00000000-0000-4000-8000-000000000001",
@@ -844,51 +835,51 @@ describe("expectDenied", () => {
       );
       const bob = policyTestApp.as(session("bob", "00000000-0000-4000-8000-000000000002"));
       // The replica stages it, and the server's refusal counts.
-      await bob.expectDenied((db) => db.update(testApp.todos, todo.id, { title: "Bob's now" }));
+      await bob.expectDenied((db) => db.update(todosApp.todos, todo.id, { title: "Bob's now" }));
     } finally {
       await policyTestApp.shutdown();
     }
   }, 10_000);
 
   it("counts an update denied at once, of a row deleted on this replica", async () => {
-    const policyTestApp = await createPolicyTestApp(testApp, owned, expect);
+    const policyTestApp = await createPolicyTestApp(todosApp, owned, expect);
     try {
       const todo = await policyTestApp.seed((db) =>
-        db.insert(testApp.todos, {
+        db.insert(todosApp.todos, {
           title: "Alice's",
           done: false,
           ownerId: "00000000-0000-4000-8000-000000000001",
         }),
       );
-      await policyTestApp.seed((db) => db.delete(testApp.todos, todo.id));
+      await policyTestApp.seed((db) => db.delete(todosApp.todos, todo.id));
       const bob = policyTestApp.as(session("bob", "00000000-0000-4000-8000-000000000002"));
       // The local denial carries the code a server rejection carries.
       let thrown: unknown;
       try {
-        bob.update(testApp.todos, todo.id, { title: "Bob's now" });
+        bob.update(todosApp.todos, todo.id, { title: "Bob's now" });
       } catch (error) {
         thrown = error;
       }
       expect((thrown as { code?: string } | undefined)?.code).toBe("permission_denied");
-      await bob.expectDenied((db) => db.update(testApp.todos, todo.id, { title: "Bob's now" }));
+      await bob.expectDenied((db) => db.update(todosApp.todos, todo.id, { title: "Bob's now" }));
     } finally {
       await policyTestApp.shutdown();
     }
   }, 10_000);
 
   it("fails, saying so, when the write is accepted", async () => {
-    const policyTestApp = await createPolicyTestApp(testApp, owned, expect);
+    const policyTestApp = await createPolicyTestApp(todosApp, owned, expect);
     try {
       const alice = policyTestApp.as(session("alice", "00000000-0000-4000-8000-000000000001"));
       const todo = await policyTestApp.seed((db) =>
-        db.insert(testApp.todos, {
+        db.insert(todosApp.todos, {
           title: "Alice's",
           done: false,
           ownerId: "00000000-0000-4000-8000-000000000001",
         }),
       );
       await expect(
-        alice.expectDenied((db) => db.update(testApp.todos, todo.id, { title: "still hers" })),
+        alice.expectDenied((db) => db.update(todosApp.todos, todo.id, { title: "still hers" })),
       ).rejects.toThrow("expected the write to be denied, but it was accepted");
     } finally {
       await policyTestApp.shutdown();
@@ -900,37 +891,37 @@ describe("policies that correlate optional and required columns", () => {
   // `exists.where` equalities between an optional column and a required column
   // of the same type used to be rejected when the server converted the policy
   // (OperandTypeMismatch), although the TypeScript DSL accepted them.
-  const inviteSchema = {
-    shows: s.table({ name: s.string() }, {}),
-    invites: s.table(
-      { showId: s.uuid(), code: s.string(), parentId: s.uuid().optional() },
-      { show: s.rel("shows", "showId"), parent: s.rel("shows", "parentId") },
-    ),
-    members: s.table(
-      {
-        showId: s.uuid(),
-        parentId: s.uuid(),
-        account: s.uuid(),
-        inviteCode: s.string().optional(),
+  const inviteApp = testApp({
+    tables: {
+      invites: {
+        columns: { showId: "uuid", code: "string", parentId: "uuid?" },
+        relations: {
+          parent: { rel: "shows", column: "parentId" },
+          show: { rel: "shows", column: "showId" },
+        },
       },
-      { show: s.rel("shows", "showId"), parent: s.rel("shows", "parentId") },
-    ),
-  };
-  type InviteSchema = s.Schema<typeof inviteSchema>;
-  const inviteApp: s.App<InviteSchema> = s.defineApp(inviteSchema, { migrations: "none" });
-  const invitePermissions = definePermissions(inviteApp, ({ policy, session }) => {
-    policy.shows.allowRead.always();
-    policy.members.allowRead.where({ account: session.user });
-    policy.members.allowInsert.where((member) =>
-      policy.invites.exists.where({
-        showId: member.showId,
-        // Optional text compared with required text.
-        code: member.inviteCode,
-        // Required reference compared with an optional reference.
-        parentId: member.parentId,
-      }),
-    );
+      members: {
+        columns: { showId: "uuid", parentId: "uuid", account: "uuid", inviteCode: "string?" },
+        relations: {
+          parent: { rel: "shows", column: "parentId" },
+          show: { rel: "shows", column: "showId" },
+        },
+      },
+      shows: { columns: { name: "string" } },
+    },
   });
+  const invitePermissions = {
+    tables: {
+      members: {
+        read: "account = session.user",
+        // Optional text (inviteCode) compared with required text (code), and a
+        // required reference (parentId) compared with an optional one.
+        insert:
+          "exists invites(showId = this.showId, code = this.inviteCode, parentId = this.parentId)",
+      },
+      shows: { read: "true" },
+    },
+  };
 
   it("publishes the policy and enforces the correlation", async () => {
     const policyTestApp = await createPolicyTestApp(inviteApp, invitePermissions, expect);
@@ -992,24 +983,22 @@ describe("startLocalJazzServer with an app that ships a migration", () => {
   // publish its migration chain ("deployment cannot replace the runtime
   // genesis schema"), and clients opening with its lenses refused queries.
   it("serves the app's createJazz and its migration chain", async () => {
-    const notesV1 = { notes: s.table({ title: s.string() }, {}) };
-    const notesV2 = { notes: s.table({ title: s.string(), body: s.string().optional() }, {}) };
-    const v1Hash = await computeSchemaHash(s.defineApp(notesV1, { migrations: "none" }).wasmSchema);
-    const migration = m.defineMigration({
-      fromHash: v1Hash,
-      toHash: await computeSchemaHash(s.defineApp(notesV2, { migrations: "none" }).wasmSchema),
-      from: notesV1,
-      to: notesV2,
-      migrate: { notes: { body: m.add.string({ default: null }) } },
+    const app = testApp({
+      tables: { notes: { columns: { title: "string", body: "string?" } } },
+      history: { "7c868faac577": { tables: { notes: { columns: { title: "string" } } } } },
+      migrations: [
+        {
+          from: "7c868faac577",
+          migrate: { notes: { body: { add: "string", default: null } } },
+        },
+      ],
     });
-    const app = s.defineApp(notesV2, {
-      migrations: await appMigrations(notesV1, { to: notesV2, migration }),
+    const permissions = { format: 1, tables: { notes: { read: "true", insert: "true" } } };
+    const server = await startLocalJazzServer({
+      inMemory: true,
+      schema: app,
+      permissions,
     });
-    const permissions = definePermissions(app, ({ policy }) => {
-      policy.notes.allowRead.always();
-      policy.notes.allowInsert.always();
-    });
-    const server = await startLocalJazzServer({ inMemory: true, schema: app, permissions });
     const { createJazz, remote } = await import("../backend/index.js");
     const jazz = createJazz({
       app,
@@ -1031,21 +1020,21 @@ describe("startLocalJazzServer with an app that ships a migration", () => {
   }, 20_000);
 
   it("refuses a trusted workload for such an app instead of starting a server that would refuse it", async () => {
-    const v1 = { notes: s.table({ title: s.string() }, {}) };
-    const v2 = { notes: s.table({ title: s.string(), body: s.string().optional() }, {}) };
-    const migration = m.defineMigration({
-      fromHash: await computeSchemaHash(s.defineApp(v1, { migrations: "none" }).wasmSchema),
-      toHash: await computeSchemaHash(s.defineApp(v2, { migrations: "none" }).wasmSchema),
-      from: v1,
-      to: v2,
-      migrate: { notes: { body: m.add.string({ default: null }) } },
+    const app = testApp({
+      tables: { notes: { columns: { title: "string", body: "string?" } } },
+      history: { "7c868faac577": { tables: { notes: { columns: { title: "string" } } } } },
+      migrations: [
+        {
+          from: "7c868faac577",
+          migrate: { notes: { body: { add: "string", default: null } } },
+        },
+      ],
     });
-    const app = s.defineApp(v2, { migrations: await appMigrations(v1, { to: v2, migration }) });
     await expect(
       startLocalJazzServer({
         inMemory: true,
         schema: app,
-        permissions: {},
+        permissions: { format: 1, tables: {} },
         trustedWorkload: { issuer: "https://workload.example", audience: "jazz", subject: "ci" },
       }),
     ).rejects.toThrow(/ships migrations is not supported with trustedWorkload yet/);

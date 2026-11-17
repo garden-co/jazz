@@ -43,7 +43,7 @@ if [[ "${1:-}" == "--ci" && $# == 1 ]]; then
 fi
 
 if [[ "${1:-}" == "--compile-ci" && $# == 1 ]]; then
-  run_phase jazz-benchmark-api cargo check -p jazz --benches --features testing
+  run_phase jazz-benchmark-api cargo check -p jazz-core --benches --features testing
   run_phase jazz-sim-benchmark-api cargo check -p jazz-sim --benches
   # --all-targets also compiles the nightly benches, which CodSpeed does not run.
   run_phase band-book-benchmark-api cargo check -p jazz-example-band-book-benchmark --all-targets

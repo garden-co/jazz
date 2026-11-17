@@ -1,7 +1,7 @@
 import { useState, useCallback } from "react";
 import type { Db } from "jazz-tools";
-import { useDb, useSession } from "jazz-tools/react";
-import { app } from "../schema";
+import { useDb, useJazzSession } from "jazz-tools/react";
+import { app } from "../jazz.generated";
 
 const TOTAL_PROJECTS = 10_000;
 const TOTAL_TODOS = 50_000;
@@ -227,8 +227,8 @@ export function GenerateData() {
   // false), so the db here is the full Db with transaction support, not the
   // async channel facade useDb is typed as.
   const db = useDb() as unknown as Db;
-  const session = useSession();
-  const sessionUserId = session?.user ?? null;
+  const session = useJazzSession();
+  const sessionUserId = session.user?.accountId ?? null;
 
   const [status, setStatus] = useState<Status>("idle");
   const [projectsCreated, setProjectsCreated] = useState(0);

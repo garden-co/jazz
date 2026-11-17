@@ -155,6 +155,7 @@ fn close_tag_undo(conn: &rusqlite::Connection, kept: bool, all: bool) {
                 (false, _) => {
                     for (tags, before) in frame.into_iter().rev() {
                         *tags.borrow_mut() = before;
+                        tags_changed();
                     }
                 }
             }
@@ -231,6 +232,35 @@ pub enum Sql {
 }
 
 impl Sql {
+    /// The value as an in-process key: a type tag, then the payload (bytes
+    /// as hex). Two values get the same key exactly when their `Debug`
+    /// prints are equal (the form keys used before), without running the
+    /// formatter: the tag keeps the variants apart, an integer prints in
+    /// decimal, a real by its bits (shortest round-trip printing is
+    /// injective on non-NaN reals, -0.0 included) and every NaN as one key,
+    /// as `Debug` prints them all as `NaN` (SQLite stores none, see
+    /// [`to_sql`]). Keys are compared and hashed in this process only.
+    pub(crate) fn key(&self) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let hex = |tag: char, bytes: &[u8]| {
+            let mut out = String::with_capacity(1 + 2 * bytes.len());
+            out.push(tag);
+            for byte in bytes {
+                out.push(char::from(HEX[usize::from(byte >> 4)]));
+                out.push(char::from(HEX[usize::from(byte & 15)]));
+            }
+            out
+        };
+        match self {
+            Sql::Null => "N".to_owned(),
+            Sql::Integer(v) => format!("I{v}"),
+            Sql::Real(v) if v.is_nan() => "RNaN".to_owned(),
+            Sql::Real(v) => hex('R', &v.to_bits().to_be_bytes()),
+            Sql::Text(bytes) => hex('T', bytes),
+            Sql::Blob(bytes) => hex('B', bytes),
+        }
+    }
+
     pub(crate) fn as_ref(&self) -> ValueRef<'_> {
         match self {
             Sql::Null => ValueRef::Null,
@@ -680,6 +710,7 @@ impl EnumTags {
     }
 
     pub(crate) fn insert(&mut self, name: String, tag: i64) {
+        tags_changed();
         self.by_tag.insert(tag, name.clone());
         self.by_name.insert(name, tag);
     }
@@ -761,6 +792,32 @@ impl EnumTags {
 /// A stored enum column's tags, shared by the schemas storing it.
 pub type ColumnTags = Rc<RefCell<EnumTags>>;
 
+thread_local! {
+    /// Counts every change to enum tags made on this thread (a variant
+    /// interned, a column renumbered, tags put back by a rollback or a
+    /// restore). SQL compiled while the tags were different may bind a
+    /// variant name as text where it now has a tag, or read cells through
+    /// a stale `CASE`: a kept statement compiled at another epoch is
+    /// compiled again.
+    ///
+    /// Per thread, not per process: a store's tags are [`ColumnTags`]
+    /// (`Rc`), so they are changed and read only on the thread that holds
+    /// the store, and that thread's counter sees every change to the tags
+    /// a statement compiled there depends on. Stores on other threads do
+    /// not move it.
+    static TAG_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// This thread's [`TAG_EPOCH`].
+pub(crate) fn tag_epoch() -> u64 {
+    TAG_EPOCH.with(std::cell::Cell::get)
+}
+
+/// Note that enum tags of a store on this thread changed.
+pub(crate) fn tags_changed() {
+    TAG_EPOCH.with(|epoch| epoch.set(epoch.get().wrapping_add(1)));
+}
+
 /// Every stored enum column's tags on a store, by (stored table, stored
 /// column). Schemas built for the store take their columns' entries from
 /// it, so a tag the store interns reaches every schema at once.
@@ -801,6 +858,7 @@ impl TagRegistry {
     /// An entry made or moved since keeps no tags: a schema still holding
     /// it reads none it did not have.
     pub(crate) fn restore(&self, snapshot: TagSnapshot) {
+        tags_changed();
         let mut map = self.map.borrow_mut();
         for tags in map.values() {
             if !snapshot.0.iter().any(|(_, kept, _)| Rc::ptr_eq(kept, tags)) {
@@ -2181,7 +2239,7 @@ fn relation_is_empty(child: &CurrentRow, index: usize) -> bool {
 
 /// The narrowest type both relation types' values fit: nullable if either
 /// is, record fields widened pairwise.
-fn widen(a: &ValueType, b: &ValueType) -> Result<ValueType, Error> {
+pub(crate) fn widen(a: &ValueType, b: &ValueType) -> Result<ValueType, Error> {
     if a == b {
         return Ok(a.clone());
     }
@@ -2230,7 +2288,7 @@ fn widen(a: &ValueType, b: &ValueType) -> Result<ValueType, Error> {
 }
 
 /// `value` re-encoded as `ty`, a type [`widen`] produced from its own.
-fn coerce(value: &Value, ty: &ValueType) -> Result<Value, Error> {
+pub(crate) fn coerce(value: &Value, ty: &ValueType) -> Result<Value, Error> {
     Ok(match (value, ty) {
         (Value::Nullable(None), _) => Value::Nullable(None),
         (Value::Nullable(Some(inner)), ValueType::Nullable(t)) => {
@@ -2356,5 +2414,78 @@ impl JsonCheck {
         let compiled = crate::tools::CompiledSchema::new(schema)
             .map_err(|error| crate::tools::json_schema_failure(error, path))?;
         Ok(Some(self.compiled.get_or_init(|| compiled)))
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::Sql;
+
+    /// The keys this form replaced: `Debug` prints.
+    fn old(value: &Sql) -> String {
+        format!("{value:?}")
+    }
+
+    fn edge_values() -> Vec<Sql> {
+        let mut out = vec![Sql::Null];
+        for v in [0, 1, -1, 10, i64::MIN, i64::MAX] {
+            out.push(Sql::Integer(v));
+        }
+        for v in [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            0.1,
+            1e300,
+            f64::MIN_POSITIVE,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            -f64::NAN,
+            f64::from_bits(0x7ff8_0000_0000_0001),
+        ] {
+            out.push(Sql::Real(v));
+        }
+        for bytes in [&b""[..], b"1", b"a", b"ab", b"\x00", b"\xff\x00", b"I1"] {
+            out.push(Sql::Text(bytes.to_vec()));
+            out.push(Sql::Blob(bytes.to_vec()));
+        }
+        out
+    }
+
+    /// Same key exactly when the old key was the same, both ways: a pair
+    /// that matched and no longer does would be a missed wake.
+    #[test]
+    fn keys_keep_the_equality_classes_of_debug_prints() {
+        let mut values = edge_values();
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..4000 {
+            let r = next();
+            values.push(match r % 5 {
+                0 => Sql::Null,
+                1 => Sql::Integer((next() % 7) as i64 - 3),
+                2 => Sql::Real(f64::from_bits(next())),
+                3 => Sql::Text((0..r % 4).map(|_| (next() % 3) as u8).collect()),
+                _ => Sql::Blob((0..r % 4).map(|_| (next() % 3) as u8).collect()),
+            });
+        }
+        for a in &values[..200] {
+            for b in &values {
+                assert_eq!(
+                    old(a) == old(b),
+                    a.key() == b.key(),
+                    "{a:?} vs {b:?}: keys {} / {}",
+                    a.key(),
+                    b.key()
+                );
+            }
+        }
     }
 }
