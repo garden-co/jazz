@@ -589,3 +589,34 @@ fn every_slot_of_an_all_search_needs_its_own_match() {
     // The one-word "Runway" ranks its term above "Running club"'s.
     assert_eq!(ids(&db, &any), [1, 2]);
 }
+
+/// A store checks its queue triggers when it opens and recreates any that
+/// are missing (a file another tool edited, say), so writes after the
+/// reopen reach the index again.
+#[test]
+fn a_reopened_store_recreates_missing_queue_triggers() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("places.sqlite");
+    let db = block_on(Db::open_at(config(schema_with(4)), &path, FileOptions::default())).unwrap();
+    seed(&db);
+    drop(db);
+    let triggers = || -> i64 {
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE '%jazz\\_ix\\_%' ESCAPE '\\'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(triggers(), 3);
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("DROP TRIGGER \"places__jazz_ix_ins\"; DROP TRIGGER \"places__jazz_ix_upd\";")
+        .unwrap();
+    let db = block_on(Db::open_at(config(schema_with(4)), &path, FileOptions::default())).unwrap();
+    assert_eq!(triggers(), 3, "recreated on open");
+    place(&db, 7, "Leipzig", None, 51.34, 12.37, [1.0, 0.0, 0.0]);
+    assert_eq!(ids(&db, &text("leipzig")), [7]);
+}
