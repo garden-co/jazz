@@ -378,6 +378,11 @@ jobs:
       - name: Verify the jazz-wasm tarball carries the Durable Object entry
         run: pnpm --filter jazz-wasm check:durable-object-pack
 
+      # The release build (wasm-opt, the patched glue) starts in workerd and
+      # admits its backend, before anything is published.
+      - name: Smoke-test the release jazz-wasm Durable Object entry
+        run: pnpm --filter jazz-wasm test:durable-object-release
+
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: jazz-napi-loader

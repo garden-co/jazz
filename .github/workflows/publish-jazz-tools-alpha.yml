@@ -665,7 +665,7 @@ jobs:
           tar -tf "${TARBALL}" | grep -q "package/pkg/jazz_wasm.js"
           tar -tf "${TARBALL}" | grep -q "package/pkg/jazz_wasm.d.ts"
           # `jazz-wasm/durable-object`: the core a Durable Object hosts.
-          tar -tf "${TARBALL}" | grep "package/durable-object/"
+          echo "durable-object files: $(tar -tf "${TARBALL}" | grep -c "package/durable-object/")"
           tar -tf "${TARBALL}" | grep -q "package/durable-object/pkg/jazz_wasm_do_bg.wasm"
           tar -tf "${TARBALL}" | grep -q "package/durable-object/pkg/jazz_wasm_do.js"
           tar -tf "${TARBALL}" | grep -q "package/durable-object/index.js"

@@ -51,7 +51,8 @@
     "build:profiling": "node ../../dev/artifacts/build.mjs wasm profiling",
     "test:durable-objects": "tests/durable-objects/run.sh",
     "build:durable-object": "wasm-pack build . --target web --release --out-dir durable-object/pkg --out-name jazz_wasm_do --no-pack -- --features durable-object && node durable-object/reinstantiable.mjs && node -e \"require('node:fs').rmSync('durable-object/pkg/.gitignore', { force: true })\"",
-    "check:durable-object-pack": "node durable-object/check-pack.mjs"
+    "check:durable-object-pack": "node durable-object/check-pack.mjs",
+    "test:durable-object-release": "node --test tests/durable-objects/release.test.mjs"
   },
   "devDependencies": {
     "miniflare": "4.20260401.0"
