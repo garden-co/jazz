@@ -8548,11 +8548,12 @@ impl Db {
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.tx.is_some() {
-            // Only a callback transaction's own writes join its capture:
-            // they never write as a session (`Db::write_op` refuses a write
-            // as another identity, and a transaction handle's commit is
-            // refused while it is open), so no session claims travel with
-            // `capture`.
+            // No local write joins a callback transaction as a session:
+            // `Db::write_op` refuses a write as another identity, and a
+            // transaction handle's commit is refused while it is open. So
+            // no session claims travel with `capture`. (A relay's apply of a
+            // downstream upload during `tick` can still land here:
+            // jazz#6038.)
             debug_assert!(!ops.iter().any(StagedOp::is_session) && claims.is_none());
             inner.capture.extend(ops);
             return Ok(());

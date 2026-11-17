@@ -348,10 +348,27 @@ fn a_write_as_another_identity_is_refused_while_a_transaction_is_open() {
 /// A transaction handle (`begin_mergeable`) committed while Alice's callback
 /// transaction is suspended would join that callback's commit. It is refused
 /// and stays open. Whether the callback then finishes (`resume`) or is
-/// cancelled, the handle commits afterwards and keeps its row.
-fn handle_commit_waits_for_a_suspended_callback(resume: bool) {
+/// cancelled, the handle commits afterwards and keeps its row. With
+/// `synced`, Alice is a client of Bob's authority, and both commits reach
+/// Bob without wedging sync.
+fn handle_commit_waits_for_a_suspended_callback(resume: bool, synced: bool) {
     use jazz::model::transaction::OpenTransactionId;
-    let alice = open(1, AuthorSubject::SYSTEM);
+    let author = AuthorSubject::for_test_bytes([1; 16]);
+    let alice = open(
+        1,
+        if synced {
+            author
+        } else {
+            AuthorSubject::SYSTEM
+        },
+    );
+    let bob = open(2, AuthorSubject::SYSTEM);
+    let _upstream = synced.then(|| {
+        let (client, server) = duplex();
+        let upstream = block_on(alice.connect_upstream(client));
+        bob.accept_subscriber(server, author).unwrap();
+        upstream
+    });
     let handle = OpenTransactionId::new();
     block_on(alice.begin_mergeable(handle)).unwrap();
     block_on(
@@ -382,23 +399,46 @@ fn handle_commit_waits_for_a_suspended_callback(resume: bool) {
     if resume {
         finish.send(()).unwrap();
         block_on(transaction).unwrap();
-        expected.insert(0, Value::String("callback's".to_owned()));
+        expected.push(Value::String("callback's".to_owned()));
     } else {
         drop(transaction);
     }
-    block_on(alice.commit_mergeable_handle(handle)).unwrap();
-    let mut bodies = bodies(&alice);
-    bodies.sort_by_key(|value| format!("{value:?}"));
+    let committed = block_on(alice.commit_mergeable_handle(handle)).unwrap();
     expected.sort_by_key(|value| format!("{value:?}"));
-    assert_eq!(bodies, expected);
+    let sorted = |db: &Db| {
+        let mut bodies = bodies(db);
+        bodies.sort_by_key(|value| format!("{value:?}"));
+        bodies
+    };
+    assert_eq!(sorted(&alice), expected);
+    if synced {
+        drive(
+            &alice,
+            &bob,
+            alice.wait_for_transaction(committed.0, DurabilityTier::Global),
+        )
+        .unwrap();
+        assert_eq!(sorted(&bob), expected);
+        assert_eq!(sorted(&alice), expected);
+    }
 }
 
 #[test]
 fn a_handle_commit_waits_for_a_suspended_callback_that_resumes() {
-    handle_commit_waits_for_a_suspended_callback(true);
+    handle_commit_waits_for_a_suspended_callback(true, false);
 }
 
 #[test]
 fn a_handle_commit_waits_for_a_suspended_callback_that_is_cancelled() {
-    handle_commit_waits_for_a_suspended_callback(false);
+    handle_commit_waits_for_a_suspended_callback(false, false);
+}
+
+#[test]
+fn a_client_handle_commit_waits_for_a_suspended_callback_that_resumes() {
+    handle_commit_waits_for_a_suspended_callback(true, true);
+}
+
+#[test]
+fn a_client_handle_commit_waits_for_a_suspended_callback_that_is_cancelled() {
+    handle_commit_waits_for_a_suspended_callback(false, true);
 }
