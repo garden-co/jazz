@@ -354,6 +354,45 @@ pub(super) struct Group {
     /// self-relation): the root rows the result holds, which wake it
     /// whatever their images say.
     root_held: Option<HashSet<RowUuid>>,
+    /// Its relation statements, kept across runs
+    /// ([`Inner::nest_relations_kept`]).
+    plans: crate::db::RelationPlans,
+    /// Its re-check's root statement, kept per number of ids
+    /// ([`Inner::root_plan`]).
+    root_plans: RootPlans,
+}
+
+/// A re-check's root statement (the query narrowed to the changed ids),
+/// kept per number of ids. Kept only where the ids bind as one blob
+/// parameter each and nothing else of the statement depends on them
+/// ([`Inner::build_root_plan`]); `None` marks a count that does not, which
+/// compiles as before. At most [`ROOT_PLANS_MAX`] counts are kept: past
+/// that the map starts over, so a result re-checking many distinct
+/// numbers of ids compiles as it would without it.
+#[derive(Default)]
+struct RootPlans {
+    stamp: Option<crate::db::PlanStamp>,
+    by_count: HashMap<usize, Option<(Compiled, Vec<usize>)>>,
+    /// Statements reused (for [`FanoutStats::kept_root_plans`]).
+    hits: u64,
+}
+
+const ROOT_PLANS_MAX: usize = 32;
+
+/// `prepared` narrowed to the root rows `ids` (as a root filter, unordered
+/// and unbounded): a re-check's query.
+fn narrowed_to(prepared: &PreparedQuery, ids: &[Value]) -> PreparedQuery {
+    let mut prepared = prepared.clone();
+    prepared.query.filters.push(crate::query::Predicate::In(
+        crate::query::Operand::Column("id".to_owned()),
+        ids.iter()
+            .cloned()
+            .map(crate::query::Operand::Literal)
+            .collect(),
+    ));
+    prepared.query.order_by.clear();
+    prepared.query.limit = None;
+    prepared
 }
 
 type SortKey = Vec<(Sql, bool)>;
@@ -409,6 +448,12 @@ pub struct FanoutStats {
     /// Of those re-nests, the ones that read only the relations on the
     /// matched levels' paths, every other relation keeping its cells.
     pub renested_narrowly: u64,
+    /// Relation statements a live result reused from an earlier run
+    /// instead of compiling them again (over the results it holds now).
+    pub kept_plans: u64,
+    /// Re-check root statements a live result reused instead of compiling
+    /// them again (over the results it holds now).
+    pub kept_root_plans: u64,
     /// Woken groups that re-ran their query and diffed the whole result.
     pub reran: u64,
     /// Changed rows of a correlation-watched table that a watching group
@@ -593,8 +638,15 @@ impl Fanout {
     }
 
     pub(super) fn stats(&self) -> FanoutStats {
+        let (kept_plans, kept_root_plans) =
+            self.groups.values().fold((0, 0), |(plans, roots), group| {
+                let group = group.borrow();
+                (plans + group.plans.hits, roots + group.root_plans.hits)
+            });
         FanoutStats {
             groups: self.groups.len(),
+            kept_plans,
+            kept_root_plans,
             ..self.stats.clone()
         }
     }
@@ -785,6 +837,8 @@ impl Inner {
             #[cfg(any(test, feature = "testing"))]
             renest_follows: false,
             root_held: None,
+            plans: crate::db::RelationPlans::default(),
+            root_plans: RootPlans::default(),
         }));
         Self::hold(&mut handle.borrow_mut(), false);
         self.read_keys(&mut handle.borrow_mut());
@@ -1699,6 +1753,10 @@ impl Inner {
             group.correlations = correlations;
             group.by_root.clear();
             group.held.clear();
+            // Claims or the schema changed: nothing compiled before holds.
+            group.plans.clear();
+            group.root_plans.stamp = None;
+            group.root_plans.by_count.clear();
             Self::hold(&mut group, false);
             if reset {
                 self.reset_group(&mut group);
@@ -1797,6 +1855,96 @@ impl Inner {
         )
     }
 
+    /// The re-check statement for `ids`, from the kept one for their
+    /// number (built on a first use, see [`Self::build_root_plan`]) with
+    /// `ids` bound in; `None`: compile it as usual.
+    fn root_plan(
+        &self,
+        plans: &mut RootPlans,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        ids: &BTreeSet<RowUuid>,
+        read: &ReadSpec,
+    ) -> Option<Compiled> {
+        // The sessions a compile would resolve anyway; the kept stamp is
+        // compared with them where they stand.
+        let sessions = self.read_sessions(prepared, identity);
+        if !crate::db::PlanStamp::keep(
+            &mut plans.stamp,
+            &self.plan_inputs(prepared, &sessions, read),
+        ) {
+            plans.by_count.clear();
+        }
+        let n = ids.len();
+        let kept = match plans.by_count.get(&n) {
+            Some(kept) => {
+                plans.hits += u64::from(kept.is_some());
+                kept.clone()
+            }
+            None => {
+                let built = self.build_root_plan(prepared, identity, n, read);
+                if plans.by_count.len() >= ROOT_PLANS_MAX {
+                    plans.by_count.clear();
+                }
+                plans.by_count.insert(n, built.clone());
+                built
+            }
+        };
+        let (mut compiled, slots) = kept?;
+        // `id IN (...)` does not care in which order its ids come: the
+        // slots are filled in the set's order, and nothing reads a
+        // position as naming a particular id.
+        for (slot, id) in slots.iter().zip(ids) {
+            compiled.params[*slot] = Sql::Blob(id.0.as_bytes().to_vec());
+        }
+        Some(compiled)
+    }
+
+    /// The re-check statement for `n` ids, kept with the parameters that
+    /// hold them: compiled for two sets of `n` sentinel ids, and kept only
+    /// when the two are one statement whose parameters differ in exactly
+    /// `n` places, each holding the matching sentinel as a blob (so the
+    /// ids are bound literals and nothing else depends on them).
+    fn build_root_plan(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        n: usize,
+        read: &ReadSpec,
+    ) -> Option<(Compiled, Vec<usize>)> {
+        let sentinels = |tag: u8| -> Vec<[u8; 16]> {
+            (0..n)
+                .map(|k| {
+                    let mut id = [tag; 16];
+                    id[8..].copy_from_slice(&(k as u64).to_be_bytes());
+                    id
+                })
+                .collect()
+        };
+        let compile = |ids: &[[u8; 16]]| {
+            let ids: Vec<Value> = ids
+                .iter()
+                .map(|id| Value::Uuid(uuid::Uuid::from_bytes(*id)))
+                .collect();
+            self.compile(&narrowed_to(prepared, &ids), identity, read)
+                .ok()
+        };
+        let (a, b) = (sentinels(0xa5), sentinels(0x5a));
+        let (plan_a, plan_b) = (compile(&a)?, compile(&b)?);
+        if plan_a.sql != plan_b.sql || plan_a.params.len() != plan_b.params.len() {
+            return None;
+        }
+        let slots: Vec<usize> = (0..plan_a.params.len())
+            .filter(|at| plan_a.params[*at] != plan_b.params[*at])
+            .collect();
+        let bound = slots.len() == n
+            && slots.iter().enumerate().all(|(k, at)| {
+                plan_a.params[*at] == Sql::Blob(a[k].to_vec())
+                    && plan_b.params[*at] == Sql::Blob(b[k].to_vec())
+            });
+        bound.then_some((plan_a, slots))
+    }
+
     /// Apply a commit that changed only the root rows `ids` to a result in
     /// place: re-check those ids and splice them in by the query's order
     /// (sort keys are kept per row), emitting a delta for just those rows.
@@ -1829,17 +1977,6 @@ impl Inner {
                 Err(error) => return Some(Err(error)),
             };
         }
-        // The same query narrowed to the changed ids, as a root filter, so
-        // SQLite seeks them by primary key instead of sorting the view.
-        let mut prepared = group.prepared.clone();
-        prepared.query.filters.push(crate::query::Predicate::In(
-            crate::query::Operand::Column("id".to_owned()),
-            ids.iter()
-                .map(|id| crate::query::Operand::Literal(Value::Uuid(id.0)))
-                .collect(),
-        ));
-        prepared.query.order_by.clear();
-        prepared.query.limit = None;
         // Under a cut, a row changed past it still reads as it was. The
         // other rows were read through the cut the last run applied: under
         // another, only a full run (which records it) keeps them one state.
@@ -1847,16 +1984,59 @@ impl Inner {
         if cut_of(&read) != group.applied {
             return None;
         }
-        let narrowed = match self.compile(&prepared, group.identity, &read) {
-            Ok(compiled) => compiled,
-            Err(error) => return Some(Err(error)),
+        // The same query narrowed to the changed ids, as a root filter, so
+        // SQLite seeks them by primary key instead of sorting the view.
+        let ids_as_values: Vec<Value> = ids.iter().map(|id| Value::Uuid(id.0)).collect();
+        let kept = if read.view.is_none() && read.cut.is_none() {
+            self.root_plan(
+                &mut group.root_plans,
+                &group.prepared,
+                group.identity,
+                ids,
+                &read,
+            )
+        } else {
+            None
+        };
+        let narrowed = match kept {
+            Some(kept) => {
+                if crate::db::plan_oracle() {
+                    let fresh = self
+                        .compile(
+                            &narrowed_to(&group.prepared, &ids_as_values),
+                            group.identity,
+                            &read,
+                        )
+                        .ok();
+                    assert!(
+                        fresh.is_some_and(|fresh| crate::db::same_compiled(&kept, &fresh)),
+                        "a kept re-check statement differs from a fresh one on {}",
+                        group.root
+                    );
+                }
+                kept
+            }
+            None => match self.compile(
+                &narrowed_to(&group.prepared, &ids_as_values),
+                group.identity,
+                &read,
+            ) {
+                Ok(compiled) => compiled,
+                Err(error) => return Some(Err(error)),
+            },
         };
         let fresh = match self.execute(&narrowed, &group.prepared.query.table) {
             Ok(rows) => rows,
             Err(error) => return Some(Err(error)),
         };
         // Relations of the changed roots only; the others' are unchanged.
-        let fresh = match self.nest_relations(&group.prepared, group.identity, &read, fresh) {
+        let fresh = match self.nest_relations_kept(
+            &group.prepared,
+            group.identity,
+            &read,
+            fresh,
+            &mut group.plans,
+        ) {
             Ok(rows) => rows,
             Err(error) => return Some(Err(error)),
         };
@@ -2150,7 +2330,13 @@ impl Inner {
         let read = self.visible_read(&group.read, &group.tables);
         group.applied = cut_of(&read);
         let rows = self.run(&group.prepared, group.identity, &read)?;
-        self.nest_relations(&group.prepared, group.identity, &read, rows)
+        self.nest_relations_kept(
+            &group.prepared,
+            group.identity,
+            &read,
+            rows,
+            &mut group.plans,
+        )
     }
 
     /// Re-run the live results whose cut moved: their read's settle rose,
@@ -2476,12 +2662,18 @@ impl Inner {
                 || tree.values().any(|node| matches!(node, ScopeNode::Part(_)))
         });
         let nested = match &scope {
-            None => self.nest_relations(&group.prepared, group.identity, &read, bare),
+            None => self.nest_relations_kept(
+                &group.prepared,
+                group.identity,
+                &read,
+                bare,
+                &mut group.plans,
+            ),
             Some(scope) => {
                 let mut scoped = group.prepared.clone();
                 scoped.query.array_subqueries =
                     scope_prune(&group.prepared.query.array_subqueries, scope);
-                self.nest_relations(&scoped, group.identity, &read, bare)
+                self.nest_relations_kept(&scoped, group.identity, &read, bare, &mut group.plans)
             }
         };
         let nested = nested.ok()?;
