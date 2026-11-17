@@ -1326,6 +1326,10 @@ fn policy_variants(expr: &PolicyExpr, seen: &mut BTreeSet<&'static str>) {
             }
             RelationPredicate::True => "Pred.True",
             RelationPredicate::False => "Pred.False",
+            // Queries only: the policy language has no prefix/suffix test.
+            RelationPredicate::StartsWith { .. } | RelationPredicate::EndsWith { .. } => {
+                unreachable!("not a policy predicate")
+            }
         };
         seen.insert(name);
     }
