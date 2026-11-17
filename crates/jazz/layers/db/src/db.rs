@@ -6578,6 +6578,7 @@ impl Inner {
             own,
             extra: Vec::new(),
             overlay: Some(overlay),
+            derived: false,
         };
         let session = self.session(author);
         let (sql, params, _) = self.policy_check(table, row, &[], Some(cut), |ctx| {
@@ -6832,6 +6833,7 @@ impl Inner {
                 own: self.own_rank(seq),
                 extra: Vec::new(),
                 overlay: Some(CutOverlay::Grounded(grounded.clone())),
+                derived: false,
             };
             let mut passed = Vec::new();
             let mut failed = Vec::new();
@@ -6991,6 +6993,7 @@ impl Inner {
                     row: *check.row.0.as_bytes(),
                     key: check.key.clone(),
                 }),
+                derived: false,
             };
             if !self
                 .write_check_holds(&check.schema, check, cut, evidence)?
@@ -7044,6 +7047,7 @@ impl Inner {
             own: self.own_rank(seq.saturating_sub(1)),
             extra: Vec::new(),
             overlay: None,
+            derived: false,
         };
         Ok(matches!(
             self.existing_at(&table.stored, row, key, Some(&cut))?,

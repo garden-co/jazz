@@ -907,14 +907,11 @@ fn search_link(bob: &Db, server: &Db) -> jazz::db::Upstream {
     link
 }
 
-/// The messages a `Remote` subscription of `query` on `bob` is refused with.
+/// The message the authority refuses `bob`'s subscription of `query`
+/// with, if it does.
 fn remote_refusal(server: &Db, bob: &Db, query: &Query) -> Option<String> {
     let prepared = bob.prepare_query(query).unwrap();
-    let remote = ReadOpts {
-        tier: jazz::db::ReadTier::Remote,
-        ..ReadOpts::default()
-    };
-    let mut stream = block_on(bob.subscribe(&prepared, remote)).unwrap();
+    let mut stream = block_on(bob.subscribe(&prepared, ReadOpts::default())).unwrap();
     pump(server, &[bob]);
     let mut refusal = None;
     while let Some(event) = stream.try_next_event() {
@@ -980,4 +977,51 @@ fn a_search_through_an_index_the_authority_dropped_is_unknown() {
             .is_some_and(|m| m.contains("table notes has no specialised index `search`")),
         "{refusal:?}"
     );
+}
+
+/// A search reads the current rows, as its index holds them (SPEC 20.4):
+/// a `Remote` read of settled rows, or a read as of a snapshot, would score
+/// content the cut does not show, so it is refused. A local-first live
+/// search, whose replica may read it cut back to what its upstream settled,
+/// reads the current rows instead.
+#[test]
+fn a_search_at_remote_tier_is_refused_and_local_first_reads_current_rows() {
+    let server = authority(schema());
+    insert(&server, 1, note("Garden plans", None, "home", &[0.0, 0.0]));
+    let bob = client(1, schema());
+    let _link = search_link(&bob, &server);
+    let remote = ReadOpts {
+        tier: jazz::db::ReadTier::Remote,
+        ..ReadOpts::default()
+    };
+    let error = try_ids_with(&bob, &search("garden"), remote).expect_err("refused");
+    assert!(
+        error
+            .message
+            .contains("index search at Remote tier or as of a cut"),
+        "{error}"
+    );
+    let prepared = bob.prepare_query(&search("garden")).unwrap();
+    let mut stream = block_on(bob.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &[&bob]);
+    // Another writer's edit lands while bob's own read is not yet settled
+    // past it: the search still reads the current rows.
+    update(&server, 1, "title", Value::String("Garden tools".into()));
+    pump(&server, &[&bob]);
+    let mut rejected = None;
+    while let Some(event) = stream.try_next_event() {
+        if let SubscriptionEvent::Rejected { message, .. } = event {
+            rejected = Some(message);
+        }
+    }
+    assert_eq!(rejected, None);
+    assert_eq!(ids(&bob, &search("tools")), [1]);
+}
+
+fn try_ids_with(db: &Db, query: &Query, opts: ReadOpts) -> Result<Vec<u8>, jazz::db::Error> {
+    let prepared = db.prepare_query(query)?;
+    Ok(block_on(db.all(&prepared, opts))?
+        .iter()
+        .map(|row| row.row_uuid().0.as_bytes()[0])
+        .collect())
 }

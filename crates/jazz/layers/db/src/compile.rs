@@ -275,6 +275,10 @@ pub struct Cut {
     /// A write check's evidence (SPEC 7, WITH CHECK): which of the
     /// versions at `own` are overlaid. `None` overlays them all.
     pub overlay: Option<Overlay>,
+    /// A replica's live read cut back to what its upstream settled for it
+    /// (`Inner::visible_read`), not one the reader asked for: an index
+    /// search reads current rows instead, as its index holds them.
+    pub derived: bool,
 }
 
 /// The versions at a write check's `own` that its policy sees (SPEC 7);
@@ -981,6 +985,7 @@ impl<'a> Ctx<'a> {
     /// clause and the read policy applied to `t` unchanged. Without an
     /// explicit order it orders by `$score`, best first; ties by `id`.
     fn compile_search(mut self, query: &Query, include_deleted: bool) -> Result<Compiled, Error> {
+        self.search_cut()?;
         let refused = [
             (query.flat_join.is_some(), "flat joins"),
             (
@@ -991,10 +996,6 @@ impl<'a> Ctx<'a> {
             (!query.inherits.is_empty(), "inherited-policy traversals"),
             (query.relation.is_some(), "relation queries"),
             (query.aggregate.is_some(), "aggregates"),
-            (
-                self.cut.is_some() && !self.settled_only,
-                "an as-of snapshot",
-            ),
             (
                 self.view.as_ref().is_some_and(|view| view.base.is_some()),
                 "a branch view with a base",
@@ -1051,6 +1052,24 @@ impl<'a> Ctx<'a> {
             writer: true,
             partial: Vec::new(),
         })
+    }
+
+    /// An index search reads the current rows, as its index holds them
+    /// (SPEC 20.4): a cut a replica's live read was given to stay within
+    /// what its upstream settled is dropped, and any other cut (a
+    /// snapshot, a read as of a position, a `Remote` read of settled rows)
+    /// is refused rather than scored against content the cut does not show.
+    fn search_cut(&mut self) -> Result<(), Error> {
+        match &self.cut {
+            Some(cut) if cut.derived && !self.settled_only => {
+                self.cut = None;
+                Ok(())
+            }
+            Some(_) => Err(unsupported(
+                "index search at Remote tier or as of a cut (searches read the current rows)",
+            )),
+            None => Ok(()),
+        }
     }
 
     /// The body of `ix(rid, score)` for the planned search (see
@@ -1141,6 +1160,7 @@ impl<'a> Ctx<'a> {
         column: &str,
         cap: usize,
     ) -> Result<(String, String, Vec<Sql>), Error> {
+        self.search_cut()?;
         if query.flat_join.is_some()
             || !query.policy_branches.is_empty()
             || !query.inherits.is_empty()

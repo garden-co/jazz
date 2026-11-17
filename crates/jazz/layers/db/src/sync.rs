@@ -7397,6 +7397,7 @@ impl Inner {
             .map(|&(seq, _)| (Pos::at(seq), None))
             .collect();
         cut.unsettled = !read.settled_only;
+        cut.derived = true;
         Cow::Owned(ReadSpec {
             cut: Some(cut),
             ..read.clone()
@@ -8265,6 +8266,11 @@ impl Db {
         // A history read lists versions and a flat join tuples, not the
         // rows a replica caches.
         if history_source_table(&query.table).is_some() || query.flat_join.is_some() {
+            return Ok(None);
+        }
+        // An index search reads current rows only (SPEC 20.4): it has no
+        // settled view to judge an answer's listing by.
+        if crate::ix::search_of(query).is_some() {
             return Ok(None);
         }
         // Only which rows the view holds matters: ids, not values (whose
