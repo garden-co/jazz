@@ -1130,3 +1130,272 @@ fn a_junction_join_on_differently_stored_enum_columns_follows_its_rows_through_a
         false,
     );
 }
+
+/// `members` of spaces, each space named by two columns (`kind`, `space`).
+/// A member row is readable by its own account and by every member of the
+/// same space: a correlated `EXISTS` on both columns at once.
+fn spaces_schema() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("members")
+                    .column("kind", ColumnType::Text)
+                    .column("space", ColumnType::Text)
+                    .column("account", ColumnType::Text)
+                    .policies(read_and_allow_all_writes(PolicyExpr::Or(vec![
+                        session_eq("account", &ME),
+                        exists(
+                            "members",
+                            vec![
+                                outer_eq("kind", "kind"),
+                                outer_eq("space", "space"),
+                                session_eq("account", &ME),
+                            ],
+                        ),
+                    ]))),
+            )
+            .build(),
+    )
+}
+
+/// A server and alice's replica of [`spaces_schema`], connected.
+fn spaces() -> (Db, Db) {
+    let open = |node: u8, author: AuthorSubject| {
+        let config = DbConfig::new(
+            spaces_schema(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        );
+        if node == 0 {
+            block_on(Db::open_history_complete(config))
+        } else {
+            block_on(Db::open(config))
+        }
+        .unwrap()
+    };
+    let server = open(0, AuthorSubject::SYSTEM);
+    let client = open(1, alice());
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    (server, client)
+}
+
+fn member(n: u8, space: &str, account: Value) -> (RowUuid, BTreeMap<String, Value>) {
+    (
+        id(7, n),
+        cells(&[
+            ("kind", Value::String("project".into())),
+            ("space", Value::String(space.into())),
+            ("account", account),
+        ]),
+    )
+}
+
+fn insert_member(server: &Db, (row, values): (RowUuid, BTreeMap<String, Value>)) {
+    block_on(server.insert(
+        "members",
+        values,
+        InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+}
+
+/// Alice's own member row of `space`.
+fn my_membership(client: &Db, space: &str) -> jazz::db::SubscriptionStream {
+    let me = Value::String(alice().principal_parts().1);
+    let query = Query::from("members")
+        .filter(eq(col("space"), lit(Value::String(space.into()))))
+        .filter(eq(col("account"), lit(me)));
+    let prepared = client.prepare_query(&query).unwrap();
+    block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap()
+}
+
+/// A policy correlated on two columns follows one space's rows: support
+/// matches every outer-row equality of the `EXISTS`, not just the first.
+/// Alice, a member of two spaces of the same kind, reads her own member
+/// row of the first; her replica receives the first space's members (what
+/// the read rests on) and nothing of the second, then or later.
+///
+/// ```text
+/// server: project/p1 {alice, bob}, project/p2 {alice, carol}
+/// alice ──subscribe members(space = p1, account = alice)──► server
+///       ◄── alice@p1 (result), bob@p1 (support); not alice@p2, carol@p2
+/// server: + dave@p1, + erin@p2 ──► alice gets dave@p1 only
+/// ```
+#[test]
+fn a_two_column_correlation_follows_one_space() {
+    let (server, client) = spaces();
+    let me = Value::String(alice().principal_parts().1);
+    let person = |name: &str| Value::String(name.into());
+    insert_member(&server, member(1, "p1", me.clone()));
+    insert_member(&server, member(2, "p1", person("bob")));
+    insert_member(&server, member(3, "p2", me.clone()));
+    insert_member(&server, member(4, "p2", person("carol")));
+
+    let _stream = my_membership(&client, "p1");
+    pump(&server, &client);
+    assert_eq!(local(&client, "members"), [id(7, 1), id(7, 2)]);
+
+    insert_member(&server, member(5, "p1", person("dave")));
+    insert_member(&server, member(6, "p2", person("erin")));
+    pump(&server, &client);
+    assert_eq!(
+        local(&client, "members"),
+        [id(7, 1), id(7, 2), id(7, 5)],
+        "a later member of the first space follows; the second space's does not"
+    );
+}
+
+/// A further equality between differently stored enum columns joins the
+/// support key recoded, like the leading one: the grant is followed by its
+/// variant, not by the document's raw tag. With `level` first or second,
+/// alice's replica receives the one grant her document's read rests on:
+/// not the same team's grant of the other level (an equality left out),
+/// nor another team's grant of the same level (only the first equality
+/// followed), nor the grant whose raw tag matches (no recode).
+///
+/// ```text
+/// documents.level ("high", "low")   grants.level ("low", "high")
+/// server: doc(high, team1); grants (high, team1) ✓, (low, team1),
+///         (high, team2)
+/// alice ──subscribe documents──► server ◄── doc + grant (high, team1)
+/// server: + grant (high, team1) ✓, + grant (low, team1) ──► the first
+/// ```
+#[test]
+fn a_differently_stored_enum_further_equality_follows_by_value() {
+    for level_first in [true, false] {
+        let open = |node: u8, author: AuthorSubject| {
+            let config = DbConfig::new(
+                graded_schema(level_first),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([node; 16]),
+                    author,
+                },
+            );
+            if node == 0 {
+                block_on(Db::open_history_complete(config))
+            } else {
+                block_on(Db::open(config))
+            }
+            .unwrap()
+        };
+        let server = open(0, AuthorSubject::SYSTEM);
+        let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
+            server
+                .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
+                .unwrap();
+        };
+        let me = Value::String(alice().principal_parts().1);
+        let level = |name: &str| Value::String(name.to_owned());
+        for team in [1, 2] {
+            seed(
+                "teams",
+                id(9, team),
+                cells(&[("name", Value::String(format!("team {team}")))]),
+            );
+        }
+        let grant = |name: &str, team: u8| {
+            cells(&[
+                ("level", level(name)),
+                ("team", Value::Uuid(id(9, team).0)),
+                ("user", me.clone()),
+            ])
+        };
+        seed("grants", id(1, 1), grant("high", 1));
+        seed("grants", id(1, 2), grant("low", 1));
+        seed("grants", id(1, 3), grant("high", 2));
+        seed(
+            "documents",
+            id(2, 1),
+            cells(&[
+                ("level", level("high")),
+                ("team", Value::Uuid(id(9, 1).0)),
+                ("title", Value::String("doc".into())),
+            ]),
+        );
+
+        let client = open(1, alice());
+        let (client_side, server_side) = duplex();
+        let _upstream = block_on(client.connect_upstream(client_side));
+        server.accept_subscriber(server_side, alice()).unwrap();
+        let documents = client.prepare_query(&Query::from("documents")).unwrap();
+        let _stream = block_on(client.subscribe(&documents, ReadOpts::default())).unwrap();
+        pump(&server, &client);
+        assert_eq!(local(&client, "documents"), [id(2, 1)], "{level_first}");
+        assert_eq!(
+            local(&client, "grants"),
+            [id(1, 1)],
+            "level_first {level_first}: the grant the document's read rests on"
+        );
+
+        seed("grants", id(1, 4), grant("high", 1));
+        seed("grants", id(1, 5), grant("low", 1));
+        pump(&server, &client);
+        assert_eq!(
+            local(&client, "grants"),
+            [id(1, 1), id(1, 4)],
+            "level_first {level_first}: a later matching grant follows"
+        );
+    }
+}
+
+/// A session's composite support watches go with the subscriptions that
+/// follow them, and so do the column sets every later write to the table
+/// is matched against: once nothing follows a space, a write pays for none
+/// of its keys.
+///
+/// ```text
+/// alice ──subscribe p1──► server   keys {p1}       sets 1
+/// alice ──subscribe p2──► server   keys {p1, p2}   sets 1
+/// alice ──drop p1───────► server   keys {p2}       sets 1
+/// alice ──drop p2───────► server   keys {}         sets 0
+/// ```
+#[test]
+fn composite_support_watches_go_with_their_subscriptions() {
+    let (server, client) = spaces();
+    let me = Value::String(alice().principal_parts().1);
+    insert_member(&server, member(1, "p1", me.clone()));
+    insert_member(&server, member(2, "p1", Value::String("bob".into())));
+    insert_member(&server, member(3, "p2", me.clone()));
+    insert_member(&server, member(4, "p2", Value::String("carol".into())));
+    assert_eq!(server.composite_watches_for_test(), (0, 0));
+
+    let first = my_membership(&client, "p1");
+    pump(&server, &client);
+    let (one_space, sets) = server.composite_watches_for_test();
+    assert!(one_space > 0, "following one space holds its key");
+    assert_eq!(sets, 1, "one column set: (kind, space)");
+
+    let second = my_membership(&client, "p2");
+    pump(&server, &client);
+    let (two_spaces, sets) = server.composite_watches_for_test();
+    assert!(two_spaces > one_space, "the second space adds its keys");
+    assert_eq!(sets, 1);
+
+    drop(first);
+    pump(&server, &client);
+    let (after_first, sets) = server.composite_watches_for_test();
+    assert!(
+        after_first < two_spaces,
+        "the first space's keys go with it"
+    );
+    assert_eq!(sets, 1);
+
+    drop(second);
+    pump(&server, &client);
+    assert_eq!(
+        server.composite_watches_for_test(),
+        (0, 0),
+        "nothing followed: a write is matched against no column set"
+    );
+    // A later write to the table still works, and reaches nobody.
+    insert_member(&server, member(5, "p1", Value::String("dave".into())));
+    pump(&server, &client);
+    assert!(!local(&client, "members").contains(&id(7, 5)));
+}
