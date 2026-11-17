@@ -1302,7 +1302,7 @@ fn release_egress(egress: &AtomicUsize, bytes: usize, runtime: &Weak<Inner>) {
 /// A session's output in server memory: the bytes held (handed to its
 /// socket side and not yet written), which it derefs to, and the raw bytes
 /// its socket has written, which tell a client that is reading slowly from
-/// one that stopped (see [`ReadClock`]).
+/// one that stopped.
 #[derive(Default)]
 pub struct Egress {
     held: AtomicUsize,
@@ -2313,10 +2313,10 @@ pub(crate) const SLOW_READER_TIMEOUT: Duration = Duration::from_secs(120);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EgressLimits {
     /// Undrained output one session may hold beyond twice its biggest
-    /// tick ([`SESSION_BACKLOG_FLOOR`]).
+    /// tick (default 64 MiB).
     pub session_backlog_bytes: usize,
     /// Undrained output one session may hold at most, however big its
-    /// ticks ([`SESSION_BACKLOG_CEILING`]). At least `session_backlog_bytes`.
+    /// ticks (default 256 MiB). At least `session_backlog_bytes`.
     pub session_backlog_max_bytes: usize,
     /// Undrained output all sessions together may hold, best effort: past
     /// it, the sessions behind the minimum read rate by
@@ -2329,10 +2329,10 @@ pub struct EgressLimits {
     /// output waits at the budget, before it is closed.
     pub slow_reader_timeout: Duration,
     /// How long a session must have been behind [`Self::min_read_rate`]
-    /// before the egress budget may close it ([`STALL_GRACE`]).
+    /// before the egress budget may close it (default 10 s).
     pub stall_grace: Duration,
     /// Bytes a second a client must read, on average, while its output
-    /// waits, to count as reading ([`MIN_READ_RATE`]).
+    /// waits, to count as reading (default 1024 bytes a second).
     pub min_read_rate: u64,
 }
 
