@@ -455,3 +455,67 @@ fn a_client_on_the_old_version_writes_into_the_default_branch() {
     );
     assert!(bodies(&v2_view, space_region("a", "us")).is_empty());
 }
+
+/// Installing a version along the app's lenses is checked like any other:
+/// a store at v2 refuses to open under a v3 whose lens drops the `region`
+/// branch column (its rows are keyed by it), and still opens as v2.
+#[test]
+fn a_store_refuses_a_lens_that_drops_a_branch_column() {
+    let path = scratch("lens-drop");
+    {
+        let db = open_file(v1(), &path).unwrap();
+        write(&db, space("a"), "before");
+        drop(common::reinstall(db, &path, config(v2()), vec![]));
+    }
+    let v3 = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("docs")
+                    .column("space", ColumnType::Text)
+                    .column("body", ColumnType::Text)
+                    .nullable_column("note", ColumnType::Text)
+                    .branch_by("space")
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let lens = jazz::protocol::MigrationLens::new(
+        v2().version_id(),
+        v3.version_id(),
+        vec![jazz::protocol::TableLens {
+            source_table: "docs".into(),
+            target_table: "docs".into(),
+            ops: vec![
+                jazz::protocol::LensOp::DropColumn {
+                    column: "region".into(),
+                    backwards_default: Value::String("eu".into()),
+                },
+                jazz::protocol::LensOp::AddColumn {
+                    column: "note".into(),
+                    default: Value::Nullable(None),
+                },
+            ],
+        }],
+    )
+    .unwrap();
+    let error = block_on(Db::open_at(
+        config(v3).with_migrations(vec![v2()], vec![lens]),
+        &path,
+        jazz::db::FileOptions::default(),
+    ))
+    .err()
+    .expect("a lens dropping a branch column");
+    assert!(
+        error
+            .to_string()
+            .contains("removing branch column docs.region"),
+        "{error}"
+    );
+
+    // Planted positive: nothing was installed.
+    let db = open_file(v2(), &path).unwrap();
+    assert_eq!(
+        bodies(&db, space_region("a", "eu")),
+        vec![(text("before"), text("eu"))]
+    );
+}
