@@ -585,3 +585,55 @@ test("revoking a user's sessions ends their stated sessions and refuses older on
     await mf.dispose();
   }
 });
+
+test("a guest the backend relays syncs by its own proof, until its identity is revoked", async () => {
+  const mf = start(mkdtempSync(join(tmpdir(), "jazz-do-guest-")));
+  const audience = "https://my-app.example";
+  const guest = JSON.parse(fixture.testGuest(7, audience, BigInt(Math.floor(Date.now() / 1000))));
+  const principal = { issuer: guest.issuer, subject: guest.subject };
+  try {
+    const published = await mf.dispatchFetch(`http://core/apps/${APP}/admin/bundles`, {
+      method: "POST",
+      headers: { "X-Jazz-Admin-Secret": SECRET, "content-type": "application/json" },
+      body: fixture.testDeployRequest(SCHEMA),
+    });
+    const { bundle } = await published.json();
+    const relay = async (proof) => {
+      // As jazz-tools relays a guest: the backend credential with no
+      // access, and a stand-in in the prelude's secret slot.
+      const socket = await connect(mf, { "X-Jazz-Backend-Credential": SECRET });
+      socket.send(
+        JSON.stringify({
+          peer_identity: guest.peer,
+          auth: { jwt_token: proof, backend_secret: "stated-by-backend-credential" },
+          local_first_audience: audience,
+          bundle,
+        }),
+      );
+      socket.send(fixture.testThinHello());
+      return [socket, await socket.next()];
+    };
+
+    const [, forged] = await relay(guest.proof.slice(0, -4) + "AAAA");
+    assert.ok(forged.error, JSON.stringify(forged));
+
+    const [socket, hello] = await relay(guest.proof);
+    assert.deepEqual(hello, { hello: true });
+    socket.send(fixture.testThinSchema(1n, SCHEMA));
+    assert.deepEqual(await socket.next(), { id: 1, ok: true });
+    socket.send(fixture.testThinInsertNote(2n, "by a guest"));
+    assert.deepEqual(await socket.next(), { id: 2, written: true });
+
+    // Revoking the guest's identity ends its live socket.
+    const revoked = await mf.dispatchFetch(`http://core/apps/${APP}/admin/accounts/revoke`, {
+      method: "POST",
+      headers: { "X-Jazz-Admin-Secret": SECRET, "content-type": "application/json" },
+      body: JSON.stringify({ approver: principal, target: principal }),
+    });
+    assert.equal(revoked.status, 204, await revoked.clone().text());
+    assert.match((await socket.next()).error ?? "", /account identity revoked/);
+    await eventually(() => socket.closed(), "the guest's socket closes");
+  } finally {
+    await mf.dispose();
+  }
+});
