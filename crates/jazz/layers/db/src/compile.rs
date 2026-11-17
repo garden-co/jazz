@@ -261,9 +261,14 @@ pub struct Ctx<'a> {
     /// Where catalogue identities ([`PolicyValue::TableIdentity`]) come
     /// from: asked once, the first time a policy names one. Without a
     /// source, or while it knows no namespace, no identity is bound, so a
-    /// comparison with one holds for no row.
+    /// comparison with one holds for no row, and a `NOT` over it for none
+    /// either (see `unknown_identities`).
     catalogue: Option<&'a dyn IdentitySource>,
     namespace: Option<Option<[u8; 16]>>,
+    /// How many table identities this compile could not bind. A `NOT`
+    /// whose operand counted one is false: an unknown identity grants
+    /// nothing, whichever way it is compared.
+    unknown_identities: usize,
     /// Compiling a table's policy for an `InheritsFrom`: one inside it is
     /// refused rather than followed (it could recurse without end). A
     /// deployment refuses such a policy first (`check_deployable_policies`).
@@ -412,6 +417,7 @@ impl<'a> Ctx<'a> {
             catalogue: None,
             namespace: None,
             in_inherits_from: false,
+            unknown_identities: 0,
         }
     }
 
@@ -2257,8 +2263,8 @@ impl<'a> Ctx<'a> {
     }
 
     /// Table `name`'s catalogue identity, a `uuid`, or no value while this
-    /// store does not know it. It reads no rows, so the table is no
-    /// dependency.
+    /// store does not know it (counted in `unknown_identities`). It reads
+    /// no rows, so the table is no dependency.
     fn table_identity(&mut self, name: &str) -> Result<Term, Error> {
         let stored = &self.schema.table(name)?.stored;
         let namespace = match self.namespace {
@@ -2274,6 +2280,9 @@ impl<'a> Ctx<'a> {
         };
         let identity =
             namespace.map(|namespace| Value::Uuid(crate::names::identity(namespace, stored, None)));
+        if identity.is_none() {
+            self.unknown_identities += 1;
+        }
         self.present(identity)
     }
 
@@ -2306,7 +2315,18 @@ impl<'a> Ctx<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 or(&parts)
             }
-            PolicyExpr::Not(inner) => format!("(NOT COALESCE({}, 0))", recurse(self, inner)?),
+            PolicyExpr::Not(inner) => {
+                let unknown = self.unknown_identities;
+                let inner = recurse(self, inner)?;
+                if self.unknown_identities > unknown {
+                    // Its operand compares with an identity this store does
+                    // not know: false, not the negation of a comparison
+                    // that held for no row.
+                    "0".to_owned()
+                } else {
+                    format!("(NOT COALESCE({inner}, 0))")
+                }
+            }
             PolicyExpr::Cmp {
                 column,
                 op,

@@ -75,7 +75,8 @@ variant`) and refuses it, so a downgrade fails closed rather than dropping
   binds there. A database that is not the authority but serves subscribers
   (used only in tests) binds an identity only once its catalogue mirror has
   confirmed the schema version's names; until then the identity is no value
-  and the policy grants nothing through it. Policies are compiled per check
+  and the policy grants nothing through it: a comparison with it holds for
+  no row, and a `NOT` whose operand compares with it is false. Policies are compiled per check
   and per read, so each one compiled after confirmation binds it.
 - **Clients.** A client never evaluates write policies. `table_id('T')` is
   read by the permissions reader of this version and later; an older reader

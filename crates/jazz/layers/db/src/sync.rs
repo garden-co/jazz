@@ -15838,7 +15838,10 @@ fn pruned_txs_created(conn: &rusqlite::Connection, known: &std::cell::Cell<Optio
 /// has them, the authority's namespace once this store holds it and its
 /// schema's names are confirmed (on the authority, always once a version is
 /// admitted). Before that, none: such a policy grants nothing through an
-/// identity until the names are confirmed, when it is compiled again.
+/// identity (a comparison with it holds for no row, and a `NOT` over one is
+/// false) until the names are confirmed, when it is compiled again. Only a
+/// store that is not the authority lacks them, and in the shipped topology
+/// only Core, the authority, evaluates policies.
 impl crate::compile::IdentitySource for Inner {
     fn identity_namespace(&self) -> Result<Option<[u8; 16]>, Error> {
         let Some(namespace) = self.stored_namespace()? else {

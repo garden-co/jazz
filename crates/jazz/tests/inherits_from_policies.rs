@@ -1155,3 +1155,88 @@ fn an_updater_who_may_not_read_the_project_adds_nobody() {
         );
     }
 }
+
+/// Under `NOT` too, a table identity this store does not know yet grants
+/// nothing: `NOT(scopeId = table_id('notes'))` holds for no row until the
+/// names are confirmed, then for a row naming another table.
+///
+/// ```text
+/// replica (names unconfirmed): note(scopeId = projects) ── NOT(= notes) ──✗
+/// replica (names confirmed):   note(scopeId = projects) ── NOT(= notes) ──✓
+/// ```
+#[test]
+fn an_unknown_table_identity_grants_nothing_under_not() {
+    let schema = || {
+        compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("projects")
+                        .column("name", ColumnType::Text)
+                        .policies(allow_all_policies()),
+                )
+                .table(
+                    TableSchemaBuilder::new("notes")
+                        .column("scopeId", ColumnType::Uuid)
+                        .policies(
+                            TablePolicies::new()
+                                .with_select(PolicyExpr::Not(Box::new(cmp(
+                                    "scopeId",
+                                    table_id("notes"),
+                                ))))
+                                .with_insert(PolicyExpr::True),
+                        ),
+                )
+                .build(),
+        )
+    };
+    let server = block_on(Db::open_history_complete(DbConfig::new(
+        schema(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xee; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    let projects = Value::Uuid(server.table_identity("projects").unwrap().unwrap().0);
+    let replica = block_on(Db::open(DbConfig::new(
+        schema(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x33; 16]),
+            author: alice(),
+        },
+    )))
+    .unwrap();
+    replica.become_replica();
+    block_on(replica.insert(
+        "notes",
+        BTreeMap::from([("scopeId".to_owned(), projects)]),
+        insert_options(id(0x20)),
+    ))
+    .unwrap();
+    let notes = replica.prepare_query(&Query::from("notes")).unwrap();
+    let read = |db: &Db| {
+        block_on(db.all_for_identity(
+            &notes,
+            ReadOpts::for_read_tier(ReadTier::LocalOnly),
+            alice(),
+        ))
+        .unwrap()
+        .len()
+    };
+    assert!(!matches!(replica.table_identity("notes"), Ok(Some(_))));
+    assert_eq!(
+        read(&replica),
+        0,
+        "no identity known: the negation holds for no row"
+    );
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(replica.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    let _stream = block_on(replica.subscribe(&notes, ReadOpts::default())).unwrap();
+    for _ in 0..40 {
+        block_on(replica.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    assert!(replica.table_identity("notes").unwrap().is_some());
+    assert_eq!(read(&replica), 1, "the confirmed identity binds");
+}
