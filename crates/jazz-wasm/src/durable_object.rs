@@ -6,8 +6,11 @@
 //! tags 0=NULL, 1=i64 LE, 2=f64 LE, 3=UTF-8 bytes, 4=blob bytes. Variable
 //! payloads have a u32 LE length; result rows start with a u32 LE cell count.
 //! Result cells of unknown type are read through tagged SQL projections, so
-//! integers and reals stay apart although JavaScript numbers do not. Unsafe
-//! integers (beyond ±(2^53−1)) are refused. Database bytes are unchanged.
+//! integers and reals stay apart although JavaScript numbers do not.
+//! Integers keep their whole 64-bit range: beyond a JavaScript number's
+//! exact range they are bound as decimal text (under the statement's
+//! `CAST(? AS INTEGER)`) and read through that projection's text. Database
+//! bytes are unchanged.
 use jazz::storage::{self, Backend, Cursor, SqlError, SqlResult, Storage, Value};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -49,7 +52,10 @@ function args(input) {
     if (tag === 0) {
       list.push(null);
     } else if (tag === 1) {
-      list.push(Number(v.getBigInt64(i, true)));
+      // A number where it holds the integer exactly; else decimal text,
+      // which the statement's CAST(? AS INTEGER) reads exactly.
+      const n = v.getBigInt64(i, true);
+      list.push(n >= -9007199254740991n && n <= 9007199254740991n ? Number(n) : n.toString());
       i += 8;
     } else if (tag === 2) {
       list.push(v.getFloat64(i, true));
@@ -215,7 +221,6 @@ export function jazz_do_next(result) {
       const b = new Uint8Array(cell), tag = b[0];
       if (tag === 1) {
         const n = BigInt(decoder.decode(b.subarray(1)));
-        if (n < -9007199254740991n || n > 9007199254740991n) throw new Error("SQL INTEGER outside Durable Object safe integer range");
         room(pos, 9); out[pos++] = 1;
         view.setBigInt64(pos, n, true); pos += 8;
       } else if (tag === 3 || tag === 4) {
@@ -301,11 +306,11 @@ impl ObjectSql {
 
 impl Backend for ObjectSql {
     fn query(&self, sql: &str, parameters: &[Value]) -> SqlResult<Box<dyn Cursor + '_>> {
-        storage::durable_object_refusal(sql, parameters, true)?;
+        storage::durable_object_refusal(sql, true)?;
         Ok(Box::new(self.cursor(sql, parameters, true)?))
     }
     fn execute(&self, sql: &str, parameters: &[Value]) -> SqlResult<usize> {
-        storage::durable_object_refusal(sql, parameters, false)?;
+        storage::durable_object_refusal(sql, false)?;
         let first = sql
             .split_whitespace()
             .next()
@@ -364,7 +369,6 @@ fn sql_error(error: JsValue) -> SqlError {
     let message = js_message(&error);
     storage::backend_error(error_code(&message), message)
 }
-const MAX_SAFE: i64 = (1 << 53) - 1;
 const SQLITE_ERROR: i32 = 1;
 const SQLITE_INTERRUPT: i32 = 9;
 const SQLITE_TOOBIG: i32 = 18;
@@ -423,11 +427,6 @@ fn encode(bindings: &[Value]) -> SqlResult<Vec<u8>> {
         match value {
             Value::Null => out.push(0),
             Value::Integer(n) => {
-                if !(-MAX_SAFE..=MAX_SAFE).contains(n) {
-                    return Err(bridge_error(
-                        "SQL INTEGER outside Durable Object safe integer range".into(),
-                    ));
-                }
                 out.push(1);
                 out.extend_from_slice(&n.to_le_bytes());
             }
@@ -648,6 +647,36 @@ mod smoke {
         serde_json::to_string(&rows).map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))
     }
 
+    /// Integers across the bridge at the ends of their 64-bit range and
+    /// just past a JavaScript number's exact one: each bound, stored,
+    /// matched and read back. Those that came back unchanged, as JSON
+    /// strings.
+    fn integers(storage: ObjectStorage) -> Result<String, jazz::db::Error> {
+        use jazz::db::{Error, ErrorCode};
+        let storage = durable_object_storage(storage);
+        let sql = |e: jazz::storage::SqlError| Error::new(ErrorCode::Storage, e.to_string());
+        storage
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS smoke_integers (v INTEGER); DELETE FROM smoke_integers",
+            )
+            .map_err(sql)?;
+        let mut same = Vec::new();
+        for n in [i64::MIN, -(1 << 53) - 1, (1 << 53) + 1, i64::MAX] {
+            storage
+                .execute("INSERT INTO smoke_integers (v) VALUES (?1)", [n])
+                .map_err(sql)?;
+            let read: i64 = storage
+                .query_row("SELECT v FROM smoke_integers WHERE v = ?1", [n], |r| {
+                    r.get(0)
+                })
+                .map_err(sql)?;
+            if read == n {
+                same.push(n.to_string());
+            }
+        }
+        serde_json::to_string(&same).map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))
+    }
+
     /// Run `step` on this object's storage; a JSON summary of what it saw.
     /// - `write`: insert a short note and a 300 KiB one.
     /// - `read`: every note's title and body length (after a restart too).
@@ -655,8 +684,10 @@ mod smoke {
     ///   refuses; the refusal's message.
     #[wasm_bindgen(js_name = durableObjectSmoke)]
     pub fn durable_object_smoke(storage: ObjectStorage, step: &str) -> Result<String, JsValue> {
-        if step == "scopes" {
-            return scopes(storage).map_err(js);
+        match step {
+            "scopes" => return scopes(storage).map_err(js),
+            "integers" => return integers(storage).map_err(js),
+            _ => {}
         }
         let db = open(storage)?;
         let note = |title: &str, body: &str| {

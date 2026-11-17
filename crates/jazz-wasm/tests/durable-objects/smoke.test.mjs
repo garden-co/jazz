@@ -62,6 +62,13 @@ test("Jazz stores, reads and restarts on a Durable Object's SQL", async () => {
     // Scopes on the object's own transactionSync: a failing inner scope is
     // undone while the outer keeps 1 and 3; a failing scope (4) is undone.
     assert.deepEqual(await step(mf, "scopes"), [1, 3]);
+    // Integers keep their whole 64-bit range across the bridge.
+    assert.deepEqual(await step(mf, "integers"), [
+      "-9223372036854775808",
+      "-9007199254740993",
+      "9007199254740993",
+      "9223372036854775807",
+    ]);
     await mf.dispose();
   } finally {
     rmSync(persist, { recursive: true, force: true });
