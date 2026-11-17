@@ -627,8 +627,8 @@ mod tests {
                 "unknown variant `Nope`, expected one of `Cmp`, `SessionCmp`, `IsNull`, \
                  `SessionIsNull`, `IsNotNull`, `SessionIsNotNull`, `Contains`, \
                  `SessionContains`, `In`, `InList`, `SessionInList`, `Exists`, `ExistsRel`, \
-                 `Inherits`, `InheritsReferencing`, `And`, `Or`, `Not`, `True`, `False` at line \
-                 1 column 14",
+                 `Inherits`, `InheritsReferencing`, `InheritsFrom`, `InsertedByThisTransaction`, \
+                 `And`, `Or`, `Not`, `True`, `False` at line 1 column 14",
             ),
         ] {
             let actual = serde_json::from_str::<PolicyExpr>(input)
