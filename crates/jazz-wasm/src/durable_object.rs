@@ -301,24 +301,31 @@ impl ObjectSql {
 
 impl Backend for ObjectSql {
     fn query(&self, sql: &str, parameters: &[Value]) -> SqlResult<Box<dyn Cursor + '_>> {
+        storage::durable_object_refusal(sql, parameters, true)?;
         Ok(Box::new(self.cursor(sql, parameters, true)?))
     }
     fn execute(&self, sql: &str, parameters: &[Value]) -> SqlResult<usize> {
-        let mut cursor = self.cursor(sql, parameters, false)?;
-        while cursor.next()?.is_some() {}
-        drop(cursor);
+        storage::durable_object_refusal(sql, parameters, false)?;
         let first = sql
             .split_whitespace()
             .next()
             .unwrap_or("")
             .to_ascii_uppercase();
-        if matches!(
-            first.as_str(),
-            "INSERT" | "UPDATE" | "DELETE" | "REPLACE" | "WITH"
-        ) {
-            Ok(self.scalar("SELECT changes()")? as usize)
-        } else {
-            Ok(0)
+        // `changes()` is the last data-modifying statement's count, which a
+        // `WITH … SELECT` does not reset: count those by `total_changes()`.
+        let before = match first.as_str() {
+            "WITH" => Some(self.scalar("SELECT total_changes()")?),
+            _ => None,
+        };
+        let mut cursor = self.cursor(sql, parameters, false)?;
+        while cursor.next()?.is_some() {}
+        drop(cursor);
+        match (first.as_str(), before) {
+            (_, Some(before)) => Ok((self.scalar("SELECT total_changes()")? - before) as usize),
+            ("INSERT" | "UPDATE" | "DELETE" | "REPLACE", None) => {
+                Ok(self.scalar("SELECT changes()")? as usize)
+            }
+            _ => Ok(0),
         }
     }
     fn execute_script(&self, script: &str) -> SqlResult<()> {
@@ -598,6 +605,49 @@ mod smoke {
         JsValue::from_str(&error.to_string())
     }
 
+    /// Scopes on the object's own `transactionSync`, through Jazz's
+    /// storage: an inner scope that fails is undone while its outer scope
+    /// keeps the rest, and a scope that fails is undone whole. The rows
+    /// left, as JSON.
+    fn scopes(storage: ObjectStorage) -> Result<String, jazz::db::Error> {
+        use jazz::db::{Error, ErrorCode};
+        let storage = durable_object_storage(storage);
+        let sql = |e: jazz::storage::SqlError| Error::new(ErrorCode::Storage, e.to_string());
+        let insert = |s: &jazz::storage::Storage, v: i64| {
+            s.execute("INSERT INTO smoke_scopes (v) VALUES (?1)", [v])
+                .map(drop)
+                .map_err(sql)
+        };
+        let refused = || Error::new(ErrorCode::Storage, "refused by the smoke test");
+        storage
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS smoke_scopes (v INTEGER); DELETE FROM smoke_scopes",
+            )
+            .map_err(sql)?;
+        storage.scope("outer", |s| {
+            insert(s, 1)?;
+            let inner = s.scope("inner", |s| {
+                insert(s, 2)?;
+                Err::<(), _>(refused())
+            });
+            assert!(inner.is_err());
+            insert(s, 3)
+        })?;
+        let failed = storage.scope("whole", |s| {
+            insert(s, 4)?;
+            Err::<(), _>(refused())
+        });
+        assert!(failed.is_err());
+        let rows: Vec<i64> = storage
+            .prepare("SELECT v FROM smoke_scopes ORDER BY v")
+            .map_err(sql)?
+            .query_map([], |row| row.get(0))
+            .map_err(sql)?
+            .collect::<Result<_, _>>()
+            .map_err(sql)?;
+        serde_json::to_string(&rows).map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))
+    }
+
     /// Run `step` on this object's storage; a JSON summary of what it saw.
     /// - `write`: insert a short note and a 300 KiB one.
     /// - `read`: every note's title and body length (after a restart too).
@@ -605,6 +655,9 @@ mod smoke {
     ///   refuses; the refusal's message.
     #[wasm_bindgen(js_name = durableObjectSmoke)]
     pub fn durable_object_smoke(storage: ObjectStorage, step: &str) -> Result<String, JsValue> {
+        if step == "scopes" {
+            return scopes(storage).map_err(js);
+        }
         let db = open(storage)?;
         let note = |title: &str, body: &str| {
             BTreeMap::from([

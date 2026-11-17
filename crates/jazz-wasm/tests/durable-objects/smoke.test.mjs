@@ -4,7 +4,8 @@
 //
 //   object #1: write (short + 300 KiB note) ── read
 //   restart (a new workerd over the same persisted storage)
-//   object #2: read ── callback transaction (refused)
+//   object #2: read ── callback transaction (refused) ── read
+//   scopes: outer(1, inner(2, fails), 3) keeps [1, 3]; whole(4, fails) undone
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -58,6 +59,9 @@ test("Jazz stores, reads and restarts on a Durable Object's SQL", async () => {
     assert.match(refused, /is not supported on managed storage \(Durable Objects\) yet/);
     // The refused transaction left nothing behind.
     assert.deepEqual(await step(mf, "read"), notes);
+    // Scopes on the object's own transactionSync: a failing inner scope is
+    // undone while the outer keeps 1 and 3; a failing scope (4) is undone.
+    assert.deepEqual(await step(mf, "scopes"), [1, 3]);
     await mf.dispose();
   } finally {
     rmSync(persist, { recursive: true, force: true });
