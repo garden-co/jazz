@@ -11538,3 +11538,71 @@ fn migration_path(
         _ => Vec::new(),
     }
 }
+
+/// White-box on purpose: how many commits a store's DDL costs, and that a
+/// failing statement undoes the statements before it, are not visible
+/// through the public API (a store that fails to open is just an error).
+#[cfg(test)]
+mod execute_script_tests {
+    use super::execute_script;
+    use rusqlite::Connection;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// `tables` tables, each with an index and a trigger whose body holds
+    /// a `;` (so the script is not split inside it).
+    fn script(tables: usize) -> String {
+        (0..tables)
+            .map(|i| {
+                format!(
+                    "CREATE TABLE t{i} (a, b); CREATE INDEX t{i}_a ON t{i}(a); \
+                     CREATE TRIGGER t{i}_tr AFTER INSERT ON t{i} BEGIN SELECT 1; END;"
+                )
+            })
+            .collect()
+    }
+
+    fn objects(conn: &Connection) -> i64 {
+        conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// A schema's DDL is one commit (one sync of the file), however many
+    /// statements it holds.
+    #[test]
+    fn a_script_commits_once() {
+        let conn = Connection::open_in_memory().unwrap();
+        let commits = Arc::new(AtomicUsize::new(0));
+        let counted = commits.clone();
+        conn.commit_hook(Some(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            false
+        }))
+        .unwrap();
+        execute_script(&conn, &script(50)).unwrap();
+        assert_eq!(commits.load(Ordering::SeqCst), 1);
+        assert_eq!(objects(&conn), 150);
+    }
+
+    /// A failing statement undoes the whole script: no half-created schema.
+    #[test]
+    fn a_failed_script_leaves_nothing() {
+        let conn = Connection::open_in_memory().unwrap();
+        let failing = format!("{} CREATE TABLE t0 (again);", script(3));
+        assert!(execute_script(&conn, &failing).is_err());
+        assert_eq!(objects(&conn), 0);
+        assert!(conn.is_autocommit());
+    }
+
+    /// Inside a caller's transaction the script commits, or rolls back,
+    /// with it.
+    #[test]
+    fn a_script_inside_a_transaction_goes_with_it() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("BEGIN").unwrap();
+        execute_script(&conn, &script(2)).unwrap();
+        assert!(!conn.is_autocommit());
+        conn.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(objects(&conn), 0);
+    }
+}
