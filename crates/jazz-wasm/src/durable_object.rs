@@ -1794,13 +1794,10 @@ mod core_host {
                     Err(error) => refusal(500, ErrorResponse::internal(error)),
                 },
                 _ => {
-                    let request = match serde_json::from_slice::<DeployRequest>(body) {
-                        Ok(request) => request,
-                        Err(error) => {
-                            return refusal(400, ErrorResponse::bad_request(error.to_string()));
-                        }
-                    };
-                    match self.deploy(request) {
+                    if let Err(error) = serde_json::from_slice::<DeployRequest>(body) {
+                        return refusal(400, ErrorResponse::bad_request(error.to_string()));
+                    }
+                    match self.deploy(body) {
                         Ok(response) => answer(200, response),
                         Err(error) => answer(error.status.as_u16(), error.body),
                     }
@@ -1852,44 +1849,31 @@ mod core_host {
             Ok(CatalogueIndex::from_rows(&self.catalogue_rows()?, None))
         }
 
-        /// Publish `request`, as native's `POST admin/bundles`: validate it
-        /// against the store's catalogue, open the core on its first schema
-        /// if none runs yet, and apply its rows and admissions in one
-        /// transaction. A bundle new to the store ends the sessions pinned
-        /// to others (they reconnect and pin again). The object serves one
-        /// request at a time, so the catalogue cannot move between
-        /// validating and applying.
-        fn deploy(&mut self, request: DeployRequest) -> Result<DeploymentResponse, DeployError> {
-            let index = self.catalogue_index().map_err(DeployError::internal)?;
+        /// Publish the deploy request in `body` (valid JSON, checked by the
+        /// caller), as native's `POST admin/bundles`: validate it against
+        /// the core's catalogue and apply its rows and admissions in one
+        /// transaction, refused if the catalogue moved since it was staged
+        /// (`apply_catalogue`). Without a core yet, the deployment is
+        /// probed on a scratch store first, so one the catalogue refuses
+        /// never opens the app's store on its schema, and the core is
+        /// opened on its first schema; it is then staged again on that
+        /// core's catalogue (which admitted the schema it opened on). A
+        /// bundle new to the store ends the sessions pinned to others.
+        fn deploy(&mut self, body: &[u8]) -> Result<DeploymentResponse, DeployError> {
+            let request =
+                || serde_json::from_slice::<DeployRequest>(body).map_err(DeployError::invalid);
             let now = js_sys::Date::now() as u64;
-            let deployment = deployment::prepare(&index, request, now)?;
-            if !deployment.staged.response.changed {
-                // Nothing to commit; the core's view of the catalogue may
-                // be behind the store's, as on native: reload it.
-                if let Some(core) = &mut self.core {
-                    core.reload_catalogue().map_err(DeployError::internal)?;
-                }
-                return Ok(deployment.staged.response);
-            }
-            let new_bundle = deployment.staged.new_bundle();
             if self.core.is_none() {
+                let index = self.catalogue_index().map_err(DeployError::internal)?;
+                let deployment = deployment::prepare(&index, request()?, now)?;
+                if !deployment.staged.response.changed {
+                    return Ok(deployment.staged.response);
+                }
                 let genesis = deployment.genesis()?;
-                // Apply on a scratch store first, as native does, so a
-                // deployment the catalogue refuses never opens the app's
-                // store on its schema.
                 let scratch = jazz::host::StoreFile::memory().map_err(DeployError::internal)?;
                 let mut probe = ServerCore::open(genesis.clone(), scratch, false, None)
                     .map_err(DeployError::internal)?;
-                let probed = probe
-                    .db()
-                    .catalogue()
-                    .map_err(DeployError::internal)
-                    .and_then(|rows| deployment.catalogue_change(&rows))
-                    .and_then(|change| {
-                        probe
-                            .apply_catalogue(change, None)
-                            .map_err(DeployError::from)
-                    });
+                let probed = apply(&mut probe, request()?, now, false).map(drop);
                 probe.close();
                 probed?;
                 let file = jazz::host::StoreFile::from_storage(durable_object_storage(
@@ -1902,11 +1886,30 @@ mod core_host {
                 );
             }
             let core = self.core.as_mut().expect("opened above");
-            let rows = core.db().catalogue().map_err(DeployError::internal)?;
-            let change = deployment.catalogue_change(&rows)?;
-            core.apply_catalogue(change, new_bundle)?;
-            Ok(deployment.staged.response)
+            apply(core, request()?, now, true)
         }
+    }
+
+    /// Stage `request` on `core`'s catalogue and apply it; with
+    /// `supersede`, a bundle new to the store ends the sessions pinned to
+    /// others. Nothing to commit reloads the core's catalogue, as native.
+    fn apply(
+        core: &mut ServerCore,
+        request: DeployRequest,
+        now: u64,
+        supersede: bool,
+    ) -> Result<DeploymentResponse, DeployError> {
+        let rows = core.db().catalogue().map_err(DeployError::internal)?;
+        let index = CatalogueIndex::from_rows(&rows, None);
+        let deployment = deployment::prepare(&index, request, now)?;
+        if !deployment.staged.response.changed {
+            core.reload_catalogue().map_err(DeployError::internal)?;
+            return Ok(deployment.staged.response);
+        }
+        let change = deployment.catalogue_change(&rows)?;
+        let new_bundle = deployment.staged.new_bundle().filter(|_| supersede);
+        core.apply_catalogue(deployment.staged.expected(), change, new_bundle)?;
+        Ok(deployment.staged.response)
     }
 
     /// What `output` answers.
