@@ -1,0 +1,356 @@
+# jazz-ix-text/1 terms (SPEC 20.10.1). Per case: `analyzer`, `text <utf8 hex>`,
+# then one `term <utf8 hex>` line per term in order. `#` starts a readable comment.
+
+analyzer jazz-text/1:en
+text   # ""
+
+analyzer jazz-text/1:en
+text 48656c6c6f2c20576f726c6421  # "Hello, World!"
+term 68656c6c6f  # "hello"
+term 776f726c64  # "world"
+
+analyzer jazz-text/1:en
+text 446f6e27742073746f70207468652052756e6e696e6720646f6773e28099206f776e65727320e2809420416e73656c6d277320636166c3a9  # "Don't stop the Running dogs’ owners — Anselm's café"
+term 646f6e2774  # "don't"
+term 73746f70  # "stop"
+term 746865  # "the"
+term 72756e  # "run"
+term 646f67  # "dog"
+term 6f776e6572  # "owner"
+term 616e73656c6d  # "anselm"
+term 63616665  # "cafe"
+
+analyzer jazz-text/1:en
+text 2771756f7465642720726f636b276e27726f6c6c204f274e65696c6c  # "'quoted' rock'n'roll O'Neill"
+term 71756f74  # "quot"
+term 726f636b276e27726f6c  # "rock'n'rol"
+term 6f276e65696c  # "o'neil"
+
+analyzer jazz-text/1:en
+text 332e313420312c3030302076312e3220323032362d31312d31352034783420d9a3d9a420c2bd  # "3.14 1,000 v1.2 2026-11-15 4x4 ٣٤ ½"
+term 33  # "3"
+term 3134  # "14"
+term 31  # "1"
+term 303030  # "000"
+term 7631  # "v1"
+term 32  # "2"
+term 32303236  # "2026"
+term 3131  # "11"
+term 3135  # "15"
+term 347834  # "4x4"
+term d9a3d9a4  # "٣٤"
+
+analyzer jazz-text/1:en
+text e69db1e4baace382bfe383afe383bc20ed959ceab5adec96b420e0b8a0e0b8b2e0b8a9e0b8b2e0b984e0b897e0b8a2  # "東京タワー 한국어 ภาษาไทย"
+term e69db1  # "東"
+term e4baac  # "京"
+term e382bf  # "タ"
+term e383af  # "ワ"
+term e383bc  # "ー"
+term ed959ceab5adec96b4  # "한국어"
+term e0b8a0  # "ภ"
+term e0b8b2  # "า"
+term e0b8a9  # "ษ"
+term e0b8b2  # "า"
+term e0b984  # "ไ"
+term e0b897  # "ท"
+term e0b8a2  # "ย"
+
+analyzer jazz-text/1:en
+text 4a617a7ae69db1e4baac616263cea9cebcceadceb3ceb120e0a4aee0a4b0e0a4bee0a4a0e0a58020d985d8b1d8add8a8d8a7  # "Jazz東京abcΩμέγα मराठी مرحبا"
+term 6a617a7a  # "jazz"
+term e69db1  # "東"
+term e4baac  # "京"
+term 616263cf89cebcceb5ceb3ceb1  # "abcωμεγα"
+term e0a4aee0a4b0e0a4bee0a4a0e0a580  # "मराठी"
+term d985d8b1d8add8a8d8a7  # "مرحبا"
+
+analyzer jazz-text/1:en
+text f09f918df09f8fbd20f09f87a9f09f87aa20f09f91a9e2808df09f91a9e2808df09f91a720e2988520e282ac20c2a9206a617a7af09f8eb7  # "👍🏽 🇩🇪 👩\u{200d}👩\u{200d}👧 ★ € © jazz🎷"
+term 6a617a7a  # "jazz"
+
+analyzer jazz-text/1:en
+text 53747261c39f65205354524153534520e1ba9e20c4b07374616e62756c20cea3ce8acea3cea5cea6ce9fcea3  # "Straße STRASSE ẞ İstanbul ΣΊΣΥΦΟΣ"
+term 737472617373  # "strass"
+term 737472617373  # "strass"
+term 7373  # "ss"
+term 697374616e62756c  # "istanbul"
+term cf83ceb9cf83cf85cf86cebfcf83  # "σισυφοσ"
+
+analyzer jazz-text/1:en
+text 63616665cc81206e6169cc8876652041cc8a6e677374726fcc886d20d081d0bbd0bad0b020d0b920c785656d616c  # "cafe\u{301} nai\u{308}ve A\u{30a}ngstro\u{308}m Ёлка й ǅemal"
+term 63616665  # "cafe"
+term 6e616976  # "naiv"
+term 616e677374726f6d  # "angstrom"
+term d0b5d0bbd0bad0b0  # "елка"
+term d0b8  # "и"
+term c786656d616c  # "ǆemal"
+
+analyzer jazz-text/1:en
+text c38673697220c5925556524520efac816e6520c581c3b364c5ba20c398727374656420efbcaaefbca1efbcbaefbcbaefbc91efbc92  # "Æsir ŒUVRE ﬁne Łódź Ørsted ＪＡＺＺ１２"
+term 6165736972  # "aesir"
+term 6f65757672  # "oeuvr"
+term 66696e65  # "fine"
+term 6c6f647a  # "lodz"
+term 6f727374  # "orst"
+term 6a617a7a3132  # "jazz12"
+
+analyzer jazz-text/1:en
+text 67656e65726f75736c7920636f6e6e656374696f6e7320636f6d6d756e69636174696f6e20756e6976657273697469657320696e74657276616c20736b696573206479696e67  # "generously connections communication universities interval skies dying"
+term 67656e65726f7573  # "generous"
+term 636f6e6e656374  # "connect"
+term 636f6d6d756e6963  # "communic"
+term 756e6976657273697469  # "universiti"
+term 696e74657276616c  # "interval"
+term 736b79  # "sky"
+term 646965  # "die"
+
+analyzer jazz-text/1:en
+text 61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161206161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161  # "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+term 61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161  # "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+analyzer jazz-text/1:en
+text cc817820e2808d20746162096e65770a6c696e65c2a06e627370  # "\u{301}x \u{200d} tab\tnew\nline\u{a0}nbsp"
+term 78  # "x"
+term 746162  # "tab"
+term 6e6577  # "new"
+term 6c696e65  # "line"
+term 6e627370  # "nbsp"
+
+analyzer jazz-text/1:en
+text e0a4a8e0a4aee0a4b8e0a58de0a4a4e0a587e0a5a4e0a4a6e0a581e0a4a8e0a4bfe0a4afe0a4be20d985d8b1d8add8a8d8a7d88cd8b9d8a7d984d98520d7a9d79cd795d79dd783d7a2d795d79cd79d2078d6897920efbbbf626f6d  # "नमस\u{94d}त\u{947}।द\u{941}निया مرحبا،عالم שלום׃עולם x։y \u{feff}bom"
+term e0a4a8e0a4aee0a4b8e0a58de0a4a4e0a587  # "नमस\u{94d}त\u{947}"
+term e0a4a6e0a581e0a4a8e0a4bfe0a4afe0a4be  # "द\u{941}निया"
+term d985d8b1d8add8a8d8a7  # "مرحبا"
+term d8b9d8a7d984d985  # "عالم"
+term d7a9d79cd795d79d  # "שלום"
+term d7a2d795d79cd79d  # "עולם"
+term 78  # "x"
+term 79  # "y"
+term 626f6d  # "bom"
+
+analyzer jazz-text/1:en
+text 636fc2ad6f706572617465206669efbbbf6e6520d985db8ce2808cd8aed988d8a7d987d985  # "co\u{ad}operate fi\u{feff}ne می\u{200c}خواهم"
+term 636f6f706572  # "cooper"
+term 66696e65  # "fine"
+term d985db8cd8aed988d8a7d987d985  # "میخواهم"
+
+analyzer jazz-text/1:en
+text 65e1aab0782065e1b780782065e28390782065efb8a07820e8919bf3a08480  # "e\u{1ab0}x e\u{1dc0}x e\u{20d0}x e\u{fe20}x 葛\u{e0100}"
+term 6578  # "ex"
+term 6578  # "ex"
+term 6578  # "ex"
+term 6578  # "ex"
+term e8919b  # "葛"
+
+analyzer jazz-text/1:en
+text 636f6cc2b76c65636369c3b320d7a6d794d7b4d79c20d7a6d79422d79c20d792d7b3d799d7a8d7a4d7942061c2b7207361792022686922  # "col·lecció צה״ל צה\"ל ג׳ירפה a· say \"hi\""
+term 636f6c6c656363696f  # "colleccio"
+term d7a6d794d79c  # "צהל"
+term d7a6d794d79c  # "צהל"
+term d79227d799d7a8d7a4d794  # "ג'ירפה"
+term 61  # "a"
+term 736179  # "say"
+term 6869  # "hi"
+
+analyzer jazz-text/1:en
+text 33c2b73420486f6d65c2b741626f757420434f4cc2b74c45434349c39320d7a6d794d6b8d7b4d79c  # "3·4 Home·About COL·LECCIÓ צה\u{5b8}״ל"
+term 33  # "3"
+term 34  # "4"
+term 686f6d65  # "home"
+term 61626f7574  # "about"
+term 636f6c6c656363696f  # "colleccio"
+term d7a6d794d79c  # "צהל"
+
+analyzer jazz-text/1:en
+text d7a9d6b8d781d79cd795d6b9d79d20d791d6b0d6bcd7a8d6b5d790d7a9d6b4d781d696d799d7aa20d985d98ed8b1d992d8add98ed8a8d98bd8a720d8b1d98ed8add992d985d9b0d98620d791d799d7aad6bed7a1d7a4d7a8  # "ש\u{5b8}\u{5c1}לו\u{5b9}ם ב\u{5b0}\u{5bc}ר\u{5b5}אש\u{5b4}\u{5c1}\u{596}ית م\u{64e}ر\u{652}ح\u{64e}ب\u{64b}ا ر\u{64e}ح\u{652}م\u{670}ن בית־ספר"
+term d7a9d79cd795d79d  # "שלום"
+term d791d7a8d790d7a9d799d7aa  # "בראשית"
+term d985d8b1d8add8a8d8a7  # "مرحبا"
+term d8b1d8add985d986  # "رحمن"
+term d791d799d7aa  # "בית"
+term d7a1d7a4d7a8  # "ספר"
+
+analyzer jazz-text/1:en
+text d985d980d8b1d8add8a8d8a720d9b1d984d8b1d98ed991d8add992d985d98ed980d9b0d986d99020d8a7d984d8b1d8add985d986db9a20d8a3d8add985d8af  # "مـرحبا ٱلر\u{64e}\u{651}ح\u{652}م\u{64e}ـ\u{670}ن\u{650} الرحمن\u{6da} أحمد"
+term d985d8b1d8add8a8d8a7  # "مرحبا"
+term d9b1d984d8b1d8add985d986  # "ٱلرحمن"
+term d8a7d984d8b1d8add985d986  # "الرحمن"
+term d8a3d8add985d8af  # "أحمد"
+
+analyzer jazz-text/1:simple
+text   # ""
+
+analyzer jazz-text/1:simple
+text 48656c6c6f2c20576f726c6421  # "Hello, World!"
+term 68656c6c6f  # "hello"
+term 776f726c64  # "world"
+
+analyzer jazz-text/1:simple
+text 446f6e27742073746f70207468652052756e6e696e6720646f6773e28099206f776e65727320e2809420416e73656c6d277320636166c3a9  # "Don't stop the Running dogs’ owners — Anselm's café"
+term 646f6e2774  # "don't"
+term 73746f70  # "stop"
+term 746865  # "the"
+term 72756e6e696e67  # "running"
+term 646f6773  # "dogs"
+term 6f776e657273  # "owners"
+term 616e73656c6d2773  # "anselm's"
+term 63616665  # "cafe"
+
+analyzer jazz-text/1:simple
+text 2771756f7465642720726f636b276e27726f6c6c204f274e65696c6c  # "'quoted' rock'n'roll O'Neill"
+term 71756f746564  # "quoted"
+term 726f636b276e27726f6c6c  # "rock'n'roll"
+term 6f276e65696c6c  # "o'neill"
+
+analyzer jazz-text/1:simple
+text 332e313420312c3030302076312e3220323032362d31312d31352034783420d9a3d9a420c2bd  # "3.14 1,000 v1.2 2026-11-15 4x4 ٣٤ ½"
+term 33  # "3"
+term 3134  # "14"
+term 31  # "1"
+term 303030  # "000"
+term 7631  # "v1"
+term 32  # "2"
+term 32303236  # "2026"
+term 3131  # "11"
+term 3135  # "15"
+term 347834  # "4x4"
+term d9a3d9a4  # "٣٤"
+
+analyzer jazz-text/1:simple
+text e69db1e4baace382bfe383afe383bc20ed959ceab5adec96b420e0b8a0e0b8b2e0b8a9e0b8b2e0b984e0b897e0b8a2  # "東京タワー 한국어 ภาษาไทย"
+term e69db1  # "東"
+term e4baac  # "京"
+term e382bf  # "タ"
+term e383af  # "ワ"
+term e383bc  # "ー"
+term ed959ceab5adec96b4  # "한국어"
+term e0b8a0  # "ภ"
+term e0b8b2  # "า"
+term e0b8a9  # "ษ"
+term e0b8b2  # "า"
+term e0b984  # "ไ"
+term e0b897  # "ท"
+term e0b8a2  # "ย"
+
+analyzer jazz-text/1:simple
+text 4a617a7ae69db1e4baac616263cea9cebcceadceb3ceb120e0a4aee0a4b0e0a4bee0a4a0e0a58020d985d8b1d8add8a8d8a7  # "Jazz東京abcΩμέγα मराठी مرحبا"
+term 6a617a7a  # "jazz"
+term e69db1  # "東"
+term e4baac  # "京"
+term 616263cf89cebcceb5ceb3ceb1  # "abcωμεγα"
+term e0a4aee0a4b0e0a4bee0a4a0e0a580  # "मराठी"
+term d985d8b1d8add8a8d8a7  # "مرحبا"
+
+analyzer jazz-text/1:simple
+text f09f918df09f8fbd20f09f87a9f09f87aa20f09f91a9e2808df09f91a9e2808df09f91a720e2988520e282ac20c2a9206a617a7af09f8eb7  # "👍🏽 🇩🇪 👩\u{200d}👩\u{200d}👧 ★ € © jazz🎷"
+term 6a617a7a  # "jazz"
+
+analyzer jazz-text/1:simple
+text 53747261c39f65205354524153534520e1ba9e20c4b07374616e62756c20cea3ce8acea3cea5cea6ce9fcea3  # "Straße STRASSE ẞ İstanbul ΣΊΣΥΦΟΣ"
+term 73747261737365  # "strasse"
+term 73747261737365  # "strasse"
+term 7373  # "ss"
+term 697374616e62756c  # "istanbul"
+term cf83ceb9cf83cf85cf86cebfcf83  # "σισυφοσ"
+
+analyzer jazz-text/1:simple
+text 63616665cc81206e6169cc8876652041cc8a6e677374726fcc886d20d081d0bbd0bad0b020d0b920c785656d616c  # "cafe\u{301} nai\u{308}ve A\u{30a}ngstro\u{308}m Ёлка й ǅemal"
+term 63616665  # "cafe"
+term 6e61697665  # "naive"
+term 616e677374726f6d  # "angstrom"
+term d0b5d0bbd0bad0b0  # "елка"
+term d0b8  # "и"
+term c786656d616c  # "ǆemal"
+
+analyzer jazz-text/1:simple
+text c38673697220c5925556524520efac816e6520c581c3b364c5ba20c398727374656420efbcaaefbca1efbcbaefbcbaefbc91efbc92  # "Æsir ŒUVRE ﬁne Łódź Ørsted ＪＡＺＺ１２"
+term 6165736972  # "aesir"
+term 6f6575767265  # "oeuvre"
+term 66696e65  # "fine"
+term 6c6f647a  # "lodz"
+term 6f7273746564  # "orsted"
+term 6a617a7a3132  # "jazz12"
+
+analyzer jazz-text/1:simple
+text 67656e65726f75736c7920636f6e6e656374696f6e7320636f6d6d756e69636174696f6e20756e6976657273697469657320696e74657276616c20736b696573206479696e67  # "generously connections communication universities interval skies dying"
+term 67656e65726f75736c79  # "generously"
+term 636f6e6e656374696f6e73  # "connections"
+term 636f6d6d756e69636174696f6e  # "communication"
+term 756e69766572736974696573  # "universities"
+term 696e74657276616c  # "interval"
+term 736b696573  # "skies"
+term 6479696e67  # "dying"
+
+analyzer jazz-text/1:simple
+text 61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161206161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161  # "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+term 61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161  # "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+analyzer jazz-text/1:simple
+text cc817820e2808d20746162096e65770a6c696e65c2a06e627370  # "\u{301}x \u{200d} tab\tnew\nline\u{a0}nbsp"
+term 78  # "x"
+term 746162  # "tab"
+term 6e6577  # "new"
+term 6c696e65  # "line"
+term 6e627370  # "nbsp"
+
+analyzer jazz-text/1:simple
+text e0a4a8e0a4aee0a4b8e0a58de0a4a4e0a587e0a5a4e0a4a6e0a581e0a4a8e0a4bfe0a4afe0a4be20d985d8b1d8add8a8d8a7d88cd8b9d8a7d984d98520d7a9d79cd795d79dd783d7a2d795d79cd79d2078d6897920efbbbf626f6d  # "नमस\u{94d}त\u{947}।द\u{941}निया مرحبا،عالم שלום׃עולם x։y \u{feff}bom"
+term e0a4a8e0a4aee0a4b8e0a58de0a4a4e0a587  # "नमस\u{94d}त\u{947}"
+term e0a4a6e0a581e0a4a8e0a4bfe0a4afe0a4be  # "द\u{941}निया"
+term d985d8b1d8add8a8d8a7  # "مرحبا"
+term d8b9d8a7d984d985  # "عالم"
+term d7a9d79cd795d79d  # "שלום"
+term d7a2d795d79cd79d  # "עולם"
+term 78  # "x"
+term 79  # "y"
+term 626f6d  # "bom"
+
+analyzer jazz-text/1:simple
+text 636fc2ad6f706572617465206669efbbbf6e6520d985db8ce2808cd8aed988d8a7d987d985  # "co\u{ad}operate fi\u{feff}ne می\u{200c}خواهم"
+term 636f6f706572617465  # "cooperate"
+term 66696e65  # "fine"
+term d985db8cd8aed988d8a7d987d985  # "میخواهم"
+
+analyzer jazz-text/1:simple
+text 65e1aab0782065e1b780782065e28390782065efb8a07820e8919bf3a08480  # "e\u{1ab0}x e\u{1dc0}x e\u{20d0}x e\u{fe20}x 葛\u{e0100}"
+term 6578  # "ex"
+term 6578  # "ex"
+term 6578  # "ex"
+term 6578  # "ex"
+term e8919b  # "葛"
+
+analyzer jazz-text/1:simple
+text 636f6cc2b76c65636369c3b320d7a6d794d7b4d79c20d7a6d79422d79c20d792d7b3d799d7a8d7a4d7942061c2b7207361792022686922  # "col·lecció צה״ל צה\"ל ג׳ירפה a· say \"hi\""
+term 636f6c6c656363696f  # "colleccio"
+term d7a6d794d79c  # "צהל"
+term d7a6d794d79c  # "צהל"
+term d79227d799d7a8d7a4d794  # "ג'ירפה"
+term 61  # "a"
+term 736179  # "say"
+term 6869  # "hi"
+
+analyzer jazz-text/1:simple
+text 33c2b73420486f6d65c2b741626f757420434f4cc2b74c45434349c39320d7a6d794d6b8d7b4d79c  # "3·4 Home·About COL·LECCIÓ צה\u{5b8}״ל"
+term 33  # "3"
+term 34  # "4"
+term 686f6d65  # "home"
+term 61626f7574  # "about"
+term 636f6c6c656363696f  # "colleccio"
+term d7a6d794d79c  # "צהל"
+
+analyzer jazz-text/1:simple
+text d7a9d6b8d781d79cd795d6b9d79d20d791d6b0d6bcd7a8d6b5d790d7a9d6b4d781d696d799d7aa20d985d98ed8b1d992d8add98ed8a8d98bd8a720d8b1d98ed8add992d985d9b0d98620d791d799d7aad6bed7a1d7a4d7a8  # "ש\u{5b8}\u{5c1}לו\u{5b9}ם ב\u{5b0}\u{5bc}ר\u{5b5}אש\u{5b4}\u{5c1}\u{596}ית م\u{64e}ر\u{652}ح\u{64e}ب\u{64b}ا ر\u{64e}ح\u{652}م\u{670}ن בית־ספר"
+term d7a9d79cd795d79d  # "שלום"
+term d791d7a8d790d7a9d799d7aa  # "בראשית"
+term d985d8b1d8add8a8d8a7  # "مرحبا"
+term d8b1d8add985d986  # "رحمن"
+term d791d799d7aa  # "בית"
+term d7a1d7a4d7a8  # "ספר"
+
+analyzer jazz-text/1:simple
+text d985d980d8b1d8add8a8d8a720d9b1d984d8b1d98ed991d8add992d985d98ed980d9b0d986d99020d8a7d984d8b1d8add985d986db9a20d8a3d8add985d8af  # "مـرحبا ٱلر\u{64e}\u{651}ح\u{652}م\u{64e}ـ\u{670}ن\u{650} الرحمن\u{6da} أحمد"
+term d985d8b1d8add8a8d8a7  # "مرحبا"
+term d9b1d984d8b1d8add985d986  # "ٱلرحمن"
+term d8a7d984d8b1d8add985d986  # "الرحمن"
+term d8a3d8add985d8af  # "أحمد"

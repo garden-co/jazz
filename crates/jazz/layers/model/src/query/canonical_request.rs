@@ -354,7 +354,48 @@ fn canonical_predicate_key(predicate: &Predicate) -> Vec<u8> {
             bytes.push(b'0');
             put_bytes(&mut bytes, &canonical_operand_key(operand));
         }
-        Predicate::Removed(removed) => match *removed {},
+        Predicate::Removed(removed)
+        | Predicate::ReservedStartsWith(removed)
+        | Predicate::ReservedEndsWith(removed) => match *removed {},
+        Predicate::Search(search) => {
+            bytes.push(b's');
+            put_str(&mut bytes, &search.index);
+            match &search.op {
+                IndexOp::Match { text, mode } => {
+                    bytes.push(0);
+                    put_str(&mut bytes, text);
+                    bytes.push(match mode {
+                        MatchMode::Any => 0,
+                        MatchMode::All => 1,
+                    });
+                }
+                IndexOp::Nearest { vector, k } => {
+                    bytes.push(1);
+                    bytes.extend_from_slice(&(vector.len() as u64).to_be_bytes());
+                    for x in vector {
+                        bytes.extend_from_slice(&x.to_bits().to_be_bytes());
+                    }
+                    bytes.extend_from_slice(&k.to_be_bytes());
+                }
+                IndexOp::WithinRadius { lat, lng, meters } => {
+                    bytes.push(2);
+                    for x in [lat, lng, meters] {
+                        bytes.extend_from_slice(&x.to_bits().to_be_bytes());
+                    }
+                }
+                IndexOp::WithinBox {
+                    south,
+                    west,
+                    north,
+                    east,
+                } => {
+                    bytes.push(3);
+                    for x in [south, west, north, east] {
+                        bytes.extend_from_slice(&x.to_bits().to_be_bytes());
+                    }
+                }
+            }
+        }
     }
     bytes
 }
@@ -576,7 +617,15 @@ fn validate_public_column_type(column_type: &ColumnType) -> Result<(), QueryErro
                 }
             }
         }
-        ColumnType::Internal(_) | ColumnType::U48 => return Err(QueryError::OperandTypeMismatch),
+        // A typed query parameter is never a vector or a point: their filter
+        // operands are byte literals compared bit for bit (SPEC 6.1.1), and
+        // nearness is an index search (SPEC 20.4).
+        ColumnType::Internal(_)
+        | ColumnType::U48
+        | ColumnType::Vector(_)
+        | ColumnType::Point => {
+            return Err(QueryError::OperandTypeMismatch);
+        }
         ColumnType::U8
         | ColumnType::U16
         | ColumnType::U32
@@ -840,6 +889,11 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
         // descriptor is carried by an otherwise supported record literal.
         ColumnType::Internal(_) => bytes.push(17),
         ColumnType::U48 => bytes.push(18),
+        ColumnType::Vector(dimensions) => {
+            bytes.push(19);
+            bytes.extend_from_slice(&dimensions.to_be_bytes());
+        }
+        ColumnType::Point => bytes.push(20),
     }
 }
 

@@ -102,9 +102,11 @@ pub(crate) use transcode::logical_record_descriptor;
 pub use values::collect_by_ordered_scalar;
 pub(crate) use values::ensure_value_type;
 pub use values::{
-    EnumCase, EnumSchema, EnumValue, ScalarEnumSchema, SystemVariantRegistry, U48_MAX, Value,
-    ValueType, VariantRegistry, decode_persisted_record_descriptor, decode_record_descriptor,
-    encode_persisted_record_descriptor, encode_record_descriptor, variant_registry_id_for_path,
+    EnumCase, EnumSchema, EnumValue, POINT_BYTES, ScalarEnumSchema, SystemVariantRegistry, U48_MAX,
+    VECTOR_MAX_DIMENSIONS, Value, ValueType, VariantRegistry, decode_persisted_record_descriptor,
+    decode_point_f64le, decode_record_descriptor, encode_persisted_record_descriptor,
+    encode_point_f64le, encode_record_descriptor, validate_vector_f32le,
+    variant_registry_id_for_path,
 };
 
 /// Maximum bytes in the canonical table-local variant-tag prefix.
@@ -1619,6 +1621,21 @@ pub enum Error {
     InvalidF64NaN,
     #[error("u48 value {0} exceeds 2^48 - 1")]
     U48OutOfRange(u64),
+    #[error("vector dimensions {0} are outside 1..=4096")]
+    VectorDimensionsOutOfRange(u32),
+    #[error("vector({dimensions}) value has {bytes} bytes, expected {}", *dimensions as usize * 4)]
+    VectorLength { dimensions: u32, bytes: usize },
+    #[error("vector element {index} is NaN or infinite")]
+    VectorNonFinite { index: usize },
+    #[error("point value has {bytes} bytes, expected 16")]
+    PointLength { bytes: usize },
+    /// The coordinates' bits (`f64` is not `Eq`), longitude first.
+    #[error(
+        "point [{}, {}] is not a finite longitude in [-180, 180] and latitude in [-90, 90]",
+        f64::from_bits(*lng_bits),
+        f64::from_bits(*lat_bits)
+    )]
+    PointOutOfRange { lng_bits: u64, lat_bits: u64 },
     #[error("encoded length exceeds u32::MAX")]
     LengthOverflow,
     #[error("value does not match type {expected:?}")]

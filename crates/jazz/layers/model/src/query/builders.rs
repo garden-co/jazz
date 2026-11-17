@@ -602,6 +602,18 @@ impl Query {
         self
     }
 
+    /// Search the root table's specialised index `index` (SPEC 20.4). The
+    /// rows match the search and every other clause; without an explicit
+    /// order they come best first (`$score`).
+    pub fn search(mut self, index: impl Into<String>, op: IndexOp) -> Self {
+        self.filters.push(Predicate::Search(IndexSearch {
+            index: index.into(),
+            op,
+            decl: None,
+        }));
+        self
+    }
+
     /// Add a result-level ordering key.
     ///
     /// Multiple calls preserve precedence: earlier keys are compared first.

@@ -6,6 +6,8 @@
  */
 
 import type { WasmSchema, ColumnType, Value as WasmValue, InsertValues } from "../drivers/types.js";
+import { vectorToBytes } from "./vector.js";
+import { pointToBytes } from "./point.js";
 import { toJsonText } from "./json-text.js";
 
 const I64_MIN = -(1n << 63n);
@@ -92,6 +94,12 @@ export function toValue(value: unknown, columnType: ColumnType): WasmValue {
     case "Bytea": {
       return { type: "Bytea", value: normalizeByteaValue(value) };
     }
+    case "Vector":
+      // Carried as its `f32le/1` bytes (SPEC 20.1).
+      return { type: "Bytea", value: vectorToBytes(value, columnType.dimensions) };
+    case "Point":
+      // Carried as its `point-f64le/1` bytes (SPEC 20.1).
+      return { type: "Bytea", value: pointToBytes(value) };
     case "Json":
       return { type: "Text", value: toJsonText(value) };
     case "Enum": {

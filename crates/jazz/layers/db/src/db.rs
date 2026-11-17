@@ -67,10 +67,11 @@ use crate::values::{
     to_sql, unsupported,
 };
 pub use sync::{
-    ACCEPTED, AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
-    FrameJoiner, Image, MAX_SEQ, Outcome, PENDING, Pos, ReadSpan, RejectedTransaction,
-    RelationSnapshot, RemoteLinkHint, SerializedReadResult, Since, SubscriberId, SyncMessage,
-    Transport, TransportError, TxName, UploadRefusal, UploadStatus, Upstream, WireBase, WireChunk,
+    ACCEPTED, AccessProof, Acting, BuiltOn, CatalogueCell, CatalogueSchema, CatalogueUpdate,
+    CatalogueVersion, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad, FrameJoiner, Image,
+    MAX_SEQ, Outcome, PENDING, Pos, ReadSpan, RejectedTransaction, RelationSnapshot,
+    RemoteLinkHint, SerializedReadResult, Since, SubscriberId, SyncMessage, Transport,
+    TransportError, TxName, UploadRefusal, UploadStatus, Upstream, WireBase, WireChunk,
     WireChunkRef, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, WireTransport,
     WireTransportAdapter, WireWrite, WriteConflict, decode_message, duplex, encode_frames,
     validate_frame_batch_for_corpus,
@@ -904,6 +905,9 @@ struct Inner {
     /// The app's versions and lenses (see [`DbConfig::migrations`]): a
     /// version this store lacks is admitted along them.
     migrations: Migrations,
+    /// Catalogue versions an upstream sent that this build cannot read,
+    /// with why (see [`crate::sync::CatalogueSchema`]): skipped, not taken.
+    unsupported_versions: BTreeMap<crate::ids::SchemaVersionId, String>,
     /// Whether `_jazz_withheld` exists (see `sync::WITHHELD_DDL`): branch
     /// views over a base read it only then.
     withheld: std::cell::Cell<bool>,
@@ -2253,6 +2257,7 @@ impl Db {
                 capture_claims: None,
                 gone: RefCell::new(Vec::new()),
                 migrations: config.migrations,
+                unsupported_versions: BTreeMap::new(),
                 withheld: std::cell::Cell::new(withheld > 0),
                 follow_memo: Rc::default(),
                 pruned_txs: std::cell::Cell::new(None),
@@ -2271,6 +2276,7 @@ impl Db {
             inner.seq = seq;
             inner.load_client()?;
             inner.load_shard()?;
+            inner.ensure_indexes()?;
         }
         Ok(db)
     }
@@ -2334,6 +2340,29 @@ impl Db {
             }
         }
         Ok(())
+    }
+
+    /// The catalogue versions an upstream sent that this build cannot read
+    /// (a column type or other variant it does not know): each skipped, with a
+    /// `SchemaVersionUnsupported` error saying why. The store keeps syncing
+    /// the versions it knows.
+    pub fn unsupported_schema_versions(&self) -> Vec<(crate::ids::SchemaVersionId, Error)> {
+        self.inner()
+            .unsupported_versions
+            .iter()
+            .map(|(id, why)| {
+                let mut error = Error::new(
+                    ErrorCode::Schema,
+                    format!(
+                        "schema version {} is not supported by this version of Jazz ({why}); \
+                         upgrade it to read that version",
+                        id.0
+                    ),
+                );
+                error.reason = Some(Reason::SchemaVersionUnsupported);
+                (*id, error)
+            })
+            .collect()
     }
 
     /// This store's own commits the authority refused, with their payloads,
@@ -2567,6 +2596,8 @@ impl Db {
             let mut inner = self.inner();
             inner.fan.collect();
             inner.reclaim_large_values(RECLAIM_NODES_PER_TICK)?;
+            // One bounded batch of any index still building (SPEC 20.3).
+            inner.build_indexes_step()?;
         }
         self.pump_chunk_store().await
     }
@@ -2865,7 +2896,11 @@ impl Db {
             }
         }
         chunks.landed(wanted);
-        self.inner().retry_awaiting();
+        let inner = self.inner();
+        if let Err(error) = crate::ix::chunks_arrived(&inner.conn) {
+            first.get_or_insert(error);
+        }
+        inner.retry_awaiting();
     }
 
     /// Fetch `wanted` from the chunk store and install it.
@@ -3338,6 +3373,10 @@ impl Db {
         let inner = self.inner();
         let normalized = normalize_relation(query, &inner.schema)?;
         let query = normalized.as_ref().unwrap_or(query);
+        // A search names the declaration it was written against (SPEC 20.4):
+        // the preparing schema's, unless the query already carries one.
+        let declared = crate::ix::with_declaration(query, &inner.schema);
+        let query = declared.as_ref().unwrap_or(query);
         // Validate: tables, columns, parameters, supported forms. Read
         // options are not known yet: validate the widest read (deleted rows
         // included, so their metadata columns are accepted).
@@ -3482,6 +3521,18 @@ impl Db {
             .flatten();
         if reach.is_some() {
             self.remote_shape(&prepared.query)?;
+        }
+        // A `Remote` search needs an upstream that offered index search
+        // (SPEC 20.4, 20.11).
+        if let Some(search) = crate::ix::search_of(&prepared.query)
+            && opts.tier == ReadTier::Remote
+            && self.upstream_supports(jazz_protocol::wire::FEATURE_SPECIALISED_INDEXES)
+                == Some(false)
+        {
+            return Err(crate::ix::unsupported_upstream(
+                &prepared.query.table,
+                &search.index,
+            ));
         }
         let view = opts.read_view.source.clone();
         let attached = reach
@@ -4306,6 +4357,9 @@ impl Inner {
         {
             return Err(authority_changed());
         }
+        // A version this build cannot read is skipped, with its lens
+        // cells; the versions it knows are taken as usual.
+        let (versions, cells) = self.skip_unsupported_versions(versions, cells);
         let mirrored = !versions.is_empty();
         if mirrored {
             self.mirror_versions(versions, cells, defaults)?;
@@ -4324,6 +4378,36 @@ impl Inner {
             }
         }
         Ok(mirrored)
+    }
+
+    /// `versions` without the ones this build cannot read (recorded in
+    /// `unsupported_versions`), and `cells` without those versions' cells.
+    fn skip_unsupported_versions(
+        &mut self,
+        versions: Vec<sync::CatalogueVersion>,
+        cells: Vec<sync::CatalogueCell>,
+    ) -> (Vec<sync::CatalogueVersion>, Vec<sync::CatalogueCell>) {
+        let mut skipped = BTreeSet::new();
+        let versions = versions
+            .into_iter()
+            .filter(|version| match &version.schema {
+                sync::CatalogueSchema::Known(_) => true,
+                sync::CatalogueSchema::Unsupported { id, error, .. } => {
+                    tracing::warn!(
+                        version = %id.0,
+                        "skipping a catalogue schema version this build cannot read: {error}"
+                    );
+                    self.unsupported_versions.insert(*id, error.clone());
+                    skipped.insert(*id.0.as_bytes());
+                    false
+                }
+            })
+            .collect();
+        let cells = cells
+            .into_iter()
+            .filter(|cell| !skipped.contains(&cell.since))
+            .collect();
+        (versions, cells)
     }
 
     /// Take the upstream's versions, names and lens cells: whole or not at
@@ -4505,7 +4589,10 @@ impl Inner {
                         })
                         .collect(),
                 };
-                (entry.schema.id, names, entry.schema.schema)
+                let sync::CatalogueSchema::Known(version) = entry.schema else {
+                    unreachable!("unsupported versions are skipped first")
+                };
+                (version.id, names, version.schema)
             })
             .collect();
         let mut fresh = std::collections::HashSet::new();
@@ -5288,11 +5375,145 @@ impl Inner {
         read: &ReadSpec,
     ) -> Result<Compiled, Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
+        let planned = match crate::ix::search_of(&prepared.query) {
+            None => None,
+            Some(search) => {
+                Some(self.plan_search(prepared, policy.as_ref(), &claims, read, search)?)
+            }
+        };
         let compiled = self
             .read_ctx(prepared, policy.as_ref(), &claims, read)
+            .with_search(planned)
             .compile_query(&prepared.query, read.include_deleted)?;
         self.refuse_latest_only_cut(&compiled, read)?;
         Ok(compiled)
+    }
+
+    /// Bring the store's specialised indexes in line with the current
+    /// schema and replica-ness, once per change of either (SPEC 20.1): a
+    /// new or changed index is created building, a removed one dropped.
+    pub(crate) fn ensure_indexes(&self) -> Result<(), Error> {
+        let registry = crate::ix::registry(&self.conn);
+        let want = (self.owner.jazz.version_id(), self.client.is_some());
+        {
+            let mut registry = registry.borrow_mut();
+            if registry.reconciled == Some(want) {
+                return Ok(());
+            }
+            registry.chunks = Some(self.chunks.clone());
+        }
+        let owner = self.owner.clone();
+        crate::values::in_savepoint(&self.conn, "jazz_ix", || {
+            crate::ix::reconcile(&self.conn, &owner, want.1)
+        })?;
+        registry.borrow_mut().reconciled = Some(want);
+        Ok(())
+    }
+
+    /// Build one batch of an index still building, in its own savepoint
+    /// (a transaction of its own outside any other). Returns whether one
+    /// is still building.
+    pub(crate) fn build_indexes_step(&self) -> Result<bool, Error> {
+        self.ensure_indexes()?;
+        crate::values::in_savepoint(&self.conn, "jazz_ix_build", || {
+            crate::ix::build_step(&self.conn)
+        })
+    }
+
+    /// Plan `search` for a read of `prepared` (SPEC 20.4-20.5): the index
+    /// it reads must be maintained here and built (a client builds it now;
+    /// the authority refuses, retryably), its queue drained, and a
+    /// Rust-scored kind's candidates scored.
+    pub(crate) fn plan_search(
+        &self,
+        prepared: &PreparedQuery,
+        policy: Option<&Session>,
+        claims: &Session,
+        read: &ReadSpec,
+        search: &crate::query::IndexSearch,
+    ) -> Result<crate::ix::Planned, Error> {
+        self.ensure_indexes()?;
+        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        let table = schema.table(&prepared.query.table)?;
+        let index = crate::ix::index_for(&self.conn, table, search)?;
+        // The search is planned under the declaration it names, or else the
+        // reading schema's; the maintained index must have that declaration.
+        let named = crate::ix::with_declaration(&prepared.query, schema);
+        let search = named
+            .as_ref()
+            .and_then(crate::ix::search_of)
+            .unwrap_or(search);
+        crate::ix::check_declaration(&index, search)?;
+        // A search that would cost more than its kind allows is refused
+        // before it runs (SPEC 20.12).
+        index.kind.admit(&self.conn, &index.prefix, &search.op)?;
+        if crate::ix::has_queued(&self.conn)? {
+            crate::values::in_savepoint(&self.conn, "jazz_ix_drain", || {
+                crate::ix::drain(&self.conn)
+            })?;
+        }
+        let authority = self.authority;
+        while !crate::ix::is_ready(&self.conn, &index.stored, &index.decl.name)? {
+            if authority {
+                return Err(crate::ix::building(&table.name, &index.decl.name));
+            }
+            if !self.build_indexes_step()? {
+                break;
+            }
+        }
+        if !crate::ix::is_scored(&index.decl.kind) {
+            return Ok(crate::ix::Planned::Sql {
+                index,
+                op: search.op.clone(),
+            });
+        }
+        let scorer = match index.kind.plan(&index.prefix, &search.op, &mut |_| {
+            unreachable!("a Rust-scored kind binds nothing")
+        })? {
+            crate::ix::Candidates::Scored(scorer) => scorer,
+            crate::ix::Candidates::Sql(_) => {
+                return Err(crate::values::query_error(
+                    "a vector kind planned SQL candidates",
+                ));
+            }
+        };
+        let (part, column) = scorer.payload();
+        let shadow = crate::ix::shadow(&index.prefix, part);
+        let cap = crate::ix::vector_cap();
+        let (sql, plain, params) = self
+            .read_ctx(prepared, policy, claims, read)
+            .compile_candidates(&prepared.query, &shadow, column, cap + 1)?;
+        // Filter-first (SPEC 20.5): a node answering for others (the
+        // authority, a relay or server serving subscribers) scores only rows
+        // the query's clauses narrow through a B-tree index, or the search
+        // would cost in proportion to the table (`INV-IX-4`). A node
+        // answering its own queries scores its replica, under the cap.
+        let answers_for_others = self.authority || !self.sessions.is_empty();
+        if answers_for_others && !crate::ix::narrows(table, &prepared.query) {
+            return Err(crate::ix::vector_unbounded(&table.name, &index.decl.name));
+        }
+        let _ = plain;
+        let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
+        let mut rows = statement
+            .query(params_from_iter(params.iter()))
+            .map_err(storage)?;
+        let mut scored = Vec::new();
+        while let Some(row) = rows.next().map_err(storage)? {
+            if scored.len() == cap {
+                return Err(crate::ix::candidates_over_cap(
+                    &table.name,
+                    &index.decl.name,
+                ));
+            }
+            let rid: i64 = row.get(0).map_err(storage)?;
+            let id: Vec<u8> = row.get(1).map_err(storage)?;
+            let score = scorer.score(row.get_ref(2).map_err(storage)?)?;
+            scored.push((score, id, rid));
+        }
+        Ok(crate::ix::Planned::Bound(crate::ix::top_k(
+            scored,
+            scorer.k(),
+        )))
     }
 
     /// A read at a past cut (a serializable snapshot, a snapshot reference,
@@ -6725,6 +6946,7 @@ impl Inner {
             own,
             extra: Vec::new(),
             overlay: Some(overlay),
+            derived: false,
         };
         let session = self.session(author);
         let (sql, params, _) = self.policy_check(table, row, &[], Some(cut), |ctx| {
@@ -7093,6 +7315,7 @@ impl Inner {
                 own: self.own_rank(seq),
                 extra: Vec::new(),
                 overlay: Some(CutOverlay::Grounded(grounded.clone())),
+                derived: false,
             };
             let mut passed = Vec::new();
             let mut failed = Vec::new();
@@ -7252,6 +7475,7 @@ impl Inner {
                     row: *check.row.0.as_bytes(),
                     key: check.key.clone(),
                 }),
+                derived: false,
             };
             if !self
                 .write_check_holds(&check.schema, check, cut, evidence)?
@@ -7305,6 +7529,7 @@ impl Inner {
             own: self.own_rank(seq.saturating_sub(1)),
             extra: Vec::new(),
             overlay: None,
+            derived: false,
         };
         Ok(matches!(
             self.existing_at(&table.stored, row, key, Some(&cut))?,

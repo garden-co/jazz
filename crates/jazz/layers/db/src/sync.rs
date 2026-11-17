@@ -1770,9 +1770,119 @@ pub enum ReadSpan {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CatalogueVersion {
     /// Its structural schema, without permissions.
-    pub schema: crate::protocol::SchemaVersion,
+    pub schema: CatalogueSchema,
     /// Per table: (name, stored name, per column (name, stored name)).
     pub names: Vec<(String, String, Vec<(String, String)>)>,
+}
+
+/// A catalogue version's schema as received. Its bytes are exactly a
+/// [`crate::protocol::SchemaVersion`]'s (the version id, then its public
+/// schema JSON), but each version decodes on its own: one this build cannot
+/// read (a column type or other variant it does not know, from a newer
+/// authority, or keys it would ignore, so that it would read as another
+/// version than its id says) is `Unsupported`, and the rest of the catalogue still applies
+/// (the receiver skips it with [`crate::options::Reason::SchemaVersionUnsupported`])
+/// instead of the whole message failing to decode and the link with it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CatalogueSchema {
+    Known(crate::protocol::SchemaVersion),
+    Unsupported {
+        id: crate::ids::SchemaVersionId,
+        /// Its public schema JSON, as sent.
+        json: Vec<u8>,
+        /// Why this build cannot read it.
+        error: String,
+    },
+}
+
+/// The wire layout of a [`crate::protocol::SchemaVersion`].
+#[derive(Serialize, Deserialize)]
+struct CatalogueSchemaWire {
+    id: crate::ids::SchemaVersionId,
+    public_schema_json: Vec<u8>,
+}
+
+impl CatalogueSchema {
+    /// The version's id, decoded or not.
+    pub fn id(&self) -> crate::ids::SchemaVersionId {
+        match self {
+            Self::Known(version) => version.id,
+            Self::Unsupported { id, .. } => *id,
+        }
+    }
+}
+
+impl Serialize for CatalogueSchema {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Known(version) => version.serialize(serializer),
+            Self::Unsupported { id, json, .. } => CatalogueSchemaWire {
+                id: *id,
+                public_schema_json: json.clone(),
+            }
+            .serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CatalogueSchema {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let CatalogueSchemaWire {
+            id,
+            public_schema_json,
+        } = CatalogueSchemaWire::deserialize(deserializer)?;
+        let source = match serde_json::from_slice::<jazz_model::model::public_schema::Schema>(
+            &public_schema_json,
+        ) {
+            Ok(source) => source,
+            // A shape this build has no variant or field for: a newer
+            // Jazz's schema, skipped on its own (never admitted).
+            Err(error) if is_newer_shape(&error) => {
+                return Ok(Self::Unsupported {
+                    id,
+                    json: public_schema_json,
+                    error: error.to_string(),
+                });
+            }
+            // Anything else (bad JSON, truncated bytes, a wrong type for a
+            // known key) is a corrupt version: it fails the message, as it
+            // always has.
+            Err(error) => {
+                return Err(D::Error::custom(format!("decode public schema: {error}")));
+            }
+        };
+        // A known shape that does not compile is corrupt too, not newer.
+        let schema = jazz_model::model::public_schema_convert::convert_public_schema(&source)
+            .map_err(|error| D::Error::custom(format!("compile public schema: {error}")))?;
+        // A key this build ignores (a newer constraint, index or option)
+        // still counts towards the sender's id: read without it, the
+        // version is another one, and would be admitted under an id the
+        // sender never wrote. So a version whose id this build does not
+        // compute for it (`INV-LENS-1`) is not read either.
+        if schema.version_id() != id {
+            return Ok(Self::Unsupported {
+                id,
+                json: public_schema_json,
+                error: format!(
+                    "it carries schema keys this build ignores (read without them it is \
+                     version {})",
+                    schema.version_id().0
+                ),
+            });
+        }
+        Ok(Self::Known(crate::protocol::SchemaVersion { id, schema }))
+    }
+}
+
+/// Whether a public schema JSON decode failed only on a variant or field
+/// this build does not know: what a newer Jazz's schema looks like here.
+fn is_newer_shape(error: &serde_json::Error) -> bool {
+    if error.classify() != serde_json::error::Category::Data {
+        return false;
+    }
+    let message = error.to_string();
+    message.starts_with("unknown variant") || message.starts_with("unknown field")
 }
 
 /// A stored column a lens fills (see `crate::names::LensCell`): a copy
@@ -6202,6 +6312,7 @@ impl Inner {
                 crate::large::install_fetched(&self.conn, &self.chunks, &request, node.bytes)?;
             }
         }
+        crate::ix::chunks_arrived(&self.conn)?;
         let parked = self
             .sessions
             .iter()
@@ -7397,6 +7508,7 @@ impl Inner {
             .map(|&(seq, _)| (Pos::at(seq), None))
             .collect();
         cut.unsettled = !read.settled_only;
+        cut.derived = true;
         Cow::Owned(ReadSpec {
             cut: Some(cut),
             ..read.clone()
@@ -7442,6 +7554,13 @@ impl Inner {
         let mut versions = Vec::new();
         let mut sent = Vec::new();
         let mut sent_schemas = Vec::new();
+        // A peer without the SPEC 20 bit cannot decode a version with a
+        // vector or point column or a specialised index: such versions (and
+        // their lens cells) are not sent it (SPEC 20.4).
+        let specialised = self.sessions[index].transport.features()
+            & crate::wire::FEATURE_SPECIALISED_INDEXES
+            != 0;
+        let mut withheld = BTreeSet::new();
         for (version, names) in self.names.in_order() {
             let digest = crate::names::names_digest(names);
             let bytes = *version.as_bytes();
@@ -7462,12 +7581,16 @@ impl Inner {
                     None => continue,
                 }
             };
+            if !specialised && jazz.uses_specialised_features() {
+                withheld.insert(bytes);
+                continue;
+            }
             sent_schemas.push((jazz.clone(), names.clone()));
             versions.push(CatalogueVersion {
-                schema: crate::protocol::SchemaVersion {
+                schema: CatalogueSchema::Known(crate::protocol::SchemaVersion {
                     id: version,
                     schema: jazz.without_permissions(),
-                },
+                }),
                 names: names
                     .tables
                     .iter()
@@ -7490,6 +7613,7 @@ impl Inner {
             .names
             .cells()
             .iter()
+            .filter(|cell| !withheld.contains(cell.since.as_bytes()))
             .map(|cell| {
                 let (source, default) = match &cell.rule {
                     crate::names::LensCellRule::Copy(source) => (Some(source.clone()), Cell::Null),
@@ -8267,6 +8391,11 @@ impl Db {
         if history_source_table(&query.table).is_some() || query.flat_join.is_some() {
             return Ok(None);
         }
+        // An index search reads current rows only (SPEC 20.4): it has no
+        // settled view to judge an answer's listing by.
+        if crate::ix::search_of(query).is_some() {
+            return Ok(None);
+        }
         // Only which rows the view holds matters: ids, not values (whose
         // large chunks may not be here yet), nor included rows.
         let mut query = remote_query(query).into_owned();
@@ -8854,6 +8983,17 @@ impl Db {
         self.inner
             .borrow_mut()
             .release_remote(query, binding, include_deleted, view, reach);
+    }
+
+    /// Whether this replica's current upstream link offered optional
+    /// wire `feature`; `None` without a link.
+    pub(crate) fn upstream_supports(
+        &self,
+        feature: jazz_protocol::wire::WireFeatures,
+    ) -> Option<bool> {
+        let inner = self.inner.borrow();
+        let transport = inner.client.as_ref()?.transport.as_ref()?;
+        Some(transport.features() & feature != 0)
     }
 
     pub(crate) fn link_hint(&self) -> Option<Rc<StdCell<Link>>> {
@@ -10316,7 +10456,29 @@ impl Db {
             .iter()
             .position(|m| matches!(m, SyncMessage::Read { .. }))
             .unwrap_or(out.len());
-        let reads = out.split_off(first_read);
+        let mut reads = out.split_off(first_read);
+        // An upstream that did not offer index search cannot decode a
+        // query using it (SPEC 20.4): such a read stays local.
+        let searchable = client
+            .transport
+            .as_ref()
+            .is_some_and(|t| t.features() & jazz_protocol::wire::FEATURE_SPECIALISED_INDEXES != 0);
+        if !searchable {
+            reads.retain(|message| {
+                let SyncMessage::Read { id, query, .. } = message else {
+                    return true;
+                };
+                if crate::ix::search_of(query).is_none() {
+                    return true;
+                }
+                // Answered by this replica alone (a `Remote` subscription
+                // over such a link is refused where it opens).
+                if let Some(live) = client.reads.get_mut(id).and_then(ActiveRead::live_mut) {
+                    live.answered.set(true);
+                }
+                false
+            });
+        }
         let wanted: Vec<ChunkRequest> = std::mem::take(&mut client.wanted)
             .into_iter()
             .filter(|r| !client.requested.contains(r) && !client.unavailable.contains(r))
@@ -15841,6 +16003,42 @@ fn pruned_txs_created(conn: &rusqlite::Connection, known: &std::cell::Cell<Optio
 
 #[cfg(test)]
 mod tests {
+    /// A known catalogue version's bytes are what they were before versions
+    /// decoded one by one (pinned from `main`, where `CatalogueVersion`
+    /// held a `SchemaVersion`), and decode back to `Known`.
+    #[test]
+    fn a_known_catalogue_versions_bytes_are_unchanged() {
+        let json = br#"{"tables":{"notes":{"columns":[{"name":"title","column_type":{"type":"Text"},"nullable":false}],"policies":{"select":{"using":{"type":"True"},"with_check":null},"insert":{"using":null,"with_check":{"type":"True"}},"update":{"using":{"type":"True"},"with_check":{"type":"True"}},"delete":{"using":{"type":"True"},"with_check":null}}}}}"#;
+        let schema =
+            jazz_model::model::public_schema_convert::decode_public_schema_json(json).unwrap();
+        let version = super::CatalogueVersion {
+            schema: super::CatalogueSchema::Known(crate::protocol::SchemaVersion::new(schema)),
+            names: vec![(
+                "notes".into(),
+                "notes".into(),
+                vec![("title".into(), "title".into())],
+            )],
+        };
+        let golden = concat!(
+            "10da442a8fd3d15524aedf5ca236ddbfcace027b227461626c6573223a7b226e6f746573223a7b22",
+            "636f6c756d6e73223a5b7b226e616d65223a227469746c65222c22636f6c756d6e5f74797065223a",
+            "7b2274797065223a2254657874227d2c226e756c6c61626c65223a66616c73657d5d2c22706f6c69",
+            "63696573223a7b2273656c656374223a7b227573696e67223a7b2274797065223a2254727565227d",
+            "2c22776974685f636865636b223a6e756c6c7d2c22696e73657274223a7b227573696e67223a6e75",
+            "6c6c2c22776974685f636865636b223a7b2274797065223a2254727565227d7d2c22757064617465",
+            "223a7b227573696e67223a7b2274797065223a2254727565227d2c22776974685f636865636b223a",
+            "7b2274797065223a2254727565227d7d2c2264656c657465223a7b227573696e67223a7b22747970",
+            "65223a2254727565227d2c22776974685f636865636b223a6e756c6c7d7d7d7d7d01056e6f746573",
+            "056e6f74657301057469746c65057469746c65",
+        );
+        let bytes = postcard::to_allocvec(&version).unwrap();
+        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, golden);
+        let decoded: super::CatalogueVersion = postcard::from_bytes(&bytes).unwrap();
+        assert!(matches!(decoded.schema, super::CatalogueSchema::Known(_)));
+        assert_eq!(decoded, version);
+    }
+
     /// Pulls a chunk store fails while a wait is on share that wait; each
     /// failed round doubles the next wait, up to the longest, however many
     /// rounds fail.

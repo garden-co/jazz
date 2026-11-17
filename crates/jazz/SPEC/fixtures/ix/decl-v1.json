@@ -1,0 +1,59 @@
+{
+  "cases": [
+    {
+      "about": "text, two fields, a declared length, prefix",
+      "bytes_hex": "000000000000000e6a617a7a2d69782d6465636c2f3100000000000000067365617263680000000000000000020000000000000004626f647901010000000000000000057469746c65040020000000000000000e6a617a7a2d746578742f313a656e0100",
+      "declaration": {
+        "kind": {
+          "text": {
+            "analyzer": "jazz-text/1:en",
+            "fields": {
+              "body": {
+                "length": 256,
+                "weight": 1
+              },
+              "title": {
+                "length": 32,
+                "weight": 4
+              }
+            },
+            "prefix": true
+          }
+        },
+        "name": "search"
+      },
+      "sha256_hex": "892d7fcbb65b26a04f114bb13bb85db9f2d4087b15fec5ad730baa6c5fcf34a6"
+    },
+    {
+      "about": "vector, l2",
+      "bytes_hex": "000000000000000e6a617a7a2d69782d6465636c2f31000000000000000773696d696c6172010000000000000009656d62656464696e67010000",
+      "declaration": {
+        "kind": {
+          "vector": {
+            "ann": "exact",
+            "column": "embedding",
+            "metric": "l2"
+          }
+        },
+        "name": "similar"
+      },
+      "sha256_hex": "85ce28265d256305dc0d8b1ea355c236fcdc73fd7f271ebf4e4b67b6d1a2ca68"
+    },
+    {
+      "about": "geo, server-only",
+      "bytes_hex": "000000000000000e6a617a7a2d69782d6465636c2f310000000000000005706c6163650200000000000000086c6f636174696f6e01",
+      "declaration": {
+        "kind": {
+          "geo": {
+            "column": "location"
+          }
+        },
+        "name": "place",
+        "server_only": true
+      },
+      "sha256_hex": "ef0fd10bbb4aaf5d39d678716d6fc9b68c07962b992e9b2cfde21e98d62950a5"
+    }
+  ],
+  "columns": "a declaration is hashed with its columns' stored names (SPEC 20.4), so a rename-only migration changes no hash",
+  "encoding": "jazz-ix-decl/1"
+}

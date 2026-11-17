@@ -1,0 +1,14 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "places": {
+      "columns": {
+        "name": "string",
+        "location": "point",
+        "pickup": "point?",
+        "home": { "type": "point", "default": [13.405, 52.52] }
+      }
+    }
+  }
+}

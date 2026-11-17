@@ -103,6 +103,20 @@ impl SchemaHash {
             if table_schema.history == super::schema::HistoryRetention::Latest {
                 hasher.update(b"history\0latest\0");
             }
+
+            // Specialised indexes (SPEC 20.1): absent unless declared, so
+            // schemas without them keep their hashes.
+            if !table_schema.specialised_indexes.is_empty() {
+                hasher.update(b"specialised_indexes\0");
+                let mut indexes: Vec<_> = table_schema.specialised_indexes.iter().collect();
+                indexes.sort_by(|left, right| left.name.cmp(&right.name));
+                hasher.update(&(indexes.len() as u64).to_be_bytes());
+                for index in indexes {
+                    let bytes = index.canonical_bytes();
+                    hasher.update(&(bytes.len() as u64).to_be_bytes());
+                    hasher.update(&bytes);
+                }
+            }
         }
 
         Self(*hasher.finalize().as_bytes())
@@ -348,6 +362,13 @@ fn hash_column_type(hasher: &mut jazz_types::sha256::Hasher, col_type: &ColumnTy
         ColumnType::Row { columns: desc } => {
             hasher.update(&[8]);
             hash_row_descriptor(hasher, desc);
+        }
+        ColumnType::Vector { dimensions } => {
+            hasher.update(&[17]);
+            hasher.update(&dimensions.to_le_bytes());
+        }
+        ColumnType::Point => {
+            hasher.update(&[18]);
         }
     }
 }

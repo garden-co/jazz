@@ -11,6 +11,9 @@ use crate::tools::public_schema::{
     CmpOp, ColumnDescriptor, ColumnType, HistoryRetention, Operation, OperationPolicy, PolicyExpr,
     PolicyValue, RowDescriptor, SchemaBuilder, TableName,
 };
+use crate::tools::public_schema::{
+    SpecialisedIndex, SpecialisedIndexKind, TextField, VectorAnn, VectorMetric,
+};
 use std::collections::BTreeSet;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/app-artifact");
@@ -2398,8 +2401,45 @@ fn the_json_schemas_take_the_keys_the_readers_take() {
             properties(&defs["table"]["properties"]["computed"]["additionalProperties"]),
             keys(app_file::COMPUTED_KEYS),
         ),
+        (
+            "a text index",
+            properties(&defs["textIndex"]),
+            keys(app_file::TEXT_INDEX_KEYS),
+        ),
+        (
+            "a vector index",
+            properties(&defs["vectorIndex"]),
+            keys(app_file::VECTOR_INDEX_KEYS),
+        ),
+        (
+            "a geo index",
+            properties(&defs["geoIndex"]),
+            keys(app_file::GEO_INDEX_KEYS),
+        ),
+        (
+            "a text index field",
+            properties(
+                &defs["textIndex"]["properties"]["text"]["additionalProperties"]["anyOf"][1],
+            ),
+            keys(app_file::TEXT_FIELD_KEYS),
+        ),
     ] {
         assert_eq!(schema, reader, "{what}");
+    }
+    // Each index object takes `name` and exactly its own kind key.
+    for (def, kind) in [
+        ("textIndex", "text"),
+        ("vectorIndex", "vector"),
+        ("geoIndex", "geo"),
+    ] {
+        let taken = properties(&defs[def]);
+        for other in app_file::INDEX_KIND_KEYS {
+            assert_eq!(
+                taken.contains(*other),
+                *other == kind,
+                "{def} and `{other}`"
+            );
+        }
     }
     let permissions = json_schema("jazz.permissions.v1.json");
     assert_eq!(properties(&permissions), keys(permissions_file::TOP_KEYS));
@@ -2547,6 +2587,422 @@ fn an_index_names_a_stored_column() {
     edited_app_loads(|v| {
         v["tables"]["todos"]["indexes"] = serde_json::json!(["owner", ["owner", "$createdAt"]])
     });
+}
+
+// ---------------------------------------------------------------------------
+// Specialised indexes (SPEC 20.1)
+// ---------------------------------------------------------------------------
+
+/// `todo_server` with a text, a vector and a geo index on `todos`.
+fn indexed_todos() -> ArtifactInput {
+    let mut input = todo_server();
+    let schema = &mut input.schemas[0];
+    let todos = schema.get_mut(&TableName::from("todos")).unwrap();
+    todos.columns.columns.push(ColumnDescriptor::new(
+        "embedding",
+        ColumnType::Vector { dimensions: 3 },
+    ));
+    todos
+        .columns
+        .columns
+        .push(ColumnDescriptor::new("location", ColumnType::Point));
+    todos.specialised_indexes = vec![
+        SpecialisedIndex {
+            name: "search".into(),
+            kind: SpecialisedIndexKind::Text {
+                fields: BTreeMap::from([
+                    (
+                        "title".into(),
+                        TextField {
+                            weight: 4,
+                            length: 256,
+                        },
+                    ),
+                    ("description".into(), TextField::weight(1)),
+                ]),
+                analyzer: "jazz-text/1:en".into(),
+                prefix: true,
+            },
+            server_only: false,
+        },
+        SpecialisedIndex {
+            name: "similar".into(),
+            kind: SpecialisedIndexKind::Vector {
+                column: "embedding".into(),
+                metric: VectorMetric::Cosine,
+                ann: VectorAnn::Exact,
+            },
+            server_only: false,
+        },
+        SpecialisedIndex {
+            name: "place".into(),
+            kind: SpecialisedIndexKind::Geo {
+                column: "location".into(),
+            },
+            server_only: false,
+        },
+    ];
+    input.current = SchemaHash::compute(&input.schemas[0]).to_string();
+    input
+}
+
+/// A table's text, vector and geo indexes are written as objects in its
+/// `indexes` (name, kind key, options; defaults left out, in name order),
+/// fit the JSON Schema, and read back to the same declarations.
+#[test]
+fn specialised_indexes_round_trip_through_the_app_file() {
+    let input = indexed_todos();
+    let expected = input.schemas[0][&TableName::from("todos")]
+        .specialised_indexes
+        .clone();
+    let written = write(input).unwrap();
+    let app: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    assert_eq!(
+        app["tables"]["todos"]["indexes"],
+        serde_json::json!([
+            { "name": "place", "geo": "location" },
+            {
+                "name": "search",
+                "text": { "description": 1, "title": { "weight": 4, "length": 256 } },
+                "analyzer": "jazz-text/1:en",
+                "prefix": true
+            },
+            { "name": "similar", "vector": "embedding", "metric": "cosine" }
+        ])
+    );
+    let validator = jsonschema::validator_for(&json_schema("jazz.app.v1.json")).unwrap();
+    assert!(validator.is_valid(&app));
+    let loaded = load(written.app.as_bytes(), written.permissions.as_bytes()).unwrap();
+    let mut read = loaded.current_schema()[&TableName::from("todos")]
+        .specialised_indexes
+        .clone();
+    let mut expected = expected;
+    read.sort_by(|a, b| a.name.cmp(&b.name));
+    expected.sort_by(|a, b| a.name.cmp(&b.name));
+    assert_eq!(read, expected);
+}
+
+fn edited_indexes(index: serde_json::Value) -> String {
+    let written = write(indexed_todos()).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    value["tables"]["todos"]["indexes"] = serde_json::json!([index]);
+    load(value.to_string().as_bytes(), written.permissions.as_bytes())
+        .expect_err("the index must be refused")
+        .to_string()
+}
+
+/// An index object names its kind by exactly one key, takes only that
+/// kind's keys, and every refusal names the path and option.
+#[test]
+fn malformed_specialised_indexes_are_refused_by_path() {
+    let cases = [
+        (
+            serde_json::json!({ "name": "x" }),
+            "tables.todos.indexes[0]: an index object names its kind by key",
+        ),
+        (
+            serde_json::json!({ "name": "x", "geo": "location", "vector": "embedding" }),
+            "an index object has exactly one kind key, not `vector` and `geo`",
+        ),
+        (
+            serde_json::json!({ "name": "x", "geo": "location", "metric": "l2" }),
+            "tables.todos.indexes[0]: unknown key `metric`",
+        ),
+        (
+            serde_json::json!({ "name": "X", "geo": "location" }),
+            "tables.todos.indexes[0].name: `X` is not an index name",
+        ),
+        (
+            serde_json::json!({ "geo": "location" }),
+            "an index object needs `name`",
+        ),
+        (
+            serde_json::json!({ "name": "s", "text": { "title": 16 }, "analyzer": "jazz-text/1:en" }),
+            "tables.todos.indexes[0].text.title: a field weight is an integer from 1 to 15",
+        ),
+        (
+            serde_json::json!({ "name": "s", "text": { "title": 1 } }),
+            "a text index needs `analyzer`",
+        ),
+        (
+            serde_json::json!({ "name": "s", "text": { "title": { "weight": 1, "length": 0 } }, "analyzer": "jazz-text/1:en" }),
+            "tables.todos.indexes[0].text.title.length: a field's reference length is an integer from 1 to 4096",
+        ),
+        (
+            serde_json::json!({ "name": "s", "text": { "title": { "weight": 1, "length": 5000 } }, "analyzer": "jazz-text/1:en" }),
+            "tables.todos.indexes[0].text.title.length: a field's reference length is an integer from 1 to 4096",
+        ),
+        (
+            serde_json::json!({ "name": "s", "text": { "title": { "length": 64 } }, "analyzer": "jazz-text/1:en" }),
+            "tables.todos.indexes[0].text.title: a field object needs `weight`",
+        ),
+        (
+            serde_json::json!({ "name": "s", "text": { "title": { "weight": 1, "len": 64 } }, "analyzer": "jazz-text/1:en" }),
+            "tables.todos.indexes[0].text.title: unknown key `len`",
+        ),
+        (
+            serde_json::json!({ "name": "s", "text": { "title": 1 }, "analyzer": "jazz-text/1:fr" }),
+            "tables.todos.indexes[0].analyzer: unknown analyzer `jazz-text/1:fr`",
+        ),
+        (
+            serde_json::json!({ "name": "s", "text": { "nope": 1 }, "analyzer": "jazz-text/1:en" }),
+            "tables.todos.indexes[0].text.nope: table todos has no column `nope`",
+        ),
+        (
+            serde_json::json!({ "name": "v", "vector": "embedding", "metric": "cosine", "ann": "ivf" }),
+            "tables.todos.indexes[0].ann: `ann: \"ivf\"` is not supported yet",
+        ),
+        (
+            serde_json::json!({ "name": "v", "vector": "embedding", "metric": "hamming" }),
+            "tables.todos.indexes[0].metric: unknown metric `hamming`",
+        ),
+        (
+            serde_json::json!({ "name": "v", "vector": "embedding" }),
+            "a vector index needs `metric`",
+        ),
+        (
+            serde_json::json!({ "name": "g", "geo": { "column": "location" } }),
+            "tables.todos.indexes[0].geo: must be a string, not an object; a geo index names a point column",
+        ),
+        (
+            serde_json::json!({ "name": "g", "geo": "location", "serverOnly": "yes" }),
+            "tables.todos.indexes[0].serverOnly: must be true or false",
+        ),
+        (
+            serde_json::json!({ "name": "g", "geo": "location", "serverOnly": true }),
+            "serverOnly indexes are not supported yet",
+        ),
+        (
+            serde_json::json!({ "name": "g", "geo": "title" }),
+            "a geo index needs a point column",
+        ),
+        (
+            serde_json::json!(7),
+            "an index is a column name, an array of names or a text, vector or geo index object",
+        ),
+    ];
+    for (index, expected) in cases {
+        let error = edited_indexes(index.clone());
+        assert!(error.contains(expected), "{index}: {error}");
+    }
+    let written = write(indexed_todos()).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    value["tables"]["todos"]["indexes"] = serde_json::json!([
+        { "name": "g", "geo": "location" },
+        { "name": "g", "vector": "embedding", "metric": "l2" }
+    ]);
+    let error = load(value.to_string().as_bytes(), written.permissions.as_bytes())
+        .expect_err("same names")
+        .to_string();
+    assert!(
+        error.contains("tables.todos.indexes[1].name: two specialised indexes are named `g`"),
+        "{error}"
+    );
+}
+
+fn with_vector_columns() -> ArtifactInput {
+    let mut input = todo_server();
+    let todos = input.schemas[0].get_mut(&TableName::from("todos")).unwrap();
+    let mut embedding = ColumnDescriptor::new("embedding", ColumnType::Vector { dimensions: 3 });
+    embedding.default = Some(Value::Bytea(
+        [0.1f32, -2.0, 3e-5]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect(),
+    ));
+    todos.columns.columns.push(embedding);
+    todos
+        .columns
+        .columns
+        .push(nullable("draft", ColumnType::Vector { dimensions: 1 }));
+    input.current = SchemaHash::compute(&structural(input.schemas[0].clone())).to_string();
+    input
+}
+
+/// A vector column is written `{ "vector": n }`, its default as `n` numbers
+/// that read back to the same `f32` bits, and the file reads back to the
+/// same schema (SPEC 20.1).
+#[test]
+fn vector_columns_round_trip_through_the_file() {
+    let input = with_vector_columns();
+    let expected = structural(input.schemas[0].clone());
+    let written = write(input).unwrap();
+    let app: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    let columns = &app["tables"]["todos"]["columns"];
+    assert_eq!(
+        columns["embedding"],
+        serde_json::json!({ "vector": 3, "default": [0.1, -2, 0.00003] }),
+        "{}",
+        written.app
+    );
+    assert_eq!(
+        columns["draft"],
+        serde_json::json!({ "vector": 1, "optional": true })
+    );
+    let loaded = load(written.app.as_bytes(), written.permissions.as_bytes()).unwrap();
+    assert_eq!(
+        loaded.current_hash(),
+        SchemaHash::compute(&expected),
+        "the file reads back to the schema it was written from"
+    );
+}
+
+/// The dimensions are part of the schema's identity: `vector(3)`,
+/// `vector(4)` and `bytes` are three different schemas.
+#[test]
+fn vector_dimensions_are_schema_identity() {
+    let hash = |ty: ColumnType| {
+        let mut input = todo_server();
+        input.schemas[0]
+            .get_mut(&TableName::from("todos"))
+            .unwrap()
+            .columns
+            .columns
+            .push(ColumnDescriptor::new("embedding", ty));
+        SchemaHash::compute(&structural(input.schemas[0].clone()))
+    };
+    let three = hash(ColumnType::Vector { dimensions: 3 });
+    assert_ne!(three, hash(ColumnType::Vector { dimensions: 4 }));
+    assert_ne!(three, hash(ColumnType::Bytea));
+    assert_eq!(three, hash(ColumnType::Vector { dimensions: 3 }));
+}
+
+#[test]
+fn malformed_vector_columns_are_refused_by_name() {
+    let column = |spec: serde_json::Value| {
+        edited_app(move |v| v["tables"]["todos"]["columns"]["embedding"] = spec)
+    };
+    for spec in [
+        serde_json::json!({ "vector": 0 }),
+        serde_json::json!({ "vector": 4097 }),
+        serde_json::json!({ "vector": 3.5 }),
+        serde_json::json!({ "vector": "3" }),
+        serde_json::json!({ "vector": -1 }),
+    ] {
+        let error = column(spec.clone());
+        assert!(
+            error.contains("a vector's dimensions are an integer from 1 to 4096"),
+            "{spec}: {error}"
+        );
+    }
+    let error = column(serde_json::json!({ "array": { "vector": 3 } }));
+    assert!(
+        error.contains("an array of vectors is not supported"),
+        "{error}"
+    );
+    let error = column(serde_json::json!({ "vector": 3, "array": "int" }));
+    assert!(error.contains("exactly one of"), "{error}");
+    let error = column(serde_json::json!({ "vector": 2, "default": [1, 2, 3] }));
+    assert!(
+        error.contains("a vector default has 2 numbers, not 3"),
+        "{error}"
+    );
+    let error = column(serde_json::json!({ "vector": 2, "default": [1, "x"] }));
+    assert!(
+        error.contains("finite numbers within float32 range"),
+        "{error}"
+    );
+    let error = column(serde_json::json!({ "vector": 1, "default": [1e39] }));
+    assert!(
+        error.contains("finite numbers within float32 range"),
+        "{error}"
+    );
+}
+
+fn point_bytes(lng: f64, lat: f64) -> Vec<u8> {
+    jazz_types::records::encode_point_f64le(lng, lat)
+        .unwrap()
+        .to_vec()
+}
+
+/// A point column is written `"point"` (`"point?"` when optional), its
+/// default as `[lng, lat]` in GeoJSON order, and the file reads back to the
+/// same schema (SPEC 20.1, 10.10).
+#[test]
+fn point_columns_round_trip_through_the_file() {
+    let mut input = todo_server();
+    let todos = input.schemas[0].get_mut(&TableName::from("todos")).unwrap();
+    todos
+        .columns
+        .columns
+        .push(ColumnDescriptor::new("location", ColumnType::Point));
+    todos
+        .columns
+        .columns
+        .push(nullable("pickup", ColumnType::Point));
+    let mut home = ColumnDescriptor::new("home", ColumnType::Point);
+    home.default = Some(Value::Bytea(point_bytes(-122.419416, 37.774929)));
+    todos.columns.columns.push(home);
+    input.current = SchemaHash::compute(&structural(input.schemas[0].clone())).to_string();
+
+    let expected = structural(input.schemas[0].clone());
+    let written = write(input).unwrap();
+    let app: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    let columns = &app["tables"]["todos"]["columns"];
+    assert_eq!(
+        columns["location"],
+        serde_json::json!("point"),
+        "{}",
+        written.app
+    );
+    assert_eq!(columns["pickup"], serde_json::json!("point?"));
+    assert_eq!(
+        columns["home"],
+        serde_json::json!({ "type": "point", "default": [-122.419416, 37.774929] })
+    );
+    let loaded = load(written.app.as_bytes(), written.permissions.as_bytes()).unwrap();
+    assert_eq!(
+        loaded.current_hash(),
+        SchemaHash::compute(&expected),
+        "the file reads back to the schema it was written from"
+    );
+}
+
+/// `point` is its own type: a schema with a point column differs from one
+/// with a bytes column.
+#[test]
+fn point_is_schema_identity() {
+    let hash = |ty: ColumnType| {
+        let mut input = todo_server();
+        input.schemas[0]
+            .get_mut(&TableName::from("todos"))
+            .unwrap()
+            .columns
+            .columns
+            .push(ColumnDescriptor::new("location", ty));
+        SchemaHash::compute(&structural(input.schemas[0].clone()))
+    };
+    assert_ne!(hash(ColumnType::Point), hash(ColumnType::Bytea));
+    assert_eq!(hash(ColumnType::Point), hash(ColumnType::Point));
+}
+
+#[test]
+fn malformed_point_columns_are_refused_by_name() {
+    let column = |spec: serde_json::Value| {
+        edited_app(move |v| v["tables"]["todos"]["columns"]["location"] = spec)
+    };
+    let error = column(serde_json::json!("pointt"));
+    assert!(error.contains("did you mean `point`"), "{error}");
+    let error = column(serde_json::json!({ "array": "point" }));
+    assert!(
+        error.contains("an array of points is not supported"),
+        "{error}"
+    );
+    for default in [
+        serde_json::json!([37.77, -122.42]),
+        serde_json::json!([181, 0]),
+        serde_json::json!([0]),
+        serde_json::json!([0, 0, 0]),
+        serde_json::json!(["0", 0]),
+        serde_json::json!({ "lng": 0, "lat": 0 }),
+    ] {
+        let error = column(serde_json::json!({ "type": "point", "default": default }));
+        assert!(
+            error.contains("a point is [lng, lat]")
+                || error.contains("doesn't fit this column's type"),
+            "{default}: {error}"
+        );
+    }
 }
 
 /// What the TS permissions compiler (and the engine behind it) refused, the

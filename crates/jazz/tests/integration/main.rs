@@ -29,6 +29,8 @@ mod bundle_permissions;
 mod callback_transaction_cancellation;
 #[path = "../catalogue_rows.rs"]
 mod catalogue_rows;
+#[path = "../catalogue_unsupported_versions.rs"]
+mod catalogue_unsupported_versions;
 #[path = "../claims_change.rs"]
 mod claims_change;
 #[path = "../claims_registry_refresh.rs"]
@@ -201,6 +203,12 @@ mod shard_role;
 mod slow_queries;
 #[path = "../snapshots.rs"]
 mod snapshots;
+#[path = "../specialised_index_kinds.rs"]
+mod specialised_index_kinds;
+#[path = "../specialised_index_policies.rs"]
+mod specialised_index_policies;
+#[path = "../specialised_indexes.rs"]
+mod specialised_indexes;
 #[path = "../storage_corpus.rs"]
 mod storage_corpus;
 #[path = "../storage_errors.rs"]
@@ -274,5 +282,9 @@ mod write_check_evidence;
 #[path = "../write_receipt_owner.rs"]
 mod write_receipt_owner;
 
+#[path = "../point_columns.rs"]
+mod point_columns;
 #[path = "../transaction_read_prefix.rs"]
 mod transaction_read_prefix;
+#[path = "../vector_columns.rs"]
+mod vector_columns;

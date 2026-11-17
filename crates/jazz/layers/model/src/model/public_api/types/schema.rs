@@ -131,6 +131,19 @@ pub enum ColumnType {
     /// Heterogeneous row/tuple of values with a known schema.
     /// Used for nested rows (e.g., array of rows from subquery).
     Row { columns: Box<RowDescriptor> },
+    /// `dimensions` IEEE-754 binary32 values (SPEC 20.1), `1..=4096`,
+    /// carried as [`Value::Bytea`](super::Value::Bytea) of exactly
+    /// `4 * dimensions` bytes in encoding `f32le/1`; NaN and infinities are
+    /// refused at admission. Written `{ "vector": n }` in `jazz.app.json`.
+    /// Appended last so existing serde variant indices are unchanged.
+    Vector { dimensions: u32 },
+    /// A WGS84 point (SPEC 20.1), carried as
+    /// [`Value::Bytea`](super::Value::Bytea) of exactly 16 bytes in encoding
+    /// `point-f64le/1`: longitude then latitude, binary64 little-endian
+    /// (GeoJSON order). Non-finite or out-of-range coordinates are refused
+    /// at admission. Written `"point"` in `jazz.app.json`. Appended last so
+    /// existing serde variant indices are unchanged.
+    Point,
 }
 
 impl ColumnType {
@@ -465,6 +478,10 @@ pub struct TableSchema {
     /// hashes as it did before retention existed.
     #[serde(default, skip_serializing_if = "HistoryRetention::is_full")]
     pub history: HistoryRetention,
+    /// Text, vector and geo indexes (SPEC 20.1), by name. Empty is
+    /// omitted, so a table without any serializes and hashes as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub specialised_indexes: Vec<SpecialisedIndex>,
 }
 
 /// How much of a table's row history nodes keep (SPEC 4 §4.9).
@@ -494,7 +511,15 @@ impl PartialEq for TableSchema {
             && self.policies == other.policies
             && self.branch_by == other.branch_by
             && self.history == other.history
+            && sorted_specialised(&self.specialised_indexes)
+                == sorted_specialised(&other.specialised_indexes)
     }
+}
+
+fn sorted_specialised(indexes: &[SpecialisedIndex]) -> Vec<&SpecialisedIndex> {
+    let mut sorted: Vec<&SpecialisedIndex> = indexes.iter().collect();
+    sorted.sort_by(|left, right| left.name.cmp(&right.name));
+    sorted
 }
 
 /// Canonical order of a table's composite indexes: lexicographic over each
@@ -561,6 +586,7 @@ impl TableSchema {
             policies: TablePolicies::default(),
             branch_by: Vec::new(),
             history: HistoryRetention::Full,
+            specialised_indexes: Vec::new(),
         }
     }
 
@@ -573,6 +599,7 @@ impl TableSchema {
             policies,
             branch_by: Vec::new(),
             history: HistoryRetention::Full,
+            specialised_indexes: Vec::new(),
         }
     }
 
@@ -620,6 +647,7 @@ pub struct TableSchemaBuilder {
     policies: TablePolicies,
     branch_by: Vec<ColumnName>,
     history: HistoryRetention,
+    specialised_indexes: Vec<SpecialisedIndex>,
 }
 
 impl TableSchemaBuilder {
@@ -633,6 +661,7 @@ impl TableSchemaBuilder {
             policies: TablePolicies::default(),
             branch_by: Vec::new(),
             history: HistoryRetention::Full,
+            specialised_indexes: Vec::new(),
         }
     }
 
@@ -733,6 +762,59 @@ impl TableSchemaBuilder {
         self
     }
 
+    /// Add a specialised index (SPEC 20.1).
+    pub fn specialised_index(mut self, index: SpecialisedIndex) -> Self {
+        self.specialised_indexes.push(index);
+        self
+    }
+
+    /// Add a text index over `fields` (column, weight 1–15 or a
+    /// [`TextField`] with its reference length).
+    pub fn text_index<'a, F: Into<TextField>>(
+        self,
+        name: &str,
+        fields: impl IntoIterator<Item = (&'a str, F)>,
+        analyzer: &str,
+        prefix: bool,
+    ) -> Self {
+        self.specialised_index(SpecialisedIndex {
+            name: name.to_owned(),
+            kind: SpecialisedIndexKind::Text {
+                fields: fields
+                    .into_iter()
+                    .map(|(column, field)| (column.to_owned(), field.into()))
+                    .collect(),
+                analyzer: analyzer.to_owned(),
+                prefix,
+            },
+            server_only: false,
+        })
+    }
+
+    /// Add an exact vector index over `column`.
+    pub fn vector_index(self, name: &str, column: &str, metric: VectorMetric) -> Self {
+        self.specialised_index(SpecialisedIndex {
+            name: name.to_owned(),
+            kind: SpecialisedIndexKind::Vector {
+                column: column.to_owned(),
+                metric,
+                ann: VectorAnn::Exact,
+            },
+            server_only: false,
+        })
+    }
+
+    /// Add a geo index over a `point` column.
+    pub fn geo_index(self, name: &str, column: &str) -> Self {
+        self.specialised_index(SpecialisedIndex {
+            name: name.to_owned(),
+            kind: SpecialisedIndexKind::Geo {
+                column: column.to_owned(),
+            },
+            server_only: false,
+        })
+    }
+
     /// Get the table name.
     pub fn name(&self) -> &str {
         &self.name
@@ -747,6 +829,7 @@ impl TableSchemaBuilder {
             policies: self.policies,
             branch_by: self.branch_by,
             history: self.history,
+            specialised_indexes: self.specialised_indexes,
         }
     }
 
@@ -760,6 +843,7 @@ impl TableSchemaBuilder {
             policies: self.policies,
             branch_by: self.branch_by,
             history: self.history,
+            specialised_indexes: self.specialised_indexes,
         };
         (name, schema)
     }

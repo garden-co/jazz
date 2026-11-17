@@ -250,6 +250,11 @@ pub struct Ctx<'a> {
     /// rows keeps it rather than listing every row the policy grants.
     lift_row_keys: bool,
     next_alias: usize,
+    /// The query's index search, planned (SPEC 20.5): the root is
+    /// `t JOIN ix ON ix.rid = t.rid`.
+    search: Option<crate::ix::Planned>,
+    /// The statement being compiled joins `ix` to its root `t`.
+    searching: bool,
 }
 
 /// A frozen snapshot: every version at or before position `seq`, plus the
@@ -270,6 +275,10 @@ pub struct Cut {
     /// A write check's evidence (SPEC 7, WITH CHECK): which of the
     /// versions at `own` are overlaid. `None` overlays them all.
     pub overlay: Option<Overlay>,
+    /// A replica's live read cut back to what its upstream settled for it
+    /// (`Inner::visible_read`), not one the reader asked for: an index
+    /// search reads current rows instead, as its index holds them.
+    pub derived: bool,
 }
 
 /// The versions at a write check's `own` that its policy sees (SPEC 7);
@@ -387,7 +396,19 @@ impl<'a> Ctx<'a> {
             overlay_tables: BTreeSet::new(),
             lift_row_keys: false,
             next_alias: 0,
+            search: None,
+            searching: false,
         }
+    }
+
+    fn search_compiling(&self, alias: &str) -> bool {
+        self.searching && alias == "t"
+    }
+
+    /// Compile the query's index search as `planned`.
+    pub(crate) fn with_search(mut self, planned: Option<crate::ix::Planned>) -> Self {
+        self.search = planned;
+        self
     }
 
     pub fn with_history_origin(mut self, origin: Option<[u8; 16]>) -> Self {
@@ -879,6 +900,9 @@ impl<'a> Ctx<'a> {
     }
 
     fn compile_shape(mut self, query: &Query, include_deleted: bool) -> Result<Compiled, Error> {
+        if crate::ix::search_of(query).is_some() {
+            return self.compile_search(query, include_deleted);
+        }
         if let Some(column) = deletion_column(query) {
             if !include_deleted {
                 return Err(query_error(format!(
@@ -956,6 +980,210 @@ impl<'a> Ctx<'a> {
         })
     }
 
+    /// A query with an index search (SPEC 20.5): one statement over the
+    /// current table, `t JOIN ix ON ix.rid = t.rid`, with every other
+    /// clause and the read policy applied to `t` unchanged. Without an
+    /// explicit order it orders by `$score`, best first; ties by `id`.
+    fn compile_search(mut self, query: &Query, include_deleted: bool) -> Result<Compiled, Error> {
+        self.search_cut()?;
+        let refused = [
+            (query.flat_join.is_some(), "flat joins"),
+            (
+                crate::schema::history::history_source_table(&query.table).is_some(),
+                "history reads",
+            ),
+            (!query.policy_branches.is_empty(), "policy branches"),
+            (!query.inherits.is_empty(), "inherited-policy traversals"),
+            (query.relation.is_some(), "relation queries"),
+            (query.aggregate.is_some(), "aggregates"),
+            (
+                self.view.as_ref().is_some_and(|view| view.base.is_some()),
+                "a branch view with a base",
+            ),
+        ];
+        if let Some((_, what)) = refused.iter().find(|(present, _)| *present) {
+            return Err(unsupported(format!("index search on {what}")));
+        }
+        let searches = query
+            .filters
+            .iter()
+            .filter(|predicate| matches!(predicate, Predicate::Search(_)))
+            .count();
+        if searches > 1 {
+            return Err(query_error("a query can search only one index"));
+        }
+        let search = crate::ix::search_of(query).expect("a search");
+        let declared = self
+            .schema
+            .jazz
+            .tables()
+            .iter()
+            .find(|table| table.name == query.table)
+            .ok_or_else(|| query_error(format!("unknown table {}", query.table)))?;
+        crate::query::validate_search(declared, search).map_err(query_error)?;
+        let cte = self.search_cte()?;
+        let (table, projection, wheres) = self.root_rows(query, include_deleted)?;
+        let alias = "t";
+        self.searching = true;
+        let order = self.order_sql(table, alias, &query.order_by)?;
+        self.searching = false;
+        let columns = projection
+            .iter()
+            .map(|(name, ..)| Ok(format!(", {}", column_sql(table, alias, name)?)))
+            .collect::<Result<String, Error>>()?;
+        let limit = self.bind(Sql::Integer(query.limit.map_or(-1, |l| l as i64)));
+        let offset = self.bind(Sql::Integer(query.offset as i64));
+        let source = self.source(table)?;
+        let sql = format!(
+            "WITH ix(rid, score) AS ({cte}) SELECT {alias}.id, {alias}._clock, {alias}._state{columns}, \
+             {alias}._writer FROM {source} AS {alias} JOIN ix ON ix.rid = {alias}.rid WHERE {} \
+             ORDER BY {order} LIMIT {limit} OFFSET {offset}",
+            and(&wheres),
+        );
+        Ok(Compiled {
+            sql,
+            params: self.params,
+            projection,
+            tables: self.tables,
+            aggregate: false,
+            joined: 0,
+            versioned: false,
+            union: false,
+            writer: true,
+            partial: Vec::new(),
+        })
+    }
+
+    /// An index search reads the current rows, as its index holds them
+    /// (SPEC 20.4): a cut a replica's live read was given to stay within
+    /// what its upstream settled is dropped, and any other cut (a
+    /// snapshot, a read as of a position, a `Remote` read of settled rows)
+    /// is refused rather than scored against content the cut does not show.
+    fn search_cut(&mut self) -> Result<(), Error> {
+        match &self.cut {
+            Some(cut) if cut.derived && !self.settled_only => {
+                self.cut = None;
+                Ok(())
+            }
+            Some(_) => Err(unsupported(
+                "index search at Remote tier or as of a cut (searches read the current rows)",
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// The body of `ix(rid, score)` for the planned search (see
+    /// [`crate::ix::Planned`]).
+    fn search_cte(&mut self) -> Result<String, Error> {
+        // Without a plan this is a validation-only compile (as
+        // `Db::prepare_query` runs): an empty candidate relation.
+        let planned = self.search.take();
+        Ok(match planned {
+            None => "SELECT NULL AS rid, NULL AS score WHERE 0".to_owned(),
+            Some(planned) => match planned {
+                crate::ix::Planned::Sql { index, op } => {
+                    let prefix = index.prefix.clone();
+                    let mut binds = Vec::new();
+                    let first = self.params.len();
+                    let mut next = first;
+                    let candidates = index.kind.plan(&prefix, &op, &mut |value| {
+                        binds.push(value);
+                        next += 1;
+                        format!("?{next}")
+                    })?;
+                    self.params.extend(binds);
+                    match candidates {
+                        crate::ix::Candidates::Sql(sql) => sql,
+                        crate::ix::Candidates::Scored(_) => {
+                            return Err(query_error("a Rust-scored search planned as SQL"));
+                        }
+                    }
+                }
+                crate::ix::Planned::Bound(candidates) => {
+                    let mut binds = Vec::new();
+                    let mut next = self.params.len();
+                    let sql = crate::ix::bound_cte(&candidates, &mut |value| {
+                        binds.push(value);
+                        next += 1;
+                        format!("?{next}")
+                    });
+                    self.params.extend(binds);
+                    sql
+                }
+            },
+        })
+    }
+
+    /// The sort keys of rows `ids` (a JSON array of hex ids) of a query
+    /// with a search, by `order`, which may name `$score`: for splicing a
+    /// live search's changed rows (SPEC 20.8).
+    pub(crate) fn compile_sort_keys(
+        mut self,
+        query: &Query,
+        order: &[crate::query::OrderBy],
+        ids: Sql,
+    ) -> Result<(String, Vec<Sql>), Error> {
+        let cte = self.search_cte()?;
+        let table = self.table(&query.table)?;
+        let mut columns = String::new();
+        for by in order {
+            if by.column == crate::query::SCORE_COLUMN {
+                columns.push_str(", ix.score");
+                continue;
+            }
+            let sql = column_sql(table, "t", &by.column)?;
+            let sql = table
+                .column(&by.column)
+                .and_then(|column| column.rank_sql(&sql))
+                .unwrap_or(sql);
+            columns.push_str(&format!(", {sql}"));
+        }
+        let ids = self.bind(ids);
+        let sql = format!(
+            "WITH ix(rid, score) AS ({cte}) SELECT t.id{columns} FROM {} AS t \
+             JOIN ix ON ix.rid = t.rid WHERE t.id IN (SELECT unhex(value) FROM json_each({ids}))",
+            quote(&table.stored)
+        );
+        Ok((sql, self.params))
+    }
+
+    /// Phase 1 of a Rust-scored search (SPEC 20.5): the rows `query`'s
+    /// other clauses and read policy match, ordered by `rid` and capped at
+    /// `cap`, each with its payload from shadow table `shadow`'s column
+    /// `column`. Returns that statement, the same statement without the
+    /// shadow table (whose plan decides whether the clauses narrow the
+    /// table through an index), and their parameters.
+    pub(crate) fn compile_candidates(
+        mut self,
+        query: &Query,
+        shadow: &str,
+        column: &str,
+        cap: usize,
+    ) -> Result<(String, String, Vec<Sql>), Error> {
+        self.search_cut()?;
+        if query.flat_join.is_some()
+            || !query.policy_branches.is_empty()
+            || !query.inherits.is_empty()
+            || query.relation.is_some()
+            || query.aggregate.is_some()
+            || crate::schema::history::history_source_table(&query.table).is_some()
+        {
+            return Err(unsupported("this query form with an index search"));
+        }
+        let (table, _, wheres) = self.root_rows(query, false)?;
+        let source = self.source(table)?;
+        let cap = self.bind(Sql::Integer(cap as i64));
+        let wheres = and(&wheres);
+        let plain = format!("SELECT t.rid FROM {source} AS t WHERE {wheres}");
+        let sql = format!(
+            "SELECT t.rid, t.id, s.{} FROM {source} AS t JOIN {} AS s ON s.rid = t.rid \
+             WHERE {wheres} ORDER BY t.rid LIMIT {cap}",
+            quote(column),
+            quote(shadow)
+        );
+        Ok((sql, plain, self.params))
+    }
+
     /// A plain query's root table (read as `t`), its projection, and the
     /// conditions its rows meet: filters, traversals, required includes and
     /// array requirements, the read policy, and liveness.
@@ -972,6 +1200,10 @@ impl<'a> Ctx<'a> {
             wheres.push(format!("({alias}._state & {STATE_DELETED}) = 0"));
         }
         for filter in &query.filters {
+            // The search is the root's join (see `compile_shape`).
+            if matches!(filter, Predicate::Search(_)) {
+                continue;
+            }
             wheres.push(self.predicate(filter, table, alias)?);
         }
         for reachable in &query.reachable {
@@ -2077,7 +2309,15 @@ impl<'a> Ctx<'a> {
                 Term::NaN => "0".to_owned(),
                 term => format!("({} IS NULL)", term.sql().expect("present")),
             },
-            Predicate::Removed(removed) => match *removed {},
+            Predicate::Removed(removed)
+            | Predicate::ReservedStartsWith(removed)
+            | Predicate::ReservedEndsWith(removed) => match *removed {},
+            Predicate::Search(_) => {
+                return Err(query_error(
+                    "an index search is valid only as a top-level filter of a query, not nested \
+                     in a condition, a join, a policy or a subquery",
+                ));
+            }
         })
     }
 
@@ -2089,6 +2329,18 @@ impl<'a> Ctx<'a> {
         table: &Table,
         alias: &str,
     ) -> Result<String, Error> {
+        if is_range(&op) {
+            for operand in [left, right] {
+                if let Operand::Column(column) = operand
+                    && is_whole_only(table, column)
+                {
+                    return Err(query_error(format!(
+                        "operand type mismatch: a range on {column}: vector and point \
+                         columns compare whole (eq, ne, in, notIn, isNull)"
+                    )));
+                }
+            }
+        }
         let (left, right) = match (left, right) {
             (Operand::Column(column), other) => (
                 self.operand(left, table, alias)?,
@@ -3256,11 +3508,34 @@ fn check_candidate(table: &Table, column: &str, option: &Operand) -> Result<(), 
     )))
 }
 
+/// Whether `column` is a vector or point column (nullable or not): one
+/// that compares only whole, by `eq`, `ne`, `in`, `notIn` and `isNull`
+/// (SPEC 20.1). Its bytes have no order a range or `orderBy` could mean,
+/// and no part `contains` could find.
+fn is_whole_only(table: &Table, column: &str) -> bool {
+    fn whole(ty: &ValueType) -> bool {
+        match ty {
+            ValueType::Nullable(inner) => whole(inner),
+            ValueType::Vector(_) | ValueType::Point => true,
+            _ => false,
+        }
+    }
+    table
+        .column(column)
+        .is_some_and(|declared| whole(&declared.ty))
+}
+
 /// `contains` searches text, bytes or an array.
 fn check_haystack(table: &Table, column: &str) -> Result<(), Error> {
     let Some(declared) = table.column(column) else {
         return Ok(());
     };
+    if is_whole_only(table, column) {
+        return Err(query_error(format!(
+            "operand type mismatch: contains on {column}: vector and point columns compare \
+             whole (eq, ne, in, notIn, isNull)"
+        )));
+    }
     match type_kind(&declared.ty) {
         Kind::Text | Kind::Bytes | Kind::Array | Kind::Other => Ok(()),
         _ => Err(query_error(format!(
@@ -4084,6 +4359,11 @@ impl Ctx<'_> {
             .into_iter()
             .map(|key| format!("{} {}", key.sql, key.direction))
             .collect();
+        // A search without an explicit order orders by its score, best
+        // first (SPEC 20.4).
+        if order.is_empty() && self.search_compiling(alias) {
+            keys.push("ix.score ASC".to_owned());
+        }
         let tie = match order.last().map(|key| key.direction) {
             Some(OrderDirection::Desc) => "DESC",
             _ => "ASC",
@@ -4114,6 +4394,23 @@ impl Ctx<'_> {
                     "ordering by the author record `{}` (order by its parts)",
                     key.column
                 )));
+            }
+            if is_whole_only(table, &key.column) {
+                return Err(query_error(format!(
+                    "column {} cannot be ordered by: vector and point columns compare whole \
+                     (eq, ne, in, notIn, isNull)",
+                    key.column
+                )));
+            }
+            if key.column == crate::query::SCORE_COLUMN {
+                if !self.search_compiling(alias) {
+                    return Err(query_error("ordering by $score needs an index search"));
+                }
+                terms.push(OrderTerm {
+                    sql: "ix.score".to_owned(),
+                    direction,
+                });
+                continue;
             }
             let mut sql = column_sql(table, alias, &key.column)?;
             // An enum column orders by the query schema's declaration order.

@@ -616,7 +616,111 @@ pub enum Predicate {
     Removed(RemovedVariant),
     /// Nullable value is null.
     IsNull(Operand),
+    /// The slot of jazz#5983's `StartsWith` (postcard tag 13), held so
+    /// that `Search` keeps tag 15 whichever lands first.
+    ReservedStartsWith(RemovedVariant),
+    /// The slot of jazz#5983's `EndsWith` (postcard tag 14).
+    ReservedEndsWith(RemovedVariant),
+    /// A specialised index search (SPEC 20.4), postcard tag 15, after the
+    /// two slots above, so every other predicate keeps its encoding. Valid only as a top-level
+    /// filter of a query, at most once, and never in a policy, a join, an
+    /// include or under `Any`/`Not`.
+    Search(IndexSearch),
 }
+
+/// A search through one of the root table's specialised indexes.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct IndexSearch {
+    /// The index's name, unique within the table.
+    pub index: String,
+    /// What it asks the index.
+    pub op: IndexOp,
+    /// The SHA-256 of the index's `jazz-ix-decl/1` declaration bytes as the
+    /// querying node declares it (SPEC 20.4). `None` is filled in when the
+    /// query is prepared, from the preparing schema; a node whose maintained
+    /// index has another declaration refuses the search
+    /// (`IndexDeclarationMismatch`) rather than score it differently.
+    #[serde(default)]
+    pub decl: Option<[u8; 32]>,
+}
+
+/// What a search asks its index.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum IndexOp {
+    /// Rows whose analyzed fields contain the query's terms: any of them
+    /// or all of them, by `mode`.
+    Match {
+        /// The query text, analyzed like the indexed fields.
+        text: String,
+        /// Whether a row needs any query term or all of them.
+        mode: MatchMode,
+    },
+    /// The `k` rows nearest to a vector, by the index metric.
+    Nearest {
+        /// The query vector, of the index's dimension.
+        vector: Vec<f32>,
+        /// How many rows (1–1000).
+        k: u32,
+    },
+    /// Rows within a radius of a point.
+    WithinRadius {
+        /// Latitude, degrees.
+        lat: f64,
+        /// Longitude, degrees.
+        lng: f64,
+        /// Radius, meters (at most 1000 km).
+        meters: f64,
+    },
+    /// Rows inside a lat/lng rectangle (may cross the antimeridian when
+    /// `west > east`).
+    WithinBox {
+        /// Southern edge, degrees.
+        south: f64,
+        /// Western edge, degrees.
+        west: f64,
+        /// Northern edge, degrees.
+        north: f64,
+        /// Eastern edge, degrees.
+        east: f64,
+    },
+}
+
+impl IndexOp {
+    /// The index kind this op searches.
+    pub fn kind(&self) -> crate::model::public_schema::SpecialisedIndexKindName {
+        use crate::model::public_schema::SpecialisedIndexKindName as Kind;
+        match self {
+            Self::Match { .. } => Kind::Text,
+            Self::Nearest { .. } => Kind::Vector,
+            Self::WithinRadius { .. } | Self::WithinBox { .. } => Kind::Geo,
+        }
+    }
+
+    /// The op's name in errors.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Match { .. } => "match",
+            Self::Nearest { .. } => "nearest",
+            Self::WithinRadius { .. } => "withinRadius",
+            Self::WithinBox { .. } => "withinBox",
+        }
+    }
+}
+
+/// How many of a text search's terms a row needs (SPEC 20.4). The prefix
+/// term, if any, counts as one term. Either way a row's score sums the
+/// impacts of the terms it holds, so rows holding more rank higher.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum MatchMode {
+    /// At least one term.
+    #[default]
+    Any,
+    /// Every term.
+    All,
+}
+
+/// The reserved order column of a search's score (SPEC 20.4), best first.
+pub const SCORE_COLUMN: &str = "$score";
 
 impl Predicate {
     /// Calls `f` on every operand of this predicate, descending through
@@ -629,7 +733,9 @@ impl Predicate {
                 }
             }
             Self::Not(predicate) => predicate.for_each_operand_mut(f),
-            Self::Removed(removed) => match *removed {},
+            Self::Removed(removed)
+            | Self::ReservedStartsWith(removed)
+            | Self::ReservedEndsWith(removed) => match *removed {},
             Self::Eq(left, right)
             | Self::Ne(left, right)
             | Self::Gt(left, right)
@@ -645,6 +751,7 @@ impl Predicate {
                 values.iter_mut().for_each(f);
             }
             Self::IsNull(operand) => f(operand),
+            Self::Search(_) => {}
         }
     }
 
@@ -656,7 +763,9 @@ impl Predicate {
                 predicates.iter().any(|predicate| predicate.any_operand(f))
             }
             Self::Not(predicate) => predicate.any_operand(f),
-            Self::Removed(removed) => match *removed {},
+            Self::Removed(removed)
+            | Self::ReservedStartsWith(removed)
+            | Self::ReservedEndsWith(removed) => match *removed {},
             Self::Eq(left, right)
             | Self::Ne(left, right)
             | Self::Gt(left, right)
@@ -666,6 +775,7 @@ impl Predicate {
             | Self::Contains(left, right) => f(left) || f(right),
             Self::In(left, values) => f(left) || values.iter().any(f),
             Self::IsNull(operand) => f(operand),
+            Self::Search(_) => false,
         }
     }
 }

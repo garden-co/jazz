@@ -38,6 +38,10 @@ pub use public_schema::{
     RowDelta, RowDescriptor, Schema, SchemaBuilder, SchemaHash, Session, TableName, TablePolicies,
     TableSchema, TableSchemaBuilder, TransactionId, Value, WriteContext, permissions, policy_expr,
 };
+pub use public_schema::{
+    SpecialisedIndex, SpecialisedIndexKind, SpecialisedIndexKindName, TextField, VectorAnn,
+    VectorMetric,
+};
 pub use schema_lens::{Direction, Lens, LensOp, LensTransform};
 pub use transaction::OpenTransactionId;
 

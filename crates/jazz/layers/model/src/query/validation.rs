@@ -221,6 +221,47 @@ pub fn binding_id_for_values(values: &BTreeMap<String, Value>) -> Result<Binding
 /// Query validation error.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum QueryError {
+    /// A search is valid only as a top-level filter (SPEC 20.4).
+    #[error("an index search is valid only as a top-level filter of a query, not {0}")]
+    SearchMisplaced(String),
+    /// A query searches at most one index.
+    #[error("a query can search only one index")]
+    SearchMoreThanOnce,
+    /// The search names an index the table does not declare.
+    #[error("table {table} has no specialised index `{index}`")]
+    UnknownIndex {
+        /// Table name.
+        table: String,
+        /// Index name.
+        index: String,
+    },
+    /// The op searches another kind of index.
+    #[error("index {table}.{index} is a {kind} index; `{op}` searches a {op_kind} index")]
+    SearchOpMismatch {
+        /// Table name.
+        table: String,
+        /// Index name.
+        index: String,
+        /// The index's kind.
+        kind: String,
+        /// The op.
+        op: String,
+        /// The kind the op searches.
+        op_kind: String,
+    },
+    /// The op's arguments are out of range.
+    #[error("search on {table}.{index}: {detail}")]
+    InvalidSearch {
+        /// Table name.
+        table: String,
+        /// Index name.
+        index: String,
+        /// What is wrong.
+        detail: String,
+    },
+    /// `$score` orders a search's rows only.
+    #[error("ordering by $score needs an index search")]
+    ScoreWithoutSearch,
     /// Aggregate aliases cannot occupy compiler-owned output names.
     #[error("aggregate alias {0} uses a reserved compiler namespace")]
     ReservedAggregateAlias(String),
@@ -1080,7 +1121,21 @@ fn validate_parameter_contexts(
     for join in &mut query.joins {
         validate_join(schema, root, &query.table, join, phase)?;
     }
-    validate_predicates(filter_schema, &mut query.filters, phase)?;
+    let mut searches = 0;
+    for predicate in &mut query.filters {
+        if let Predicate::Search(search) = predicate {
+            searches += 1;
+            if searches > 1 {
+                return Err(QueryError::SearchMoreThanOnce);
+            }
+            if query.flat_join.is_some() {
+                return Err(QueryError::SearchMisplaced("in a flat join".into()));
+            }
+            validate_search(root, search)?;
+        } else {
+            validate_predicate(filter_schema, predicate, phase)?;
+        }
+    }
     for reachable in &mut query.reachable {
         validate_reachable(schema, root, reachable, phase)?;
     }
@@ -1300,7 +1355,17 @@ fn validate_query_canonical_parts_as(
         validate_aggregate(root, aggregate)?;
         validate_aggregate_order_by(&query.table, aggregate, &query.order_by)?;
     } else {
+        let searches = query
+            .filters
+            .iter()
+            .any(|predicate| matches!(predicate, Predicate::Search(_)));
         for order in &query.order_by {
+            if order.column == SCORE_COLUMN {
+                if !searches {
+                    return Err(QueryError::ScoreWithoutSearch);
+                }
+                continue;
+            }
             planner_column_type(root, &order.column)?;
         }
     }
@@ -1634,8 +1699,11 @@ fn rewrite_flat_join_predicate_columns(
             rewrite_operand(value)?;
             options.iter_mut().try_for_each(rewrite_operand)
         }
-        Predicate::Removed(removed) => match *removed {},
+        Predicate::Removed(removed)
+        | Predicate::ReservedStartsWith(removed)
+        | Predicate::ReservedEndsWith(removed) => match *removed {},
         Predicate::IsNull(operand) => rewrite_operand(operand),
+        Predicate::Search(_) => Err(QueryError::SearchMisplaced("in a flat join".into())),
     }
 }
 
@@ -2357,6 +2425,131 @@ fn unknown_column(table: &str, column: &str) -> QueryError {
     }
 }
 
+/// Most nearest rows a vector search returns.
+pub const SEARCH_K_MAX: u32 = 1000;
+/// Largest search radius, in meters.
+pub const SEARCH_RADIUS_MAX_M: f64 = 1_000_000.0;
+
+/// A search's index and arguments (SPEC 20.4). What needs the index's
+/// implementation (an empty text after analysis, a building index) is
+/// checked where the search runs.
+pub fn validate_search(table: &TableSchema, search: &IndexSearch) -> Result<(), QueryError> {
+    let invalid = |detail: String| QueryError::InvalidSearch {
+        table: table.name.clone(),
+        index: search.index.clone(),
+        detail,
+    };
+    let index = table
+        .specialised_indexes
+        .iter()
+        .find(|index| index.name == search.index)
+        .ok_or_else(|| QueryError::UnknownIndex {
+            table: table.name.clone(),
+            index: search.index.clone(),
+        })?;
+    let kind = index.kind.kind_name();
+    if search.op.kind() != kind {
+        return Err(QueryError::SearchOpMismatch {
+            table: table.name.clone(),
+            index: search.index.clone(),
+            kind: kind.to_string(),
+            op: search.op.name().into(),
+            op_kind: search.op.kind().to_string(),
+        });
+    }
+    let latitude = |name: &str, value: f64| {
+        if (-90.0..=90.0).contains(&value) {
+            Ok(())
+        } else {
+            Err(invalid(format!("{name} {value} is outside -90..90")))
+        }
+    };
+    let longitude = |name: &str, value: f64| {
+        if (-180.0..=180.0).contains(&value) {
+            Ok(())
+        } else {
+            Err(invalid(format!("{name} {value} is outside -180..180")))
+        }
+    };
+    match &search.op {
+        IndexOp::Match { text, .. } => {
+            if text.trim().is_empty() {
+                return Err(invalid("the search text is empty".into()));
+            }
+        }
+        IndexOp::Nearest { vector, k } => {
+            if !(1..=SEARCH_K_MAX).contains(k) {
+                return Err(invalid(format!("k {k} is outside 1..{SEARCH_K_MAX}")));
+            }
+            if let Some(position) = vector.iter().position(|x| !x.is_finite()) {
+                return Err(invalid(format!(
+                    "the query vector holds a non-finite value at {position}"
+                )));
+            }
+            let expected = match &index.kind {
+                crate::model::public_schema::SpecialisedIndexKind::Vector { column, .. } => table
+                    .columns
+                    .iter()
+                    .find(|c| &c.name == column)
+                    .and_then(|c| vector_dimensions(&c.column_type)),
+                _ => None,
+            };
+            if vector.is_empty() || expected.is_some_and(|n| n as usize != vector.len()) {
+                return Err(invalid(format!(
+                    "the query vector has {} dimensions{}",
+                    vector.len(),
+                    expected.map_or(String::new(), |n| format!("; the index has {n}"))
+                )));
+            }
+            let cosine = matches!(
+                &index.kind,
+                crate::model::public_schema::SpecialisedIndexKind::Vector {
+                    metric: crate::model::public_schema::VectorMetric::Cosine,
+                    ..
+                }
+            );
+            if cosine && vector.iter().all(|x| *x == 0.0) {
+                return Err(invalid(
+                    "a cosine query vector cannot be zero: it has no direction".into(),
+                ));
+            }
+        }
+        IndexOp::WithinRadius { lat, lng, meters } => {
+            latitude("lat", *lat)?;
+            longitude("lng", *lng)?;
+            if !(0.0..=SEARCH_RADIUS_MAX_M).contains(meters) {
+                return Err(invalid(format!(
+                    "radius {meters} m is outside 0..{SEARCH_RADIUS_MAX_M} m"
+                )));
+            }
+        }
+        IndexOp::WithinBox {
+            south,
+            west,
+            north,
+            east,
+        } => {
+            latitude("south", *south)?;
+            latitude("north", *north)?;
+            longitude("west", *west)?;
+            longitude("east", *east)?;
+            if south > north {
+                return Err(invalid(format!("south {south} is north of north {north}")));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The dimension of a runtime vector column.
+fn vector_dimensions(column_type: &ColumnType) -> Option<u32> {
+    match column_type {
+        ColumnType::Vector(dimensions) => Some(*dimensions),
+        ColumnType::Nullable(inner) => vector_dimensions(inner),
+        _ => None,
+    }
+}
+
 fn validate_predicates(
     table: &TableSchema,
     predicates: &mut [Predicate],
@@ -2393,7 +2586,14 @@ fn validate_predicate(
                 .try_for_each(|predicate| validate_predicate(table, predicate, params));
         }
         Predicate::Not(predicate) => return validate_predicate(table, predicate, params),
-        Predicate::Removed(removed) => match *removed {},
+        Predicate::Search(_) => {
+            return Err(QueryError::SearchMisplaced(
+                "nested in a condition, a join, a policy or a subquery".into(),
+            ));
+        }
+        Predicate::Removed(removed)
+        | Predicate::ReservedStartsWith(removed)
+        | Predicate::ReservedEndsWith(removed) => match *removed {},
         _ => {}
     }
     if let ParameterPhase::Prepare(domain) = params {
@@ -2429,10 +2629,12 @@ fn validate_predicate(
         unreachable!()
     };
     match predicate {
-        Predicate::All(_) | Predicate::Any(_) | Predicate::Not(_) => {
-            unreachable!("recursive predicates handled by the shared traversal")
+        Predicate::All(_) | Predicate::Any(_) | Predicate::Not(_) | Predicate::Search(_) => {
+            unreachable!("recursive predicates and searches handled by the shared traversal")
         }
-        Predicate::Removed(removed) => match *removed {},
+        Predicate::Removed(removed)
+        | Predicate::ReservedStartsWith(removed)
+        | Predicate::ReservedEndsWith(removed) => match *removed {},
         Predicate::Eq(left, right) | Predicate::Ne(left, right) => {
             validate_comparable_operands(table, left, right, params).map(|_| ())
         }

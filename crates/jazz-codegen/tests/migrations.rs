@@ -390,6 +390,10 @@ fn a_change_that_keeps_every_row_needs_an_empty_step() {
             "indexes",
         ),
         (
+            r#"{ "todos": { "columns": { "title": "string", "done": "boolean" }, "indexes": [{ "name": "search", "text": { "title": 1 }, "analyzer": "jazz-text/1:en" }] } }"#,
+            "indexes",
+        ),
+        (
             r#"{ "todos": { "columns": { "title": { "type": "string", "merge": "text" }, "done": "boolean" } } }"#,
             "merge strategies",
         ),
@@ -515,6 +519,66 @@ fn a_reference_follows_a_renamed_table() {
     );
     assert!(created.todos.is_empty(), "{:?}", created.todos);
     App::load(created.app.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// SPEC 20.1: no migration converts a column to, from or between vector
+/// types; adding a vector column is an ordinary new column.
+#[test]
+fn vector_type_changes_are_refused_and_new_vector_columns_migrate() {
+    let vec3 = r#"{ "docs": { "columns": { "e": { "vector": 3 } } } }"#;
+    for after in [
+        r#"{ "docs": { "columns": { "e": { "vector": 4 } } } }"#,
+        r#"{ "docs": { "columns": { "e": "bytes" } } }"#,
+    ] {
+        let error = refused(vec3, after);
+        assert!(
+            error.contains("Changing the type of column `docs.e` to or from a vector"),
+            "{after}: {error}"
+        );
+    }
+    let error = refused(r#"{ "docs": { "columns": { "e": "bytes" } } }"#, vec3);
+    assert!(error.contains("to or from a vector"), "{error}");
+
+    let created = migrate(
+        r#"{ "docs": { "columns": { "title": "string" } } }"#,
+        r#"{ "docs": { "columns": { "title": "string", "e": { "vector": 3, "optional": true } } } }"#,
+    );
+    assert!(created.changed);
+    assert!(created.todos.is_empty(), "{:?}", created.todos);
+    App::load(created.app.as_bytes()).unwrap();
+}
+
+/// SPEC 20.1: no migration converts a column to or from a point; adding a
+/// point column is an ordinary new column.
+#[test]
+fn point_type_changes_are_refused_and_new_point_columns_migrate() {
+    let point = r#"{ "places": { "columns": { "p": "point" } } }"#;
+    for other in [
+        r#"{ "places": { "columns": { "p": "bytes" } } }"#,
+        r#"{ "places": { "columns": { "p": { "vector": 2 } } } }"#,
+        r#"{ "places": { "columns": { "p": "string" } } }"#,
+    ] {
+        for (before, after) in [(point, other), (other, point)] {
+            let error = refused(before, after);
+            assert!(
+                error.contains("to or from a point") || error.contains("to or from a vector"),
+                "{before} -> {after}: {error}"
+            );
+        }
+    }
+    let error = refused(point, r#"{ "places": { "columns": { "p": "bytes" } } }"#);
+    assert!(
+        error.contains("Changing the type of column `places.p` to or from a point"),
+        "{error}"
+    );
+
+    let created = migrate(
+        r#"{ "places": { "columns": { "name": "string" } } }"#,
+        r#"{ "places": { "columns": { "name": "string", "p": "point?" } } }"#,
+    );
+    assert!(created.changed);
+    assert!(created.todos.is_empty(), "{:?}", created.todos);
+    App::load(created.app.as_bytes()).unwrap();
 }
 
 /// The decisions every language renders its stub from, as the JSON the TS

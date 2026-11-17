@@ -46,6 +46,7 @@ fn schema() -> JazzSchema {
             policies: allow_all_policies(),
             branch_by: Vec::new(),
             history: Default::default(),
+            specialised_indexes: Vec::new(),
         },
     )]))
     .expect("BandBook sheet schema compiles")
