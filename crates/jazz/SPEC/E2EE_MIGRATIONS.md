@@ -374,7 +374,12 @@ app therefore moves in two deploys:
    warns). The app then writes the member rows: for each space row, one row
    per account that should keep reading it, typically from its own
    membership data, from a client of an updater or a trusted backend. A
-   space row's creator may also add itself (spec R12).
+   space row's creator may also add itself (spec R12). A space supports at
+   most 1,000 member accounts (spec §3.8): a space row that more accounts
+   read today needs a narrower readership or another space table before it
+   can be encrypted. The client refuses member rows beyond the limit; a
+   trusted backend that writes them without the E2EE runtime must keep to
+   it itself.
 2. Change the space table's read rule to `exists __e2ee_members(...)` (spec
    §1.5) and add the encrypted columns. Accounts without a member row lose
    read access to the space row at this deploy. From then on, a client that
