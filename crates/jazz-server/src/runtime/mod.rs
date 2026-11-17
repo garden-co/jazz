@@ -12,37 +12,60 @@
 //! serving the server's host tables (catalogue, account registry), and the
 //! runtime's [`Db`] opens on the same connection once a schema is known.
 
+#[cfg(feature = "native")]
 pub mod auth_admission;
+mod core;
+#[cfg(feature = "native")]
 mod host;
 mod thin;
 
+pub use core::ServerCore;
+#[cfg(feature = "native")]
 pub use host::*;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak, mpsc as std_mpsc};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use web_time::Instant;
 
-use crate::kv::HostKv;
-use crate::kv::HostSql;
-use jazz::catalogue::{CatalogueChange, CatalogueRows};
+use jazz::catalogue::CatalogueRows;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, LensEffects, SubscriberId, SyncMessage, Transport,
-    TransportError, block_on,
+    Db, DbConfig, DbIdentity, SubscriberId, SyncMessage, Transport, TransportError, block_on,
 };
-use jazz::host::{HostReader, HostTable, HostTables, StoreFile};
-use jazz::ids::{AuthorSubject, MigrationLensId, NodeUuid, SchemaVersionId};
+use jazz::host::{HostTables, StoreFile};
+use jazz::ids::{AuthorSubject, NodeUuid, SchemaVersionId};
 use jazz::protocol::MigrationLens;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{TableName, TablePolicies};
 use jazz::wire::{WireAuthorityEndpoint, WireErrorCode, WireFeatures, WireRetry};
-use tokio::sync::{mpsc as tokio_mpsc, oneshot, watch};
+use tokio::sync::mpsc as tokio_mpsc;
+
+// What only the native host uses (`host`, through `use super::*`).
+#[cfg(feature = "native")]
+use crate::kv::{HostKv, HostSql};
+#[cfg(feature = "native")]
+use jazz::catalogue::CatalogueChange;
+#[cfg(feature = "native")]
+use jazz::db::{FileOptions, LensEffects};
+#[cfg(feature = "native")]
+use jazz::host::{HostReader, HostTable};
+#[cfg(feature = "native")]
+use jazz::ids::MigrationLensId;
+#[cfg(feature = "native")]
+use std::panic::{AssertUnwindSafe, catch_unwind};
+#[cfg(feature = "native")]
+use std::sync::atomic::AtomicBool;
+#[cfg(feature = "native")]
+use std::sync::{Weak, mpsc as std_mpsc};
+#[cfg(feature = "native")]
+use std::thread;
+#[cfg(feature = "native")]
+use tokio::sync::{oneshot, watch};
 
 /// Encoded frames exchanged with a host transport.
 pub type AbiBytes = Vec<u8>;
@@ -177,6 +200,7 @@ fn slow_query_threshold() -> Option<Duration> {
 
 /// How often the owner ticks with no traffic, for time-based engine work
 /// such as expiring staged large-value chunks.
+#[cfg(feature = "native")]
 pub(crate) const IDLE_TICK: Duration = Duration::from_secs(1);
 
 /// Inbound messages one session may have applied per round of ticks.
@@ -200,6 +224,62 @@ const READS_OUT_OF_TURN_PER_TICK: usize = 8;
 /// A session with nothing but reads queued does not wait for its turn: its
 /// reads are taken out of turn, up to [`READS_OUT_OF_TURN_PER_TICK`] a tick.
 const TICK_SLICE: Duration = Duration::from_millis(4);
+
+/// Room for one thin request, in its session's and the server's ingress
+/// budgets, held from before its bytes are buffered until the owner has
+/// run it.
+pub struct ThinIngress {
+    _session: tokio::sync::OwnedSemaphorePermit,
+    _server: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+/// Room for one batch of sync frames in its session's ingress budget, held
+/// from when it was read until the owner has taken it.
+pub struct WireIngress {
+    _room: tokio::sync::OwnedSemaphorePermit,
+}
+
+/// A session's next frame batch, or the error frame that ends it.
+type Outbound = (Result<Vec<AbiBytes>, jazz::wire::WireError>, usize);
+
+/// The error frame for a session the engine closed over a message it sent.
+/// Overload and storage failures are the server's state and can pass, so the
+/// client reconnects with backoff. Anything else fails the same way when the
+/// client reconnects and resends, so asking for that would loop.
+fn session_closed_error(error: &jazz::db::Error) -> jazz::wire::WireError {
+    let (code, retry) = match error.code {
+        jazz::db::ErrorCode::Backpressure | jazz::db::ErrorCode::Storage => {
+            (WireErrorCode::Backpressure, WireRetry::Later)
+        }
+        _ => (WireErrorCode::Internal, WireRetry::Never),
+    };
+    jazz::wire::WireError::new(code, retry, format!("sync session closed: {error}"))
+}
+
+/// A session's output in server memory: the bytes held (handed to its
+/// socket side and not yet written), which it derefs to, and the raw bytes
+/// its socket has written, which tell a client that is reading slowly from
+/// one that stopped.
+#[derive(Default)]
+pub struct Egress {
+    held: AtomicUsize,
+    written: AtomicU64,
+}
+
+impl std::ops::Deref for Egress {
+    type Target = AtomicUsize;
+
+    fn deref(&self) -> &AtomicUsize {
+        &self.held
+    }
+}
+
+impl Egress {
+    /// Raw bytes the session's socket has written.
+    fn written(&self) -> u64 {
+        self.written.load(Ordering::Acquire)
+    }
+}
 
 /// Why a session was not opened.
 #[derive(Debug, Clone)]
@@ -269,6 +349,7 @@ struct Owner {
     /// The app this store serves, named in slow-query reports.
     app: Option<String>,
     /// Runs a network chunk store's I/O beside this thread.
+    #[cfg(feature = "native")]
     chunk_io: Option<ChunkIoRunner>,
     /// Tests: the next catalogue reload after a commit fails.
     #[cfg(test)]
@@ -623,7 +704,7 @@ struct ReadClock {
     written: std::cell::Cell<u64>,
     /// The moment the client's reading has caught up to, at the minimum
     /// rate, while the egress is at the budget.
-    caught_up: std::cell::Cell<Option<std::time::Instant>>,
+    caught_up: std::cell::Cell<Option<Instant>>,
 }
 
 impl ReadClock {
@@ -634,7 +715,7 @@ impl ReadClock {
 
     /// Check at `now`: how far the client is behind `min_rate` bytes a
     /// second while its egress is at the budget, if it is.
-    fn check(&self, egress: &Egress, now: std::time::Instant, min_rate: u64) -> Option<Duration> {
+    fn check(&self, egress: &Egress, now: Instant, min_rate: u64) -> Option<Duration> {
         let (held, written) = (egress.load(Ordering::Acquire), egress.written());
         let taken = i128::from(self.handed.get()) - held as i128;
         let took = u64::try_from(taken - self.taken.replace(taken)).unwrap_or(0);
@@ -898,6 +979,7 @@ impl Catalogue {
         }
     }
 
+    #[cfg(feature = "native")]
     fn lenses_for(&self, schema: SchemaVersionId) -> Vec<MigrationLens> {
         self.incoming.get(&schema).cloned().unwrap_or_default()
     }
@@ -964,6 +1046,10 @@ impl Owner {
     /// makes its current permissions revision current again. `schema` is
     /// current instead when the store has no revision yet, or (unless
     /// `any_stored_catalogue`) none whose catalogue admits `schema`.
+    /// Open the runtime on `file` with the native host's chunk store: a
+    /// network one gets its I/O runner, which wakes the store thread
+    /// through `wake`.
+    #[cfg(feature = "native")]
     fn open(
         schema: JazzSchema,
         file: StoreFile,
@@ -971,6 +1057,39 @@ impl Owner {
         wake: std_mpsc::Sender<Work>,
         any_stored_catalogue: bool,
         app: Option<String>,
+    ) -> Result<Self, String> {
+        let chunk_io = match &chunk_store {
+            Some(choice) if choice.network => {
+                Some(ChunkIoRunner::start(Arc::clone(&choice.store), wake)?)
+            }
+            _ => None,
+        };
+        let mut owner =
+            Self::open_on(
+                schema,
+                file,
+                any_stored_catalogue,
+                app,
+                |config| match &chunk_store {
+                    Some(choice) if choice.network => config
+                        .with_chunk_store(Arc::clone(&choice.store))
+                        .with_host_chunk_io(),
+                    Some(choice) => config.with_chunk_store(Arc::clone(&choice.store)),
+                    None => config,
+                },
+            )?;
+        owner.chunk_io = chunk_io;
+        Ok(owner)
+    }
+
+    /// Open the runtime on `file`, whatever hosts it: `configure` adds the
+    /// host's chunk store, if any, to the store's configuration.
+    fn open_on(
+        schema: JazzSchema,
+        file: StoreFile,
+        any_stored_catalogue: bool,
+        app: Option<String>,
+        configure: impl FnOnce(jazz::db::DbConfig) -> jazz::db::DbConfig,
     ) -> Result<Self, String> {
         let rows = file
             .catalogue()
@@ -998,17 +1117,7 @@ impl Owner {
             (None, Some(genesis)) => compile(&genesis.hash)?,
             (None, None) => schema,
         };
-        let config = match &chunk_store {
-            Some(choice) if choice.network => config(current)
-                .with_chunk_store(Arc::clone(&choice.store))
-                .with_host_chunk_io(),
-            Some(choice) => config(current).with_chunk_store(Arc::clone(&choice.store)),
-            None => config(current),
-        };
-        let chunk_io = match chunk_store {
-            Some(choice) if choice.network => Some(ChunkIoRunner::start(choice.store, wake)?),
-            _ => None,
-        };
+        let config = configure(config(current));
         let db = block_on(Db::open_file(config, file))
             .map_err(|error| format!("open server store: {error}"))?;
         db.set_authority();
@@ -1025,7 +1134,8 @@ impl Owner {
             slice: Rc::default(),
             catalogue,
             app,
-            chunk_io,
+            #[cfg(feature = "native")]
+            chunk_io: None,
             #[cfg(test)]
             fail_next_reload: false,
         })
@@ -1231,6 +1341,7 @@ impl Owner {
     /// Fetches run beside a batch came back: install them. A failure
     /// refuses the reads waiting on them, and holds fetches back (batches
     /// go on without them) for the backoff.
+    #[cfg(feature = "native")]
     fn finish_chunk_fetches(&mut self, done: jazz::chunk_store::ChunkIoDone) {
         let finished = self.db.finish_chunk_fetches(done);
         let log = match &self.chunk_io {
@@ -1244,6 +1355,7 @@ impl Owner {
         }
     }
 
+    #[cfg(feature = "native")]
     fn finish_chunk_io(&mut self, done: jazz::chunk_store::ChunkIoDone) {
         // Fetches that failed in a batch hold fetches back as the fetch
         // lane's do, so the next batch does not ask again at once.
@@ -1262,13 +1374,14 @@ impl Owner {
 
     fn tick(&mut self) {
         start_tick(self.sessions.values().map(|session| &*session.queues));
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let ticked = block_on(self.db.tick());
         self.slice.ticked(started.elapsed());
         if let Err(error) = ticked {
             tracing::error!(%error, "server runtime tick failed");
         }
         self.retry_parked_thin();
+        #[cfg(feature = "native")]
         if let Some(runner) = &self.chunk_io {
             runner.pump(self);
         }
@@ -1322,7 +1435,7 @@ impl Owner {
     /// together hold more than the server's egress budget, the stalled
     /// sessions holding the most.
     fn shed_egress(&mut self) {
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         let timeout = self.limits.slow_reader_timeout;
         let mut held: Vec<(ServerSession, usize, bool)> = Vec::new();
         let mut too_slow = Vec::new();
@@ -1385,6 +1498,7 @@ impl Owner {
 /// ends: reconnect later. `NotReady` with `Later` is the close every client
 /// already answers by reconnecting with backoff, so new permissions need no
 /// new wire code; the message says why.
+#[cfg(feature = "native")]
 fn superseded_error(published: &jazz::catalogue::BundleId) -> jazz::wire::WireError {
     jazz::wire::WireError::new(
         WireErrorCode::NotReady,
@@ -2767,6 +2881,71 @@ mod tests {
             Some(jazz::records::Value::Bytes(bytes)) => bytes.clone(),
             other => panic!("expected the body, got {other:?}"),
         }
+    }
+
+    /// A host without the store thread drives the engine itself through
+    /// [`ServerCore`]: it hands a thin session's requests in, ticks, and
+    /// drains the answers, with nothing held between its calls. Here a
+    /// backend session declares its schema and reads a row the store holds.
+    ///
+    /// ```text
+    /// host ──schema──► core ─tick─► Ok
+    /// host ──query───► core ─tick─► Rows(body)
+    /// ```
+    #[test]
+    fn a_host_drives_server_core_directly() {
+        let mut core = ServerCore::open(docs(), StoreFile::memory().unwrap(), false, None).unwrap();
+        block_on(core.db().insert(
+            "docs",
+            BTreeMap::from([(
+                "body".to_owned(),
+                jazz::records::Value::Bytes(b"hello".to_vec()),
+            )]),
+            Default::default(),
+        ))
+        .unwrap();
+        let session = core
+            .open_thin_session(
+                AuthorSubject::SYSTEM,
+                BTreeMap::new(),
+                None,
+                CommitUnitTrust::TrustedBackend,
+            )
+            .unwrap();
+        let ask = |core: &mut ServerCore, id: u64, op: jazz::thin::ThinOp| {
+            assert!(
+                core.receive_thin_request(session, jazz::thin::ThinRequest { id, op }, 1024, false)
+                    .unwrap(),
+                "room for the request"
+            );
+            core.tick();
+            let out = core.take_output(session);
+            assert_eq!(out.len(), 1, "one answer");
+            let frames = out.into_iter().next().unwrap().expect("frames");
+            match jazz::wire::decode_frame(&frames[0]).unwrap() {
+                jazz::wire::WireFrame::ThinResponse(response) => {
+                    assert_eq!(response.id, id);
+                    response.body
+                }
+                other => panic!("expected a thin response, got {other:?}"),
+            }
+        };
+        assert_eq!(
+            ask(
+                &mut core,
+                0,
+                jazz::thin::ThinOp::Schema {
+                    schema: serde_json::to_vec(&docs_source()).unwrap(),
+                },
+            ),
+            jazz::thin::ThinBody::Ok
+        );
+        assert_eq!(thin_body(ask(&mut core, 1, thin_query(None))), b"hello");
+        assert!(!core.inbound_pending());
+        assert!(core.db().held_for_test().is_nothing());
+        core.close_session(session);
+        assert!(core.take_output(session).is_empty());
+        core.close();
     }
 
     /// The store thread answers runtime work within a second.

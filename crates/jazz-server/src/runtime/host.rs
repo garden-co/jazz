@@ -1025,23 +1025,6 @@ pub(super) struct Edge {
     pub(super) egress: Arc<Egress>,
 }
 
-/// Room for one thin request, in its session's and the server's ingress
-/// budgets, held from before its bytes are buffered until the owner has
-/// run it.
-pub struct ThinIngress {
-    pub(super) _session: tokio::sync::OwnedSemaphorePermit,
-    pub(super) _server: Option<tokio::sync::OwnedSemaphorePermit>,
-}
-
-/// Room for one batch of sync frames in its session's ingress budget, held
-/// from when it was read until the owner has taken it.
-pub struct WireIngress {
-    pub(super) _room: tokio::sync::OwnedSemaphorePermit,
-}
-
-/// A session's next frame batch, or the error frame that ends it.
-pub(super) type Outbound = (Result<Vec<AbiBytes>, jazz::wire::WireError>, usize);
-
 /// Activity subscription for a server runtime.
 pub struct ServerRuntimeActivity {
     pub(super) receiver: watch::Receiver<u64>,
@@ -1057,20 +1040,6 @@ impl ServerRuntimeActivity {
     }
 }
 
-/// The error frame for a session the engine closed over a message it sent.
-/// Overload and storage failures are the server's state and can pass, so the
-/// client reconnects with backoff. Anything else fails the same way when the
-/// client reconnects and resends, so asking for that would loop.
-pub(super) fn session_closed_error(error: &jazz::db::Error) -> jazz::wire::WireError {
-    let (code, retry) = match error.code {
-        jazz::db::ErrorCode::Backpressure | jazz::db::ErrorCode::Storage => {
-            (WireErrorCode::Backpressure, WireRetry::Later)
-        }
-        _ => (WireErrorCode::Internal, WireRetry::Never),
-    };
-    jazz::wire::WireError::new(code, retry, format!("sync session closed: {error}"))
-}
-
 /// Take `bytes` the client read off `egress`. Crossing back under the
 /// budget queues a tick: output the owner held back can move again.
 pub(super) fn release_egress(egress: &AtomicUsize, bytes: usize, runtime: &Weak<Inner>) {
@@ -1080,31 +1049,6 @@ pub(super) fn release_egress(egress: &AtomicUsize, bytes: usize, runtime: &Weak<
         && let Some(inner) = runtime.upgrade()
     {
         let _ = ServerRuntimeHandle { inner }.queue_tick();
-    }
-}
-
-/// A session's output in server memory: the bytes held (handed to its
-/// socket side and not yet written), which it derefs to, and the raw bytes
-/// its socket has written, which tell a client that is reading slowly from
-/// one that stopped.
-#[derive(Default)]
-pub struct Egress {
-    pub(super) held: AtomicUsize,
-    pub(super) written: AtomicU64,
-}
-
-impl std::ops::Deref for Egress {
-    type Target = AtomicUsize;
-
-    fn deref(&self) -> &AtomicUsize {
-        &self.held
-    }
-}
-
-impl Egress {
-    /// Raw bytes the session's socket has written.
-    pub(super) fn written(&self) -> u64 {
-        self.written.load(Ordering::Acquire)
     }
 }
 

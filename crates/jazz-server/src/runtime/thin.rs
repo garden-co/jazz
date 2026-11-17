@@ -117,7 +117,7 @@ impl ThinSession {
     /// at the budget, if it is ([`super::ReadClock`]).
     pub(super) fn stalled_for(
         &self,
-        now: std::time::Instant,
+        now: web_time::Instant,
         min_rate: u64,
     ) -> Option<std::time::Duration> {
         self.clock.check(&self.egress, now, min_rate)
