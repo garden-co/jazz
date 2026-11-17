@@ -68,6 +68,60 @@ impl core::fmt::Debug for AccountKey {
     }
 }
 
+/// The account epoch keys of an account's current generation that a device
+/// reaches from the authenticated current key through each successor's
+/// `history` (§2.7, §2.12), root epoch first. An envelope sealed to the
+/// account names the epoch whose sealing key it used; every device holding
+/// a later epoch key of the same generation opens it with these. Keys are
+/// cleared on drop and never printed.
+pub struct AccountEpochKeys {
+    account_id: String,
+    generation: u64,
+    root_id: String,
+    keys: Vec<(String, Zeroizing<[u8; 32]>)>,
+}
+
+impl AccountEpochKeys {
+    pub fn account_id(&self) -> &str {
+        &self.account_id
+    }
+
+    /// The generation every key belongs to (§2.11).
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The canonical root of that generation.
+    pub fn root_id(&self) -> &str {
+        &self.root_id
+    }
+
+    /// The key of `epoch_id`, if it is an epoch of this generation's chain.
+    pub fn get(&self, epoch_id: &str) -> Option<&[u8; 32]> {
+        self.keys
+            .iter()
+            .find(|(epoch, _)| epoch == epoch_id)
+            .map(|(_, key)| &**key)
+    }
+
+    /// The epochs whose keys are held, root epoch first; the last is the
+    /// current epoch.
+    pub fn epoch_ids(&self) -> impl Iterator<Item = &str> {
+        self.keys.iter().map(|(epoch, _)| epoch.as_str())
+    }
+}
+
+impl core::fmt::Debug for AccountEpochKeys {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("AccountEpochKeys")
+            .field("account_id", &self.account_id)
+            .field("generation", &self.generation)
+            .field("root_id", &self.root_id)
+            .field("epochs", &self.epoch_ids().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
 /// The evidence the account key is checked against: public replay, its
 /// current state, and the private records verified against exactly that
 /// state. Built only by [`AccountKeyEvidence::new`], which refuses parts
@@ -356,6 +410,47 @@ impl AccountKeyEvidence<'_> {
         Ok(AuthenticatedAccountKey {
             epoch_id: current.epoch_id.to_owned(),
             approval_ids,
+        })
+    }
+
+    /// Every account epoch key of the current generation, reached from the
+    /// authenticated current `key` through each successor's `history` back
+    /// to the root, each confirmed by its epoch's marker (§2.7). A key of
+    /// another epoch than the current one is
+    /// [`ProtocolError::AccountKeyUnavailable`].
+    pub fn epoch_keys(&self, key: &AccountKey) -> ProtocolResult<AccountEpochKeys> {
+        let chain = self.chain()?;
+        let current = chain.last().expect("a state has its root epoch");
+        if key.epoch_id() != current.epoch_id {
+            return Err(ProtocolError::AccountKeyUnavailable);
+        }
+        self.confirm(current, key.key())?;
+        let mut keys = vec![(current.epoch_id.to_owned(), Zeroizing::new(*key.key()))];
+        for index in (1..chain.len()).rev() {
+            let successor = chain[index]
+                .successor
+                .expect("successor epochs have successors");
+            let previous = &chain[index - 1];
+            let context = successor_context(
+                self.application(),
+                self.account_id(),
+                &successor.id,
+                &successor.epoch_id,
+                "history",
+                "",
+            )?;
+            let later = &keys.last().expect("the later key is held").1;
+            let previous_key = unwrap(self.registry(), later, &context, &successor.history)?
+                .ok_or(ProtocolError::AccountKeyUnavailable)?;
+            self.confirm(previous, &previous_key)?;
+            keys.push((previous.epoch_id.to_owned(), previous_key));
+        }
+        keys.reverse();
+        Ok(AccountEpochKeys {
+            account_id: self.account_id().to_owned(),
+            generation: self.state.generation,
+            root_id: self.state.root.row.id.clone(),
+            keys,
         })
     }
 
