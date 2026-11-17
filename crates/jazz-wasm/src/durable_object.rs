@@ -935,7 +935,11 @@ mod core_host {
     /// The core (see the module docs). Sockets are numbered by `accept`.
     #[wasm_bindgen]
     pub struct DurableObjectCore {
-        core: ServerCore,
+        storage: ObjectStorage,
+        app_id: String,
+        /// Open once a schema is known: published to the store (or
+        /// configured), else `None` and sockets are told to wait.
+        core: Option<ServerCore>,
         secret: String,
         sockets: HashMap<u32, Socket>,
         next_socket: u32,
@@ -974,26 +978,21 @@ mod core_host {
             storage: ObjectStorage,
             app_id: String,
             secret: String,
-            schema: String,
+            schema: Option<String>,
         ) -> Result<DurableObjectCore, JsValue> {
             if secret.len() < 32 {
                 return Err(js("the core secret must be at least 32 characters"));
             }
-            let source: jazz::tools::public_schema::Schema =
-                serde_json::from_str(&schema).map_err(js)?;
-            let schema = jazz::schema::JazzSchema::new(&source).map_err(js)?;
-            let file =
-                jazz::host::StoreFile::from_storage(durable_object_storage(storage)).map_err(js)?;
-            let any_stored = jazz::host::HostTables::catalogue(&file)
-                .map(|rows| !rows.schemas.is_empty())
-                .map_err(js)?;
-            let core = ServerCore::open(schema, file, any_stored, Some(app_id)).map_err(js)?;
-            Ok(Self {
-                core,
+            let mut this = Self {
+                storage,
+                app_id,
+                core: None,
                 secret,
                 sockets: HashMap::new(),
                 next_socket: 1,
-            })
+            };
+            this.open_core(schema.as_deref())?;
+            Ok(this)
         }
 
         /// Admit a new connection: its prelude (JSON) and first frame batch
@@ -1046,15 +1045,22 @@ mod core_host {
                 Ok(link) => link,
                 Err(error) => return refused(error_frame(&error)),
             };
+            let Some(core) = self.core.as_mut() else {
+                return refused(error_frame(&jazz::wire::WireError::new(
+                    jazz::wire::WireErrorCode::NotReady,
+                    jazz::wire::WireRetry::Later,
+                    "no schema has been published for this app; start the app's createJazz backend, which publishes its schema, before connecting",
+                )));
+            };
             let opened = if link.thin {
-                self.core.open_thin_session(
+                core.open_thin_session(
                     admission.identity,
                     admission.claims,
                     admission.bundle,
                     admission.trust,
                 )
             } else {
-                self.core.open_session(
+                core.open_session(
                     admission.identity,
                     admission.claims,
                     admission.bundle,
@@ -1127,6 +1133,9 @@ mod core_host {
         }
 
         fn admit_held(&mut self, socket: u32) -> Result<(), JsValue> {
+            let Some(core) = self.core.as_mut() else {
+                return Ok(());
+            };
             let Some(state) = self.sockets.get_mut(&socket) else {
                 return Ok(());
             };
@@ -1135,8 +1144,7 @@ mod core_host {
                     Held::Frames(frames, bytes) => {
                         let retry = Held::Frames(frames.clone(), bytes);
                         (
-                            self.core
-                                .receive_frames(state.session, frames, bytes)
+                            core.receive_frames(state.session, frames, bytes)
                                 .map_err(js)?,
                             retry,
                         )
@@ -1144,8 +1152,7 @@ mod core_host {
                     Held::Thin(request, bytes, split) => {
                         let retry = Held::Thin(request.clone(), bytes, split);
                         (
-                            self.core
-                                .receive_thin_request(state.session, request, bytes, split)
+                            core.receive_thin_request(state.session, request, bytes, split)
                                 .map_err(js)?,
                             retry,
                         )
@@ -1165,12 +1172,15 @@ mod core_host {
         /// call `tick` again while `wantsTick`).
         pub fn tick(&mut self) -> Result<(), JsValue> {
             loop {
-                self.core.tick();
+                let Some(core) = self.core.as_mut() else {
+                    return Ok(());
+                };
+                core.tick();
                 let sockets: Vec<u32> = self.sockets.keys().copied().collect();
                 for socket in sockets {
                     self.admit_held(socket)?;
                 }
-                if !self.core.inbound_pending() {
+                if !self.core.as_ref().is_some_and(ServerCore::inbound_pending) {
                     return Ok(());
                 }
             }
@@ -1179,7 +1189,7 @@ mod core_host {
         /// Whether the core wants a tick now (see `ServerCore::wants_tick`).
         #[wasm_bindgen(js_name = wantsTick)]
         pub fn wants_tick(&self) -> bool {
-            self.core.wants_tick()
+            self.core.as_ref().is_some_and(ServerCore::wants_tick)
         }
 
         /// How often to tick while sockets are open, in milliseconds.
@@ -1199,7 +1209,11 @@ mod core_host {
             };
             let mut batches = Vec::new();
             let mut ended = false;
-            for out in self.core.take_output(state.session) {
+            let taken = match self.core.as_mut() {
+                Some(core) => core.take_output(state.session),
+                None => Vec::new(),
+            };
+            for out in taken {
                 match out {
                     Ok(frames) => {
                         for batch in encode_ws_frame_batches(&frames).unwrap_or_default() {
@@ -1226,7 +1240,185 @@ mod core_host {
         /// `socket` closed.
         pub fn close(&mut self, socket: u32) {
             if let Some(state) = self.sockets.remove(&socket) {
-                self.core.close_session(state.session);
+                if let Some(core) = self.core.as_mut() {
+                    core.close_session(state.session);
+                }
+            }
+        }
+    }
+
+    impl DurableObjectCore {
+        /// Open the core if a schema is known: the store's published
+        /// catalogue (the engine then serves its current revision), else
+        /// `configured` (a public schema's JSON). Without either, the core
+        /// waits for a deployment.
+        fn open_core(&mut self, configured: Option<&str>) -> Result<(), JsValue> {
+            if self.core.is_some() {
+                return Ok(());
+            }
+            let file =
+                jazz::host::StoreFile::from_storage(durable_object_storage(self.storage.clone()))
+                    .map_err(js)?;
+            let rows = jazz::host::HostTables::catalogue(&file).map_err(js)?;
+            let schema = match (rows.schemas.first(), configured) {
+                (Some(stored), _) => jazz::schema::JazzSchema::new(&stored.schema).map_err(js)?,
+                (None, Some(json)) => {
+                    let source: jazz::tools::public_schema::Schema =
+                        serde_json::from_str(json).map_err(js)?;
+                    jazz::schema::JazzSchema::new(&source).map_err(js)?
+                }
+                (None, None) => return Ok(()),
+            };
+            let any_stored = !rows.schemas.is_empty();
+            self.core = Some(
+                ServerCore::open(schema, file, any_stored, Some(self.app_id.clone()))
+                    .map_err(js)?,
+            );
+            Ok(())
+        }
+    }
+
+    /// What `http` answers: a status and a JSON body (empty for 204).
+    #[wasm_bindgen(getter_with_clone)]
+    pub struct HttpAnswer {
+        pub status: u16,
+        pub body: String,
+    }
+
+    fn answer(status: u16, body: impl serde::Serialize) -> HttpAnswer {
+        HttpAnswer {
+            status,
+            body: serde_json::to_string(&body).unwrap_or_default(),
+        }
+    }
+
+    fn refusal(status: u16, error: jazz::tools::transport_error::ErrorResponse) -> HttpAnswer {
+        answer(status, error)
+    }
+
+    /// Compare two secrets in time independent of where they differ.
+    fn same_secret(expected: &str, given: &str) -> bool {
+        let (a, b) = (expected.as_bytes(), given.as_bytes());
+        a.len() == b.len() && a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
+    }
+
+    /// The secrets an HTTP request carried: native's headers
+    /// (`X-Jazz-Admin-Secret`, `X-Jazz-Backend-Secret`) or the credential
+    /// pair a trusted caller vouches with (`X-Jazz-Backend-Credential` +
+    /// `X-Jazz-Backend-Access`).
+    #[wasm_bindgen]
+    #[derive(Default)]
+    pub struct HttpCredentials {
+        admin_secret: Option<String>,
+        backend_secret: Option<String>,
+        credential: Option<String>,
+        access: Option<String>,
+    }
+
+    #[wasm_bindgen]
+    impl HttpCredentials {
+        #[wasm_bindgen(constructor)]
+        pub fn new(
+            admin_secret: Option<String>,
+            backend_secret: Option<String>,
+            credential: Option<String>,
+            access: Option<String>,
+        ) -> HttpCredentials {
+            Self {
+                admin_secret,
+                backend_secret,
+                credential,
+                access,
+            }
+        }
+    }
+
+    impl HttpCredentials {
+        fn vouched(&self, secret: &str, access: &[&str]) -> bool {
+            match (&self.credential, &self.access) {
+                (Some(credential), Some(given)) => {
+                    same_secret(secret, credential) && access.contains(&given.as_str())
+                }
+                _ => false,
+            }
+        }
+
+        /// As native's `validate_admin_secret`, by the core secret.
+        fn admin(&self, secret: &str) -> Result<(), HttpAnswer> {
+            use jazz::tools::transport_error::ErrorResponse;
+            if self.vouched(secret, &["admin"]) {
+                return Ok(());
+            }
+            match &self.admin_secret {
+                Some(given) if same_secret(secret, given) => Ok(()),
+                Some(_) => Err(refusal(
+                    401,
+                    ErrorResponse::unauthorized("Invalid admin secret"),
+                )),
+                None => Err(refusal(
+                    401,
+                    ErrorResponse::unauthorized("Admin secret required for this operation"),
+                )),
+            }
+        }
+
+        /// As native's `validate_backend_secret`, by the core secret.
+        fn backend(&self, secret: &str) -> Result<(), HttpAnswer> {
+            use jazz::tools::transport_error::ErrorResponse;
+            if self.vouched(secret, &["admin", "backend"]) {
+                return Ok(());
+            }
+            match &self.backend_secret {
+                Some(given) if same_secret(secret, given) => Ok(()),
+                Some(_) => Err(refusal(
+                    401,
+                    ErrorResponse::unauthorized("Invalid backend secret"),
+                )),
+                None => Err(refusal(
+                    401,
+                    ErrorResponse::unauthorized("Backend secret required for backend access"),
+                )),
+            }
+        }
+    }
+
+    #[wasm_bindgen]
+    impl DurableObjectCore {
+        /// Serve an HTTP request to `route` (the path after
+        /// `/apps/{appId}/`), as the native server serves it.
+        pub fn http(
+            &mut self,
+            method: &str,
+            route: &str,
+            credentials: &HttpCredentials,
+            body: &[u8],
+        ) -> HttpAnswer {
+            use jazz::tools::transport_error::ErrorResponse;
+            let _ = body;
+            let checked = match (method, route) {
+                ("POST", "backend/admit") => credentials.backend(&self.secret),
+                ("GET", "admin/migrations/graph" | "admin/bundles") | ("POST", "admin/bundles") => {
+                    credentials.admin(&self.secret)
+                }
+                _ => {
+                    return refusal(404, ErrorResponse::not_found("route not found"));
+                }
+            };
+            if let Err(refused) = checked {
+                return refused;
+            }
+            match (method, route) {
+                // The backend's credential holds: it may open sessions.
+                ("POST", "backend/admit") => HttpAnswer {
+                    status: 204,
+                    body: String::new(),
+                },
+                _ => refusal(
+                    501,
+                    ErrorResponse::internal(
+                        "publication is not supported on a Durable Object core yet",
+                    ),
+                ),
             }
         }
     }

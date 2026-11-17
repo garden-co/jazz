@@ -72,6 +72,42 @@ async function connect(mf, headers = {}) {
 const backend = { "X-Jazz-Backend-Credential": SECRET, "X-Jazz-Backend-Access": "backend" };
 const prelude = JSON.stringify({ peer_identity: fixture.testSystemIdentity(), auth: {} });
 
+test("a Durable Object core without a published schema answers health and admits its backend", async () => {
+  const mf = new Miniflare({
+    modules: true,
+    scriptPath: join(here, "host-worker.mjs"),
+    modulesRoot: join(here, "../.."),
+    modulesRules: [
+      { type: "ESModule", include: ["**/*.js", "**/*.mjs"] },
+      { type: "CompiledWasm", include: ["**/*.wasm"] },
+    ],
+    compatibilityDate: "2026-04-01",
+    durableObjects: { JAZZ: { className: "JazzCore", useSQLite: true } },
+    // As the docs deploy it: no JAZZ_SCHEMA.
+    bindings: { JAZZ_APP_ID: APP, JAZZ_CORE_SECRET: SECRET },
+  });
+  try {
+    assert.equal(await (await mf.dispatchFetch("http://core/health")).text(), "ok");
+    const admit = (headers) =>
+      mf.dispatchFetch(`http://core/apps/${APP}/backend/admit`, { method: "POST", headers });
+    assert.equal((await admit({ "X-Jazz-Backend-Secret": SECRET })).status, 204);
+    const wrong = await admit({ "X-Jazz-Backend-Secret": "w".repeat(40) });
+    assert.equal(wrong.status, 401);
+    assert.equal((await wrong.json()).error, "Invalid backend secret");
+    assert.equal((await admit({})).status, 401);
+    const graph = await mf.dispatchFetch(`http://core/apps/${APP}/admin/migrations/graph`);
+    assert.equal(graph.status, 401, "admin routes need the admin secret");
+
+    // Until a schema is published, a backend's socket is told to wait.
+    const early = await connect(mf, backend);
+    early.send(prelude);
+    early.send(fixture.testThinHello());
+    assert.match((await early.next()).error, /no schema has been published/);
+  } finally {
+    await mf.dispose();
+  }
+});
+
 test("a Durable Object core serves its app's backend and refuses anyone else", async () => {
   const persist = mkdtempSync(join(tmpdir(), "jazz-do-core-"));
   try {
