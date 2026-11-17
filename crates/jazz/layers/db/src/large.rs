@@ -1402,7 +1402,7 @@ pub(crate) fn intern(conn: &Storage, chunks: &Chunks, value: &LargeValueRef) -> 
                 statement.execute(rusqlite::params![root, encoded_base, edits, n as i64])
             })
             .map_err(storage)?;
-            conn.last_insert_rowid()
+            conn.last_insert_rowid().map_err(storage)?
         }
     };
     chunks.put_epoch(id, &base, &edits, n);

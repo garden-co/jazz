@@ -16,11 +16,12 @@ use crate::protocol::{
 use crate::query::Query;
 use crate::records::{Value, ValueType};
 use crate::schema::{JazzSchema, MergeStrategy};
+use crate::storage::params_from_iter;
 use crate::tools::OpenTransactionId;
 use crate::tools::Operation;
 use crate::tx::DurabilityTier;
+use rusqlite::OptionalExtension;
 use rusqlite::types::ValueRef;
-use rusqlite::{OptionalExtension, params_from_iter};
 
 pub use crate::options::{
     DbConfig, DbIdentity, DeleteOptions, Error, ErrorCode, ExactWriteTarget, InsertOptions,
@@ -1833,9 +1834,13 @@ impl Db {
     ) -> Result<Self, Error> {
         // Before the first statement, so both see all of them.
         #[cfg(feature = "durable-object-limits")]
-        crate::durable_object_limits::apply(conn.native_conn());
+        if let Some(native) = conn.native_conn() {
+            crate::durable_object_limits::apply(native);
+        }
         #[cfg(feature = "sql-trace")]
-        crate::sql_trace::install(conn.native_conn());
+        if let Some(native) = conn.native_conn() {
+            crate::sql_trace::install(native);
+        }
         // A version this file admitted keeps its names; another one is
         // named against the most recently admitted.
         let mut names = crate::names::Names::load(&conn)?;
@@ -5054,7 +5059,7 @@ impl Inner {
     /// fire the large-value refcount triggers, so preparing one compiles
     /// those trigger programs too; re-preparing per row dominated bulk
     /// writes.
-    fn exec<P: rusqlite::Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
+    fn exec<P: crate::storage::Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
         self.conn.prepare_cached(sql)?.execute(params)
     }
 
@@ -6955,7 +6960,7 @@ impl Inner {
                     rusqlite::params![account, issuer, subject],
                 )
                 .map_err(storage)?;
-                self.conn.last_insert_rowid()
+                self.conn.last_insert_rowid().map_err(storage)?
             }
         };
         self.remember_author(key, code);
@@ -7032,7 +7037,11 @@ impl Inner {
     /// A pass runs only when one could find work: a row changed since the
     /// last pass that emptied the queue, or an upload was dropped.
     fn reclaim_large_values(&mut self, budget: usize) -> Result<usize, Error> {
-        if self.reclaimed_at == Some(self.conn.total_changes())
+        if self
+            .conn
+            .total_changes()
+            .ok()
+            .is_some_and(|at| self.reclaimed_at == Some(at))
             && self.upload_cleanup.borrow().is_empty()
         {
             return Ok(0);
@@ -7046,7 +7055,7 @@ impl Inner {
         // A pass inside an open transaction may yet roll back, and one
         // that ran out of budget left work queued: both run again.
         if self.conn.is_autocommit() && !crate::large::reclaim_queued(&self.conn)? {
-            self.reclaimed_at = Some(self.conn.total_changes());
+            self.reclaimed_at = self.conn.total_changes().ok();
         }
         Ok(deleted)
     }
