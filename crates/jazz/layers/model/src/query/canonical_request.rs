@@ -576,8 +576,9 @@ fn validate_public_column_type(column_type: &ColumnType) -> Result<(), QueryErro
                 }
             }
         }
-        // Vectors are compared only by a vector index search (SPEC 20.4),
-        // never as query literals.
+        // A typed query parameter is never a vector: a vector filter operand
+        // is a byte literal compared bit for bit (SPEC 6.1.1), and nearness
+        // is a vector index search (SPEC 20.4).
         ColumnType::Internal(_) | ColumnType::U48 | ColumnType::Vector(_) => {
             return Err(QueryError::OperandTypeMismatch);
         }

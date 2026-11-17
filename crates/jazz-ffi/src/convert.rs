@@ -125,7 +125,9 @@ pub(crate) fn to_value(
         // A vector is an array of exactly `dimensions` numbers, each rounded
         // to binary32 and stored as `f32le/1` (SPEC 20.1).
         ColumnType::Vector { dimensions } => {
-            let items = json.as_array().ok_or_else(|| wrong("an array of numbers"))?;
+            let items = json
+                .as_array()
+                .ok_or_else(|| wrong("an array of numbers"))?;
             if items.len() != *dimensions as usize {
                 return Err(wrong(&format!("an array of {dimensions} numbers")));
             }

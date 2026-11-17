@@ -928,7 +928,7 @@ generate` writes both files from it, and marks each with a top-level
   - `{"array": <Column type>}` (not of vectors);
   - `{"vector": n}`, `1 ≤ n ≤ 4096`: `n` IEEE-754 binary32 values (20.1),
     stored as `f32le/1` bytes; not an array element, payload field, index
-    column or query literal, and no migration changes a column to, from or
+    column or typed query parameter, and no migration changes a column to, from or
     between vector types.
   - Options: `"optional": true`, `"default": <Value>`,
     `"merge": "counter" | "g-set" | "text" | "markdown" | "html"`, and
