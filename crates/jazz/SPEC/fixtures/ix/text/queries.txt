@@ -44,11 +44,13 @@ prefix 6162 6162 6163  # "ab" "ab"
 
 analyzer jazz-text/1:en
 query 1 72756e2072756e  # "run run"
+term 72756e  # "run"
 prefix 72756e 72756e 72756f  # "run" "run"
 
 analyzer jazz-text/1:en
 query 1 6a617a7a2072756e6e696e672072756e  # "jazz running run"
 term 6a617a7a  # "jazz"
+term 72756e  # "run"
 prefix 72756e 72756e 72756f  # "run" "run"
 
 analyzer jazz-text/1:en
@@ -131,6 +133,7 @@ prefix 6162 6162 6163  # "ab" "ab"
 
 analyzer jazz-text/1:simple
 query 1 72756e2072756e  # "run run"
+term 72756e  # "run"
 prefix 72756e 72756e 72756f  # "run" "run"
 
 analyzer jazz-text/1:simple

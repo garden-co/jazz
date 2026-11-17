@@ -450,20 +450,31 @@ fn mid_letter_punctuation_stays_inside_words() {
     assert_eq!(terms(simple(), "ג׳ירפה ג'ירפה"), ["ג'ירפה", "ג'ירפה"]);
     // Only between letters: elsewhere they still separate.
     assert_eq!(terms(simple(), "a·"), ["a"]);
+    // The middle dot joins only the Catalan `l·l`.
+    assert_eq!(terms(simple(), "COL·LECCIÓ"), ["colleccio"]);
+    assert_eq!(
+        terms(simple(), "3·4 Home·About a·b"),
+        ["3", "4", "home", "about", "a", "b"]
+    );
+    // WB4: niqqud before a gershayim belongs to the letter before it.
+    assert_eq!(terms(simple(), "צהָ״ל"), ["צהָל"]);
     assert_eq!(terms(simple(), "say \"hi\""), ["say", "hi"]);
     assert_eq!(terms(simple(), "a\"b"), ["a", "b"]);
     assert_eq!(terms(simple(), "שלום״"), ["שלום"]);
 }
 
-/// A whole-word term the prefix slot already matches is not also an exact
-/// slot: `run run` with a prefix binds the prefix alone.
+/// A word repeated as the prefix keeps its exact slot: the prefix slot
+/// also matches longer terms, so dropping the exact slot would let
+/// `running run` under `All` match a row holding only `runway`. SQL sums
+/// each posting once, so the row's score does not double.
 #[test]
-fn the_prefix_word_is_not_also_an_exact_term() {
+fn the_prefix_word_keeps_its_exact_term_slot() {
     let q = en().query("run run", true).unwrap();
-    assert!(q.terms.is_empty());
+    assert_eq!(q.terms, ["run"]);
     assert_eq!(q.prefix.unwrap().exact, "run");
     let q = en().query("jazz running run", true).unwrap();
-    assert_eq!(q.terms, ["jazz"]);
+    assert_eq!(q.terms, ["jazz", "run"]);
+    assert_eq!(q.prefix.unwrap().lo, "run");
 }
 
 // ---------------------------------------------------------------------------
@@ -489,6 +500,7 @@ const TERM_CASES: &[&str] = &[
     "co\u{ad}operate fi\u{feff}ne می\u{200c}خواهم",
     "e\u{1ab0}x e\u{1dc0}x e\u{20d0}x e\u{fe20}x 葛\u{e0100}",
     "col·lecció צה״ל צה\"ל ג׳ירפה a· say \"hi\"",
+    "3·4 Home·About COL·LECCIÓ צהָ״ל",
 ];
 
 const IMPACT_CASES: &[&[(u8, u16, &str)]] = &[

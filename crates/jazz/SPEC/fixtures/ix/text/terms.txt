@@ -153,6 +153,15 @@ term 61  # "a"
 term 736179  # "say"
 term 6869  # "hi"
 
+analyzer jazz-text/1:en
+text 33c2b73420486f6d65c2b741626f757420434f4cc2b74c45434349c39320d7a6d794d6b8d7b4d79c  # "3·4 Home·About COL·LECCIÓ צה\u{5b8}״ל"
+term 33  # "3"
+term 34  # "4"
+term 686f6d65  # "home"
+term 61626f7574  # "about"
+term 636f6c6c656363696f  # "colleccio"
+term d7a6d794d6b8d79c  # "צה\u{5b8}ל"
+
 analyzer jazz-text/1:simple
 text   # ""
 
@@ -304,3 +313,12 @@ term d79227d799d7a8d7a4d794  # "ג'ירפה"
 term 61  # "a"
 term 736179  # "say"
 term 6869  # "hi"
+
+analyzer jazz-text/1:simple
+text 33c2b73420486f6d65c2b741626f757420434f4cc2b74c45434349c39320d7a6d794d6b8d7b4d79c  # "3·4 Home·About COL·LECCIÓ צה\u{5b8}״ל"
+term 33  # "3"
+term 34  # "4"
+term 686f6d65  # "home"
+term 61626f7574  # "about"
+term 636f6c6c656363696f  # "colleccio"
+term d7a6d794d6b8d79c  # "צה\u{5b8}ל"
