@@ -973,7 +973,8 @@ impl Db {
         let result = async {
             let prepared =
                 self.prepare_write(StagedOp::Update(table.to_owned(), row, cells, opts.clone()))?;
-            self.write_prepared(prepared, who(opts.identity)).await
+            self.write_prepared(prepared, who(opts.identity), None)
+                .await
         }
         .await;
         self.inner().await.clear_derived();
@@ -1024,7 +1025,8 @@ impl Db {
         let result = async {
             let prepared =
                 self.prepare_write(StagedOp::Update(table.to_owned(), row, patch, opts.clone()))?;
-            self.write_prepared(prepared, who(opts.identity)).await
+            self.write_prepared(prepared, who(opts.identity), None)
+                .await
         }
         .await;
         self.inner().await.clear_derived();
@@ -1178,6 +1180,7 @@ impl Db {
         upload: &mut StreamingValueUpload,
         bytes: &[u8],
     ) -> Result<(), Error> {
+        let _operation = self.inner.operation.lock().await;
         self.check_streaming_upload(upload)?;
         let inner = self.inner().await;
         let now = streaming_now_ms();
@@ -1219,6 +1222,7 @@ impl Db {
         &self,
         mut upload: StreamingValueUpload,
     ) -> Result<(), Error> {
+        let _operation = self.inner.operation.lock().await;
         self.check_streaming_upload(&mut upload)?;
         upload.preparation.take();
         crate::large::end_upload(&mut self.inner().await.conn.sql(), &upload.id).await
@@ -1261,20 +1265,20 @@ impl Db {
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
     ) -> Result<WriteHandle, Error> {
-        if let Some(value) = self
-            .seal_streaming_upload(&mut upload, table, &mut cells, column)
-            .await?
-        {
-            self.inner().await.derived.borrow_mut().push(value);
-        }
-        let result = match mutation {
-            StreamingMutationKind::Insert if base.is_some() => Err(Error::new(
+        if mutation == StreamingMutationKind::Insert && base.is_some() {
+            return Err(Error::new(
                 ErrorCode::WriteRejected,
                 "a streamed insert writes one exact branch, not a branch view",
-            )),
-            StreamingMutationKind::Insert => {
-                self.insert(
-                    table,
+            ));
+        }
+        let (op, large) = {
+            let _operation = self.inner.operation.lock().await;
+            let large = self
+                .seal_streaming_upload(&mut upload, table, &mut cells, column)
+                .await?;
+            let op = match mutation {
+                StreamingMutationKind::Insert => StagedOp::Insert(
+                    table.to_owned(),
                     cells,
                     InsertOptions {
                         row_id: Some(row),
@@ -1282,40 +1286,40 @@ impl Db {
                         target: head.map_or(ExactWriteTarget::Root, ExactWriteTarget::Branch),
                         updated_at_ms: now_ms,
                     },
-                )
-                .await
-            }
-            StreamingMutationKind::Update => {
-                let target = view_target(head, base);
-                self.update(
-                    table,
+                ),
+                StreamingMutationKind::Update => StagedOp::Update(
+                    table.to_owned(),
                     row,
                     cells,
                     UpdateOptions {
                         identity,
-                        target,
+                        target: view_target(head, base),
                         updated_at_ms: now_ms,
                     },
-                )
-                .await
-            }
-            StreamingMutationKind::Upsert => {
-                let target = view_target(head, base);
-                self.upsert(
-                    table,
+                ),
+                StreamingMutationKind::Upsert => StagedOp::Upsert(
+                    table.to_owned(),
                     row,
                     cells,
+                    BTreeMap::new(),
                     UpsertOptions {
                         identity,
-                        target,
+                        target: view_target(head, base),
                         updated_at_ms: now_ms,
                     },
-                )
-                .await
-            }
+                ),
+            };
+            (self.prepare_write(op)?, large)
         };
+        // The upload lease stays alive across unlocked chunk fetches. Each
+        // write attempt installs its own trusted value under the operation lock.
+        let result = self
+            .fetching_with(op, async |op| {
+                self.write_prepared(op, who(identity), large.as_ref()).await
+            })
+            .await;
+        let _operation = self.inner.operation.lock().await;
         let inner = self.inner().await;
-        inner.clear_derived();
         crate::large::end_upload(&mut inner.conn.sql(), &upload.id).await?;
         result
     }
@@ -1406,6 +1410,7 @@ impl Db {
     /// maximum age, and every pushed-node receipt past it; returns how
     /// many uploads ended.
     pub async fn evict_expired_staged_large_values(&self) -> Result<usize, Error> {
+        let _operation = self.inner.operation.lock().await;
         let inner = self.inner().await;
         let now = streaming_now_ms();
         let max_age = i64::try_from(inner.staging.get().max_age_ms).unwrap_or(i64::MAX);
@@ -1810,6 +1815,7 @@ impl TxRef<'_> {
                 "a streamed insert writes one exact branch, not a branch view",
             ));
         }
+        let _operation = self.db.inner.operation.lock().await;
         let token = self.db.batch_token(self.id)?;
         let large = self
             .db
@@ -1872,31 +1878,41 @@ impl TxRef<'_> {
         &self,
         table: &str,
         row: RowUuid,
-        mut patch: BTreeMap<String, Value>,
+        patch: BTreeMap<String, Value>,
         mutations: Vec<LargeValueUpdate>,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
         let mutations =
             prepare_mutations(self.db.operation_schema(), table, row, &patch, mutations)?;
-        let edits = self
-            .db
-            .in_overlay(self.id, None, async |inner, _| {
-                let identity = identity_of(opts.identity);
-                let lowered = inner
-                    .lower_large_mutations(&mut patch, mutations, identity)
-                    .await;
-                let edits = crate::db::LargeEdits {
-                    derived: inner.derived.take(),
-                    pending_nodes: inner.pending_nodes.take(),
-                };
-                lowered.map(|()| edits)
-            })
-            .await?;
+        let token = self.db.batch_token(self.id)?;
         self.db
-            .stage_with_edits(
-                self.id,
-                StagedOp::Update(table.to_owned(), row, patch, opts),
-                edits,
+            .fetching_with(
+                (patch, mutations, opts),
+                async |(mut patch, mutations, opts)| {
+                    self.db.check_batch(self.id, &token)?;
+                    let edits = self
+                        .db
+                        .in_overlay(self.id, None, async |inner, _| {
+                            let identity = identity_of(opts.identity);
+                            let lowered = inner
+                                .lower_large_mutations(&mut patch, mutations, identity)
+                                .await;
+                            let edits = crate::db::LargeEdits {
+                                derived: inner.derived.take(),
+                                pending_nodes: inner.pending_nodes.take(),
+                            };
+                            lowered.map(|()| edits)
+                        })
+                        .await?;
+                    self.db.check_batch(self.id, &token)?;
+                    self.db
+                        .stage_with_edits(
+                            self.id,
+                            StagedOp::Update(table.to_owned(), row, patch, opts),
+                            edits,
+                        )
+                        .await
+                },
             )
             .await?;
         Ok(WriteHandle {

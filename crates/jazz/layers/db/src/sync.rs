@@ -7739,7 +7739,8 @@ impl Db {
     /// Connect this database to its server. Writes from now on upload, and
     /// subscriptions attach remotely.
     pub async fn connect_upstream(&self, transport: Box<dyn Transport>) -> Upstream {
-        self.become_replica().await;
+        let _operation = self.inner.operation.lock().await;
+        self.become_replica_locked().await;
         let inner = self.inner.ready().await;
         let reask = {
             let mut client_state = inner.client.borrow_mut();
@@ -8096,6 +8097,11 @@ impl Db {
     /// by, and was never recorded for upload, so such a store keeps it and
     /// refuses every upstream (see [`stranded`]).
     pub async fn become_replica(&self) {
+        let _operation = self.inner.operation.lock().await;
+        self.become_replica_locked().await;
+    }
+
+    async fn become_replica_locked(&self) {
         let inner = self.inner.ready().await;
         if inner.client.borrow().is_some() {
             return;
@@ -8122,7 +8128,8 @@ impl Db {
     }
 
     pub async fn set_remote_link_hint(&self, hint: RemoteLinkHint) {
-        self.become_replica().await;
+        let _operation = self.inner.operation.lock().await;
+        self.become_replica_locked().await;
         let inner = self.inner.ready().await;
         let client_state = inner.client.borrow();
         let client = client_state.as_ref().expect("client");
@@ -8664,17 +8671,10 @@ impl Db {
         let tier = reach.tier;
         // Held on a live link: leaving it (even for a new attempt) releases
         // the read, as it releases a gated opening.
-        let live = self
-            .inner
-            .ready()
-            .await
-            .client
-            .borrow()
-            .as_ref()
-            .is_some_and(|client| {
-                let link = client.hint.get();
-                link.hint == RemoteLinkHint::Live && may_wait(link)
-            });
+        let live = self.inner.client.borrow().as_ref().is_some_and(|client| {
+            let link = client.hint.get();
+            link.hint == RemoteLinkHint::Live && may_wait(link)
+        });
         // A non-durable foreground's relay answers a local read from its
         // store whatever its own path to the server: the read waits for it
         // while connected to it.
@@ -8833,20 +8833,22 @@ impl Db {
     /// replica can read; writes still pending after that (offline) are
     /// named individually and stay readable here and at the authority.
     pub async fn capture_snapshot(&self) -> Result<SnapshotRef, Error> {
-        let node = self.inner.ready().await.identity.node;
-        if !self.is_client() {
-            return Ok(SnapshotRef {
-                owner: node,
-                global_base: GlobalTime(self.inner.ready().await.seq.get()),
-                local_base: TxTime(0),
-                dots: Vec::new(),
-            });
-        }
-        let captured: Vec<u64> = {
-            let inner = self.inner.ready().await;
+        let (node, captured) = {
+            let inner = self.inner.acquire().await;
+            let node = inner.identity.node;
             let client_state = inner.client.borrow();
-            let client = client_state.as_ref().expect("client");
-            client.pending.iter().map(|p| p.tx).collect()
+            let Some(client) = client_state.as_ref() else {
+                return Ok(SnapshotRef {
+                    owner: node,
+                    global_base: GlobalTime(inner.seq.get()),
+                    local_base: TxTime(0),
+                    dots: Vec::new(),
+                });
+            };
+            (
+                node,
+                client.pending.iter().map(|p| p.tx).collect::<Vec<_>>(),
+            )
         };
         poll_fn(|_| {
             let inner = self.inner.as_ref();
@@ -8862,7 +8864,7 @@ impl Db {
             }
         })
         .await;
-        let inner = self.inner.ready().await;
+        let inner = self.inner.acquire().await;
         let client_state = inner.client.borrow();
         let client = client_state.as_ref().expect("client");
         Ok(SnapshotRef {
@@ -8947,7 +8949,7 @@ impl Db {
             return Ok(());
         }
         let pending: Vec<u64> = {
-            let inner = self.inner.ready().await;
+            let inner = self.inner.acquire().await;
             let client_state = inner.client.borrow();
             let client = client_state.as_ref().expect("client");
             client.pending.iter().map(|p| p.tx).collect()
@@ -11297,6 +11299,15 @@ impl Db {
         identity: AuthorSubject,
         bundle: Option<&crate::catalogue::BundleId>,
     ) -> Result<(), Error> {
+        let _operation = self.inner.operation.lock().await;
+        self.check_session_pin_locked(identity, bundle).await
+    }
+
+    async fn check_session_pin_locked(
+        &self,
+        identity: AuthorSubject,
+        bundle: Option<&crate::catalogue::BundleId>,
+    ) -> Result<(), Error> {
         self.check_serves(identity)?;
         let inner = self.inner.ready().await;
         if let Some(bundle) = bundle
@@ -11369,7 +11380,9 @@ impl Db {
         claims: Option<BTreeMap<String, Value>>,
         bundle: Option<crate::catalogue::BundleId>,
     ) -> Result<SubscriberId, Error> {
-        self.check_session_pin(identity, bundle.as_ref()).await?;
+        let _operation = self.inner.operation.lock().await;
+        self.check_session_pin_locked(identity, bundle.as_ref())
+            .await?;
         let inner = self.inner.ready().await;
         // One relay tier only (SPEC 9 §9.5).
         debug_assert!(
@@ -15019,6 +15032,7 @@ impl Db {
 
     /// One tick for both roles.
     pub(crate) async fn sync_tick(&self) -> Result<(), Error> {
+        let _operation = self.inner.operation.lock().await;
         self.server_tick().await?;
         self.client_tick().await?;
         // Relayed fates and reads the upstream just answered go out now.
@@ -15512,6 +15526,7 @@ impl Db {
     /// whatever its tier, waits for the upstream's answer (the relay's
     /// stored view, or its upstream's once that answers).
     pub async fn set_non_durable_client(&self) {
+        let _operation = self.inner.operation.lock().await;
         let inner = self.inner.ready().await;
         debug_assert!(
             inner.sessions.borrow().is_empty(),

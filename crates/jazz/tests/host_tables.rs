@@ -454,3 +454,170 @@ fn reused_transaction_id_does_not_reuse_an_abandoned_overlay() {
         Some(Value::String("replacement".to_owned()))
     );
 }
+
+/// Alice's suspended host write owns SQL until it finishes. Bob's reads,
+/// maintenance, schema lookup and session admission must wait, then work on
+/// the rolled-back store when Alice cancels; none may enter her savepoint.
+#[test]
+fn database_entry_points_wait_for_the_current_sql_operation() {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Waker};
+
+    let db = block_on(Db::open(config())).unwrap();
+    let query = db.prepare_query(&Query::from("notes")).unwrap();
+    let mut write = Box::pin(db.host_put_then_wait_for_test(
+        JOURNAL,
+        b"pending",
+        b"alice",
+        std::future::pending(),
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(write.as_mut().poll(&mut cx).is_pending());
+    let mut operations: Vec<Pin<Box<dyn Future<Output = ()> + '_>>> = vec![
+        Box::pin(async {
+            db.tick().await.unwrap();
+        }),
+        Box::pin(async {
+            db.close().await.unwrap();
+        }),
+        Box::pin(async {
+            assert!(db.read(&query).await.unwrap().is_empty());
+        }),
+        Box::pin(async {
+            db.set_authority().await;
+        }),
+        Box::pin(async {
+            db.table_identity("notes").await.unwrap();
+        }),
+        Box::pin(async {
+            db.capture_snapshot().await.unwrap();
+        }),
+        Box::pin(async {
+            db.check_session_pin(AuthorSubject::SYSTEM, None)
+                .await
+                .unwrap();
+        }),
+        Box::pin(async {
+            db.begin_serializable(jazz::tools::OpenTransactionId::new())
+                .await
+                .unwrap();
+        }),
+    ];
+    for operation in &mut operations {
+        assert!(operation.as_mut().poll(&mut cx).is_pending());
+    }
+    drop(write);
+    for operation in operations {
+        block_on(operation);
+    }
+    assert_eq!(block_on(db.host_get(JOURNAL, b"pending")).unwrap(), None);
+    block_on(db.insert(
+        "notes",
+        BTreeMap::from([("title".to_owned(), Value::String("bob".to_owned()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    assert_eq!(block_on(db.read(&query)).unwrap().len(), 1);
+}
+
+/// Alice's staged reads, writes and partial edits wait for Bob's suspended SQL.
+/// Reusing Alice's transaction ID while she waits must reject the old operation.
+/// bob:   host SQL ──pending────drop
+/// alice: staged op ──wait──────resume (or reject replaced batch)
+#[test]
+fn staged_operations_wait_for_storage_and_reject_replaced_batches() {
+    use jazz::db::{LargeValueUpdate, LargeValueUpdatePage, LargeValueUpdateSplice};
+    use jazz::tools::OpenTransactionId;
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    for operation in ["read", "write", "edit"] {
+        for replace in [false, true] {
+            let db = block_on(Db::open(config())).unwrap();
+            let original = "a".repeat(jazz::large_values::LEAF_MAX_BYTES + 1);
+            let row = block_on(db.insert(
+                "notes",
+                BTreeMap::from([("title".to_owned(), Value::String(original.clone()))]),
+                Default::default(),
+            ))
+            .unwrap()
+            .row_uuid();
+            let id = OpenTransactionId::new();
+            block_on(db.begin_serializable(id)).unwrap();
+            let tx = db.tx_ref(id);
+            let query = db.prepare_query(&Query::from("notes")).unwrap();
+            let mut bob = Box::pin(db.host_put_then_wait_for_test(
+                JOURNAL,
+                b"bob",
+                b"pending",
+                std::future::pending(),
+            ));
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(bob.as_mut().poll(&mut cx).is_pending());
+            let mut alice = Box::pin(async {
+                match operation {
+                    "read" => {
+                        let rows = tx.all_prepared(&query).await?;
+                        assert_eq!(rows[0].cell("title"), Some(Value::String(original.clone())));
+                        Ok(())
+                    }
+                    "write" => tx
+                        .update(
+                            "notes",
+                            row,
+                            BTreeMap::from([(
+                                "title".to_owned(),
+                                Value::String("replacement".into()),
+                            )]),
+                            Default::default(),
+                        )
+                        .await
+                        .map(|_| ()),
+                    _ => tx
+                        .update_with_large_value_mutations(
+                            "notes",
+                            row,
+                            BTreeMap::new(),
+                            vec![LargeValueUpdate::Splice {
+                                column: "title".into(),
+                                within: LargeValueUpdatePage::TextUtf8 { from: 0, to: 1 },
+                                splices: vec![LargeValueUpdateSplice {
+                                    at: 0,
+                                    delete: 1,
+                                    insert: b"b".to_vec(),
+                                }],
+                            }],
+                            Default::default(),
+                        )
+                        .await
+                        .map(|_| ()),
+                }
+            });
+            assert!(alice.as_mut().poll(&mut cx).is_pending());
+            if replace {
+                db.abandon_transaction_handle(id).unwrap();
+                block_on(db.begin_mergeable(id)).unwrap();
+            }
+            drop(bob);
+            let result = block_on(alice);
+            if replace {
+                assert!(result.is_err());
+                block_on(db.commit_mergeable_handle(id)).unwrap();
+            } else {
+                result.unwrap();
+                block_on(db.commit_serializable_handle(id)).unwrap();
+            }
+            let expected = if replace || operation == "read" {
+                original
+            } else if operation == "write" {
+                "replacement".into()
+            } else {
+                format!("b{}", &original[1..])
+            };
+            let rows = block_on(db.read(&query)).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].cell("title"), Some(Value::String(expected)));
+        }
+    }
+}

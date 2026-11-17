@@ -325,3 +325,88 @@ fn rolled_back_maintenance_does_not_forget_dropped_uploads() {
         (0, 0)
     );
 }
+
+/// Alice finalizes a streamed row while Bob holds a suspended host write.
+/// Both standalone and staged finalization wait; cancelling a waiting finish
+/// leaves no row and does not prevent a later upload from completing.
+///
+/// bob: host write ──pending──drop
+/// alice: finish   ──wait─────finish or cancel
+#[test]
+fn streaming_finalization_waits_for_storage() {
+    use jazz::host::HostTable;
+    use jazz::tools::OpenTransactionId;
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    for transactional in [false, true] {
+        for cancel in [false, true] {
+            let db = open(1);
+            let upload = stage(&db, b'a');
+            let id = OpenTransactionId::new();
+            if transactional {
+                block_on(db.begin_mergeable(id)).unwrap();
+            }
+            let tx = db.tx_ref(id);
+            let mut bob = Box::pin(db.host_put_then_wait_for_test(
+                HostTable::new("streaming_wait"),
+                b"bob",
+                b"pending",
+                std::future::pending(),
+            ));
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(bob.as_mut().poll(&mut cx).is_pending());
+            let mut alice = Box::pin(async {
+                if transactional {
+                    tx.finish_streaming_value_upload(
+                        upload,
+                        StreamingMutationKind::Insert,
+                        "files",
+                        RowUuid::from_bytes([2; 16]),
+                        BTreeMap::new(),
+                        "body",
+                        WriteIdentity::Database,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                } else {
+                    db.finish_streaming_value_upload(
+                        upload,
+                        StreamingMutationKind::Insert,
+                        "files",
+                        RowUuid::from_bytes([2; 16]),
+                        BTreeMap::new(),
+                        "body",
+                        WriteIdentity::Database,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                }
+            });
+            assert!(alice.as_mut().poll(&mut cx).is_pending());
+            if cancel {
+                drop(alice);
+                drop(bob);
+                if transactional {
+                    db.abandon_transaction_handle(id).unwrap();
+                }
+                block_on(db.tick()).unwrap();
+                assert!(bodies(&db, "files").is_empty());
+                publish(&db, stage(&db, b'b'), 3, "files", "body", BTreeMap::new()).unwrap();
+                assert_eq!(bodies(&db, "files"), vec!["b".repeat(LEAF_MAX_BYTES + 1)]);
+            } else {
+                drop(bob);
+                block_on(alice).unwrap();
+                if transactional {
+                    assert!(bodies(&db, "files").is_empty());
+                    block_on(db.commit_mergeable_handle(id)).unwrap();
+                }
+                assert_eq!(bodies(&db, "files"), vec!["a".repeat(LEAF_MAX_BYTES + 1)]);
+            }
+        }
+    }
+}

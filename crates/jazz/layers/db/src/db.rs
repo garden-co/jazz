@@ -1366,6 +1366,7 @@ impl Error {
 
 impl Db {
     pub async fn close_worker(&self) -> Result<(), Error> {
+        let _operation = self.inner.operation.lock().await;
         self.inner.as_ref().conn.close_worker().await
     }
 
@@ -1861,6 +1862,7 @@ impl Db {
     /// still follow it once it is restored. A store that cannot write it
     /// now mints it when it first serves its catalogue, as before.
     pub async fn set_authority(&self) {
+        let _operation = self.inner.operation.lock().await;
         let inner = self.inner.ready().await;
         inner.authority.set(true);
         if inner.publishes_catalogue() {
@@ -1959,6 +1961,7 @@ impl Db {
         table: &str,
         column: Option<&str>,
     ) -> Result<Option<uuid::Uuid>, Error> {
+        let _operation = self.inner.operation.lock().await;
         let active_schema = self.operation_schema();
         let inner = self.inner().await;
         let schema = active_schema.clone();
@@ -2005,6 +2008,7 @@ impl Db {
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> bool {
+        let _operation = self.inner.operation.lock().await;
         // A peek: a host repeats an identity's claims before each of its
         // writes, and the store gate would undo an open transaction's
         // cached overlay, so its next stage would replay every write it
@@ -2020,12 +2024,12 @@ impl Db {
 
     pub async fn tick(&self) -> Result<(), Error> {
         #[cfg(any(test, feature = "testing"))]
-        if let Some(code) = self.inner().await.failing_ticks.borrow_mut().pop_front() {
+        if let Some(code) = self.inner.failing_ticks.borrow_mut().pop_front() {
             return Err(Error::new(code, "a tick failure injected by a test"));
         }
         self.sync_tick().await?;
         {
-            let inner = self.inner().await;
+            let inner = self.inner.acquire().await;
             inner.fan.borrow_mut().collect();
             inner.reclaim_large_values(RECLAIM_NODES_PER_TICK).await?;
         }
@@ -2039,7 +2043,7 @@ impl Db {
     /// operation is retried next tick; the first failure is returned once
     /// the rest ran.
     async fn pump_chunk_store(&self) -> Result<(), Error> {
-        let chunks = self.inner().await.chunks.clone();
+        let chunks = self.inner.chunks.clone();
         if chunks.host_io() {
             return Ok(());
         }
@@ -2087,7 +2091,7 @@ impl Db {
         &self,
         fetches: bool,
     ) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
-        let chunks = self.inner().await.chunks.clone();
+        let chunks = self.inner.chunks.clone();
         if !chunks.host_io() {
             return Err(not_host_run());
         }
@@ -2109,7 +2113,8 @@ impl Db {
     /// batch: a host backing its fetches off takes these only once the
     /// wait is over.
     pub async fn take_chunk_fetches(&self) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
-        let chunks = self.inner().await.chunks.clone();
+        let _operation = self.inner.operation.lock().await;
+        let chunks = self.inner.chunks.clone();
         if !chunks.host_io() {
             return Err(not_host_run());
         }
@@ -2141,7 +2146,7 @@ impl Db {
         &self,
         mut done: crate::chunk_store::ChunkIoDone,
     ) -> Result<(), Error> {
-        let chunks = self.inner().await.chunks.clone();
+        let chunks = self.inner.chunks.clone();
         if !chunks.host_io() {
             return Err(not_host_run());
         }
@@ -2179,7 +2184,7 @@ impl Db {
         &self,
         done: crate::chunk_store::ChunkIoDone,
     ) -> Result<(), Error> {
-        let chunks = self.inner().await.chunks.clone();
+        let chunks = self.inner.chunks.clone();
         if !chunks.host_io() {
             return Err(not_host_run());
         }
@@ -2210,6 +2215,7 @@ impl Db {
         chunks: &std::sync::Arc<crate::large::Chunks>,
         fetches: bool,
     ) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
+        let _operation = self.inner.operation.lock().await;
         // The last batch's failed fetches are asked again: results that
         // were refused for them run again, and want what they still lack
         // in this batch.
@@ -2283,7 +2289,7 @@ impl Db {
                 .await;
         }
         {
-            let inner = self.inner().await;
+            let inner = self.inner.acquire().await;
             if !io.puts.is_empty() {
                 crate::values::in_savepoint_async(&inner.conn, "jazz_lv_offloaded", async || {
                     for ((key, _), put) in io.puts.iter().zip(put) {
@@ -2334,6 +2340,7 @@ impl Db {
         refuse: bool,
         first: &mut Option<Error>,
     ) {
+        let _operation = self.inner.operation.lock().await;
         for (request, answer) in wanted.iter().zip(answers) {
             if let Err(error) = answer.and_then(|bytes| chunks.install_from_store(request, bytes)) {
                 if refuse {
@@ -2416,7 +2423,7 @@ impl Db {
             };
             match result {
                 Err(error) if crate::large::is_missing(&error) => {
-                    let chunks = self.inner().await.chunks.clone();
+                    let chunks = self.inner.chunks.clone();
                     let Some(store) = chunks.store().cloned().filter(|_| chunks.has_fetch()) else {
                         return Err(error);
                     };
@@ -2533,6 +2540,7 @@ impl Db {
     /// Diagnostics: stored large-value nodes, and roots referenced by cells.
     #[doc(hidden)]
     pub async fn large_value_nodes_for_test(&self) -> Result<(u64, u64), Error> {
+        let _operation = self.inner.operation.lock().await;
         let inner = self.inner().await;
         inner
             .conn
@@ -2551,6 +2559,7 @@ impl Db {
     /// chunk store.
     #[doc(hidden)]
     pub async fn offloaded_large_value_nodes_for_test(&self) -> Result<u64, Error> {
+        let _operation = self.inner.operation.lock().await;
         self.inner()
             .await
             .conn
@@ -2573,6 +2582,7 @@ impl Db {
     /// Diagnostics: (epochs, encoded edit bytes they hold).
     #[doc(hidden)]
     pub async fn large_value_epochs_for_test(&self) -> Result<(u64, u64), Error> {
+        let _operation = self.inner.operation.lock().await;
         self.inner()
             .await
             .conn
@@ -2619,6 +2629,7 @@ impl Db {
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
     ) -> Result<(String, String), Error> {
+        let _operation = self.inner.operation.lock().await;
         let inner = self.inner().await;
         let compiled = inner.compile(prepared, identity, &ReadSpec::default())?;
         let plan: Vec<String> = inner
@@ -2656,6 +2667,7 @@ impl Db {
         author: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Result<(usize, Vec<(RowUuid, Vec<bool>)>), Error> {
+        let _operation = self.inner.operation.lock().await;
         let active_schema = self.operation_schema();
         let inner = self.inner().await;
         let table = active_schema.table(table)?;
@@ -2780,6 +2792,7 @@ impl Db {
         author: AuthorSubject,
         grounded: &[RowUuid],
     ) -> Result<String, Error> {
+        let _operation = self.inner.operation.lock().await;
         let active_schema = self.operation_schema();
         let ids = grounded.iter().map(|id| *id.0.as_bytes()).collect();
         let inner = self.inner().await;
@@ -2800,6 +2813,7 @@ impl Db {
         row: RowUuid,
         author: AuthorSubject,
     ) -> Result<String, Error> {
+        let _operation = self.inner.operation.lock().await;
         let active_schema = self.operation_schema();
         let inner = self.inner().await;
         let stored = active_schema.table(table)?.stored.clone();
@@ -2869,6 +2883,7 @@ impl Db {
         prepared: &PreparedQuery,
         roots: Vec<CurrentRow>,
     ) -> Result<Vec<CurrentRow>, Error> {
+        let _operation = self.inner.operation.lock().await;
         self.inner()
             .await
             .nest_relations(prepared, None, &ReadSpec::default(), roots)
@@ -2876,6 +2891,7 @@ impl Db {
     }
 
     pub async fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
+        let _operation = self.inner.operation.lock().await;
         self.inner()
             .await
             .run(prepared, None, &ReadSpec::default())
@@ -2952,6 +2968,7 @@ impl Db {
         identity: Option<AuthorSubject>,
         opts: ReadOpts,
     ) -> Result<SubscriptionStream, Error> {
+        let _operation = self.inner.operation.lock().await;
         let read = ReadSpec::of(&opts, self.inner().await).await?;
         let client = self.is_client();
         let non_durable = self.inner().await.non_durable.get();
@@ -3049,6 +3066,7 @@ impl Db {
         table: &str,
         row: RowUuid,
     ) -> Result<Option<(u64, String, u64, String)>, Error> {
+        let _operation = self.inner.operation.lock().await;
         let active_schema = self.operation_schema();
         let inner = self.inner().await;
         let schema = active_schema.clone();
@@ -3093,6 +3111,7 @@ impl Db {
     /// How many distinct authors this database has interned.
     #[doc(hidden)]
     pub async fn interned_authors_for_test(&self) -> usize {
+        let _operation = self.inner.operation.lock().await;
         self.inner()
             .await
             .conn
@@ -3207,11 +3226,16 @@ impl Db {
 
     async fn write_op(&self, op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
         let op = self.prepare_write(op)?;
-        self.fetching_with(op, async |op| self.write_prepared(op, who).await)
+        self.fetching_with(op, async |op| self.write_prepared(op, who, None).await)
             .await
     }
 
-    async fn write_prepared(&self, mut op: PreparedWrite, who: Who) -> Result<WriteHandle, Error> {
+    async fn write_prepared(
+        &self,
+        mut op: PreparedWrite,
+        who: Who,
+        streamed: Option<&jazz_types::large_values::LargeValueRef>,
+    ) -> Result<WriteHandle, Error> {
         self.with_upload(async || {
             let table = op.layout.source.name.clone();
             let (prior, mark) = {
@@ -3221,13 +3245,21 @@ impl Db {
             };
             let (notify, handle) = self
                 .write_unnotified(&table, async |inner, seq, origin| {
+                    // The caller owns the operation lease. Keep the streamed
+                    // value trusted only for this attempt, including cancellation.
+                    struct ClearDerived<'a>(&'a Store);
+                    impl Drop for ClearDerived<'_> {
+                        fn drop(&mut self) {
+                            self.0.clear_derived();
+                        }
+                    }
+                    let _cleanup = ClearDerived(inner);
+                    inner.derived.borrow_mut().extend(streamed.cloned());
                     let edits = inner.chunk_large_cells(&mut op).await?;
                     inner.counter_deltas(&mut op).await?;
                     inner.derived.borrow_mut().extend(edits.derived);
                     inner.pending_nodes.borrow_mut().extend(edits.pending_nodes);
-                    let applied = inner.apply_as(&op, who, seq, origin, None).await;
-                    inner.clear_derived();
-                    applied
+                    inner.apply_as(&op, who, seq, origin, None).await
                 })
                 .await?;
             // A standalone write that changed nothing made no commit: its
@@ -3457,6 +3489,7 @@ impl Db {
         &self,
         publication: SchemaPublication,
     ) -> Result<(), Error> {
+        let _operation = self.inner.operation.lock().await;
         self.inner()
             .await
             .publications
@@ -3528,6 +3561,7 @@ impl Db {
         schema: JazzSchema,
         lenses: &[MigrationLens],
     ) -> Result<(), Error> {
+        let _operation = self.inner.operation.lock().await;
         self.admit(schema, lenses, None).await
     }
 
@@ -3537,6 +3571,7 @@ impl Db {
         lenses: &[MigrationLens],
         revision: Option<u64>,
     ) -> Result<(), Error> {
+        let _operation = self.inner.operation.lock().await;
         self.admit(schema, lenses, Some(revision)).await
     }
 
@@ -3548,6 +3583,7 @@ impl Db {
         &self,
         change: crate::catalogue::CatalogueChange,
     ) -> Result<(), Error> {
+        let _operation = self.inner.operation.lock().await;
         let saved = {
             let inner = self.inner().await;
             (
@@ -8766,7 +8802,7 @@ impl MergeableTxHandle<'_> {
                     }
                     let who = selected.map_or(Who::Local, who);
                     db.fetching_with(prepared, async |prepared| {
-                        db.write_prepared(prepared, who).await
+                        db.write_prepared(prepared, who, None).await
                     })
                     .await?;
                 }
@@ -8902,6 +8938,7 @@ impl Db {
         version: crate::ids::SchemaVersionId,
         bundle: Option<&crate::catalogue::BundleId>,
     ) -> Result<Option<Db>, Error> {
+        let _operation = self.inner.operation.lock().await;
         let Some(bundle) = bundle else {
             return Ok(self.governed_view(version));
         };
@@ -8954,6 +8991,7 @@ impl Db {
     /// batches, clock and subscriptions; it reads and writes its own columns
     /// of the physical tables, which hold the union of every admitted view.
     pub async fn register_schema_view(&self, schema: JazzSchema) -> Result<Db, Error> {
+        let _operation = self.inner.operation.lock().await;
         // A version the app's lenses lead to is admitted as the authority
         // admits it, not named against the current one.
         self.admit_along_migrations(&schema).await?;
@@ -9729,6 +9767,7 @@ impl Db {
     /// complete through, plus its own unsettled commits: never positions it
     /// numbered itself, which would hold every authority version.
     pub async fn begin_serializable(&self, id: OpenTransactionId) -> Result<(), Error> {
+        let _operation = self.inner.operation.lock().await;
         let (snapshot, own) = {
             let inner = self.inner.ready().await;
             let snapshot = match &*inner.client.borrow() {
@@ -9842,6 +9881,7 @@ impl Db {
 
     pub async fn commit_mergeable_handle(&self, id: OpenTransactionId) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
+        let _operation = self.inner.operation.lock().await;
         if !matches!(batch.kind, BatchKind::Mergeable) {
             return Err(rejected(format!("transaction {id:?} is not mergeable")));
         }
@@ -9852,13 +9892,14 @@ impl Db {
     /// version at or before the snapshot, and every read must return the
     /// same rows at the same versions now as it did at the snapshot (this
     /// catches phantoms: rows that entered or left a predicate or window).
-    /// The check and the apply run under one store borrow, so nothing can
+    /// The check and the apply hold one operation lease, so nothing can
     /// commit in between.
     pub async fn commit_serializable_handle(
         &self,
         id: OpenTransactionId,
     ) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
+        let _operation = self.inner.operation.lock().await;
         let BatchKind::Serializable {
             snapshot,
             reads,
@@ -10384,6 +10425,7 @@ impl Db {
 
     /// Stage a write whose large values a partial update built:
     /// the batch keeps what it built for every later apply.
+    /// The caller holds the operation lease through preparation and staging.
     pub(crate) async fn stage_with_edits(
         &self,
         id: OpenTransactionId,
@@ -10652,6 +10694,8 @@ impl TxRef<'_> {
         tier: ReadTier,
     ) -> Result<Vec<CurrentRow>, Error> {
         let token = self.db.batch_token(self.id)?;
+        let admission = self.db.inner.operation.lock().await;
+        self.db.check_batch(self.id, &token)?;
         // Capture before hydration: later writes must not leak into an
         // already admitted read, including when another read is cancelled.
         // Peeks skip the store gate, which would undo the cached overlay.
@@ -10676,6 +10720,7 @@ impl TxRef<'_> {
             }) => Some((*snapshot, *pinned)),
             _ => None,
         };
+        drop(admission);
         if let (Some(_), Some(flat_join)) = (snapshot, &prepared.query.flat_join) {
             // Its read set would need each occurrence's joined rows.
             let joined = flat_join
@@ -10734,6 +10779,7 @@ impl TxRef<'_> {
                     &ReadViewSourceSpec::Current,
                 )
                 .await?;
+            let _operation = self.db.inner.operation.lock().await;
             self.db.check_batch(self.id, &token)?;
             if let Some(Batch {
                 kind:
@@ -10758,7 +10804,8 @@ impl TxRef<'_> {
             .db
             .fetching_with((), async |()| {
                 self.db.check_batch(self.id, &token)?;
-                self.db
+                let rows = self
+                    .db
                     .in_overlay_prefix(self.id, prefix, async |inner, cut| {
                         let read = ReadSpec {
                             include_deleted,
@@ -10768,12 +10815,15 @@ impl TxRef<'_> {
                         let roots = inner.run(prepared, identity, &read).await?;
                         inner.nest_relations(prepared, identity, &read, roots).await
                     })
-                    .await
+                    .await?;
+                self.db.check_batch(self.id, &token)?;
+                // Keep the result and its conflict evidence in the same
+                // serialized attempt; committing must not overtake this read.
+                self.db
+                    .record_read(self.id, prepared, include_deleted)
+                    .await?;
+                Ok(rows)
             })
-            .await?;
-        self.db.check_batch(self.id, &token)?;
-        self.db
-            .record_read(self.id, prepared, include_deleted)
             .await?;
         Ok(rows)
     }
