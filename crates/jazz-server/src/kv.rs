@@ -113,7 +113,9 @@ impl HostKv {
 
 /// SQL on the host tables a server shapes itself. Writes run like
 /// [`HostKv`] writes: on the store's thread, in one savepoint, durable when
-/// they return. Reads run on the read-only connection.
+/// they return. Reads use the read-only connection when available, otherwise
+/// they queue on the store owner. This synchronous interface is consumed by
+/// the dedicated account-registry thread; request tasks await that owner.
 pub(crate) struct HostSql {
     reader: Option<Arc<HostReader>>,
     store: crate::runtime::HostSender,

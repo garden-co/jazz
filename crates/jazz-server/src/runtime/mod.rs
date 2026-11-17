@@ -293,7 +293,7 @@ struct Runtime {
 struct Start {
     runtime: Runtime,
     initial: Option<Box<CatalogueChange>>,
-    reply: std_mpsc::Sender<Result<(), CatalogueApplyError>>,
+    reply: oneshot::Sender<Result<(), CatalogueApplyError>>,
 }
 
 /// Sendable handle for the thread that owns one app's store file: its host
@@ -856,16 +856,40 @@ impl AppStore {
             .map_err(String::from)
     }
 
+    /// Open a runtime without blocking the asynchronous request executor.
+    pub(crate) async fn start_runtime_async(
+        &self,
+        schema: JazzSchema,
+        role: NodeRole,
+        any_stored_catalogue: bool,
+    ) -> Result<ServerRuntimeHandle, String> {
+        self.start_wait(schema, role, any_stored_catalogue, false, None)
+            .await
+            .map_err(String::from)
+    }
+
     /// Initialize and commit the first deployment before making the runtime available.
-    pub(crate) fn start_deployment(
+    pub(crate) async fn start_deployment(
         &self,
         schema: JazzSchema,
         change: CatalogueChange,
     ) -> Result<ServerRuntimeHandle, CatalogueApplyError> {
-        self.start(schema, NodeRole::Core, false, false, Some(change))
+        self.start_wait(schema, NodeRole::Core, false, false, Some(change))
+            .await
     }
 
     fn start(
+        &self,
+        schema: JazzSchema,
+        role: NodeRole,
+        any_stored_catalogue: bool,
+        owns_store: bool,
+        initial: Option<CatalogueChange>,
+    ) -> Result<ServerRuntimeHandle, CatalogueApplyError> {
+        block_on(self.start_wait(schema, role, any_stored_catalogue, owns_store, initial))
+    }
+
+    async fn start_wait(
         &self,
         schema: JazzSchema,
         role: NodeRole,
@@ -878,7 +902,7 @@ impl AppStore {
                 "relay nodes are not supported yet on SQLite".to_owned(),
             ));
         }
-        let (reply, started) = std_mpsc::channel();
+        let (reply, started) = oneshot::channel();
         self.send(Work::Start(Start {
             runtime: Runtime {
                 schema,
@@ -888,7 +912,7 @@ impl AppStore {
             reply,
         }))?;
         started
-            .recv()
+            .await
             .map_err(|_| "server store thread exited before the runtime started".to_owned())??;
         let (activity, _) = watch::channel(0_u64);
         Ok(ServerRuntimeHandle {
@@ -3059,6 +3083,50 @@ mod tests {
     }
 
     const PROBE: HostTable = HostTable::new("probe");
+
+    /// Alice reads the catalogue while Bob holds the owner thread. Force the
+    /// worker's queued-read path over a native fixture so no worker provider is
+    /// needed: polling must yield before Bob releases the owner.
+    #[test]
+    fn worker_catalogue_read_yields_while_the_owner_is_busy() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+        let store = AppStore::open(&StorageConfig::InMemory).unwrap();
+        let runtime = store
+            .start_runtime(schema(), NodeRole::Core, false)
+            .unwrap();
+        let release = hold(&runtime);
+        let storage = crate::server::CatalogueStorage::new(None, host_sender(&store));
+        let mut read = Box::pin(storage.read_async());
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(read.as_mut().poll(&mut cx).is_pending());
+        release.send(()).unwrap();
+        block_on(read).unwrap();
+        store.close().unwrap();
+    }
+
+    /// Alice starts the runtime behind Bob's host job. The asynchronous start
+    /// yields its executor until the owner acknowledges opening the runtime.
+    #[test]
+    fn async_runtime_start_yields_while_the_owner_is_busy() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+        let store = AppStore::open(&StorageConfig::InMemory).unwrap();
+        let (release, wait) = oneshot::channel();
+        host_sender(&store)
+            .send(Box::new(move |_| {
+                Box::pin(async move {
+                    let _ = wait.await;
+                })
+            }))
+            .unwrap();
+        let mut start = Box::pin(store.start_runtime_async(schema(), NodeRole::Core, false));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(start.as_mut().poll(&mut cx).is_pending());
+        release.send(()).unwrap();
+        block_on(start).unwrap();
+        store.close().unwrap();
+    }
 
     fn host_sender(store: &AppStore) -> HostSender {
         store.host_sender().unwrap()

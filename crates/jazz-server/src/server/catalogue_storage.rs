@@ -36,24 +36,39 @@ impl CatalogueStorage {
     }
 
     pub(crate) fn read(&self) -> CatalogueStorageResult<CatalogueRows> {
-        #[cfg(feature = "sqlite")]
-        if let Some(reader) = &self.reader {
-            return reader
-                .catalogue()
-                .map_err(|error| CatalogueStorageError(format!("read catalogue: {error}")));
-        }
-        let (reply, answer) = std::sync::mpsc::sync_channel(1);
-        self.store
-            .send(Box::new(move |tables| {
+        jazz::db::block_on(self.read_async())
+    }
+
+    /// Enqueue a worker read synchronously, but await its answer without
+    /// blocking an executor thread. The returned future borrows no locks.
+    pub(crate) fn read_async(
+        &self,
+    ) -> impl std::future::Future<Output = CatalogueStorageResult<CatalogueRows>> + Send + use<>
+    {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        let queued = match &self.reader {
+            #[cfg(feature = "sqlite")]
+            Some(reader) => {
+                let _ = reply.send(
+                    reader
+                        .catalogue()
+                        .map_err(|error| format!("read catalogue: {error}")),
+                );
+                Ok(())
+            }
+            _ => self.store.send(Box::new(move |tables| {
                 Box::pin(async move {
                     let _ = reply.send(tables.catalogue().await.map_err(|error| error.to_string()));
                 })
-            }))
-            .map_err(CatalogueStorageError)?;
-        answer
-            .recv()
-            .map_err(|_| CatalogueStorageError("store closed before catalogue read".into()))?
-            .map_err(CatalogueStorageError)
+            })),
+        };
+        async move {
+            queued.map_err(CatalogueStorageError)?;
+            answer
+                .await
+                .map_err(|_| CatalogueStorageError("store closed before catalogue read".into()))?
+                .map_err(CatalogueStorageError)
+        }
     }
 
     /// Write `put` in one commit: all or none. A deploy instead writes its

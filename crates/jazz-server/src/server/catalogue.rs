@@ -235,11 +235,25 @@ impl StoredCatalogue {
     }
 
     /// Read the catalogue again, after the runtime changed it.
+    #[cfg(any(test, feature = "embedded-server"))]
     pub(crate) fn refresh(&self) -> Result<(), CatalogueError> {
         let storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
         self.reindex(&storage)
     }
 
+    /// Refresh from a worker store without holding a mutex or blocking while
+    /// the owner finishes a prior job.
+    pub(crate) async fn refresh_async(&self) -> Result<(), CatalogueError> {
+        let read = {
+            let storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
+            storage.read_async()
+        };
+        let index = CatalogueIndex::from_rows(&read.await?, self.initial_schema.as_ref())?;
+        *self.index.lock().map_err(|_| CatalogueError::LockError)? = index;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "embedded-server"))]
     fn reindex(&self, storage: &CatalogueStorage) -> Result<(), CatalogueError> {
         let index = CatalogueIndex::from_rows(&storage.read()?, self.initial_schema.as_ref())?;
         *self.index.lock().map_err(|_| CatalogueError::LockError)? = index;

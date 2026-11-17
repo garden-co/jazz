@@ -203,7 +203,8 @@ pub(crate) async fn deploy(
                 .store
                 .as_ref()
                 .ok_or_else(|| DeployError::internal("server store unavailable"))?
-                .start_runtime(genesis, crate::runtime::NodeRole::Core, true)
+                .start_runtime_async(genesis, crate::runtime::NodeRole::Core, true)
+                .await
                 .map_err(DeployError::internal)?;
             *state.core_server_shell.write().unwrap() = Some(runtime);
         }
@@ -230,12 +231,14 @@ pub(crate) async fn deploy(
                 .store
                 .as_ref()
                 .ok_or_else(|| DeployError::internal("server store unavailable"))?
-                .start_deployment(genesis, change);
+                .start_deployment(genesis, change)
+                .await;
             // Refresh even after a storage error: commit acknowledgement can be
             // lost after the deployment has durably committed.
             state
                 .catalogue_store
-                .refresh()
+                .refresh_async()
+                .await
                 .map_err(DeployError::internal)?;
             let runtime = runtime.map_err(DeployError::from)?;
             // No request can obtain this handle before initialization and the
@@ -259,7 +262,8 @@ pub(crate) async fn deploy(
     let applied = runtime.apply_catalogue(change, new_bundle).await;
     state
         .catalogue_store
-        .refresh()
+        .refresh_async()
+        .await
         .map_err(DeployError::internal)?;
     applied?;
     Ok(staged.response)
