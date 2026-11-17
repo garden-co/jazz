@@ -9,11 +9,42 @@ use jazz::ids::AuthorSubject;
 use jazz::records::Value as CoreValue;
 use jazz::wire::{WireError, WireErrorCode, WireRetry};
 
-use crate::runtime::{CommitUnitTrust, ServerLinkAdmission};
+/// How much the server trusts a link's commits, chosen at admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommitUnitTrust {
+    /// An end-user session: every read and write is checked against the
+    /// table policies for its identity.
+    Session,
+    /// An authenticated backend. It is served with full access.
+    TrustedBackend,
+    /// An authenticated administrative or authority link, served with full
+    /// access.
+    TrustedAuthority,
+}
+
+/// Capability selected by the server after authenticating a WebSocket and
+/// negotiating its features.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ServerLinkAdmission {
+    /// A normal session or backend link.
+    #[default]
+    OrdinarySession,
+    /// Host-verified SYSTEM authority credential permitting scoped query
+    /// delegation. On SQLite it is served as a trusted SYSTEM link; the sync
+    /// protocol cannot express a delegated scope yet.
+    AuthorityQueryDelegate,
+    /// A durable relay for exactly the one session authenticated by this
+    /// connection. On SQLite it is served as that session.
+    ScopeIsolatedClientRelay {
+        /// Fresh server-issued capability epoch for this accepted connection.
+        admission_epoch: u64,
+    },
+}
 
 /// The JSON a peer sends first on a new socket, before any wire frame:
 /// who it says it is and the credentials it presents.
 #[derive(serde::Deserialize)]
+#[non_exhaustive]
 pub struct WebSocketPrelude {
     pub peer_identity: String,
     pub auth: jazz::tools::websocket_prelude_auth::AuthConfig,
@@ -61,6 +92,7 @@ pub enum WebSocketCredential {
 
 /// What a socket was admitted as, once its credential was verified.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct WebSocketAdmission {
     pub identity: AuthorSubject,
     pub claims: BTreeMap<String, CoreValue>,
