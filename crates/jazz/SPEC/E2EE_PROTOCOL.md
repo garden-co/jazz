@@ -428,8 +428,8 @@ accounts are possible later work). One row makes the account a member; the
 row ID carries no meaning, and a second row for the same account and space
 changes nothing, so removing a member deletes every row of that account for
 the space. A trusted backend writes it like any application table, without
-policies. A space has at most 1,000 member accounts in the first release; the
-client refuses an insert beyond that (§3.8).
+policies. The first release supports up to 1,000 member accounts per space
+(§3.8).
 
 The system tables define indexes on the columns their policies and the
 runtime's queries look up: `(scopeId, identifier)` on every space table,
@@ -1985,39 +1985,13 @@ is repaired as in §3.2 once the device is online and holds the real key.
 ### 3.8 Supported size and costs
 
 **Limit.** The first release supports up to 1,000 member accounts per space
-(distinct `accountId` values of its member rows). Adding a member beyond
-that is refused with the typed error `space-member-limit`: "Adding a member
-to a space that has 1,000 members is not supported yet". A member row for
-an account that is already a member is not refused, since it adds no
-member.
-
-**Where it is enforced.** On the client. The E2EE runtime refuses, when the
-insert is staged, a member row that would give the space more than 1,000
-member accounts. It counts the distinct accounts the staging transaction
-would leave: the space's member rows it sees, plus the member rows the same
-transaction has already staged, minus those it has staged deletes of ([core
-hooks](E2EE_CORE_HOOKS.md) H2). It sees the member rows of every space its
-account is a member of (it watches them) and otherwise loads them before
-staging, without acquiring any key (offline, from what its replica holds).
-When the same transaction inserts the space row, the count starts from that
-transaction's staged rows, with nothing to load. The server does
-not enforce the limit: Jazz policies can test only whether a matching row
-exists (`Exists`) and cannot count rows, and this design adds no check
-outside policies (§1.4). So concurrent or offline additions by several
-updaters, a trusted backend that writes member
-rows without the E2EE runtime, or a modified client can exceed it. The limit
-is a supported-size safeguard, not a capacity guarantee. Every member's runtime that sees more than 1,000 member accounts
-in a space emits a `space-over-member-limit` encryption event `{space,
-members}` once per space and keeps working; the costs below then grow
-beyond what the first release is designed for.
-
-Required tests: with 999 member accounts, one transaction staging two
-distinct new accounts has the second refused; member rows for one account
-staged twice in one transaction count once; a member removed and another
-added in one transaction at 1,000 is accepted; a rolled-back transaction's
-staged rows do not count for the retry; a creator's first member row
-loads nothing, acquires no key and prepares no root, also in a binding with
-a synchronous callback.
+(distinct `accountId` values of its member rows). It is a documented design
+limit, not enforced: neither the client nor the server refuses a member
+beyond it (Jazz policies cannot count rows). Every member's runtime that
+sees more than 1,000 member accounts in a space emits a
+`space-over-member-limit` encryption event `{space, members}` once per space
+and keeps working; the costs below then grow beyond what the first release
+is designed for.
 
 **What a device watches.** Per space its account is a member of: the
 space's member rows (at most 1,000), its roots and successors (one per
@@ -2592,7 +2566,6 @@ Refusal codes:
 | `space-pending`                 | An encrypted write to a space that has no valid root, after this device's creation of it was refused while the client runs (§3.2).                                        |
 | `space-create-refused`          | The authority refused the root itself, staged with a write or by `createSpace` (§3.2); only that transaction fails, and the device stops automatic creation of the space. |
 | `rotation-needs-key`            | A rotation by a device that holds no authenticated key of the current version (§3.5), or a recovery rotation by one that holds no version at all.                         |
-| `space-member-limit`            | A member row that would give the space more than 1,000 member accounts, refused by the client before submission (§3.8).                                                   |
 | `local-first-identity-mismatch` | A local-first root written with an identity whose key does not derive the account ID (§2.3).                                                                              |
 
 ## 8. Security properties and limits
@@ -2712,9 +2685,9 @@ Limits:
   mark is conservative evidence, not proof of key possession. The
   application's remedy is removing that member.
 - **Supported size.** The first release supports up to 1,000 members per
-  space. The limit is enforced by clients, not by the server, which cannot
-  count rows in a policy (§3.8). Beyond it, costs grow past what the first
-  release is designed for.
+  space. Nothing enforces it (§3.8); beyond it, costs grow past what the
+  first release is designed for, and members' apps are told
+  (`space-over-member-limit`).
 - **Any updater can add roots.** The server does not limit roots per space
   (R15). Roots after the first valid one are ignored by every client (§3.2);
   they cost storage only, and a creator whose root lost repairs its own rows.
