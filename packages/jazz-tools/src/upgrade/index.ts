@@ -277,6 +277,13 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     writes.push([spread.file, await formatSpread(edited.text, spread.file, prettier)]);
     codemod.changes.push(`${rel(spread.file)}: exports \`tables\` and \`permissions\``);
   }
+  const oldPermissions = project.permissionsFile
+    ? readFileSync(project.permissionsFile, "utf8")
+    : "";
+  const separate =
+    project.permissionsFile !== undefined &&
+    oldPermissions.split("\n").length > SEPARATE_PERMISSIONS_LINES &&
+    !codemod.inlinePermissions;
   // The old permissions' named values keep their names; what came from the environment gets a TODO.
   const oldSource =
     codemod.inlinePermissions || !project.permissionsFile
@@ -286,6 +293,8 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     resolveImport(project, spec, from),
   );
   const printed = printPermissions(app, permissions, {
+    // A separate permissions.ts imports the namespace as `s`; schema.ts has its own name for it.
+    dsl: separate ? "s" : codemod.dsl,
     spreads: spreadPermissions,
     skipTables,
     constants: constants.byValue,
@@ -300,13 +309,6 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
         printed.unsupported.map((u) => `  ${u.path}: ${u.text}\n    ${u.reason}`).join("\n"),
     );
   }
-  const oldPermissions = project.permissionsFile
-    ? readFileSync(project.permissionsFile, "utf8")
-    : "";
-  const separate =
-    project.permissionsFile !== undefined &&
-    oldPermissions.split("\n").length > SEPARATE_PERMISSIONS_LINES &&
-    !codemod.inlinePermissions;
   const deleted = new Set<string>(project.permissionsSources);
   if (separate) deleted.delete(project.permissionsFile!);
   const permissionsOut = separate ? project.permissionsFile! : project.schemaFile;

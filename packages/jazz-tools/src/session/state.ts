@@ -130,6 +130,14 @@ export function onJazzSessionClientUpgraded<Client>(
 }
 
 /**
+ * @internal Have the public session re-read its client's state (its
+ * `localFirst`, its `localFirstUnavailable`) without a new core snapshot.
+ */
+export function notifyJazzSessionClientChanged(session: object): void {
+  for (const listener of [...(upgradeListeners.get(session) ?? [])]) listener();
+}
+
+/**
  * @internal Sign the current account out and the user the backend names now
  * in, as one transition: the session stays `transitioning` from the first
  * account to the next and never publishes `signed-out` in between. The first
@@ -586,7 +594,7 @@ export async function createJazzSessionOwner<
       // Same client, upgraded in place: the core publishes nothing (there is
       // nothing for a provider to redo), but the public session re-reads
       // its snapshot's `localFirst`.
-      for (const listener of [...(upgradeListeners.get(session) ?? [])]) listener();
+      notifyJazzSessionClientChanged(session);
       return;
     }
     client = next;

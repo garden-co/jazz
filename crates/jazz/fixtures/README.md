@@ -7,6 +7,10 @@ code that defines its format.
 - `../layers/db/fixtures/binding_codec_golden.json`: the binding row-batch
   codec (`jazz-db` `binding_codec.rs`, `binding-codec-golden.test.ts`). It
   lives in jazz-db, which embeds it, so the published crate contains it.
+- `../layers/db/fixtures/link_wire_failure_v1.json`: how the upstream link
+  classifies a server's `WireError` (`jazz-db` `link.rs`
+  `LinkFailure::from_wire_error`, `thin/link-failure.test.ts`). Not bytes but
+  a rule table: the thin client cannot call Rust, so it is held to this.
 - `native_query_codec.json`, `native_row_codec.json`: the TypeScript native
   query and row codecs.
 - `relation_query_postcard.json`: relation IR postcard bytes
@@ -15,6 +19,9 @@ code that defines its format.
   (`jazz-query-v0` plus a retained relation's `jazz-relation-v1` tree) and the
   resulting shape ids. Receivers recompute shape ids on registration, so these
   bytes are a cross-release contract.
+- `union_arm_label_v2.json`: derived labels of unnamed union arms
+  (`jazz.union-arm-label.v2`, `jazz-model` `union_arm_label.rs`): preimages,
+  labels, and a nested union filled innermost first.
 - `result-key.json`: result-key sidecar addresses (`jazz-types` `object.rs`).
 - `snapshot_ref_v1.json`: snapshot reference codec.
 - `sqlite_sync_wire_v1.json`: the sync wire corpus (`sync_wire_corpus.rs`,

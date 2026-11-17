@@ -4,7 +4,7 @@ import { getRuntimeSchemaCacheKey } from "../../drivers/schema-wire.js";
 import type { WasmSchema } from "../../drivers/types.js";
 import { setCredentialRenewal } from "../client.js";
 import type { AuthUpdate, JazzClient, MutationErrorEvent } from "../client.js";
-import type { DbConfig } from "../db.js";
+import type { DbConfig, DbPhase } from "../db.js";
 import type { Session } from "../context.js";
 import type { ForegroundNodeLease, RuntimeSource } from "../runtime-source.js";
 import { resolveTelemetryCollectorUrlFromEnv } from "../sync-telemetry.js";
@@ -68,7 +68,18 @@ export interface ConnectionManagerClientInput {
 export interface DbForConnection {
   readonly config: DbConfig;
   readonly runtimeSource: RuntimeSource<any>;
-  readonly isShuttingDown: boolean;
+  /**
+   * The Db's lifecycle phase (see `DbPhase`). `closing` and `closed` are
+   * final: a manager stops recovering its connection then.
+   */
+  readonly phase: DbPhase;
+  /**
+   * Whether the Db, still `open`, waits for its pending writes to upload
+   * before a graceful shutdown. It takes no new work, but its connection must
+   * keep (re)connecting for that upload. If the wait fails, the Db is
+   * plainly open again.
+   */
+  readonly draining: boolean;
   markUnauthenticated(reason: AuthFailureReason): void;
   /** Whether something renews the credential after this refusal. */
   renewsCredential?(reason: AuthFailureReason): boolean;

@@ -395,6 +395,61 @@ pub async fn group_todo_writes(
 }
 // #endregion writing-transaction-rust
 
+// #region writing-mutation-errors-rust
+pub async fn insert_todo_and_wait(jazz: &Jazz) -> jazz_app::Result<Option<Todo>> {
+    // A durable write returns once the server accepted it, and fails with
+    // its verdict if it refused it.
+    let inserted = jazz
+        .durable(DurabilityTier::GlobalServer)
+        .insert(NewTodo {
+            owner_id: Some(ObjectId::from_uuid(EXAMPLE_OWNER_ID)),
+            project_id: Some(ObjectId::from_uuid(EXAMPLE_PROJECT_ID)),
+            ..NewTodo::new("Ship review fixes", false)
+        })
+        .await;
+
+    match inserted {
+        Ok(todo) => Ok(Some(todo)),
+        // `code` is TypeScript's: `permission_denied`, `write_rejected`, …
+        Err(jazz_app::Error::WriteRejected { code, reason, .. }) => {
+            eprintln!("{code}: {reason}");
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+// #endregion writing-mutation-errors-rust
+
+// #region writing-transaction-errors-rust
+/// Whether the server accepted the commit.
+pub async fn complete_todo_in_transaction(
+    jazz: &Jazz,
+    todo_id: ObjectId,
+) -> jazz_app::Result<bool> {
+    let committed = jazz
+        .durable(DurabilityTier::GlobalServer)
+        .transaction(move |tx| async move {
+            tx.update(
+                todo_id,
+                TodoUpdate {
+                    done: Some(true),
+                    ..Default::default()
+                },
+            )
+        })
+        .await;
+
+    match committed {
+        Ok(()) => Ok(true),
+        Err(jazz_app::Error::WriteRejected { code, reason, .. }) => {
+            eprintln!("{code}: {reason}");
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+// #endregion writing-transaction-errors-rust
+
 // #region writing-serializable-transaction-rust
 pub async fn finish_todo_serializably(
     jazz: &Jazz,

@@ -371,6 +371,8 @@ struct Inner {
     /// Sockets open now.
     sockets: Arc<std::sync::atomic::AtomicUsize>,
     max_transaction_clients: usize,
+    /// How long a thin socket's requests may wait on an answer.
+    answer_deadline: Duration,
     /// Thin sessions' transaction clients running now.
     transaction_clients: Arc<std::sync::atomic::AtomicUsize>,
     http: reqwest::Client,
@@ -457,6 +459,7 @@ impl Endpoint {
                 max_sockets: DEFAULT_MAX_SOCKETS,
                 sockets: Arc::default(),
                 max_transaction_clients: DEFAULT_MAX_TRANSACTION_CLIENTS,
+                answer_deadline: thin::ANSWER_DEADLINE,
                 transaction_clients: Arc::default(),
                 http,
                 challenge_key,
@@ -499,6 +502,15 @@ impl Endpoint {
         self.reconfigure(|inner| inner.max_transaction_clients = max)
     }
 
+    /// How long a thin socket's requests may wait on an answer, from the
+    /// core or the session's client, since the last one came (default 60
+    /// s): past it the socket is closed with 1011, and the client
+    /// reconnects.
+    #[doc(hidden)]
+    pub fn answer_deadline(self, deadline: Duration) -> Self {
+        self.reconfigure(|inner| inner.answer_deadline = deadline)
+    }
+
     /// How many thin sessions' transaction clients run now.
     #[doc(hidden)]
     pub fn transaction_clients(&self) -> usize {
@@ -522,6 +534,7 @@ impl Endpoint {
                 max_sockets: shared.max_sockets,
                 sockets: shared.sockets.clone(),
                 max_transaction_clients: shared.max_transaction_clients,
+                answer_deadline: shared.answer_deadline,
                 transaction_clients: shared.transaction_clients.clone(),
                 http: shared.http.clone(),
                 challenge_key: shared.challenge_key.clone(),
@@ -1223,7 +1236,7 @@ impl Endpoint {
                 }
                 _ => None,
             };
-            let waited_out = waiting_since.map(|since| since + thin::ANSWER_DEADLINE);
+            let waited_out = waiting_since.map(|since| since + self.inner.answer_deadline);
             tokio::select! {
                 () = async {
                     match waited_out {
@@ -1263,6 +1276,7 @@ impl Endpoint {
                 Some(answer) = answered.recv() => {
                     if let Some(thin) = &mut thin {
                         thin.router.answered(&answer);
+                        waiting_since = None;
                     }
                     let mut sent = true;
                     for frame in thin::answer_frames(answer) {
@@ -1286,8 +1300,11 @@ impl Endpoint {
                 },
                 message = from_core.next() => match message {
                     Some(Ok(Message::Binary(data))) => {
-                        if let Some(thin) = &mut thin {
-                            thin.note_core_message(&data);
+                        if let Some(thin) = &mut thin
+                            && thin.note_core_message(&data)
+                        {
+                            // An answer: the wait goes on from here.
+                            waiting_since = None;
                         }
                         if outgoing.send(data.to_vec()).await.is_err() {
                             break Closed::normal();
@@ -1664,11 +1681,11 @@ impl ThinSocket {
             .is_some_and(|frames| self.router.from_client(frames).is_ok())
     }
 
-    /// Note one message the core sent the client.
-    fn note_core_message(&mut self, message: &[u8]) {
-        if let Ok(frames) = jazz::wire::decode_websocket_frame_batch(message) {
-            self.router.from_core(&frames);
-        }
+    /// Note one message the core sent the client: whether it answered a
+    /// request the core was sent.
+    fn note_core_message(&mut self, message: &[u8]) -> bool {
+        jazz::wire::decode_websocket_frame_batch(message)
+            .is_ok_and(|frames| self.router.from_core(&frames))
     }
 
     /// Release what may go now: backend requests to the session's client,

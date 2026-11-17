@@ -899,6 +899,7 @@ mod tests {
             NativeTransportError::Retryable(_) => "retryable",
             NativeTransportError::Terminal(_) => "terminal",
             NativeTransportError::AuthRejected(_) => "auth",
+            NativeTransportError::Wire(_) => "wire",
         };
         assert_eq!(kind(refused(401)), "auth");
         assert_eq!(kind(refused(403)), "auth");
