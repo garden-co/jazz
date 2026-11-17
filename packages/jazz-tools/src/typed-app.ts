@@ -212,7 +212,11 @@ type WhereInputForColumn<C extends ColumnTypes> = C["kind"] extends "string"
                       >
                     : // Whole values, bit for bit (SPEC 6.1.1); nearness is an index search.
                       C["kind"] extends "vector"
-                      ? WhereEqNe<Float32Array, C["nullable"], Membership<Float32Array | number[]>>
+                      ? WhereEqNe<
+                          Float32Array | number[],
+                          C["nullable"],
+                          Membership<Float32Array | number[]>
+                        >
                       : C["kind"] extends "point"
                         ? WhereEqNe<C["value"], C["nullable"], Membership<C["value"]>>
                         : never;
