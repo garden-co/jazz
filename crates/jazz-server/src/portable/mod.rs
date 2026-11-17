@@ -6,6 +6,8 @@
 
 pub mod accounts;
 pub mod admission;
+pub mod catalogue;
+pub mod deployment;
 pub mod handshake;
 pub mod session;
 pub mod websocket_codec;
