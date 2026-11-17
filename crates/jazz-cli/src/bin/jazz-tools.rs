@@ -68,14 +68,6 @@ struct Cli {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
-    /// Import an alpha.59 server data dir into a new one, from the dump that
-    /// `jazz-alpha59-alpha60-export` writes (`import`), and check the result
-    /// (`verify`). Run `jazz-tools alpha59-alpha60` for its usage.
-    #[command(name = "alpha59-alpha60")]
-    Alpha59Alpha60 {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
     /// With --check (for CI): check the committed jazz.app.json (and
     /// jazz.permissions.json) and fail when the bindings are stale, changing
     /// nothing. Writing them is `npx jazz-tools generate`'s, from schema.ts.
@@ -474,9 +466,7 @@ fn main() {
 
 async fn run() {
     let cli = Cli::parse();
-    // alpha59-alpha60 prints its JSON summary on stdout, so its logs go to
-    // stderr.
-    init_tracing(matches!(cli.command, Commands::Alpha59Alpha60 { .. }));
+    init_tracing();
     if let Err(error) = validate_server_cli_options(&cli.command) {
         eprintln!("Server error: {error}");
         shutdown_tracing();
@@ -484,11 +474,6 @@ async fn run() {
     }
 
     match cli.command {
-        Commands::Alpha59Alpha60 { args } => {
-            let code = jazz_cli::alpha59_alpha60::main("jazz-tools alpha59-alpha60", args).await;
-            shutdown_tracing();
-            std::process::exit(code);
-        }
         Commands::Validate { .. } => finish_app_files(Err(
             "`jazz-tools validate` is renamed to `jazz-tools generate`: run `npx jazz-tools generate` (`jazz-tools generate --check` for CI)".into(),
         )),
@@ -704,17 +689,11 @@ static OTEL_LOGGER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::logs::SdkLog
 static OTEL_METER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::metrics::SdkMeterProvider> =
     std::sync::OnceLock::new();
 
-fn init_tracing(to_stderr: bool) {
-    use tracing_subscriber::fmt::writer::BoxMakeWriter;
+fn init_tracing() {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let writer = if to_stderr {
-        BoxMakeWriter::new(std::io::stderr)
-    } else {
-        BoxMakeWriter::new(std::io::stdout)
-    };
-    let fmt_layer = tracing_subscriber::fmt::layer().with_writer(writer);
+    let fmt_layer = tracing_subscriber::fmt::layer();
 
     #[cfg(feature = "otel")]
     {
