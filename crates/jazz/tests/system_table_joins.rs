@@ -389,24 +389,24 @@ fn row_ids(db: &Db, table: &str) -> Vec<RowUuid> {
         .collect()
 }
 
-/// An edge that takes a subscription before it knows its catalogue
+/// A relay that takes a subscription before it knows its catalogue
 /// identities still ships the rows the read rests on once it learns them,
-/// then and later. Alice reads projects through an edge that has not yet
+/// then and later. Alice reads projects through a relay that has not yet
 /// heard from the authority, so the `M(projects)` membership her read
-/// rests on names a table identity the edge cannot resolve. Once the edge
+/// rests on names a table identity the relay cannot resolve. Once the relay
 /// confirms its names, alice holds the project and its member rows, as a
 /// subscription opened after confirmation would, and a member added later
 /// reaches her too.
 ///
 /// ```text
 /// authority: P1, members {alice@P1, bob@P1}
-/// alice ──subscribe projects──► edge (identities unknown)
-/// edge ◄──catalogue, rows── authority
+/// alice ──subscribe projects──► relay (identities unknown)
+/// relay ◄──catalogue, rows── authority
 /// alice ◄── P1, alice@P1, bob@P1
-/// authority: + carol@P1 ──► edge ──► alice
+/// authority: + carol@P1 ──► relay ──► alice
 /// ```
 #[test]
-fn an_edge_subscribed_before_confirming_its_names_ships_the_membership() {
+fn a_relay_subscribed_before_confirming_its_names_ships_the_membership() {
     let schema = space_tables().build();
     let authority = open_authority(&schema);
     let projects = Value::Uuid(authority.table_identity("projects").unwrap().unwrap().0);
@@ -420,39 +420,39 @@ fn an_edge_subscribed_before_confirming_its_names_ships_the_membership() {
     add_member(&authority, &projects, p1, account(alice()));
     add_member(&authority, &projects, p1, person(0xb0));
 
-    let edge = open_as(&schema, 0xed, AuthorSubject::SYSTEM);
-    let (edge_side, authority_side) = duplex();
-    let _edge_upstream = block_on(edge.connect_upstream(edge_side));
+    let relay = open_as(&schema, 0xed, AuthorSubject::SYSTEM);
+    let (relay_side, authority_side) = duplex();
+    let _relay_upstream = block_on(relay.connect_upstream(relay_side));
     authority
         .accept_subscriber(authority_side, AuthorSubject::SYSTEM)
         .unwrap();
 
     let client = open_as(&schema, 0xa1, alice());
-    let (client_side, edge_client_side) = duplex();
+    let (client_side, relay_client_side) = duplex();
     let _client_upstream = block_on(client.connect_upstream(client_side));
-    edge.accept_subscriber(edge_client_side, alice()).unwrap();
+    relay.accept_subscriber(relay_client_side, alice()).unwrap();
     let all_projects = client.prepare_query(&Query::from("projects")).unwrap();
     let _stream = block_on(client.subscribe(&all_projects, ReadOpts::default())).unwrap();
 
-    // The edge takes alice's subscription before the authority has told it
+    // The relay takes alice's subscription before the authority has told it
     // anything.
     block_on(client.tick()).unwrap();
-    block_on(edge.tick()).unwrap();
+    block_on(relay.tick()).unwrap();
     assert_eq!(
-        edge.table_identity("projects").unwrap_err().code,
+        relay.table_identity("projects").unwrap_err().code,
         jazz::db::ErrorCode::NotObserved
     );
 
     let pump = || {
         for _ in 0..20 {
             block_on(client.tick()).unwrap();
-            block_on(edge.tick()).unwrap();
+            block_on(relay.tick()).unwrap();
             block_on(authority.tick()).unwrap();
         }
     };
     pump();
     assert_eq!(
-        edge.table_identity("projects").unwrap(),
+        relay.table_identity("projects").unwrap(),
         authority.table_identity("projects").unwrap()
     );
     assert_eq!(row_ids(&client, "projects"), vec![p1]);
