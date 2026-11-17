@@ -459,14 +459,34 @@ An **analyzer** turns a field's string into terms. `jazz-text/1:<lang>`,
 Jazz at Unicode 16.0.0, never the toolchain's or the platform's Unicode
 version:
 
-1. Split into words with `jazz-text`'s plain-text unit segmentation
-   (`plain_units`). Keep the word runs, and the units that are one
-   standalone letter or digit: an ideograph, a kana or a Thai, Lao, Myanmar
-   or Khmer letter, which `jazz-text` cuts one per unit, so these scripts are
-   searched by character. Punctuation, symbols, emoji and spaces are dropped.
-   Two word runs with a single `'` or `’` between them are one word (`don't`,
-   `O’Neill`). Other separators split, so `e-mail`, `3.14` and `snake_case`
-   are two words each.
+1. Split into words by a character class table frozen with the analyzer
+   (generated from Unicode 16.0.0 general categories; independent of the
+   text-merge tokenizer, so a merge change never changes `jazz-text/1`):
+   - _separators_: punctuation, spaces, symbols, controls, format and
+     private-use characters, surrogates, and other numbers (Gc `P*`, `Z*`,
+     `S*`, `Cc`, `Cf`, `Co`, `Cs`, `No`), except the ignored ones;
+   - _ignored_: U+00AD soft hyphen, U+200C, U+200D, U+2060 and U+FEFF;
+   - _standalone letters_: letters and digits (`L*`, `Nd`, `Nl`) in the
+     blocks of the scripts written without spaces (U+0E00–U+0FFF,
+     U+1000–U+109F, U+1780–U+17FF, U+2E80–U+2FDF, U+3000–U+31FF,
+     U+3400–U+4DBF, U+4E00–U+9FFF, U+A000–U+A4CF, U+F900–U+FAFF,
+     U+FF66–U+FF9F, U+20000–U+3FFFF), with the marks (`M*`) of those blocks;
+   - _word characters_: every other letter, mark and digit, and unassigned
+     code points.
+
+   A word is a run of word characters (with ignored characters inside it),
+   or one standalone letter with the marks after it, so the unspaced
+   scripts are searched by character. Separators end words and are dropped,
+   in every script (`नमस्ते।दुनिया`, `مرحبا،عالم` and `x։y` are two words
+   each), and ignored characters do not split a word and are left out of
+   its term (`co\u{AD}operate` is `cooperate`). Two runs of word characters
+   with a single `'` or `’` between them are one word (`don't`, `O’Neill`);
+   other separators split, so `e-mail`, `3.14` and `snake_case` are two
+   words each. A field is analyzed up to its first 65 536 terms (after step
+   5); the rest of it is not indexed and does not count toward its length
+   `L`. This bounds the postings one write creates; a value is never
+   refused or left unindexed for its length (`INV-IX-7`).
+
 2. Lowercase with Unicode simple case folding (CaseFolding.txt, statuses C
    and S). `ẞ` folds to `ß`, every sigma to `σ`, and `İ`, which has no simple
    folding, is left to step 3.
@@ -479,8 +499,8 @@ version:
    the fullwidth Latin letters and digits fold to ASCII. Combining marks
    (U+0300–U+036F, U+1AB0–U+1AFF, U+1DC0–U+1DFF, U+20D0–U+20FF,
    U+FE20–U+FE2F) and variation selectors are dropped, so precomposed and
-   decomposed spellings meet. `’` becomes `'`. Other characters are
-   unchanged.
+   decomposed spellings meet, as are ignored characters. `’` becomes `'`.
+   Other characters are unchanged.
 4. For `en`, stem with the Snowball English (Porter 2) algorithm of Snowball
    v3.2.0 (`algorithms/english.sbl`), which also strips possessives (`'s`,
    `s'`).
@@ -498,8 +518,12 @@ indexed term equal to the word analyzed as a whole word (so a fully typed
 `running` meets the stem `run`), or any indexed term starting with the word
 folded but unstemmed (steps 1–3), compared as UTF-8 bytes. A partly typed
 word whose stem is shorter than what has been typed (`runn`) matches only
-once completed. A query with no terms and no prefix after analysis is
-refused (20.4).
+once completed. A last word of one character is an exact term, not a prefix
+(a prefix has at least 2 characters), so `jazz b` does not expand to every
+term starting with `b`. A query with no terms and no prefix after analysis
+is refused (20.4), as is query text over 1 KiB (refused before analysis)
+or with more than 32 distinct terms, the prefix counted as one
+(`SearchQueryTooLong`, 20.11).
 
 The impact of a term in a field with declared weight `w` and reference
 length `R` (20.1: 1–4096, default 32), frequency `f` and actual length `L`
