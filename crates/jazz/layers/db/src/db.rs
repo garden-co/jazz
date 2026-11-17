@@ -5206,6 +5206,9 @@ impl Inner {
             .and_then(crate::ix::search_of)
             .unwrap_or(search);
         crate::ix::check_declaration(&index, search)?;
+        // A search that would cost more than its kind allows is refused
+        // before it runs (SPEC 20.12).
+        index.kind.admit(&self.conn, &index.prefix, &search.op)?;
         if crate::ix::has_queued(&self.conn)? {
             crate::values::in_savepoint(&self.conn, "jazz_ix_drain", || {
                 crate::ix::drain(&self.conn)

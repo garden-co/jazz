@@ -36,11 +36,11 @@ pub use jazz_db::result_tree;
 pub use jazz_db::slow;
 pub use jazz_db::thin_transactions;
 #[cfg(feature = "testing")]
-pub use jazz_db::{set_postings_cap_for_test, use_test_kinds};
-#[cfg(feature = "testing")]
 pub use jazz_db::{
     cell_ranges_for_test, decode_session_read_cells_for_test, full_materializations_for_test,
 };
+#[cfg(feature = "testing")]
+pub use jazz_db::{set_postings_cap_for_test, use_test_kinds};
 pub use jazz_model::model;
 pub use jazz_model::query;
 pub use jazz_model::row_input;

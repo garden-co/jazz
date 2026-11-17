@@ -517,3 +517,71 @@ fn a_changed_field_length_rebuilds_the_index() {
     assert_eq!(ids(&db, &any("palaces harbour")).len(), ranked.len());
     assert_eq!(ids(&db, &text("berlin")), [1, 2], "every row indexed again");
 }
+
+/// A text search's cost is capped (SPEC 20.12), each cap refused with a
+/// typed error before the search runs: a query over 1 KiB or 32 terms
+/// (`search_query_too_long`, the analyzer's caps), a prefix standing for
+/// more than 1 000 indexed terms, and more than 200 000 postings to read
+/// (`search_too_broad`; lowered here to reach it). A word both whole and
+/// the prefix counts once.
+#[test]
+fn text_search_costs_are_capped() {
+    let db = open();
+    seed(&db);
+    let refused = |words: &str| {
+        try_ids(&db, &text(words))
+            .expect_err("refused")
+            .reason
+            .map(|reason| reason.as_str())
+    };
+    assert_eq!(refused(&"a".repeat(1100)), Some("search_query_too_long"));
+    let many: Vec<String> = (0..33).map(|n| format!("w{n}")).collect();
+    assert_eq!(refused(&many.join(" ")), Some("search_query_too_long"));
+
+    let words: Vec<String> = (0..1001).map(|n| format!("ab{n:04}x")).collect();
+    place(
+        &db,
+        9,
+        "Abacus",
+        Some(&words.join(" ")),
+        0.0,
+        0.0,
+        [1.0, 1.0, 1.0],
+    );
+    assert_eq!(refused("ab"), Some("search_too_broad"));
+    assert_eq!(
+        ids(&db, &text("ab0001x")),
+        [9],
+        "a whole term is not a prefix"
+    );
+
+    jazz::set_postings_cap_for_test(Some(1));
+    // "berlin" has two postings (Berlin, Potsdam).
+    assert_eq!(refused("berlin"), Some("search_too_broad"));
+    jazz::set_postings_cap_for_test(None);
+    assert_eq!(ids(&db, &text("berlin")), [1, 2]);
+
+    // "run run": a word that is both a whole term and the prefix has two
+    // slots, and its postings count once in the score.
+    assert_eq!(ids(&db, &text("run run")), ids(&db, &text("run")));
+}
+
+/// Under `All`, every slot needs its own match: "running run" needs the
+/// term `run` (the stem of "running") and a term starting with "run". A row
+/// holding only "runway" fills the prefix slot but not the whole-term one,
+/// so it does not match; under `Any` it does.
+#[test]
+fn every_slot_of_an_all_search_needs_its_own_match() {
+    let db = open();
+    place(&db, 1, "Runway", None, 0.0, 0.0, [1.0, 0.0, 0.0]);
+    place(&db, 2, "Running club", None, 0.0, 0.0, [1.0, 0.0, 0.0]);
+    assert_eq!(ids(&db, &text("running run")), [2]);
+    let any = Query::from("places").search(
+        "search",
+        IndexOp::Match {
+            text: "running run".into(),
+            mode: MatchMode::Any,
+        },
+    );
+    assert_eq!(ids(&db, &any), [2, 1]);
+}
