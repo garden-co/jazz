@@ -978,6 +978,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private drainingSubscriptionPool = false;
   private subscriptionPoolDirty = false;
   private authFailureCallback: ((reason: string) => void) | null = null;
+  private authRestoredCallback: (() => void) | null = null;
   private mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
   private serverTransportErrorCallback:
     | ((error: Error, state: { retrying: boolean }) => void)
@@ -2935,6 +2936,8 @@ export class NativeRuntimeAdapter implements Runtime {
       case "live":
         // Writes' Global waits armed through the outage keep waiting.
         if (previous?.outagePublished) this.forgetServerTransportError();
+        // Admitted: whatever refused the credential before holds no more.
+        if (previous?.phase !== "live") this.authRestoredCallback?.();
         return;
       case "connecting":
       case "backoff":
@@ -3339,6 +3342,11 @@ export class NativeRuntimeAdapter implements Runtime {
       this.nativeAuthRefusalRenewable = isRenewableAuthFailure(mapAuthReason(reason));
       this.authFailureCallback?.(reason);
     });
+  }
+
+  onAuthRestored(callback: () => void): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onAuthRestored(callback);
+    this.authRestoredCallback = callback;
   }
 
   onMutationError(callback: (event: MutationErrorEvent) => void): void {
@@ -5973,6 +5981,8 @@ const REJECTION_CODES_BY_REASON: Readonly<Record<NativeCoreErrorReason, string>>
   schema_version_not_deployed: "write_rejected",
   // A refused subscriber, never a write's fate.
   identity_mismatch: "write_rejected",
+  // A skipped catalogue version, never a write's fate.
+  schema_version_unsupported: "write_rejected",
 };
 
 /** A rejected wait's code, from the core reason every binding carries on it. */

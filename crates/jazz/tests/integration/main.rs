@@ -29,6 +29,8 @@ mod bundle_permissions;
 mod callback_transaction_cancellation;
 #[path = "../catalogue_rows.rs"]
 mod catalogue_rows;
+#[path = "../catalogue_unsupported_versions.rs"]
+mod catalogue_unsupported_versions;
 #[path = "../claims_change.rs"]
 mod claims_change;
 #[path = "../claims_registry_refresh.rs"]
@@ -159,6 +161,8 @@ mod relation_queries;
 mod relation_results;
 #[path = "../relational_delete_retraction.rs"]
 mod relational_delete_retraction;
+#[path = "../relations_parity.rs"]
+mod relations_parity;
 #[path = "../relay_local_seqs.rs"]
 mod relay_local_seqs;
 #[path = "../relay_policy_subscriptions.rs"]

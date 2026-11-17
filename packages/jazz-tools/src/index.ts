@@ -129,6 +129,7 @@ export {
 export type {
   JazzSession,
   JazzSessionSnapshot,
+  JazzSessionErrorViewProps,
   JazzSessionOperation,
   JazzUser,
   LocalFirstUnavailable,

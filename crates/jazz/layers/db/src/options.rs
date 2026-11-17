@@ -504,11 +504,16 @@ pub enum Reason {
     /// A store configured as one user was asked to serve a session of
     /// another identity (code `Protocol`): relays serve one identity.
     IdentityMismatch,
+    /// An upstream's catalogue named a schema version this build cannot read
+    /// (a column type or other variant it does not know): the version is
+    /// skipped and the store keeps syncing the versions it knows (code
+    /// `Schema`).
+    SchemaVersionUnsupported,
 }
 
 impl Reason {
     /// Every reason, in declaration order.
-    pub const ALL: [Reason; 12] = [
+    pub const ALL: [Reason; 13] = [
         Reason::AuthorizationDenied,
         Reason::ClientClockTooFarAhead,
         Reason::SerializationConflict,
@@ -521,6 +526,7 @@ impl Reason {
         Reason::PredecessorRejected,
         Reason::SchemaVersionNotDeployed,
         Reason::IdentityMismatch,
+        Reason::SchemaVersionUnsupported,
     ];
 
     /// The stable, snake_case name of this reason.
@@ -543,6 +549,7 @@ impl Reason {
             Reason::PredecessorRejected => "predecessor_rejected",
             Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
             Reason::IdentityMismatch => "identity_mismatch",
+            Reason::SchemaVersionUnsupported => "schema_version_unsupported",
         }
     }
 
