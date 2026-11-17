@@ -35,7 +35,6 @@ pub enum IntrinsicContradiction {
     ConflictingRoots,
     ConflictingDeviceKeys,
     MissingRootKey,
-    MissingRecipientKey,
     MissingSignerKey,
 }
 
@@ -45,7 +44,6 @@ impl IntrinsicContradiction {
             Self::ConflictingRoots => "conflicting-roots",
             Self::ConflictingDeviceKeys => "conflicting-device-keys",
             Self::MissingRootKey => "missing-root-key",
-            Self::MissingRecipientKey => "missing-recipient-key",
             Self::MissingSignerKey => "missing-signer-key",
         }
     }
@@ -102,6 +100,8 @@ pub enum RefusalCode {
     ApprovalClosed,
     InvalidPossessionProof,
     TargetNotActive,
+    /// A device cannot remove itself (§2.8): another device does it.
+    SelfRemoval,
     UnsupportedRecipient,
     AccountResetNotAllowed,
     SpacePending,
@@ -124,6 +124,7 @@ impl RefusalCode {
             Self::ApprovalClosed => "approval-closed",
             Self::InvalidPossessionProof => "invalid-possession-proof",
             Self::TargetNotActive => "target-not-active",
+            Self::SelfRemoval => "self-removal",
             Self::UnsupportedRecipient => "unsupported-recipient",
             Self::AccountResetNotAllowed => "account-reset-not-allowed",
             Self::SpacePending => "space-pending",

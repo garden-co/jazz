@@ -395,11 +395,11 @@ fn env(id: &str, payload: &[u8]) -> Vec<u8> {
 const SIGNED_DIGESTS: &[(&str, &str)] = &[
     (
         "public approval",
-        "6629c281de9e66edebc66540166595b0b3d98467561f7222e19ea9b88cdba5e5",
+        "3933b20201f63442a778751094ac61a868639c1f92c3db9078d9c9cd29f8604c",
     ),
     (
         "recovery approval",
-        "280e1e6d4ad56648f3195ae7c76a7217da2d74d08affb8181d1c9813223f05a8",
+        "0b235d59c0f4356913300e8c03380d6b78e9ee73776b95b67db879d55dcbac73",
     ),
     (
         "proof",
@@ -511,17 +511,23 @@ fn signed_bytes() {
     };
     cases.push((
         "public approval",
-        approval.signed_bytes(&da).unwrap(),
-        ctx(
-            da.as_str(),
-            "jazz.e2ee.public-device-approval.v1",
-            "account",
-            ALICE,
-            "__e2ee_public_device_approvals",
-            R1,
-            &format!("approval-signature:{D1}"),
-            E1,
-            D2,
+        approval.signed_bytes(&da, &keys()).unwrap(),
+        append(
+            ctx(
+                da.as_str(),
+                "jazz.e2ee.public-device-approval.v1",
+                "account",
+                ALICE,
+                "__e2ee_public_device_approvals",
+                R1,
+                &format!("approval-signature:{D1}"),
+                E1,
+                D2,
+            ),
+            &[
+                &env("jazz.sodium.sign", &[0x22; 32]),
+                &env("jazz.wrap.hpke-x25519", &[0x11; 32]),
+            ],
         ),
     ));
     let recovery_approval = PublicDeviceApproval {
@@ -532,17 +538,23 @@ fn signed_bytes() {
     };
     cases.push((
         "recovery approval",
-        recovery_approval.signed_bytes(&da).unwrap(),
-        ctx(
-            da.as_str(),
-            "jazz.e2ee.recovery-device-approval.v1",
-            "account",
-            ALICE,
-            "__e2ee_public_device_approvals",
-            R1,
-            &format!("recovery-signature:{R2}"),
-            E1,
-            D2,
+        recovery_approval.signed_bytes(&da, &keys()).unwrap(),
+        append(
+            ctx(
+                da.as_str(),
+                "jazz.e2ee.recovery-device-approval.v1",
+                "account",
+                ALICE,
+                "__e2ee_public_device_approvals",
+                R1,
+                &format!("recovery-signature:{R2}"),
+                E1,
+                D2,
+            ),
+            &[
+                &env("jazz.sodium.sign", &[0x22; 32]),
+                &env("jazz.wrap.hpke-x25519", &[0x11; 32]),
+            ],
         ),
     ));
     let challenge = ChallengeCoordinates {
@@ -1414,8 +1426,18 @@ fn hand_computed_signed_bytes() {
         E1,
         D2,
     ]);
-    assert_eq!(approval.signed_bytes(&da).unwrap(), expected);
     assert_eq!(to_hex(&expected), PUBLIC_APPROVAL_HEX);
+    // The approval signs its device's keys after the context (§2.5).
+    assert_eq!(
+        approval.signed_bytes(&da, &keys()).unwrap(),
+        append(
+            expected,
+            &[
+                &env("jazz.sodium.sign", &[0x22; 32]),
+                &env("jazz.wrap.hpke-x25519", &[0x11; 32]),
+            ],
+        )
+    );
 
     let root = RecoveryRoot {
         id: R2.into(),

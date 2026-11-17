@@ -537,7 +537,9 @@ fn retired_recovery_root_no_longer_approves() {
     let mut current = stale.records.public.clone();
     current.id = ids::random_v4(&mut rng).unwrap();
     current.epoch_id = state.epoch_id().to_owned();
-    let bytes = current.signed_bytes(&env.application()).unwrap();
+    let bytes = current
+        .signed_bytes(&env.application(), &replacement.keys())
+        .unwrap();
     let signer = env.registry.signer(signature::MECHANISM).unwrap();
     current.signature = signing::sign(signer, &replacement.signing, &bytes).unwrap();
     current.recovery_signature = Some(signing::sign(signer, &recovery.signing, &bytes).unwrap());
@@ -743,10 +745,10 @@ fn intrinsic_contradictions_fail_replay() {
     );
 }
 
-/// An approval whose recipient has no published keys is a contradiction
-/// once its signature verifies.
+/// An approval signs its device's keys (§2.5), so one whose device has no
+/// published keys cannot be verified: it is skipped, and replay goes on.
 #[test]
-fn approval_without_recipient_keys_is_a_contradiction() {
+fn approval_without_recipient_keys_is_skipped() {
     let env = Env::new(ALICE);
     let mut rng = TestRandom(15);
     let laptop = env.device(&mut rng);
@@ -760,9 +762,77 @@ fn approval_without_recipient_keys_is_a_contradiction() {
         .public
         .keys
         .retain(|row| row.row.device_id != phone.id);
+    let state = ledger.replay(&env).current().unwrap().unwrap();
+    assert!(!state.is_active(&phone.id));
+    assert!(state.is_active(&laptop.id));
+}
+
+/// A server that shows a client another keys row for an approved device
+/// (its own keys under the device's ID) gains nothing: the approval signed
+/// the device's real keys, so it no longer verifies and the device is not
+/// active in that client's replay. Nothing is sealed to the substituted
+/// keys, and nothing signed with them is accepted.
+#[test]
+fn substituted_device_keys_do_not_activate_the_approved_device() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(16);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mallory = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    assert!(ledger.state(&env).is_active(&phone.id));
+
+    let mut substituted = ledger.public.clone();
+    for row in &mut substituted.keys {
+        if row.row.device_id == phone.id {
+            row.row.keys = mallory.keys();
+        }
+    }
+    let replay =
+        jazz_e2ee::protocol::account::AccountReplay::new(&substituted, &env.domain, &env.registry)
+            .unwrap();
+    let state = replay.current().unwrap().unwrap();
+    assert!(!state.is_active(&phone.id));
+    assert!(state.is_active(&laptop.id));
+    assert_eq!(state.active.len(), 1);
+}
+
+/// An `app` root is unsigned, so before first contact a client cannot tell
+/// its device's keys from substituted ones (§8). After it, the floor holds
+/// the root device's keys, and a later read showing other keys for that
+/// device is refused as `root-not-mine`.
+#[test]
+fn a_floor_refuses_substituted_root_device_keys() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(17);
+    let laptop = env.device(&mut rng);
+    let mallory = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    let through = ledger.public.through;
+    let state = ledger.state(&env);
+    let floor = state.floor(through, None);
+    assert_eq!(floor.root_keys, laptop.keys());
+    state.check_floor(through, &floor).unwrap();
+
+    let mut substituted = ledger.public.clone();
+    for row in &mut substituted.keys {
+        if row.row.device_id == laptop.id {
+            row.row.keys = mallory.keys();
+        }
+    }
+    let replay =
+        jazz_e2ee::protocol::account::AccountReplay::new(&substituted, &env.domain, &env.registry)
+            .unwrap();
+    let state = replay.current().unwrap().unwrap();
     assert_eq!(
-        ledger.replay(&env).current().unwrap_err(),
-        ProtocolError::Intrinsic(IntrinsicContradiction::MissingRecipientKey)
+        state.check_floor(through, &floor).unwrap_err(),
+        ProtocolError::RootNotMine
     );
 }
 
@@ -1141,7 +1211,7 @@ fn private_evidence_is_bound_to_its_state() {
     let mut public = ledger.public.clone();
     let row = &mut public.approvals[0].row;
     row.id = ids::random_v4(&mut rng).unwrap();
-    let bytes = row.signed_bytes(&env.application()).unwrap();
+    let bytes = row.signed_bytes(&env.application(), &phone.keys()).unwrap();
     row.signature = signing::sign(&signature::Builtin, &laptop.signing, &bytes).unwrap();
     let replay =
         jazz_e2ee::protocol::account::AccountReplay::new(&public, &env.domain, &env.registry)
@@ -1368,7 +1438,7 @@ fn assert_sealing_key(
 
 /// Every account epoch's creation writes its sealing key record in the same
 /// transaction (§2.12): a bootstrap and a reset signed by the root's
-/// device, a rotation by its author, also when the author removes itself.
+/// device, a rotation by its author.
 /// A later publication for the current epoch is by an active device that
 /// holds the current key; a removed device is refused.
 #[test]
@@ -1387,7 +1457,7 @@ fn every_epoch_publishes_its_sealing_key() {
     ledger.approve(&env, &laptop, &phone, &mut rng);
     let (rotation_at, rotation) = ledger.rotate(
         &env,
-        &phone,
+        &laptop,
         RotationTarget::RemoveDevice(phone.id.clone()),
         &mut rng,
     );
@@ -1399,7 +1469,7 @@ fn every_epoch_publishes_its_sealing_key() {
         &ledger,
         1,
         rotation_at,
-        &phone,
+        &laptop,
         &rotation.public.epoch_id,
         &rotation.key,
     );
@@ -1429,5 +1499,309 @@ fn every_epoch_publishes_its_sealing_key() {
         &tablet,
         &reset_epoch,
         &reset_key,
+    );
+}
+
+/// A rotation from an account key authenticated before a later approval of
+/// the same epoch is refused: its private revision would miss that approval,
+/// and no device could verify the new epoch. Authenticated again, the key
+/// rotates, and every remaining device acquires the new key.
+#[test]
+fn a_key_from_before_a_later_approval_cannot_rotate() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(18);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let tablet = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    let stale = ledger.acquire(&env, &laptop).unwrap();
+
+    ledger.request(&tablet, &mut rng);
+    ledger.approve(&env, &laptop, &tablet, &mut rng);
+    let state = ledger.state(&env);
+    assert!(state.is_active(&tablet.id));
+    let target = RotationTarget::RemoveDevice(phone.id.clone());
+    assert_eq!(
+        build::rotate(&env.writer(), &state, &laptop, &stale, &target, &mut rng).unwrap_err(),
+        ProtocolError::AccountKeyUnavailable
+    );
+
+    ledger.rotate(&env, &laptop, target, &mut rng);
+    let state = ledger.state(&env);
+    assert!(!state.is_active(&phone.id));
+    let laptop_key = ledger.acquire(&env, &laptop).unwrap();
+    let tablet_key = ledger.acquire(&env, &tablet).unwrap();
+    assert_eq!(laptop_key.epoch_id(), state.epoch_id());
+    assert_eq!(laptop_key.key(), tablet_key.key());
+}
+
+/// laptop (root), phone and tablet approved; laptop then removes phone and
+/// approves a watch in the new epoch. The
+/// returned successor is one laptop built, from that state, to remove tablet
+/// (not yet accepted): every check passes for it as built.
+fn removed_phone_and_a_pending_successor(
+    seed: u64,
+) -> (
+    Env,
+    Ledger,
+    LocalDevice,
+    LocalDevice,
+    LocalDevice,
+    jazz_e2ee::protocol::records::account::PublicAccountSuccessor,
+) {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(seed);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let tablet = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    ledger.request(&tablet, &mut rng);
+    ledger.approve(&env, &laptop, &tablet, &mut rng);
+    ledger.rotate(
+        &env,
+        &laptop,
+        RotationTarget::RemoveDevice(phone.id.clone()),
+        &mut rng,
+    );
+    // An approval in the new epoch, so the successor's revision is not empty.
+    let watch = env.device(&mut rng);
+    ledger.request(&watch, &mut rng);
+    ledger.approve(&env, &laptop, &watch, &mut rng);
+    let key = ledger.acquire(&env, &laptop).unwrap();
+    let state = ledger.state(&env);
+    let records = build::rotate(
+        &env.writer(),
+        &state,
+        &laptop,
+        &key,
+        &RotationTarget::RemoveDevice(tablet.id.clone()),
+        &mut rng,
+    )
+    .unwrap();
+    (env, ledger, laptop, phone, tablet, records.public)
+}
+
+/// Re-signs `successor` with `device`'s signing key, as `device`.
+fn re_sign(
+    env: &Env,
+    successor: &mut jazz_e2ee::protocol::records::account::PublicAccountSuccessor,
+    device: &LocalDevice,
+) {
+    successor.signer_id = device.id.clone();
+    let bytes = successor.signed_bytes(&env.application()).unwrap();
+    successor.signature = signing::sign(&signature::Builtin, &device.signing, &bytes).unwrap();
+}
+
+/// Accepts `successor` alone at the next position and replays.
+fn with_successor(
+    env: &Env,
+    ledger: &Ledger,
+    successor: jazz_e2ee::protocol::records::account::PublicAccountSuccessor,
+) -> jazz_e2ee::protocol::account::AccountState {
+    let mut ledger = ledger.clone();
+    let at = ledger.next();
+    ledger.public.successors.push(Accepted::new(at, successor));
+    ledger.state(env)
+}
+
+/// A successor correctly signed by a removed device, or by a device that was
+/// never approved, is not accepted: its signer is not active before it. The
+/// same successor signed by an active device is accepted, so only the signer
+/// differs.
+#[test]
+fn a_correctly_signed_successor_by_an_inactive_device_is_rejected() {
+    let (env, ledger, laptop, phone, tablet, successor) = removed_phone_and_a_pending_successor(19);
+    let epoch = ledger.state(&env).epoch_id().to_owned();
+
+    let accepted = with_successor(&env, &ledger, successor.clone());
+    assert!(!accepted.is_active(&tablet.id));
+    assert_ne!(accepted.epoch_id(), epoch);
+
+    let mut by_removed = successor.clone();
+    re_sign(&env, &mut by_removed, &phone);
+    let state = with_successor(&env, &ledger, by_removed);
+    assert!(state.is_active(&tablet.id));
+    assert_eq!(state.epoch_id(), epoch);
+
+    let mut rng = TestRandom(20);
+    let stranger = env.device(&mut rng);
+    let mut ledger_with_stranger = ledger.clone();
+    ledger_with_stranger.request(&stranger, &mut rng);
+    let mut by_stranger = successor.clone();
+    re_sign(&env, &mut by_stranger, &stranger);
+    let state = with_successor(&env, &ledger_with_stranger, by_stranger);
+    assert!(state.is_active(&tablet.id));
+    assert_eq!(state.epoch_id(), epoch);
+
+    let mut by_laptop = successor;
+    re_sign(&env, &mut by_laptop, &laptop);
+    assert!(!with_successor(&env, &ledger, by_laptop).is_active(&tablet.id));
+}
+
+/// A successor whose `membership` is not exactly the active set minus its
+/// target, or whose public `revision` is not the recomputed one, is not
+/// accepted, even correctly signed by an active device.
+#[test]
+fn a_successor_with_other_membership_or_revision_is_rejected() {
+    let (env, ledger, laptop, phone, tablet, successor) = removed_phone_and_a_pending_successor(21);
+    let epoch = ledger.state(&env).epoch_id().to_owned();
+
+    let mut wider = successor.clone();
+    let mut members = jazz_e2ee::protocol::json::decode_id_list(&wider.membership).unwrap();
+    members.push(phone.id.clone());
+    members.sort();
+    wider.membership = jazz_e2ee::protocol::json::encode_id_list(&members).unwrap();
+    re_sign(&env, &mut wider, &laptop);
+    let state = with_successor(&env, &ledger, wider);
+    assert!(state.is_active(&tablet.id));
+    assert_eq!(state.epoch_id(), epoch);
+
+    let mut narrower = successor.clone();
+    narrower.membership = jazz_e2ee::protocol::json::encode_id_list(Vec::<String>::new()).unwrap();
+    re_sign(&env, &mut narrower, &laptop);
+    assert_eq!(with_successor(&env, &ledger, narrower).epoch_id(), epoch);
+
+    let mut revision = successor;
+    assert_ne!(
+        revision.revision,
+        jazz_e2ee::protocol::json::encode_revision(Vec::<&String>::new()).unwrap()
+    );
+    revision.revision = jazz_e2ee::protocol::json::encode_revision(Vec::<&String>::new()).unwrap();
+    re_sign(&env, &mut revision, &laptop);
+    assert_eq!(with_successor(&env, &ledger, revision).epoch_id(), epoch);
+}
+
+/// A successor accepted at the current epoch's own position is not strictly
+/// after it, and is not accepted; the same row one position later is. The
+/// epoch has no approvals, so the successor's revision is right at either
+/// position and only the position differs.
+#[test]
+fn a_successor_at_the_epochs_own_position_is_rejected() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(22);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let tablet = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    ledger.request(&tablet, &mut rng);
+    ledger.approve(&env, &laptop, &tablet, &mut rng);
+    ledger.rotate(
+        &env,
+        &laptop,
+        RotationTarget::RemoveDevice(phone.id.clone()),
+        &mut rng,
+    );
+    let key = ledger.acquire(&env, &laptop).unwrap();
+    let state = ledger.state(&env);
+    let successor = build::rotate(
+        &env.writer(),
+        &state,
+        &laptop,
+        &key,
+        &RotationTarget::RemoveDevice(tablet.id.clone()),
+        &mut rng,
+    )
+    .unwrap()
+    .public;
+    let mut same = ledger.clone();
+    same.public.successors.push(Accepted::new(
+        state.current_epoch().position,
+        successor.clone(),
+    ));
+    let replayed = same.state(&env);
+    assert!(replayed.is_active(&tablet.id));
+    assert_eq!(replayed.epoch_id(), state.epoch_id());
+    assert!(!with_successor(&env, &ledger, successor).is_active(&tablet.id));
+}
+
+/// An identity marker must unwrap to 32 zero bytes: one that authenticates
+/// under the root key but wraps other bytes makes the key unavailable.
+#[test]
+fn an_identity_marker_of_other_bytes_makes_the_key_unavailable() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(23);
+    let laptop = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    let key = ledger.acquire(&env, &laptop).unwrap();
+    let identity = ledger.private.identities[0].row.clone();
+    let context = jazz_e2ee::protocol::records::account::identity_context(
+        &env.application(),
+        ALICE,
+        &identity.id,
+        &identity.epoch_id,
+        "verification",
+        "",
+    )
+    .unwrap();
+    use jazz_e2ee::agility::KeyWrapper;
+    ledger.private.identities[0].row.verification = jazz_e2ee::mechanisms::key_envelope::Builtin
+        .wrap(key.key(), &context, &[1; 32], &mut rng)
+        .unwrap();
+    assert_eq!(
+        ledger.acquire(&env, &laptop).unwrap_err(),
+        ProtocolError::AccountKeyUnavailable
+    );
+}
+
+/// A device never removes itself (§2.8): it generated the new epoch's key and
+/// would keep it. The builder refuses (`self-removal`), and a self-removal
+/// successor correctly signed by the removed device is not accepted.
+/// Another device removes it, and the removed device holds no key of the
+/// new epoch.
+#[test]
+fn a_device_cannot_remove_itself() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(25);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &phone, &mut rng);
+    let state = ledger.state(&env);
+    let phone_key = ledger.acquire(&env, &phone).unwrap();
+    let laptop_key = ledger.acquire(&env, &laptop).unwrap();
+    let itself = RotationTarget::RemoveDevice(phone.id.clone());
+    assert_eq!(
+        build::rotate(&env.writer(), &state, &phone, &phone_key, &itself, &mut rng).unwrap_err(),
+        refused(RefusalCode::SelfRemoval)
+    );
+
+    // The same removal built by laptop, then signed by phone as its author.
+    let mut by_itself = build::rotate(
+        &env.writer(),
+        &state,
+        &laptop,
+        &laptop_key,
+        &itself,
+        &mut rng,
+    )
+    .unwrap()
+    .public;
+    re_sign(&env, &mut by_itself, &phone);
+    let replayed = with_successor(&env, &ledger, by_itself);
+    assert!(replayed.is_active(&phone.id));
+    assert_eq!(replayed.epoch_id(), state.epoch_id());
+
+    ledger.rotate(&env, &laptop, itself, &mut rng);
+    assert!(ledger.state(&env).is_removed(&phone.id));
+    assert_eq!(
+        ledger.acquire(&env, &phone).unwrap_err(),
+        ProtocolError::AccountKeyUnavailable
     );
 }

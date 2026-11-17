@@ -151,21 +151,21 @@ fn record_co_published_by_a_rotation_is_valid() {
     );
 }
 
-/// A rotation whose author removes itself still signs the new epoch's
-/// record: the creation authorises it, not the new membership.
+/// A rotation's author signs the new epoch's record; the device it removes
+/// does not. (A device never removes itself, §2.8.)
 #[test]
-fn record_co_published_by_a_rotation_whose_signer_removes_itself_is_valid() {
+fn record_co_published_by_a_removal_is_signed_by_its_author() {
     let (env, mut ledger, laptop, mut rng) = bootstrapped(4);
     let phone = env.device(&mut rng);
     ledger.request(&phone, &mut rng);
     ledger.approve(&env, &laptop, &phone, &mut rng);
     ledger.rotate(
         &env,
-        &phone,
+        &laptop,
         RotationTarget::RemoveDevice(phone.id.clone()),
         &mut rng,
     );
-    assert_eq!(ledger.public.account_keys[1].row.signer_id, phone.id);
+    assert_eq!(ledger.public.account_keys[1].row.signer_id, laptop.id);
     assert!(valid_ids(&env, &ledger).contains(&record_id(&ledger, 1)));
 }
 

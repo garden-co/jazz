@@ -319,3 +319,40 @@ fn stream_matches_libsodium_construction() {
         }
     }
 }
+
+/// A public key whose `y` coordinate is encoded non-canonically (`y = p + 3`,
+/// which names the valid point with `y = 3`) is not canonical, while its
+/// canonical encoding is; `verify` refuses it, as libsodium does. No valid
+/// signature under such a key can be made without its discrete logarithm,
+/// so the canonical check is tested directly.
+#[test]
+fn non_canonical_public_key_is_refused() {
+    init();
+    let mut key = [0xffu8; 32];
+    key[0] = 0xf0;
+    key[31] = 0x7f;
+    let mut canonical = [0u8; 32];
+    canonical[0] = 3;
+    assert!(
+        curve25519_dalek::edwards::CompressedEdwardsY(key)
+            .decompress()
+            .is_some(),
+        "the non-canonical encoding names a valid point"
+    );
+    assert!(!sign::is_canonical_public_key(&key));
+    assert!(sign::is_canonical_public_key(&canonical));
+    let pair = sign::SigningKeyPair::from_seed(&[9; 32]);
+    assert!(sign::is_canonical_public_key(&pair.public_key));
+    let message = b"canonical keys only";
+    let signature = sign::sign(&pair.secret_key, message).unwrap();
+    assert!(!sign::verify(&key, message, &signature));
+    let sodium = unsafe {
+        ffi::crypto_sign_verify_detached(
+            signature.as_ptr(),
+            message.as_ptr(),
+            message.len() as u64,
+            key.as_ptr(),
+        )
+    };
+    assert_ne!(sodium, 0);
+}

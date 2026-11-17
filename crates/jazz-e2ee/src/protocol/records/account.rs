@@ -448,11 +448,19 @@ impl PublicDeviceApproval {
     /// signature (§2.5, §2.9): `ctx{application: D, policy:
     /// "jazz.e2ee.public-device-approval.v1", scope: "account", identifier:
     /// account, table: "__e2ee_public_device_approvals", row: id, column:
-    /// "approval-signature:" ‖ signerId, epoch, recipient: deviceId}`; a
-    /// recovery approval uses policy `"jazz.e2ee.recovery-device-approval.v1"`
-    /// and column `"recovery-signature:" ‖ rootId`.
-    pub fn signed_bytes(&self, application: &AccountDomain) -> ProtocolResult<Vec<u8>> {
+    /// "approval-signature:" ‖ signerId, epoch, recipient: deviceId} ‖
+    /// frame[env(signingMechanism, signingPublicKey), env(mechanism,
+    /// publicKey)]`, with the approved device's key columns, so the approval
+    /// vouches for the keys and not only for the device ID; a recovery
+    /// approval uses policy `"jazz.e2ee.recovery-device-approval.v1"` and
+    /// column `"recovery-signature:" ‖ rootId`.
+    pub fn signed_bytes(
+        &self,
+        application: &AccountDomain,
+        device_keys: &KeyColumns,
+    ) -> ProtocolResult<Vec<u8>> {
         self.check_unsigned()?;
+        device_keys.validate()?;
         let (policy, column) = match &self.recovery_root_id {
             Some(root) => (
                 RECOVERY_APPROVAL_POLICY,
@@ -463,7 +471,7 @@ impl PublicDeviceApproval {
                 format!("approval-signature:{}", self.signer_id),
             ),
         };
-        context(CryptoContext {
+        let prefix = context(CryptoContext {
             application: application.as_str(),
             policy,
             scope: SCOPE,
@@ -473,7 +481,14 @@ impl PublicDeviceApproval {
             column: &column,
             epoch: &self.epoch_id,
             recipient: &self.device_id,
-        })
+        })?;
+        append_framed(
+            prefix,
+            &[
+                &device_keys.signing_envelope()?,
+                &device_keys.sealing_envelope()?,
+            ],
+        )
     }
 }
 

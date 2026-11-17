@@ -46,6 +46,12 @@ pub struct AuthenticatedAccountKey {
     /// do not derive from the epoch key they name (§2.12), by position then
     /// ID: reported and ignored by this device.
     pub non_derived_sealing_keys: Vec<NonDerivedSealingKey>,
+    /// The public approvals of the current epoch that the state it was
+    /// authenticated against accepted. A key authenticated before a later
+    /// approval landed is stale for writing: a rotation built from it would
+    /// list a private revision without that approval, which no device can
+    /// then verify (§2.8).
+    pub public_approval_ids: BTreeSet<String>,
 }
 
 /// An account key with what authenticated it, obtainable only by
@@ -445,6 +451,7 @@ impl AccountKeyEvidence<'_> {
             epoch_id: current.epoch_id.to_owned(),
             approval_ids,
             non_derived_sealing_keys: keys.non_derived,
+            public_approval_ids: self.state.current_approval_ids(),
         })
     }
 
