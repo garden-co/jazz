@@ -1926,7 +1926,8 @@ impl Inner {
                 .iter()
                 .map(|id| Value::Uuid(uuid::Uuid::from_bytes(*id)))
                 .collect();
-            self.compile(&narrowed_to(prepared, &ids), identity, read).ok()
+            self.compile(&narrowed_to(prepared, &ids), identity, read)
+                .ok()
         };
         let (a, b) = (sentinels(0xa5), sentinels(0x5a));
         let (plan_a, plan_b) = (compile(&a)?, compile(&b)?);
@@ -2001,7 +2002,11 @@ impl Inner {
             Some(kept) => {
                 if crate::db::plan_oracle() {
                     let fresh = self
-                        .compile(&narrowed_to(&group.prepared, &ids_as_values), group.identity, &read)
+                        .compile(
+                            &narrowed_to(&group.prepared, &ids_as_values),
+                            group.identity,
+                            &read,
+                        )
                         .ok();
                     assert!(
                         fresh.is_some_and(|fresh| crate::db::same_compiled(&kept, &fresh)),

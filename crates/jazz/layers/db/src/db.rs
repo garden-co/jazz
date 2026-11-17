@@ -6254,7 +6254,10 @@ impl Inner {
         path.push('\u{1f}');
         path.push_str(&array.column_name);
         let key = (path, elements, blobs);
-        let kept = run.kept.as_ref().and_then(|plans| plans.by.get(&key).cloned());
+        let kept = run
+            .kept
+            .as_ref()
+            .and_then(|plans| plans.by.get(&key).cloned());
         let Some(kept) = kept else {
             let fresh = run
                 .ctx(self)

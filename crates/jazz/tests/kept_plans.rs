@@ -88,7 +88,12 @@ fn claims(role: &str) -> BTreeMap<String, Value> {
 }
 
 fn team(db: &Db, n: usize) {
-    insert(db, "teams", id(TEAM, n), &[("name", text(&format!("t{n}")))]);
+    insert(
+        db,
+        "teams",
+        id(TEAM, n),
+        &[("name", text(&format!("t{n}")))],
+    );
 }
 
 fn doc(db: &Db, n: usize, team: usize, status: &str) {
@@ -173,7 +178,11 @@ fn a_recheck_root_statement_is_kept_per_number_of_ids() {
         let before = db.fanout_stats().rechecked;
         retitle(&db, n, &format!("renamed {n}"));
         check(&db, &mut lives, &format!("retitle {n}"));
-        assert_eq!(db.fanout_stats().rechecked, before + 1, "doc {n} was re-checked");
+        assert_eq!(
+            db.fanout_stats().rechecked,
+            before + 1,
+            "doc {n} was re-checked"
+        );
     }
     assert_eq!(
         db.fanout_stats().kept_root_plans,
@@ -230,7 +239,11 @@ fn a_variant_tagged_after_a_recheck_statement_was_kept_is_matched_by_its_tag() {
     keep_variant(&db, "ghost");
     doc(&db, 2, 0, "ghost");
     let rows = check(&db, &mut lives, "a ghost doc (tagged now)");
-    assert_eq!(rows[0].len(), 1, "the ghost doc is readable to the ghost role");
+    assert_eq!(
+        rows[0].len(),
+        1,
+        "the ghost doc is readable to the ghost role"
+    );
 }
 
 /// Retitle docs `ns` in one transaction: the result re-checks them as one
@@ -274,7 +287,10 @@ fn a_recheck_of_more_ids_compiles_its_own_kept_statement() {
     let rows = check(&db, &mut lives, "re-check two ids (kept)");
     let after = db.fanout_stats();
     assert_eq!(
-        (after.rechecked - before.rechecked, after.reran - before.reran),
+        (
+            after.rechecked - before.rechecked,
+            after.reran - before.reran
+        ),
         (2, 0),
         "both transactions were re-checked, not re-run"
     );
@@ -389,7 +405,10 @@ fn a_run_under_a_sessions_vouched_claims_uses_no_statement_kept_under_the_stored
     );
     retitle(&server, 1, "done");
     check(&server, &mut lives, "re-check one id (the kept statement)");
-    assert_eq!(server.fanout_stats().kept_root_plans, served.kept_root_plans + 1);
+    assert_eq!(
+        server.fanout_stats().kept_root_plans,
+        served.kept_root_plans + 1
+    );
 }
 
 /// Teams with their docs, each doc with its notes (optional) and its
@@ -410,7 +429,10 @@ fn note(db: &Db, n: usize, doc: usize) {
         db,
         "notes",
         id(NOTE, n),
-        &[("doc", uuid(id(DOC, doc))), ("body", text(&format!("n{n}")))],
+        &[
+            ("doc", uuid(id(DOC, doc))),
+            ("body", text(&format!("n{n}"))),
+        ],
     );
 }
 
@@ -450,7 +472,11 @@ fn required_sibling(plan_oracle: bool) {
     note(&db, 1, 0);
     check(&db, &mut lives, "a second note");
     update(&db, "teams", id(TEAM, 0), &[("name", text("renamed"))]);
-    let rows = check(&db, &mut lives, "the team renamed (re-checked with its relations)");
+    let rows = check(
+        &db,
+        &mut lives,
+        "the team renamed (re-checked with its relations)",
+    );
     let docs = rows[0][0]
         .1
         .iter()
@@ -501,7 +527,10 @@ fn root_statements_are_kept_for_a_bounded_number_of_id_counts() {
         check(&db, &mut lives, &format!("re-check {count} ids"));
         let after = db.fanout_stats();
         assert_eq!(
-            (after.rechecked - before.rechecked, after.reran - before.reran),
+            (
+                after.rechecked - before.rechecked,
+                after.reran - before.reran
+            ),
             (1, 0),
             "{count} ids were re-checked, not re-run"
         );
