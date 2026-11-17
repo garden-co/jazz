@@ -238,12 +238,15 @@ impl Core {
             .and_then(Json::as_u64)
             .unwrap_or(1);
         let has_server = config.server_url.is_some();
+        // Before opening, so an app whose relations don't resolve opens
+        // nothing.
+        let relations = convert::Relations::read(&app_text)?;
         let jazz = block_on(Jazz::open(files, config))?;
         let schema = block_on(jazz.with_client(|client| async move { Ok(client.schema()?) }))?;
         Ok(Self::with(
             jazz,
             Arc::new(schema),
-            convert::Relations::read(&app_text)?,
+            relations,
             has_server,
             contract,
             None,

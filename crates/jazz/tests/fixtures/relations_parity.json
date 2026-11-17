@@ -3,12 +3,27 @@
     "description": "a forward relation and its reverse",
     "tables": {
       "users": {
-        "columns": { "name": "string" },
-        "relations": { "todos": { "reverse": "todos", "relation": "owner" } }
+        "columns": {
+          "name": "string"
+        },
+        "relations": {
+          "todos": {
+            "reverse": "todos",
+            "relation": "owner"
+          }
+        }
       },
       "todos": {
-        "columns": { "title": "string", "ownerId": "uuid" },
-        "relations": { "owner": { "rel": "users", "column": "ownerId" } }
+        "columns": {
+          "title": "string",
+          "ownerId": "uuid"
+        },
+        "relations": {
+          "owner": {
+            "rel": "users",
+            "column": "ownerId"
+          }
+        }
       }
     },
     "relations": {
@@ -41,10 +56,21 @@
   {
     "description": "a forward relation over a nullable column is nullable",
     "tables": {
-      "users": { "columns": { "name": "string" } },
+      "users": {
+        "columns": {
+          "name": "string"
+        }
+      },
       "todos": {
-        "columns": { "assigneeId": "uuid?" },
-        "relations": { "assignee": { "rel": "users", "column": "assigneeId" } }
+        "columns": {
+          "assigneeId": "uuid?"
+        },
+        "relations": {
+          "assignee": {
+            "rel": "users",
+            "column": "assigneeId"
+          }
+        }
       }
     },
     "relations": {
@@ -67,12 +93,28 @@
     "description": "a forward relation over a uuid array leads to many rows",
     "tables": {
       "users": {
-        "columns": { "name": "string" },
-        "relations": { "teams": { "reverse": "teams", "relation": "members" } }
+        "columns": {
+          "name": "string"
+        },
+        "relations": {
+          "teams": {
+            "reverse": "teams",
+            "relation": "members"
+          }
+        }
       },
       "teams": {
-        "columns": { "memberIds": { "array": "uuid" } },
-        "relations": { "members": { "rel": "users", "column": "memberIds" } }
+        "columns": {
+          "memberIds": {
+            "array": "uuid"
+          }
+        },
+        "relations": {
+          "members": {
+            "rel": "users",
+            "column": "memberIds"
+          }
+        }
       }
     },
     "relations": {
@@ -106,12 +148,26 @@
     "description": "a reverse relation needs a forward relation of that name",
     "tables": {
       "users": {
-        "columns": { "name": "string" },
-        "relations": { "todos": { "reverse": "todos", "relation": "ownr" } }
+        "columns": {
+          "name": "string"
+        },
+        "relations": {
+          "todos": {
+            "reverse": "todos",
+            "relation": "ownr"
+          }
+        }
       },
       "todos": {
-        "columns": { "ownerId": "uuid" },
-        "relations": { "owner": { "rel": "users", "column": "ownerId" } }
+        "columns": {
+          "ownerId": "uuid"
+        },
+        "relations": {
+          "owner": {
+            "rel": "users",
+            "column": "ownerId"
+          }
+        }
       }
     },
     "refused": true
@@ -119,14 +175,32 @@
   {
     "description": "a reverse relation's forward relation must lead back to its table",
     "tables": {
-      "users": { "columns": { "name": "string" } },
+      "users": {
+        "columns": {
+          "name": "string"
+        }
+      },
       "projects": {
-        "columns": { "name": "string" },
-        "relations": { "todos": { "reverse": "todos", "relation": "owner" } }
+        "columns": {
+          "name": "string"
+        },
+        "relations": {
+          "todos": {
+            "reverse": "todos",
+            "relation": "owner"
+          }
+        }
       },
       "todos": {
-        "columns": { "ownerId": "uuid" },
-        "relations": { "owner": { "rel": "users", "column": "ownerId" } }
+        "columns": {
+          "ownerId": "uuid"
+        },
+        "relations": {
+          "owner": {
+            "rel": "users",
+            "column": "ownerId"
+          }
+        }
       }
     },
     "refused": true
@@ -134,10 +208,21 @@
   {
     "description": "a relation's column must be a uuid or uuid array",
     "tables": {
-      "users": { "columns": { "name": "string" } },
+      "users": {
+        "columns": {
+          "name": "string"
+        }
+      },
       "todos": {
-        "columns": { "ownerName": "string" },
-        "relations": { "owner": { "rel": "users", "column": "ownerName" } }
+        "columns": {
+          "ownerName": "string"
+        },
+        "relations": {
+          "owner": {
+            "rel": "users",
+            "column": "ownerName"
+          }
+        }
       }
     },
     "refused": true
@@ -145,10 +230,21 @@
   {
     "description": "a relation can't share a column's name",
     "tables": {
-      "users": { "columns": { "name": "string" } },
+      "users": {
+        "columns": {
+          "name": "string"
+        }
+      },
       "todos": {
-        "columns": { "owner": "uuid" },
-        "relations": { "owner": { "rel": "users", "column": "owner" } }
+        "columns": {
+          "owner": "uuid"
+        },
+        "relations": {
+          "owner": {
+            "rel": "users",
+            "column": "owner"
+          }
+        }
       }
     },
     "refused": true
@@ -156,10 +252,288 @@
   {
     "description": "a relation can't take a JavaScript object internal's name",
     "tables": {
-      "users": { "columns": { "name": "string" } },
+      "users": {
+        "columns": {
+          "name": "string"
+        }
+      },
       "todos": {
-        "columns": { "ownerId": "uuid" },
-        "relations": { "constructor": { "rel": "users", "column": "ownerId" } }
+        "columns": {
+          "ownerId": "uuid"
+        },
+        "relations": {
+          "constructor": {
+            "rel": "users",
+            "column": "ownerId"
+          }
+        }
+      }
+    },
+    "refused": true
+  },
+  {
+    "description": "a table can relate to itself",
+    "tables": {
+      "tasks": {
+        "columns": {
+          "title": "string",
+          "parentId": "uuid?"
+        },
+        "relations": {
+          "children": {
+            "reverse": "tasks",
+            "relation": "parent"
+          },
+          "parent": {
+            "rel": "tasks",
+            "column": "parentId"
+          }
+        }
+      }
+    },
+    "relations": {
+      "tasks": [
+        {
+          "name": "children",
+          "type": "reverse",
+          "fromTable": "tasks",
+          "toTable": "tasks",
+          "fromColumn": "id",
+          "toColumn": "parentId",
+          "isArray": true,
+          "nullable": false
+        },
+        {
+          "name": "parent",
+          "type": "forward",
+          "fromTable": "tasks",
+          "toTable": "tasks",
+          "fromColumn": "parentId",
+          "toColumn": "id",
+          "isArray": false,
+          "nullable": true
+        }
+      ]
+    }
+  },
+  {
+    "description": "two references to one table are two relations",
+    "tables": {
+      "users": {
+        "columns": {
+          "name": "string"
+        },
+        "relations": {
+          "owned": {
+            "reverse": "todos",
+            "relation": "owner"
+          },
+          "reviewing": {
+            "reverse": "todos",
+            "relation": "reviewer"
+          }
+        }
+      },
+      "todos": {
+        "columns": {
+          "ownerId": "uuid",
+          "reviewerId": "uuid?"
+        },
+        "relations": {
+          "owner": {
+            "rel": "users",
+            "column": "ownerId"
+          },
+          "reviewer": {
+            "rel": "users",
+            "column": "reviewerId"
+          }
+        }
+      }
+    },
+    "relations": {
+      "users": [
+        {
+          "name": "owned",
+          "type": "reverse",
+          "fromTable": "users",
+          "toTable": "todos",
+          "fromColumn": "id",
+          "toColumn": "ownerId",
+          "isArray": true,
+          "nullable": false
+        },
+        {
+          "name": "reviewing",
+          "type": "reverse",
+          "fromTable": "users",
+          "toTable": "todos",
+          "fromColumn": "id",
+          "toColumn": "reviewerId",
+          "isArray": true,
+          "nullable": false
+        }
+      ],
+      "todos": [
+        {
+          "name": "owner",
+          "type": "forward",
+          "fromTable": "todos",
+          "toTable": "users",
+          "fromColumn": "ownerId",
+          "toColumn": "id",
+          "isArray": false,
+          "nullable": false
+        },
+        {
+          "name": "reviewer",
+          "type": "forward",
+          "fromTable": "todos",
+          "toTable": "users",
+          "fromColumn": "reviewerId",
+          "toColumn": "id",
+          "isArray": false,
+          "nullable": true
+        }
+      ]
+    }
+  },
+  {
+    "description": "a nullable uuid array leads to many rows and can be null",
+    "tables": {
+      "users": {
+        "columns": {
+          "name": "string"
+        }
+      },
+      "teams": {
+        "columns": {
+          "memberIds": {
+            "array": "uuid",
+            "optional": true
+          }
+        },
+        "relations": {
+          "members": {
+            "rel": "users",
+            "column": "memberIds"
+          }
+        }
+      }
+    },
+    "relations": {
+      "users": [],
+      "teams": [
+        {
+          "name": "members",
+          "type": "forward",
+          "fromTable": "teams",
+          "toTable": "users",
+          "fromColumn": "memberIds",
+          "toColumn": "id",
+          "isArray": true,
+          "nullable": true
+        }
+      ]
+    }
+  },
+  {
+    "description": "a relation must lead to a table that exists",
+    "tables": {
+      "todos": {
+        "columns": {
+          "ownerId": "uuid"
+        },
+        "relations": {
+          "owner": {
+            "rel": "people",
+            "column": "ownerId"
+          }
+        }
+      }
+    },
+    "refused": true
+  },
+  {
+    "description": "a relation can't contradict its column's declared reference",
+    "tables": {
+      "users": {
+        "columns": {
+          "name": "string"
+        }
+      },
+      "projects": {
+        "columns": {
+          "name": "string"
+        }
+      },
+      "todos": {
+        "columns": {
+          "ownerId": {
+            "type": "uuid",
+            "references": "projects"
+          }
+        },
+        "relations": {
+          "owner": {
+            "rel": "users",
+            "column": "ownerId"
+          }
+        }
+      }
+    },
+    "refused": true
+  },
+  {
+    "description": "a reverse relation can't reverse another reverse relation",
+    "tables": {
+      "users": {
+        "columns": {
+          "name": "string"
+        },
+        "relations": {
+          "todos": {
+            "reverse": "todos",
+            "relation": "owner"
+          }
+        }
+      },
+      "todos": {
+        "columns": {
+          "ownerId": "uuid"
+        },
+        "relations": {
+          "again": {
+            "reverse": "users",
+            "relation": "todos"
+          },
+          "owner": {
+            "rel": "users",
+            "column": "ownerId"
+          }
+        }
+      }
+    },
+    "refused": true
+  },
+  {
+    "description": "a relation can't be named __proto__",
+    "tables": {
+      "users": {
+        "columns": {
+          "name": "string"
+        }
+      },
+      "todos": {
+        "columns": {
+          "ownerId": "uuid"
+        },
+        "relations": {
+          "__proto__": {
+            "rel": "users",
+            "column": "ownerId"
+          }
+        }
       }
     },
     "refused": true

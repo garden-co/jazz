@@ -42,7 +42,8 @@ pub struct ResolvedRelation {
     pub nullable: bool,
 }
 
-/// Every table's relations, in declared-name order.
+/// Every table's relations, by table name and then relation name (both
+/// in alphabetical order).
 pub type Relations = BTreeMap<String, Vec<ResolvedRelation>>;
 
 /// Names a relation can't take: they collide with a row's own fields or
@@ -54,7 +55,11 @@ fn reserved(name: &str) -> bool {
         || matches!(name, "__proto__" | "constructor" | "prototype")
 }
 
-fn column<'a>(schema: &'a TableSchema, name: &str) -> Option<&'a crate::tools::ColumnDescriptor> {
+/// A table's stored column of this name.
+pub(super) fn column<'a>(
+    schema: &'a TableSchema,
+    name: &str,
+) -> Option<&'a crate::tools::ColumnDescriptor> {
     schema.columns.columns.iter().find(|c| c.name_str() == name)
 }
 

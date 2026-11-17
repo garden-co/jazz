@@ -8,7 +8,7 @@
 use base64::Engine as _;
 use jazz_app_support::jazz::query::{self as q, OrderDirection, Predicate};
 use jazz_app_support::jazz::records::Value as CoreValue;
-use jazz_app_support::jazz::tools::deployment::artifact::load_app;
+use jazz_app_support::jazz::tools::deployment::artifact::load_relations;
 use jazz_app_support::jazz::tools::deployment::artifact::relations::RelationKind;
 use jazz_app_support::jazz::tools::{
     ColumnType, ObjectId, OrderedRowDelta, QueryResultField, Schema, TableName, TableSchema, Value,
@@ -284,11 +284,13 @@ pub(crate) struct Relation {
 
 impl Relations {
     /// From the text of `jazz.app.json`, as jazz resolves them: an app
-    /// whose relations don't resolve is refused.
+    /// whose relations don't resolve is refused. Only relations are checked
+    /// here; opening checks the rest as for any client.
     pub(crate) fn read(app: &str) -> Result<Self> {
-        let app = load_app(app.as_bytes()).map_err(|error| refused(error.to_string()))?;
+        let relations = load_relations(app.as_bytes())
+            .map_err(|error| refused(format!("app files: {error}")))?;
         Ok(Self(
-            app.relations()
+            relations
                 .iter()
                 .map(|(table, relations)| {
                     let relations = relations

@@ -800,6 +800,15 @@ pub fn load_client_current(json: &[u8]) -> Result<(Schema, crate::db::Migrations
     ))
 }
 
+/// The relations `jazz.app.json` declares, resolved against its current
+/// schema ([`relations::resolve_relations`]), and nothing else checked: what
+/// a client that follows relations itself (the FFI) needs at open.
+pub fn load_relations(json: &[u8]) -> Result<relations::Relations, ArtifactError> {
+    let app_file = read_app(json)?;
+    relations::resolve_relations(&app_file.codegen, &app_file.current)
+        .map_err(|(path, message)| ArtifactError::at(APP_FILE, (path, message)))
+}
+
 fn read_app(json: &[u8]) -> Result<app_file::AppFile, ArtifactError> {
     let root = read_version(APP_FILE, json)?;
     refuse_todos(&root)?;
@@ -1339,14 +1348,7 @@ fn check_codegen(
             ))
         })
     };
-    let column_of = |schema: &TableSchema, column: &str| {
-        schema
-            .columns
-            .columns
-            .iter()
-            .find(|c| c.name_str() == column)
-            .cloned()
-    };
+    let column_of = |schema: &TableSchema, column: &str| relations::column(schema, column).cloned();
     let has_column = |schema: &TableSchema, column: &str| column_of(schema, column).is_some();
     for (name, entry) in &codegen.tables {
         let schema = table(&format!("tables.{name}"), name)?;

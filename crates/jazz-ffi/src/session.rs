@@ -41,11 +41,14 @@ impl SessionCore {
         tokens: Option<Arc<dyn jazz_app_support::TokenProvider>>,
     ) -> Result<Self> {
         let (files, config, app_text, contract) = session_config(config_json, tokens)?;
+        // Before opening, so an app whose relations don't resolve opens
+        // nothing.
+        let relations = convert::Relations::read(&app_text)?;
         let session = block_on(JazzSession::open(files, config))?;
         Ok(Self {
             session,
             schema: OnceLock::new(),
-            relations: convert::Relations::read(&app_text)?,
+            relations,
             contract,
             closed: Arc::new(AtomicBool::new(false)),
             next_tx: Arc::new(AtomicU64::new(
