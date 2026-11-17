@@ -2,12 +2,16 @@
 //!
 //! 1. implement the role's trait ([`KeySealer`]),
 //! 2. register it under a reverse-DNS ID,
-//! 3. run the conformance kit,
+//! 3. run the conformance kit, including its header-binding check,
 //! 4. select it in the configuration and seal to recipients that advertise it.
 //!
-//! The mechanism here is a toy: it delegates to the built-in HPKE sealer and
-//! only relabels the envelope and keys with its own ID. A real replacement,
-//! such as a post-quantum or hybrid KEM, has the same shape.
+//! The mechanism here is a toy: it delegates to the built-in HPKE sealer under
+//! its own envelope and keys. Delegating is not enough by itself: the inner
+//! sealer authenticates its own header, not the outer one, so the toy binds
+//! its outer header into the context it passes down. Without that, its bytes
+//! could be relabelled as another ID or version, and the conformance kit's
+//! header-binding check fails. A real replacement, such as a post-quantum or
+//! hybrid KEM, has the same shape and must bind its header the same way.
 //!
 //! Run with `cargo run -p jazz-e2ee --example custom_mechanism --features conformance`.
 
@@ -24,12 +28,23 @@ use jazz_e2ee::{Error, OsRandom, RandomSource, Result, Zeroizing, conformance};
 const TOY: Mechanism<'static> = Mechanism::new("com.example.toy-kem", 1);
 
 /// Seals with the built-in HPKE mechanism, under its own envelope and keys.
-struct ToyKem;
+/// The label is a field so the conformance kit can build the same algorithm
+/// under a sibling label and check that relabelled output fails.
+struct ToyKem(Mechanism<'static>);
 
 impl ToyKem {
+    /// The context passed to the inner sealer: this mechanism's own envelope
+    /// header first, so the outer label is authenticated (§0, mechanism
+    /// agility), then the caller's context.
+    fn bound(&self, context: &[u8]) -> Result<Vec<u8>> {
+        let mut bound = self.0.header()?;
+        bound.extend_from_slice(context);
+        Ok(bound)
+    }
+
     /// The same key, labelled as the built-in mechanism's.
-    fn inner(public: &PublicKey) -> Result<PublicKey> {
-        if public.mechanism != TOY {
+    fn inner(&self, public: &PublicKey) -> Result<PublicKey> {
+        if public.mechanism != self.0 {
             return Err(Error::RecipientUnsupported);
         }
         Ok(PublicKey {
@@ -41,14 +56,14 @@ impl ToyKem {
 
 impl MechanismImpl for ToyKem {
     fn mechanism(&self) -> Mechanism<'static> {
-        TOY
+        self.0
     }
 }
 
 impl KeySealer for ToyKem {
     fn derive_key_pair(&self, ikm: &[u8]) -> Result<KeyPair> {
         let mut pair = key_seal::Builtin.derive_key_pair(ikm)?;
-        pair.public.mechanism = TOY.into();
+        pair.public.mechanism = self.0.into();
         Ok(pair)
     }
 
@@ -59,8 +74,9 @@ impl KeySealer for ToyKem {
         key: &[u8; 32],
         rng: &mut dyn RandomSource,
     ) -> Result<Vec<u8>> {
-        let sealed = key_seal::Builtin.seal(&Self::inner(recipient)?, context, key, rng)?;
-        envelope::encode(TOY, &sealed)
+        let sealed =
+            key_seal::Builtin.seal(&self.inner(recipient)?, &self.bound(context)?, key, rng)?;
+        envelope::encode(self.0, &sealed)
     }
 
     fn open(
@@ -69,12 +85,12 @@ impl KeySealer for ToyKem {
         context: &[u8],
         envelope: &[u8],
     ) -> Result<Zeroizing<[u8; 32]>> {
-        let inner = envelope::decode(TOY, envelope)?;
+        let inner = envelope::decode(self.0, envelope)?;
         let pair = KeyPair {
-            public: Self::inner(&recipient.public)?,
+            public: self.inner(&recipient.public)?,
             secret: recipient.secret.clone(),
         };
-        key_seal::Builtin.open(&pair, context, inner)
+        key_seal::Builtin.open(&pair, &self.bound(context)?, inner)
     }
 }
 
@@ -82,10 +98,15 @@ fn run() -> core::result::Result<(), Box<dyn std::error::Error>> {
     // 1–2. Register beside the built-ins. The reserved `jazz.` namespace and
     // IDs without a domain are refused.
     let mut registry = Registry::builtin();
-    registry.register_key_sealer(Arc::new(ToyKem))?;
+    registry.register_key_sealer(Arc::new(ToyKem(TOY)))?;
 
-    // 3. The conformance kit. A real mechanism also declares vectors.
-    conformance::check_key_sealer(&ToyKem, &[])?;
+    // 3. The conformance kit. A real mechanism also declares vectors. The
+    // header-binding check builds the toy under sibling labels and fails a
+    // mechanism whose bytes still open after being relabelled.
+    conformance::check_key_sealer(&ToyKem(TOY), &[])?;
+    conformance::check_key_sealer_header_binding(&ToyKem(TOY), &|mechanism| {
+        Box::new(ToyKem(mechanism))
+    })?;
 
     // 4. Select it for sealing; every other role keeps its built-in.
     let config = MechanismConfig {
@@ -96,7 +117,7 @@ fn run() -> core::result::Result<(), Box<dyn std::error::Error>> {
 
     // A device advertises key pairs for the mechanisms it supports.
     let mut rng = OsRandom;
-    let upgraded = ToyKem.generate_key_pair(&mut rng)?;
+    let upgraded = ToyKem(TOY).generate_key_pair(&mut rng)?;
     let classic = key_seal::Builtin.generate_key_pair(&mut rng)?;
     let advertised = [classic.public.clone(), upgraded.public.clone()];
 
