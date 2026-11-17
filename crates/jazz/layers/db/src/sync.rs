@@ -1779,7 +1779,8 @@ pub struct CatalogueVersion {
 /// [`crate::protocol::SchemaVersion`]'s (the version id, then its public
 /// schema JSON), but each version decodes on its own: one this build cannot
 /// read (a column type or other variant it does not know, from a newer
-/// authority) is `Unsupported`, and the rest of the catalogue still applies
+/// authority, or keys it would ignore, so that it would read as another
+/// version than its id says) is `Unsupported`, and the rest of the catalogue still applies
 /// (the receiver skips it with [`crate::options::Reason::SchemaVersionUnsupported`])
 /// instead of the whole message failing to decode and the link with it.
 #[derive(Clone, Debug, PartialEq)]
@@ -1836,10 +1837,7 @@ impl<'de> Deserialize<'de> for CatalogueSchema {
         ) {
             Ok(source) => source,
             // A shape this build has no variant or field for: a newer
-            // Jazz's schema, skipped on its own. Its id cannot be checked
-            // against its contents (`INV-LENS-1`), since this build cannot
-            // compute it; the version is never admitted, so nothing relies
-            // on it.
+            // Jazz's schema, skipped on its own (never admitted).
             Err(error) if is_newer_shape(&error) => {
                 return Ok(Self::Unsupported {
                     id,
@@ -1857,6 +1855,22 @@ impl<'de> Deserialize<'de> for CatalogueSchema {
         // A known shape that does not compile is corrupt too, not newer.
         let schema = jazz_model::model::public_schema_convert::convert_public_schema(&source)
             .map_err(|error| D::Error::custom(format!("compile public schema: {error}")))?;
+        // A key this build ignores (a newer constraint, index or option)
+        // still counts towards the sender's id: read without it, the
+        // version is another one, and would be admitted under an id the
+        // sender never wrote. So a version whose id this build does not
+        // compute for it (`INV-LENS-1`) is not read either.
+        if schema.version_id() != id {
+            return Ok(Self::Unsupported {
+                id,
+                json: public_schema_json,
+                error: format!(
+                    "it carries schema keys this build ignores (read without them it is \
+                     version {})",
+                    schema.version_id().0
+                ),
+            });
+        }
         Ok(Self::Known(crate::protocol::SchemaVersion { id, schema }))
     }
 }
