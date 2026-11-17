@@ -43,10 +43,41 @@ impl Storage {
         name: &str,
         f: impl FnOnce(&Storage) -> Result<T, Error>,
     ) -> Result<T, Error> {
+        self.scope_then(name, |storage| match f(storage) {
+            Ok(value) => Scoped::Keep(Ok(value)),
+            Err(error) => Scoped::Undo(Err(error)),
+        })?
+    }
+
+    /// Run `f` atomically, keeping or undoing what it wrote as it decides
+    /// ([`Scoped`]), and return its value either way: for a dry run (undo
+    /// always) or a unit whose failure carries more than an [`Error`].
+    /// `Err` only when the scope itself cannot open or close.
+    pub fn scope_then<T>(
+        &self,
+        name: &str,
+        f: impl FnOnce(&Storage) -> Scoped<T>,
+    ) -> Result<T, Error> {
         match &self.owner {
-            Owner::Native(conn) => crate::values::in_savepoint(conn, name, || f(self)),
+            Owner::Native(conn) => {
+                crate::values::begin_savepoint(conn, name)?;
+                let (value, keep) = match f(self) {
+                    Scoped::Keep(value) => (value, true),
+                    Scoped::Undo(value) => (value, false),
+                };
+                crate::values::end_savepoint(conn, name, keep)?;
+                Ok(value)
+            }
         }
     }
+}
+
+/// What a scope ([`Storage::scope_then`]) does with what it wrote.
+pub enum Scoped<T> {
+    /// Keep it (committed with the outermost scope).
+    Keep(T),
+    /// Undo it.
+    Undo(T),
 }
 
 impl From<rusqlite::Connection> for Storage {
@@ -148,6 +179,32 @@ mod tests {
         });
         assert!(failed.is_err());
         assert_eq!(values(&storage), [1, 3]);
+        assert!(storage.is_autocommit());
+    }
+
+    /// A dry run returns what it found and undoes what it wrote; a unit
+    /// that decides to keep returns its value too.
+    ///
+    /// ```text
+    /// scope_then ── insert 1 ── count → 1 ── Undo  → [] and 1 returned
+    /// scope_then ── insert 2 ──────────────── Keep  → [2]
+    /// ```
+    #[test]
+    fn scope_then_keeps_or_undoes_as_its_body_decides_and_returns_its_value() {
+        let storage = storage();
+        let seen = storage
+            .scope_then("dry", |s| {
+                insert(s, 1).unwrap();
+                Scoped::Undo(values(s).len())
+            })
+            .unwrap();
+        assert_eq!(seen, 1);
+        assert_eq!(values(&storage), Vec::<i64>::new());
+        let kept = storage
+            .scope_then("unit", |s| Scoped::Keep(insert(s, 2)))
+            .unwrap();
+        assert!(kept.is_ok());
+        assert_eq!(values(&storage), [2]);
         assert!(storage.is_autocommit());
     }
 }
