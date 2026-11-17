@@ -805,8 +805,10 @@ Stage `request`. Insert the request row (ID = device ID) and a device-keys row
 if absent. The request carries `nonceCommitment = SHA-256(UTF8(
 "jazz.e2ee.approval-nonce.v1\0") ‖ frame[deviceId, n_R])` of the device's
 random 32-byte **approval nonce** `n_R`, which the device keeps until its
-approval (§2.5). A nonce serves one approval attempt: a device whose attempt
-failed or was cancelled after it revealed `n_R` starts again as a new local
+approval (§2.5). A device answers at most one challenge with its nonce, in an
+approval or a recovery: it refuses any further challenge
+(`invalid-challenge`), and keeps that state with the device. A device whose
+attempt failed or was cancelled after that starts again as a new local
 device (§2.1), with a new ID and request. An existing row whose keys differ refuses ("immutable device
 identity differs"). A request is not an approval.
 
@@ -1073,7 +1075,9 @@ challengeId, proof: wrap(S, P("proof"), Z32), nonce: n_R, signature:
 sign(P("proof-signature") ‖ frame[proof, n_R])}`, revealing the approval
    nonce.
 3. **Completion** (stage `approval`, approving device). The challenge epoch
-   equals both the challenge's and the current epoch. Possession is verified:
+   equals both the challenge's and the current epoch, and the request is the
+   one the challenge was signed over (`stale-challenge` otherwise: a request
+   read again at completion may have been swapped). Possession is verified:
    the proof's `nonce` opens the request's `nonceCommitment`,
    `unwrap(S, P("proof"), proof)` yields `Z32` and the proof signature verifies
    under the request's signing key; anything else refuses ("invalid device

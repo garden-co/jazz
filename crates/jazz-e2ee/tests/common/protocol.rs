@@ -220,7 +220,11 @@ impl Ledger {
         self.private
             .challenges
             .push(Accepted::new(at, challenge.challenge.clone()));
-        let proof = build::respond(&writer, &state, requester, &challenge.challenge, rng).unwrap();
+        // Answering spends the nonce of this copy; the caller's device is
+        // not used to answer again in these tests.
+        let mut answering = requester.clone();
+        let proof =
+            build::respond(&writer, &state, &mut answering, &challenge.challenge, rng).unwrap();
         let at = self.next();
         self.private.proofs.push(Accepted::new(at, proof.clone()));
         let records = build::approve(
