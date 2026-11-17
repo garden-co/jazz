@@ -29,7 +29,7 @@ export async function startDurableObjectCore(
   } = {},
 ): Promise<DurableObjectCore> {
   const script = options.script ?? join(here, "mock-core.mjs");
-  const appId = options.appId ?? "do-test-app";
+  const appId = options.appId ?? "6f1c2d4e-0b7a-4c3e-9a51-3d2f8e7b6a10";
   const secret = options.secret ?? "do-test-core-secret-".repeat(2);
   const miniflare = new Miniflare({
     modules: true,

@@ -252,13 +252,18 @@ export function remote(
 
 /** The shortest core secret a Durable Object core accepts. */
 const DURABLE_OBJECT_SECRET_MIN_LENGTH = 32;
+/**
+ * A Durable Object core's app id is a UUID: the object answers only under
+ * `/apps/{JAZZ_APP_ID}`, and Jazz reaches some routes by the app's UUID.
+ */
+const DURABLE_OBJECT_APP_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
  * A core running in a Cloudflare Durable Object: one SQLite-backed object per
  * app, in a Worker you deploy that exports `JazzCore` and forwards requests to
  * it with `routeJazzRequest` (both from `jazz-tools/durable-object`). `url` is
  * that Worker's origin (e.g. `https://my-app-jazz.example.workers.dev`),
- * `appId` its `JAZZ_APP_ID` and `secret` its `JAZZ_CORE_SECRET`: a random
+ * `appId` its `JAZZ_APP_ID` (a lowercase UUID) and `secret` its `JAZZ_CORE_SECRET`: a random
  * string of at least 32 characters that stays the same across deployments.
  *
  * The core admits only this backend, which holds the secret; browsers keep
@@ -289,15 +294,20 @@ export function durableObjects(options: {
       `durableObjects(): url must be the Worker's origin, like "https://my-app-jazz.example.workers.dev"; got ${JSON.stringify(url)}`,
     );
   }
-  if (typeof appId !== "string" || !appId.trim()) {
-    throw new Error("durableObjects(): appId must be the Worker's JAZZ_APP_ID (it is empty)");
+  if (typeof appId !== "string" || !DURABLE_OBJECT_APP_ID.test(appId)) {
+    throw new Error(
+      `durableObjects(): appId must be the Worker's JAZZ_APP_ID, a UUID (make one with \`uuidgen\`); got ${JSON.stringify(appId)}`,
+    );
   }
   if (typeof secret !== "string" || secret.length < DURABLE_OBJECT_SECRET_MIN_LENGTH) {
     throw new Error(
       `durableObjects(): secret must be the Worker's JAZZ_CORE_SECRET, a random string of at least ${DURABLE_OBJECT_SECRET_MIN_LENGTH} characters`,
     );
   }
-  return { ...remote({ url: origin.origin, appId, secret }), host: "durable-objects" };
+  return {
+    ...remote({ url: origin.origin, appId, secret }),
+    host: "durable-objects",
+  };
 }
 
 /**
@@ -333,7 +343,9 @@ export function durableObjects(options: {
  * Sandbox and a Drive of up to `maxDriveBytes` until you remove them.
  */
 export function vercel(
-  options: VercelStoreOptions & { local?: Extract<JazzStore, { kind: "sqlite" | "memory" }> },
+  options: VercelStoreOptions & {
+    local?: Extract<JazzStore, { kind: "sqlite" | "memory" }>;
+  },
 ): JazzStore {
   // Refused here, not on the first deployed request: in dev the local
   // store runs and would never read them.
@@ -342,7 +354,11 @@ export function vercel(
   checkNamespaceOption(options ?? {});
   checkRegionOption(options ?? {});
   const { local, ...rest } = options;
-  return { kind: "vercel", options: rest, local: local ?? sqlite({ path: ".jazz/local" }) };
+  return {
+    kind: "vercel",
+    options: rest,
+    local: local ?? sqlite({ path: ".jazz/local" }),
+  };
 }
 
 function blobOptions(blobs: BlobStore): {
@@ -363,7 +379,10 @@ function blobOptions(blobs: BlobStore): {
       ...(blobs.prefix === undefined ? {} : { s3Prefix: blobs.prefix }),
     };
   }
-  return { blobs: "files", ...(blobs.dir === undefined ? {} : { blobsDir: blobs.dir }) };
+  return {
+    blobs: "files",
+    ...(blobs.dir === undefined ? {} : { blobsDir: blobs.dir }),
+  };
 }
 
 declare const localFirstGuestBrand: unique symbol;
@@ -1923,7 +1942,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
 
   /** One admin account request to the core: this backend vouches for the identities. */
   async function adminAccounts(operation: string, body: unknown): Promise<{ account: string }> {
-    const parsed = (await adminAccountsCall(operation, body)) as { account: unknown };
+    const parsed = (await adminAccountsCall(operation, body)) as {
+      account: unknown;
+    };
     return { ...parsed, account: String(parsed.account) };
   }
 
@@ -1980,7 +2001,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     const cached = accounts.get(userId);
     if (cached && cached.until > Date.now()) return cached.account;
     try {
-      const { account } = await adminAccounts("resolve", { identity: identity(userId) });
+      const { account } = await adminAccounts("resolve", {
+        identity: identity(userId),
+      });
       return remember(userId, account);
     } catch (error) {
       // Only the core's own "no account for this identity" answer: any other
@@ -1996,7 +2019,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   async function accountOf(userId: string): Promise<string> {
     const cached = accounts.get(userId);
     if (cached && cached.until > Date.now()) return cached.account;
-    const { account } = await adminAccounts("login-or-register", { identity: identity(userId) });
+    const { account } = await adminAccounts("login-or-register", {
+      identity: identity(userId),
+    });
     return remember(userId, account);
   }
 
@@ -2034,7 +2059,12 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     const account = await accountOf(user.userId);
     const expiresAt = Math.floor(Date.now() / 1000) + (options.sessionTtlSeconds ?? 3600);
     return Response.json(
-      { account, identity: identity(user.userId), claims: user.claims ?? {}, expiresAt },
+      {
+        account,
+        identity: identity(user.userId),
+        claims: user.claims ?? {},
+        expiresAt,
+      },
       { headers: { "Cache-Control": "no-store" } },
     );
   }
@@ -2188,10 +2218,18 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   const challengeMac = (payload: string) =>
     createHmac("sha256", challengeKey).update(payload).digest("base64url");
 
-  function issueLinkChallenge(userId: string): { challenge: string; expiresAt: number } {
+  function issueLinkChallenge(userId: string): {
+    challenge: string;
+    expiresAt: number;
+  } {
     const expiresAt = Math.floor(Date.now() / 1000) + LINK_CHALLENGE_TTL_SECONDS;
     const payload = Buffer.from(
-      JSON.stringify({ v: 1, sub: userId, nonce: randomUUID(), exp: expiresAt }),
+      JSON.stringify({
+        v: 1,
+        sub: userId,
+        nonce: randomUUID(),
+        exp: expiresAt,
+      }),
     ).toString("base64url");
     return { challenge: `${payload}.${challengeMac(payload)}`, expiresAt };
   }
@@ -2285,7 +2323,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       }
       if (!guestRevoked) {
         try {
-          await adminAccounts("link", { from: guest, to: identity(user.userId), nonce });
+          await adminAccounts("link", {
+            from: guest,
+            to: identity(user.userId),
+            nonce,
+          });
         } catch (error) {
           // Linking is idempotent for this guest and this user: when the user
           // already belongs to the guest's account (an earlier link went
@@ -2347,7 +2389,12 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     }
     const expiresAt = Math.floor(Date.now() / 1000) + (options.sessionTtlSeconds ?? 3600);
     return Response.json(
-      { account, identity: identity(user.userId), claims: user.claims ?? {}, expiresAt },
+      {
+        account,
+        identity: identity(user.userId),
+        claims: user.claims ?? {},
+        expiresAt,
+      },
       { headers: { "Cache-Control": "no-store" } },
     );
   }
@@ -2460,7 +2507,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     const revokedWhileAdmitting = new Set<string>();
     // A session that never sends its prelude ends too.
     let stopExpiry: (() => void) | undefined = startTimer(() => {
-      onEvent(null, { kind: "close", code: 1008, reason: "no sign-in in time" });
+      onEvent(null, {
+        kind: "close",
+        code: 1008,
+        reason: "no sign-in in time",
+      });
       end();
     }, PRELUDE_DEADLINE_MS);
     const end = () => {
@@ -2583,7 +2634,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
               "session expired: authenticate returned an expiresAt in the past",
             ),
           });
-          onEvent(null, { kind: "close", code: 1008, reason: "session expired" });
+          onEvent(null, {
+            kind: "close",
+            code: 1008,
+            reason: "session expired",
+          });
           end();
           return false;
         }
@@ -2592,7 +2647,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         // Told once the core's hello reached the client, which takes no
         // other frame before it.
         if (admitted.renewal)
-          renewal = { session: randomUUID(), claims: admitted.user.claims, told: false };
+          renewal = {
+            session: randomUUID(),
+            claims: admitted.user.claims,
+            told: false,
+          };
       } else if (admitted.guest) {
         // A guest's key is its credential; the app lets it in anew each
         // `sessionTtlSeconds`, the same way.
@@ -2698,7 +2757,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
             })
             .catch(() => {
               // A core that failed to take a message ends the session.
-              onEvent(null, { kind: "close", code: 1011, reason: "session failed" });
+              onEvent(null, {
+                kind: "close",
+                code: 1011,
+                reason: "session failed",
+              });
               end();
               return false;
             })
@@ -2713,7 +2776,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
                   kind: "message",
                   data: authFailedBatch(`session refused: ${refusalCode(error)}`),
                 });
-                onEvent(null, { kind: "close", code: 1008, reason: "sign-in refused" });
+                onEvent(null, {
+                  kind: "close",
+                  code: 1008,
+                  reason: "sign-in refused",
+                });
               } else {
                 // The core is unreachable or failed (5xx), or the app's own
                 // `authenticate` threw: the client tries again later. An
@@ -2724,7 +2791,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
                 else if (isThrownByAuthenticate(error)) {
                   console.error(AUTHENTICATE_THREW_MESSAGE, error);
                 }
-                onEvent(null, { kind: "close", code: 1011, reason: "admission failed" });
+                onEvent(null, {
+                  kind: "close",
+                  code: 1011,
+                  reason: "admission failed",
+                });
               }
               end();
               return false;
@@ -2744,7 +2815,10 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         if (ended) return;
         // A refusal the client doesn't retry: its session asks the backend
         // who is signed in, and signs out if no one is.
-        onEvent(null, { kind: "message", data: authFailedBatch(`session revoked: ${reason}`) });
+        onEvent(null, {
+          kind: "message",
+          data: authFailedBatch(`session revoked: ${reason}`),
+        });
         onEvent(null, { kind: "close", code: 1008, reason: "session revoked" });
         end();
       },
@@ -2831,7 +2905,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       }
       if (parsed.backend_secret == null && auth.backend_secret == null) return null;
       const vouched = { backend_secret: core.backendSecret };
-      const rewritten = { ...parsed, ...vouched, auth: { ...auth, ...vouched } };
+      const rewritten = {
+        ...parsed,
+        ...vouched,
+        auth: { ...auth, ...vouched },
+      };
       return {
         prelude: new TextEncoder().encode(JSON.stringify(rewritten)),
         userId: undefined,
@@ -3031,7 +3109,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       if (ended !== undefined) {
         if (!holdsKey(request, ended.key))
           return new Response("not this stream's client", { status: 403 });
-        return new Response(`stream session ended: ${ended.reason}`, { status: 410 });
+        return new Response(`stream session ended: ${ended.reason}`, {
+          status: 410,
+        });
       }
       // Sessions live in the process that opened them.
       return new Response(
@@ -3075,7 +3155,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       // Keep only the latest ask's answer (a slower earlier one must not
       // undo a refusal since), and none once the session ended meanwhile.
       if (streamAuthReuseMs() > 0 && entry.authAsks === ask && streams.get(id) === entry) {
-        entry.checked = { credentials, userUntil: user.expiresAt * 1000, askedAt };
+        entry.checked = {
+          credentials,
+          userUntil: user.expiresAt * 1000,
+          askedAt,
+        };
       }
     }
     return socket;
@@ -3126,7 +3210,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     if (socket instanceof Response) return socket;
     // A send's records go in whole and in order: one send at a time.
     if (sendingStreams.has(id)) {
-      return new Response("a send to this stream is in progress", { status: 409 });
+      return new Response("a send to this stream is in progress", {
+        status: 409,
+      });
     }
     sendingStreams.add(id);
     try {
@@ -3364,9 +3450,12 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
    * for a request with no proof; a proof that doesn't verify or isn't
    * admitted throws a {@link RequestAuthenticationError}.
    */
-  async function deviceAccountOf(
-    request: Request,
-  ): Promise<{ token: string; subject: string; account: string; audience: string } | null> {
+  async function deviceAccountOf(request: Request): Promise<{
+    token: string;
+    subject: string;
+    account: string;
+    audience: string;
+  } | null> {
     const token = deviceProofOf(request);
     if (token === null) return null;
     const audience = guestAudience(request, token);
@@ -3824,7 +3913,10 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     },
     schema: () => {
       if (schemaOf?.app !== options.app) {
-        schemaOf = { app: options.app, schema: resolveSchemaSource(options.app) };
+        schemaOf = {
+          app: options.app,
+          schema: resolveSchemaSource(options.app),
+        };
       }
       return schemaOf.schema;
     },
@@ -3928,7 +4020,10 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       // usually not this one), and refuses any they admit later on an
       // `authenticate` answer from before now.
       try {
-        await adminAccountsCall("revoke-sessions", { identity: identity(userId), revokedBefore });
+        await adminAccountsCall("revoke-sessions", {
+          identity: identity(userId),
+          revokedBefore,
+        });
       } catch (error) {
         // A core without the route: only this instance's sessions end.
         // The route never answers 404 itself (a refused secret is 401/403,
@@ -4398,7 +4493,10 @@ function settledNow(entry: Entry): OpenedJazz | undefined {
  * the session takes it over, so no message is lost while it waits. Past
  * `MAX_HELD_SOCKET_BYTES` held, it is closed (1013, try again later).
  */
-function heldSocket(ws: WsLikeSocket): { socket: WsLikeSocket; refuse(reason: string): void } {
+function heldSocket(ws: WsLikeSocket): {
+  socket: WsLikeSocket;
+  refuse(reason: string): void;
+} {
   type Event = ["message", unknown, boolean | undefined] | ["close"] | ["error", unknown];
   const held: Event[] = [];
   let heldBytes = 0;

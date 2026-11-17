@@ -40,9 +40,12 @@ export default { fetch: routeJazzRequest };
   "compatibility_date": "2026-04-01",
   "durable_objects": { "bindings": [{ "name": "JAZZ", "class_name": "JazzCore" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["JazzCore"] }],
-  "vars": { "JAZZ_APP_ID": "my-app" },
+  "vars": { "JAZZ_APP_ID": "<your app ID>" },
 }
 ```
+
+Its app ID is a UUID you make once (`uuidgen | tr A-Z a-z`) and never change: it names the app's
+object, and with it the app's data.
 
 Give it a core secret: a random string of at least 32 characters (`openssl rand -hex 32`). Keep it
 the same across deployments; the core admits only requests that carry it.
@@ -59,7 +62,7 @@ like a database password:
 
 ```bash title=".env"
 JAZZ_DO_URL="https://my-app-jazz.<your subdomain>.workers.dev"
-JAZZ_APP_ID="my-app"
+JAZZ_APP_ID="<your app ID>"
 JAZZ_CORE_SECRET="<the same core secret>"
 ```
 
