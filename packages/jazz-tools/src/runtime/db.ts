@@ -80,6 +80,7 @@ import {
   type ColumnTransformMap,
   type ColumnTransformRegistry,
 } from "./column-transforms.js";
+
 export type {
   ColumnTransform,
   ColumnTransformMap,
@@ -94,7 +95,9 @@ import {
 } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import { AuthRenewalBackoff } from "./auth-renewal-backoff.js";
+import { accountAppId } from "../accounts/local-first.js";
 import {
+  LOCAL_FIRST_JWT_ISSUER,
   parseJwtPayload,
   internalSessionFromVerifiedReservedJwtPayload,
   resolveClientInternalSessionSync,
@@ -132,6 +135,9 @@ import { toError } from "./util.js";
 import { isThinDb, upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-first-upgrade.js";
 import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 import { RuntimeClosedError } from "./runtime-closed-error.js";
+
+/** `getLocalFirstIdentityProof` hands out a session's sync proof only with this long left. */
+const SESSION_PROOF_MIN_REMAINING_SECONDS = 30;
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyRuntimeSource = RuntimeSource<any>;
@@ -2807,12 +2813,32 @@ export class Db {
   }
 
   /**
-   * Mint a short-lived local-first JWT proving possession of the current identity.
-   * Returns `null` if the current session is not local-first.
+   * A short-lived local-first JWT proving possession of the current identity:
+   * what a device account sends its own backend's routes as
+   * `Authorization: Bearer` (`jazz.forReqUser(request)` there). Returns
+   * `null` if the current session is not local-first.
+   *
+   * A Db opened by a session (`createJazzClient`, a provider) doesn't hold the
+   * device key: it returns the session's current sync proof, which lasts up
+   * to an hour and is for this app, so `ttlSeconds` doesn't apply and any
+   * other `audience` returns `null`, as does one with under 30 seconds left
+   * (the session renews it). Ask for one per request, and don't log or
+   * forward it: until it expires it also opens this account's sync.
    */
   getLocalFirstIdentityProof(options?: { ttlSeconds?: number; audience?: string }): string | null {
     if (!this._localFirstSecret) {
-      return null;
+      const token = this.config.jwtToken;
+      const payload = token ? parseJwtPayload(token) : null;
+      if (
+        !token ||
+        payload?.iss !== LOCAL_FIRST_JWT_ISSUER ||
+        typeof payload.exp !== "number" ||
+        // One about to expire could lapse on its way to the backend.
+        payload.exp <= Date.now() / 1000 + SESSION_PROOF_MIN_REMAINING_SECONDS ||
+        (options?.audience !== undefined && payload.aud !== accountAppId(options.audience))
+      )
+        return null;
+      return token;
     }
 
     const ttl = options?.ttlSeconds ?? 60;
