@@ -331,7 +331,7 @@ impl World {
         let read = self.read();
         let chain = read.chain(self).expect("a space root");
         let own = self.own(account);
-        acquire(&chain, &read.space, &own.epoch_keys, &self.shared.registry)
+        acquire(&chain, &read.space, &read.directory(self), &own.epoch_keys)
     }
 
     /// `from` delivers version `epoch_id` of the space to `to`, in its own

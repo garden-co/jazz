@@ -486,7 +486,7 @@ fn an_unsupported_signing_mechanism_leaves_the_chain_unresolved() {
         ))
     );
     let own = world.own(ALICE);
-    let alice = acquire(&chain, &read.space, &own.epoch_keys, &builtin).unwrap();
+    let alice = acquire(&chain, &read.space, &directory, &own.epoch_keys).unwrap();
     assert!(alice.keys.holds(&v0));
     assert!(!alice.has_current(&chain));
 }
@@ -585,7 +585,13 @@ fn a_delivery_that_fails_with_a_provider_error_is_not_reported() {
     let own = world.own(BOB);
     fails.store(true, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
-        acquire(&chain, &read.space, &own.epoch_keys, &world.shared.registry).err(),
+        acquire(
+            &chain,
+            &read.space,
+            &read.directory(&world),
+            &own.epoch_keys
+        )
+        .err(),
         Some(ProtocolError::ProviderFailure)
     );
 }
@@ -682,8 +688,13 @@ fn account_devices_open_envelopes_of_earlier_account_epochs() {
     let read = world.read();
     let chain = read.chain(&world).unwrap();
     let own = world.own_with(ALICE, &tablet).unwrap();
-    let tablet_keys =
-        acquire(&chain, &read.space, &own.epoch_keys, &world.shared.registry).unwrap();
+    let tablet_keys = acquire(
+        &chain,
+        &read.space,
+        &read.directory(&world),
+        &own.epoch_keys,
+    )
+    .unwrap();
     assert!(tablet_keys.has_current(&chain));
 }
 
@@ -703,8 +714,8 @@ fn deliveries_are_bound_to_their_space() {
     let other_keys = acquire(
         &other_chain,
         &other.space,
+        &other.directory(&world),
         &own.epoch_keys,
-        &world.shared.registry,
     )
     .unwrap()
     .keys;
@@ -1319,7 +1330,7 @@ fn assert_inconsistent(
         inconsistent
     );
     assert_eq!(
-        acquire(chain, ledger, &own.epoch_keys, &world.shared.registry).err(),
+        acquire(chain, ledger, directory, &own.epoch_keys).err(),
         inconsistent
     );
 }
@@ -1380,7 +1391,7 @@ fn a_chain_ledger_and_directory_of_different_reads_are_inconsistent_evidence() {
     );
     let own = world.own(BOB);
     assert!(
-        acquire(&new_chain, &new.space, &own.epoch_keys, registry)
+        acquire(&new_chain, &new.space, &new_directory, &own.epoch_keys)
             .unwrap()
             .has_current(&new_chain)
     );
@@ -1660,8 +1671,13 @@ fn a_rotation_delivers_to_the_first_batch_then_to_the_rest() {
         }
         for account in &accounts {
             let own = world.own(account);
-            let acquisition =
-                acquire(&chain, &read.space, &own.epoch_keys, &world.shared.registry).unwrap();
+            let acquisition = acquire(
+                &chain,
+                &read.space,
+                &read.directory(&world),
+                &own.epoch_keys,
+            )
+            .unwrap();
             assert!(acquisition.has_current(&chain), "{account}");
             let reported = usize::from(*account == garbled);
             assert_eq!(acquisition.invalid_deliveries.len(), reported, "{account}");
@@ -1977,16 +1993,27 @@ fn provider_failures_at_markers_history_and_signatures_fail_the_operation() {
         let own = world.own(BOB);
         let registry = &world.shared.registry;
         assert!(
-            acquire(&chain, &read.space, &own.epoch_keys, registry)
-                .unwrap()
-                .keys
-                .holds(&v1),
+            acquire(
+                &chain,
+                &read.space,
+                &read.directory(&world),
+                &own.epoch_keys
+            )
+            .unwrap()
+            .keys
+            .holds(&v1),
             "supported and valid while the provider works"
         );
         wrap_fails.store(true, std::sync::atomic::Ordering::SeqCst);
         let failure = Some(ProtocolError::ProviderFailure);
         assert_eq!(
-            acquire(&chain, &read.space, &own.epoch_keys, registry).err(),
+            acquire(
+                &chain,
+                &read.space,
+                &read.directory(&world),
+                &own.epoch_keys
+            )
+            .err(),
             failure
         );
         let mut keys = SpaceKeys::new(&chain);
@@ -2324,17 +2351,16 @@ fn a_read_for_one_account_serves_only_that_accounts_acquisition() {
     let chain = SpaceChain::replay(&bobs, &directory).unwrap().unwrap();
     assert_eq!(chain, whole.chain(&world).unwrap());
 
-    let registry = &world.shared.registry;
     let bob = world.own(BOB);
     assert!(
-        acquire(&chain, &bobs, &bob.epoch_keys, registry)
+        acquire(&chain, &bobs, &directory, &bob.epoch_keys)
             .unwrap()
             .has_current(&chain)
     );
     let alice = world.own(ALICE);
     let inconsistent = Some(ProtocolError::InconsistentEvidence);
     assert_eq!(
-        acquire(&chain, &bobs, &alice.epoch_keys, registry).err(),
+        acquire(&chain, &bobs, &directory, &alice.epoch_keys).err(),
         inconsistent
     );
     let mut rng = TestRandom(65);
@@ -2352,7 +2378,7 @@ fn a_read_for_one_account_serves_only_that_accounts_acquisition() {
     // The whole space's read serves every helper.
     assert!(lacking(&chain, &whole.space, &directory).is_ok());
     assert!(
-        acquire(&chain, &whole.space, &alice.epoch_keys, registry)
+        acquire(&chain, &whole.space, &directory, &alice.epoch_keys)
             .unwrap()
             .has_current(&chain)
     );
@@ -2635,6 +2661,89 @@ fn a_delivery_sealed_to_a_non_derived_record_is_reported_against_the_record() {
             .iter()
             .all(|reported| reported.sealing_key.record_id == record.id)
     );
+}
+
+/// Attribution is decided against the read being replayed, not against a
+/// report the account's keys carry from an earlier read: a non-derived
+/// record published after the device last took its keys still takes the
+/// blame for a delivery sealed to it, never the sender (§2.12, §3.4).
+#[test]
+fn a_record_published_after_the_keys_were_taken_still_takes_the_blame() {
+    let (registry, _) = custom_registry(OTHER_SEAL);
+    let mut world = World::with_registry(52, registry);
+    world.account(ALICE);
+    world.account_with(BOB, sealing_with(OTHER_SEAL));
+    world.add_member(ALICE);
+    world.add_member(BOB);
+    world.create(ALICE);
+    let v0 = world.current();
+
+    // Bob's keys, taken before any built-in record of his exists.
+    let stale = world.own(BOB);
+    assert!(stale.epoch_keys.non_derived_sealing_keys().is_empty());
+
+    // A device of Bob's publishes a later built-in record that does not
+    // derive from the account key; senders of the built-in mechanism
+    // select it.
+    let own = world.own(BOB);
+    let record = world.with_account(BOB, |entry, rng| {
+        let builtin = common::protocol::Env::with(
+            entry.env.registry.clone(),
+            MechanismConfig::default(),
+            BOB,
+        );
+        let sealing = entry
+            .ledger
+            .replay(&entry.env)
+            .sealing_keys()
+            .unwrap()
+            .unwrap();
+        let mut record = jazz_e2ee::protocol::account::build::later_account_sealing_key(
+            &builtin.writer(),
+            &sealing,
+            &own.state,
+            &entry.device,
+            &own.key,
+            rng,
+        )
+        .unwrap()
+        .unwrap();
+        record.public_key = derive::account_sealing_key_pair(&key_seal::Builtin, &[9; 32])
+            .unwrap()
+            .public
+            .bytes;
+        let bytes = record.signed_bytes(&entry.env.application()).unwrap();
+        let signer = entry
+            .env
+            .registry
+            .signer(entry.device.signing.public.mechanism.as_mechanism())
+            .unwrap();
+        record.signature = signing::sign(signer, &entry.device.signing, &bytes).unwrap();
+        let at = entry.ledger.next();
+        entry
+            .ledger
+            .public
+            .account_keys
+            .push(Accepted::new(at, record.clone()));
+        record
+    });
+    let delivery = world.deliver(ALICE, BOB, &v0);
+
+    // With the stale keys and today's read, the delivery is blamed on the
+    // record, as it is with fresh keys.
+    let read = world.read();
+    let chain = read.chain(&world).unwrap();
+    for keys in [&stale.epoch_keys, &world.own(BOB).epoch_keys] {
+        let bob = acquire(&chain, &read.space, &read.directory(&world), keys).unwrap();
+        assert!(!bob.keys.holds(&v0));
+        assert!(bob.invalid_deliveries.is_empty());
+        assert_eq!(bob.non_derived_deliveries.len(), 1);
+        assert_eq!(bob.non_derived_deliveries[0].delivery_id, delivery.id);
+        assert_eq!(
+            bob.non_derived_deliveries[0].sealing_key.record_id,
+            record.id
+        );
+    }
 }
 
 /// A recipient or an author state from another read than the chain's is

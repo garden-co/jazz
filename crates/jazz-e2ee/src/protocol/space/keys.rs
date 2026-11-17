@@ -41,7 +41,7 @@ use super::super::domain::AccountDomain;
 use super::super::error::{ProtocolError, ProtocolResult};
 use super::super::records::space::{SpaceAddress, SpaceDelivery, SpaceScope};
 use super::chain::SpaceChain;
-use super::ledger::SpaceLedger;
+use super::ledger::{AccountDirectory, SpaceLedger};
 
 const Z32: [u8; 32] = [0; 32];
 
@@ -481,8 +481,11 @@ impl Acquisition {
 /// Acquires every key of `chain` this device can obtain (§3.3): the current
 /// version first, then earlier ones, for versions the history links of a
 /// newer key do not reach. `own` are the account epoch keys of the device's
-/// own account, current generation (§2.12), with the derivation check's
-/// report on the account's sealing key records; `ledger` holds the deliveries
+/// own account, current generation (§2.12); `accounts` is the account
+/// directory of the same read as `ledger`, from which the account's sealing
+/// key records are checked against `own` afresh, so a delivery sealed to a
+/// record that does not derive is attributed to that record (§2.12, §3.4)
+/// whenever the record was published; `ledger` holds the deliveries
 /// addressed to that account and must be the read `chain` was replayed
 /// from, either of the whole space or filtered for this account (a read
 /// filtered for another account is
@@ -496,11 +499,18 @@ impl Acquisition {
 pub fn acquire(
     chain: &SpaceChain,
     ledger: &SpaceLedger,
+    accounts: &AccountDirectory<'_>,
     own: &AccountEpochKeys,
-    registry: &Registry,
 ) -> ProtocolResult<Acquisition> {
-    chain.check_read(ledger, None)?;
+    chain.check_read(ledger, Some(accounts))?;
+    let registry = accounts.registry();
     let account_id = own.account_id();
+    // Derivation is checked against this read's records, never taken from
+    // a report made at another read.
+    let non_derived = match accounts.sealing_keys(account_id)? {
+        Some(sealing) => sealing.check_derived(registry, own)?,
+        None => return Err(ProtocolError::InconsistentEvidence),
+    };
     if ledger
         .filtered_for()
         .is_some_and(|filtered| filtered != account_id)
@@ -581,7 +591,7 @@ pub fn acquire(
                 PathCheck::BrokenHistory(at) => broken(at),
                 PathCheck::Unopened | PathCheck::Invalid => {
                     let non_derived = matches!(outcome, PathCheck::Unopened)
-                        .then(|| sealed_to_non_derived(own, row))
+                        .then(|| sealed_to_non_derived(&non_derived, row))
                         .flatten();
                     match non_derived {
                         Some(record) => non_derived_deliveries.push(NonDerivedDelivery {
@@ -631,13 +641,13 @@ fn broken_history(chain: &SpaceChain, depth: usize) -> BrokenHistory {
 /// (§2.12): a delivery sealed to it cannot open, through no fault of its
 /// sender.
 fn sealed_to_non_derived<'k>(
-    own: &'k AccountEpochKeys,
+    non_derived: &'k [NonDerivedSealingKey],
     row: &SpaceDelivery,
 ) -> Option<&'k NonDerivedSealingKey> {
     let (id, version, _) = envelope::parse(&row.envelope).ok()?;
     let id = core::str::from_utf8(id).ok()?;
     let mechanism = Mechanism::new(id, version);
-    own.non_derived_sealing_keys()
+    non_derived
         .iter()
         .find(|record| record.is_selected_for(&row.recipient_account_epoch_id, mechanism))
 }
