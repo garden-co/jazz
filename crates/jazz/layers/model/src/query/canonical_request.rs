@@ -617,11 +617,9 @@ fn validate_public_column_type(column_type: &ColumnType) -> Result<(), QueryErro
                 }
             }
         }
-        // A typed query parameter is never a vector: a vector filter operand
-        // is a byte literal compared bit for bit (SPEC 6.1.1), and nearness
-        // is a vector index search (SPEC 20.4). Points get bit-exact
-        // `Eq`/`in` through the shared operator table (jazz#5966); until then
-        // they are refused here too.
+        // A typed query parameter is never a vector or a point: their filter
+        // operands are byte literals compared bit for bit (SPEC 6.1.1), and
+        // nearness is an index search (SPEC 20.4).
         ColumnType::Internal(_)
         | ColumnType::U48
         | ColumnType::Vector(_)
