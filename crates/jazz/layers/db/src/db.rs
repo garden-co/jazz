@@ -544,6 +544,7 @@ impl Drop for SubscriptionStream {
                 inner,
                 view: None,
                 defer_fetches: false,
+                operation_held: false,
             }
             .detach_remote(&query, &binding, include_deleted, &view, reach);
         }
@@ -991,6 +992,8 @@ pub struct Db {
     /// the host's fetch lane, instead of fetching them on this thread
     /// ([`Self::deferring_chunk_fetches`]).
     defer_fetches: bool,
+    /// This temporary handle borrows the enclosing origin write's lease.
+    operation_held: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -2192,6 +2195,7 @@ impl Db {
         let db = Self {
             view: None,
             defer_fetches: false,
+            operation_held: false,
             inner: Rc::new(Store {
                 shard_clock: shard.clock.clone(),
                 fanout_stats: fan.stats(),
@@ -2441,32 +2445,52 @@ impl Db {
     /// of the same key by the same author, here or through another server of
     /// the same authority, is not written again: it returns what this store
     /// knows of the first. A write that fails, or makes no commit, leaves
-    /// nothing under the id.
+    /// nothing under the id. The callback must make its standalone write through
+    /// the supplied handle, which borrows this operation's lease.
     pub async fn write_as_origin(
         &self,
         key: crate::tx::TxId,
         author: &AuthorSubject,
-        write: impl AsyncFnOnce() -> Result<WriteHandle, Error>,
+        write: impl AsyncFnOnce(&Db) -> Result<WriteHandle, Error>,
     ) -> Result<OriginWrite, Error> {
+        let inner = self.inner.acquire().await?;
         let (node, tx) = (sync::origin_node(author, *key.node.as_bytes()), key.time.0);
-        {
-            let inner = self.inner.ready().await?;
-            if inner.tx.borrow().is_some() {
-                return Err(unsupported(
-                    "a write as another writer's commit inside a transaction",
-                ));
-            }
-            match inner.origin_fate(node, tx, author).await? {
-                OriginFate::Unseen => {}
-                OriginFate::Pending | OriginFate::Accepted => return Ok(OriginWrite::Repeat),
-                OriginFate::Rejected(error) => return Err(error),
+        if inner.tx.borrow().is_some() {
+            return Err(unsupported(
+                "a write as another writer's commit inside a transaction",
+            ));
+        }
+        match inner.origin_fate(node, tx, author).await? {
+            OriginFate::Unseen => {}
+            OriginFate::Pending | OriginFate::Accepted => return Ok(OriginWrite::Repeat),
+            OriginFate::Rejected(error) => return Err(error),
+        }
+        // Clear attribution before releasing the operation, including when the
+        // callback is cancelled or returns without making a commit.
+        struct ClearOrigin<'a>(&'a Store);
+        impl Drop for ClearOrigin<'_> {
+            fn drop(&mut self) {
+                self.0.next_origin.set(None);
             }
         }
-        self.inner.ready().await?.next_origin.set(Some((node, tx)));
-        let written = write().await;
-        // Read by each attempt of the write's commit.
-        self.inner.ready().await?.next_origin.set(None);
-        written.map(OriginWrite::Written)
+        let _clear = ClearOrigin(&inner);
+        inner.next_origin.set(Some((node, tx)));
+        let scoped = Db {
+            inner: self.inner.clone(),
+            view: self.view.clone(),
+            defer_fetches: self.defer_fetches,
+            operation_held: true,
+        };
+        write(&scoped).await.map(OriginWrite::Written)
+    }
+
+    /// A scoped origin write already owns this store's operation lease.
+    async fn write_operation(&self) -> Option<futures::lock::MutexGuard<'_, ()>> {
+        if self.operation_held {
+            None
+        } else {
+            Some(self.inner.operation.lock().await)
+        }
     }
 
     /// Whether this store is the global authority.
@@ -2939,7 +2963,7 @@ impl Db {
         refuse: bool,
         first: &mut Option<Error>,
     ) {
-        let _operation = self.inner.operation.lock().await;
+        let _operation = self.write_operation().await;
         for (request, answer) in wanted.iter().zip(answers) {
             if let Err(error) = answer.and_then(|bytes| chunks.install_from_store(request, bytes)) {
                 if refuse {
@@ -3001,7 +3025,7 @@ impl Db {
     ) -> Result<T, Error> {
         // A peek: the store gate would undo a transaction's cached overlay.
         {
-            let _operation = self.inner.operation.lock().await;
+            let _operation = self.write_operation().await;
             let local_only = self.inner.as_ref().chunks.store().is_none();
             if local_only {
                 return attempt(arg).await;
@@ -3020,7 +3044,7 @@ impl Db {
     ) -> Result<T, Error> {
         loop {
             let result = {
-                let _operation = self.inner.operation.lock().await;
+                let _operation = self.write_operation().await;
                 attempt().await
             };
             match result {
@@ -3826,7 +3850,7 @@ impl Db {
         mut opts: InsertOptions,
     ) -> Result<WriteHandle, Error> {
         if opts.row_id.is_none() {
-            let _operation = self.inner.operation.lock().await;
+            let _operation = self.write_operation().await;
             opts.row_id = Some(self.next_row_id());
         }
         let who = who(opts.identity);
@@ -10536,6 +10560,7 @@ impl Db {
             inner: self.inner.clone(),
             view: Some(view),
             defer_fetches: self.defer_fetches,
+            operation_held: false,
         })
     }
 
@@ -10585,6 +10610,7 @@ impl Db {
             inner: self.inner.clone(),
             view: Some(view),
             defer_fetches: self.defer_fetches,
+            operation_held: false,
         }))
     }
 
@@ -10685,6 +10711,7 @@ impl Db {
             inner: self.inner.clone(),
             view: Some(Rc::new(logical)),
             defer_fetches: self.defer_fetches,
+            operation_held: false,
         })
     }
 

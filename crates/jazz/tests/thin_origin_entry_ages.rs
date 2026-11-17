@@ -131,7 +131,7 @@ fn update_as(
     block_on(db.write_as_origin(
         TxId::new(TxTime(seq), NodeUuid::from_bytes(client)),
         &alice(),
-        async || {
+        async |db: &Db| {
             db.update(
                 table,
                 id,

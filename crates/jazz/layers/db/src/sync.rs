@@ -14162,6 +14162,7 @@ impl Db {
             inner: self.inner.clone(),
             view: Some(view),
             defer_fetches: self.defer_fetches,
+            operation_held: false,
         })
     }
 
@@ -14186,6 +14187,7 @@ impl Db {
             inner: self.inner.clone(),
             view,
             defer_fetches: self.defer_fetches,
+            operation_held: false,
         }
     }
 

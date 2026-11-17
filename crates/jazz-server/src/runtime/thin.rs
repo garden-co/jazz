@@ -270,10 +270,10 @@ fn written_once(
     author: AuthorSubject,
     row: RowUuid,
     noted: &mut impl FnMut(Result<WriteHandle, Error>) -> Result<WriteHandle, Error>,
-    write: impl AsyncFnOnce() -> Result<WriteHandle, Error>,
+    write: impl AsyncFnOnce(&Db) -> Result<WriteHandle, Error>,
 ) -> ThinBody {
     let Some(key) = key else {
-        return written(noted(block_on(write())));
+        return written(noted(block_on(write(db))));
     };
     match block_on(db.write_as_origin(key, &author, write)) {
         Ok(OriginWrite::Written(handle)) => written(Ok(handle)),
@@ -897,7 +897,7 @@ fn serve_thin_op(
                         (_, row) => row.unwrap_or_else(|| db.next_row_id()),
                     };
                     options.row_id = Some(row);
-                    written_once(db, key, identity, row, &mut noted, async || {
+                    written_once(db, key, identity, row, &mut noted, async |db: &Db| {
                         db.insert(table, cells, options).await
                     })
                 }
@@ -930,7 +930,7 @@ fn serve_thin_op(
                         noted(block_on(db.tx_ref(open).update(table, row, patch, options))),
                     )
                 }
-                None => written_once(db, key, identity, row, &mut noted, async || {
+                None => written_once(db, key, identity, row, &mut noted, async |db: &Db| {
                     db.update(table, row, patch, options).await
                 }),
             }
@@ -962,7 +962,7 @@ fn serve_thin_op(
                         noted(block_on(db.tx_ref(open).upsert(table, row, cells, options))),
                     )
                 }
-                None => written_once(db, key, identity, row, &mut noted, async || {
+                None => written_once(db, key, identity, row, &mut noted, async |db: &Db| {
                     db.upsert(table, row, cells, options).await
                 }),
             }
@@ -992,7 +992,7 @@ fn serve_thin_op(
                         noted(block_on(db.tx_ref(open).delete(table, row, options))),
                     )
                 }
-                None => written_once(db, key, identity, row, &mut noted, async || {
+                None => written_once(db, key, identity, row, &mut noted, async |db: &Db| {
                     db.delete(table, row, options).await
                 }),
             }
@@ -1030,7 +1030,7 @@ fn serve_thin_op(
                         )),
                     )
                 }
-                None => written_once(db, key, identity, row, &mut noted, async || {
+                None => written_once(db, key, identity, row, &mut noted, async |db: &Db| {
                     db.restore(table, row, cells, options).await
                 }),
             }

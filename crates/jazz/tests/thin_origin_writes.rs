@@ -84,7 +84,7 @@ fn bodies(db: &Db) -> Vec<String> {
 }
 
 fn insert_as(db: &Db, n: u64, row: RowUuid, text: &str) -> OriginWrite {
-    block_on(db.write_as_origin(origin(n), &user(1), async || {
+    block_on(db.write_as_origin(origin(n), &user(1), async |db: &Db| {
         db.insert(
             "notes",
             body(text),
@@ -100,7 +100,7 @@ fn insert_as(db: &Db, n: u64, row: RowUuid, text: &str) -> OriginWrite {
 }
 
 fn update_as(db: &Db, n: u64, row: RowUuid, text: &str) -> Result<OriginWrite, jazz::db::Error> {
-    block_on(db.write_as_origin(origin(n), &user(1), async || {
+    block_on(db.write_as_origin(origin(n), &user(1), async |db: &Db| {
         db.update(
             "notes",
             row,
@@ -154,8 +154,8 @@ fn another_users_write_under_the_same_key_is_a_write_of_its_own() {
     let core = open(0);
     let row = RowUuid::from_bytes([1; 16]);
     insert_as(&core, 1, row, "draft");
-    let theirs = block_on(core.write_as_origin(origin(2), &user(2), async || {
-        core.update(
+    let theirs = block_on(core.write_as_origin(origin(2), &user(2), async |db: &Db| {
+        db.update(
             "notes",
             row,
             body("theirs"),
@@ -303,9 +303,9 @@ fn two_users_writing_under_one_key_through_two_servers_both_land() {
     };
     // The second user writes first, under the key the first user's write
     // will name, through another server: still both are written.
-    let theirs = block_on(second.write_as_origin(origin(1), &user(2), async || {
-        second
-            .insert(
+    let theirs = block_on(
+        second.write_as_origin(origin(1), &user(2), async |db: &Db| {
+            db.insert(
                 "notes",
                 body("theirs"),
                 InsertOptions {
@@ -315,7 +315,8 @@ fn two_users_writing_under_one_key_through_two_servers_both_land() {
                 },
             )
             .await
-    }))
+        }),
+    )
     .unwrap();
     assert!(matches!(theirs, OriginWrite::Written(_)));
     settle();
@@ -376,4 +377,83 @@ fn only_a_thin_clients_writer_node_is_refused_to_sessions() {
         }
     }
     assert_eq!(bodies(&core), vec!["legacy".to_owned()]);
+}
+
+/// Alice's thin-client origin waits for Bob's suspended SQL operation. Once
+/// admitted, Alice keeps the origin until her own write finishes; Bob's queued
+/// insert must remain a separate commit and must not consume Alice's key.
+/// bob -> paused SQL -> alice waits -> alice paused callback -> bob waits -> alice commits
+#[test]
+fn an_origin_write_owns_its_lease_until_its_callback_finishes() {
+    use jazz::host::HostTable;
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let db = open(0);
+    let (resume_sql, wait_sql) = futures::channel::oneshot::channel();
+    let mut sql = Box::pin(db.host_put_then_wait_for_test(
+        HostTable::new("origin_lease"),
+        b"pending",
+        b"bob",
+        async { wait_sql.await.unwrap() },
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(sql.as_mut().poll(&mut cx).is_pending());
+    let (resume_alice, wait_alice) = futures::channel::oneshot::channel();
+    let mut alice =
+        Box::pin(
+            db.write_as_origin(origin(90), &AuthorSubject::SYSTEM, async |scoped: &Db| {
+                wait_alice.await.unwrap();
+                scoped
+                    .insert("notes", body("alice"), Default::default())
+                    .await
+            }),
+        );
+    assert!(alice.as_mut().poll(&mut cx).is_pending());
+    resume_sql.send(()).unwrap();
+    block_on(sql).unwrap();
+    assert!(alice.as_mut().poll(&mut cx).is_pending());
+    let mut bob = Box::pin(db.insert("notes", body("bob"), Default::default()));
+    assert!(bob.as_mut().poll(&mut cx).is_pending());
+    resume_alice.send(()).unwrap();
+    assert!(matches!(block_on(alice).unwrap(), OriginWrite::Written(_)));
+    block_on(bob).unwrap();
+    let repeated =
+        block_on(
+            db.write_as_origin(origin(90), &AuthorSubject::SYSTEM, async |_scoped: &Db| {
+                panic!("Alice's committed key must be recognized without another write")
+            }),
+        )
+        .unwrap();
+    assert!(matches!(repeated, OriginWrite::Repeat));
+    assert_eq!(bodies(&db).len(), 2);
+}
+
+/// Alice abandons an origin callback before writing. Bob's next insert must not
+/// consume Alice's key; Alice can still submit that key afterwards.
+#[test]
+fn a_cancelled_origin_callback_clears_its_attribution() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+    let db = open(0);
+    let mut alice = Box::pin(db.write_as_origin(
+        origin(91),
+        &AuthorSubject::SYSTEM,
+        async |_scoped: &Db| std::future::pending().await,
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(alice.as_mut().poll(&mut cx).is_pending());
+    drop(alice);
+    block_on(db.insert("notes", body("bob"), Default::default())).unwrap();
+    let result =
+        block_on(
+            db.write_as_origin(origin(91), &AuthorSubject::SYSTEM, async |scoped: &Db| {
+                scoped
+                    .insert("notes", body("alice"), Default::default())
+                    .await
+            }),
+        )
+        .unwrap();
+    assert!(matches!(result, OriginWrite::Written(_)));
+    assert_eq!(bodies(&db).len(), 2);
 }
