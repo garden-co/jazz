@@ -651,7 +651,14 @@ read policy).
   client can only date its own new rows: an earlier time loses it the
   clause, and a later one gains it nothing it did not already have. A
   creator whose clock is behind `creatorSince` when it creates a row is
-  refused the clause for that row; an updater adds it instead.
+  refused the clause for that row. A new space row has no member yet, so
+  nobody can read it and there is no updater to add the creator: the
+  transaction that carries the creator's member row is refused, and only a
+  trusted backend can add the first member of that row. When the client
+  holds the space row (staged in the same transaction, or in its replica)
+  it checks this before submission and fails the write
+  `space-row-before-creator-since` instead of a policy refusal
+  ([core hooks](E2EE_CORE_HOOKS.md) H2).
 
   Required tests: a fresh space row and its creator's member row in one
   transaction are accepted, in both insert orders, in mergeable,
@@ -788,8 +795,12 @@ trusted backend. Every other account is added by an updater.
   it. `jazz-tools` writes the current time when a table first becomes a
   space table (first named as a `scope`), so rows that existed before then
   give their creators no right to add themselves
-  ([migrations](E2EE_MIGRATIONS.md) §4.1). The deploy refuses a space table
-  without one. It refuses a change that moves it earlier than the deployed
+  ([migrations](E2EE_MIGRATIONS.md) §4.1). Rows created after the tool ran
+  and before the deploy that makes the table a space table do have a
+  creator with the clause; at that deploy the server warns, with their
+  number, when the table holds rows created at or after `creatorSince`, and
+  documentation says to regenerate the time just before deploying. The
+  deploy refuses a space table without one. It refuses a change that moves it earlier than the deployed
   time, which would give existing rows' creators the clause. It allows a
   change that moves it later, with a warning: creators of rows in between
   lose the clause.
@@ -1856,7 +1867,8 @@ recipientAccountEpochId, envelope}`, with a random ID, sealed to that
   account's member row and holds the current version (not an unpublished
   key, §5.4) also stages, in the
   same transaction, a delivery of the current version to that account, when
-  it knows the account's valid sealing key: the generated members API looks
+  it knows the account's valid sealing key and its own account is not a
+  voided sender for that account and version (below): the generated members API looks
   it up online before staging ([core hooks](E2EE_CORE_HOOKS.md) H2). R17
   accepts it on the member row the same transaction inserts, once that row
   has passed its own check (Jazz's grounding rule). Offline, without a
@@ -2175,9 +2187,18 @@ only while a delivery to it waits for a valid sealing key (§3.4), and the
 members' public account successors only by a device that may act on the
 needs-rotation mark (§3.5); the delivery transaction reads the rest of a
 member's account history when it needs it (§3.4). Watches of public account
-rows are shared across spaces: one subscription per table over the accounts
-the device needs, replaced (the new one opened before the old one closes)
-when that set changes. A watch is opened before the decision it guards is
+rows are shared across spaces: per table, the accounts the device needs
+are split into groups by a fixed function of the account ID, with at most
+500 accounts in a group (the number of groups is a power of two, doubled
+when a group would exceed 500), and each group is one subscription. A
+change of the set replaces only the subscriptions of the groups it touches
+(the new one opened before the old one closes); doubling replaces all of
+them, once. The design figure is 10,000 watched accounts per device (for
+example 10 spaces at the 1,000-member limit, or many smaller ones):
+40 subscriptions over the two account tables, and a membership change in
+any space reopens one subscription per table. Beyond it the watches still
+work, with cost growing in proportion to the accounts; this is one of the
+costs to be measured. A watch is opened before the decision it guards is
 first made, and the decision is made from the watch's results, so no change
 between a read and the watch is missed. An account leaves the set when it
 is no longer a member of any space that needs it, or its waiting delivery
@@ -2203,6 +2224,9 @@ is made or abandoned.
 - A device removal marks every space whose current version the removed
   device could open; the removing device rotates them at a bounded rate
   (§2.8), and each rotation costs as above.
+- A device watches the public account rows of every member of every space
+  it belongs to, in groups of at most 500 accounts per subscription (above);
+  the design figure is 10,000 watched accounts per device.
 - Each policy check of an internal row is one or two indexed member lookups
   on the server ([core hooks](E2EE_CORE_HOOKS.md) H7).
 
@@ -2712,26 +2736,27 @@ reconciled by its transaction identity.
 
 Refusal codes:
 
-| Code                            | Refusal                                                                                                                                                                        |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `account-has-history`           | Bootstrap found existing account evidence (§2.3).                                                                                                                              |
-| `device-identity-conflict`      | A device request or key row exists with different keys (§2.2).                                                                                                                 |
-| `device-keys-mismatch`          | The device's keys do not match its accepted request.                                                                                                                           |
-| `no-device-request`             | Bootstrap or reset found no request (or more than one) for this device (§2.3, §2.11).                                                                                          |
-| `reset-device-active`           | An account reset by a device that is still active in the current generation (§2.11).                                                                                           |
-| `device-not-active`             | The acting device is not an active device of the account.                                                                                                                      |
-| `device-removed`                | The device was removed and needs a new device ID.                                                                                                                              |
-| `stale-challenge`               | The challenge is unknown, for another device, or not of the current account epoch (§2.5).                                                                                      |
-| `approval-closed`               | The approval handle was closed or belongs to another operation.                                                                                                                |
-| `invalid-possession-proof`      | The requesting device's possession proof failed (§2.5).                                                                                                                        |
-| `target-not-active`             | The device or recovery root to remove or retire is not active (§2.8).                                                                                                          |
-| `unsupported-recipient`         | A recipient device, recovery root or account has no key of the selected mechanism (§0, §2.12).                                                                                 |
-| `account-reset-not-allowed`     | An account reset by a local-first session, or where the application has not enabled `allowAccountReset` (§2.11).                                                               |
-| `space-pending`                 | An encrypted write to a space that has no valid root, while this device's creation of it is suppressed after a refusal (§3.2).                                                 |
-| `space-create-refused`          | The authority refused the root itself, staged with a write or by `createSpace` (§3.2); only that transaction fails, and the device suppresses automatic creation of the space. |
-| `rotation-needs-key`            | A rotation by a device that holds no authenticated key of the current version (§3.5), or a recovery rotation by one that holds no version at all.                              |
-| `space-member-limit`            | A member row that would give the space more than 1,000 member accounts, refused by the client before submission (§3.8).                                                        |
-| `local-first-identity-mismatch` | A local-first root written with an identity whose key does not derive the account ID (§2.3).                                                                                   |
+| Code                             | Refusal                                                                                                                                                                                                                                         |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `account-has-history`            | Bootstrap found existing account evidence (§2.3).                                                                                                                                                                                               |
+| `device-identity-conflict`       | A device request or key row exists with different keys (§2.2).                                                                                                                                                                                  |
+| `device-keys-mismatch`           | The device's keys do not match its accepted request.                                                                                                                                                                                            |
+| `no-device-request`              | Bootstrap or reset found no request (or more than one) for this device (§2.3, §2.11).                                                                                                                                                           |
+| `reset-device-active`            | An account reset by a device that is still active in the current generation (§2.11).                                                                                                                                                            |
+| `device-not-active`              | The acting device is not an active device of the account.                                                                                                                                                                                       |
+| `device-removed`                 | The device was removed and needs a new device ID.                                                                                                                                                                                               |
+| `stale-challenge`                | The challenge is unknown, for another device, or not of the current account epoch (§2.5).                                                                                                                                                       |
+| `approval-closed`                | The approval handle was closed or belongs to another operation.                                                                                                                                                                                 |
+| `invalid-possession-proof`       | The requesting device's possession proof failed (§2.5).                                                                                                                                                                                         |
+| `target-not-active`              | The device or recovery root to remove or retire is not active (§2.8).                                                                                                                                                                           |
+| `unsupported-recipient`          | A recipient device, recovery root or account has no key of the selected mechanism (§0, §2.12).                                                                                                                                                  |
+| `account-reset-not-allowed`      | An account reset by a local-first session, or where the application has not enabled `allowAccountReset` (§2.11).                                                                                                                                |
+| `space-pending`                  | An encrypted write to a space that has no valid root, while this device's creation of it is suppressed after a refusal (§3.2).                                                                                                                  |
+| `space-create-refused`           | The authority refused the root itself, staged with a write or by `createSpace` (§3.2); only that transaction fails, and the device suppresses automatic creation of the space.                                                                  |
+| `rotation-needs-key`             | A rotation by a device that holds no authenticated key of the current version (§3.5), or a recovery rotation by one that holds no version at all.                                                                                               |
+| `space-row-before-creator-since` | A member row for the session's own account that only the creator clause could accept, for a space row created before its table's `creatorSince` (for example on a device whose clock is behind), refused by the client before submission (R12). |
+| `space-member-limit`             | A member row that would give the space more than 1,000 member accounts, refused by the client before submission (§3.8).                                                                                                                         |
+| `local-first-identity-mismatch`  | A local-first root written with an identity whose key does not derive the account ID (§2.3).                                                                                                                                                    |
 
 ## 8. Security properties and limits
 
@@ -2795,7 +2820,9 @@ Limits:
   creator create the space row and its first member row from a trusted
   backend (§1.5). Only rows created at or after the space table's
   `creatorSince` have such a creator (§1.5), so switching encryption on
-  gives the creators of existing rows no right to add themselves.
+  gives the creators of rows created before that time no right to add
+  themselves. Rows created between the tool run that wrote the time and the
+  deploy do have one; the deploy warns when there are any (§1.5).
 - **Removal cannot erase copies.** A delivered key is never revoked. Keys,
   plaintext and ciphertext a former member already obtained remain with it,
   and old versions stay readable to whoever holds their keys.

@@ -377,8 +377,11 @@ app therefore moves in two deploys:
    Declaring the space table also records its `creatorSince` time (spec
    §1.5): the creators of rows that exist now gain no right to add
    themselves, and only rows created from then on have a creator who may
-   (spec R12). Encryption therefore makes nobody a permanent owner of an
-   existing row. A space supports at
+   (spec R12). `jazz-tools` writes the time when it is run, so regenerate
+   it just before this deploy: rows created in production between the two
+   still have a creator who may add itself, and the deploy warns, with
+   their number, when the table holds such rows. Apart from those,
+   encryption makes nobody a permanent owner of an existing row. A space supports at
    most 1,000 member accounts (spec §3.8): a space row that more accounts
    read today needs a narrower readership or another space table before it
    can be encrypted. The client refuses member rows beyond the limit; a
