@@ -128,18 +128,7 @@ pub enum NodeRole {
     Core,
 }
 
-/// How much the server trusts a link's commits, chosen at admission.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CommitUnitTrust {
-    /// An end-user session: every read and write is checked against the
-    /// table policies for its identity.
-    Session,
-    /// An authenticated backend. It is served with full access.
-    TrustedBackend,
-    /// An authenticated administrative or authority link, served with full
-    /// access.
-    TrustedAuthority,
-}
+pub use crate::portable::admission::{CommitUnitTrust, ServerLinkAdmission};
 
 /// Authority endpoints and features negotiated for one connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -152,25 +141,6 @@ pub struct ConnectionSessionContext {
     pub link_identity: AuthorSubject,
     /// The negotiated wire features.
     pub negotiated_features: WireFeatures,
-}
-
-/// Capability selected by the server after authenticating a WebSocket and
-/// negotiating its features.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ServerLinkAdmission {
-    /// A normal session or backend link.
-    #[default]
-    OrdinarySession,
-    /// Host-verified SYSTEM authority credential permitting scoped query
-    /// delegation. On SQLite it is served as a trusted SYSTEM link; the sync
-    /// protocol cannot express a delegated scope yet.
-    AuthorityQueryDelegate,
-    /// A durable relay for exactly the one session authenticated by this
-    /// connection. On SQLite it is served as that session.
-    ScopeIsolatedClientRelay {
-        /// Fresh server-issued capability epoch for this accepted connection.
-        admission_epoch: u64,
-    },
 }
 
 /// Opaque handle for one admitted session.
