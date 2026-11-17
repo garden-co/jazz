@@ -218,11 +218,10 @@ returned.
   stages the space creation (spec §3.2) in the same transaction as the row
   write, and the authority accepts it only from a session that may read and
   update the space row. A refusal fails that transaction alone. A refusal
-  of the root itself suppresses automatic creation of that space on the
-  device, so its later encrypted writes to the space are refused
-  `space-pending` until a valid root exists or the suppression is lifted
-  (an explicit `createSpace`, or a visible change of the account's member
-  rows or the space row, spec §3.2). Within one transaction the row is never
+  of the root itself stops automatic creation of that space on the device
+  while the client runs, so its later encrypted writes to the space are
+  refused `space-pending` until a valid root exists or an explicit
+  `createSpace` succeeds (spec §3.2). Within one transaction the row is never
   observable encrypted under a space that was not accepted.
 - A decrypt writes plaintext. It is refused unless the deploy confirmed the
   decrypt (§5).
@@ -246,11 +245,11 @@ overwrite. A sweeper starts at a random row of its space, so several sweepers
 rarely collide. Sweeping needs Jazz update permission on the rows; a sweeper
 without it skips them and they appear in progress. A sweeper that may update
 a space row without a space creates the space in its first conversion
-transaction (§3.4), unless creation of that space is suppressed on its
-device (spec §3.2). The client does not evaluate permissions: a sweeper
+transaction (§3.4), unless creation of that space was refused on its
+device while the client runs (spec §3.2). The client does not evaluate permissions: a sweeper
 learns that it may not create or convert from refusals. After a refused
-conversion it stops sweeping the space; after a refused creation it follows
-the creation suppression of spec §3.2. The repair of a refused or lost
+conversion it stops sweeping the space; after a refused creation it makes
+no further automatic attempt (spec §3.2). The repair of a refused or lost
 creation (spec §3.2) uses the same serializable, bounded, re-reading
 pattern as this sweep.
 
