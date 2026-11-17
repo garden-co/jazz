@@ -107,6 +107,19 @@ export const ciPartitions = Object.freeze({
   lint: Object.freeze([
     command("format check", "pnpm", ["format:check"]),
     command("lint", "pnpm", ["lint"]),
+    // jazz-server's engine without its native host (what a Durable Object
+    // host runs), with its tests; wasm32 is checked where the wasm32
+    // toolchain is (build-jazz-packages).
+    command("jazz-server without its native host", "cargo", [
+      "clippy",
+      "-p",
+      "jazz-server",
+      "--no-default-features",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings",
+    ]),
     // Ready PRs run only this partition, so it carries the TypeScript
     // typecheck too. The binding declarations it needs are committed.
     command("jazz-tools typecheck", "pnpm", ["--filter", "jazz-tools", "check"]),

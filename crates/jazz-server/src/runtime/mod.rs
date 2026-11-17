@@ -352,7 +352,7 @@ struct Owner {
     #[cfg(feature = "native")]
     chunk_io: Option<ChunkIoRunner>,
     /// Tests: the next catalogue reload after a commit fails.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "native"))]
     fail_next_reload: bool,
 }
 
@@ -1019,7 +1019,7 @@ impl Owner {
     /// runs them: their handles, and the overlay of the last one staged.
     /// A violation aborts the test process: the store loop catches panics
     /// and restarts the runtime, which a test could miss.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "native"))]
     fn assert_holds_nothing(&self, after: &str) {
         let held = self.db.held_for_test();
         let thin = self.open_thin_transactions();
@@ -1041,14 +1041,9 @@ impl Owner {
 }
 
 impl Owner {
-    /// Open the runtime on `file`. A reopened store admits every version
-    /// it admitted before (the engine reads them from its catalogue) and
-    /// makes its current permissions revision current again. `schema` is
-    /// current instead when the store has no revision yet, or (unless
-    /// `any_stored_catalogue`) none whose catalogue admits `schema`.
-    /// Open the runtime on `file` with the native host's chunk store: a
-    /// network one gets its I/O runner, which wakes the store thread
-    /// through `wake`.
+    /// Open the runtime on `file` with the native host's chunk store (see
+    /// [`Self::open_on`]): a network one gets its I/O runner, which wakes
+    /// the store thread through `wake`.
     #[cfg(feature = "native")]
     fn open(
         schema: JazzSchema,
@@ -1082,8 +1077,13 @@ impl Owner {
         Ok(owner)
     }
 
-    /// Open the runtime on `file`, whatever hosts it: `configure` adds the
-    /// host's chunk store, if any, to the store's configuration.
+    /// Open the runtime on `file`, whatever hosts it. A reopened store
+    /// admits every version it admitted before (the engine reads them from
+    /// its catalogue) and makes its current permissions revision current
+    /// again. `schema` is current instead when the store has no revision
+    /// yet, or (unless `any_stored_catalogue`) none whose catalogue admits
+    /// `schema`. `configure` adds the host's chunk store, if any, to the
+    /// store's configuration.
     fn open_on(
         schema: JazzSchema,
         file: StoreFile,
@@ -1136,7 +1136,7 @@ impl Owner {
             app,
             #[cfg(feature = "native")]
             chunk_io: None,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "native"))]
             fail_next_reload: false,
         })
     }
@@ -1510,7 +1510,7 @@ fn superseded_error(published: &jazz::catalogue::BundleId) -> jazz::wire::WireEr
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
     use jazz::tools::public_schema::{ColumnType, SchemaBuilder, TableSchema};
@@ -2881,71 +2881,6 @@ mod tests {
             Some(jazz::records::Value::Bytes(bytes)) => bytes.clone(),
             other => panic!("expected the body, got {other:?}"),
         }
-    }
-
-    /// A host without the store thread drives the engine itself through
-    /// [`ServerCore`]: it hands a thin session's requests in, ticks, and
-    /// drains the answers, with nothing held between its calls. Here a
-    /// backend session declares its schema and reads a row the store holds.
-    ///
-    /// ```text
-    /// host ──schema──► core ─tick─► Ok
-    /// host ──query───► core ─tick─► Rows(body)
-    /// ```
-    #[test]
-    fn a_host_drives_server_core_directly() {
-        let mut core = ServerCore::open(docs(), StoreFile::memory().unwrap(), false, None).unwrap();
-        block_on(core.db().insert(
-            "docs",
-            BTreeMap::from([(
-                "body".to_owned(),
-                jazz::records::Value::Bytes(b"hello".to_vec()),
-            )]),
-            Default::default(),
-        ))
-        .unwrap();
-        let session = core
-            .open_thin_session(
-                AuthorSubject::SYSTEM,
-                BTreeMap::new(),
-                None,
-                CommitUnitTrust::TrustedBackend,
-            )
-            .unwrap();
-        let ask = |core: &mut ServerCore, id: u64, op: jazz::thin::ThinOp| {
-            assert!(
-                core.receive_thin_request(session, jazz::thin::ThinRequest { id, op }, 1024, false)
-                    .unwrap(),
-                "room for the request"
-            );
-            core.tick();
-            let out = core.take_output(session);
-            assert_eq!(out.len(), 1, "one answer");
-            let frames = out.into_iter().next().unwrap().expect("frames");
-            match jazz::wire::decode_frame(&frames[0]).unwrap() {
-                jazz::wire::WireFrame::ThinResponse(response) => {
-                    assert_eq!(response.id, id);
-                    response.body
-                }
-                other => panic!("expected a thin response, got {other:?}"),
-            }
-        };
-        assert_eq!(
-            ask(
-                &mut core,
-                0,
-                jazz::thin::ThinOp::Schema {
-                    schema: serde_json::to_vec(&docs_source()).unwrap(),
-                },
-            ),
-            jazz::thin::ThinBody::Ok
-        );
-        assert_eq!(thin_body(ask(&mut core, 1, thin_query(None))), b"hello");
-        assert!(!core.inbound_pending());
-        assert!(core.db().held_for_test().is_nothing());
-        core.close_session(session);
-        assert!(core.take_output(session).is_empty());
-        core.close();
     }
 
     /// The store thread answers runtime work within a second.

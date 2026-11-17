@@ -434,7 +434,7 @@ impl Owner {
     /// Thin-client transactions open on this core, across its sessions:
     /// the only thing it may hold between the calls it serves, until the
     /// core stops running them (the app's backend runs them instead).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "native"))]
     pub(super) fn open_thin_transactions(&self) -> usize {
         self.thin.values().map(|thin| thin.transactions.len()).sum()
     }

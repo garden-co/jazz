@@ -1196,12 +1196,7 @@ impl ServerRuntimeHandle {
         }
         // Trusted links are served with full access; a session reads and
         // writes under its identity's policies.
-        let served_as = match trust {
-            CommitUnitTrust::Session => identity,
-            CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => {
-                AuthorSubject::SYSTEM
-            }
-        };
+        let served_as = trust.served_as(identity);
         let session = ServerSession(self.inner.next_session.fetch_add(1, Ordering::Relaxed));
         let (output, receiver) = tokio_mpsc::unbounded_channel();
         let egress = Arc::new(Egress::default());
@@ -1349,12 +1344,7 @@ impl ServerRuntimeHandle {
         bundle: Option<jazz::catalogue::BundleId>,
         trust: CommitUnitTrust,
     ) -> Result<ServerSession, SessionOpenError> {
-        let served_as = match trust {
-            CommitUnitTrust::Session => identity,
-            CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => {
-                AuthorSubject::SYSTEM
-            }
-        };
+        let served_as = trust.served_as(identity);
         let session = ServerSession(self.inner.next_session.fetch_add(1, Ordering::Relaxed));
         let (output, receiver) = tokio_mpsc::unbounded_channel();
         let egress = Arc::new(Egress::default());
