@@ -373,8 +373,12 @@ app therefore moves in two deploys:
    write its member rows, while the read rule stays as it is (the deploy
    warns). The app then writes the member rows: for each space row, one row
    per account that should keep reading it, typically from its own
-   membership data, from a client of an updater or a trusted backend. A
-   space row's creator may also add itself (spec R12). A space supports at
+   membership data, from a client of an updater or a trusted backend.
+   Declaring the space table also records its `creatorSince` time (spec
+   §1.5): the creators of rows that exist now gain no right to add
+   themselves, and only rows created from then on have a creator who may
+   (spec R12). Encryption therefore makes nobody a permanent owner of an
+   existing row. A space supports at
    most 1,000 member accounts (spec §3.8): a space row that more accounts
    read today needs a narrower readership or another space table before it
    can be encrypted. The client refuses member rows beyond the limit; a

@@ -324,9 +324,12 @@ replay. "Before `p`" always means strictly earlier position.
   separated from editing the space row, so fields that members other than
   the managers may change belong in another table (§1.5).
 - **Space creator.** The account that created the space row (its
-  `$createdBy.account`). It may add itself as a member at any time, even
-  without update permission and even after it was removed (R12), so it is
-  a permanent owner of the space's membership.
+  `$createdBy.account`), if the row was created at or after its space
+  table's `creatorSince` time (§1.5). It may add itself as a member at any
+  time, even without update permission and even after it was removed (R12),
+  so it is a permanent owner of the space's membership. A row created
+  before that time, such as one that existed before its table became a
+  space table, has no space creator.
 - **Key version.** A space's key history is a chain: the root version, then
   one per **rotation** (a successor). Each version has an epoch ID and a
   random 32-byte key, and wraps the previous version's key, so the newest key
@@ -587,7 +590,8 @@ state then. **member(a)** means: the members table has a row with the
 checked row's `scopeId` and `identifier` and `accountId = a` (an `Exists`
 over the members table, correlated with the checked row). **creator(row)**
 means: the space row exists, not deleted, as the checking transaction sees
-it, and its `$createdBy.account` is the session account (an `Exists` over
+it, its `$createdBy.account` is the session account, and its `$createdAt`
+is at or after the space table's `creatorSince` (§1.5) (an `Exists` over
 the space table reached through the same `(scopeId, identifier)` link; it
 reads the space row as raw evidence and does not apply the space table's
 read policy).
@@ -635,6 +639,20 @@ read policy).
   from a trusted backend: the space row's creator is then not a client
   account, and only updaters add members.
 
+  **Only rows created since `creatorSince`.** Every row has a
+  `$createdBy`, including rows that existed before encryption was switched
+  on. Without the time condition, switching encryption on would make the
+  account that once created each existing row its permanent owner, even an
+  account the application had since taken off it. So the clause covers
+  only rows created at or after the space table's `creatorSince` (§1.5).
+  `$createdAt` is maintained by the engine: no update changes it, a deleted
+  row's ID cannot be inserted again, and a restore revives the same row
+  with its creation time. It comes from the creating client's clock, so a
+  client can only date its own new rows: an earlier time loses it the
+  clause, and a later one gains it nothing it did not already have. A
+  creator whose clock is behind `creatorSince` when it creates a row is
+  refused the clause for that row; an updater adds it instead.
+
   Required tests: a fresh space row and its creator's member row in one
   transaction are accepted, in both insert orders, in mergeable,
   serializable and handle transactions; the same transaction with the
@@ -647,7 +665,10 @@ read policy).
   deletes its own member rows, including when a further read conjunct
   (R13) hides the space row from it, and is accepted; such a member deleting
   another account's member row is refused; an updater deleting its own
-  member row is accepted.
+  member row is accepted; the creator of a space row created before
+  `creatorSince` adding itself is refused, and an updater adding it is
+  accepted; a restored space row keeps its creation time, and with it the
+  creator clause's answer.
 
 - R13. **Space row read rule.** Every space table that any encrypted table
   with at least one encrypted column names as its `scope` has a read
@@ -695,8 +716,9 @@ ignore a row that fails (§3.2–§3.4).
 
 An encrypted table's `encryption` entry names its space: `space` is the
 column holding the space row's ID (`id` for a table whose rows are their own
-spaces), and `scope` is the space table. Nothing else is declared in
-`jazz.app.json`. In `jazz.permissions.json`, the space table's read rule
+spaces), and `scope` is the space table. Nothing else is declared in the
+table's entry (the space table's `creatorSince` is set at the top level,
+below). In `jazz.permissions.json`, the space table's read rule
 comes from the members table (R13), and its update rule decides who changes
 members, creates and rotates:
 
@@ -728,7 +750,8 @@ written; it cannot pass through read and update of the project, which need
 the member row itself. If the same transaction also carries the space root
 (§3.2), the root passes R15 once the member row has passed, so the project,
 its first member and its root can be one transaction. The creator remains a
-permanent owner (R12): an application that must be able to remove a
+permanent owner of projects created since `creatorSince` (R12, §1.5): an
+application that must be able to remove a
 project's creator creates projects and their first member rows from a
 trusted backend. Every other account is added by an updater.
 
@@ -759,6 +782,17 @@ trusted backend. Every other account is added by an updater.
   `$createdBy.account = session.user`): such a member row cannot ground it
   (R12). The deploy warns when it can see an insert rule of a space table
   that reads `__e2ee_members` for the row being inserted.
+- **Creator start time.** The top-level `encryption` object gives each
+  space table a `creatorSince` time (ISO 8601, UTC, with milliseconds). The
+  creator clause (R12) covers only that table's rows created at or after
+  it. `jazz-tools` writes the current time when a table first becomes a
+  space table (first named as a `scope`), so rows that existed before then
+  give their creators no right to add themselves
+  ([migrations](E2EE_MIGRATIONS.md) §4.1). The deploy refuses a space table
+  without one. It refuses a change that moves it earlier than the deployed
+  time, which would give existing rows' creators the clause. It allows a
+  change that moves it later, with a warning: creators of rows in between
+  lose the clause.
 - **Space row update rule = managing members.** Whoever may update a space
   row may add any account to the space, remove any member, create the space
   and rotate its key (R12, R15, R16). In the example above only the
@@ -773,14 +807,20 @@ trusted backend. Every other account is added by an updater.
   reader, manages members. It cannot decide breadth in general and does not
   claim to.
 
-Application-wide encryption settings live in an optional top-level
-`encryption` object of `jazz.app.json`, beside `tables`: `allowAccountReset`
-(boolean, default `false`, §2.11) and `mechanisms` (selection and
-allow-list, §0). Like the per-table entries, it is client and deploy
+Application-wide encryption settings live in a top-level
+`encryption` object (optional until the app has a space table) of `jazz.app.json`, beside `tables`: `allowAccountReset`
+(boolean, default `false`, §2.11), `creatorSince` (one time per space
+table, above) and `mechanisms` (selection and allow-list, §0). Like the per-table entries, it is client and deploy
 metadata, outside the schema hash, carried in the deploy request:
 
 ```json
-{ "encryption": { "allowAccountReset": true }, "tables": { … } }
+{
+  "encryption": {
+    "allowAccountReset": true,
+    "creatorSince": { "projects": "2026-11-17T09:30:00.000Z" }
+  },
+  "tables": { … }
+}
 ```
 
 ## 2. Account and device lifecycle
@@ -2753,7 +2793,9 @@ Limits:
   every key, the history included. Removing it only until it re-adds itself
   is not exclusion. Applications that must be able to remove a space's
   creator create the space row and its first member row from a trusted
-  backend (§1.5).
+  backend (§1.5). Only rows created at or after the space table's
+  `creatorSince` have such a creator (§1.5), so switching encryption on
+  gives the creators of existing rows no right to add themselves.
 - **Removal cannot erase copies.** A delivered key is never revoked. Keys,
   plaintext and ciphertext a former member already obtained remain with it,
   and old versions stay readable to whoever holds their keys.
