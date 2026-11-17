@@ -100,6 +100,20 @@ describe.skipIf(!hostBuilt && !process.env.CI)("clients of a Durable Object core
     expect(seen.map((todo) => todo.title)).toEqual(["made as a guest"]);
   });
 
+  it("keeps one guest's rows from another, by the app's permissions", async () => {
+    const { client } = await appOn((request) => acceptDeviceAccounts(request));
+    const first = await client("device");
+    const second = await client("device");
+    expect(first.session!.user).not.toBe(second.session!.user);
+    await first.db
+      .insert(app.todos, { title: "first's", owner: first.session!.user! })
+      .wait({ tier: "global" });
+    expect((await first.db.all(app.todos, { tier: "remote" })).map((t) => t.title)).toEqual([
+      "first's",
+    ]);
+    expect(await second.db.all(app.todos, { tier: "remote" })).toEqual([]);
+  });
+
   it("refuses a local-first guest the app doesn't accept", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const { client } = await appOn(() => null);
