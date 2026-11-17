@@ -582,7 +582,9 @@ export function watchBackendUser<Client>(
   const watch: BackendWatch = {
     authRefused(reason) {
       refusedPending = true;
-      if (reason === "revoked") revokedPending = true;
+      // A refusal that says why decides: a later one for another reason
+      // (a stale cookie) doesn't sign a background tab out.
+      if (reason !== undefined) revokedPending = reason === "revoked";
       check(true);
     },
     connected: resetRefusal,

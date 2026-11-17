@@ -340,6 +340,7 @@ export class ThinRuntime implements Runtime {
   private readonly streamsInFlight = new Set<Promise<void>>();
   private mutationErrorCallback?: (event: MutationErrorEvent) => void;
   private authFailureCallback?: (reason: string) => void;
+  private authRestoredCallback?: () => void;
 
   constructor(schema: WasmSchema, options: ThinRuntimeOptions = {}) {
     this.schema = schema;
@@ -405,6 +406,10 @@ export class ThinRuntime implements Runtime {
 
   onAuthFailure(callback: (reason: string) => void): void {
     this.authFailureCallback = callback;
+  }
+
+  onAuthRestored(callback: () => void): void {
+    this.authRestoredCallback = callback;
   }
 
   onMutationError(callback: (event: MutationErrorEvent) => void): void {
@@ -496,6 +501,8 @@ export class ThinRuntime implements Runtime {
         this.attempt = 0;
         this.bound = true;
         this.reauthenticating = false;
+        // Admitted: whatever refused the credential before holds no more.
+        this.authRestoredCallback?.();
         this.refused = false;
         this.refusal = undefined;
         this.stopped = false;

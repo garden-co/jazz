@@ -884,6 +884,27 @@ it("keeps a revoked background tab whose second answer names the user again", as
   await t.session.close();
 });
 
+it("leaves a background tab to the next focus when a later refusal isn't a revocation", async () => {
+  vi.useFakeTimers();
+  const t = await setup(user("alice"), { confirmMs: 2_000 });
+  t.signIn(user("alice"));
+  await vi.advanceTimersByTimeAsync(0);
+  // Revoked to make her sign in again: the backend still names her.
+  t.watch.authRefused("revoked");
+  await vi.advanceTimersByTimeAsync(0);
+  expect(t.reconnect).toHaveBeenCalledOnce();
+  // Refused again before connecting, now for a stale cookie.
+  t.signIn(null);
+  t.watch.authRefused("expired");
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(t.session.getSnapshot().status).toBe("ready");
+  t.focus();
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(t.session.getSnapshot().status).toBe("signed-out");
+  t.watch.stop();
+  await t.session.close();
+});
+
 it("leaves a background tab refused for another reason to the next focus", async () => {
   vi.useFakeTimers();
   const t = await setup(user("alice"), { confirmMs: 2_000 });

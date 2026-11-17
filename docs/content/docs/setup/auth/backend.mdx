@@ -105,7 +105,10 @@ after your sign-out (see [Signing out in every tab](#signing-out-in-every-tab)).
 says the session was revoked, so a "no one" answer there signs the user out as in a tab in view
 (confirmed by a second answer two seconds later, after `onSignedOut`). Until then the link reads
 `{ state: "offline", reason: "auth", authReason: "revoked" }` in `db.getSyncStatus()`, and writes
-made meanwhile stay pending: stop taking edits from there if your app shouldn't accept them.
+made meanwhile stay pending: stop taking edits from there if your app shouldn't accept them. A
+connection the server refuses because the user's account identity was retired reads as `revoked`
+too, and signs out the same way. Once the tab is admitted again (your backend still names the
+user), the reason is forgotten.
 
 ### Keep auth middleware off Jazz's routes
 
