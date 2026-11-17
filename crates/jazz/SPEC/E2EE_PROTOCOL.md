@@ -633,7 +633,10 @@ read policy).
 
   Required tests: a fresh space row and its creator's member row in one
   transaction are accepted, in both insert orders, in mergeable,
-  serializable and handle transactions; the same transaction with the
+  serializable and handle transactions (a handle transaction staged at the
+  authority checks each write as it is staged, so there the space row is
+  inserted first; both orders hold for a unit uploaded to it); the same
+  transaction with the
   member row admissible only through read(row) and update(row) (the creator
   clause removed) is refused, pinning the grounding rule; a session that is
   neither the creator nor an updater adding itself to an existing space is
