@@ -1432,3 +1432,38 @@ fn an_older_read_of_the_chain_never_replaces_a_newer_one() {
     assert_eq!(known.epochs().len(), 2);
     assert!(held.incomplete(&address), "the device still lacks {v1}");
 }
+
+/// Once the device has read the space's chain, a write uses only keys of
+/// that chain's root: a creation that lost the race, accepted or still
+/// pending, never takes a write, whatever its root ID or depth.
+#[test]
+fn a_write_uses_only_the_known_roots_keys() {
+    let world = world(27);
+    let address = space(ROW);
+    let chain = chain_of(&world, ROW);
+    let space_root = chain.root.row.id.clone();
+    let lost = root_from(&world, ROW, root_random(4, 1, 6));
+    assert!(lost.root.id < space_root);
+    // Before any read of the chain, the pending creation writes.
+    let mut pending = HeldKeys::new();
+    pending.hold(creation(&world, &lost, "tx-lost")).unwrap();
+    assert_eq!(write_key(&pending, &address).root_id(), lost.root.id);
+    // The chain names another root: the race is lost, and the space's key
+    // is acquired before writing.
+    pending.observe_chain(&chain);
+    assert!(matches!(
+        pending.write_key(&address, false),
+        WriteChoice::NeedsKey
+    ));
+    pending.hold(acquire_held(&world, ALICE, ROW)).unwrap();
+    assert_eq!(write_key(&pending, &address).root_id(), space_root);
+    // A creation once taken for the root, against the chain's root at the
+    // same depth: the smaller root ID does not win.
+    let mut accepted = HeldKeys::new();
+    let mut own = creation(&world, &lost, "tx-lost");
+    own.settle(CreationFate::Accepted, Some(&lost.root.id));
+    accepted.hold(own).unwrap();
+    accepted.hold(acquire_held(&world, ALICE, ROW)).unwrap();
+    accepted.observe_chain(&chain);
+    assert_eq!(write_key(&accepted, &address).root_id(), space_root);
+}

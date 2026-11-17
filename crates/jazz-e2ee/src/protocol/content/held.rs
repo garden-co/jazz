@@ -503,7 +503,9 @@ impl HeldKeys {
 
     /// The key a write to `address` uses (§5.2): the held key of greatest
     /// depth that is not `refused`; at equal depth a published key wins
-    /// over an unpublished one, then the smaller root ID. Without one, the
+    /// over an unpublished one, then the smaller root ID. Once the device
+    /// has read the address's chain, only keys of that chain's root count:
+    /// a creation that lost to it never takes a write. Without one, the
     /// write fails `space-pending` when `creation_refused` (this device's
     /// creation of the space was refused while the client runs, §3.2) and
     /// no valid root of the address is known; otherwise it needs a key.
@@ -513,7 +515,11 @@ impl HeldKeys {
         creation_refused: bool,
     ) -> WriteChoice<'k> {
         let mut best: Option<WriteKey<'k>> = None;
+        let known_root = self.known.get(address).map(KnownChain::root_id);
         for space in self.roots_of(address) {
+            if known_root.is_some_and(|root_id| root_id != space.root.id) {
+                continue;
+            }
             for (depth, mark) in space.held() {
                 if *mark == KeyMark::Refused {
                     continue;
