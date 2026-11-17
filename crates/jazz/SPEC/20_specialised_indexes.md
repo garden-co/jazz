@@ -384,8 +384,10 @@ ascending is best first: text binds the negated sum.
   by one expression of `+`, `-` and `*` in a fixed order (IEEE-754 binary64,
   correctly rounded on every target). Smaller is better. Chord distance is
   monotonic in great-circle distance.
-- **vector:** computed in Rust in index order with f32 products accumulated
-  in f64 sequentially, never fused (no FMA) and never reassociated (SIMD
+- **vector:** computed in Rust in index order: each f32 element is widened
+  to f64, then multiplied (for `l2`, subtracted and then squared), and the
+  products are summed in f64 sequentially, never fused (no FMA) and never
+  reassociated (SIMD
   implementations must reproduce the sequential result exactly or not be
   used). `cosine` and `dot` are larger-better similarities stored negated
   so that every vector score is smaller-better; `l2` is the squared distance.
