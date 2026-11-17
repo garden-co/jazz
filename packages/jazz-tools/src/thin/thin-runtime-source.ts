@@ -44,8 +44,9 @@ export class ThinRuntimeSource extends RuntimeSource<DbConfig> {
     config,
     schema,
     onAuthFailure,
+    onAuthRestored,
   }: RuntimeClientContext<DbConfig>): JazzClient {
-    const runtimeOptions: ConnectRuntimeOptions = { onAuthFailure };
+    const runtimeOptions: ConnectRuntimeOptions = { onAuthFailure, onAuthRestored };
     const context: AppContext = {
       appId: clientScope(config),
       accountId: config.accountId,
