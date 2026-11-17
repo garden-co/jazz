@@ -5241,7 +5241,7 @@ impl Inner {
         };
         let (part, column) = scorer.payload();
         let shadow = crate::ix::shadow(&index.prefix, part);
-        let cap = crate::ix::VECTOR_EXACT_MAX;
+        let cap = crate::ix::vector_cap();
         let (sql, plain, params) = self
             .read_ctx(prepared, policy, claims, read)
             .compile_candidates(&prepared.query, &shadow, column, cap + 1)?;

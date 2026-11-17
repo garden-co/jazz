@@ -61,6 +61,25 @@ const DRAIN_BATCH: usize = 512;
 /// Most candidate rows a Rust-scored search scores (SPEC 20.5).
 pub(crate) const VECTOR_EXACT_MAX: usize = 50_000;
 
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static VECTOR_CAP: std::cell::Cell<usize> = const { std::cell::Cell::new(VECTOR_EXACT_MAX) };
+}
+
+/// Lower this thread's vector candidate cap, for a test to reach it.
+#[cfg(any(test, feature = "testing"))]
+pub fn set_vector_cap_for_test(cap: Option<usize>) {
+    VECTOR_CAP.with(|c| c.set(cap.unwrap_or(VECTOR_EXACT_MAX)));
+}
+
+/// The vector candidate cap in force.
+pub(crate) fn vector_cap() -> usize {
+    #[cfg(any(test, feature = "testing"))]
+    return VECTOR_CAP.with(std::cell::Cell::get);
+    #[cfg(not(any(test, feature = "testing")))]
+    VECTOR_EXACT_MAX
+}
+
 /// The name prefix of an index's shadow tables.
 pub(crate) fn prefix(stored_table: &str, index: &str) -> String {
     format!("_jazz_ix_{stored_table}__{index}")
@@ -238,8 +257,9 @@ pub(crate) fn candidates_over_cap(table: &str, index: &str) -> Error {
         ErrorCode::Query,
         Reason::VectorCandidatesOverCap,
         format!(
-            "a search on index `{table}.{index}` would score more than {VECTOR_EXACT_MAX} \
-             candidate rows; narrow the query's other filters"
+            "a search on index `{table}.{index}` would score more than {} candidate rows; \
+             narrow the query's other filters",
+            vector_cap()
         ),
     )
 }
