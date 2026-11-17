@@ -833,6 +833,10 @@ struct Inner {
     inherited_heads: RefCell<InheritedHeads>,
     /// The open transaction's seq and the tables it wrote.
     tx: Option<(u64, BTreeSet<String>)>,
+    /// The identity the open callback transaction writes as. A write as
+    /// any other identity while it is open would join its commit, and
+    /// upload under its author and claims, so it is refused.
+    tx_identity: Option<WriteIdentity>,
     publications: Vec<SchemaPublication>,
     /// Set once connected upstream: this store is a replica.
     client: Option<sync::Client>,
@@ -892,10 +896,6 @@ struct Inner {
     since_tick: Vec<(String, RowUuid, Vec<u8>)>,
     /// Ops of the open local transaction, for upload, by stored names.
     pub(crate) capture: Vec<StagedOp>,
-    /// The claims the open local transaction's session writes were staged
-    /// with: its upload carries these, not whatever its author's claims
-    /// are by the time it commits.
-    pub(crate) capture_claims: Option<BTreeMap<String, Value>>,
     /// Images a replica dropped since the last dispatch (evictions and
     /// rebases), for keyed invalidation.
     gone: RefCell<Vec<sync::Image>>,
@@ -2068,6 +2068,7 @@ impl Db {
                 trusted_rows: RefCell::new(BTreeMap::new()),
                 inherited_heads: RefCell::new(HashMap::new()),
                 tx: None,
+                tx_identity: None,
                 publications: Vec::new(),
                 client: None,
                 non_durable: false,
@@ -2088,7 +2089,6 @@ impl Db {
                 accepted: 0,
                 since_tick: Vec::new(),
                 capture: Vec::new(),
-                capture_claims: None,
                 gone: RefCell::new(Vec::new()),
                 migrations: config.migrations,
                 withheld: std::cell::Cell::new(withheld > 0),
@@ -3559,6 +3559,15 @@ impl Db {
     /// upload: it is recorded for the authority, which decides its fate.
     fn write_op(&self, mut op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
         self.inner().require_mutation_admission()?;
+        // A write while a callback transaction is open joins its commit:
+        // only one made as that transaction's identity may (its own).
+        if let (Some(open), Some(identity)) = (self.inner().tx_identity, op.identity())
+            && identity != open
+        {
+            return Err(unsupported(
+                "a write as another identity while a transaction is open",
+            ));
+        }
         self.with_upload(|| {
             let table = op.table().to_owned();
             let (prior, mark) = {
@@ -3742,6 +3751,7 @@ impl Db {
             inner.changed.borrow_mut().clear();
             let seq = inner.fresh_seq();
             inner.tx = Some((seq, BTreeSet::new()));
+            inner.tx_identity = Some(identity);
         }
         // Until the unit commits or is rolled back below, dropping this
         // future (cancellation) or unwinding out of the callback rolls it
@@ -3761,10 +3771,8 @@ impl Db {
         let changed = {
             let mut inner = self.inner();
             let (seq, tables) = inner.tx.take().expect("open transaction");
-            captured = (
-                std::mem::take(&mut inner.capture),
-                inner.capture_claims.take(),
-            );
+            inner.tx_identity = None;
+            captured = std::mem::take(&mut inner.capture);
             prior = inner.seq;
             match &result {
                 Ok(_) => {
@@ -3786,9 +3794,10 @@ impl Db {
         let value = result?;
         let (seq, _) = changed.expect("committed");
         // The upload record joins the transaction's SQLite savepoint.
-        let (captured, claims) = captured;
-        let recorded =
-            self.record_stored_upload(captured, seq, sync::Kind::Mergeable, None, claims);
+        // A callback transaction writes as the database or attributed
+        // (`transaction_as`), never as a session, so no session claims
+        // travel with it.
+        let recorded = self.record_stored_upload(captured, seq, sync::Kind::Mergeable, None, None);
         if let Err(error) = recorded {
             guard.armed = false;
             self.inner().roll_back_callback_tx(Some(prior))?;
@@ -4764,8 +4773,8 @@ impl Inner {
     /// so it closes mutation admission.
     fn roll_back_callback_tx(&mut self, restore_seq: Option<u64>) -> Result<(), Error> {
         self.tx = None;
+        self.tx_identity = None;
         self.capture.clear();
-        self.capture_claims = None;
         self.writer = None;
         self.clear_derived();
         if let Some(seq) = restore_seq {
@@ -10382,6 +10391,7 @@ impl Db {
     }
 
     pub async fn commit_mergeable_handle(&self, id: OpenTransactionId) -> Result<TxReceipt, Error> {
+        self.refuse_commit_in_callback_tx()?;
         let batch = self.take_batch(id)?;
         if !matches!(batch.kind, BatchKind::Mergeable) {
             return Err(rejected(format!("transaction {id:?} is not mergeable")));
@@ -10400,6 +10410,7 @@ impl Db {
         &self,
         id: OpenTransactionId,
     ) -> Result<TxReceipt, Error> {
+        self.refuse_commit_in_callback_tx()?;
         let batch = self.take_batch(id)?;
         let BatchKind::Serializable {
             snapshot,
@@ -10559,8 +10570,23 @@ impl Db {
         self.with_upload(|| self.commit_ops_now(batch, kind))
     }
 
+    /// A transaction handle's commit while a callback transaction is open
+    /// would join that transaction's commit (and be undone with it), so it
+    /// is refused; the handle stays open, to commit once the callback
+    /// transaction has finished.
+    fn refuse_commit_in_callback_tx(&self) -> Result<(), Error> {
+        if self.inner().tx.is_some() {
+            return Err(unsupported(
+                "committing a transaction while a callback transaction is open",
+            ));
+        }
+        Ok(())
+    }
+
     fn commit_ops_now(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
         self.inner().require_mutation_admission()?;
+        // Its handle's commit refused this before taking the batch.
+        self.refuse_commit_in_callback_tx()?;
         let ops = &batch.ops;
         let (seq, prior, mark) = {
             let mut inner = self.inner();

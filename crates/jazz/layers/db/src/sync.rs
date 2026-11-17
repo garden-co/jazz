@@ -8502,16 +8502,9 @@ impl Db {
                 .map(|op| inner.stored_op(op, &schema))
                 .collect::<Result<Vec<_>, _>>()?;
             if inner.tx.is_some() {
-                // The claims a session write is staged with travel with it.
-                if inner.capture_claims.is_none()
-                    && let Some(author) = ops
-                        .iter()
-                        .find(|op| op.is_session())
-                        .and_then(StagedOp::author)
-                {
-                    inner.capture_claims =
-                        Some(inner.claims.get(&author).cloned().unwrap_or_default());
-                }
+                // As in `record_upload_under_stored_view`: no session write
+                // joins a callback transaction.
+                debug_assert!(!ops.iter().any(StagedOp::is_session));
                 inner.capture.extend(ops);
                 return Ok(());
             }
@@ -8555,6 +8548,13 @@ impl Db {
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.tx.is_some() {
+            // No local write joins a callback transaction as a session:
+            // `Db::write_op` refuses a write as another identity, and a
+            // transaction handle's commit is refused while it is open. So
+            // no session claims travel with `capture`. (A relay's apply of a
+            // downstream upload during `tick` can still land here:
+            // jazz#6038.)
+            debug_assert!(!ops.iter().any(StagedOp::is_session) && claims.is_none());
             inner.capture.extend(ops);
             return Ok(());
         }

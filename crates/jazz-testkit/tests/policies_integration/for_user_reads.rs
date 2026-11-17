@@ -157,12 +157,11 @@ async fn for_user_transaction_writes_keep_their_handles_claims() {
                 .unwrap()
                 .2
                 .unwrap();
-            assert!(
+            assert_transaction_policy_denied(
                 backend
                     .wait_for_transaction(alone, DurabilityTier::GlobalServer)
                     .await
-                    .is_err(),
-                "o1's claims forbid an o2 doc"
+                    .expect_err("o1's claims forbid an o2 doc"),
             );
 
             let tx = in_o1.begin_mergeable_transaction().unwrap();
@@ -180,12 +179,13 @@ async fn for_user_transaction_writes_keep_their_handles_claims() {
                 .await
                 .unwrap();
             let committed = tx.commit().unwrap();
-            let outcome = backend
-                .wait_for_transaction(committed, DurabilityTier::GlobalServer)
-                .await;
-            assert!(
-                outcome.is_err(),
-                "the transaction is checked with the claims of the handle that staged it"
+            assert_transaction_policy_denied(
+                backend
+                    .wait_for_transaction(committed, DurabilityTier::GlobalServer)
+                    .await
+                    .expect_err(
+                        "the transaction is checked with the claims of the handle that staged it",
+                    ),
             );
             server.shutdown().await;
         })
