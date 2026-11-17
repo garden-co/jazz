@@ -1,5 +1,7 @@
 //! One application's account registry, kept as its current state in two
-//! host tables of the app's store file.
+//! host tables of the app's store file ([`crate::portable::accounts`]),
+//! over native's [`HostSql`]: lookups on the read connection, commands on
+//! the store's thread, durable before they answer.
 //!
 //! Nothing is cached: a login is one primary-key read of committed state,
 //! and a command reads what it needs, decides and writes in one savepoint
@@ -7,87 +9,31 @@
 //! second owner of the same file cannot decide from stale state.
 
 use jazz::account_registry::{
-    self, AccountCommand, AccountCommandResult, AccountError, AccountId, AccountState, Assignment,
-    LinkIntent, Principal,
+    AccountCommand, AccountCommandResult, AccountId, Assignment, Principal,
 };
-use jazz::storage::Storage;
-use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::kv::HostSql;
-
-/// The tables, created by the registry's first open. Principals keep their
-/// exact issuer and subject text; ids are 16 uuid bytes.
-const CREATE: &str = "
-CREATE TABLE IF NOT EXISTS _jazz_host_account_identities (
-    issuer TEXT NOT NULL,
-    subject TEXT NOT NULL,
-    account BLOB NOT NULL,
-    active INTEGER NOT NULL,
-    manage_identities INTEGER NOT NULL,
-    generation INTEGER NOT NULL,
-    PRIMARY KEY (issuer, subject)
-) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS _jazz_host_account_identities_by_account
-    ON _jazz_host_account_identities (account);
-CREATE TABLE IF NOT EXISTS _jazz_host_account_links (
-    nonce BLOB PRIMARY KEY,
-    account BLOB NOT NULL,
-    approver_issuer TEXT NOT NULL,
-    approver_subject TEXT NOT NULL,
-    approver_generation INTEGER NOT NULL,
-    candidate_issuer TEXT NOT NULL,
-    candidate_subject TEXT NOT NULL,
-    expires_at INTEGER NOT NULL,
-    completed INTEGER NOT NULL
-) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS _jazz_host_account_links_open_by_expiry
-    ON _jazz_host_account_links (expires_at) WHERE completed = 0;
-CREATE TABLE IF NOT EXISTS _jazz_host_account_session_revocations (
-    issuer TEXT NOT NULL,
-    subject TEXT NOT NULL,
-    revoked_before_ms INTEGER NOT NULL,
-    PRIMARY KEY (issuer, subject)
-) WITHOUT ROWID;
-";
+use crate::portable::accounts::{self as registry, unavailable};
+pub(crate) use crate::portable::accounts::{LoginOrRegisterResult, RegistryError};
 
 pub(crate) struct StoredAccountRegistry {
     storage: HostSql,
-}
-
-/// Outcome of an atomic login-or-register decision; creation is reported only
-/// after its durable boundary so owners can notify admission observers once.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LoginOrRegisterResult {
-    pub(crate) assignment: Assignment,
-    pub(crate) created: bool,
-}
-
-/// Registry denial or an unavailable/corrupt durable authority.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum RegistryError {
-    /// A valid request did not meet registry preconditions.
-    #[error(transparent)]
-    Decision(#[from] AccountError),
-    /// The store could not be read or written; the outcome of a write that
-    /// fails this way is unknown until the next read.
-    #[error("account registry unavailable: {0}")]
-    Unavailable(String),
 }
 
 impl StoredAccountRegistry {
     /// Open the registry in `storage`, creating its tables in a new file.
     pub(crate) fn open(storage: HostSql) -> Result<Self, RegistryError> {
         storage
-            .write(|conn| conn.execute_batch(CREATE).map_err(storage_error))
-            .map_err(unavailable)?;
+            .write(|conn| Ok(registry::open(conn)))
+            .map_err(unavailable)??;
         Ok(Self { storage })
     }
 
     /// Resolve current admission from committed state.
     pub(crate) fn login(&mut self, principal: &Principal) -> Result<Assignment, RegistryError> {
         self.storage
-            .read(|conn| Ok(account_registry::login(&mut Sql(conn), principal)))
+            .read(|conn| Ok(registry::login(conn, principal)))
             .map_err(unavailable)?
     }
 
@@ -98,27 +44,13 @@ impl StoredAccountRegistry {
         &mut self,
         principal: &Principal,
     ) -> Result<LoginOrRegisterResult, RegistryError> {
-        principal.validate(false)?;
-        match self.login(principal) {
-            Ok(assignment) => Ok(LoginOrRegisterResult {
-                assignment,
-                created: false,
-            }),
-            Err(RegistryError::Decision(AccountError::NotAssigned)) => {
-                let result = self.execute(&AccountCommand::Register {
-                    principal: principal.clone(),
-                    account: AccountId(Uuid::new_v4()),
-                })?;
-                let AccountCommandResult::Assignment(assignment) = result else {
-                    unreachable!("registration returns an assignment")
-                };
-                Ok(LoginOrRegisterResult {
-                    assignment,
-                    created: true,
-                })
-            }
-            Err(error) => Err(error),
-        }
+        let this = std::cell::RefCell::new(self);
+        registry::login_or_register_by(
+            principal,
+            || AccountId(Uuid::new_v4()),
+            |principal| this.borrow_mut().login(principal),
+            |command| this.borrow_mut().execute(command),
+        )
     }
 
     /// Decide and write in one savepoint: the result is durable when it
@@ -129,22 +61,41 @@ impl StoredAccountRegistry {
     ) -> Result<AccountCommandResult, RegistryError> {
         let command = command.clone();
         self.storage
-            .write(
-                move |conn| match account_registry::apply(&mut Sql(conn), &command) {
-                    Err(RegistryError::Unavailable(error)) => Err(storage_error(error)),
-                    decided => Ok(decided),
-                },
-            )
+            .write(move |conn| match registry::execute(conn, &command) {
+                Err(RegistryError::Unavailable(error)) => Err(registry::storage_error(error)),
+                decided => Ok(decided),
+            })
+            .map_err(unavailable)?
+    }
+
+    /// Record that `principal`'s sessions authenticated before `before_ms`
+    /// (Unix milliseconds, the app backend's clock) are revoked; see
+    /// [`registry::revoke_sessions`]. Returns the mark now in force.
+    pub(crate) fn revoke_sessions(
+        &mut self,
+        principal: &Principal,
+        before_ms: u64,
+    ) -> Result<u64, RegistryError> {
+        let principal = principal.clone();
+        let now_ms = unix_now_ms();
+        self.storage
+            .write(move |conn| {
+                registry::revoke_sessions(conn, &principal, before_ms, now_ms)
+                    .map_err(registry::storage_error)
+            })
+            .map_err(unavailable)
+    }
+
+    /// The latest session revocation mark recorded for `principal`.
+    pub(crate) fn sessions_revoked_before(
+        &mut self,
+        principal: &Principal,
+    ) -> Result<Option<u64>, RegistryError> {
+        self.storage
+            .read(|conn| Ok(registry::sessions_revoked_before(conn, principal)))
             .map_err(unavailable)?
     }
 }
-
-/// How long a session revocation mark is kept. A mark only refuses an
-/// admission whose `authenticatedAt` is older than it, and an admission
-/// states the time its own `authenticate` started, seconds before: live
-/// sessions are ended when the mark is recorded, not from the table. A day
-/// covers that and any clock skew between backend instances many times over.
-const REVOCATION_MARK_RETENTION_MS: u64 = 24 * 60 * 60 * 1000;
 
 fn unix_now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -154,246 +105,11 @@ fn unix_now_ms() -> u64 {
         })
 }
 
-impl StoredAccountRegistry {
-    /// Record that `principal`'s sessions authenticated before `before_ms`
-    /// (Unix milliseconds, the app backend's clock) are revoked. A later
-    /// mark never moves back: the stored mark is the latest one given.
-    /// Returns the mark now in force. Kept in its own table, which a core
-    /// without session revocation never reads; recording a mark forgets those
-    /// older than [`REVOCATION_MARK_RETENTION_MS`].
-    pub(crate) fn revoke_sessions(
-        &mut self,
-        principal: &Principal,
-        before_ms: u64,
-    ) -> Result<u64, RegistryError> {
-        let principal = principal.clone();
-        let forget_before = unix_now_ms().saturating_sub(REVOCATION_MARK_RETENTION_MS);
-        self.storage
-            .write(move |conn| {
-                conn.prepare_cached(
-                    "DELETE FROM _jazz_host_account_session_revocations \
-                     WHERE revoked_before_ms < ?1",
-                )
-                .and_then(|mut statement| statement.execute([signed(forget_before)?]))
-                .map_err(storage_error)?;
-                conn.prepare_cached(
-                    "INSERT INTO _jazz_host_account_session_revocations \
-                     (issuer, subject, revoked_before_ms) VALUES (?1, ?2, ?3) \
-                     ON CONFLICT (issuer, subject) DO UPDATE SET revoked_before_ms = \
-                     max(revoked_before_ms, excluded.revoked_before_ms) \
-                     RETURNING revoked_before_ms",
-                )
-                .and_then(|mut statement| {
-                    statement.query_row(
-                        params![principal.issuer, principal.subject, signed(before_ms)?],
-                        |row| row.get::<_, i64>(0),
-                    )
-                })
-                .map_err(storage_error)
-            })
-            .map_err(unavailable)
-            .and_then(unsigned)
-    }
-
-    /// The latest session revocation mark recorded for `principal`.
-    pub(crate) fn sessions_revoked_before(
-        &mut self,
-        principal: &Principal,
-    ) -> Result<Option<u64>, RegistryError> {
-        self.storage
-            .read(|conn| {
-                conn.prepare_cached(
-                    "SELECT revoked_before_ms FROM _jazz_host_account_session_revocations \
-                     WHERE issuer = ?1 AND subject = ?2",
-                )
-                .and_then(|mut statement| {
-                    statement
-                        .query_row(params![principal.issuer, principal.subject], |row| {
-                            row.get::<_, i64>(0)
-                        })
-                        .optional()
-                })
-                .map_err(storage_error)
-            })
-            .map_err(unavailable)?
-            .map(unsigned)
-            .transpose()
-    }
-}
-
-/// The registry state in the store, inside one read or write.
-struct Sql<'a>(&'a Storage);
-
-impl AccountState for Sql<'_> {
-    type Error = RegistryError;
-
-    fn assignment(&mut self, principal: &Principal) -> Result<Option<Assignment>, RegistryError> {
-        self.0
-            .prepare_cached(
-                "SELECT account, active, manage_identities, generation \
-                 FROM _jazz_host_account_identities WHERE issuer = ?1 AND subject = ?2",
-            )
-            .and_then(|mut statement| {
-                statement
-                    .query_row(params![principal.issuer, principal.subject], |row| {
-                        Ok((
-                            row.get::<_, Vec<u8>>(0)?,
-                            row.get::<_, bool>(1)?,
-                            row.get::<_, bool>(2)?,
-                            row.get::<_, i64>(3)?,
-                        ))
-                    })
-                    .optional()
-            })
-            .map_err(unavailable)?
-            .map(|(account, active, manage_identities, generation)| {
-                Ok(Assignment {
-                    account: AccountId(uuid(&account)?),
-                    active,
-                    manage_identities,
-                    generation: unsigned(generation)?,
-                })
-            })
-            .transpose()
-    }
-
-    fn account_assigned(&mut self, account: AccountId) -> Result<bool, RegistryError> {
-        self.0
-            .prepare_cached(
-                "SELECT EXISTS (SELECT 1 FROM _jazz_host_account_identities WHERE account = ?1)",
-            )
-            .and_then(|mut statement| statement.query_row([account.0.as_bytes()], |row| row.get(0)))
-            .map_err(unavailable)
-    }
-
-    fn link(&mut self, nonce: Uuid) -> Result<Option<LinkIntent>, RegistryError> {
-        self.0
-            .prepare_cached(
-                "SELECT account, approver_issuer, approver_subject, approver_generation, \
-                 candidate_issuer, candidate_subject, expires_at, completed \
-                 FROM _jazz_host_account_links WHERE nonce = ?1",
-            )
-            .and_then(|mut statement| {
-                statement
-                    .query_row([nonce.as_bytes()], |row| {
-                        Ok((
-                            row.get::<_, Vec<u8>>(0)?,
-                            Principal {
-                                issuer: row.get(1)?,
-                                subject: row.get(2)?,
-                            },
-                            row.get::<_, i64>(3)?,
-                            Principal {
-                                issuer: row.get(4)?,
-                                subject: row.get(5)?,
-                            },
-                            row.get::<_, i64>(6)?,
-                            row.get::<_, bool>(7)?,
-                        ))
-                    })
-                    .optional()
-            })
-            .map_err(unavailable)?
-            .map(
-                |(account, approver, approver_generation, candidate, expires_at, completed)| {
-                    Ok(LinkIntent {
-                        account: AccountId(uuid(&account)?),
-                        approver,
-                        approver_generation: unsigned(approver_generation)?,
-                        candidate,
-                        expires_at: unsigned(expires_at)?,
-                        completed,
-                    })
-                },
-            )
-            .transpose()
-    }
-
-    fn put_assignment(
-        &mut self,
-        principal: &Principal,
-        assignment: &Assignment,
-    ) -> Result<(), RegistryError> {
-        self.0
-            .prepare_cached(
-                "INSERT OR REPLACE INTO _jazz_host_account_identities \
-                 (issuer, subject, account, active, manage_identities, generation) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            )
-            .and_then(|mut statement| {
-                statement.execute(params![
-                    principal.issuer,
-                    principal.subject,
-                    assignment.account.0.as_bytes(),
-                    assignment.active,
-                    assignment.manage_identities,
-                    signed(assignment.generation)?,
-                ])
-            })
-            .map(|_| ())
-            .map_err(unavailable)
-    }
-
-    fn put_link(&mut self, nonce: Uuid, link: &LinkIntent) -> Result<(), RegistryError> {
-        self.0
-            .prepare_cached(
-                "INSERT OR REPLACE INTO _jazz_host_account_links \
-                 (nonce, account, approver_issuer, approver_subject, approver_generation, \
-                 candidate_issuer, candidate_subject, expires_at, completed) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            )
-            .and_then(|mut statement| {
-                statement.execute(params![
-                    nonce.as_bytes(),
-                    link.account.0.as_bytes(),
-                    link.approver.issuer,
-                    link.approver.subject,
-                    signed(link.approver_generation)?,
-                    link.candidate.issuer,
-                    link.candidate.subject,
-                    signed(link.expires_at)?,
-                    link.completed,
-                ])
-            })
-            .map(|_| ())
-            .map_err(unavailable)
-    }
-
-    fn prune_links(&mut self, now: u64) -> Result<(), RegistryError> {
-        self.0
-            .prepare_cached(
-                "DELETE FROM _jazz_host_account_links WHERE completed = 0 AND expires_at <= ?1",
-            )
-            .and_then(|mut statement| statement.execute([signed(now)?]))
-            .map(|_| ())
-            .map_err(unavailable)
-    }
-}
-
-fn uuid(bytes: &[u8]) -> Result<Uuid, RegistryError> {
-    Uuid::from_slice(bytes).map_err(unavailable)
-}
-
-/// Counters and Unix seconds are stored as SQLite's signed integers.
-fn unsigned(value: i64) -> Result<u64, RegistryError> {
-    u64::try_from(value).map_err(unavailable)
-}
-
-fn signed(value: u64) -> rusqlite::Result<i64> {
-    i64::try_from(value).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
-}
-
-fn storage_error(error: impl std::fmt::Display) -> jazz::db::Error {
-    jazz::db::Error::new(jazz::db::ErrorCode::Storage, error.to_string())
-}
-
-fn unavailable(error: impl std::fmt::Display) -> RegistryError {
-    RegistryError::Unavailable(error.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::portable::accounts::{REVOCATION_MARK_RETENTION_MS, storage_error};
+    use jazz::account_registry::AccountError;
 
     fn principal(subject: &str) -> Principal {
         Principal {

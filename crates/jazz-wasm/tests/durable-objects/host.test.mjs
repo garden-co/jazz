@@ -229,3 +229,72 @@ test("a backend publishes its schema to a Durable Object core, which then serves
     rmSync(persist, { recursive: true, force: true });
   }
 });
+
+test("a Durable Object core keeps its app's accounts", async () => {
+  const persist = mkdtempSync(join(tmpdir(), "jazz-do-accounts-"));
+  const open = () =>
+    new Miniflare({
+      modules: true,
+      scriptPath: join(here, "host-worker.mjs"),
+      modulesRoot: join(here, "../.."),
+      modulesRules: [
+        { type: "ESModule", include: ["**/*.js", "**/*.mjs"] },
+        { type: "CompiledWasm", include: ["**/*.wasm"] },
+      ],
+      compatibilityDate: "2026-04-01",
+      durableObjects: { JAZZ: { className: "JazzCore", useSQLite: true } },
+      durableObjectsPersist: persist,
+      bindings: { JAZZ_APP_ID: APP, JAZZ_CORE_SECRET: SECRET },
+    });
+  const post = (mf, path, headers, body) =>
+    mf.dispatchFetch(`http://core/apps/${APP}/admin/accounts/${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify(body),
+    });
+  const asBackend = { "X-Jazz-Backend-Secret": SECRET };
+  const asAdmin = { "X-Jazz-Admin-Secret": SECRET };
+  const alice = { identity: { issuer: "https://idp.example", subject: "alice" } };
+  let mf;
+  try {
+    mf = open();
+    // A backend vouches for its users: it registers and resolves them.
+    const registered = await post(mf, "login-or-register", asBackend, alice);
+    assert.equal(registered.status, 200);
+    const account = (await registered.json()).account;
+    const resolved = await post(mf, "resolve", asBackend, alice);
+    assert.equal((await resolved.json()).account, account);
+    // Refusals are sent without a body: the secret is checked first, and
+    // Node's fetch cannot answer a 401 to a request that streamed one.
+    const refused = (path, headers) =>
+      mf.dispatchFetch(`http://core/apps/${APP}/admin/accounts/${path}`, {
+        method: "POST",
+        headers,
+      });
+    // A wrong admin secret is not excused by a right backend one.
+    const wrong = await refused("resolve", { ...asBackend, "X-Jazz-Admin-Secret": "w".repeat(40) });
+    assert.equal(wrong.status, 401);
+    // Revoking sessions is the admin's.
+    assert.equal((await refused("revoke-sessions", asBackend)).status, 401);
+    const asked = { ...alice, revokedBefore: 1000 };
+    assert.equal((await post(mf, "revoke-sessions", asAdmin, asked)).status, 200);
+    const unknown = await post(mf, "nonsense", asAdmin, alice);
+    assert.equal(unknown.status, 404);
+    const malformed = await mf.dispatchFetch(`http://core/apps/${APP}/admin/accounts/resolve`, {
+      method: "POST",
+      headers: asBackend,
+      body: "{",
+    });
+    assert.equal(malformed.status, 400);
+    await mf.dispose();
+
+    // The next instance knows alice's account.
+    mf = open();
+    const again = await post(mf, "resolve", asBackend, alice);
+    assert.equal((await again.json()).account, account);
+    assert.equal(await (await mf.dispatchFetch("http://core/health")).text(), "ok");
+  } finally {
+    await mf?.dispose();
+    rmSync(persist, { recursive: true, force: true });
+  }
+});

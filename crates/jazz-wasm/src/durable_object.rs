@@ -931,6 +931,9 @@ mod smoke {
 /// send what `output` returns.
 mod core_host {
     use super::{durable_object_storage, ObjectStorage};
+    use jazz_server::portable::accounts::{
+        self, AccountRoute, RouteAuthority, RouteBody, RouteContext,
+    };
     use jazz_server::portable::admission::{
         admit_by_core_secret, UpgradeCredential, WebSocketPrelude,
     };
@@ -1013,6 +1016,8 @@ mod core_host {
         secret: String,
         sockets: HashMap<u32, Socket>,
         next_socket: u32,
+        /// The account registry's tables exist (made on first use).
+        accounts_open: bool,
     }
 
     /// What `accept` answers: the frames to send, and the socket's number
@@ -1060,6 +1065,7 @@ mod core_host {
                 secret,
                 sockets: HashMap::new(),
                 next_socket: 1,
+                accounts_open: false,
             };
             this.open_core(schema.as_deref())?;
             Ok(this)
@@ -1369,12 +1375,16 @@ mod core_host {
     pub struct HttpAnswer {
         pub status: u16,
         pub body: String,
+        /// The body's content type (empty for no body).
+        #[wasm_bindgen(js_name = contentType)]
+        pub content_type: String,
     }
 
     fn answer(status: u16, body: impl serde::Serialize) -> HttpAnswer {
         HttpAnswer {
             status,
             body: serde_json::to_string(&body).unwrap_or_default(),
+            content_type: "application/json".to_owned(),
         }
     }
 
@@ -1480,8 +1490,19 @@ mod core_host {
             body: &[u8],
         ) -> HttpAnswer {
             use jazz::tools::transport_error::ErrorResponse;
+            let account = route
+                .strip_prefix("admin/accounts/")
+                .and_then(AccountRoute::from_path);
             let checked = match (method, route) {
                 ("POST", "backend/admit") => credentials.backend(&self.secret),
+                // As native: the admin secret, or for the routes a backend
+                // vouches for, the backend's when no admin secret is sent.
+                ("POST", _) if account.is_some() => match account.expect("matched").authority() {
+                    RouteAuthority::VouchingBackend if credentials.admin_secret.is_none() => {
+                        credentials.backend(&self.secret)
+                    }
+                    _ => credentials.admin(&self.secret),
+                },
                 ("GET", "admin/migrations/graph" | "admin/bundles") | ("POST", "admin/bundles") => {
                     credentials.admin(&self.secret)
                 }
@@ -1497,7 +1518,9 @@ mod core_host {
                 ("POST", "backend/admit") => HttpAnswer {
                     status: 204,
                     body: String::new(),
+                    content_type: String::new(),
                 },
+                ("POST", _) if account.is_some() => self.account(account.expect("matched"), body),
                 ("GET", "admin/migrations/graph") => match self.catalogue_index() {
                     Ok(index) => answer(200, index.migration_graph()),
                     Err(error) => refusal(500, ErrorResponse::internal(error)),
@@ -1558,6 +1581,45 @@ mod core_host {
                     .map_err(|error| error.to_string())?;
                     jazz::host::HostTables::catalogue(&file).map_err(|error| error.to_string())
                 }
+            }
+        }
+
+        /// Serve an account route (`admin/accounts/...`) on the store's
+        /// account registry, as native does. Its effects on live sessions
+        /// are not needed here: the object admits no user credential
+        /// (JWT or local-first proof) a revocation could end, only its
+        /// backend, which states its users' sessions itself.
+        fn account(&mut self, route: AccountRoute, body: &[u8]) -> HttpAnswer {
+            use jazz::tools::transport_error::ErrorResponse;
+            let storage = durable_object_storage(self.storage.clone());
+            if !self.accounts_open {
+                if let Err(error) = accounts::open(&storage) {
+                    return refusal(503, ErrorResponse::internal(error.to_string()));
+                }
+                self.accounts_open = true;
+            }
+            let Ok(app_id) = uuid::Uuid::parse_str(&self.app_id) else {
+                return refusal(500, ErrorResponse::internal("the app id is not a UUID"));
+            };
+            let (reply, _effects) = accounts::serve(
+                &storage,
+                route,
+                body,
+                RouteContext {
+                    app_id,
+                    now_ms: js_sys::Date::now() as u64,
+                    fresh_id: &mut uuid::Uuid::new_v4,
+                },
+            );
+            let (body, content_type) = match reply.body {
+                RouteBody::Empty => (String::new(), ""),
+                RouteBody::Json(body) => (body, "application/json"),
+                RouteBody::Text(body) => (body, "text/plain; charset=utf-8"),
+            };
+            HttpAnswer {
+                status: reply.status,
+                body,
+                content_type: content_type.to_owned(),
             }
         }
 
