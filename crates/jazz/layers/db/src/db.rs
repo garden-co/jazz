@@ -1717,9 +1717,18 @@ impl Error {
 
 impl Db {
     pub async fn open(config: DbConfig) -> Result<Self, Error> {
+        #[cfg(not(feature = "managed-storage-emulation"))]
         let conn = Storage::open_in_memory().map_err(storage)?;
-        crate::format::admit(&conn)?;
-        Self::open_on(config, conn, None)
+        #[cfg(feature = "managed-storage-emulation")]
+        let conn = Storage::managed_emulation_in_memory().map_err(storage)?;
+        Self::open_storage(config, conn).await
+    }
+
+    /// Open on `storage` (a host's SQL: [`Storage::from_backend`]), with
+    /// no file: chunks live in the store itself.
+    pub async fn open_storage(config: DbConfig, storage: Storage) -> Result<Self, Error> {
+        crate::format::admit(&storage)?;
+        Self::open_on(config, storage, None)
     }
 
     /// A durable store in one SQLite file (WAL unless `options.journal`
@@ -1858,8 +1867,12 @@ impl Db {
         names.check_types(&schema)?;
         // Variants are tagged before any DDL: an enum default is its tag.
         names.mint(&conn, &schema)?;
-        let chunks =
-            crate::large::Chunks::install(path, config.chunk_store.clone(), config.host_chunk_io)?;
+        let chunks = crate::large::Chunks::install_reading(
+            path,
+            conn.shared_reader(),
+            config.chunk_store.clone(),
+            config.host_chunk_io,
+        )?;
         // Statements are keyed per table and verb; the default 16 entries
         // thrash as soon as a schema has a few tables.
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
@@ -1877,7 +1890,7 @@ impl Db {
         // SQLite's own rollbacks (after a full disk, say) count too.
         let rollback_key = crate::values::rollback_key(&conn);
         conn.rollback_hook(Some(move || {
-            rolled_back.unpin();
+            rolled_back.rolled_back();
             crate::values::note_rollback(rollback_key);
         }))
         .map_err(storage)?;

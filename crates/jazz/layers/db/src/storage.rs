@@ -155,6 +155,21 @@ impl Storage {
         }))
     }
 
+    /// A second handle on a managed store's backend, for the chunk cache to
+    /// read what it lacks: a Durable Object has one connection, which the
+    /// cache shares (no hooks of its own; it sees the owner's open scope,
+    /// whose writes the cache already holds pinned). `None` on native
+    /// storage, where a file store opens its own read-only connection.
+    pub(crate) fn shared_reader(&self) -> Option<Storage> {
+        match &self.owner {
+            Owner::Native(_) => None,
+            Owner::Managed(managed) => Some(Storage::new(Owner::Managed(Managed {
+                backend: managed.backend.clone(),
+                hooks: Arc::default(),
+            }))),
+        }
+    }
+
     /// Whether this store runs on a host's SQL ([`Storage::from_backend`]),
     /// which keeps nothing open between calls: no savepoint can outlive the
     /// call that opened it.
