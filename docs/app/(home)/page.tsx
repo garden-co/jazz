@@ -73,6 +73,9 @@ export const jazz = createJazz({
   // Also coming soon: cloudflare().
   store: vercel({
     namespace: ({ environment }) => environment,
+    // Where the cores run and keep their data: your
+    // functions' region, fixed once a core exists.
+    region: "iad1",
   }),
 
   // Who is signed in, from Better Auth, WorkOS, any other

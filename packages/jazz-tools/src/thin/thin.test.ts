@@ -18,6 +18,8 @@ import { THIN_WRITE_RESEND_WINDOW_MS, ThinRuntime } from "./thin-runtime.js";
 const createAccountManager = (config: AccountManagerConfig) =>
   createAccountManagerWithMinter(config, mintLocalFirstTokenInJs);
 import { decodeThinResponse, isThinResponse } from "./wire.js";
+import { WebSocketCarrier } from "../runtime/native-runtime/websocket.js";
+import { PostcardReader } from "../runtime/native-runtime/native-codec.js";
 import { JazzClient } from "../runtime/client.js";
 import type { Session } from "../runtime/context.js";
 import { LOCAL_FIRST_ISSUER, mintSelfSignedToken } from "./self-signed-token.js";
@@ -455,6 +457,159 @@ describe("thin client", () => {
       .poll(() => deliveries.at(-1)?.slice().sort(), { timeout: 10_000 })
       .toEqual(["after", "before"]);
     expect(deliveries.every((rows) => new Set(rows).size === rows.length)).toBe(true);
+    stop();
+  }, 60_000);
+
+  // Pipelined handshake: the schema and the live queries go out right behind
+  // the hello, and the server serves them in order once it admitted the
+  // connection, so the first results arrive one round trip after the socket
+  // opens (SPEC §8.1.2, §8.14).
+  it("sends its schema and live queries right behind its hello, and the server serves them in order", async () => {
+    const server = await startServer();
+    const writer = await thinDb(server, formatAuthSecret(new Uint8Array(32).fill(0x51)));
+    await writer.insert(app.notes, { text: "there", done: false }).wait({ tier: "global" });
+    const sent = recordSentAhead();
+    const db = await thinDb(server, formatAuthSecret(new Uint8Array(32).fill(0x51)));
+    const notes: string[][] = [];
+    const done: boolean[][] = [];
+    const stopNotes = db.subscribe(app.notes, (rows) => notes.push(rows.map((row) => row.text)));
+    const stopDone = db.subscribe(app.notes.where({ done: false }), (rows) =>
+      done.push(rows.map((row) => row.done)),
+    );
+    await expect.poll(() => notes.at(-1), { timeout: 10_000 }).toEqual(["there"]);
+    await expect.poll(() => done.at(-1), { timeout: 10_000 }).toEqual([false]);
+
+    const carriers = [...new Set(sent.map((frame) => frame.carrier))];
+    expect(carriers).toHaveLength(1);
+    // All three went out before the server's hello, the schema first.
+    expect(sent.map(({ op, negotiated }) => [op, negotiated])).toEqual([
+      ["schema", false],
+      ["subscribe", false],
+      ["subscribe", false],
+    ]);
+    expect(db.getSyncStatus().link).toEqual({ state: "connected" });
+
+    // Requests after the bind go out as before, and live queries stay live.
+    await db.insert(app.notes, { text: "here", done: true }).wait({ tier: "global" });
+    await expect
+      .poll(() => notes.at(-1)?.slice().sort(), { timeout: 10_000 })
+      .toEqual(["here", "there"]);
+    expect(sent.filter(({ op }) => op === "subscribe")).toHaveLength(2);
+    stopNotes();
+    stopDone();
+  }, 60_000);
+
+  it("opens each live query once per connection, also across reconnects", async () => {
+    const server = await startServer();
+    const sent = recordSentAhead();
+    const db = await thinDb(server);
+    const deliveries: string[][] = [];
+    const stop = db.subscribe(app.notes, (rows) => deliveries.push(rows.map((row) => row.text)));
+    await db.insert(app.notes, { text: "before", done: false }).wait({ tier: "global" });
+    await expect.poll(() => deliveries.at(-1), { timeout: 10_000 }).toEqual(["before"]);
+    // A live query opened after the schema was bound goes out once too.
+    const later: string[][] = [];
+    const stopLater = db.subscribe(app.notes, (rows) => later.push(rows.map((row) => row.text)));
+    await expect.poll(() => later.at(-1), { timeout: 10_000 }).toEqual(["before"]);
+
+    reconnect(db);
+    await db.insert(app.notes, { text: "after", done: false }).wait({ tier: "global" });
+    await expect
+      .poll(() => deliveries.at(-1)?.slice().sort(), { timeout: 10_000 })
+      .toEqual(["after", "before"]);
+    await expect
+      .poll(() => later.at(-1)?.slice().sort(), { timeout: 10_000 })
+      .toEqual(["after", "before"]);
+    expect(deliveries.every((rows) => new Set(rows).size === rows.length)).toBe(true);
+
+    const perCarrier = new Map<unknown, string[]>();
+    for (const { carrier, op } of sent) {
+      perCarrier.set(carrier, [...(perCarrier.get(carrier) ?? []), op]);
+    }
+    const [first, second] = [...perCarrier.values()];
+    expect(perCarrier.size).toBe(2);
+    expect(first!.filter((op) => op === "subscribe")).toHaveLength(2);
+    // The new connection sends the schema and both live queries ahead again.
+    expect(second!.slice(0, 3)).toEqual(["schema", "subscribe", "subscribe"]);
+    expect(second!.filter((op) => op === "subscribe")).toHaveLength(2);
+    stop();
+    stopLater();
+  }, 60_000);
+
+  it("takes nothing sent ahead on a connection the server refuses, and sends it again on the next", async () => {
+    const server = await startServer({ maxConnectionsPerUser: 1 });
+    const secret = formatAuthSecret(new Uint8Array(32).fill(0x43));
+    const first = await thinDb(server, secret);
+    await first.insert(app.notes, { text: "mine", done: false }).wait({ tier: "global" });
+
+    const sent = recordSentAhead();
+    const second = await thinDb(server, secret);
+    const deliveries: string[][] = [];
+    const errors: Error[] = [];
+    const stop = second.subscribe(app.notes, {
+      onUpdate: (rows) => deliveries.push(rows.map((row) => row.text)),
+      onError: (error) => errors.push(error),
+    });
+    // Refused before its hello (the user is at the cap), with the schema
+    // and a live query already sent: nothing is answered, and it retries.
+    await expect
+      .poll(() => second.getSyncStatus().lastError?.message ?? "", { timeout: 10_000 })
+      .toMatch(/connection cap per user/);
+    expect(sent.filter(({ negotiated }) => negotiated)).toEqual([]);
+    expect(deliveries).toEqual([]);
+    expect(errors).toEqual([]);
+
+    opened.splice(opened.indexOf(first), 1);
+    await first.shutdown();
+    await expect.poll(() => deliveries.at(-1), { timeout: 15_000 }).toEqual(["mine"]);
+    expect(errors).toEqual([]);
+    // Each connection sent the schema and the live query once, in order.
+    const perCarrier = new Map<unknown, string[]>();
+    for (const { carrier, op } of sent) {
+      perCarrier.set(carrier, [...(perCarrier.get(carrier) ?? []), op]);
+    }
+    expect(perCarrier.size).toBeGreaterThan(1);
+    for (const ops of perCarrier.values()) expect(ops).toEqual(["schema", "subscribe"]);
+    stop();
+  }, 60_000);
+
+  it("closes a live query unsubscribed before its schema's answer, right behind it", async () => {
+    const server = await startServer();
+    const sent = recordSentAhead();
+    const db = await thinDb(server);
+    const dropped: unknown[] = [];
+    const stopDropped = db.subscribe(app.notes, (rows) => dropped.push(rows));
+    stopDropped();
+    const kept: string[][] = [];
+    const stopKept = db.subscribe(app.notes, (rows) => kept.push(rows.map((row) => row.text)));
+    await db.insert(app.notes, { text: "seen", done: false }).wait({ tier: "global" });
+    await expect.poll(() => kept.at(-1), { timeout: 10_000 }).toEqual(["seen"]);
+    expect(dropped).toEqual([]);
+    expect(sent.slice(0, 3).map(({ op }) => op)).toEqual(["schema", "subscribe", "unsubscribe"]);
+    expect(sent.filter(({ op }) => op === "subscribe")).toHaveLength(2);
+    stopKept();
+  }, 60_000);
+
+  it("ends a live query sent ahead of a schema the server refuses with that refusal", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    const stale = testApp({
+      tables: { notes: { columns: { text: "string", done: "boolean", extra: "string" } } },
+    });
+    const sent = recordSentAhead();
+    let liveError: Error | undefined;
+    const updates: unknown[] = [];
+    const stop = db.subscribe(stale.notes, {
+      onUpdate: (rows) => updates.push(rows),
+      onError: (error) => (liveError = error),
+    });
+    await expect.poll(() => liveError, { timeout: 10_000 }).toBeDefined();
+    // The schema's answer came first, not the live query's own refusal of a
+    // session that declared no schema.
+    expect(liveError).toMatchObject({ code: "SchemaNotDeployed" });
+    expect(updates).toEqual([]);
+    expect(sent.slice(0, 2).map(({ op }) => op)).toEqual(["schema", "subscribe"]);
+    expect(db.getSyncStatus().link).toMatchObject({ state: "offline", reason: "stopped" });
     stop();
   }, 60_000);
 
@@ -944,7 +1099,11 @@ describe("thin client", () => {
     const write = db.insert(app.notes, { text: "unsent", done: false });
     // The connection that would send it ends with a terminal error.
     await db.reconnect().catch(() => {});
-    internals.lost(internals.carrier, { code: "gone", retry: "never", message: "for good" });
+    internals.lost(internals.carrier, {
+      code: "malformed_frame",
+      retry: "never",
+      message: "for good",
+    });
     await expect(read).rejects.toThrow(/for good/);
     // Never sent, so it certainly didn't commit.
     const writeError = await write.wait({ tier: "global" }).catch((error: unknown) => error);
@@ -954,6 +1113,51 @@ describe("thin client", () => {
     await expect.poll(() => liveError?.message).toMatch(/for good/);
     unsubscribe();
     expect(db.getSyncStatus().link).toMatchObject({ state: "offline", reason: "stopped" });
+  }, 60_000);
+
+  // #5927 R10: the link decides by the error's code. A malformed frame the
+  // server says to retry `later` cannot succeed by retrying, so the thin
+  // client stops, as every other host does, instead of reconnecting forever.
+  it("stops on a malformed frame even when the server says to retry later", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    const internals = runtime as unknown as {
+      carrier: unknown;
+      lost(carrier: unknown, error: { code: string; retry: string; message: string }): void;
+    };
+    internals.lost(internals.carrier, {
+      code: "malformed_frame",
+      retry: "later",
+      message: "bad envelope",
+    });
+    expect(db.getSyncStatus().link).toMatchObject({ state: "offline", reason: "stopped" });
+    await expect(db.all(app.notes)).rejects.toThrow(/bad envelope/);
+  }, 60_000);
+
+  // An `auth_failed` with a retry this client doesn't know comes from a newer
+  // server: it is retried like any refusal, never taken as a refused
+  // credential that waits for a new one (native clients can't decode it).
+  it("retries a refusal whose retry it doesn't know instead of waiting for a credential", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    const internals = runtime as unknown as {
+      carrier: unknown;
+      lost(carrier: unknown, error: { code: string; retry: string; message: string }): void;
+    };
+    internals.lost(internals.carrier, {
+      code: "auth_failed",
+      retry: "unknown:9",
+      message: "token expired",
+    });
+    const link = db.getSyncStatus().link;
+    expect(link).not.toMatchObject({ reason: "auth" });
+    expect(link).toMatchObject({ retrying: true });
+    // It reconnects with the same credential.
+    await expect.poll(() => db.getSyncStatus().link.state).toBe("connected");
   }, 60_000);
 
   // E12: a sign-out drains writes with `shutdown({ waitForSync: true })`.
@@ -1152,6 +1356,41 @@ describe("thin client", () => {
 });
 
 /** Renew the credential with itself: a thin client reconnects for a new one. */
+const THIN_OPS = [
+  "schema",
+  "subscribe",
+  "unsubscribe",
+  "query",
+  "insert",
+  "update",
+  "upsert",
+  "delete",
+];
+
+/** Every thin request any carrier sends from now on: its op, and whether
+ * the server had said hello when it went out. */
+function recordSentAhead(): { carrier: WebSocketCarrier; op: string; negotiated: boolean }[] {
+  const sent: { carrier: WebSocketCarrier; op: string; negotiated: boolean }[] = [];
+  const sendAhead = WebSocketCarrier.prototype.sendAhead;
+  vi.spyOn(WebSocketCarrier.prototype, "sendAhead").mockImplementation(
+    function (this: WebSocketCarrier, frames) {
+      for (const frame of frames) {
+        const reader = new PostcardReader(frame);
+        if (reader.u64() !== 4) continue; // WireFrame::ThinRequest
+        reader.u64(); // its id
+        const op = Number(reader.u64());
+        sent.push({
+          carrier: this,
+          op: THIN_OPS[op] ?? `op ${op}`,
+          negotiated: this.hasNegotiated,
+        });
+      }
+      return sendAhead.call(this, frames);
+    },
+  );
+  return sent;
+}
+
 function reconnect(db: Db): void {
   const runtime = db.currentRuntime();
   if (!(runtime instanceof ThinRuntime)) throw new Error("not a thin Db");

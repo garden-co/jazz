@@ -1,5 +1,7 @@
 # jazz-wasm
 
+## 2.0.0-alpha.66
+
 ## 2.0.0-alpha.65
 
 ## 2.0.0-alpha.64

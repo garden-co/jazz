@@ -76,6 +76,22 @@ public enum JazzApp {
         try await Jazz.Client.open(app: app, config: config, implementations: computed)
     }
 
+    /// A session of the app, following who is signed in (a device account,
+    /// your sign-in's `bearer` token, or no one) through its Jazz endpoint
+    /// `serverUrl`: `try await session.client()` is the signed-in user's
+    /// client, and in SwiftUI `JazzRoot(session) { … } signedOut: { … }`
+    /// hands it to your views.
+    public static func session(
+        appId: Swift.String, serverUrl: Swift.String,
+        bearer: (@Sendable (Jazz.TokenReason) async throws -> Swift.String?)? = nil,
+        start: Jazz.JazzSession.Start? = nil, linkGuest: Swift.Bool = true,
+        storage: Jazz.Config.Storage = .persistent, dataDir: Swift.String? = nil, computed: some Computed
+    ) -> Jazz.JazzSession {
+        Jazz.JazzSession(
+            app: app, appId: appId, serverUrl: serverUrl, bearer: bearer, start: start, linkGuest: linkGuest,
+            storage: storage, dataDir: dataDir, implementations: computed)
+    }
+
     /// The values of computed field `tasks.priority`.
     public enum TaskPriority: Swift.String, Swift.Codable, Swift.Sendable, Swift.Hashable, Swift.CaseIterable {
         case low = "low"

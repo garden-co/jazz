@@ -717,8 +717,10 @@ test("alpha release preview can call the publisher without elevating nested perm
   );
 
   assert.deepEqual(previewWorkflow.permissions, { contents: "read" });
+  // actions: write is the publisher's dispatch-crates ceiling; the dry-run
+  // preview never runs that job (it needs a real npm publish).
   assert.deepEqual(previewWorkflow.jobs.preview.permissions, {
-    actions: "read",
+    actions: "write",
     contents: "write",
     "id-token": "write",
     "pull-requests": "read",
@@ -734,6 +736,12 @@ test("alpha release preview can call the publisher without elevating nested perm
   assert.equal(previewWorkflow.jobs.preview.with.mode, "dry-run");
   assert.match(publisherWorkflow, /permissions:[\s\S]*?contents: write/);
   assert.match(publisherWorkflow, /if: env\.RELEASE_MODE == 'publish'/);
+  const publisher = parse(publisherWorkflow);
+  assert.deepEqual(publisher.jobs["dispatch-crates"].permissions, {
+    actions: "write",
+    contents: "read",
+  });
+  assert.match(publisher.jobs["dispatch-crates"].if, /== 'publish'/);
 });
 
 function packedNapiFixture(mutate = () => {}) {
