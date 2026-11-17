@@ -1502,16 +1502,41 @@ impl<'a> Ctx<'a> {
     /// it.
     ///
     /// Also checks what each column's type supports beyond what compiling
-    /// it does ([`check_operators`]), at the root and in every relation.
+    /// it does ([`check_operators`]) everywhere a query names columns: its
+    /// filters and order, its joins (hop seeds) and their nested joins, every
+    /// union arm and the union's order, history reads (against their source
+    /// table), and every relation.
     pub fn validate_prepared(mut self, query: &Query) -> Result<(), Error> {
-        // History reads (`history.<table>`) have their own source and take
-        // no relations: compiling them checked them.
-        let Ok(table) = self.table(&query.table) else {
+        self.validate_rules(query)
+    }
+
+    fn validate_rules(&mut self, query: &Query) -> Result<(), Error> {
+        let name =
+            crate::schema::history::history_source_table(&query.table).unwrap_or(&query.table);
+        // A source compiling resolved but that isn't a table of the schema
+        // (none today besides history) has no column types to check.
+        let Ok(table) = self.table(name) else {
             return Ok(());
         };
         check_operators(table, &query.filters, &query.order_by)?;
+        self.check_joins(&query.joins)?;
+        if let Some(plan) = crate::db::union_plan(query, self.schema)? {
+            for (_, arm) in &plan.arms {
+                self.validate_rules(arm)?;
+            }
+            check_operators(table, &[], &plan.order_by)?;
+        }
         for array in &query.array_subqueries {
             self.check_array(table, array)?;
+        }
+        Ok(())
+    }
+
+    fn check_joins(&mut self, joins: &[crate::query::JoinVia]) -> Result<(), Error> {
+        for join in joins {
+            let table = self.table(&join.table)?;
+            check_operators(table, &join.filters, &[])?;
+            self.check_joins(&join.nested_joins)?;
         }
         Ok(())
     }
@@ -3277,7 +3302,6 @@ fn check_candidate(table: &Table, column: &str, option: &Operand) -> Result<(), 
     )))
 }
 
-/// `contains` searches text, bytes or an array.
 /// What a column's type supports beyond what compiling a query checks: a
 /// JSON or bytes column takes no range comparison (`gt`, `gte`, `lt`,
 /// `lte`) and can't order a query, and a JSON column takes no `contains`.
@@ -3327,9 +3351,9 @@ fn check_operators(
                     continue;
                 }
                 let supported = if kind == "bytes" {
-                    "eq, ne, in, notIn or contains"
+                    "eq, ne, in, notIn, contains, isNull or isNotNull"
                 } else {
-                    "eq, ne, in or notIn"
+                    "eq, ne, in, notIn, isNull or isNotNull"
                 };
                 return Err(query_error(format!(
                     "{kind} column \"{column}\" does not support \"{op}\"; use {supported}"
@@ -3352,6 +3376,7 @@ fn check_operators(
     Ok(())
 }
 
+/// `contains` searches text, bytes or an array.
 fn check_haystack(table: &Table, column: &str) -> Result<(), Error> {
     let Some(declared) = table.column(column) else {
         return Ok(());

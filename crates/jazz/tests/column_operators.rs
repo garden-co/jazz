@@ -9,8 +9,14 @@ use crate::common;
 
 use jazz::db::{Db, DbConfig, DbIdentity, ErrorCode, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid};
-use jazz::query::{self as q, ArraySubquery, OrderDirection, Query};
+use jazz::query::{
+    self as q, ArraySubquery, OrderDirection, Query, RelationOrderBy, RelationQuery,
+};
 use jazz::records::Value;
+use jazz::tools::public_schema::{
+    RelationCmpOp, RelationColumnRef, RelationExpr, RelationPredicate, RelationProjectColumn,
+    RelationProjectExpr, RelationRowIdRef, RelationUnionArm, RelationValueRef,
+};
 use jazz::tools::{ColumnDescriptor, ColumnType, RowDescriptor, Schema, TableName, TableSchema};
 
 use common::{allow_all_policies, compile_schema};
@@ -117,4 +123,111 @@ fn other_columns_keep_what_the_engine_supports() {
         db.prepare_query(&query)
             .unwrap_or_else(|error| panic!("{query:?}: {error}"));
     }
+}
+
+fn things_column(column: &str) -> RelationColumnRef {
+    RelationColumnRef {
+        scope: Some("things".to_owned()),
+        column: column.to_owned(),
+    }
+}
+
+/// `things.where({ column: { op: value } })`, as a union arm.
+fn arm(label: &str, column: &str, op: RelationCmpOp) -> RelationUnionArm {
+    RelationUnionArm {
+        label: label.to_owned(),
+        input: RelationExpr::Project {
+            input: Box::new(RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "things".to_owned(),
+                    alias: None,
+                }),
+                predicate: RelationPredicate::Cmp {
+                    left: things_column(column),
+                    op,
+                    right: RelationValueRef::literal(jazz::tools::Value::Text("a".to_owned())),
+                },
+            }),
+            columns: ["id", "label", "flag", "meta", "blob", "tags"]
+                .iter()
+                .map(|alias| RelationProjectColumn {
+                    alias: (*alias).to_owned(),
+                    expr: if *alias == "id" {
+                        RelationProjectExpr::RowId(RelationRowIdRef::Current)
+                    } else {
+                        RelationProjectExpr::Column(things_column(alias))
+                    },
+                })
+                .collect(),
+        },
+    }
+}
+
+fn union(arms: Vec<RelationUnionArm>, order: Option<&str>) -> Query {
+    let mut rel = RelationExpr::Union { inputs: arms };
+    if let Some(column) = order {
+        rel = RelationExpr::OrderBy {
+            input: Box::new(rel),
+            terms: vec![RelationOrderBy {
+                column: things_column(column),
+                direction: OrderDirection::Asc,
+            }],
+        };
+    }
+    let mut query = Query::from("things");
+    query.relation = Some(RelationQuery { rel });
+    query
+}
+
+/// The check reaches every place a query names columns: union arms and
+/// the union's order, hop seeds (joins), and history reads, which compile
+/// against their source table.
+#[test]
+fn unions_joins_and_history_are_checked_too() {
+    let db = open_db();
+    let fine = || arm("fine", "label", RelationCmpOp::Eq);
+    let refused = |query: Query, expected: &str| {
+        let message = refusal(&db, query);
+        assert!(message.contains(expected), "{message}");
+    };
+    refused(
+        union(vec![fine(), arm("json", "meta", RelationCmpOp::Gt)], None),
+        "JSON column \"meta\" does not support \"gt\"",
+    );
+    refused(
+        union(vec![fine(), arm("bytes", "blob", RelationCmpOp::Lt)], None),
+        "bytes column \"blob\" does not support \"lt\"",
+    );
+    refused(
+        union(vec![fine()], Some("meta")),
+        "JSON column \"meta\" cannot be used in orderBy",
+    );
+    refused(
+        union(vec![fine()], Some("blob")),
+        "bytes column \"blob\" cannot be used in orderBy",
+    );
+    db.prepare_query(&union(
+        vec![fine(), arm("text", "label", RelationCmpOp::Gt)],
+        Some("label"),
+    ))
+    .expect("a union of supported operators");
+
+    refused(
+        Query::from("things").join_via("parts", "thing", [q::gt(q::col("meta"), text("a"))]),
+        "JSON column \"meta\" does not support \"gt\"",
+    );
+
+    let message = refusal(
+        &db,
+        Query::from("history.things")
+            .filter(q::eq(q::col("id"), q::lit(Value::Uuid(uuid::Uuid::nil()))))
+            .filter(q::gt(q::col("meta"), text("a"))),
+    );
+    assert!(message.contains("JSON column \"meta\""), "{message}");
+    db.prepare_query(
+        &Query::from("history.things")
+            .filter(q::eq(q::col("id"), q::lit(Value::Uuid(uuid::Uuid::nil()))))
+            .filter(q::gt(q::col("label"), text("a"))),
+    )
+    .expect("a supported history read");
 }

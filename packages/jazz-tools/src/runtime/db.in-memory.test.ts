@@ -33,22 +33,46 @@ describe("createDb in-memory driver", () => {
     db = undefined;
   });
 
+  const refusedCode = async (read: Promise<unknown>) =>
+    read.then(
+      () => "accepted",
+      (error: unknown) => nativeCoreErrorCode(error) ?? String(error),
+    );
+
   it("leaves operator and orderBy checks to the engine, which refuses them by code", async () => {
     db = await createDb({
       ...(await localAccountConfig("in-memory-operator-checks-test")),
       driver: { type: "memory" },
     });
+    const done = largeValues.documents.where({ done: true });
     for (const query of [
       largeValues.documents.where({ metadata: { gt: 1 } } as never),
       largeValues.documents.orderBy("payload" as never),
-    ]) {
-      const refused = await db.all(query).then(
-        () => undefined,
-        (error: unknown) => error,
-      );
-      expect(nativeCoreErrorCode(refused), String(refused)).toBe("query");
+      // Union arms and the union's order.
+      largeValues.union([done, largeValues.documents.where({ metadata: { gt: 1 } } as never)]),
+      largeValues.union([done]).orderBy("metadata" as never),
+    ] as never[]) {
+      expect(await refusedCode(db.all(query))).toBe("query");
     }
     await expect(db.all(largeValues.documents.orderBy("done"))).resolves.toEqual([]);
+  });
+
+  it("checks a hop's seed filter in the engine too", async () => {
+    const seeded = testApp({
+      tables: {
+        documents: { columns: { body: "string" } },
+        links: {
+          columns: { documentId: "uuid", meta: { json: true } },
+          relations: { document: { rel: "documents", column: "documentId" } },
+        },
+      },
+    });
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-operator-checks-hop-test")),
+      driver: { type: "memory" },
+    });
+    const hop = seeded.links.where({ meta: { gt: 1 } } as never).hopTo("document");
+    expect(await refusedCode(db.all(hop as never))).toBe("query");
   });
 
   it("opens a native Db with the current ordinary-column schema layout", async () => {
