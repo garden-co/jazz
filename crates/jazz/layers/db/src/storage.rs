@@ -86,8 +86,31 @@ struct Hooks {
 
 #[derive(Clone)]
 struct Managed {
-    backend: Arc<dyn Backend>,
+    backend: SharedBackend,
     hooks: Arc<Mutex<Hooks>>,
+}
+
+/// A managed backend, shared by its store and the store's chunk cache,
+/// which the store's commit and rollback hooks (`Send`) hold. Native
+/// backends are `Send + Sync` ([`BackendThreading`]); a wasm32 host
+/// without threads has one thread, so nothing can send or share it
+/// elsewhere. With wasm threads this does not compile, rather than assume.
+#[derive(Clone)]
+struct SharedBackend(Arc<dyn Backend>);
+
+// SAFETY: wasm32 without the `atomics` target feature runs one thread.
+#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+unsafe impl Send for SharedBackend {}
+// SAFETY: as above.
+#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+unsafe impl Sync for SharedBackend {}
+
+impl std::ops::Deref for SharedBackend {
+    type Target = dyn Backend;
+
+    fn deref(&self) -> &(dyn Backend + 'static) {
+        &*self.0
+    }
 }
 
 impl Managed {
@@ -150,7 +173,7 @@ impl Storage {
     /// Run on a host's SQL ([`Backend`]).
     pub fn from_backend(backend: impl Backend + 'static) -> Self {
         Self::new(Owner::Managed(Managed {
-            backend: Arc::new(backend),
+            backend: SharedBackend(Arc::new(backend)),
             hooks: Arc::default(),
         }))
     }

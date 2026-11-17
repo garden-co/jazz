@@ -34,6 +34,8 @@ use wasm_bindgen_futures::future_to_promise;
 mod browser;
 #[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
 pub mod browser_bench;
+#[cfg(all(target_arch = "wasm32", feature = "durable-object"))]
+mod durable_object;
 #[cfg(target_arch = "wasm32")]
 mod idb_vfs;
 mod identity;
@@ -1252,6 +1254,35 @@ impl WasmDb {
             inner: Rc::new(RefCell::new(Some(WasmDbInner::new(binding)))),
             owns_runtime: true,
         }
+    }
+
+    /// Open the backend store a Durable Object owns, on its SQL
+    /// (`ctx.storage`): chunks and host tables live in that store, so it
+    /// survives the object's restarts. A core there accepts finished
+    /// transactions only (see `jazz::storage`).
+    #[cfg(all(target_arch = "wasm32", feature = "durable-object"))]
+    #[wasm_bindgen(js_name = openDurableObject)]
+    pub fn open_durable_object(
+        storage: durable_object::ObjectStorage,
+        schema: Vec<u8>,
+        config: Vec<u8>,
+    ) -> Result<WasmDb, JsValue> {
+        initialize_wasm_tracing();
+        let (schema, mut config) =
+            binding_host::decode_open(&schema, &config).map_err(host_error)?;
+        let (identity, trusted) =
+            binding_host::open_identity(&mut config, OpenAs::Backend).map_err(host_error)?;
+        let db_config = jazz::tools::deployment::published::with_client_migrations(
+            binding_host::db_config(schema, &config, identity),
+            config.migrations.as_deref(),
+        )
+        .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
+        let db = block_on(jazz::db::Db::open_storage(
+            db_config,
+            durable_object::durable_object_storage(storage),
+        ))
+        .map_err(to_js_error)?;
+        Ok(Self::runtime_owner(Binding::new(db, identity, trusted)))
     }
 
     fn open_memory_as(schema: &[u8], config: &[u8], how: OpenAs<'_>) -> Result<WasmDb, JsValue> {
