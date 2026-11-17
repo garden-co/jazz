@@ -393,6 +393,10 @@ export class WebSocketCarrier {
   private resolveNegotiation!: (value: WebSocketNegotiation) => void;
   private rejectNegotiation!: (reason: unknown) => void;
   private negotiated = false;
+  /** Whether the prelude and Hello went out, after which frames may follow. */
+  private helloSent = false;
+  /** Frames sent ahead before the Hello went out, oldest first (`sendAhead`). */
+  private ahead: (readonly Uint8Array[])[] = [];
   private closing = false;
   private terminated = false;
   private lastInbound = performance.now();
@@ -431,6 +435,8 @@ export class WebSocketCarrier {
           ),
         );
         this.socket.send(encodeWebSocketFrameBatch([encodeWireClientHello(this.localFeatures)]));
+        this.helloSent = true;
+        for (const frames of this.ahead.splice(0)) this.write(frames);
       },
       (error) => {
         this.reportTerminal({
@@ -481,6 +487,27 @@ export class WebSocketCarrier {
 
   async sendBatch(frames: readonly Uint8Array[]): Promise<void> {
     await this.ready();
+    this.write(frames);
+  }
+
+  /**
+   * Send `frames` right behind this connection's `Hello`, without waiting
+   * for the server's: the server reads nothing past a client's `Hello`
+   * until it admitted the connection and said hello itself, then reads on
+   * in order, and a connection it refuses never reads them (SPEC §8.1.2).
+   * Frames sent ahead go out in the order of the calls, also once
+   * negotiated (a `sendBatch` waiting for the server's `Hello` may go out
+   * after them). On a connection that closes before its `Hello` went out,
+   * they are dropped.
+   */
+  sendAhead(frames: readonly Uint8Array[]): void {
+    if (this.closing || this.terminated) return;
+    if (this.helloSent) this.write(frames);
+    else this.ahead.push(frames);
+  }
+
+  /** Write `frames` to the socket, in as few batches as the limits allow. */
+  private write(frames: readonly Uint8Array[]): void {
     let batch: Uint8Array[] = [];
     let batchBytes = POSTCARD_BATCH_LENGTH_RESERVE;
     for (const frame of frames) {
@@ -513,6 +540,7 @@ export class WebSocketCarrier {
   close(): void {
     if (this.closing) return;
     this.closing = true;
+    this.ahead = [];
     clearTimeout(this.silenceTimer);
     clearTimeout(this.handshakeTimer);
     clearTimeout(this.renewalTimer);

@@ -291,7 +291,9 @@ export class ThinRuntime implements Runtime {
   private parts = new ThinAssembler();
   private url?: string;
   private authJson?: string;
-  /** Requests and live queries go out only once the schema is bound. */
+  /** Whether the server took this connection's schema. Live queries and
+   * the schema go out right behind the `Hello` (see `open`); other requests
+   * only once it is bound. */
   private bound = false;
   /** A planned re-authentication is reconnecting a bound connection (see `lost`). */
   private reauthenticating = false;
@@ -464,14 +466,22 @@ export class ThinRuntime implements Runtime {
       onTerminal: (error) => this.lost(carrier, error),
     });
     this.carrier = carrier;
+    // Pipelined: the schema and the app's live queries go out right behind
+    // the `Hello`, without waiting for the server's or for the schema's
+    // answer. The server reads them only once it admitted this connection,
+    // in order, so each live query resolves against the schema just before
+    // it; a connection it refuses never reads them (SPEC §8.1.2, §8.14).
+    // The first results then arrive one round trip after the socket opens,
+    // not three. Refused or lost, nothing sent ahead took effect: the next
+    // connection sends it all again.
+    this.bindSchema(carrier);
+    for (const live of this.liveQueries.values()) if (live.callback) this.openLive(live);
     void carrier.ready().then(
       (negotiation) => {
         if (this.carrier !== carrier) return;
         if ((negotiation.features & FEATURE_THIN_RESULTS) === 0) {
           this.fatal(new Error("this Jazz server does not serve thin clients"));
-          return;
         }
-        this.bindSchema(carrier);
       },
       () => {
         // `onTerminal` reports why.
@@ -498,7 +508,10 @@ export class ThinRuntime implements Runtime {
         this.stopped = false;
         this.clearOutage();
         this.notifySyncStatus();
-        for (const live of this.liveQueries.values()) if (live.callback) this.openLive(live);
+        // Live queries opened since went out ahead already (`executeSubscription`).
+        for (const live of this.liveQueries.values()) {
+          if (live.callback && live.requestId === undefined) this.openLive(live);
+        }
         for (const [requestId, oneShot] of this.oneShots) {
           if (!oneShot.sent) this.transmit(requestId, oneShot);
         }
@@ -528,8 +541,9 @@ export class ThinRuntime implements Runtime {
       refused(frame.byteLength);
       return false;
     }
-    // Parts of one frame go back to back.
-    void carrier?.sendBatch(frames);
+    // Parts of one frame go back to back, and every frame in the order sent,
+    // also before the server's `Hello` (see `open`).
+    carrier?.sendAhead(frames);
     return true;
   }
 
@@ -922,7 +936,8 @@ export class ThinRuntime implements Runtime {
     if (!live) return;
     if (live.callback) throw new Error("Subscription has already been activated");
     live.callback = onUpdate;
-    if (this.bound) this.openLive(live);
+    // Behind the schema, also while its answer is on its way (see `open`).
+    if (this.carrier) this.openLive(live);
   }
 
   /** @internal The runtime queries the app is subscribed to now, for an upgrade to warm. */
@@ -946,6 +961,16 @@ export class ThinRuntime implements Runtime {
       }).catch(() => {
         // The connection ended: the server closed the live query with it.
       });
+    } else if (this.carrier) {
+      // Opened ahead of the schema's answer: closed the same way, right
+      // behind it. Nobody waits for the answer (its id is unknown here),
+      // and a connection that ends first took the live query with it.
+      const id = this.nextRequestId++;
+      this.sendFrame(
+        this.carrier,
+        encodeThinRequest(id, { type: "unsubscribe", subscription: live.requestId }),
+        () => undefined,
+      );
     }
   }
 
