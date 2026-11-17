@@ -1,4 +1,5 @@
 import { resolveQueryTable } from "./history-relation.js";
+import { vectorToBytes } from "./vector.js";
 /**
  * Translate public QueryBuilder JSON into the runtime query payload.
  *
@@ -118,6 +119,9 @@ function toRuntimeValue(value: unknown, columnType: ColumnType): object {
   }
   if (columnType.type === "Timestamp" && value instanceof Date) {
     return { type: "Timestamp", value: toRuntimeTimestampValue(value) };
+  }
+  if (columnType.type === "Vector") {
+    return { type: "Bytea", value: [...vectorToBytes(value, columnType.dimensions)] };
   }
   if (columnType.type === "Bytea") {
     if (value instanceof Uint8Array) {
@@ -465,6 +469,12 @@ function conditionToRelPredicate(
       },
     };
     return cond.op === "notIn" ? { Not: membership } : membership;
+  }
+  // Vectors compare as whole values, bit for bit (SPEC 6.1.1): -0 ≠ 0.
+  if (columnType.type === "Vector" && ["gt", "gte", "lt", "lte", "contains"].includes(cond.op)) {
+    throw new Error(
+      `Vector column "${column}" only supports eq/ne/in/notIn/isNull; search it through a vector index.`,
+    );
   }
   const valueTypeForCondition =
     cond.op === "contains" && columnType.type === "Array" ? columnType.element : columnType;
@@ -880,6 +890,9 @@ function translateBuilderToRelationIr(
       if (columnType?.type === "Bytea") {
         throw new Error(`BYTEA column "${column}" cannot be used in orderBy().`);
       }
+      if (columnType?.type === "Vector") {
+        throw new Error(`Vector column "${column}" cannot be used in orderBy().`);
+      }
       if (columnType?.type === "Json") {
         throw new Error(`JSON column "${column}" cannot be used in orderBy().`);
       }
@@ -932,6 +945,9 @@ function toRuntimeOrderBy(
     const columnType = getColumnType(schema, table, strippedColumn);
     if (columnType?.type === "Bytea") {
       throw new Error(`BYTEA column "${column}" cannot be used in orderBy().`);
+    }
+    if (columnType?.type === "Vector") {
+      throw new Error(`Vector column "${column}" cannot be used in orderBy().`);
     }
     if (columnType?.type === "Json") {
       throw new Error(`JSON column "${column}" cannot be used in orderBy().`);

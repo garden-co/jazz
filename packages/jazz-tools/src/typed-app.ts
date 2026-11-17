@@ -7,6 +7,7 @@ import { assertSchemaNameAllowed } from "./schema-name.js";
 import { WHERE_OPERATORS, type WhereOperator } from "./where-operators.js";
 import type { ColumnTransformMap, ColumnTransformRegistry, QueryBuilder } from "./runtime/db.js";
 import type { StreamingValueSource } from "./runtime/client.js";
+import { vectorLiteralJson } from "./runtime/vector.js";
 
 // ============================================================================
 // The generated type map
@@ -830,6 +831,8 @@ function cloneBuiltCondition(condition: BuiltCondition): BuiltCondition {
 
 function queryBuilderJsonReplacer(_key: string, value: unknown): unknown {
   if (value instanceof Uint8Array) return [...value];
+  // Hex of the f32le bytes, so a filter keeps every bit (JSON numbers lose -0).
+  if (value instanceof Float32Array) return vectorLiteralJson(value);
   return typeof value === "bigint" ? value.toString() : value;
 }
 
@@ -1212,6 +1215,7 @@ export class TypedTableQueryBuilder<
         ((columnType?.type === "Json" && !hasRecognizedOperator) ||
           (columnType?.type === "Timestamp" && value instanceof Date) ||
           (columnType?.type === "Bytea" && value instanceof Uint8Array) ||
+          (columnType?.type === "Vector" && value instanceof Float32Array) ||
           (columnType?.type === "Row" &&
             columnType.columns.some((column) => Object.hasOwn(value, column.name))));
 

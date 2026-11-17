@@ -4,6 +4,7 @@ members = [
   "crates/benchmark-guard",
   "crates/jazz",
   "crates/jazz/layers/db",
+  "crates/jazz/layers/index",
   "crates/jazz/layers/model",
   "crates/jazz/layers/protocol",
   "crates/jazz/layers/types",
@@ -78,6 +79,7 @@ rust-version = "1.93"
 [workspace.dependencies]
 jazz = { package = "jazz-core", version = "=2.0.0-alpha.66", path = "crates/jazz", default-features = false }
 jazz-db = { version = "=2.0.0-alpha.66", path = "crates/jazz/layers/db", default-features = false }
+jazz-index = { version = "=2.0.0-alpha.66", path = "crates/jazz/layers/index" }
 jazz-model = { version = "=2.0.0-alpha.66", path = "crates/jazz/layers/model", default-features = false }
 jazz-protocol = { version = "=2.0.0-alpha.66", path = "crates/jazz/layers/protocol", default-features = false }
 jazz-types = { version = "=2.0.0-alpha.66", path = "crates/jazz/layers/types", default-features = false }

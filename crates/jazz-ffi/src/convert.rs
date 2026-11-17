@@ -122,6 +122,26 @@ pub(crate) fn to_value(
                 .map(|(at, item)| to_value(item, element, false, &format!("{path}[{at}]")))
                 .collect::<Result<_>>()?,
         ),
+        // A vector is an array of exactly `dimensions` numbers, each rounded
+        // to binary32 and stored as `f32le/1` (SPEC 20.1).
+        ColumnType::Vector { dimensions } => {
+            let items = json
+                .as_array()
+                .ok_or_else(|| wrong("an array of numbers"))?;
+            if items.len() != *dimensions as usize {
+                return Err(wrong(&format!("an array of {dimensions} numbers")));
+            }
+            let mut bytes = Vec::with_capacity(items.len() * 4);
+            for item in items {
+                let value = item
+                    .as_f64()
+                    .map(|x| x as f32)
+                    .filter(|x| x.is_finite())
+                    .ok_or_else(|| wrong("finite numbers within float32 range"))?;
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            Value::Bytea(bytes)
+        }
         ColumnType::TransactionId | ColumnType::Row { .. } => {
             return Err(unsupported(format!(
                 "writing a column of type {column_type:?} ({path})"
@@ -162,7 +182,19 @@ pub(crate) fn to_json(value: Value, column_type: Option<&ColumnType>) -> Json {
         Value::TransactionId(bytes) => {
             Json::String(bytes.iter().map(|b| format!("{b:02x}")).collect())
         }
-        Value::Bytea(bytes) => Json::String(BASE64.encode(bytes)),
+        Value::Bytea(bytes) => match column_type {
+            // A vector reads back as its numbers (SPEC 20.1).
+            Some(ColumnType::Vector { .. }) => Json::Array(
+                bytes
+                    .chunks_exact(4)
+                    .map(|chunk| {
+                        let x = f32::from_le_bytes(chunk.try_into().expect("four bytes"));
+                        Number::from_f64(f64::from(x)).map_or(Json::Null, Json::Number)
+                    })
+                    .collect(),
+            ),
+            _ => Json::String(BASE64.encode(bytes)),
+        },
         Value::Array(values) => {
             let element = column_type.and_then(ColumnType::element_type);
             Json::Array(
@@ -1047,5 +1079,21 @@ mod tests {
             );
         }
         assert_eq!(to_json(Value::Double(0.5), None), json!(0.5));
+    }
+
+    /// A vector column takes and gives its numbers as a JSON array, stored
+    /// as `f32le/1` bytes; a wrong length or a non-finite number is refused.
+    #[test]
+    fn vectors_cross_as_arrays_of_numbers() {
+        let vector = ColumnType::Vector { dimensions: 2 };
+        let value = to_value(&json!([0.5, -1]), &vector, false, "e").unwrap();
+        assert_eq!(
+            value,
+            Value::Bytea([0.5f32.to_le_bytes(), (-1f32).to_le_bytes()].concat())
+        );
+        assert_eq!(to_json(value, Some(&vector)), json!([0.5, -1.0]));
+        assert!(to_value(&json!([1]), &vector, false, "e").is_err());
+        assert!(to_value(&json!([1, 1e39]), &vector, false, "e").is_err());
+        assert!(to_value(&json!("AAAA"), &vector, false, "e").is_err());
     }
 }

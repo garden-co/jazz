@@ -244,6 +244,7 @@ impl<'a> Writer<'a> {
             ColumnType::Timestamp => format!("{RT}::Timestamp"),
             ColumnType::Uuid => format!("{RT}::ObjectId"),
             ColumnType::Bytea => format!("{VEC}<u8>"),
+            ColumnType::Vector { .. } => format!("{VEC}<f32>"),
             ColumnType::Json { .. } => format!("{RT}::Json"),
             ColumnType::Array { element } => {
                 format!("{VEC}<{}>", self.rust_type(element, name, what)?)

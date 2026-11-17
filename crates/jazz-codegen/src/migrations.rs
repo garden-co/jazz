@@ -312,6 +312,17 @@ fn refuse_shared_column_changes(
                     .join(", ")
             )));
         }
+        // SPEC 20.1: no lens converts to, from or between vector types (a
+        // vector's dimensions are its type), so say so rather than "not yet".
+        if matches!(source.column_type, ColumnType::Vector { .. })
+            || matches!(column.column_type, ColumnType::Vector { .. })
+        {
+            return Err(CodegenError::unsupported(format!(
+                "Changing the type of column `{name}` to or from a vector, or its dimensions, \
+                 is not supported: no migration converts vectors (embeddings from another model \
+                 are not comparable). {KEEP_VALUES_ADVICE}"
+            )));
+        }
         let what = if matches!(
             (&source.column_type, &column.column_type),
             (ColumnType::Json { .. }, ColumnType::Json { .. })

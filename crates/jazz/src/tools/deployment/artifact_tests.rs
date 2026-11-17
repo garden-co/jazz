@@ -2549,6 +2549,115 @@ fn an_index_names_a_stored_column() {
     });
 }
 
+fn with_vector_columns() -> ArtifactInput {
+    let mut input = todo_server();
+    let todos = input.schemas[0].get_mut(&TableName::from("todos")).unwrap();
+    let mut embedding = ColumnDescriptor::new("embedding", ColumnType::Vector { dimensions: 3 });
+    embedding.default = Some(Value::Bytea(
+        [0.1f32, -2.0, 3e-5]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect(),
+    ));
+    todos.columns.columns.push(embedding);
+    todos
+        .columns
+        .columns
+        .push(nullable("draft", ColumnType::Vector { dimensions: 1 }));
+    input.current = SchemaHash::compute(&structural(input.schemas[0].clone())).to_string();
+    input
+}
+
+/// A vector column is written `{ "vector": n }`, its default as `n` numbers
+/// that read back to the same `f32` bits, and the file reads back to the
+/// same schema (SPEC 20.1).
+#[test]
+fn vector_columns_round_trip_through_the_file() {
+    let input = with_vector_columns();
+    let expected = structural(input.schemas[0].clone());
+    let written = write(input).unwrap();
+    let app: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    let columns = &app["tables"]["todos"]["columns"];
+    assert_eq!(
+        columns["embedding"],
+        serde_json::json!({ "vector": 3, "default": [0.1, -2, 0.00003] }),
+        "{}",
+        written.app
+    );
+    assert_eq!(
+        columns["draft"],
+        serde_json::json!({ "vector": 1, "optional": true })
+    );
+    let loaded = load(written.app.as_bytes(), written.permissions.as_bytes()).unwrap();
+    assert_eq!(
+        loaded.current_hash(),
+        SchemaHash::compute(&expected),
+        "the file reads back to the schema it was written from"
+    );
+}
+
+/// The dimensions are part of the schema's identity: `vector(3)`,
+/// `vector(4)` and `bytes` are three different schemas.
+#[test]
+fn vector_dimensions_are_schema_identity() {
+    let hash = |ty: ColumnType| {
+        let mut input = todo_server();
+        input.schemas[0]
+            .get_mut(&TableName::from("todos"))
+            .unwrap()
+            .columns
+            .columns
+            .push(ColumnDescriptor::new("embedding", ty));
+        SchemaHash::compute(&structural(input.schemas[0].clone()))
+    };
+    let three = hash(ColumnType::Vector { dimensions: 3 });
+    assert_ne!(three, hash(ColumnType::Vector { dimensions: 4 }));
+    assert_ne!(three, hash(ColumnType::Bytea));
+    assert_eq!(three, hash(ColumnType::Vector { dimensions: 3 }));
+}
+
+#[test]
+fn malformed_vector_columns_are_refused_by_name() {
+    let column = |spec: serde_json::Value| {
+        edited_app(move |v| v["tables"]["todos"]["columns"]["embedding"] = spec)
+    };
+    for spec in [
+        serde_json::json!({ "vector": 0 }),
+        serde_json::json!({ "vector": 4097 }),
+        serde_json::json!({ "vector": 3.5 }),
+        serde_json::json!({ "vector": "3" }),
+        serde_json::json!({ "vector": -1 }),
+    ] {
+        let error = column(spec.clone());
+        assert!(
+            error.contains("a vector's dimensions are an integer from 1 to 4096"),
+            "{spec}: {error}"
+        );
+    }
+    let error = column(serde_json::json!({ "array": { "vector": 3 } }));
+    assert!(
+        error.contains("an array of vectors is not supported"),
+        "{error}"
+    );
+    let error = column(serde_json::json!({ "vector": 3, "array": "int" }));
+    assert!(error.contains("exactly one of"), "{error}");
+    let error = column(serde_json::json!({ "vector": 2, "default": [1, 2, 3] }));
+    assert!(
+        error.contains("a vector default has 2 numbers, not 3"),
+        "{error}"
+    );
+    let error = column(serde_json::json!({ "vector": 2, "default": [1, "x"] }));
+    assert!(
+        error.contains("finite numbers within float32 range"),
+        "{error}"
+    );
+    let error = column(serde_json::json!({ "vector": 1, "default": [1e39] }));
+    assert!(
+        error.contains("finite numbers within float32 range"),
+        "{error}"
+    );
+}
+
 /// What the TS permissions compiler (and the engine behind it) refused, the
 /// loader refuses too, naming the spot.
 #[test]

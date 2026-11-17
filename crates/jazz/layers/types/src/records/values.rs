@@ -474,6 +474,13 @@ pub enum ValueType {
     /// member or ordered key part. Appended last so existing serde variant
     /// indices of this type are unchanged.
     U48,
+    /// `n` IEEE-754 binary32 values (SPEC 20.1), `1 ≤ n ≤ 4096`, carried as
+    /// [`Value::Bytes`] of exactly `4n` bytes in encoding `f32le/1` (each
+    /// element's bits little-endian, no header). Encoded like `Bytes`
+    /// everywhere (record payload, SQLite BLOB cell, wire); encoders refuse a
+    /// wrong length or a NaN/infinite element. Not orderable, not a key.
+    /// Appended last so existing serde variant indices are unchanged.
+    Vector(u32),
 }
 
 /// Opaque marker for physical-only value encodings beneath the public
@@ -540,6 +547,38 @@ const DESCRIPTOR_NODE_U48: u8 = 25;
 /// logical value type. Only node-local descriptors carry it; a descriptor
 /// that leaves the node is resolved to its logical form first.
 const DESCRIPTOR_NODE_INTERNED: u8 = 26;
+/// A `vector(n)` column (SPEC 20.1): one `dimensions: u32` field.
+const DESCRIPTOR_NODE_VECTOR: u8 = 27;
+
+/// Largest dimension of a [`ValueType::Vector`] (SPEC 20.1).
+pub const VECTOR_MAX_DIMENSIONS: u32 = 4096;
+
+fn checked_vector_dimensions(dimensions: u32) -> Result<u32, Error> {
+    if (1..=VECTOR_MAX_DIMENSIONS).contains(&dimensions) {
+        Ok(dimensions)
+    } else {
+        Err(Error::VectorDimensionsOutOfRange(dimensions))
+    }
+}
+
+/// Checks a `vector(dimensions)` payload in encoding `f32le/1`: exactly
+/// `4 * dimensions` bytes, every element finite.
+pub fn validate_vector_f32le(bytes: &[u8], dimensions: u32) -> Result<(), Error> {
+    let dimensions = checked_vector_dimensions(dimensions)?;
+    if bytes.len() != dimensions as usize * 4 {
+        return Err(Error::VectorLength {
+            dimensions,
+            bytes: bytes.len(),
+        });
+    }
+    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
+        let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        if !value.is_finite() {
+            return Err(Error::VectorNonFinite { index });
+        }
+    }
+    Ok(())
+}
 
 /// Largest value representable by [`ValueType::U48`] (`2^48 - 1`).
 pub const U48_MAX: u64 = (1 << 48) - 1;
@@ -764,6 +803,13 @@ fn descriptor_codec_push_value_type(
         ValueType::U32 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_U32)),
         ValueType::U64 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_U64)),
         ValueType::U48 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_U48)),
+        ValueType::Vector(dimensions) => descriptor_codec_push(
+            nodes,
+            DescriptorCodecNode {
+                registry_id: u64::from(checked_vector_dimensions(*dimensions)?),
+                ..scalar(DESCRIPTOR_NODE_VECTOR)
+            },
+        ),
         ValueType::I32 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_I32)),
         ValueType::I64 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_I64)),
         ValueType::F64 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_F64)),
@@ -1019,6 +1065,15 @@ fn descriptor_codec_decode_value_type(
         DESCRIPTOR_NODE_U32 => scalar(DESCRIPTOR_NODE_U32, ValueType::U32),
         DESCRIPTOR_NODE_U64 => scalar(DESCRIPTOR_NODE_U64, ValueType::U64),
         DESCRIPTOR_NODE_U48 => scalar(DESCRIPTOR_NODE_U48, ValueType::U48),
+        DESCRIPTOR_NODE_VECTOR => {
+            let dimensions =
+                u32::try_from(node.registry_id).map_err(|_| Error::NonCanonicalRecord)?;
+            descriptor_codec_metadata_empty(&DescriptorCodecNode {
+                registry_id: 0,
+                ..node.clone()
+            })?;
+            Ok(ValueType::Vector(checked_vector_dimensions(dimensions)?))
+        }
         DESCRIPTOR_NODE_I32 => scalar(DESCRIPTOR_NODE_I32, ValueType::I32),
         DESCRIPTOR_NODE_I64 => scalar(DESCRIPTOR_NODE_I64, ValueType::I64),
         DESCRIPTOR_NODE_F64 => scalar(DESCRIPTOR_NODE_F64, ValueType::F64),
@@ -1232,6 +1287,7 @@ fn persisted_descriptor_node_schema() -> &'static EnumSchema {
             (DESCRIPTOR_NODE_ENUM_CASE, "EnumCase"),
             (DESCRIPTOR_NODE_U48, "U48"),
             (DESCRIPTOR_NODE_INTERNED, "Interned"),
+            (DESCRIPTOR_NODE_VECTOR, "Vector"),
         ];
         let cases = kinds.into_iter().enumerate().map(|(index, (tag, name))| {
             assert_eq!(index, usize::from(tag));
@@ -1259,6 +1315,7 @@ fn persisted_descriptor_node_schema() -> &'static EnumSchema {
                 DESCRIPTOR_NODE_ENUM_CASE | DESCRIPTOR_NODE_INTERNED => {
                     vec![("name", ValueType::raw_string())]
                 }
+                DESCRIPTOR_NODE_VECTOR => vec![("dimensions", ValueType::U32)],
                 _ => Vec::new(),
             };
             EnumCase::new(name, RecordDescriptor::new(fields))
@@ -1301,6 +1358,11 @@ fn persisted_descriptor_node_value(node: DescriptorCodecNode) -> Result<Value, E
         DESCRIPTOR_NODE_ENUM_CASE | DESCRIPTOR_NODE_INTERNED => {
             vec![Value::String(node.name.ok_or(Error::NonCanonicalRecord)?)]
         }
+        // The node's `registry_id` slot carries the dimensions in memory; the
+        // persisted case names it.
+        DESCRIPTOR_NODE_VECTOR => vec![Value::U32(
+            u32::try_from(node.registry_id).map_err(|_| Error::NonCanonicalRecord)?,
+        )],
         _ => Vec::new(),
     };
     let tag = u32::from(node.tag);
@@ -1371,6 +1433,9 @@ fn persisted_descriptor_node_from_value(value: &Value) -> Result<DescriptorCodec
         }
         (DESCRIPTOR_NODE_ARRAY | DESCRIPTOR_NODE_NULLABLE | DESCRIPTOR_NODE_RECORD, []) => {
             node.children = 1;
+        }
+        (DESCRIPTOR_NODE_VECTOR, [Value::U32(dimensions)]) => {
+            node.registry_id = u64::from(*dimensions);
         }
         (DESCRIPTOR_NODE_U8..=DESCRIPTOR_NODE_UUID | DESCRIPTOR_NODE_U48, []) => {}
         _ => return Err(Error::NonCanonicalRecord),
@@ -1754,6 +1819,7 @@ impl ValueType {
             Self::Nullable(value_type) => value_type.fixed_size().map(|size| size + 1),
             Self::String
             | Self::Bytes
+            | Self::Vector(_)
             | Self::Internal(_)
             | Self::Array(_)
             | Self::Record(_)
@@ -1800,6 +1866,10 @@ pub(super) fn encode_value_into(
             Value::Bytes(value),
             ValueType::Internal(InternalValueType(InternalValueTypeRepr::RawBytes)),
         ) => bytes.extend_from_slice(value),
+        (Value::Bytes(value), ValueType::Vector(dimensions)) => {
+            validate_vector_f32le(value, *dimensions)?;
+            bytes.extend_from_slice(value)
+        }
         (
             Value::Bytes(value),
             ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(
@@ -1998,6 +2068,10 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::RawBytes)) => {
             Ok(Value::Bytes(bytes.to_vec()))
         }
+        ValueType::Vector(dimensions) => {
+            validate_vector_f32le(bytes, *dimensions)?;
+            Ok(Value::Bytes(bytes.to_vec()))
+        }
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::Interned { .. })) => {
             Ok(Value::U32(u32::from_le_bytes(read_exact::<4>(bytes)?)))
         }
@@ -2107,6 +2181,7 @@ fn validate_value_inner(
                 .map_err(|_| Error::InvalidUtf8)
         }
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::RawBytes)) => Ok(()),
+        ValueType::Vector(dimensions) => validate_vector_f32le(bytes, *dimensions),
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::Interned { .. })) => {
             read_exact::<4>(bytes).map(|_| ())
         }
@@ -2254,6 +2329,7 @@ fn validate_tuple_member(bytes: &[u8], value_type: &ValueType) -> Result<(), Err
         }
         ValueType::String
         | ValueType::Bytes
+        | ValueType::Vector(_)
         | ValueType::Internal(_)
         | ValueType::Array(_)
         | ValueType::Record(_)
@@ -2397,6 +2473,9 @@ impl Value {
 pub(crate) fn ensure_value_type(value: &Value, value_type: &ValueType) -> Result<(), Error> {
     match (value, value_type) {
         (Value::U48(value), ValueType::U48) => checked_u48(*value).map(|_| ()),
+        (Value::Bytes(value), ValueType::Vector(dimensions)) => {
+            validate_vector_f32le(value, *dimensions)
+        }
         (Value::U8(_), ValueType::U8)
         | (Value::U16(_), ValueType::U16)
         | (Value::U32(_), ValueType::U32)
@@ -2542,6 +2621,7 @@ pub(super) fn validate_schema_value_type(value_type: &ValueType) -> Result<(), E
             }
             Ok(())
         }
+        ValueType::Vector(dimensions) => checked_vector_dimensions(*dimensions).map(|_| ()),
         ValueType::EnumTag(schema) => schema.validate(),
         ValueType::Enum(schema) => {
             schema.validate()?;
@@ -2675,6 +2755,7 @@ pub(super) fn decode_tuple_member(bytes: &[u8], value_type: &ValueType) -> Resul
         }
         ValueType::String
         | ValueType::Bytes
+        | ValueType::Vector(_)
         | ValueType::Internal(_)
         | ValueType::Array(_)
         | ValueType::Record(_)
