@@ -9,8 +9,7 @@ use std::task::{Poll, Waker};
 
 use crate::ids::{AuthorSubject, GlobalPhysicalColumnId, GlobalPhysicalTableId, RowUuid};
 use crate::protocol::{
-    BranchSelector, BranchViewBase, CurrentWriteSchema, LensOp, MigrationLens, ReadViewSourceSpec,
-    ReadViewSpec, SchemaVersion,
+    BranchSelector, BranchViewBase, LensOp, MigrationLens, ReadViewSourceSpec, ReadViewSpec,
 };
 use crate::query::Query;
 use crate::records::{Value, ValueType};
@@ -67,10 +66,11 @@ use crate::values::{
     to_sql, unsupported,
 };
 pub use sync::{
-    ACCEPTED, AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
-    FrameJoiner, Image, MAX_SEQ, Outcome, PENDING, Pos, ReadSpan, RejectedTransaction,
-    RelationSnapshot, RemoteLinkHint, SerializedReadResult, Since, SubscriberId, SyncMessage,
-    Transport, TransportError, TxName, UploadRefusal, UploadStatus, Upstream, WireBase, WireChunk,
+    ACCEPTED, AccessProof, Acting, BuiltOn, CatalogueCell, CatalogueSchema, CatalogueUpdate,
+    CatalogueVersion, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad, FrameJoiner, Image,
+    MAX_SEQ, Outcome, PENDING, Pos, ReadSpan, RejectedTransaction, RelationSnapshot,
+    RemoteLinkHint, SerializedReadResult, Since, SubscriberId, SyncMessage, Transport,
+    TransportError, TxName, UploadRefusal, UploadStatus, Upstream, WireBase, WireChunk,
     WireChunkRef, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, WireTransport,
     WireTransportAdapter, WireWrite, WriteConflict, decode_message, duplex, encode_frames,
     validate_frame_batch_for_corpus,
@@ -378,6 +378,11 @@ pub enum SubscriptionEvent {
         removed: Vec<RemovedRow>,
         settled: bool,
         tier: DurabilityTier,
+        /// A reset that stands for deltas the reader fell too far behind
+        /// to be told one by one (see
+        /// [`Db::set_subscription_backlog_limit`]): the current result,
+        /// which supersedes them. Always `false` on other deltas.
+        coalesced: bool,
     },
     /// The subscription ended with an error: `code` says what kind,
     /// `message` is the error's own message, `reason` the error as text
@@ -599,7 +604,23 @@ impl SubscriptionStream {
             }
             return Some(event);
         }
-        self.queue.borrow_mut().pop_front()
+        let mut queue = self.queue.borrow_mut();
+        if !queue.reset_due() {
+            return queue.pop_front(None);
+        }
+        // A group is borrowed mutably only inside the store's own calls
+        // (dispatching a commit), which never run a reader's code, so it
+        // is free here. Were it not, the reset stays due for the next read.
+        let group = self.group.upgrade();
+        let group = group.as_ref().and_then(|group| group.try_borrow().ok());
+        debug_assert!(group.is_some(), "a reader reads outside dispatch");
+        queue.pop_front(group.as_ref().map(|group| group.rows.as_slice()))
+    }
+
+    /// Changed rows its undelivered deltas hold: at most its backlog limit
+    /// ([`Db::set_subscription_backlog_limit`]), past which they coalesce.
+    pub fn backlog_rows(&self) -> usize {
+        self.queue.borrow().backlog_rows()
     }
 
     pub async fn close(self) -> Result<(), Error> {
@@ -645,13 +666,6 @@ pub struct RuntimeStats {
     pub active_subscriptions: usize,
     pub active_prepared_shapes: usize,
     pub active_shape_params: usize,
-}
-
-/// A schema lineage step authored for publication.
-#[derive(Clone, Debug)]
-pub struct SchemaPublication {
-    version: SchemaVersion,
-    lens: MigrationLens,
 }
 
 struct Inner {
@@ -855,7 +869,6 @@ struct Inner {
     /// any other identity while it is open would join its commit, and
     /// upload under its author and claims, so it is refused.
     tx_identity: Option<WriteIdentity>,
-    publications: Vec<SchemaPublication>,
     /// Set once connected upstream: this store is a replica.
     client: Option<sync::Client>,
     /// A replica whose store does not outlive it (a foreground over a
@@ -920,6 +933,9 @@ struct Inner {
     /// The app's versions and lenses (see [`DbConfig::migrations`]): a
     /// version this store lacks is admitted along them.
     migrations: Migrations,
+    /// Catalogue versions an upstream sent that this build cannot read,
+    /// with why (see [`crate::sync::CatalogueSchema`]): skipped, not taken.
+    unsupported_versions: BTreeMap<crate::ids::SchemaVersionId, String>,
     /// Whether `_jazz_withheld` exists (see `sync::WITHHELD_DDL`): branch
     /// views over a base read it only then.
     withheld: std::cell::Cell<bool>,
@@ -927,6 +943,14 @@ struct Inner {
     /// followed key found, read once for every session following it
     /// (see `sync::FollowMemo`).
     follow_memo: Rc<RefCell<Option<sync::FollowMemo>>>,
+    /// Per stored table, how many composite support column sets the
+    /// server's sessions hold (see `sync::CompositeTables`): a written row
+    /// of a table no session follows that way skips the sessions' sets.
+    pub(crate) composite_tables: sync::CompositeTables,
+    /// Ticks' gatherings of composite support column sets (see
+    /// `Db::composite_scans_for_test`).
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) composite_scans: std::cell::Cell<usize>,
     /// Whether `_jazz_pruned_txs` exists, as last read (see
     /// `sync::has_pruned_txs`).
     pruned_txs: std::cell::Cell<Option<sync::Known>>,
@@ -2249,7 +2273,6 @@ impl Db {
                 inherited_heads: RefCell::new(HashMap::new()),
                 tx: None,
                 tx_identity: None,
-                publications: Vec::new(),
                 client: None,
                 non_durable: false,
                 reopenable: path.is_some(),
@@ -2271,8 +2294,12 @@ impl Db {
                 capture: Vec::new(),
                 gone: RefCell::new(Vec::new()),
                 migrations: config.migrations,
+                unsupported_versions: BTreeMap::new(),
                 withheld: std::cell::Cell::new(withheld > 0),
                 follow_memo: Rc::default(),
+                composite_tables: sync::CompositeTables::default(),
+                #[cfg(any(test, feature = "testing"))]
+                composite_scans: std::cell::Cell::new(0),
                 pruned_txs: std::cell::Cell::new(None),
             })),
         };
@@ -2352,6 +2379,29 @@ impl Db {
             }
         }
         Ok(())
+    }
+
+    /// The catalogue versions an upstream sent that this build cannot read
+    /// (a column type or other variant it does not know): each skipped, with a
+    /// `SchemaVersionUnsupported` error saying why. The store keeps syncing
+    /// the versions it knows.
+    pub fn unsupported_schema_versions(&self) -> Vec<(crate::ids::SchemaVersionId, Error)> {
+        self.inner()
+            .unsupported_versions
+            .iter()
+            .map(|(id, why)| {
+                let mut error = Error::new(
+                    ErrorCode::Schema,
+                    format!(
+                        "schema version {} is not supported by this version of Jazz ({why}); \
+                         upgrade it to read that version",
+                        id.0
+                    ),
+                );
+                error.reason = Some(Reason::SchemaVersionUnsupported);
+                (*id, error)
+            })
+            .collect()
     }
 
     /// This store's own commits the authority refused, with their payloads,
@@ -3306,6 +3356,17 @@ impl Db {
             .set_threshold(threshold);
     }
 
+    /// How many changed rows a subscription's undelivered deltas may hold
+    /// before they are coalesced into one reset of its current result
+    /// (marked `coalesced`), for reads that set no
+    /// [`ReadOpts::backlog_rows`]. Defaults to
+    /// [`fanout::DEFAULT_SUBSCRIPTION_BACKLOG_LIMIT`]. It cannot be turned
+    /// off: a reader that stops reading holds at most this many changed
+    /// rows plus its result, however fast others write.
+    pub fn set_subscription_backlog_limit(&self, limit: std::num::NonZeroUsize) {
+        self.inner.borrow_mut().fan.backlog_limit = Some(limit);
+    }
+
     /// Diagnostics: SQLite's query plan for the INSERT check a commit
     /// would run on `row` of `table` as `author`, with `grounded` rows of
     /// that table overlaid as a later grounding round sees them.
@@ -3545,22 +3606,24 @@ impl Db {
         };
         let include_deleted = read.include_deleted;
         let mut inner = self.inner();
-        let (queue, group) = match inner.subscribe_member(prepared, identity, read, settled) {
-            Ok(member) => member,
-            Err(error) => {
-                drop(inner);
-                if let (Some(_), Some(reach)) = (&remote, reach) {
-                    self.detach_remote(
-                        &prepared.query,
-                        &prepared.binding,
-                        include_deleted,
-                        &view,
-                        reach,
-                    );
+        let backlog = fanout::Backlog::Reader(opts.backlog_rows);
+        let (queue, group) =
+            match inner.subscribe_member(prepared, identity, read, settled, backlog) {
+                Ok(member) => member,
+                Err(error) => {
+                    drop(inner);
+                    if let (Some(_), Some(reach)) = (&remote, reach) {
+                        self.detach_remote(
+                            &prepared.query,
+                            &prepared.binding,
+                            include_deleted,
+                            &view,
+                            reach,
+                        );
+                    }
+                    return Err(error);
                 }
-                return Err(error);
-            }
-        };
+            };
         Ok(SubscriptionStream {
             queue,
             dropped: inner.fan.dropped.clone(),
@@ -3998,45 +4061,13 @@ impl Db {
 
     // ---- schema evolution -------------------------------------------------
 
-    pub fn author_schema_lineage_publication(
-        &self,
-        version: SchemaVersion,
-        lens: MigrationLens,
-    ) -> Result<SchemaPublication, Error> {
-        Ok(SchemaPublication { version, lens })
-    }
-
-    pub async fn publish_schema_with_lens(
-        &self,
-        publication: SchemaPublication,
-    ) -> Result<(), Error> {
-        self.inner().publications.push(publication);
-        Ok(())
-    }
-
-    /// Make a published version current with the lens it was published
-    /// with (see [`Db::activate_schema_with_lenses`]).
-    pub async fn activate_catalogue_schema_for_test(
-        &self,
-        current: CurrentWriteSchema,
-    ) -> Result<(), Error> {
-        let publication = self
-            .inner()
-            .publications
-            .iter()
-            .find(|publication| publication.version.id == current.schema)
-            .cloned()
-            .ok_or_else(|| Error::new(ErrorCode::Schema, "schema version was not published"))?;
-        self.activate(publication.version.schema, &[publication.lens], None)
-    }
-
     /// Make `schema` the current schema. The stored tables grow to hold it:
     /// new tables, new columns (`ADD COLUMN ... DEFAULT`, no rows rewritten)
     /// and new indexes. Columns other schemas added stay, so older clients
     /// keep their data. Changing a column's type is not supported yet, and a
     /// new required column needs a default.
     pub async fn activate_schema(&self, schema: JazzSchema) -> Result<(), Error> {
-        self.activate(schema, &[], None)
+        self.activate(schema, &[])
     }
 
     /// [`Db::activate_schema`], with the migration lenses into `schema`
@@ -4049,20 +4080,7 @@ impl Db {
         schema: JazzSchema,
         lenses: &[MigrationLens],
     ) -> Result<(), Error> {
-        self.activate(schema, lenses, None)
-    }
-
-    /// [`Db::activate_schema_with_lenses`] as permissions revision
-    /// `revision` of the store's catalogue (see [`crate::catalogue`]): its
-    /// row records the schema and policies, and when they took effect. A
-    /// store without a server numbers its activations itself.
-    pub async fn activate_schema_at_revision(
-        &self,
-        revision: u64,
-        schema: JazzSchema,
-        lenses: &[MigrationLens],
-    ) -> Result<(), Error> {
-        self.activate(schema, lenses, Some(revision))
+        self.activate(schema, lenses)
     }
 
     /// Admit `schema` without making it current: the stored tables grow to
@@ -4077,18 +4095,12 @@ impl Db {
         self.admit(schema, lenses, None)
     }
 
-    fn activate(
-        &self,
-        schema: JazzSchema,
-        lenses: &[MigrationLens],
-        revision: Option<u64>,
-    ) -> Result<(), Error> {
-        self.admit(schema, lenses, Some(revision))
+    fn activate(&self, schema: JazzSchema, lenses: &[MigrationLens]) -> Result<(), Error> {
+        self.admit(schema, lenses, Some(None))
     }
 
     /// Apply `change` to the store's catalogue in one transaction: publish
-    /// its rows, admit its versions in order, then make its schema current
-    /// at its revision. A change that fails anywhere leaves the file and
+    /// its rows, then admit its versions in order. A change that fails anywhere leaves the file and
     /// this database as they were.
     pub async fn apply_catalogue(
         &self,
@@ -4109,9 +4121,6 @@ impl Db {
             crate::catalogue::put(&self.inner().conn, &change.put)?;
             for (schema, lenses) in change.admit {
                 self.admit(schema, &lenses, None)?;
-            }
-            if let Some((revision, schema, lenses)) = change.activate {
-                self.admit(schema, &lenses, Some(Some(revision)))?;
             }
             Ok(())
         })();
@@ -4340,6 +4349,9 @@ impl Inner {
         {
             return Err(authority_changed());
         }
+        // A version this build cannot read is skipped, with its lens
+        // cells; the versions it knows are taken as usual.
+        let (versions, cells) = self.skip_unsupported_versions(versions, cells);
         let mirrored = !versions.is_empty();
         if mirrored {
             self.mirror_versions(versions, cells, defaults)?;
@@ -4358,6 +4370,36 @@ impl Inner {
             }
         }
         Ok(mirrored)
+    }
+
+    /// `versions` without the ones this build cannot read (recorded in
+    /// `unsupported_versions`), and `cells` without those versions' cells.
+    fn skip_unsupported_versions(
+        &mut self,
+        versions: Vec<sync::CatalogueVersion>,
+        cells: Vec<sync::CatalogueCell>,
+    ) -> (Vec<sync::CatalogueVersion>, Vec<sync::CatalogueCell>) {
+        let mut skipped = BTreeSet::new();
+        let versions = versions
+            .into_iter()
+            .filter(|version| match &version.schema {
+                sync::CatalogueSchema::Known(_) => true,
+                sync::CatalogueSchema::Unsupported { id, error, .. } => {
+                    tracing::warn!(
+                        version = %id.0,
+                        "skipping a catalogue schema version this build cannot read: {error}"
+                    );
+                    self.unsupported_versions.insert(*id, error.clone());
+                    skipped.insert(*id.0.as_bytes());
+                    false
+                }
+            })
+            .collect();
+        let cells = cells
+            .into_iter()
+            .filter(|cell| !skipped.contains(&cell.since))
+            .collect();
+        (versions, cells)
     }
 
     /// Take the upstream's versions, names and lens cells: whole or not at
@@ -4539,7 +4581,10 @@ impl Inner {
                         })
                         .collect(),
                 };
-                (entry.schema.id, names, entry.schema.schema)
+                let sync::CatalogueSchema::Known(version) = entry.schema else {
+                    unreachable!("unsupported versions are skipped first")
+                };
+                (version.id, names, version.schema)
             })
             .collect();
         let mut fresh = std::collections::HashSet::new();
@@ -4800,6 +4845,7 @@ fn delta(
         removed,
         settled: true,
         tier: DurabilityTier::Local,
+        coalesced: false,
     }
 }
 
