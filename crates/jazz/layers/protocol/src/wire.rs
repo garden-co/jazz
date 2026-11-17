@@ -119,6 +119,21 @@ pub enum WireErrorReason {
     Reauthenticate,
 }
 
+impl WireErrorReason {
+    /// The reason with this postcard-v1 tag, if this build knows it.
+    pub fn from_tag(tag: u32) -> Option<Self> {
+        Some(match tag {
+            0 => Self::Expired,
+            1 => Self::Missing,
+            2 => Self::Invalid,
+            3 => Self::Disabled,
+            4 => Self::Revoked,
+            5 => Self::Reauthenticate,
+            _ => return None,
+        })
+    }
+}
+
 /// The body of a [`WireFrame::Error`] that names its reason (encoding
 /// `wire-error-reason-v1`): the `Error` body (code, retry, message) followed
 /// by the [`WireErrorReason`] tag, under the same frame tag (1). The message
@@ -600,16 +615,19 @@ pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
 /// Every other receiver uses [`decode_frame`], which refuses those bytes.
 pub fn decode_frame_with_error_reason(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
     decode_frame(bytes).or_else(|error| {
-        let (tag, reasoned) =
-            decode_postcard_exact::<(u32, WireReasonedError)>(bytes).map_err(|_| error.clone())?;
+        // The reason as a raw tag: one this build does not know (a newer
+        // server) leaves the error unnamed, and the message decides.
+        let (tag, code, retry, message, reason) =
+            decode_postcard_exact::<(u32, WireErrorCode, WireRetry, String, u32)>(bytes)
+                .map_err(|_| error.clone())?;
         if tag != ERROR_FRAME_TAG {
             return Err(error);
         }
         Ok(WireFrame::Error(WireError {
-            code: reasoned.code,
-            retry: reasoned.retry,
-            message: reasoned.message,
-            reason: Some(reasoned.reason),
+            code,
+            retry,
+            message,
+            reason: WireErrorReason::from_tag(reason),
         }))
     })
 }
@@ -2761,6 +2779,14 @@ mod tests {
         };
         let cases = fixture["cases"].as_array().unwrap();
         assert_eq!(cases.len(), 6, "one case per WireErrorReason");
+        // A reason tag from a newer server leaves the error unnamed.
+        let mut newer = hex(&cases[0]["reasoned_hex"]);
+        *newer.last_mut().unwrap() = 99;
+        let WireFrame::Error(read) = decode_frame_with_error_reason(&newer).unwrap() else {
+            panic!("an error frame")
+        };
+        assert_eq!(read.reason, None);
+        assert_eq!(read.message, cases[0]["message"].as_str().unwrap());
         for case in cases {
             let error = WireError::new(
                 serde_json::from_value(case["code"].clone()).unwrap(),

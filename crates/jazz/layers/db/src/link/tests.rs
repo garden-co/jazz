@@ -897,7 +897,7 @@ fn the_shared_wire_failure_table_matches_the_classifier() {
     );
 }
 
-/// R3b: a server that names its reason (`WireFrame::ReasonedError`) is
+/// R3b: a server that names its reason (`wire-error-reason-v1`) is
 /// taken at its word, whatever its message says; an older server's refusal
 /// is still read from its message.
 ///

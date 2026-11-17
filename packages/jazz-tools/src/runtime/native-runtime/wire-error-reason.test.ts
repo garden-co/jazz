@@ -64,6 +64,14 @@ describe("wire-error-reason-v1", () => {
     const error = { code: "auth_failed", retry: "after_resume", message: "session ends" };
     expect(isReauthenticateWireError({ ...error, reason: "reauthenticate" })).toBe(true);
     expect(isReauthenticateWireError(error)).toBe(false);
+    // A reason from a newer server leaves the message to decide.
+    expect(
+      isReauthenticateWireError({
+        ...error,
+        message: "reauthenticate: session ends",
+        reason: "unknown:9",
+      }),
+    ).toBe(true);
     expect(isReauthenticateWireError({ ...error, message: "reauthenticate: session ends" })).toBe(
       true,
     );

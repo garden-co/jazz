@@ -1896,3 +1896,58 @@ async fn a_thin_socket_whose_answer_never_comes_is_closed() {
     assert_eq!(frame.reason.as_str(), "an answer never came");
     app.stop().await;
 }
+
+/// #5927 R3b: the endpoint refuses a sign-in right after the prelude, so it
+/// reads the Hello the client sends behind it first, and names why it
+/// refused to a client that offered `FEATURE_TYPED_ERROR_REASON`. A client
+/// without the bit gets the plain `Error` bytes and reads the message.
+///
+/// ```text
+/// client ─prelude (no one), Hello{+typed reasons}─► endpoint ─Error{missing}─► client
+/// client ─prelude (no one), Hello─────────────────► endpoint ─Error──────────► client
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_sign_in_names_its_reason_to_a_client_that_reads_one() {
+    use jazz::wire::{
+        FEATURE_TYPED_ERROR_REASON, WireErrorCode, WireErrorReason, WireFrame, WireHello,
+        WirePeerRole, current_wire_features, decode_frame, decode_frame_with_error_reason,
+        decode_websocket_frame_batch, encode_frame, encode_websocket_frame_batch,
+    };
+    let app = App::start().await;
+    let refusal = async |features: u64| {
+        let prelude = serde_json::to_vec(&json!({ "auth": {} })).unwrap();
+        let hello = encode_websocket_frame_batch(&[encode_frame(&WireFrame::Hello(
+            WireHello::current(WirePeerRole::Client, features),
+        ))
+        .unwrap()])
+        .unwrap();
+        let incoming =
+            futures::stream::iter(vec![prelude, hello]).chain(futures::stream::pending());
+        let (sent, mut received) = futures::channel::mpsc::unbounded::<Vec<u8>>();
+        let closed = app
+            .endpoint
+            .serve_socket(
+                Request::new("GET", app.path("ws")),
+                Box::pin(incoming),
+                sent.sink_map_err(|_| ()),
+            )
+            .await;
+        assert_eq!(closed.code, 1008, "{closed:?}");
+        let batch = received.next().await.expect("a refusal");
+        decode_websocket_frame_batch(&batch).unwrap().remove(0)
+    };
+    let named = refusal(current_wire_features() | FEATURE_TYPED_ERROR_REASON).await;
+    let Ok(WireFrame::Error(error)) = decode_frame_with_error_reason(&named) else {
+        panic!("an error frame")
+    };
+    assert_eq!(error.code, WireErrorCode::AuthFailed);
+    assert_eq!(error.reason, Some(WireErrorReason::Missing));
+
+    let plain = refusal(current_wire_features()).await;
+    let Ok(WireFrame::Error(error)) = decode_frame(&plain) else {
+        panic!("a plain error frame")
+    };
+    assert_eq!(error.reason, None);
+    assert!(error.message.contains("missing"), "{}", error.message);
+    app.stop().await;
+}

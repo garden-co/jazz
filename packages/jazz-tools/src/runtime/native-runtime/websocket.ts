@@ -75,7 +75,10 @@ export const REAUTHENTICATE_WIRE_MESSAGE_PREFIX = "reauthenticate:";
  */
 export function isReauthenticateWireError(error: WireError): boolean {
   if (error.code !== "auth_failed") return false;
-  if (error.reason !== undefined) return error.reason === "reauthenticate";
+  // A reason this client knows decides; one from a newer server does not.
+  if (error.reason !== undefined && !error.reason.startsWith("unknown:")) {
+    return error.reason === "reauthenticate";
+  }
   return (
     error.retry === "after_resume" && error.message.startsWith(REAUTHENTICATE_WIRE_MESSAGE_PREFIX)
   );
@@ -1092,6 +1095,61 @@ function wireErrorCodeName(tag: number): string {
       // link retries rather than a frame it failed to read.
       return `unknown:${tag}`;
   }
+}
+
+/** `WireErrorReason` tags (encoding `wire-error-reason-v1`). Append-only. */
+const WIRE_ERROR_REASON_TAGS = {
+  expired: 0,
+  missing: 1,
+  invalid: 2,
+  disabled: 3,
+  revoked: 4,
+  reauthenticate: 5,
+} as const;
+export type WireErrorReasonName = keyof typeof WIRE_ERROR_REASON_TAGS;
+
+/**
+ * The features a client's `Hello` offered, from the websocket message that
+ * carries it; null when the message is not a lone `Hello`. A backend that
+ * relays a client (`createJazz`) reads this to answer the client in the
+ * encoding it reads.
+ */
+export function clientHelloFeatures(message: Uint8Array): number | null {
+  try {
+    const frames = decodeWebSocketFrameBatch(message);
+    if (frames.length !== 1 || frames[0]![0] !== WIRE_HELLO_TAG) return null;
+    const reader = new PostcardReader(frames[0]!);
+    reader.u64(); // WireFrame::Hello
+    reader.u64(); // min_protocol_version
+    reader.u64(); // max_protocol_version
+    return reader.u64();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A websocket message refusing a client's credential (`auth_failed`), naming
+ * `reason` when the client's `Hello` offered `FEATURE_TYPED_ERROR_REASON`
+ * (`wire-error-reason-v1`) and as the plain `Error` every client reads
+ * otherwise. `clientFeatures` undefined: the client's `Hello` has not been
+ * seen, so the plain one.
+ */
+export function encodeAuthFailedBatch(
+  retry: "never" | "after_resume",
+  message: string,
+  reason: WireErrorReasonName,
+  clientFeatures: number | undefined,
+): Uint8Array {
+  const frame = new PostcardWriter();
+  frame.u64(WIRE_ERROR_TAG);
+  frame.u64(3); // WireErrorCode::AuthFailed
+  frame.u64(retry === "never" ? 0 : 2);
+  frame.string(message);
+  if (clientFeatures !== undefined && (clientFeatures & FEATURE_TYPED_ERROR_REASON) !== 0) {
+    frame.u64(WIRE_ERROR_REASON_TAGS[reason]);
+  }
+  return encodeWebSocketFrameBatch([frame.finish()]);
 }
 
 /** `WireErrorReason` (encoding `wire-error-reason-v1`). */

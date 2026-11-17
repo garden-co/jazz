@@ -26,8 +26,8 @@ use jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
 use jazz::records::Value as CoreValue;
 use jazz::tools::Session;
 use jazz::wire::{
-    WireAuthorityEndpoint, WireError, WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry,
-    current_wire_features, encode_frame, negotiate_wire,
+    WireAuthorityEndpoint, WireError, WireErrorCode, WireErrorReason, WireFrame, WireHello,
+    WirePeerRole, WireRetry, current_wire_features, encode_frame, negotiate_wire,
 };
 use tokio::sync::mpsc;
 
@@ -646,9 +646,10 @@ async fn ws_admission(
                 auth.backend_secret = backend;
             }
             None if check.required() => {
-                return Err("this server admits only sockets its trusted workload opens"
-                    .to_owned()
-                    .into());
+                return Err(super::accounts::AdmissionError::refused(
+                    "this server admits only sockets its trusted workload opens",
+                    WireErrorReason::Invalid,
+                ));
             }
             None => {}
         }
@@ -656,7 +657,9 @@ async fn ws_admission(
 
     if let Some(admin_secret) = auth.admin_secret.as_deref() {
         crate::middleware::auth::validate_admin_secret(Some(admin_secret), &state.auth_config)
-            .map_err(|(_, message)| message.to_owned())?;
+            .map_err(|(_, message)| {
+                super::accounts::AdmissionError::refused(message, WireErrorReason::Invalid)
+            })?;
         // Forwarded commits keep their own permission subjects. Admin
         // authentication is not a substitute for per-transaction authorization.
         let trust = CommitUnitTrust::TrustedAuthority;
@@ -725,18 +728,22 @@ async fn ws_admission(
     // trusted workload vouched for).
     if !backend_credential && !vouched_upgrade {
         return Err(match backend_secret {
-            Some(_) => "Invalid backend secret",
-            None => {
-                "this core admits only its app's backend: connect through the app's createJazz handler"
-            }
-        }
-        .into());
+            Some(_) => super::accounts::AdmissionError::refused(
+                "Invalid backend secret",
+                WireErrorReason::Invalid,
+            ),
+            None => super::accounts::AdmissionError::refused(
+                "this core admits only its app's backend: connect through the app's createJazz handler",
+                WireErrorReason::Missing,
+            ),
+        });
     }
     if !has_jwt && !has_session_header {
         if !backend_credential {
-            return Err(
-                "Session required. Provide a backend session or a local-first proof.".into(),
-            );
+            return Err(super::accounts::AdmissionError::refused(
+                "Session required. Provide a backend session or a local-first proof.",
+                WireErrorReason::Missing,
+            ));
         }
         return Ok(WebSocketAdmission {
             identity: peer_identity,
@@ -757,7 +764,10 @@ async fn ws_admission(
             .map_err(super::accounts::AdmissionError::from)?;
 
     let Some(mut session) = session else {
-        return Err("Session required. Provide a backend session or a local-first proof.".into());
+        return Err(super::accounts::AdmissionError::refused(
+            "Session required. Provide a backend session or a local-first proof.",
+            WireErrorReason::Missing,
+        ));
     };
 
     // A session the backend states is policy-scoped, and its authority is the
@@ -767,9 +777,12 @@ async fn ws_admission(
     // off both so the skip never rests on the header alone.)
     let backend_stated = backend_credential && has_session_header;
     if !backend_stated {
-        let account = peer_identity
-            .account_id()
-            .ok_or("public sessions require an enrolled account identity")?;
+        let account = peer_identity.account_id().ok_or_else(|| {
+            super::accounts::AdmissionError::refused(
+                "public sessions require an enrolled account identity",
+                WireErrorReason::Invalid,
+            )
+        })?;
         let principal = jazz::account_registry::Principal {
             issuer: session.issuer.clone(),
             subject: session.user_id.clone(),
@@ -779,11 +792,17 @@ async fn ws_admission(
         }
         let assignment = super::accounts::resolve_assignment(state, principal).await?;
         if assignment != account {
-            return Err("account does not match authenticated identity assignment".into());
+            // The identity was reassigned to another account.
+            return Err(super::accounts::AdmissionError::refused(
+                "account does not match authenticated identity assignment",
+                WireErrorReason::Revoked,
+            ));
         }
         session.account_id = Some(account);
     }
-    ws_validate_session_identity(&session, peer_identity)?;
+    ws_validate_session_identity(&session, peer_identity).map_err(|message| {
+        super::accounts::AdmissionError::refused(message, WireErrorReason::Invalid)
+    })?;
     let revocation = backend_stated.then(|| SessionRevocation {
         principal: jazz::account_registry::Principal {
             issuer: session.issuer.clone(),
@@ -1072,7 +1091,9 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     };
     // What the client reads: a refusal names its reason to a client that
     // offered `FEATURE_TYPED_ERROR_REASON`, even before the server's hello.
-    let client_features = jazz::wire::decode_hello_frame(&first)
+    // `first` is the websocket batch, not the frame: read it as the hello
+    // below does.
+    let client_features = decode_ws_hello(&first)
         .map(|hello| hello.features)
         .unwrap_or(0);
     if let Some(refusal) = ws_foreign_version_refusal(&first) {
@@ -4387,6 +4408,65 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// #5927 R3b, over a real socket: the server reads the bit from the
+    /// client's Hello (sent behind its prelude, before admission decides),
+    /// and names why it refused to a client that offered it. Without the
+    /// bit the client gets the plain `Error` bytes.
+    ///
+    /// ```text
+    /// client ─prelude, Hello{+typed reasons}─► server ─Error + reason──► client
+    /// client ─prelude, Hello──────────────────► server ─Error (unchanged)─► client
+    /// ```
+    #[tokio::test]
+    async fn a_refusal_over_a_socket_names_its_reason_to_a_client_that_reads_one() {
+        use jazz::wire::{FEATURE_TYPED_ERROR_REASON, decode_frame_with_error_reason};
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let refusal = |features: u64| {
+            let state = state.clone();
+            async move {
+                let (_, prelude) = ws_anonymous_prelude(state.app_id, [0xb4; 32]);
+                let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
+                    .await
+                    .expect("connect");
+                ws.send(WsMessage::Binary(prelude.into()))
+                    .await
+                    .expect("send proof");
+                ws.send(WsMessage::Binary(
+                    ws_client_hello_batch_with_features(features).into(),
+                ))
+                .await
+                .expect("send hello");
+                let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
+                    .await
+                    .expect("admission resolves")
+                    .expect("response")
+                    .expect("wire response");
+                let WsMessage::Binary(bytes) = response else {
+                    panic!("expected admission error")
+                };
+                let frames: Vec<Vec<u8>> = postcard::from_bytes(&bytes).expect("frame batch");
+                assert_eq!(frames.len(), 1);
+                frames.into_iter().next().unwrap()
+            }
+        };
+        let named = refusal(current_wire_features() | FEATURE_TYPED_ERROR_REASON).await;
+        let WireFrame::Error(error) = decode_frame_with_error_reason(&named).expect("error frame")
+        else {
+            panic!("an error frame")
+        };
+        assert_eq!(error.code, WireErrorCode::AuthFailed);
+        // No backend credential: `missing`.
+        assert_eq!(error.reason, Some(WireErrorReason::Missing), "{error:?}");
+
+        let plain = refusal(current_wire_features()).await;
+        let WireFrame::Error(error) = decode_frame(&plain).expect("plain error frame") else {
+            panic!("an error frame")
+        };
+        assert_eq!(error.code, WireErrorCode::AuthFailed);
+        assert_eq!(error.reason, None);
     }
 
     /// The app's backend's word on the account registry (its admin calls).

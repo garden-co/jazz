@@ -14,12 +14,15 @@ import { AUTHENTICATE_EXPIRES_AT_MISSING } from "../accounts/registry-client.js"
 import { LOCAL_FIRST_JWT_ISSUER, parseJwtPayload } from "../runtime/client-session.js";
 import { verifyLocalFirstToken } from "../runtime/local-first-token.js";
 import { endpointScope } from "../runtime/client-scope.js";
-import { PostcardWriter } from "../runtime/native-runtime/native-codec.js";
+import { mapAuthReason } from "../runtime/auth-state.js";
 import {
+  clientHelloFeatures,
   decodeWebSocketFrameBatch,
   decodeWireError,
+  encodeAuthFailedBatch,
   encodeWebSocketFrameBatch,
   REAUTHENTICATE_WIRE_MESSAGE_PREFIX,
+  type WireErrorReasonName,
 } from "../runtime/native-runtime/websocket.js";
 import {
   SESSION_RENEWAL_HEADER,
@@ -2332,6 +2335,16 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     // A thin client's socket (its Hello asks for thin results): its
     // transactions are served here (SPEC 8.14), the rest relayed.
     let helloSeen = false;
+    // What the client's Hello offered, read as it arrives (before the core
+    // sees it): a refusal names its reason to a client that reads one
+    // (`FEATURE_TYPED_ERROR_REASON`). Undefined until then.
+    let clientFeatures: number | undefined;
+    let helloArrived!: () => void;
+    const hello = new Promise<void>((resolve) => (helloArrived = resolve));
+    // A refusal before the Hello waits for it, briefly: a client sends it
+    // right behind its prelude, while `authenticate` runs.
+    const awaitHello = () =>
+      Promise.race([hello, new Promise<void>((resolve) => setTimeout(resolve, HELLO_WAIT_MS))]);
     let thin: ThinRelay | undefined;
     // The prelude the core admitted the session's socket with: its own
     // client connects with the same.
@@ -2400,7 +2413,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     // request: a planned reconnect the client doesn't show as an outage.
     const reauthenticate = () => {
       if (ended) return;
-      onEvent(null, { kind: "message", data: reauthenticateBatch() });
+      onEvent(null, { kind: "message", data: reauthenticateBatch(clientFeatures) });
       onEvent(null, { kind: "close", code: 1008, reason: "reauthenticate" });
       end();
     };
@@ -2423,14 +2436,18 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         // reports `offline: auth`, and its session asks the backend whether
         // anyone is still signed in. A credential that was sent and not
         // accepted is `invalid` to the client; none at all is `missing`.
+        if (!ended) await awaitHello();
         if (!ended)
           onEvent(null, {
             kind: "message",
-            data: authFailedBatch(
+            data:
               admitted === UNVERIFIED_CREDENTIAL
-                ? "session invalid: this backend did not accept the credential the client sent"
-                : "session missing: not signed in",
-            ),
+                ? authFailedBatch(
+                    "session invalid: this backend did not accept the credential the client sent",
+                    "invalid",
+                    clientFeatures,
+                  )
+                : authFailedBatch("session missing: not signed in", "missing", clientFeatures),
           });
         onEvent(null, { kind: "close", code: 1008, reason: "not signed in" });
         end();
@@ -2462,6 +2479,8 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
             kind: "message",
             data: authFailedBatch(
               "session expired: authenticate returned an expiresAt in the past",
+              "expired",
+              clientFeatures,
             ),
           });
           onEvent(null, { kind: "close", code: 1008, reason: "session expired" });
@@ -2529,6 +2548,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     let waitingBytes = 0;
     const deliver = (data: Uint8Array): Promise<boolean> => {
       if (ended) return Promise.resolve(false);
+      // The message after the prelude is the client's Hello.
+      if (chain && clientFeatures === undefined) {
+        clientFeatures = clientHelloFeatures(data) ?? 0;
+        helloArrived();
+      }
       // A renewal ticket is for this backend, never for the core.
       if (renewal && chain) {
         const ticket = renewalTicketIn(data);
@@ -2585,14 +2609,21 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
             })
             .then(taken)
         : admit(data)
-            .catch((error: unknown) => {
+            .catch(async (error: unknown) => {
               if (!ended && isRefusal(error)) {
                 // The core refused this identity (revoked, local-first auth
                 // disabled, invalid): an auth failure the client must not
                 // retry, reported as a sign-in refusal is.
+                await awaitHello();
+                if (ended) return false;
+                const code = refusalCode(error);
                 onEvent(null, {
                   kind: "message",
-                  data: authFailedBatch(`session refused: ${refusalCode(error)}`),
+                  data: authFailedBatch(
+                    `session refused: ${code}`,
+                    mapAuthReason(code),
+                    clientFeatures,
+                  ),
                 });
                 onEvent(null, { kind: "close", code: 1008, reason: "sign-in refused" });
               } else {
@@ -2625,7 +2656,10 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         if (ended) return;
         // A refusal the client doesn't retry: its session asks the backend
         // who is signed in, and signs out if no one is.
-        onEvent(null, { kind: "message", data: authFailedBatch(`session revoked: ${reason}`) });
+        onEvent(null, {
+          kind: "message",
+          data: authFailedBatch(`session revoked: ${reason}`, "revoked", clientFeatures),
+        });
         onEvent(null, { kind: "close", code: 1008, reason: "session revoked" });
         end();
       },
@@ -4625,16 +4659,19 @@ function isResponseLike(value: unknown): value is Response {
  * as "connect again now" (`isReauthenticateWireError`). A client that
  * doesn't know it takes it as a refused credential and asks its backend.
  */
-function reauthenticateBatch(): Buffer {
-  const frame = new PostcardWriter();
-  frame.u64(1); // WireFrame::Error
-  frame.u64(3); // WireErrorCode::AuthFailed
-  frame.u64(2); // WireRetry::AfterResume
-  frame.string(
-    `${REAUTHENTICATE_WIRE_MESSAGE_PREFIX} the session reached the expiry authenticate gave it`,
+function reauthenticateBatch(clientFeatures: number | undefined): Buffer {
+  return Buffer.from(
+    encodeAuthFailedBatch(
+      "after_resume",
+      `${REAUTHENTICATE_WIRE_MESSAGE_PREFIX} the session reached the expiry authenticate gave it`,
+      "reauthenticate",
+      clientFeatures,
+    ),
   );
-  return Buffer.from(encodeWebSocketFrameBatch([frame.finish()]));
 }
+
+/** How long a refusal before the client's Hello waits for it (see `awaitHello`). */
+const HELLO_WAIT_MS = 1_000;
 
 /**
  * What `admitPrelude` answers for a credential the client sent that doesn't
@@ -4685,13 +4722,17 @@ function isObject(value: unknown): value is object {
   return (typeof value === "object" && value !== null) || typeof value === "function";
 }
 
-function authFailedBatch(message: string): Buffer {
-  const frame = new PostcardWriter();
-  frame.u64(1); // WireFrame::Error
-  frame.u64(3); // WireErrorCode::AuthFailed
-  frame.u64(0); // WireRetry::Never
-  frame.string(message);
-  return Buffer.from(encodeWebSocketFrameBatch([frame.finish()]));
+/**
+ * A refused credential (`auth_failed`, retry `never`), naming `reason` to a
+ * client whose Hello offered `FEATURE_TYPED_ERROR_REASON`. The message keeps
+ * its reason word first, for clients that read it from there.
+ */
+function authFailedBatch(
+  message: string,
+  reason: WireErrorReasonName,
+  clientFeatures: number | undefined,
+): Buffer {
+  return Buffer.from(encodeAuthFailedBatch("never", message, reason, clientFeatures));
 }
 
 /** A development endpoint on this machine, where header-derived audiences are fine. */

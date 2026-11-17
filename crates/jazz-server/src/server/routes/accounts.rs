@@ -375,6 +375,14 @@ impl From<RegistryError> for AdmissionError {
     }
 }
 impl AdmissionError {
+    /// A denial naming why.
+    pub(super) fn refused(message: impl Into<String>, reason: jazz::wire::WireErrorReason) -> Self {
+        Self::Refused {
+            message: message.into(),
+            reason,
+        }
+    }
+
     pub(super) fn into_wire(self) -> jazz::wire::WireError {
         use jazz::wire::{WireError, WireErrorCode, WireRetry};
         match self {

@@ -209,8 +209,9 @@ body, after the message: same tag (1), then the reason's postcard enum tag
 `crates/jazz/layers/protocol/fixtures/wire_reasoned_error_v1.json`). There is
 no new frame tag: after its hello a server's frames are told apart from sync
 messages by their first byte, and every tag past 1 is a sync message's. The
-server decides by what the client offered, not by negotiation, so it names
-the reason before its own hello too; it never advertises the bit. Every
+bit is one-sided: only a client advertises it, the server never does, and
+it is not part of the negotiated features. The server decides by what the
+client offered, so it names the reason before its own hello too. Every
 other client gets the `Error` bytes it always got and reads the reason from
 the message, which is diagnostic text, not a contract
 (`AuthFailureReason::from_message`, `mapAuthReason`).
@@ -227,6 +228,12 @@ Compatibility:
 - A receiver that did not offer the bit decodes with `decode_frame`, which
   rejects the extra byte (`INV-WIRE-1` holds for it); only a client that
   offered it decodes with `decode_frame_with_error_reason`.
+
+An app's backend that relays its clients (`createJazz`, the Rust app
+endpoint) answers them the same way: it reads the client's Hello as it
+passes, and a refusal it sends before the Hello (a sign-in it cannot admit)
+waits for it briefly (up to 1 s), since a client sends it right behind its
+prelude. A refusal that finds no Hello in time goes out plain.
 
 The TypeScript carrier (browsers, Node, workers, the thin client) offers it
 on every link. The native Rust transport does not offer it yet: after its

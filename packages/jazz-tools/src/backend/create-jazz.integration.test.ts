@@ -26,7 +26,12 @@ import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { JazzCore } from "jazz-napi";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { startTestJazz, testApp, testPermissions } from "../testing/index.js";
-import { decodeWebSocketFrameBatch } from "../runtime/native-runtime/websocket.js";
+import {
+  CLIENT_WIRE_FEATURES,
+  FEATURE_TYPED_ERROR_REASON,
+  decodeWebSocketFrameBatch,
+  decodeWireError,
+} from "../runtime/native-runtime/websocket.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import {
   acceptDeviceAccounts,
@@ -2755,6 +2760,44 @@ describe("createJazz", () => {
     });
     expect(missing).toContain("session missing");
     expect(mapAuthReason(missing)).toBe("missing");
+  }, 60_000);
+
+  // #5927 R3b: a client whose Hello offers FEATURE_TYPED_ERROR_REASON is told
+  // why createJazz refused it in the error itself; one that doesn't gets the
+  // same bytes as before and reads the message.
+  it("names why it refused a sign-in to a client that reads the reason", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const refusal = async (prelude: unknown, features: number) => {
+      const socket = new NodeWebSocket(
+        `${origin.replace("http", "ws")}/jazz/apps/${jazz.appId}/ws`,
+      );
+      socket.binaryType = "arraybuffer";
+      socket.addEventListener("open", () => {
+        socket.send(JSON.stringify(prelude));
+        socket.send(encodeWebSocketFrameBatch([encodeWireClientHello(features)]));
+      });
+      const messages: Uint8Array[] = [];
+      socket.addEventListener("message", (event) =>
+        messages.push(new Uint8Array(event.data as ArrayBuffer)),
+      );
+      await new Promise((resolve) => socket.addEventListener("close", resolve));
+      expect(messages).toHaveLength(1);
+      return decodeWireError(decodeWebSocketFrameBatch(messages[0]!)[0]!);
+    };
+    const nobody = {
+      peer_identity: "nobody",
+      backend_session: { issuer: "jazz:backend", user_id: "alice" },
+    };
+    const junk = { peer_identity: "junk", auth: { jwt_token: "junk" } };
+    const reads = CLIENT_WIRE_FEATURES | FEATURE_TYPED_ERROR_REASON;
+    expect(await refusal(nobody, reads)).toMatchObject({ code: "auth_failed", reason: "missing" });
+    expect(await refusal(junk, reads)).toMatchObject({ code: "auth_failed", reason: "invalid" });
+    // Without the bit: no reason, the message says it as before.
+    const plain = await refusal(nobody, CLIENT_WIRE_FEATURES);
+    expect(plain.reason).toBeUndefined();
+    expect(mapAuthReason(plain.message)).toBe("missing");
   }, 60_000);
 
   it("syncs over the HTTP stream when the host can't upgrade sockets", async () => {
