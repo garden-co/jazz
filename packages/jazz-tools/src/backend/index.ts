@@ -26,6 +26,7 @@ export { trustWorkload, type BackendClientTrust } from "./backend-clients.js";
 export { fromJWT, type FromJWTOptions } from "./from-jwt.js";
 export {
   createJazz,
+  durableObjects,
   files,
   memory,
   remote,
