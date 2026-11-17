@@ -132,9 +132,11 @@ pub enum ClientStorage {
     Memory,
 }
 
-/// Errors from Jazz client operations.
+/// Errors from Jazz client operations. More may come: match it with a
+/// wildcard arm.
 #[cfg(feature = "runtime")]
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum JazzError {
     #[error("Identity error: {0}")]
     Identity(#[from] crate::ids::AuthorSubjectError),
@@ -150,6 +152,15 @@ pub enum JazzError {
 
     #[error("Sync error: {0}")]
     Sync(String),
+
+    /// The authority rejected a write: a durable wait, a transaction's or
+    /// [`JazzClient::wait_for_sync`]'s. `code` and `reason` are TS's
+    /// (`PersistedWriteRejectedError`): `code` is `permission_denied`,
+    /// `serialization_conflict`, `transaction_conflict`,
+    /// `client_clock_too_far_ahead` or `write_rejected`.
+    #[error("Write rejected ({code}): {reason}")]
+    #[non_exhaustive]
+    WriteRejected { code: String, reason: String },
 
     #[error("Storage error: {0}")]
     Storage(String),
@@ -184,7 +195,55 @@ impl JazzError {
     /// another reason. For `jazz-app-support`'s mutation-error reporting.
     #[doc(hidden)]
     pub fn is_transaction_rejection(&self) -> bool {
-        matches!(self, Self::Sync(message) | Self::Write(message) if message.starts_with(REJECTED_BEFORE))
+        matches!(self, Self::WriteRejected { .. })
+            || matches!(self, Self::Sync(message) | Self::Write(message) if message.starts_with(REJECTED_BEFORE))
+    }
+
+    /// The rejection of a write the core reported as `error`, if it is one.
+    pub(crate) fn write_rejected(error: &crate::db::Error) -> Option<Self> {
+        let (code, reason) = rejection_code_and_reason(error)?;
+        Some(Self::WriteRejected { code, reason })
+    }
+}
+
+/// TS's code and reason for a write the core rejected with `error`
+/// (`native-runtime-adapter`'s `rejectionCode` and `rejectionReason`), or
+/// `None` when `error` is no rejection.
+#[cfg(feature = "runtime")]
+pub(crate) fn rejection_code_and_reason(error: &crate::db::Error) -> Option<(String, String)> {
+    use crate::db::{ErrorCode, Reason};
+    match error.code {
+        // TS keeps the whole diagnostic when the message is empty.
+        ErrorCode::TransactionConflict if error.message.is_empty() => {
+            Some(("transaction_conflict".to_owned(), error.to_string()))
+        }
+        ErrorCode::TransactionConflict => {
+            Some(("transaction_conflict".to_owned(), error.message.clone()))
+        }
+        ErrorCode::WriteRejected => {
+            let (code, readable) = match error.reason {
+                Some(Reason::AuthorizationDenied) => (
+                    "permission_denied",
+                    Some("Write rejected by server authorization"),
+                ),
+                Some(Reason::SerializationConflict) => (
+                    "serialization_conflict",
+                    Some("Serializable transaction conflicted with another write"),
+                ),
+                Some(Reason::ClientClockTooFarAhead) => (
+                    "client_clock_too_far_ahead",
+                    Some("Client clock is too far ahead"),
+                ),
+                _ => ("write_rejected", None),
+            };
+            let reason = match readable {
+                Some(readable) => readable.to_owned(),
+                None if error.message.is_empty() => "Write rejected".to_owned(),
+                None => error.message.clone(),
+            };
+            Some((code.to_owned(), reason))
+        }
+        _ => None,
     }
 }
 
@@ -298,5 +357,73 @@ impl Drop for SubscriptionStream {
         if let Some(on_drop) = self.on_drop.take() {
             on_drop();
         }
+    }
+}
+
+#[cfg(all(test, feature = "runtime"))]
+mod rejection_code_tests {
+    use super::rejection_code_and_reason;
+    use crate::db::{Error, ErrorCode, Reason};
+
+    fn rejected(reason: Option<Reason>, message: &str) -> Error {
+        Error {
+            code: ErrorCode::WriteRejected,
+            reason,
+            message: message.to_owned(),
+        }
+    }
+
+    /// TS's `rejectionCode` and `rejectionReason`, case by case.
+    #[test]
+    fn rejections_carry_ts_codes_and_reasons() {
+        let pair = rejection_code_and_reason;
+        let owned = |code: &str, reason: &str| Some((code.to_owned(), reason.to_owned()));
+        assert_eq!(
+            pair(&rejected(
+                Some(Reason::AuthorizationDenied),
+                "authorization_denied: x"
+            )),
+            owned(
+                "permission_denied",
+                "Write rejected by server authorization"
+            )
+        );
+        assert_eq!(
+            pair(&rejected(Some(Reason::SerializationConflict), "x")),
+            owned(
+                "serialization_conflict",
+                "Serializable transaction conflicted with another write"
+            )
+        );
+        assert_eq!(
+            pair(&rejected(Some(Reason::ClientClockTooFarAhead), "x")),
+            owned(
+                "client_clock_too_far_ahead",
+                "Client clock is too far ahead"
+            )
+        );
+        assert_eq!(
+            pair(&rejected(Some(Reason::RowAlreadyExists), "row exists")),
+            owned("write_rejected", "row exists")
+        );
+        assert_eq!(
+            pair(&rejected(None, "")),
+            owned("write_rejected", "Write rejected")
+        );
+        let conflict = Error {
+            code: ErrorCode::TransactionConflict,
+            reason: None,
+            message: "read changed".to_owned(),
+        };
+        assert_eq!(
+            pair(&conflict),
+            owned("transaction_conflict", "read changed")
+        );
+        let other = Error {
+            code: ErrorCode::Storage,
+            reason: None,
+            message: "disk".to_owned(),
+        };
+        assert_eq!(pair(&other), None);
     }
 }

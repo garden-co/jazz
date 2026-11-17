@@ -314,7 +314,7 @@ describe("typed app prototype", () => {
           union: {
             inputs: [
               {
-                label: "derived:d48cadaae9a566a710ffe64030c95b86598055df9c54c3170acefb10c448fa2f",
+                label: "",
                 input: {
                   table: "team_edges",
                   conditions: [{ column: "child_team", op: "eq", value: "team-a" }],
@@ -322,7 +322,7 @@ describe("typed app prototype", () => {
                 },
               },
               {
-                label: "derived:9ca5aebdc72dbdc2fb4a2b163d5ee572234fab051359a67ef4edbf8ced2ff4c8",
+                label: "",
                 input: {
                   table: "teams",
                   conditions: [],

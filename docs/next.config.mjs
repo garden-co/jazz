@@ -88,11 +88,6 @@ const config = {
         destination: "/docs/reference/nextjs-better-auth",
         permanent: false,
       },
-      {
-        source: "/docs/setup/rust",
-        destination: "/docs/setup/backend-client",
-        permanent: false,
-      },
       // Older create-jazz builds fetch the agent brief from its old URL.
       { source: "/agent-brief.md", destination: "/quickstart.md", permanent: false },
       {

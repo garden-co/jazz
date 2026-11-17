@@ -51,6 +51,8 @@ export type {
   ValueKind,
   ValueHandle,
   Policy,
+  NestedPolicy,
+  Inherits,
   Rel,
   Permissions,
   ColumnHandle,
@@ -143,6 +145,7 @@ export type {
   Exists,
   AllowedTarget,
   AllowedTo,
+  AllowedPolicy,
   DefinePermissions,
   PermissionTools,
 } from "./permissions/dsl.js";

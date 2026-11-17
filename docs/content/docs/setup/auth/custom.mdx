@@ -251,7 +251,10 @@ For an app with this `todos` table:
 import { schema as s } from "jazz-tools";
 
 export const schema = s.defineSchema({
-  todos: s.table({ title: s.string(), owner_id: s.uuid() }),
+  todos: s.table({
+    title: s.string(),
+    owner_id: s.uuid(),
+  }),
 });
 ```
 
@@ -291,7 +294,7 @@ authorship.
 Apps on alpha.59 signed users in with JWTs, so their accounts belong to identities like
 `{ issuer: "https://idp.example.com", subject: "user_01" }`. `createJazz` names users
 `{ issuer: "jazz:backend", subject: userId }` instead. The alpha.59 import
-(`jazz-alpha59-alpha60-import import`, a binary on the release's GitHub page) links each user's `jazz:backend` identity to their existing account. Its
+(`jazz-alpha59-alpha60-import import`, a binary on the [v2.0.0-alpha.65 release](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.65); see [Self-hosted alpha.59 servers](/docs/operating/backups-and-upgrades#self-hosted-alpha59-servers)) links each user's `jazz:backend` identity to their existing account. Its
 `--app-id` must be exactly the app ID your alpha.59 app used, which is the `appId` you pass to
 `remote()` on Jazz Cloud (deprecated). With `sqlite()` the import writes it into the data directory, so your
 code doesn't pass it. If your

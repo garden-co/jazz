@@ -8,13 +8,27 @@ description: "Learn how to keep the data in your backend's Jazz directory safe a
 Everything your [main backend](/docs/how-jazz-works#how-a-backend-talks-to-jazz) stores lives in the directory you pass to
 `sqlite({ path })`:
 
-| File or folder                         | What it is                                                                                                   |
-| :------------------------------------- | :----------------------------------------------------------------------------------------------------------- |
-| `jazz.sqlite` (with `-wal` and `-shm`) | Rows, history, schemas, permissions and the index of large-value chunks                                      |
-| `blobs/`                               | The chunks of large values, unless you chose [another place](/docs/setup/deployment/own-server#large-values) |
-| `app-id`                               | The app this directory belongs to                                                                            |
-| `store-id`, `blob-store`               | This directory's identity, and where its chunks live                                                         |
-| `jazz.lock`                            | Held by the running process, so a second one on the same directory is refused                                |
+| File or folder                         | What it is                                                                                                                                       |
+| :------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `jazz.sqlite` (with `-wal` and `-shm`) | Rows, history, schemas, permissions, the index of large-value chunks, and the store's identity: its app id, its own id and where its chunks live |
+| `blobs/`                               | The chunks of large values, unless you chose [another place](/docs/setup/deployment/own-server#large-values)                                     |
+| `app-id`, `store-id`, `blob-store`     | Copies of the identity in `jazz.sqlite`, kept so an earlier release opened on the directory reads the same one                                   |
+| `inspect-token-secret`                 | A secret: what [Inspector](/docs/tooling/inspector) agent tokens are signed with (readable by its owner only, never in `jazz.sqlite`)            |
+| `jazz.lock`                            | Held by the running process, so a second one on the same directory is refused                                                                    |
+
+`jazz.sqlite` holds the identity; the files are copies each start rewrites from it. A copy that
+disagrees with `jazz.sqlite` (edited, or from another store) is refused with an error naming both,
+never chosen.
+
+A store keeps the app id it was first started with, and refuses to start for another one. If it was
+first started with the wrong one, or your app's id changed, stop the backend and set it:
+
+```sh
+npx jazz-tools store set-app-id ./data <app id>
+```
+
+Local-first guests' accounts are derived from the app id, so after a change they no longer match
+the ones their devices hold: change it only for a store whose users haven't relied on the old one.
 
 If your chunks are in another directory (`files({ dir })`) or a bucket (`s3()`), they're part of the
 data too.
@@ -22,6 +36,10 @@ data too.
 ## Backing up
 
 Back up the whole directory together, and its chunk directory or bucket prefix with it:
+
+- **Keep `inspect-token-secret` as a secret**, apart from the data if you like: it signs Inspector
+  agent tokens. Restoring `jazz.sqlite` without it revokes every token issued before; a new one is
+  made on the next start.
 
 - **Stop the backend first**, or snapshot the disk it's on atomically (a volume snapshot). Copying
   `jazz.sqlite` while it's being written can give you a copy that doesn't open.
@@ -34,9 +52,22 @@ Back up the whole directory together, and its chunk directory or bucket prefix w
 
 To restore in place, stop the backend, put the files back, and start it again.
 
-To restore into a new place while the original keeps running, such as a staging copy, give the copy
-its own chunk directory or `s3()` prefix and delete its `store-id` and `blob-store` files before it
-first starts. Otherwise it claims the original's chunks.
+`jazz.sqlite` is the whole store: a copy of it opens as the same store, for the same app, with the
+same chunks.
+
+To restore into a new place while the original keeps running, such as a staging copy, make the copy
+a store of its own before it first starts, and give it its own chunk directory or `s3()` prefix:
+
+```sh
+npx jazz-tools store detach ./staging-data
+```
+
+Otherwise it claims the original's chunks, and deletes the ones it no longer needs. The copy keeps
+the app id, so it still serves the same app, and gets an `inspect-token-secret` of its own, so agent
+tokens the original issued don't open it.
+
+Apart from that secret and the chunks, `jazz.sqlite` is the whole store: a copy of it opens as the
+same store, for the same app, with its large values where they were.
 
 ## Upgrading between releases
 
@@ -55,6 +86,14 @@ deployment isn't a fallback: the core always runs the newest `jazz-tools` its Dr
 once the new deployment has woken it, promoting the old deployment again doesn't roll back its data.
 To try an upgrade first, deploy it to a preview branch: with the per-branch setup, that preview gets
 a core of its own, separate from production's (a dry run with its own data, not a copy).
+
+## Upgrading from alpha.66
+
+- **`vercel()` takes a required `region`**, the Vercel region its cores run and keep their data
+  in. Earlier versions created every core in `iad1`: add `region: "iad1"` and the same cores open
+  with their data. A `region` that doesn't match an existing core now throws instead of being
+  ignored, since moving a core isn't supported yet. See
+  [Region](/docs/setup/deployment/vercel#region).
 
 {/* Older jazz-tools link the section by its previous anchor. */}
 
@@ -454,7 +493,12 @@ a store: on Android that also deletes SecureStore, and with it a device account.
 
 ## Upgrading from alpha.59
 
-Alpha.60 changes how Jazz runs, so an alpha.59 app needs more than a version bump:
+Upgrade an alpha.59 app in two moves: first to **alpha.65**, as described below, then from alpha.65
+to the current release as in [Upgrading from alpha.65](#upgrading-from-alpha65). alpha.65 is the
+last release that ships the alpha.59 exporter and importer, so pin `jazz-tools@2.0.0-alpha.65` (and
+the other Jazz packages at the same version) for the first move.
+
+Alpha.60 changed how Jazz runs, so an alpha.59 app needs more than a version bump:
 
 - **Jazz runs inside your backend.** Clients no longer talk to a Jazz server with a JWT. Add a main
   backend with `createJazz` (see [Your Own Server](/docs/setup/deployment/own-server)), and, if your data is on Jazz
@@ -519,8 +563,11 @@ account.
 
 ### Self-hosted alpha.59 servers
 
-Move a self-hosted data directory with the same import tool Jazz Cloud uses. You need only the two
-downloads below, no Node or Rust toolchain, and nothing writes to your alpha.59 directory.
+Move a self-hosted data directory with the alpha.65 exporter and importer, attached to the
+[v2.0.0-alpha.65 release](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.65). Later
+releases don't ship them: the import gives you an alpha.65 data directory, and you upgrade from
+there. You need only the two downloads below, no Node or Rust toolchain, and nothing writes to your
+alpha.59 directory.
 
 Before you start:
 
@@ -545,7 +592,7 @@ Then:
 2. **Download the tools.** Get `jazz-alpha59-alpha60-export-<platform>` and
    `jazz-alpha59-alpha60-import-<platform>` (`linux-x64`, `linux-arm64` or `darwin-arm64`) and the
    two checksum files from the
-   [v2.0.0-alpha.60 release](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.60). Each
+   [v2.0.0-alpha.65 release](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.65). Each
    checksum file lists every platform, so check with `--ignore-missing`, then rename the tools to
    drop the platform suffix and make them executable:
 
@@ -573,7 +620,8 @@ Then:
    ./jazz-alpha59-alpha60-import verify --dump app.dump --data-dir ./data-new --app-id <appId>
    ```
 
-5. **Start your new backend** with `sqlite({ path: "./data-new" })`, then deploy the new client.
+5. **Start your new backend** on alpha.65 with `sqlite({ path: "./data-new" })`, then deploy the
+   new client, also on alpha.65.
    If your alpha.59 app had local-first guests, pass your old app ID as `scope` to the client, so
    each guest's device finds its account again:
 
@@ -588,9 +636,12 @@ Then:
    on that origin, guests aren't picked up automatically.
    Keep `./data` and the dump until you're happy with the result.
 
+6. **Upgrade from alpha.65** to the current release as in
+   [Upgrading from alpha.65](#upgrading-from-alpha65). The data directory needs nothing more.
+
 `--app-id` is your app's ID exactly as before, case included: the import uses it to link each
 returning user's old sign-in to their account, as `jazz:backend` with their old `sub` (as [`fromJWT()`](/docs/setup/auth/custom) returns it), and to keep
-local-first guests on their accounts once the client is scoped to the alpha.59 app ID (step 5). It's written to `<data-dir>/app-id`, so your code never needs
+local-first guests on their accounts once the client is scoped to the alpha.59 app ID (step 5). The store keeps it in `jazz.sqlite`, so your code never needs
 it: `sqlite({ path })` runs as the old app. Pass
 `--no-backend-identity-links` to skip that. The dump holds all your app's data, so store it like the
 data directory and delete it when you're done.
