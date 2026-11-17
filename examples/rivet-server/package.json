@@ -1,0 +1,20 @@
+{
+  "name": "rivet-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file=.env.local --import tsx server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test rivet-socket.test.ts",
+    "test:integration": "node --env-file=.env.local --import tsx smoke-test.ts"
+  },
+  "dependencies": {
+    "jazz-tools": "workspace:*",
+    "rivetkit": "3.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:default",
+    "tsx": "^4.21.0",
+    "typescript": "catalog:default"
+  }
+}

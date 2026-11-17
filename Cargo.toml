@@ -49,6 +49,8 @@ members = [
   "examples/wequencer/benchmarks",
 ]
 exclude = [
+  # Rivet owns SQLite and requires its own dependency graph and newer toolchain.
+  "crates/jazz-rivet",
   # The patched ruzstd fork, published as jazz-ruzstd. Not a member, since its
   # upstream tests aren't vendored; dev/scripts/publish-crates.mjs adds it
   # while packaging so it verifies with the crates that depend on it.
