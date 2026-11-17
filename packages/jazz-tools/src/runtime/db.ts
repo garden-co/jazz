@@ -2245,8 +2245,6 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * Read data is scoped to this transaction.
    */
   all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    const refusal = transactionBranchReadRefusal(this.kind, options);
-    if (refusal) return Promise.reject(new Error(refusal));
     const reading = this.readAll(query, options);
     this.pendingReads.add(reading);
     const settled = () => this.pendingReads.delete(reading);
@@ -2298,23 +2296,6 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const results = await this.all(limitQueryToOne(query), options);
     return results[0] ?? null;
   }
-}
-
-/**
- * Reads through a branch view inside a transaction (jazz#5806): mergeable
- * transactions read the view (live or frozen base) over their staged writes;
- * serializable ones cannot yet record a read set per view. Refuse those up
- * front with a message that names the option, rather than the core's
- * lower-level error.
- */
-function transactionBranchReadRefusal(
-  kind: TransactionKind,
-  options: QueryOptions | undefined,
-): string | undefined {
-  const candidate = options as { branch?: unknown; base?: unknown } | undefined;
-  if (candidate?.branch === undefined && candidate?.base === undefined) return undefined;
-  if (kind === "mergeable") return undefined;
-  return "Reading through a branch (`branch`/`base`) inside a serializable transaction is not supported yet (jazz#5806). Use a mergeable transaction, or read outside the transaction with db.all/db.one.";
 }
 
 /**
