@@ -5,43 +5,36 @@ description: "Get a first glimpse of how to set Jazz up and how to use it from t
 
 Jazz is a relational database that runs inside your backend, with real-time queries and permissions built in. Query and update data from your server or directly from your frontend, using a thin client or a local-first client for offline support.
 
-Every Jazz app is defined first by its database schema and permission policies. They're verbose, but agents are good at writing and checking them.
+Every Jazz app is defined first by its database schema and permission policies. You write both in TypeScript, in `schema.ts`.
 
-```json title="jazz.app.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
-  "tables": {
-    "todos": {
-      "columns": {
-        "title": "string",
-        "done": "boolean"
-      }
-    }
-  }
-}
-```
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
 
-```json title="jazz.permissions.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
-  "$comment": "Each user sees and edits only the todos they created",
-  "defs": {
-    "isCreator": "$createdBy.account = session.user"
+export const schema = s.defineSchema({
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+  }),
+});
+
+const { definePermissions, session } = schema;
+
+// Each user sees and edits only the todos they created
+const createdByMe = { $createdBy: session.user };
+
+export const permissions = definePermissions({
+  todos: {
+    read: createdByMe,
+    insert: createdByMe,
+    update: createdByMe,
+    delete: createdByMe,
   },
-  "tables": {
-    "todos": {
-      "read": "isCreator()",
-      "insert": "isCreator()",
-      "update": "isCreator()",
-      "delete": "isCreator()"
-    }
-  }
-}
+});
 ```
 
-Run `npx jazz-tools generate` after writing them, and again after each change. It checks both files
-and writes `jazz.generated.ts`, the typed `app` your code imports. See
-[App files](/docs/reference/app-files).
+Run `npx jazz-tools generate` after writing it, and again after each change. It checks the schema
+and permissions and writes `jazz.app.json`, `jazz.permissions.json` and `jazz.generated.ts`, the
+typed `app` your code imports. Commit all of them. See [Defining Tables](/docs/schemas/defining-tables).
 
 Jazz runs inside your backend: no separate database server and no deploy step. The schema and permissions your backend imports are the ones it enforces.
 
@@ -74,7 +67,7 @@ new Hono()
 
 You can also query and write to the database right from your frontend. It is protected by the same auth as your backend, and the same permission policies apply. Pick a thin client (%bundle.thin% gzipped) or a full local-first client (its Wasm engine adds %bundle.wasm% gzipped).
 
-<Tabs groupId="client-framework" items={["JavaScript", "React", "Vue", "Svelte", "Solid", "Effect"]} persist updateAnchor>
+<Tabs groupId="client-framework" items={["JavaScript", "React", "Vue", "Svelte", "Solid", "Effect", "Swift", "Kotlin"]} persist updateAnchor>
   <Tab value="JavaScript">
     ```ts title="client.ts"
     import { createJazzClient } from "jazz-tools/client";
@@ -228,6 +221,26 @@ You can also query and write to the database right from your frontend. It is pro
     // Same config as createJazzClient(): asks /jazz who is signed in, with your session cookie
     program.pipe(Effect.provide(Jazz.layer({ serverUrl: "/jazz" })), Effect.runPromise);
     ```
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift" meta='title="App.swift"'>
+      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#context-setup-swift-client
+    </include>
+
+    <include cwd lang="swift" meta='title="App.swift"'>
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#reading-subscriptions-swift
+    </include>
+
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin" meta='title="App.kt"'>
+      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#context-setup-kotlin-client
+    </include>
+
+    <include cwd lang="kotlin" meta='title="App.kt"'>
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#reading-subscriptions-kotlin
+    </include>
 
   </Tab>
 </Tabs>

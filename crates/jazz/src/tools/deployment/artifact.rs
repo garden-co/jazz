@@ -128,7 +128,7 @@ impl ArtifactError {
     }
 }
 
-const REGENERATE: &str = "regenerate it with `jazz-tools generate`";
+const REGENERATE: &str = "regenerate it with `npx jazz-tools generate`";
 
 // ============================================================================
 // Codegen metadata
@@ -145,7 +145,7 @@ pub struct Codegen {
     /// The file's `transforms`, by name: what every language implements.
     #[serde(default)]
     pub transforms: BTreeMap<String, TransformDecl>,
-    /// Slices a .63 `schema.ts` exported. Slicing is gone in alpha.65:
+    /// Slices a .63 `schema.ts` exported. Slicing is gone in alpha.66:
     /// accepted from the .63 writer's input and ignored, never written.
     #[serde(default, skip_serializing)]
     pub slices: BTreeMap<String, Vec<String>>,
@@ -165,8 +165,9 @@ pub struct CodegenTable {
     #[serde(default)]
     pub transforms: BTreeMap<String, String>,
     /// .63's `tsOnly` (the TS DSL's `s.computed` and `.transform` fields).
-    /// The .63 writer still emits it and loaders accept it with a warning,
-    /// so `jazz-tools upgrade` can turn it into `computed` and `transforms`.
+    /// The .63 writer still emits it and loaders accept it with a warning
+    /// that it is ignored: those fields are declared in schema.ts with
+    /// `s.computed(…)` or `.transform(…)`.
     #[serde(default)]
     pub ts_only: Vec<TsOnlyColumn>,
 }
@@ -423,7 +424,7 @@ enum BoundRelation {
 pub fn load_backend(bound: &[u8], permissions: &[u8]) -> Result<LoadedApp, ArtifactError> {
     let refuse = |message: String| {
         ArtifactError::new(format!(
-            "the bindings' compiled app: {message}; regenerate them with `jazz-tools generate`"
+            "the bindings' compiled app: {message}; regenerate them with `npx jazz-tools generate`"
         ))
     };
     let bound: BoundApp =
@@ -765,6 +766,19 @@ pub fn schema_hash(schema_json: &[u8]) -> Result<SchemaHash, ArtifactError> {
     Ok(SchemaHash::compute(&structural(schema)))
 }
 
+/// [`super::schemas_are_compatible`] of two schemas in the engine's JSON
+/// form, as [`schema_hash`] reads them.
+pub fn schemas_are_compatible(left_json: &[u8], right_json: &[u8]) -> Result<bool, ArtifactError> {
+    let read = |json: &[u8]| {
+        serde_json::from_slice::<Schema>(json)
+            .map_err(|error| ArtifactError::new(format!("not an engine schema: {error}")))
+    };
+    Ok(super::schemas_are_compatible(
+        &read(left_json)?,
+        &read(right_json)?,
+    ))
+}
+
 /// Read a `jazz.app.json` for a client: the schema versions and lenses it
 /// opens along. Its references are checked as [`load`] checks them and
 /// every lens is lowered; the deployment's review of each lens is the
@@ -889,8 +903,8 @@ fn refuse_todos(root: &Json) -> Result<(), ArtifactError> {
         .map(|(path, text)| format!("  {path}: {text}"))
         .collect();
     Err(ArtifactError::new(format!(
-        "{} unresolved TODO{} left by `jazz-tools migrations create` or `upgrade`; replace each with \
-         the value it asks for, then run `jazz-tools generate` again:\n{}",
+        "{} unresolved TODO{} left by `npx jazz-tools migrations create` or `upgrade`; replace each with \
+         the value it asks for, then run `npx jazz-tools generate` again:\n{}",
         todos.len(),
         if todos.len() == 1 { "" } else { "s" },
         list.join("\n")
@@ -963,8 +977,8 @@ fn read_version(file: &'static str, json: &[u8]) -> Result<Json, ArtifactError> 
         Some(other) if format.is_some() && !matches!(other, Json::String(_)) => Ok(root),
         None if format.is_some() => Ok(root),
         None => Err(refuse(format!(
-            "no `$schema`; the file starts {{ \"$schema\": \"{url}\", … }}. Run `jazz-tools \
-             generate` to write it"
+            "no `$schema`; the file starts {{ \"$schema\": \"{url}\", … }}. Run `npx \
+             jazz-tools generate` to write it"
         ))),
         Some(Json::String(s)) if s == legacy_url => Ok(root),
         Some(Json::String(s)) => match versioned(s) {
@@ -1087,7 +1101,7 @@ fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
     }
     // Every version a client may open must lead to the current one: lenses
     // run both ways, so any chain of migrations connects them. Before
-    // alpha.65, `migrations create` wrote no migration when no row needed
+    // alpha.66, `migrations create` wrote no migration when no row needed
     // transforming (an index, merge strategy or column order changed), so a
     // version such files hold may stand alone: it is joined to the next
     // version its rows pass to unchanged by the identity step it implies.
@@ -1135,7 +1149,7 @@ fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
             stranded.push(format!(
                 "{APP_FILE}: history.{name}: no migration leads from it to the current `tables`, \
                  directly or through other versions, so clients holding its rows couldn't open; \
-                 add one (`jazz-tools migrations create` writes it) or remove the version"
+                 add one (`npx jazz-tools migrations create` writes it) or remove the version"
             ));
             stranded_hashes.push(*hash);
             continue;
@@ -1454,6 +1468,14 @@ fn check_codegen(codegen: &Codegen, current: &Schema) -> Result<(), ArtifactErro
 pub fn version_tables(schema: &Schema) -> Result<Json, ArtifactError> {
     app_file::write_version_tables(schema)
         .map_err(|error| ArtifactError::unsupported(APP_FILE, error))
+}
+
+/// [`version_tables`] of a schema in the engine's JSON form, as
+/// [`schema_hash`] reads it, printed.
+pub fn version_tables_json(schema_json: &[u8]) -> Result<String, ArtifactError> {
+    let schema: Schema = serde_json::from_slice(schema_json)
+        .map_err(|error| ArtifactError::new(format!("not an engine schema: {error}")))?;
+    Ok(json::print(&version_tables(&schema)?))
 }
 
 /// A column type in the file's form (`"string"`, `{ "enum": […] }`).

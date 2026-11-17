@@ -27,12 +27,16 @@ cargo build -p jazz-tools --bin jazz-tools
 cargo build -p jazz-app-support --features test-relay --bin jazz-app-test-relay
 cargo test -p jazz-codegen --test golden the_stage_plan_go_example_commits_current_bindings
 (cd examples/stage-plan/apps/go-cli && ../../../../target/debug/jazz-tools generate --check)
+# The docs' Go snippets, on the docs todo app (and its required-references recipe).
+(cd examples/docs/todo-client-go && ../../../target/debug/jazz-tools generate --check)
+(cd examples/docs/todo-client-go/recipes/required-references && ../../../../../target/debug/jazz-tools generate --check)
 
-test -z "$(gofmt -l packages/jazz-go examples/stage-plan/apps/go-cli)"
+test -z "$(gofmt -l packages/jazz-go examples/stage-plan/apps/go-cli examples/docs/todo-client-go)"
 # The module ships jazz-ffi's header for builds from the module cache.
 cmp crates/jazz-ffi/include/jazz_ffi.h packages/jazz-go/include/jazz_ffi.h
 (cd packages/jazz-go && go vet ./...)
 (cd examples/stage-plan/apps/go-cli && go vet ./...)
+(cd examples/docs/todo-client-go && go vet ./...)
 
 # Each committed golden, as the jazzapp package of a module of its own.
 for dir in crates/jazz-codegen/tests/apps/*/jazzapp crates/jazz-codegen/tests/go-apps/*/jazzapp; do
@@ -50,6 +54,7 @@ done
 # The race detector needs cgo; purego runs under it too.
 (cd packages/jazz-go && CGO_ENABLED=1 go test -race ./...)
 (cd examples/stage-plan/apps/go-cli && CGO_ENABLED=1 go test -race -v ./...)
+(cd examples/docs/todo-client-go && CGO_ENABLED=1 go test -race -v ./...)
 
 # The same suite with StagePlan's main backend in TypeScript (createJazz,
 # go-cli/ts-main) as the server, and Go backend clients of it: needs the

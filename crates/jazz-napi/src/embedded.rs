@@ -18,7 +18,10 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct JazzCoreOpenOptions {
-    app_id: String,
+    /// Required in memory. A persistent core keeps its app in its store:
+    /// a new store mints one (or records this one), and a store for another
+    /// app is refused.
+    app_id: Option<String>,
     backend_secret: String,
     admin_secret: String,
     data_dir: Option<String>,
@@ -59,6 +62,9 @@ pub struct JazzCore {
     /// The OS lock on `<dataDir>/jazz.lock`, held while the core is open.
     /// The kernel drops it when the process exits, however it exits.
     dir_lock: Mutex<Option<std::fs::File>>,
+    app_id: String,
+    /// What the backend signs agent tokens with, beside a persistent store.
+    token_secret: Option<String>,
 }
 
 #[napi]
@@ -66,7 +72,7 @@ impl JazzCore {
     /// Open the core's storage and serve it in this process.
     #[napi(
         factory,
-        ts_args_type = "options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: \"files\" | \"s3\" | \"sqlite\"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; telemetryCollectorUrl?: string }",
+        ts_args_type = "options: { appId?: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: \"files\" | \"s3\" | \"sqlite\"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; telemetryCollectorUrl?: string }",
         ts_return_type = "Promise<JazzCore>"
     )]
     pub async fn open(options: serde_json::Value) -> napi::Result<Self> {
@@ -74,25 +80,41 @@ impl JazzCore {
             napi::Error::from_reason(format!("Invalid JazzCore options: {error}"))
         })?;
         crate::init_jazz_server_telemetry(opts.telemetry_collector_url.as_deref());
-        let app_id =
-            AppId::from_string(&opts.app_id).unwrap_or_else(|_| AppId::from_name(&opts.app_id));
         let auth_config = AuthConfig {
             backend_secret: Some(opts.backend_secret),
             admin_secret: Some(opts.admin_secret),
             ..Default::default()
         };
         let mut dir_lock = None;
-        let storage = if opts.in_memory.unwrap_or(false) {
-            StorageBackend::InMemory
+        let mut token_secret = None;
+        let (storage, app_id_text) = if opts.in_memory.unwrap_or(false) {
+            let app_id = opts
+                .app_id
+                .ok_or_else(|| napi::Error::from_reason("JazzCore needs appId in memory"))?;
+            (StorageBackend::InMemory, app_id)
         } else {
             let data_dir = opts.data_dir.ok_or_else(|| {
                 napi::Error::from_reason("JazzCore needs dataDir unless inMemory is set")
             })?;
-            dir_lock = Some(lock_data_dir(std::path::Path::new(&data_dir))?);
-            StorageBackend::Persistent {
-                path: data_dir.into(),
-            }
+            let path = std::path::Path::new(&data_dir);
+            dir_lock = Some(lock_data_dir(path)?);
+            let identity = jazz_server::open_store_identity(
+                path,
+                jazz_server::IdentityOpen::Embedded {
+                    app_id: opts.app_id.as_deref(),
+                },
+            )
+            .map_err(|error| napi::Error::from_reason(format!("JazzCore: {error}")))?;
+            token_secret = identity.token_secret;
+            (
+                StorageBackend::Persistent {
+                    path: data_dir.into(),
+                },
+                identity.app_id,
+            )
         };
+        let app_id =
+            AppId::from_string(&app_id_text).unwrap_or_else(|_| AppId::from_name(&app_id_text));
         let blobs = match (opts.blobs.as_deref(), opts.blobs_dir) {
             (None | Some("sqlite"), None) => BlobStore::Sqlite,
             (Some("files"), dir) => BlobStore::Files {
@@ -128,7 +150,23 @@ impl JazzCore {
         Ok(Self {
             server: Arc::new(EmbeddedServer::new(built)),
             dir_lock: Mutex::new(dir_lock),
+            app_id: app_id_text,
+            token_secret,
         })
+    }
+
+    /// The app this core serves: the one its store keeps, or the one it was
+    /// opened with in memory.
+    #[napi(getter)]
+    pub fn app_id(&self) -> String {
+        self.app_id.clone()
+    }
+
+    /// The secret a backend signs agent tokens with, kept in
+    /// `<dataDir>/inspect-token-secret` (`null` in memory).
+    #[napi(getter)]
+    pub fn token_secret(&self) -> Option<String> {
+        self.token_secret.clone()
     }
 
     /// Route one HTTP request. `url` is the path and query, as the core's
@@ -330,4 +368,37 @@ fn pairs(headers: &[Vec<String>]) -> Vec<(String, String)> {
             _ => None,
         })
         .collect()
+}
+
+/// Make the stopped store in `dataDir` a store of its own: it forgets its
+/// store id and where its large values live, so its next start claims a
+/// chunk directory or bucket prefix of its own instead of the original's,
+/// and its agent-token secret, so the original's tokens don't open it. For
+/// a copy of a store (a staging copy of a backup) opened next to the
+/// original. It keeps the app id: the copy serves the same app.
+#[napi(js_name = "detachStore")]
+pub fn detach_store(data_dir: String) -> napi::Result<()> {
+    let path = std::path::Path::new(&data_dir);
+    if !path.join("jazz.sqlite").exists() {
+        return Err(napi::Error::from_reason(format!(
+            "'{data_dir}' holds no store"
+        )));
+    }
+    let _lock = lock_data_dir(path)?;
+    jazz_server::detach_store_identity(path).map_err(napi::Error::from_reason)
+}
+
+/// Make the stopped store in `dataDir` serve `appId` from its next start. A
+/// store refuses any app but the one it was first opened for; this is the
+/// way to change it (a wrong first `--app-id`, or a renamed app).
+#[napi(js_name = "setStoreAppId")]
+pub fn set_store_app_id(data_dir: String, app_id: String) -> napi::Result<()> {
+    let path = std::path::Path::new(&data_dir);
+    if !path.join("jazz.sqlite").exists() {
+        return Err(napi::Error::from_reason(format!(
+            "'{data_dir}' holds no store"
+        )));
+    }
+    let _lock = lock_data_dir(path)?;
+    jazz_server::set_store_app_id(path, &app_id).map_err(napi::Error::from_reason)
 }

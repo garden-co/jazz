@@ -114,6 +114,23 @@ pub fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConver
     ))
 }
 
+/// Refuse declared JSON Schemas that use a feature the browser runtime
+/// cannot evaluate, so every runtime enforces a deployed schema alike (see
+/// `json_schema_support`). Deployments (and the `validateSchema` binding) run
+/// it next to [`check_deployable_policies`]; opening a store does not.
+pub fn check_deployable_json_schemas(schema: &Schema) -> Result<(), SchemaConversionError> {
+    for (name, table) in schema {
+        for column in &table.columns.columns {
+            crate::model::public_schema::check_supported_json_schemas(
+                &column.column_type,
+                column.name.as_str(),
+            )
+            .map_err(|message| column_err(name, column.name.as_str(), message))?;
+        }
+    }
+    Ok(())
+}
+
 /// Refuse what a deployment may not introduce, beyond what
 /// [`convert_public_schema`] checks. Deployments and `jazz-tools validate`
 /// run it; opening a store does not, so a catalogue that already holds such
@@ -124,6 +141,10 @@ pub fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConver
 /// names (the SQL compiler reads the enclosing `exists`'s row, validation
 /// and sync the row under check), so the form is not supported until that
 /// is settled.
+///
+/// A relation policy's unsupported shapes (output steps, query parameters,
+/// malformed union labels) are the schema compile's to refuse, which
+/// `jazz-tools validate`, the dev server and a deployment all run.
 pub fn check_deployable_policies(schema: &Schema) -> Result<(), SchemaConversionError> {
     for (name, table) in schema {
         let slots = [

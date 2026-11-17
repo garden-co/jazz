@@ -3,7 +3,7 @@ const warned = new Set<string>();
 /**
  * @internal Warn once, outside production builds, that a framework's
  * permission-session hook (`useSession()`, Svelte `getSession()`) is
- * deprecated. It still works in alpha.65; it throws, naming its replacement,
+ * deprecated. It still works in alpha.66; it throws, naming its replacement,
  * from a later release.
  */
 export function warnSessionHookDeprecated(name: string, replacement: string): void {

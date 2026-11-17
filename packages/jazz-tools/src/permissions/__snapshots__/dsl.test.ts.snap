@@ -1,0 +1,182 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`acceptance: the reference renderings > prints the readable tree 1`] = `
+{
+  "artists": {
+    "delete": "exists memberships(organizationId = this.organizationId, userId = session.user, role = 'admin')",
+    "insert": "exists memberships(organizationId = this.organizationId, userId = session.user, role in ['admin', 'editor'])",
+    "read": "exists memberships(organizationId = this.organizationId, userId = session.user)",
+    "update": "exists memberships(organizationId = this.organizationId, userId = session.user, role in ['admin', 'editor'])",
+  },
+  "better_auth_account": {
+    "delete": "false",
+    "insert": "false",
+    "read": "false",
+    "update": "false",
+  },
+  "better_auth_jwks": {
+    "delete": "false",
+    "insert": "false",
+    "read": "false",
+    "update": "false",
+  },
+  "better_auth_session": {
+    "delete": "false",
+    "insert": "false",
+    "read": "false",
+    "update": "false",
+  },
+  "better_auth_user": {
+    "delete": "false",
+    "insert": "false",
+    "read": "false",
+    "update": "false",
+  },
+  "better_auth_verification": {
+    "delete": "false",
+    "insert": "false",
+    "read": "false",
+    "update": "false",
+  },
+  "catalogues": {
+    "delete": "exists memberships(organizationId = this.organizationId, userId = session.user, role = 'admin')",
+    "insert": "exists memberships(organizationId = this.organizationId, userId = session.user, role = 'admin')",
+    "read": "exists memberships(organizationId = this.organizationId, userId = session.user)",
+    "update": "exists memberships(organizationId = this.organizationId, userId = session.user, role = 'admin')",
+  },
+  "memberships": {
+    "delete": "exists memberships(organizationId = this.organizationId, userId = session.user, role = 'admin')",
+    "insert": {
+      "allOf": [
+        "exists memberships(organizationId = this.organizationId, userId = session.user, role = 'admin')",
+        "exists people(id = this.personId, userId = this.userId)",
+        "role in ['editor', 'viewer']",
+      ],
+    },
+    "read": "exists memberships(organizationId = this.organizationId, userId = session.user)",
+    "update": {
+      "new": {
+        "allOf": [
+          "exists memberships(organizationId = this.organizationId, userId = session.user, role = 'admin')",
+          "exists people(id = this.personId, userId = this.userId)",
+          "role in ['admin', 'editor', 'viewer']",
+        ],
+      },
+      "old": "exists memberships(organizationId = this.organizationId, userId = session.user, role = 'admin')",
+    },
+  },
+  "organizations": {
+    "delete": "exists memberships(organizationId = this.id, userId = session.user, role = 'admin')",
+    "read": "exists memberships(organizationId = this.id, userId = session.user)",
+    "update": "exists memberships(organizationId = this.id, userId = session.user, role = 'admin')",
+  },
+  "people": {
+    "read": {
+      "anyOf": [
+        "userId = session.user",
+        "allowedTo.read(membershipsViaPerson)",
+      ],
+    },
+    "update": "userId = session.user",
+  },
+  "personEmails": {},
+  "releaseAssignments": {
+    "delete": "exists memberships(organizationId = this.organizationId, userId = session.user, role = 'admin')",
+    "insert": {
+      "allOf": [
+        "exists memberships(organizationId = this.organizationId, userId = session.user, role = 'admin')",
+        "exists releases(id = this.releaseId, organizationId = this.organizationId)",
+        "exists memberships(id = this.membershipId, organizationId = this.organizationId)",
+      ],
+    },
+    "read": "allowedTo.read(release)",
+    "update": {
+      "new": {
+        "allOf": [
+          "exists memberships(organizationId = this.organizationId, userId = session.user, role = 'admin')",
+          "exists releases(id = this.releaseId, organizationId = this.organizationId)",
+          "exists memberships(id = this.membershipId, organizationId = this.organizationId)",
+        ],
+      },
+      "old": "exists memberships(organizationId = this.organizationId, userId = session.user, role = 'admin')",
+    },
+  },
+  "releaseTeams": {
+    "delete": "exists memberships(organizationId = this.organizationId, userId = session.user, role in ['admin', 'editor'])",
+    "insert": {
+      "allOf": [
+        "exists memberships(organizationId = this.organizationId, userId = session.user, role in ['admin', 'editor'])",
+        "exists releases(id = this.releaseId, organizationId = this.organizationId)",
+        "exists teams(id = this.teamId, organizationId = this.organizationId)",
+      ],
+    },
+    "read": "exists memberships(organizationId = this.organizationId, userId = session.user)",
+  },
+  "releases": {
+    "delete": "exists memberships(organizationId = this.organizationId, userId = session.user, role = 'admin')",
+    "insert": {
+      "allOf": [
+        "exists memberships(organizationId = this.organizationId, userId = session.user, role in ['admin', 'editor'])",
+        {
+          "allOf": [
+            "exists artists(id = this.artistId, organizationId = this.organizationId)",
+            {
+              "anyOf": [
+                "catalogueId = null",
+                "exists catalogues(id = this.catalogueId, organizationId = this.organizationId)",
+              ],
+            },
+          ],
+        },
+      ],
+    },
+    "read": "exists memberships(organizationId = this.organizationId, userId = session.user)",
+    "update": {
+      "new": {
+        "allOf": [
+          "exists memberships(organizationId = this.organizationId, userId = session.user, role in ['admin', 'editor'])",
+          {
+            "allOf": [
+              "exists artists(id = this.artistId, organizationId = this.organizationId)",
+              {
+                "anyOf": [
+                  "catalogueId = null",
+                  "exists catalogues(id = this.catalogueId, organizationId = this.organizationId)",
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      "old": "exists memberships(organizationId = this.organizationId, userId = session.user, role in ['admin', 'editor'])",
+    },
+  },
+  "teamAssignments": {
+    "delete": "allowedTo.delete(team)",
+    "insert": {
+      "allOf": [
+        "allowedTo.insert(team)",
+        "exists teams(id = this.teamId, organizationId = this.organizationId)",
+        "exists memberships(id = this.membershipId, organizationId = this.organizationId)",
+      ],
+    },
+    "read": "allowedTo.read(team)",
+    "update": {
+      "new": {
+        "allOf": [
+          "allowedTo.update(team)",
+          "exists teams(id = this.teamId, organizationId = this.organizationId)",
+          "exists memberships(id = this.membershipId, organizationId = this.organizationId)",
+        ],
+      },
+      "old": "allowedTo.update(team)",
+    },
+  },
+  "teams": {
+    "delete": "exists memberships(organizationId = this.organizationId, userId = session.user, role = 'admin')",
+    "insert": "exists memberships(organizationId = this.organizationId, userId = session.user, role = 'admin')",
+    "read": "exists memberships(organizationId = this.organizationId, userId = session.user)",
+    "update": "exists memberships(organizationId = this.organizationId, userId = session.user, role = 'admin')",
+  },
+}
+`;

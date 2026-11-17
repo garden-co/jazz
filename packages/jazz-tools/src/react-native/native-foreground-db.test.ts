@@ -269,3 +269,40 @@ it("reports each upstream connection failure change once while ticks keep runnin
     { reason: "tls", retrying: true },
   ]);
 });
+
+// The native host sets the relay status as `error.code`. Only an unknown
+// command (`invalid_command`) means an older build without it; a lifecycle
+// or encode failure, under the same message, must not turn the count off.
+it("turns the pending-upload count off only for a command the host does not know", () => {
+  const codedFailure = (code: string) =>
+    Object.assign(new Error("Jazz native foreground runtime failed during execute"), { code });
+  const counting = (failure: Error) => {
+    let fail = true;
+    const db = new NativeForegroundDb(
+      {
+        execute: () => {
+          if (fail) {
+            fail = false;
+            throw failure;
+          }
+          return Uint8Array.of(1);
+        },
+        tick: vi.fn(),
+        close: () => true,
+      },
+      {
+        encodeNativeForegroundCommand: () => Uint8Array.of(1),
+        decodeNativeForegroundResponse: () => ({ type: "pendingUploadCount", count: 3 }),
+      } as never,
+    );
+    return [db.pendingUploadCount(), db.pendingUploadCount()];
+  };
+
+  expect(counting(codedFailure("lifecycle_failure"))).toEqual([0, 3]);
+  expect(counting(codedFailure("encode_failure"))).toEqual([0, 3]);
+  expect(counting(codedFailure("invalid_command"))).toEqual([0, 0]);
+  // A native build older than the code: the message is all there is.
+  expect(counting(new Error("Jazz native foreground runtime failed during execute"))).toEqual([
+    0, 0,
+  ]);
+});

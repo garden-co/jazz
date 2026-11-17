@@ -1,5 +1,8 @@
 # StagePlan: Rust CLI
 
+> [!WARNING]
+> **Experimental: client only; backends are TypeScript.** See [Language Support](https://jazz.tools/docs/reference/language-support#jazz-environment-rust).
+
 StagePlan from the command line, in Rust, with the `jazz-app-support` crate. It is a **backend client** of StagePlan's TypeScript main backend (`createJazz`): it connects to the main backend's `/jazz` with a machine credential (an OIDC token) that the main backend trusts through `trustWorkload`. As a **scoped** client it acts as one user (`session.user` in the permissions). As a **trusted** client it acts as the system, and for any user with `for_user`. It can:
 
 - create the user's show, as its crew chief;
@@ -9,7 +12,8 @@ StagePlan from the command line, in Rust, with the `jazz-app-support` crate. It 
 
 ## Files
 
-- `jazz.app.json` and `jazz.permissions.json`: byte-identical copies of [`../react-localfirst`](../react-localfirst)'s. Never edit them here: copy them from there. The `app_files_are_stage_plans` test fails while they differ.
+- `schema.ts`: re-exports [`../react-localfirst`](../react-localfirst)'s schema and permissions, so this is StagePlan's app.
+- `jazz.app.json` and `jazz.permissions.json`: what `npx jazz-tools generate` writes from `schema.ts`, committed. Don't edit them; `npx jazz-tools generate --check` refuses stale ones.
 - `src/jazz_app.rs`: the typed bindings `jazz-tools generate` writes from `jazz.app.json`, committed. Don't edit it. The `bindings_are_current` test and `npx jazz-tools generate --check` refuse a stale copy.
 - `src/lib.rs`: the slice: `ensure_show`, `tasks_of`, `add_task` and `move_task`.
 - `src/main.rs`: the `stage-plan` CLI over it.

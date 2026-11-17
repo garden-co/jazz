@@ -27,24 +27,9 @@ pub struct Transaction {
     id: OpenTransactionId,
     wrote: Rc<Cell<bool>>,
     implementations: Implementations,
-    /// Mergeable ([`Jazz::transaction`]): it can read through a branch.
-    mergeable: bool,
 }
 
 impl Transaction {
-    /// `write`, which returns the row read back, is not supported yet
-    /// through a branch in a serializable transaction: refuse it before
-    /// staging anything, so a caller that ignores the error doesn't commit
-    /// it.
-    fn refuse_read_back_on_branch(&self, write: &str) -> Result<()> {
-        if self.client.is_on_branch() && !self.mergeable {
-            return Err(crate::Error::Unsupported(format!(
-                "{write} through a branch inside a serializable transaction (it reads the row back)"
-            )));
-        }
-        Ok(())
-    }
-
     pub(crate) fn client(&self) -> &JazzClient {
         &self.client
     }
@@ -83,7 +68,6 @@ impl Transaction {
     /// Writes the row with this id, as [`Jazz::upsert`]; returns it as the
     /// transaction now sees it.
     pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
-        self.refuse_read_back_on_branch("upsert")?;
         let cells = new.into_cells(&self.implementations)?;
         self.client
             .upsert(<N::Row as Table>::NAME, *id.uuid(), cells)?;
@@ -99,7 +83,6 @@ impl Transaction {
 
     /// Brings back a deleted row, as [`Jazz::restore`].
     pub async fn restore<T: Table>(&self, id: ObjectId) -> Result<T> {
-        self.refuse_read_back_on_branch("restore")?;
         self.client.restore(T::NAME, id, None)?;
         self.wrote.set(true);
         self.read_back(id).await
@@ -108,7 +91,6 @@ impl Transaction {
     /// Brings back a deleted row with `new`'s values, as
     /// [`Jazz::restore_with`].
     pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
-        self.refuse_read_back_on_branch("restore_with")?;
         let cells = new.into_cells(&self.implementations)?;
         self.client.restore(
             <N::Row as Table>::NAME,
@@ -209,7 +191,6 @@ impl Jazz {
                 id: open.transaction_id(),
                 wrote: Rc::new(Cell::new(false)),
                 implementations,
-                mergeable,
             };
             let wrote = transaction.wrote.clone();
             let scoped = transaction.client.clone();
@@ -315,7 +296,6 @@ impl Jazz {
                     id: open.transaction_id(),
                     wrote: Rc::new(Cell::new(false)),
                     implementations,
-                    mergeable,
                 };
                 Ok(OPEN.with(|open| {
                     let mut open = open.borrow_mut();
@@ -418,7 +398,8 @@ impl OpenTransaction {
             .await
     }
 
-    /// [`Jazz::splice`] staged in the transaction.
+    /// [`Jazz::splice`] staged in the transaction, in the same units (UTF-8
+    /// bytes on a text column).
     pub async fn splice<T: Table, V: crate::LargeColumn>(
         &self,
         id: ObjectId,
