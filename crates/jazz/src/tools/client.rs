@@ -2681,11 +2681,12 @@ impl Deref for JazzTransaction {
     }
 }
 
-/// A write's synchronous failure. A rejection decided before the write
-/// leaves the client (a policy, a taken id) carries TS's code, as TS's
+/// A write's or transaction's synchronous failure. A rejection the core
+/// decides before the write leaves the client (input it refuses, a taken
+/// id, a local transaction conflict) carries TS's code, as TS's
 /// synchronous writes do, with the core's detail as its reason.
 fn write_error(error: CoreError) -> JazzError {
-    let Some((code, readable)) = super::rejection_code_and_reason(&error) else {
+    let Some((code, _)) = super::rejection_code_and_reason(&error) else {
         return JazzError::Write(error.to_string());
     };
     let detail = match error.reason {
@@ -2696,8 +2697,10 @@ fn write_error(error: CoreError) -> JazzError {
             .unwrap_or(&error.message),
         None => &error.message,
     };
+    // The authority's wording ("…by server authorization") would be wrong
+    // here: without a detail, the core's own diagnostic is the reason.
     let reason = if detail.is_empty() {
-        readable
+        error.to_string()
     } else {
         detail.to_owned()
     };
