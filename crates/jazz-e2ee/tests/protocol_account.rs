@@ -1404,24 +1404,16 @@ fn every_epoch_publishes_its_sealing_key() {
         &rotation.key,
     );
 
+    // The rotation already published this epoch's record, so a later
+    // publication writes nothing; a removed device is refused.
     let key = ledger.acquire(&env, &laptop).unwrap();
-    let later = build::account_sealing_key(&env.writer(), &state, &laptop, &key, &mut rng).unwrap();
-    let later_at = ledger.next();
-    ledger
-        .public
-        .account_keys
-        .push(Accepted::new(later_at, later));
-    assert_sealing_key(
-        &env,
-        &ledger,
-        2,
-        later_at,
-        &laptop,
-        &rotation.public.epoch_id,
-        &rotation.key,
+    let sealing = ledger.replay(&env).sealing_keys().unwrap().unwrap();
+    assert_eq!(
+        build::later_account_sealing_key(&env.writer(), &sealing, &state, &laptop, &key, &mut rng),
+        Ok(None)
     );
     assert_eq!(
-        build::account_sealing_key(&env.writer(), &state, &phone, &key, &mut rng),
+        build::later_account_sealing_key(&env.writer(), &sealing, &state, &phone, &key, &mut rng),
         Err(refused(RefusalCode::DeviceNotActive))
     );
 
@@ -1432,7 +1424,7 @@ fn every_epoch_publishes_its_sealing_key() {
     assert_sealing_key(
         &env,
         &ledger,
-        3,
+        2,
         reset_at,
         &tablet,
         &reset_epoch,

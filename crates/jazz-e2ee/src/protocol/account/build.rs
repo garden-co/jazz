@@ -458,12 +458,11 @@ fn sealing_key_record(
     Ok(record)
 }
 
-/// A sealing key record of the current epoch for the selected mechanism
-/// (§2.12, stage `account-key`), by an active device holding the current
-/// account key. It does not look at the records already published:
-/// [`later_account_sealing_key`] is the publication that refuses when the
-/// current epoch already has a valid record of the selected mechanism.
-pub fn account_sealing_key(
+/// A sealing key record of the current epoch for the selected mechanism,
+/// signed by an active device holding the current account key. It does
+/// not look at the records already published; only
+/// [`later_account_sealing_key`] calls it, after checking them.
+fn account_sealing_key(
     writer: &AccountWriter<'_>,
     state: &AccountState,
     signer: &LocalDevice,
@@ -499,6 +498,9 @@ pub fn later_account_sealing_key(
         || sealing.current_epoch_id() != state.epoch_id()
     {
         return Err(ProtocolError::InconsistentEvidence);
+    }
+    if !state.is_active(&signer.id) {
+        return refuse(RefusalCode::DeviceNotActive);
     }
     if sealing.current(writer.suite.key_seal.mechanism()).is_some() {
         return Ok(None);
