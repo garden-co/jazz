@@ -31,6 +31,7 @@ use super::super::signing;
 use super::chain::SpaceChain;
 use super::keys::{HeldVersion, Outcome, SpaceKeys, open_account_envelope, unwrap};
 use super::ledger::Recipient;
+use super::members::DELIVERY_BATCH;
 
 const Z32: [u8; 32] = [0; 32];
 
@@ -221,7 +222,8 @@ pub fn space_root(
 /// one transaction. The new key is never printed.
 pub struct RotationRecords {
     pub successor: SpaceSuccessor,
-    /// One delivery of the new version to each recipient given.
+    /// One delivery of the new version to each recipient given: at most
+    /// [`DELIVERY_BATCH`].
     pub deliveries: Vec<SpaceDelivery>,
     pub key: Zeroizing<[u8; 32]>,
 }
@@ -239,10 +241,13 @@ impl core::fmt::Debug for RotationRecords {
 /// A rotation (§3.5) by an active device of the writer's account that holds
 /// the authenticated key of the current version: a successor whose
 /// `predecessor` and `historyEpochId` are both the current version, and one
-/// delivery of the new key to each of `recipients` (at most
-/// [`super::members::DELIVERY_BATCH`] in the rotation's own transaction,
-/// chosen by [`super::members::rotation_recipients`]). Without the current
-/// version's key it is `rotation-needs-key`.
+/// delivery of the new key to each of `recipients`, the rotation's own
+/// batch ([`first`](super::members::RotationRecipients::first)). The
+/// remaining members ([`rest`](super::members::RotationRecipients::rest))
+/// are delivered to with [`deliver`] in later transactions of up to
+/// [`DELIVERY_BATCH`], once the rotation is accepted. Without the current
+/// version's key it is `rotation-needs-key`; more than [`DELIVERY_BATCH`]
+/// recipients is an invalid input, refused before anything is generated.
 pub fn rotate(
     writer: &SpaceWriter<'_>,
     chain: &SpaceChain,
@@ -262,8 +267,9 @@ pub fn rotate(
 /// A recovery rotation (§3.5), which the application calls explicitly: a
 /// successor whose `predecessor` is the current version and whose `history`
 /// wraps the newest version the rotator holds, so the versions after that
-/// one, up to and including the predecessor, are skipped. With no held
-/// version of the space it is `rotation-needs-key`.
+/// one, up to and including the predecessor, are skipped. `recipients` is
+/// the rotation's own batch, as for [`rotate`]. With no held version of the
+/// space it is `rotation-needs-key`.
 pub fn recover_rotation(
     writer: &SpaceWriter<'_>,
     chain: &SpaceChain,
@@ -288,6 +294,11 @@ fn successor(
     recipients: &[Recipient],
     rng: &mut dyn RandomSource,
 ) -> ProtocolResult<RotationRecords> {
+    if recipients.len() > DELIVERY_BATCH {
+        return Err(ProtocolError::InvalidRecord(
+            "more deliveries than a rotation's own transaction holds",
+        ));
+    }
     writer.check_author(author)?;
     let current = chain.current()?;
     let application = &chain.application;

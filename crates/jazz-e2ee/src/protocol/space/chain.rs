@@ -87,10 +87,7 @@ pub fn select_root(
     ledger: &SpaceLedger,
     accounts: &AccountDirectory<'_>,
 ) -> ProtocolResult<SpaceRoots> {
-    ledger.check()?;
-    if ledger.through != accounts.through() {
-        return Err(ProtocolError::InconsistentEvidence);
-    }
+    check_read(ledger, Some(accounts))?;
     let mut roots: Vec<_> = ledger.address_roots().collect();
     super::by_position_then_id(&mut roots);
     let mut chosen = None;
@@ -109,6 +106,26 @@ pub fn select_root(
         root: chosen,
         lost: lost_roots,
     })
+}
+
+/// Fails with [`ProtocolError::InconsistentEvidence`] unless `ledger` is
+/// one read (every row at or before its cut, no row ID repeated in a table)
+/// and `accounts`, when given, was read at the same cut.
+fn check_read(ledger: &SpaceLedger, accounts: Option<&AccountDirectory<'_>>) -> ProtocolResult<()> {
+    ledger.check()?;
+    match accounts {
+        Some(accounts) if accounts.through() != ledger.through => {
+            Err(ProtocolError::InconsistentEvidence)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The read a chain was replayed from: the space's address and the cut.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Source {
+    address: SpaceAddress,
+    through: Position,
 }
 
 /// The root's own checks; `None` when it is valid.
@@ -176,7 +193,10 @@ pub struct Unresolved {
     pub capability: UnsupportedCapability,
 }
 
-/// A space's root and its authenticated chain at one cut (§3.3).
+/// A space's root and its authenticated chain at one cut (§3.3). Built
+/// only by [`SpaceChain::replay`], which records the read it came from:
+/// every function that takes the chain together with a space ledger or an
+/// account directory refuses evidence from another read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpaceChain {
     /// The domain of the root's creator, `Dₐ(creatorAccountId)`, in which
@@ -190,6 +210,7 @@ pub struct SpaceChain {
     pub unresolved: Option<Unresolved>,
     /// The other roots of the address (§3.2).
     pub lost: Vec<LostRoot>,
+    source: Source,
 }
 
 impl SpaceChain {
@@ -227,6 +248,10 @@ impl SpaceChain {
             root,
             unresolved: None,
             lost,
+            source: Source {
+                address: ledger.address.clone(),
+                through: ledger.through,
+            },
         };
         let mut used = BTreeSet::from([chain.root.row.epoch_id.clone()]);
         let mut candidates: Vec<_> = ledger.address_successors().collect();
@@ -278,6 +303,28 @@ impl SpaceChain {
 
     pub fn address(&self) -> &SpaceAddress {
         &self.scope.address
+    }
+
+    /// The cut of the read this chain was replayed from.
+    pub fn through(&self) -> Position {
+        self.source.through
+    }
+
+    /// Fails with [`ProtocolError::InconsistentEvidence`] unless `ledger`
+    /// is the read this chain was replayed from (same address and cut) and
+    /// passes its own check, and `accounts`, when given, was read at the
+    /// same cut. Every function that combines a chain with a space ledger
+    /// or an account directory checks this first.
+    pub(crate) fn check_read(
+        &self,
+        ledger: &SpaceLedger,
+        accounts: Option<&AccountDirectory<'_>>,
+    ) -> ProtocolResult<()> {
+        check_read(ledger, accounts)?;
+        if ledger.address != self.source.address || ledger.through != self.source.through {
+            return Err(ProtocolError::InconsistentEvidence);
+        }
+        Ok(())
     }
 
     /// The account that created the space's root, whose domain the space's

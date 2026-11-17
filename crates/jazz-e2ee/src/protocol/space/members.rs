@@ -46,16 +46,25 @@ pub struct VersionEnvelope {
 /// The envelopes of the version at `depth`: the `accountEnvelope` of its
 /// own record, then the deliveries of it, by position then ID. With
 /// `after_root`, deliveries at or before the root's position are left out,
-/// as acquisition skips them (§3.3).
+/// as acquisition skips them (§3.3). `ledger` must be the read `chain` was
+/// replayed from.
 pub fn envelopes(
     chain: &SpaceChain,
     ledger: &SpaceLedger,
     depth: usize,
     after_root: bool,
 ) -> ProtocolResult<Vec<VersionEnvelope>> {
-    if *chain.address() != ledger.address {
-        return Err(ProtocolError::InconsistentEvidence);
-    }
+    chain.check_read(ledger, None)?;
+    version_envelopes(chain, ledger, depth, after_root)
+}
+
+/// [`envelopes`], over a read already checked.
+fn version_envelopes(
+    chain: &SpaceChain,
+    ledger: &SpaceLedger,
+    depth: usize,
+    after_root: bool,
+) -> ProtocolResult<Vec<VersionEnvelope>> {
     let version = chain
         .version(depth)
         .ok_or(ProtocolError::InvalidRecord("depth beyond the chain"))?;
@@ -88,13 +97,23 @@ pub fn envelopes(
 
 /// The key holders of the version at `depth` (§1.1): the account that wrote
 /// its root or successor, and every account a delivery of it was accepted
-/// to.
+/// to. `ledger` must be the read `chain` was replayed from.
 pub fn holders(
     chain: &SpaceChain,
     ledger: &SpaceLedger,
     depth: usize,
 ) -> ProtocolResult<BTreeSet<String>> {
-    Ok(envelopes(chain, ledger, depth, false)?
+    chain.check_read(ledger, None)?;
+    version_holders(chain, ledger, depth)
+}
+
+/// [`holders`], over a read already checked.
+fn version_holders(
+    chain: &SpaceChain,
+    ledger: &SpaceLedger,
+    depth: usize,
+) -> ProtocolResult<BTreeSet<String>> {
+    Ok(version_envelopes(chain, ledger, depth, false)?
         .into_iter()
         .map(|envelope| envelope.account_id)
         .collect())
@@ -117,16 +136,18 @@ pub struct Lacking {
 /// `accountEnvelope` of the version's record that it wrote) names an
 /// account epoch of its current generation. A reset member therefore lacks
 /// every version until someone delivers again; a device-removal account
-/// rotation changes nothing here. Needs the public ledger of every member.
+/// rotation changes nothing here. Needs the public ledger of every member,
+/// from the read `chain` was replayed from.
 pub fn lacking(
     chain: &SpaceChain,
     ledger: &SpaceLedger,
     accounts: &AccountDirectory<'_>,
 ) -> ProtocolResult<Vec<Lacking>> {
+    chain.check_read(ledger, Some(accounts))?;
     let concerned = chain.concerned()?;
     let mut by_depth = BTreeMap::new();
     for depth in &concerned {
-        by_depth.insert(*depth, envelopes(chain, ledger, *depth, true)?);
+        by_depth.insert(*depth, version_envelopes(chain, ledger, *depth, true)?);
     }
     let mut out = Vec::new();
     for account in ledger.member_accounts() {
@@ -192,15 +213,16 @@ impl RotationMark {
 /// anywhere after that epoch in the account's chain, even with other
 /// successors in between. Derived from tables every member can read;
 /// nobody writes it. Needs the public ledger of every account an envelope
-/// of the current version names.
+/// of the current version names, from the read `chain` was replayed from.
 pub fn rotation_mark(
     chain: &SpaceChain,
     ledger: &SpaceLedger,
     accounts: &AccountDirectory<'_>,
 ) -> ProtocolResult<RotationMark> {
+    chain.check_read(ledger, Some(accounts))?;
     let depth = chain.current_depth()?;
     let members = ledger.member_accounts();
-    let found = envelopes(chain, ledger, depth, false)?;
+    let found = version_envelopes(chain, ledger, depth, false)?;
     let former_members: BTreeSet<String> = found
         .iter()
         .filter(|envelope| !members.contains(&envelope.account_id))
@@ -300,7 +322,8 @@ pub struct RotationRecipients {
 /// Chooses the recipients of a rotation by `rotator` (§3.5): every current
 /// member other than the rotator's account that has a valid sealing key of
 /// `mechanism` (§2.12), the members that held the current version first.
-/// Needs the public ledger of every member.
+/// Needs the public ledger of every member, from the read `chain` was
+/// replayed from.
 pub fn rotation_recipients(
     chain: &SpaceChain,
     ledger: &SpaceLedger,
@@ -309,8 +332,9 @@ pub fn rotation_recipients(
     mechanism: Mechanism<'_>,
     rng: &mut dyn RandomSource,
 ) -> ProtocolResult<RotationRecipients> {
+    chain.check_read(ledger, Some(accounts))?;
     let depth = chain.current_depth()?;
-    let held = holders(chain, ledger, depth)?;
+    let held = version_holders(chain, ledger, depth)?;
     let mut holding = Vec::new();
     let mut others = Vec::new();
     let mut waiting = Vec::new();

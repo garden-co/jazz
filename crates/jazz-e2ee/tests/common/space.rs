@@ -12,8 +12,9 @@ use jazz_e2ee::protocol::account::{
 };
 use jazz_e2ee::protocol::records::space::{SpaceAddress, SpaceDelivery, SpaceMember};
 use jazz_e2ee::protocol::space::build::{self, Author, SpaceWriter};
+use jazz_e2ee::protocol::space::members::DELIVERY_BATCH;
 use jazz_e2ee::protocol::space::{
-    AccountDirectory, Acquisition, SpaceChain, SpaceKeys, SpaceLedger, acquire,
+    AccountDirectory, Acquisition, Recipient, SpaceChain, SpaceKeys, SpaceLedger, acquire,
 };
 use jazz_e2ee::protocol::{Accepted, Position, ProtocolResult, ids};
 use jazz_e2ee::registry::Registry;
@@ -50,6 +51,15 @@ pub struct Own {
     pub state: AccountState,
     pub key: AccountKey,
     pub epoch_keys: AccountEpochKeys,
+}
+
+/// A rotation as its rotator publishes it (§3.5): the successor with the
+/// deliveries to the first batch of members, and the remaining members,
+/// delivered to in later transactions once the successor is accepted.
+pub struct Rotation {
+    pub rotator: String,
+    pub records: build::RotationRecords,
+    pub rest: Vec<Recipient>,
 }
 
 /// A ledger read at one cut: every account's public rows and the space's.
@@ -360,64 +370,77 @@ impl World {
         build::deliver(&writer, &version, &recipient, &mut rng)
     }
 
-    /// `account` rotates the space with its default device, delivering to
-    /// every member with a valid sealing key in the rotation's own
-    /// transaction. Returns the new version's epoch.
+    /// `account` rotates the space with its default device (§3.5): the
+    /// successor and the deliveries to the first batch of members in one
+    /// transaction, then the deliveries to the remaining members in later
+    /// transactions. Returns the new version's epoch.
     pub fn rotate(&mut self, account: &str) -> String {
-        let records = self.build_rotation(account, false).unwrap();
-        self.accept_rotation(records)
+        let rotation = self.build_rotation(account, false).unwrap();
+        self.accept_rotation(rotation)
     }
 
-    pub fn build_rotation(
-        &mut self,
-        account: &str,
-        recovery: bool,
-    ) -> ProtocolResult<build::RotationRecords> {
+    /// A rotation by `account`'s default device at the current cut, not
+    /// yet accepted: an ordinary one, or with `recovery` a recovery
+    /// rotation.
+    pub fn build_rotation(&mut self, account: &str, recovery: bool) -> ProtocolResult<Rotation> {
         let mut rng = TestRandom(self.rng.next_u64());
         let read = self.read();
         let directory = read.directory(self);
         let chain = read.chain(self).expect("a space root");
-        let keys = self
-            .try_acquire(account)
-            .map(|acquisition| acquisition.keys)
-            .unwrap_or_else(|_| SpaceKeys::new(&chain));
-        self.build_rotation_with(account, &chain, &keys, &directory, recovery, &mut rng)
+        let keys = self.try_acquire(account)?.keys;
+        self.build_rotation_with(
+            account, &read, &chain, &keys, &directory, recovery, &mut rng,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn build_rotation_with(
         &self,
         account: &str,
+        read: &Read,
         chain: &SpaceChain,
         keys: &SpaceKeys,
         directory: &AccountDirectory<'_>,
         recovery: bool,
         rng: &mut TestRandom,
-    ) -> ProtocolResult<build::RotationRecords> {
+    ) -> ProtocolResult<Rotation> {
         let own = self.own(account);
         let writer = self.writer(account);
         let recipients = jazz_e2ee::protocol::space::members::rotation_recipients(
             chain,
-            &self.read().space,
+            &read.space,
             directory,
             account,
             writer.suite.key_seal.mechanism(),
             rng,
         )?;
-        let mut all = recipients.first;
-        all.extend(recipients.rest);
         let author = Author {
             state: &own.state,
             account_key: &own.key,
             device: &self.accounts[account].device,
         };
-        if recovery {
-            build::recover_rotation(&writer, chain, keys, &author, &all, rng)
+        let records = if recovery {
+            build::recover_rotation(&writer, chain, keys, &author, &recipients.first, rng)
         } else {
-            build::rotate(&writer, chain, keys, &author, &all, rng)
-        }
+            build::rotate(&writer, chain, keys, &author, &recipients.first, rng)
+        }?;
+        Ok(Rotation {
+            rotator: account.to_owned(),
+            records,
+            rest: recipients.rest,
+        })
     }
 
-    pub fn accept_rotation(&mut self, records: build::RotationRecords) -> String {
+    /// Accepts the rotation's successor and its deliveries in one
+    /// transaction, then, if the successor became the next version, the
+    /// rotator's deliveries of it to the remaining members in transactions
+    /// of up to [`DELIVERY_BATCH`] each. Returns the new version's epoch.
+    pub fn accept_rotation(&mut self, rotation: Rotation) -> String {
+        let Rotation {
+            rotator,
+            records,
+            rest,
+        } = rotation;
         let at = self.next();
         let epoch = records.successor.epoch_id.clone();
         self.space
@@ -426,7 +449,39 @@ impl World {
         for delivery in records.deliveries {
             self.space.deliveries.push(Accepted::new(at, delivery));
         }
+        for batch in rest.chunks(DELIVERY_BATCH) {
+            let Some(deliveries) = self.build_deliveries(&rotator, &epoch, batch).unwrap() else {
+                break;
+            };
+            let at = self.next();
+            for delivery in deliveries {
+                self.space.deliveries.push(Accepted::new(at, delivery));
+            }
+        }
         epoch
+    }
+
+    /// `from`'s deliveries of version `epoch_id` to each of `recipients`,
+    /// whether or not a delivery to it already exists, built from what
+    /// `from` acquires at the current cut. `None` when `from` does not hold
+    /// the version (a successor that did not become the next version).
+    pub fn build_deliveries(
+        &mut self,
+        from: &str,
+        epoch_id: &str,
+        recipients: &[Recipient],
+    ) -> ProtocolResult<Option<Vec<SpaceDelivery>>> {
+        let mut rng = TestRandom(self.rng.next_u64());
+        let acquisition = self.try_acquire(from)?;
+        let Some(version) = acquisition.keys.version(epoch_id) else {
+            return Ok(None);
+        };
+        let writer = self.writer(from);
+        recipients
+            .iter()
+            .map(|recipient| build::deliver(&writer, &version, recipient, &mut rng))
+            .collect::<ProtocolResult<_>>()
+            .map(Some)
     }
 
     /// The current version's epoch at the cut.

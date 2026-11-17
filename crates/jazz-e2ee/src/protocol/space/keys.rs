@@ -407,18 +407,15 @@ impl Acquisition {
 /// version first, then earlier ones, for versions the history links of a
 /// newer key do not reach. `own` are the account epoch keys of the device's
 /// own account, current generation (§2.12); `ledger` holds the deliveries
-/// addressed to that account. Over an unresolved chain, only its resolved
-/// versions are acquired.
+/// addressed to that account and must be the read `chain` was replayed
+/// from. Over an unresolved chain, only its resolved versions are acquired.
 pub fn acquire(
     chain: &SpaceChain,
     ledger: &SpaceLedger,
     own: &AccountEpochKeys,
     registry: &Registry,
 ) -> ProtocolResult<Acquisition> {
-    if *chain.address() != ledger.address {
-        return Err(ProtocolError::InconsistentEvidence);
-    }
-    ledger.check()?;
+    chain.check_read(ledger, None)?;
     let account_id = own.account_id();
     let root_position = chain.root.position;
     let mut keys = SpaceKeys::new(chain);
