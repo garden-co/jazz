@@ -333,8 +333,72 @@ fn a_write_as_another_identity_is_refused_while_a_transaction_is_open() {
             ..Default::default()
         },
     ));
-    assert!(joined.is_err(), "{joined:?}");
+    let refused = joined.expect_err("a joining write is refused");
+    assert!(
+        refused
+            .to_string()
+            .contains("a write as another identity while a transaction is open"),
+        "{refused}"
+    );
     resume.send(()).unwrap();
     block_on(transaction).unwrap();
     assert_eq!(bodies(&alice), [Value::String("own".to_owned())]);
+}
+
+/// A transaction handle (`begin_mergeable`) committed while Alice's callback
+/// transaction is suspended would join that callback's commit. It is refused
+/// and stays open. Whether the callback then finishes (`resume`) or is
+/// cancelled, the handle commits afterwards and keeps its row.
+fn handle_commit_waits_for_a_suspended_callback(resume: bool) {
+    use jazz::model::transaction::OpenTransactionId;
+    let alice = open(1, AuthorSubject::SYSTEM);
+    let handle = OpenTransactionId::new();
+    block_on(alice.begin_mergeable(handle)).unwrap();
+    block_on(
+        alice
+            .tx_ref(handle)
+            .insert("notes", body("handle's"), Default::default()),
+    )
+    .unwrap();
+    let (finish, finished) = futures_channel::oneshot::channel::<()>();
+    let mut transaction = Box::pin(alice.transaction(async |tx| {
+        tx.insert("notes", body("callback's"), Default::default())
+            .await?;
+        finished.await.unwrap();
+        Ok(())
+    }));
+    poll_pending(transaction.as_mut());
+
+    let refused = block_on(alice.commit_mergeable_handle(handle))
+        .expect_err("a handle's commit waits for the callback transaction");
+    assert!(
+        refused
+            .to_string()
+            .contains("committing a transaction while a callback transaction is open"),
+        "{refused}"
+    );
+
+    let mut expected = vec![Value::String("handle's".to_owned())];
+    if resume {
+        finish.send(()).unwrap();
+        block_on(transaction).unwrap();
+        expected.insert(0, Value::String("callback's".to_owned()));
+    } else {
+        drop(transaction);
+    }
+    block_on(alice.commit_mergeable_handle(handle)).unwrap();
+    let mut bodies = bodies(&alice);
+    bodies.sort_by_key(|value| format!("{value:?}"));
+    expected.sort_by_key(|value| format!("{value:?}"));
+    assert_eq!(bodies, expected);
+}
+
+#[test]
+fn a_handle_commit_waits_for_a_suspended_callback_that_resumes() {
+    handle_commit_waits_for_a_suspended_callback(true);
+}
+
+#[test]
+fn a_handle_commit_waits_for_a_suspended_callback_that_is_cancelled() {
+    handle_commit_waits_for_a_suspended_callback(false);
 }

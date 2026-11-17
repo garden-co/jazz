@@ -8502,9 +8502,8 @@ impl Db {
                 .map(|op| inner.stored_op(op, &schema))
                 .collect::<Result<Vec<_>, _>>()?;
             if inner.tx.is_some() {
-                // Callback transactions never write as a session
-                // (`Db::write_op` refuses a joining write of another
-                // identity), so no session claims travel with `capture`.
+                // As in `record_upload_under_stored_view`: no session write
+                // joins a callback transaction.
                 debug_assert!(!ops.iter().any(StagedOp::is_session));
                 inner.capture.extend(ops);
                 return Ok(());
@@ -8549,6 +8548,12 @@ impl Db {
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.tx.is_some() {
+            // Only a callback transaction's own writes join its capture:
+            // they never write as a session (`Db::write_op` refuses a write
+            // as another identity, and a transaction handle's commit is
+            // refused while it is open), so no session claims travel with
+            // `capture`.
+            debug_assert!(!ops.iter().any(StagedOp::is_session) && claims.is_none());
             inner.capture.extend(ops);
             return Ok(());
         }

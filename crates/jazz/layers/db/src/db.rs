@@ -10265,6 +10265,7 @@ impl Db {
     }
 
     pub async fn commit_mergeable_handle(&self, id: OpenTransactionId) -> Result<TxReceipt, Error> {
+        self.refuse_commit_in_callback_tx()?;
         let batch = self.take_batch(id)?;
         if !matches!(batch.kind, BatchKind::Mergeable) {
             return Err(rejected(format!("transaction {id:?} is not mergeable")));
@@ -10283,6 +10284,7 @@ impl Db {
         &self,
         id: OpenTransactionId,
     ) -> Result<TxReceipt, Error> {
+        self.refuse_commit_in_callback_tx()?;
         let batch = self.take_batch(id)?;
         let BatchKind::Serializable {
             snapshot,
@@ -10442,8 +10444,23 @@ impl Db {
         self.with_upload(|| self.commit_ops_now(batch, kind))
     }
 
+    /// A transaction handle's commit while a callback transaction is open
+    /// would join that transaction's commit (and be undone with it), so it
+    /// is refused; the handle stays open, to commit once the callback
+    /// transaction has finished.
+    fn refuse_commit_in_callback_tx(&self) -> Result<(), Error> {
+        if self.inner().tx.is_some() {
+            return Err(unsupported(
+                "committing a transaction while a callback transaction is open",
+            ));
+        }
+        Ok(())
+    }
+
     fn commit_ops_now(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
         self.inner().require_mutation_admission()?;
+        // Its handle's commit refused this before taking the batch.
+        self.refuse_commit_in_callback_tx()?;
         let ops = &batch.ops;
         let (seq, prior, mark) = {
             let mut inner = self.inner();
