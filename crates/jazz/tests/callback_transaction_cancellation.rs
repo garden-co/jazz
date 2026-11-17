@@ -78,6 +78,26 @@ fn drive<T>(alice: &Db, bob: &Db, future: impl Future<Output = T>) -> T {
     panic!("sync operation did not finish within 100 turns");
 }
 
+/// A suspended callback transaction holds its savepoint across the
+/// callback's await, as `Db::held_for_test` reports; dropping it releases
+/// everything.
+#[test]
+fn held_for_test_sees_a_suspended_callback_transaction() {
+    let alice = open(1, AuthorSubject::SYSTEM);
+    assert!(alice.held_for_test().is_nothing());
+    let mut transaction = Box::pin(alice.transaction(async |tx| {
+        tx.insert("notes", body("uncommitted"), Default::default())
+            .await?;
+        pending::<Result<(), Error>>().await
+    }));
+    poll_pending(transaction.as_mut());
+    let held = alice.held_for_test();
+    assert!(held.callback_transaction);
+    assert!(held.sqlite_transaction);
+    drop(transaction);
+    assert!(alice.held_for_test().is_nothing());
+}
+
 /// Alice cancels a suspended callback after an update and a large insert. Her
 /// retained view sees the original row, subscribers hear no rolled-back change,
 /// SQLite releases its writer lock, and a subsequent transaction can commit.

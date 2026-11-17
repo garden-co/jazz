@@ -57,6 +57,7 @@ export const LANGUAGES: readonly Language[] = [
   { label: "Effect", backend: true, mainBackend: true, enabled: true },
   {
     label: "Rust",
+    setupPage: "setup/rust",
     experimental: true,
     backend: true,
     bindings: {

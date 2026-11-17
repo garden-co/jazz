@@ -187,8 +187,10 @@ columns (`merge: "text"`) take plain string writes.
 - **Query:** `{ "table", "where": [{ "column", "op", "value"? }], "orderBy":
 [{ "column", "direction" }], "limit", "offset" }`. The `where` entries are
   ANDed. Ops: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `contains` (string or
-  array column), `in`, `isNull`, `isNotNull`. Columns also include `id`,
-  `$createdAt` and `$updatedAt`.
+  array column), `in`, `notIn`, `isNull` (`"value": false` means "is not
+  null"), `isNotNull`; `eq`/`ne` with `null` test for null. They mean what
+  TS's `where` means (`jazz::query::where_condition`). Columns also include
+  `id`, `$createdAt` and `$updatedAt`.
 - **Include:** `"include": [{ "relation": "<name>", "required"?: bool,
 "query"?: { "where", "orderBy", "limit", "select", "include" } }]`, at the
   root or nested in an include's `query`, which has no `table` and no
@@ -287,7 +289,9 @@ row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
     table to itself, up to `maxDepth` (default 10).
   - `{"union": [Q, …], "orderBy"?, "limit"?, "offset"?}`: every arm's rows,
     as TS's union: a row matched by two arms comes twice, and `limit` /
-    `offset` count every occurrence; arms read one table, with `where` only.
+    `offset` count every occurrence; arms read one table, with `where` and
+    an optional `"label"` only. An arm without a label is labelled by what
+    it reads, as every client labels it, so two identical arms need labels.
     Subscribing to a union whose arms overlap can mis-apply removals (deltas
     name rows by id), as in jazz-app-support.
   - `{"table", "history": true, "where"?, "orderBy"?, "limit"?}`: the

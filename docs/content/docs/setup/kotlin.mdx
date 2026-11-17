@@ -14,18 +14,8 @@ The `jazz-kotlin` library wraps Jazz's native core (`jazz-ffi`, through JNA). It
 
 ## Install
 
-`jazz-kotlin` isn't on Maven Central yet (it's coming, as `tools.jazz:jazz-kotlin` and
-`tools.jazz:jazz-kotlin-android`). Each Jazz release has it as files on its
-[GitHub release](https://github.com/garden-co/jazz/releases), checked by the `SHA256SUMS` beside
-them:
-
-- `jazz-kotlin-<version>.jar`: the JVM library, with `libjazz_ffi` for Linux (x86-64, arm64),
-  macOS (arm64, x86-64) and Windows (x86-64) inside, which JNA loads from the jar;
-- `jazz-kotlin-android-<version>.aar`: the Android library, with `libjazz_ffi` for arm64-v8a,
-  armeabi-v7a and x86_64.
-
-Download the one you need into your project's `libs/`, and depend on it with the libraries it uses
-from Maven Central:
+`jazz-kotlin` is on Maven Central, at the same version as every Jazz package. On the JVM, depend on
+`tools.jazz:jazz-kotlin`:
 
 ```kotlin title="build.gradle.kts"
 plugins {
@@ -37,15 +27,24 @@ plugins {
 repositories { mavenCentral() }
 
 dependencies {
-    implementation(files("libs/jazz-kotlin-2.0.0-alpha.66.jar"))
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
-    implementation("net.java.dev.jna:jna:5.17.0")
+    implementation("tools.jazz:jazz-kotlin:2.0.0-alpha.66")
 }
 ```
 
-On Android, depend on `files("libs/jazz-kotlin-android-2.0.0-alpha.66.aar")` and
-`net.java.dev.jna:jna:5.17.0@aar` instead of the jar and `jna`. Keep `tools.jazz.**`,
+The jar has `libjazz_ffi` for Linux (x86-64, arm64), macOS (arm64, x86-64) and Windows (x86-64)
+inside, which JNA loads from it. It brings `kotlinx-serialization-json`,
+`kotlinx-coroutines-core` and JNA with it.
+
+On Android, depend on `tools.jazz:jazz-kotlin-android` instead:
+
+```kotlin title="app/build.gradle.kts"
+dependencies {
+    implementation("tools.jazz:jazz-kotlin-android:2.0.0-alpha.66")
+}
+```
+
+Its AAR has `libjazz_ffi` for arm64-v8a, armeabi-v7a and x86_64, and brings JNA's Android build.
+Apply `kotlin("plugin.serialization")` for the generated bindings, and keep `tools.jazz.**`,
 `uniffi.jazz_ffi.**` and `com.sun.jna.**` if you minify.
 
 To build from source: in a Jazz checkout,
@@ -140,6 +139,11 @@ A `"merge": "text"` column (like StagePlan's `tasks.notes`) is written as an edi
 read, so concurrent edits merge. `jazz.edit(table, id) { … }` also splices text and bytes and sets
 values inside JSON columns.
 
+Text positions are UTF-16 code units, Kotlin's `String` indices, as Android's `EditText`
+selections and `Spannable` ranges count them: `splice(column, from, to, …)` and `column.range(from,
+to)` take them as they are. Pass `SpliceUnits.Utf8` for UTF-8 byte offsets, and `SpliceUnits.Bytes`
+for a `bytea` column.
+
 <include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
   ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-text-edit-kotlin
 </include>
@@ -199,7 +203,6 @@ In Kotlin, Jazz doesn't support these yet:
 - guest (anonymous) users;
 - nested rows, catalogue enums and transaction-id columns in bindings;
 - Kotlin Multiplatform targets other than the JVM and Android;
-- Maven Central: install the jar or AAR from the GitHub release;
 - non-finite doubles (`NaN`, infinities): writing or comparing one throws, as JSON has none;
 - `limit` and `offset` with `watch`: they apply to the server's result before `watch` re-sorts it
   locally, so a page can be off after changes. Use them with `all`.
