@@ -200,8 +200,9 @@ length then its UTF-8 bytes; a byte is one byte.
    - geo: the point column name;
 5. the `serverOnly` byte (0 or 1).
 
-A search names a declaration by the SHA-256 of these bytes in logical column
-names (20.4). `SPEC/fixtures/ix/decl-v1.json` pins the bytes and hashes of
+A search names a declaration by the SHA-256 of these bytes with each column
+under its stored name, as `decl` above (20.4): a migration that only renames
+an indexed column changes no hash. `SPEC/fixtures/ix/decl-v1.json` pins the bytes and hashes of
 one declaration of each kind.
 
 `encoding` names every byte-level choice the shadow rows depend on: the
@@ -307,7 +308,8 @@ after the text (`Any` 0, `All` 1); other values are refused on decode.
 **Declarations.** Nodes on different schema versions can declare one index
 differently (another field weight, another metric). A search names the
 declaration it was written against: `decl`, filled in when the query is
-prepared, from the preparing node's schema. The node answering compares it
+prepared, from the preparing node's schema, hashed with its columns' stored
+names (so a rename-only migration is no mismatch). The node answering compares it
 (or, when it is absent, the reading schema's declaration) with the
 declaration of the index it maintains, and on a mismatch refuses with
 `IndexDeclarationMismatch` ("the index changed; upgrade the app"); it never
@@ -429,8 +431,11 @@ in two phases:
    the schema alone, so every node decides it alike: some top-level filter,
    or a conjunct of the read policy that pins a column, is `Eq`, `In` or a
    range on `id` or on the leading column of a declared B-tree index (a
-   declared column, a reference, or a composite index's first column). The
-   cap stays the backstop. A node answering only its own queries is exempt:
+   declared column, a reference, or a composite index's first column). Any
+   range counts, however wide (`createdAt > 0` narrows by this rule), so
+   narrowing is a check that the query is written against an index, not a
+   bound on how many rows it reads: the cap of `VECTOR_EXACT_MAX` readable
+   candidates is the real bound. A node answering only its own queries is exempt:
    its replica is the bounded set.
 2. **Rows.** The `k` pairs `(rid, score key)` are bound as one JSON array,
    and the statement runs with `ix` as `json_each` over it, so filters,
