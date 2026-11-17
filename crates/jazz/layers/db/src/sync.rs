@@ -4454,6 +4454,35 @@ impl Inner {
         contains: bool,
         value: &Sql,
     ) -> Result<Rc<Vec<Image>>, Error> {
+        // `value` is portable, as images carry it (see
+        // [`Inner::portable_enums`]): an enum variant by its name, whatever
+        // column it came from. An enum column's cells hold this store's tags
+        // for it, so the lookup binds the tag; watch keys stay on the name,
+        // as written rows' keys are. A name the column has no tag for stays
+        // a name, which no cell holds.
+        let tagged;
+        let value = match value {
+            Sql::Text(name)
+                if !contains
+                    && column != "id"
+                    && self
+                        .names
+                        .stored_type(table, column)
+                        .is_some_and(crate::values::is_enum_type) =>
+            {
+                let tag = std::str::from_utf8(name)
+                    .ok()
+                    .and_then(|name| self.names.tags().column(table, column).borrow().tag(name));
+                match tag {
+                    Some(tag) => {
+                        tagged = Sql::Integer(tag);
+                        &tagged
+                    }
+                    None => value,
+                }
+            }
+            _ => value,
+        };
         let read = || {
             let filter = if column == "id" {
                 "id = ?1".to_owned()
@@ -8502,16 +8531,9 @@ impl Db {
                 .map(|op| inner.stored_op(op, &schema))
                 .collect::<Result<Vec<_>, _>>()?;
             if inner.tx.is_some() {
-                // The claims a session write is staged with travel with it.
-                if inner.capture_claims.is_none()
-                    && let Some(author) = ops
-                        .iter()
-                        .find(|op| op.is_session())
-                        .and_then(StagedOp::author)
-                {
-                    inner.capture_claims =
-                        Some(inner.claims.get(&author).cloned().unwrap_or_default());
-                }
+                // As in `record_upload_under_stored_view`: no session write
+                // joins a callback transaction.
+                debug_assert!(!ops.iter().any(StagedOp::is_session));
                 inner.capture.extend(ops);
                 return Ok(());
             }
@@ -8555,6 +8577,13 @@ impl Db {
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.tx.is_some() {
+            // No local write joins a callback transaction as a session:
+            // `Db::write_op` refuses a write as another identity, and a
+            // transaction handle's commit is refused while it is open. So
+            // no session claims travel with `capture`. (A relay's apply of a
+            // downstream upload during `tick` can still land here:
+            // jazz#6038.)
+            debug_assert!(!ops.iter().any(StagedOp::is_session) && claims.is_none());
             inner.capture.extend(ops);
             return Ok(());
         }
@@ -15009,6 +15038,7 @@ impl Db {
             begin_savepoint(&inner.conn, "upload").map_err(|e| (e, Vec::new()))?;
             let mark = inner.changed.borrow().len();
             // The unit's write checks run at its end, grounded (SPEC 7).
+            inner.start_unit_heads();
             inner.defer_checks();
             // The unit was made over the sender's image (SPEC 4, INV-HIST-8);
             // text merges read what each row was built on.
