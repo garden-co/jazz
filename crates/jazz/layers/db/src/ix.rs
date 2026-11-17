@@ -968,5 +968,5 @@ pub(crate) fn is_scored(decl: &SpecialisedIndexKind) -> bool {
 mod geo;
 #[cfg(any(test, feature = "testing"))]
 pub(crate) mod test_kind;
-mod text;
+pub(crate) mod text;
 mod vector;

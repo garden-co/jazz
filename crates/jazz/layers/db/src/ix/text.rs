@@ -168,15 +168,16 @@ impl Kind for Text {
         let sql = format!(
             "SELECT count(*) FROM (SELECT 1 FROM (SELECT DISTINCT tid FROM ({sources})) AS q \
              JOIN {post} AS p ON p.tid = q.tid LIMIT {})",
-            POSTINGS_MAX + 1
+            postings_cap() + 1
         );
         let postings: i64 = conn
             .prepare(&sql)
             .and_then(|mut s| s.query_row(rusqlite::params_from_iter(params.iter()), |r| r.get(0)))
             .map_err(storage)?;
-        if postings as usize > POSTINGS_MAX {
+        if postings as usize > postings_cap() {
             return Err(super::too_broad(format!(
-                "the search would read more than {POSTINGS_MAX} postings; use rarer words"
+                "the search would read more than {} postings; use rarer words",
+                postings_cap()
             )));
         }
         Ok(())
@@ -229,6 +230,24 @@ impl Kind for Text {
 pub(super) const PREFIX_TERMS_MAX: usize = 1_000;
 /// Most postings a search may read (SPEC 20.12).
 pub(super) const POSTINGS_MAX: usize = 200_000;
+
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static POSTINGS_CAP: std::cell::Cell<usize> = const { std::cell::Cell::new(POSTINGS_MAX) };
+}
+
+/// Lower this thread's postings cap, for a test to reach it.
+#[cfg(any(test, feature = "testing"))]
+pub fn set_postings_cap_for_test(cap: Option<usize>) {
+    POSTINGS_CAP.with(|c| c.set(cap.unwrap_or(POSTINGS_MAX)));
+}
+
+fn postings_cap() -> usize {
+    #[cfg(any(test, feature = "testing"))]
+    return POSTINGS_CAP.with(std::cell::Cell::get);
+    #[cfg(not(any(test, feature = "testing")))]
+    POSTINGS_MAX
+}
 
 impl Text {
     fn query(&self, op: &IndexOp) -> Result<QueryTerms, Error> {
