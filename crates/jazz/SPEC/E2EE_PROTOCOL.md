@@ -1461,9 +1461,13 @@ fails with "recipient unsupported" and the sender waits. A device of the
 account also checks that the record derives from `K`, for each mechanism it
 supports. One that does not is reported (`conflicting-account-key`, §7) and
 ignored by that device; it never stops the device acquiring its account
-key. Only the account's own devices (or the server) can write such a record.
-Senders cannot check derivation, so until it is replaced their deliveries
-sealed to it do not open and are reported (§3.4). The remedy is to remove
+key. Only an active device of the account can sign a valid record; a row
+the server writes without that is not valid and is ignored. Senders cannot
+check derivation, so until the record is replaced they may seal to it. The
+account's devices know which of their records do not derive, so a delivery
+sealed to one is reported against that record and its signing device
+(`conflicting-account-key`), never as `invalid-delivery` against the
+sender (§3.4). The remedy is to remove
 the device that signed it: the removal starts a new account epoch, whose
 co-published record is correct. A record whose signer has no signing key
 published before it is not valid. A record whose signer's signing mechanism
@@ -1769,7 +1773,9 @@ recipientAccountEpochId, envelope}`, with a random ID, sealed to that
   that it needs, a member's device reports the space `key-pending` (§4.3).
 - **A delivery that does not open.** A delivery whose envelope provably
   fails to open, or whose opened key fails its own version's marker (§3.3),
-  is skipped, and the recipient's devices emit
+  is skipped, and the recipient's devices emit (unless it was sealed to a
+  sealing key record of theirs that does not derive, which is reported
+  against that record instead, §2.12)
   an `invalid-delivery` encryption event `{space, sender, recipient,
 keyEpochId}`, once per delivery and device. Nothing is written: holders
   cannot see that the envelope failed, so they count the member as holding
