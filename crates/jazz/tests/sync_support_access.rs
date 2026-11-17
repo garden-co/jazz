@@ -759,3 +759,165 @@ fn a_backend_updates_for_its_user_through_an_inherited_parent_after_reading_the_
     let rows = block_on(server.all(&prepared, ReadOpts::default())).unwrap();
     assert_eq!(rows[0].cell("body"), Some(Value::String("edited".into())));
 }
+
+fn enumeration(variants: &[&str]) -> ColumnType {
+    ColumnType::Enum {
+        variants: variants.iter().map(|v| (*v).to_owned()).collect(),
+    }
+}
+
+/// `documents` readable through a matching grant, correlated on `level`
+/// (two enum columns declaring their variants in opposite orders, so each
+/// stores the same variant as a different tag) and on the `team` they
+/// reference. `level_first`
+/// puts the enum equality first, which makes it the one support follows.
+fn graded_schema(level_first: bool) -> JazzSchema {
+    let level = outer_eq("level", "level");
+    let team = outer_eq("team", "team");
+    let correlation = if level_first {
+        vec![level, team, session_eq("user", &ME)]
+    } else {
+        vec![team, level, session_eq("user", &ME)]
+    };
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("teams")
+                    .column("name", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("grants")
+                    .column("level", enumeration(&["low", "high"]))
+                    .fk_column("team", "teams")
+                    .column("user", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("documents")
+                    .column("level", enumeration(&["high", "low"]))
+                    .fk_column("team", "teams")
+                    .column("title", ColumnType::Text)
+                    .policies(read_and_allow_all_writes(exists("grants", correlation))),
+            )
+            .build(),
+    )
+}
+
+/// A policy whose first correlation compares two enum columns that store
+/// the same variant as different tags still ships what it reads: support
+/// follows the grant by its variant, not by the document's raw tag, so the
+/// relay can evaluate the policy for alice.
+///
+/// ```text
+/// server ──grants + documents──► relay ──documents──► alice
+///          (level = "high": tag 1 in grants, tag 0 in documents)
+/// ```
+#[test]
+fn a_correlation_on_differently_stored_enum_columns_follows_its_rows_through_a_relay() {
+    for level_first in [true, false] {
+        let open = |node: u8, author: AuthorSubject| {
+            let config = DbConfig::new(
+                graded_schema(level_first),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([node; 16]),
+                    author,
+                },
+            );
+            if node == 0 {
+                block_on(Db::open_history_complete(config))
+            } else {
+                block_on(Db::open(config))
+            }
+            .unwrap()
+        };
+        let server = open(0, AuthorSubject::SYSTEM);
+        let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
+            server
+                .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
+                .unwrap();
+        };
+        let me = Value::String(alice().principal_parts().1);
+        seed(
+            "teams",
+            id(9, 1),
+            cells(&[("name", Value::String("team".into()))]),
+        );
+        let team = Value::Uuid(id(9, 1).0);
+        let level = |name: &str| Value::String(name.to_owned());
+        seed(
+            "grants",
+            id(1, 1),
+            cells(&[
+                ("level", level("high")),
+                ("team", team.clone()),
+                ("user", me.clone()),
+            ]),
+        );
+        let document = |n: u8, name: &str| {
+            cells(&[
+                ("level", level(name)),
+                ("team", team.clone()),
+                ("title", Value::String(format!("doc {n}"))),
+            ])
+        };
+        seed("documents", id(2, 1), document(1, "high"));
+        seed("documents", id(2, 2), document(2, "low"));
+
+        let relay = open(5, alice());
+        let (relay_side, server_side) = duplex();
+        let _relay_upstream = block_on(relay.connect_upstream(relay_side));
+        server.accept_subscriber(server_side, alice()).unwrap();
+        relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+        let client = open(1, alice());
+        let (client_side, relay_client_side) = duplex();
+        let _upstream = block_on(client.connect_upstream(client_side));
+        relay.accept_subscriber(relay_client_side, alice()).unwrap();
+        client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+        let pump_all = || {
+            for _ in 0..4 {
+                block_on(client.tick()).unwrap();
+                block_on(relay.tick()).unwrap();
+                block_on(server.tick()).unwrap();
+                block_on(relay.tick()).unwrap();
+            }
+            block_on(client.tick()).unwrap();
+        };
+        let documents = client.prepare_query(&Query::from("documents")).unwrap();
+        let _stream = block_on(client.subscribe(&documents, ReadOpts::default())).unwrap();
+        pump_all();
+        assert_eq!(
+            local(&client, "documents"),
+            [id(2, 1)],
+            "level_first {level_first}: the document the grant matches"
+        );
+        assert_eq!(
+            local(&relay, "grants"),
+            [id(1, 1)],
+            "level_first {level_first}: the grant the relay evaluates alice's read with"
+        );
+        assert_eq!(
+            local(&client, "grants"),
+            [id(1, 1)],
+            "level_first {level_first}: the grant the document's read rests on"
+        );
+
+        // A later grant for the other level opens the other document, which
+        // the relay ships with the grant its read rests on.
+        seed(
+            "grants",
+            id(1, 2),
+            cells(&[
+                ("level", level("low")),
+                ("team", team.clone()),
+                ("user", me.clone()),
+            ]),
+        );
+        pump_all();
+        assert_eq!(
+            local(&client, "documents"),
+            [id(2, 1), id(2, 2)],
+            "level_first {level_first}: a later grant opens the other document"
+        );
+    }
+}
