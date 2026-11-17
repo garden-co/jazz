@@ -4061,9 +4061,9 @@ impl Inner {
                 }
                 PolicyExpr::Not(part) => clauses(part, out),
                 // No support ships for an `InheritsFrom`: a deployment
-                // refuses one in a read policy (Jazz derives it for write
-                // policies only), and a replica lacking the candidate row
-                // would grant less, never more.
+                // refuses one in a read policy, directly or inherited (Jazz
+                // derives it for write policies only), so no read policy
+                // reaches one.
                 PolicyExpr::InheritsFrom { .. } | PolicyExpr::InsertedByThisTransaction => {}
                 _ => {}
             }

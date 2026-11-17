@@ -221,3 +221,38 @@ fn an_inherits_from_in_a_read_policy_is_refused() {
     check_deployable_policies(&derived).unwrap();
     deploy(&derived).unwrap();
 }
+
+/// A read policy that reaches an `InheritsFrom` only through an inherited
+/// write policy is refused too: `tasks` reads by inheriting the insert
+/// policy of the row its `spaceRow` names, and that policy is an
+/// `InheritsFrom`.
+///
+/// ```text
+/// tasks.select ─INHERITS insert─► spaces.insert ─IF─► projects.select   ✗
+/// ```
+#[test]
+fn a_read_policy_reaching_inherits_from_through_an_inherited_policy_is_refused() {
+    let schema = SchemaBuilder::new()
+        .table(projects())
+        .table(address_table(
+            SPACES,
+            None,
+            TablePolicies::new()
+                .with_select(PolicyExpr::True)
+                .with_insert(inherits_from(Operation::Select, "projects")),
+        ))
+        .table(
+            TableSchemaBuilder::new("tasks")
+                .fk_column("spaceRow", SPACES)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::inherits(Operation::Insert, "spaceRow")),
+                ),
+        )
+        .build();
+    assert_refused(
+        &schema,
+        UnsupportedPolicy::InheritsFromInReadPolicy,
+        "$.tasks.policies.select.using",
+    );
+}
