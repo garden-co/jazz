@@ -846,6 +846,7 @@ impl Names {
         })?;
         crate::values::tags_changing(conn, &tags);
         *tags.borrow_mut() = renumbered;
+        crate::values::tags_changed();
         if let Some(name) = stale_default {
             self.enum_defaults.borrow_mut().insert(key, name);
         }
@@ -1510,5 +1511,69 @@ mod tests {
         end_savepoint(&conn, "outer", true).unwrap();
         assert_eq!(tag("kept"), Some(0));
         assert_eq!(file(), [(0, "kept".to_owned())]);
+    }
+
+    /// Every way a store's enum tags change moves the tag epoch: a name
+    /// interned, the tags renumbered, a savepoint's tags rolled back, a
+    /// snapshot restored.
+    #[test]
+    fn every_change_of_enum_tags_moves_the_tag_epoch() {
+        use crate::values::{begin_savepoint, end_savepoint, tag_epoch};
+        let conn = Connection::open_in_memory().unwrap();
+        let names = Names::load(&conn).unwrap();
+        let moved = |what: &str, change: &dyn Fn()| {
+            let before = tag_epoch();
+            change();
+            assert!(
+                tag_epoch() > before,
+                "{what} left the tag epoch at {before}"
+            );
+        };
+        moved("interning", &|| {
+            names.intern(&conn, "t", "c", &["b", "a"]).unwrap();
+        });
+        moved("renumbering", &|| {
+            let changed = names
+                .align(&conn, "t", "c", &["a".to_owned(), "b".to_owned()])
+                .unwrap();
+            assert!(!changed.is_empty());
+        });
+        begin_savepoint(&conn, "outer").unwrap();
+        names.intern(&conn, "t", "c", &["lost"]).unwrap();
+        moved("a rollback", &|| {
+            end_savepoint(&conn, "outer", false).unwrap();
+        });
+        let snapshot = std::cell::Cell::new(Some(names.tags().snapshot()));
+        names.intern(&conn, "t", "c", &["later"]).unwrap();
+        moved("a restore", &|| {
+            names
+                .tags()
+                .restore(snapshot.take().expect("restored once"));
+        });
+    }
+
+    /// A store's tags live on its thread: interning on another thread
+    /// moves that thread's epoch and leaves this one's.
+    #[test]
+    fn tags_changed_on_another_thread_leave_this_threads_epoch() {
+        use crate::values::tag_epoch;
+        let before = tag_epoch();
+        std::thread::spawn(|| {
+            let conn = Connection::open_in_memory().unwrap();
+            let names = Names::load(&conn).unwrap();
+            let start = tag_epoch();
+            names.intern(&conn, "t", "c", &["a"]).unwrap();
+            assert!(
+                tag_epoch() > start,
+                "interning moved its own thread's epoch"
+            );
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            tag_epoch(),
+            before,
+            "another thread's interning moved this epoch"
+        );
     }
 }

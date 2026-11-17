@@ -155,6 +155,7 @@ fn close_tag_undo(conn: &rusqlite::Connection, kept: bool, all: bool) {
                 (false, _) => {
                     for (tags, before) in frame.into_iter().rev() {
                         *tags.borrow_mut() = before;
+                        tags_changed();
                     }
                 }
             }
@@ -709,6 +710,7 @@ impl EnumTags {
     }
 
     pub(crate) fn insert(&mut self, name: String, tag: i64) {
+        tags_changed();
         self.by_tag.insert(tag, name.clone());
         self.by_name.insert(name, tag);
     }
@@ -790,6 +792,32 @@ impl EnumTags {
 /// A stored enum column's tags, shared by the schemas storing it.
 pub type ColumnTags = Rc<RefCell<EnumTags>>;
 
+thread_local! {
+    /// Counts every change to enum tags made on this thread (a variant
+    /// interned, a column renumbered, tags put back by a rollback or a
+    /// restore). SQL compiled while the tags were different may bind a
+    /// variant name as text where it now has a tag, or read cells through
+    /// a stale `CASE`: a kept statement compiled at another epoch is
+    /// compiled again.
+    ///
+    /// Per thread, not per process: a store's tags are [`ColumnTags`]
+    /// (`Rc`), so they are changed and read only on the thread that holds
+    /// the store, and that thread's counter sees every change to the tags
+    /// a statement compiled there depends on. Stores on other threads do
+    /// not move it.
+    static TAG_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// This thread's [`TAG_EPOCH`].
+pub(crate) fn tag_epoch() -> u64 {
+    TAG_EPOCH.with(std::cell::Cell::get)
+}
+
+/// Note that enum tags of a store on this thread changed.
+pub(crate) fn tags_changed() {
+    TAG_EPOCH.with(|epoch| epoch.set(epoch.get().wrapping_add(1)));
+}
+
 /// Every stored enum column's tags on a store, by (stored table, stored
 /// column). Schemas built for the store take their columns' entries from
 /// it, so a tag the store interns reaches every schema at once.
@@ -830,6 +858,7 @@ impl TagRegistry {
     /// An entry made or moved since keeps no tags: a schema still holding
     /// it reads none it did not have.
     pub(crate) fn restore(&self, snapshot: TagSnapshot) {
+        tags_changed();
         let mut map = self.map.borrow_mut();
         for tags in map.values() {
             if !snapshot.0.iter().any(|(_, kept, _)| Rc::ptr_eq(kept, tags)) {
@@ -2210,7 +2239,7 @@ fn relation_is_empty(child: &CurrentRow, index: usize) -> bool {
 
 /// The narrowest type both relation types' values fit: nullable if either
 /// is, record fields widened pairwise.
-fn widen(a: &ValueType, b: &ValueType) -> Result<ValueType, Error> {
+pub(crate) fn widen(a: &ValueType, b: &ValueType) -> Result<ValueType, Error> {
     if a == b {
         return Ok(a.clone());
     }
@@ -2259,7 +2288,7 @@ fn widen(a: &ValueType, b: &ValueType) -> Result<ValueType, Error> {
 }
 
 /// `value` re-encoded as `ty`, a type [`widen`] produced from its own.
-fn coerce(value: &Value, ty: &ValueType) -> Result<Value, Error> {
+pub(crate) fn coerce(value: &Value, ty: &ValueType) -> Result<Value, Error> {
     Ok(match (value, ty) {
         (Value::Nullable(None), _) => Value::Nullable(None),
         (Value::Nullable(Some(inner)), ValueType::Nullable(t)) => {

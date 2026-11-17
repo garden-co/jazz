@@ -499,9 +499,9 @@ is reset automatically. To sync with the new server, reset the local store: in t
 `await db.deleteClientStorage()`; in Node, delete the client's data directory and open
 it again. Writes that never reached the old server are lost with the store.
 
-In the browser, tabs that sync through a shared worker may not yet see this: a tab's `global` waits
-can keep waiting after the worker's link was refused. Treat `authority-changed` in a multi-tab app as
-best effort for now.
+In the browser, every tab that syncs through the shared worker sees this too, including a tab opened
+or reloaded after the refusal: its `global` waits fail the same way and its sync status shows
+`offline` with the reason `authority-changed`, while local reads and writes keep working.
 
 In the browser, `offline` can also have the reason `held-by-another-tab`, with `retrying: true`.
 When a guest signs up in one tab, another tab may still hold the account's local store as the

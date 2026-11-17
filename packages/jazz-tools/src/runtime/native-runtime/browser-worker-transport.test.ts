@@ -547,4 +547,114 @@ describe("BrowserWorkerTransportPump", () => {
     await Promise.resolve();
     pump.close();
   });
+
+  describe("outbound frames announced by the core", () => {
+    // Mirrors the core's QueueTransport: queue the frame, then call the
+    // scheduler, while the core's send path is still on the stack.
+    function queueTransport() {
+      let announce: () => void = () => undefined;
+      const outbound: Uint8Array[] = [];
+      const peer = transport({
+        setOutboundScheduler: (callback) => {
+          announce = callback;
+        },
+        clearOutboundScheduler: () => {
+          announce = () => undefined;
+        },
+        recvWireFrames: () => outbound.splice(0),
+      });
+      return {
+        peer,
+        queue(frame: Uint8Array) {
+          outbound.push(frame);
+          announce();
+        },
+      };
+    }
+
+    async function settledPump(peer: Transport, sendFrames: (frames: Uint8Array[]) => void) {
+      const onError = vi.fn();
+      const pump = new BrowserWorkerTransportPump(runtime(peer), peer, sendFrames, onError);
+      // Let the constructor's pump pass run and the next timer task clear the flag.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return { pump, onError };
+    }
+
+    it("posts a commit's frame before an already-queued synchronous render runs", async () => {
+      const { peer, queue } = queueTransport();
+      const log: string[] = [];
+      const posted: Uint8Array[][] = [];
+      const { pump, onError } = await settledPump(peer, (frames) => {
+        posted.push(frames);
+        log.push(`post ${frames.map((frame) => frame[0]).join(",")}`);
+      });
+      try {
+        const commit = Uint8Array.from([1]);
+        // A local write: subscription listeners see the rows first and queue a
+        // long synchronous render; the core then queues the commit's frame.
+        queueMicrotask(() => {
+          log.push("render start");
+          const until = performance.now() + 30;
+          while (performance.now() < until) {
+            // a long synchronous render
+          }
+          log.push("render end");
+        });
+        queue(commit);
+        expect(posted).toEqual([[commit]]);
+
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(log).toEqual(["post 1", "render start", "render end"]);
+        expect(onError).not.toHaveBeenCalled();
+      } finally {
+        pump.close();
+      }
+    });
+
+    it("batches the rest of a task's frames and keeps them in core order", async () => {
+      const { peer, queue } = queueTransport();
+      const posted: number[][] = [];
+      const { pump, onError } = await settledPump(peer, (frames) =>
+        posted.push(frames.map((frame) => frame[0]!)),
+      );
+      try {
+        queue(Uint8Array.from([1]));
+        queue(Uint8Array.from([2]));
+        queue(Uint8Array.from([3]));
+        expect(posted).toEqual([[1]]);
+        await Promise.resolve();
+        expect(posted).toEqual([[1], [2, 3]]);
+        queue(Uint8Array.from([4]));
+        await Promise.resolve();
+        expect(posted).toEqual([[1], [2, 3], [4]]);
+
+        // Once the next timer task has run, the next frame is posted synchronously again.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        queue(Uint8Array.from([5]));
+        queue(Uint8Array.from([6]));
+        expect(posted).toEqual([[1], [2, 3], [4], [5]]);
+        await Promise.resolve();
+        expect(posted.flat()).toEqual([1, 2, 3, 4, 5, 6]);
+        expect(onError).not.toHaveBeenCalled();
+      } finally {
+        pump.close();
+      }
+    });
+
+    it("reports a failed synchronous post after the core's send path returns", async () => {
+      const { peer, queue } = queueTransport();
+      const failure = new Error("port gone");
+      const { pump, onError } = await settledPump(peer, () => {
+        throw failure;
+      });
+      try {
+        expect(() => queue(Uint8Array.from([1]))).not.toThrow();
+        expect(onError).not.toHaveBeenCalled();
+        await Promise.resolve();
+        expect(onError).toHaveBeenCalledWith(failure);
+      } finally {
+        pump.close();
+      }
+    });
+  });
 });
