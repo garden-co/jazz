@@ -71,8 +71,9 @@ struct Stream {
 /// One thin session's transactions, served from a client [`Db`] linked to
 /// the core as that session.
 pub struct ThinTransactions {
-    /// The session: every staged write runs as it.
-    identity: AuthorSubject,
+    /// The session: every staged write runs as it. `None` for a session
+    /// the core trusts as the backend: its writes are the database's own.
+    identity: Option<AuthorSubject>,
     open: BTreeMap<OpenTransactionId, Open>,
     /// Uploads begun inside a transaction, by the id of the request that
     /// began them.
@@ -80,6 +81,18 @@ pub struct ThinTransactions {
 }
 
 impl ThinTransactions {
+    /// The transactions of a thin session the core trusts as the backend
+    /// itself (a trusted backend client's): its writes are the client
+    /// database's own, linked to the core over the backend's trusted link,
+    /// as the core ran them as SYSTEM for such a session.
+    pub fn trusted() -> Self {
+        Self {
+            identity: None,
+            open: BTreeMap::new(),
+            streams: BTreeMap::new(),
+        }
+    }
+
     /// The transactions of the thin session `identity`. Never SYSTEM: a
     /// thin session is a user's, and the client serving it must be linked
     /// to the core as that user, whose checks its uploads pass.
@@ -91,7 +104,7 @@ impl ThinTransactions {
             ));
         }
         Ok(Self {
-            identity,
+            identity: Some(identity),
             open: BTreeMap::new(),
             streams: BTreeMap::new(),
         })
@@ -411,7 +424,7 @@ impl ThinTransactions {
                         argument(format!("invalid partial-value update descriptor: {error}"))
                     })?;
                 let options = UpdateOptions {
-                    identity: WriteIdentity::Session(identity),
+                    identity: written_as(identity),
                     updated_at_ms: *updated_at_ms,
                     ..UpdateOptions::default()
                 };
@@ -508,7 +521,7 @@ impl ThinTransactions {
                         open.row,
                         open.cells,
                         &open.column,
-                        WriteIdentity::Session(identity),
+                        written_as(identity),
                         open.updated_at_ms,
                         open.head,
                         open.base,
@@ -574,14 +587,23 @@ fn staged_options(options: &[u8]) -> Result<serde_json::Value, ThinBody> {
 
 /// Every thin write runs as the session: options may not name an author
 /// or attribution of their own.
-fn as_session(identity: &mut WriteIdentity, session: AuthorSubject) -> Result<(), ThinBody> {
+fn as_session(
+    identity: &mut WriteIdentity,
+    session: Option<AuthorSubject>,
+) -> Result<(), ThinBody> {
     if *identity != WriteIdentity::Database {
         return Err(argument(
             "thin writes run as the session; options name no author or attribution",
         ));
     }
-    *identity = WriteIdentity::Session(session);
+    *identity = written_as(session);
     Ok(())
+}
+
+/// The identity a session's writes run as: the session's, or the
+/// database's own for a session the core trusts as the backend.
+fn written_as(session: Option<AuthorSubject>) -> WriteIdentity {
+    session.map_or(WriteIdentity::Database, WriteIdentity::Session)
 }
 
 /// A staged write's answer. A refusal decided by the row's stored state, or
@@ -707,9 +729,11 @@ pub struct ThinRouter {
     /// backend's too, until the transaction ends.
     streams: BTreeMap<u64, String>,
     /// The public schema JSON the client bound the connection to (its
-    /// `Schema` request, which goes to the core): the session's client
-    /// opens with it.
+    /// `Schema` request, which goes to the core), once the core accepted
+    /// it: the session's client opens with it.
     schema: Option<Vec<u8>>,
+    /// A `Schema` request the core has not answered yet: its id and schema.
+    binding: Option<(u64, Vec<u8>)>,
     /// Routed, not released yet, in order.
     queue: VecDeque<Routed>,
     /// Requests released to the core it has not answered yet.
@@ -764,8 +788,9 @@ impl ThinRouter {
     }
 
     /// Note frames the core sent the client: the answers among them free
-    /// what waits on them.
-    pub fn from_core(&mut self, frames: &[Vec<u8>]) {
+    /// what waits on them. Whether one answered a request released to it.
+    pub fn from_core(&mut self, frames: &[Vec<u8>]) -> bool {
+        let mut answered = false;
         for frame in frames {
             let answer = match decode_frame(frame) {
                 Ok(WireFrame::ThinResponse(answer)) => answer,
@@ -778,8 +803,19 @@ impl ThinRouter {
                 },
                 _ => continue,
             };
-            self.core_pending.remove(&answer.id);
+            if let Some((id, _)) = &self.binding
+                && *id == answer.id
+            {
+                let (_, schema) = self.binding.take().expect("checked above");
+                // Only a version the core serves: one it refused (say, one
+                // it never admitted) binds nothing here either.
+                if answer.body == ThinBody::Ok {
+                    self.schema = Some(schema);
+                }
+            }
+            answered |= self.core_pending.remove(&answer.id);
         }
+        answered
     }
 
     /// Note the backend's `answer`. An upload it refused to begin is not
@@ -829,8 +865,8 @@ impl ThinRouter {
         steps
     }
 
-    /// The public schema JSON the client bound the connection to, once its
-    /// `Schema` request was routed.
+    /// The public schema JSON the client bound the connection to, once the
+    /// core accepted its `Schema` request.
     pub fn schema(&self) -> Option<&[u8]> {
         self.schema.as_deref()
     }
@@ -841,7 +877,8 @@ impl ThinRouter {
             return;
         }
         if let ThinOp::Schema { schema } = &request.op {
-            self.schema = Some(schema.clone());
+            self.schema = None;
+            self.binding = Some((request.id, schema.clone()));
         }
         // A live query answers for as long as it is open, and closing one
         // is answered for the query: neither is waited on.
