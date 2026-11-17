@@ -15349,6 +15349,7 @@ impl Db {
             begin_savepoint(&inner.conn, "upload").map_err(|e| (e, Vec::new()))?;
             let mark = inner.changed.borrow().len();
             // The unit's write checks run at its end, grounded (SPEC 7).
+            inner.start_unit_heads();
             inner.defer_checks();
             // The unit was made over the sender's image (SPEC 4, INV-HIST-8);
             // text merges read what each row was built on.

@@ -843,9 +843,11 @@ struct Inner {
     /// Rows a unit's trusted writes (no write check) left behind, by stored
     /// table: they need no evidence, so its grounding starts from them.
     trusted_rows: RefCell<BTreeMap<String, BTreeSet<[u8; 16]>>>,
-    /// The inherited rows the commit at `.0` copied into a branch head:
-    /// (stored table, row, head key) to the base key it acted on. Its later
-    /// writes to the head row act on that base row (SPEC 7).
+    /// The inherited rows the unit being applied (or the staging overlay)
+    /// copied into a branch head: (stored table, row, head key) to the base
+    /// key it acted on. The unit's later writes to the head row act on that
+    /// base row (SPEC 7). Cleared at every unit and overlay boundary
+    /// ([`Inner::start_unit_heads`]), never left to another unit.
     inherited_heads: RefCell<InheritedHeads>,
     /// The open transaction's seq and the tables it wrote.
     tx: Option<(u64, BTreeSet<String>)>,
@@ -2244,7 +2246,7 @@ impl Db {
                 changed: RefCell::new(Vec::new()),
                 deferred: RefCell::new(None),
                 trusted_rows: RefCell::new(BTreeMap::new()),
-                inherited_heads: RefCell::new((0, HashMap::new())),
+                inherited_heads: RefCell::new(HashMap::new()),
                 tx: None,
                 tx_identity: None,
                 publications: Vec::new(),
@@ -7039,6 +7041,12 @@ impl Inner {
         }
     }
 
+    /// Start applying a unit, or replaying a staging overlay: no head row
+    /// another unit copied is this one's ([`Inner::inherited_heads`]).
+    pub(crate) fn start_unit_heads(&self) {
+        self.inherited_heads.borrow_mut().clear();
+    }
+
     /// Drop a unit's pending checks (it rolled back).
     pub(crate) fn abandon_checks(&self) {
         *self.deferred.borrow_mut() = None;
@@ -7372,17 +7380,11 @@ impl Inner {
         let acted = if self.was_live_before(table, row, key, seq)? {
             key.to_vec()
         } else {
-            let base = {
-                let heads = self.inherited_heads.borrow();
-                (heads.0 == seq)
-                    .then(|| {
-                        heads
-                            .1
-                            .get(&(table.stored.clone(), *row.0.as_bytes(), key.to_vec()))
-                            .cloned()
-                    })
-                    .flatten()
-            };
+            let base = self
+                .inherited_heads
+                .borrow()
+                .get(&(table.stored.clone(), *row.0.as_bytes(), key.to_vec()))
+                .cloned();
             match base {
                 Some(from) if self.was_live_before(table, row, &from, seq)? => from,
                 _ => return Ok(None),
@@ -8513,16 +8515,10 @@ impl Inner {
         at: Option<&Cut>,
         seq: u64,
     ) -> Result<(), Error> {
-        {
-            let mut heads = self.inherited_heads.borrow_mut();
-            if heads.0 != seq {
-                *heads = (seq, HashMap::new());
-            }
-            heads
-                .1
-                .entry((table.stored.clone(), *row.0.as_bytes(), to.to_vec()))
-                .or_insert_with(|| from.to_vec());
-        }
+        self.inherited_heads
+            .borrow_mut()
+            .entry((table.stored.clone(), *row.0.as_bytes(), to.to_vec()))
+            .or_insert_with(|| from.to_vec());
         let columns = self.columns_list(table);
         let id = row.0.as_bytes().to_vec();
         // A frozen base is copied as it was at the cut.
@@ -8825,6 +8821,7 @@ impl Inner {
         };
         self.changed.borrow_mut().truncate(overlay.mark);
         end_savepoint(&self.conn, "overlay", false).expect("rolling back a transaction overlay");
+        self.start_unit_heads();
     }
 
     fn checked(&self, who: Who) -> Option<AuthorSubject> {
@@ -9278,7 +9275,7 @@ impl Inner {
 }
 
 /// See [`Inner::inherited_heads`].
-type InheritedHeads = (u64, HashMap<(String, [u8; 16], Vec<u8>), Vec<u8>>);
+type InheritedHeads = HashMap<(String, [u8; 16], Vec<u8>), Vec<u8>>;
 
 /// A write's own policy check, deferred to the end of its unit.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -11037,6 +11034,7 @@ impl Db {
             // commits here exactly when the authority accepts it: a row the
             // unit deleted is no evidence, and rows can't ground each other
             // in a cycle.
+            inner.start_unit_heads();
             inner.defer_checks();
             let applied = inner
                 .apply_with_edits(ops, &batch.edits, 0, seq)
@@ -11133,6 +11131,7 @@ impl Db {
         inner.pending_nodes.extend(edits.pending_nodes);
         if let Some(ops) = ops {
             inner.settle_overlay();
+            inner.start_unit_heads();
             begin_savepoint(&inner.conn, "overlay")?;
             #[cfg(any(test, feature = "testing"))]
             {
@@ -11157,6 +11156,8 @@ impl Db {
             return Err(error);
         }
         let mark = inner.changed.borrow().len();
+        // A step that is undone leaves no head rows behind.
+        let heads = inner.inherited_heads.borrow().clone();
         let joins = extra.is_some();
         let applied = match extra {
             Some(op) => inner.counter_deltas(op).and_then(|()| {
@@ -11184,6 +11185,7 @@ impl Db {
         let keep = joins && result.is_ok();
         if !keep {
             inner.changed.borrow_mut().truncate(mark);
+            *inner.inherited_heads.borrow_mut() = heads;
         }
         if let Err(error) = end_savepoint(&inner.conn, "overlay_step", keep) {
             inner.settle_overlay();
