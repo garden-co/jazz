@@ -8,7 +8,13 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 # Only what builds the library: tests, benches and their fixtures stay in the repo.
-include = ["src/**", "build.rs", "README.md", "fixtures/binding_codec_golden.json"]
+include = [
+  "src/**",
+  "build.rs",
+  "README.md",
+  "fixtures/binding_codec_golden.json",
+  "fixtures/link_wire_failure_v1.json",
+]
 
 [features]
 default = []

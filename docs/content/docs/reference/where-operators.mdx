@@ -14,7 +14,7 @@ import WhereOperatorsTable from "../../partials/where-operators-table.mdx";
 
 ### Equality and inequality
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-eq-ne-ts
@@ -25,9 +25,27 @@ import WhereOperatorsTable from "../../partials/where-operators-table.mdx";
       ../examples/docs/todo-effect/src/docs-snippets.ts#where-eq-ne-effect
     </include>
   </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-eq-ne-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#where-eq-ne-swift
+    </include>
+
+  </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#where-eq-ne-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#where-eq-ne-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#where-eq-ne-go
     </include>
 
   </Tab>
@@ -35,7 +53,7 @@ import WhereOperatorsTable from "../../partials/where-operators-table.mdx";
 
 ### Numeric comparisons
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-numeric-ts
@@ -46,9 +64,27 @@ import WhereOperatorsTable from "../../partials/where-operators-table.mdx";
       ../examples/docs/todo-effect/src/docs-snippets.ts#where-numeric-effect
     </include>
   </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-numeric-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#where-numeric-swift
+    </include>
+
+  </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#where-numeric-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#where-numeric-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#where-numeric-go
     </include>
 
   </Tab>
@@ -56,7 +92,7 @@ import WhereOperatorsTable from "../../partials/where-operators-table.mdx";
 
 ### String contains
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-contains-ts
@@ -67,9 +103,27 @@ import WhereOperatorsTable from "../../partials/where-operators-table.mdx";
       ../examples/docs/todo-effect/src/docs-snippets.ts#where-contains-effect
     </include>
   </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-contains-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#where-contains-swift
+    </include>
+
+  </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#where-contains-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#where-contains-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#where-contains-go
     </include>
 
   </Tab>
@@ -79,7 +133,7 @@ import WhereOperatorsTable from "../../partials/where-operators-table.mdx";
 
 In TypeScript, `isNull: true` matches missing values and `isNull: false` matches present values. Nullable columns with ordinary filter operators support it, including scalar and array columns, not just references; required columns do not expose it.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-null-ts
@@ -90,9 +144,27 @@ In TypeScript, `isNull: true` matches missing values and `isNull: false` matches
       ../examples/docs/todo-effect/src/docs-snippets.ts#where-null-effect
     </include>
   </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-null-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#where-null-swift
+    </include>
+
+  </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#where-null-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#where-null-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#where-null-go
     </include>
 
   </Tab>
@@ -102,7 +174,7 @@ In TypeScript, `isNull: true` matches missing values and `isNull: false` matches
 
 All predicates passed to `where(...)` / chained `filter_*` calls are AND-combined:
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-and-ts
@@ -113,9 +185,27 @@ All predicates passed to `where(...)` / chained `filter_*` calls are AND-combine
       ../examples/docs/todo-effect/src/docs-snippets.ts#where-and-effect
     </include>
   </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-and-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#where-and-swift
+    </include>
+
+  </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-filters-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#where-and-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#where-and-go
     </include>
 
   </Tab>
@@ -123,7 +213,7 @@ All predicates passed to `where(...)` / chained `filter_*` calls are AND-combine
 
 ### Combining with ordering and limits
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-order-limit-ts
@@ -134,13 +224,37 @@ All predicates passed to `where(...)` / chained `filter_*` calls are AND-combine
       ../examples/docs/todo-effect/src/docs-snippets.ts#where-order-limit-effect
     </include>
   </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-order-limit-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#where-order-limit-swift
+    </include>
+
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#where-order-limit-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#where-order-limit-go
+    </include>
+
+  </Tab>
 </Tabs>
 
 ## Live subscriptions with WHERE
 
 `useAll` and query subscriptions accept the same query builders as `db.all`. The subscription stays active and updates whenever any row enters or exits the filter:
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-subscription-ts
@@ -151,9 +265,27 @@ All predicates passed to `where(...)` / chained `filter_*` calls are AND-combine
       ../examples/docs/todo-effect/src/docs-snippets.ts#where-subscription-effect
     </include>
   </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-subscription-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#where-subscription-swift
+    </include>
+
+  </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-subscriptions-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#where-subscription-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#where-subscription-go
     </include>
 
   </Tab>

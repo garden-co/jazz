@@ -94,9 +94,11 @@ describe("Better Auth upgrade checks", () => {
       schema: {},
     })({});
     // As `npx @better-auth/cli generate --output <file>` calls it.
-    const generated = await adapter.createSchema!({}, "./does-not-exist/jazz.app.json");
-    expect(generated.path).toBe("./does-not-exist/jazz.app.json");
-    expect(JSON.parse(generated.code).tables.better_auth_user.columns.name).toBe("string");
-    expect(String(log.mock.calls[0]?.[0])).toContain("npx jazz-tools generate");
+    const generated = await adapter.createSchema!({}, "./does-not-exist/schema.ts");
+    expect(generated.path).toBe("./does-not-exist/schema.ts");
+    expect(generated.code).toMatch(/better_auth_user: s\.table\(/);
+    expect(generated.code).toMatch(/name: s\.string\(\)/);
+    expect(generated.code).toContain("export const permissions");
+    log.mockRestore();
   });
 });

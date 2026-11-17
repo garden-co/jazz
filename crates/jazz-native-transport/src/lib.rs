@@ -167,6 +167,11 @@ fn native_connect_error(error: NativeConnectFailure) -> NativeTransportError {
 /// Match typed transport/wire causes, never diagnostic strings. Retry only
 /// failures that may resolve without changing the request or credentials.
 fn native_transport_error(error: WebSocketClientError) -> NativeTransportError {
+    // The server answered with a wire error: the shared link decides what it
+    // means (`LinkFailure::from_wire_error`), as it does for every host.
+    if let WebSocketClientError::ServerWireError(error) = error {
+        return NativeTransportError::Wire(error);
+    }
     let retryable = match &error {
         // A proxy may accept TCP while its upstream is restarting and close
         // before HTTP upgrade completes. No rejected response was received.
@@ -227,20 +232,13 @@ fn native_transport_error(error: WebSocketClientError) -> NativeTransportError {
                 408 | 425 | 429 | 500 | 502 | 503 | 504
             )
         }
-        WebSocketClientError::ServerWireError(error) => {
-            error.code == jazz::wire::WireErrorCode::NotReady
-                && error.retry == jazz::wire::WireRetry::Later
-        }
         _ => false,
     };
-    // A refused credential stays refused until the caller brings a new one,
-    // whether the upgrade itself was refused or Core said so before hello.
+    // A refused credential stays refused until the caller brings a new one.
+    // Core saying so before hello is a wire error, classified above.
     let auth_rejected = match &error {
         WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Http(response)) => {
             response.status().as_u16() == 401
-        }
-        WebSocketClientError::ServerWireError(error) => {
-            error.code == jazz::wire::WireErrorCode::AuthFailed
         }
         _ => false,
     };
@@ -1200,7 +1198,19 @@ where
         return Err(WebSocketClientError::UnexpectedHandshakeMessage);
     }
     if jazz::wire::wire_hello_version_range(&encoded[0]).is_none() {
-        let frame = decode_frame(&encoded[0]).map_err(WebSocketClientError::DecodeFrame)?;
+        let frame = match decode_frame(&encoded[0]) {
+            Ok(frame) => frame,
+            // An error frame this client cannot read (a code or retry from a
+            // newer server) is still the server refusing this attempt. Nothing
+            // negotiates versions before hello, so it is retried with backoff
+            // and reported at once, never taken as a reason to stop for good.
+            Err(error) if jazz::wire::is_wire_error_frame(&encoded[0]) => {
+                return Err(WebSocketClientError::ServerRejected(format!(
+                    "server sent an error this client cannot decode: {error}"
+                )));
+            }
+            Err(error) => return Err(WebSocketClientError::DecodeFrame(error)),
+        };
         if let WireFrame::Error(error) = frame {
             return Err(WebSocketClientError::ServerWireError(error));
         }
@@ -1372,14 +1382,21 @@ mod tests {
                 "token expired",
             )))
         };
+        // Core's answer reaches the shared link classification intact.
+        let classified = |code, retry| match wire(code, retry) {
+            NativeTransportError::Wire(error) => {
+                jazz::link::LinkFailure::from_wire_error(&error, false)
+            }
+            other => panic!("a server's wire error stays typed, got {other:?}"),
+        };
         assert!(matches!(
-            wire(WireErrorCode::AuthFailed, WireRetry::Never),
-            NativeTransportError::AuthRejected(_)
+            classified(WireErrorCode::AuthFailed, WireRetry::Never),
+            jazz::link::LinkFailure::AuthRejected { .. }
         ));
         assert!(wire(WireErrorCode::NotReady, WireRetry::Later).is_retryable());
         assert!(matches!(
-            wire(WireErrorCode::MalformedFrame, WireRetry::Never),
-            NativeTransportError::Terminal(_)
+            classified(WireErrorCode::MalformedFrame, WireRetry::Never),
+            jazz::link::LinkFailure::Fatal(_)
         ));
         let http = |status: u16| {
             let response = tokio_tungstenite::tungstenite::http::Response::builder()
@@ -2308,6 +2325,78 @@ mod tests {
                 assert!(!error.is_retryable());
                 assert!(error.to_string().contains("scope_isolated_client_relay"));
             }
+            server.await.unwrap();
+        }
+    }
+
+    /// A server's answer before hello reaches the shared link classification
+    /// as a wire error (#5927 R10), so the native client treats it as the
+    /// web and Node clients do: `NotReady` is a server still starting. An
+    /// error frame with a code this client does not know (a newer server) is
+    /// a refusal the link retries, never a reason to stop for good.
+    ///
+    /// ```text
+    /// client ─prelude, hello─► server ─Error frame─► client ─► LinkFailure
+    /// ```
+    // The connector handshake is the observable contract; a synthetic
+    // upstream lets us send a code no real server of this version sends.
+    #[tokio::test]
+    async fn a_server_wire_error_before_hello_is_classified_by_the_link() {
+        use jazz::link::LinkFailure;
+        use jazz::wire::{WireErrorCode, WireRetry};
+        let not_ready = encode_frame(&WireFrame::Error(WireError::new(
+            WireErrorCode::NotReady,
+            WireRetry::Later,
+            "still starting",
+        )))
+        .unwrap();
+        // `WireFrame::Error` (tag 1), code 99, retry `never`, empty message.
+        let unknown_code = vec![1, 99, 0, 0];
+        for (frame, expected) in [(not_ready, "serverNotReady"), (unknown_code, "refusal")] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let _prelude = socket.next().await.unwrap().unwrap();
+                let _client_hello = socket.next().await.unwrap().unwrap();
+                socket
+                    .send(Message::Binary(
+                        postcard::to_allocvec(&vec![frame]).unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
+            });
+            let error = NativeWebSocketConnector
+                .connect(NativeTransportRequest {
+                    requested_link: NativeTransportLink::OrdinarySession,
+                    server_url: format!("http://{address}"),
+                    app_id: AppId::random(),
+                    peer_identity: AuthorSubject::SYSTEM,
+                    auth: AuthConfig::default(),
+                    authorization: None,
+                    bundle: None,
+                    wake: Arc::new(|| {}),
+                })
+                .await
+                .err()
+                .expect("a server error must refuse the attempt");
+            let kind = match error {
+                NativeTransportError::Wire(error) => {
+                    match LinkFailure::from_wire_error(&error, false) {
+                        LinkFailure::ServerNotReady(_) => "serverNotReady",
+                        other => panic!("unexpected classification {other:?}"),
+                    }
+                }
+                // A connector `Terminal` is a refusal the link retries
+                // (`LinkFailure::Refused`), not a stop.
+                NativeTransportError::Terminal(message) => {
+                    assert!(message.contains("cannot decode"), "{message}");
+                    "refusal"
+                }
+                other => panic!("unexpected error {other:?}"),
+            };
+            assert_eq!(kind, expected);
             server.await.unwrap();
         }
     }

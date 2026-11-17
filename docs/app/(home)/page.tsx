@@ -59,7 +59,7 @@ export const metadata: Metadata = {
 };
 
 const serverCode = `import { createJazz, vercel } from "jazz-tools/backend";
-// Generated from jazz.app.json by \`jazz-tools generate\`
+// Generated from schema.ts by \`jazz-tools generate\`
 import { app } from "./jazz.generated";
 import permissions from "./jazz.permissions.json" with { type: "json" };
 
@@ -94,7 +94,7 @@ import { app } from "@/jazz.generated";
 
 export async function GET(request: Request) {
   // Runs as the signed-in user: only their todos
-  // according to the policies in jazz.permissions.json
+  // according to the permissions in schema.ts
   const db = await jazz.forReqUser(request);
   const todos = await db.all(app.todos.where({ done: false }));
   return Response.json(todos);
@@ -105,32 +105,28 @@ const mountCode = `import { jazz } from "@/jazz.server";
 // Sync for browsers, apps and agents, on your own origin
 export const { GET, POST, DELETE } = jazz.next();`;
 
-const appCode = `{
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
-  "tables": {
-    "todos": {
-      "columns": {
-        "title": "string",
-        "done": "boolean",
-        "owner_id": "uuid"
-      }
-    }
-  }
-}`;
+const schemaCode = `import { schema as s } from "jazz-tools";
 
-const permissionsCode = `{
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
-  "tables": {
-    "todos": {
-      "read": "owner_id = session.user",
-      "insert": "owner_id = session.user",
-      "update": "owner_id = session.user",
-      "delete": "owner_id = session.user"
-    }
-  }
-}`;
+export const schema = s.defineSchema({
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+  }),
+});
+
+const { definePermissions, session } = schema;
+
+// Each user sees and edits only the todos they created
+const createdByMe = { $createdBy: session.user };
+
+export const permissions = definePermissions({
+  todos: {
+    read: createdByMe,
+    insert: createdByMe,
+    update: createdByMe,
+    delete: createdByMe,
+  },
+});`;
 
 const componentCode = `import { useAll } from "jazz-tools/react";
 import { app } from "./jazz.generated";
@@ -460,12 +456,7 @@ export default function HomePage() {
           <div className="home-code-pair mt-6">
             <CodeWindow files={[{ name: "jazz.server.ts", language: "ts", code: serverCode }]} />
             <div className="home-code-stack">
-              <CodeWindow
-                files={[
-                  { name: "jazz.app.json", language: "json", code: appCode },
-                  { name: "jazz.permissions.json", language: "json", code: permissionsCode },
-                ]}
-              />
+              <CodeWindow files={[{ name: "schema.ts", language: "ts", code: schemaCode }]} />
               <CodeWindow
                 files={[{ name: "jazz/[...path]/route.ts", language: "ts", code: mountCode }]}
               />

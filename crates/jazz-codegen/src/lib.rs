@@ -28,6 +28,11 @@ use jazz::tools::deployment::artifact::{ArtifactError, json};
 
 pub use model::App;
 
+/// What every language's bindings tell their reader on their second line:
+/// an app's one source is its `schema.ts`, from which `generate` writes
+/// `jazz.app.json` and every language's bindings.
+pub(crate) const EDIT_NOTE: &str = "Edit schema.ts and run `npx jazz-tools generate`.";
+
 /// Why generating was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodegenError {

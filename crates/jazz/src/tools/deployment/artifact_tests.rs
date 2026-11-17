@@ -402,6 +402,41 @@ fn a_loaded_app_feeds_clients_and_a_deployment() {
     );
 }
 
+/// A hop condition or relation filter with a plain literal (`name = 'x'`,
+/// as the DSL's `.hop("rel", {name: "x"})` writes it) compiles to a bare
+/// JSON literal. It validates and deploys alike: the compile reads it with
+/// the column's type, and the catalogue keeps it as JSON (#5931).
+#[test]
+fn relation_literals_written_as_text_validate_and_deploy() {
+    let written = write(shared_todos()).unwrap();
+    for read in [
+        "exists shares(todo = this.id).todoRow(name = 'x')",
+        "exists (from todos where todos.name = 'x')",
+    ] {
+        let file = serde_json::json!({
+            "format": 1,
+            "tables": { "todos": { "read": read }, "shares": { "read": "true" } },
+        });
+        let loaded = load(written.app.as_bytes(), file.to_string().as_bytes())
+            .unwrap_or_else(|error| panic!("{read}: {error}"));
+        let request = loaded.deployment_request(false);
+        let target = &request
+            .schemas
+            .iter()
+            .find(|(hash, _)| *hash == request.target_schema_hash)
+            .unwrap()
+            .1;
+        let mut with_policies = target.clone();
+        for (name, policies) in &request.permissions {
+            with_policies.get_mut(name).unwrap().policies = policies.clone();
+        }
+        crate::tools::public_schema_convert::check_deployable_policies(&with_policies)
+            .unwrap_or_else(|error| panic!("validate {read}: {error}"));
+        prepare_deployment(&DeploymentCatalogue::default(), request)
+            .unwrap_or_else(|error| panic!("deploy {read}: {error}"));
+    }
+}
+
 #[test]
 fn the_files_read_like_the_dsl() {
     let written = write(shared_todos()).unwrap();
@@ -484,39 +519,43 @@ fn printed(table: &str, expr: &PolicyExpr) -> String {
     expr::print(expr, &context, table).unwrap()
 }
 
+/// Every construct of the grammar, as `(table, source)`: the writer prints
+/// each back as it is.
+const CONSTRUCTS: &[(&str, &str)] = &[
+    ("todos", "true"),
+    ("todos", "false"),
+    ("todos", "owner = session.user"),
+    ("todos", "owner != null"),
+    ("todos", "owner = null"),
+    ("todos", "name != 'it''s'"),
+    ("todos", "name in ['a', 'b']"),
+    ("todos", "owner in session.claims.people"),
+    ("todos", "tags contains 'urgent'"),
+    ("todos", "session.claims.role = 'admin'"),
+    ("todos", "session.claims.role in ['admin', 'editor']"),
+    ("todos", "session.claims.team = null"),
+    ("todos", "session.claims.labels contains 'x'"),
+    ("todos", "$createdBy.account = session.user"),
+    (
+        "todos",
+        "exists shares(todo = this.id, user = session.user)",
+    ),
+    ("todos", "exists shares()"),
+    ("todos", "allowedTo.read(shares)"),
+    ("shares", "allowedTo.read(todoRow)"),
+    ("shares", "allowedTo.update(todoRow, maxDepth: 3)"),
+    ("todos", "not owner = session.user"),
+    ("todos", "owner = session.user or name = 'x'"),
+    (
+        "todos",
+        "(owner = session.user or name = 'x') and tags contains 'y'",
+    ),
+    ("todos", "not (owner = null or name = 'x')"),
+];
+
 #[test]
 fn every_construct_reads_and_prints_back() {
-    for (table, source) in [
-        ("todos", "true"),
-        ("todos", "false"),
-        ("todos", "owner = session.user"),
-        ("todos", "owner != null"),
-        ("todos", "owner = null"),
-        ("todos", "name != 'it''s'"),
-        ("todos", "name in ['a', 'b']"),
-        ("todos", "owner in session.claims.people"),
-        ("todos", "tags contains 'urgent'"),
-        ("todos", "session.claims.role = 'admin'"),
-        ("todos", "session.claims.role in ['admin', 'editor']"),
-        ("todos", "session.claims.team = null"),
-        ("todos", "session.claims.labels contains 'x'"),
-        ("todos", "$createdBy.account = session.user"),
-        (
-            "todos",
-            "exists shares(todo = this.id, user = session.user)",
-        ),
-        ("todos", "exists shares()"),
-        ("todos", "allowedTo.read(shares)"),
-        ("shares", "allowedTo.read(todoRow)"),
-        ("shares", "allowedTo.update(todoRow, maxDepth: 3)"),
-        ("todos", "not owner = session.user"),
-        ("todos", "owner = session.user or name = 'x'"),
-        (
-            "todos",
-            "(owner = session.user or name = 'x') and tags contains 'y'",
-        ),
-        ("todos", "not (owner = null or name = 'x')"),
-    ] {
+    for &(table, source) in CONSTRUCTS {
         let compiled = read_policy(table, source).unwrap_or_else(|e| panic!("{source}: {e}"));
         assert_eq!(printed(table, &compiled), source, "{source} printed as");
     }
@@ -1998,10 +2037,10 @@ fn slices_and_ts_only_from_alpha63_load_with_a_warning() {
     assert!(
         app.warnings()
             .iter()
-            .any(|w| w.contains("slices: schema slicing is gone in alpha.65"))
+            .any(|w| w.contains("slices: schema slicing is gone in alpha.66"))
     );
     assert!(app.warnings().iter().any(|w| {
-        w.contains("tables.shares.tsOnly: `tsOnly` (written before alpha.65) is ignored")
+        w.contains("tables.shares.tsOnly: `tsOnly` (written before alpha.66) is ignored")
     }));
     assert!(edited_app_loads(|_| {}).warnings().is_empty());
 }
@@ -2152,7 +2191,7 @@ fn the_exact_login_is_session_identity() {
 
 #[test]
 fn a_version_no_migration_leads_from_loads_with_a_warning() {
-    // As `jazz-tools validate` wrote files before alpha.65 while a
+    // As `jazz-tools validate` wrote files before alpha.66 while a
     // migration was still to be written; `generate` refuses them.
     let written = write(shared_todos()).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&written.app).unwrap();
@@ -2703,7 +2742,7 @@ fn a_relation_policy_reading_a_computed_outer_field_is_told_it_is_computed() {
     );
 }
 
-/// An enum whose cases carry fields (accepted until 2.0.0-alpha.65) loads
+/// An enum whose cases carry fields (accepted until 2.0.0-alpha.66) loads
 /// in an earlier version of `history` and in a migration dropping it, so
 /// such an app can migrate away; the current tables may not declare one.
 #[test]
@@ -2734,6 +2773,100 @@ fn enum_cases_with_fields_load_in_history_and_are_refused_in_the_current_tables(
     assert!(
         error.contains("enum cases with fields are not supported"),
         "{error}"
+    );
+}
+
+/// The policy corpus the TS printer's parity test reads
+/// (`packages/jazz-tools/src/printer/parity.test.ts`): shared-todos' app and,
+/// per case, a permissions file holding one policy as `table`'s read, as the
+/// writer prints it. `JAZZ_UPDATE_FIXTURES=1` rewrites it.
+#[test]
+fn the_policy_corpus_matches_its_fixture() {
+    let written = write(shared_todos()).unwrap();
+    let current = loaded(shared_todos()).current_schema().clone();
+    let relations = shared_todos().codegen.relations();
+    let mut cases = Vec::new();
+    let file_for = |table: &str, read: serde_json::Value| {
+        let other = if table == "shares" { "todos" } else { "shares" };
+        serde_json::json!({
+            "format": 1,
+            "tables": { table: { "read": read }, other: { "read": "true", "update": "true" } },
+        })
+    };
+    // Magic columns in both spellings: each is its own DSL key.
+    const MAGIC: &[&str] = &[
+        "$createdBy = session.user",
+        "$createdBy.identity = session.identity",
+        "$updatedBy = session.user",
+        "$updatedBy.account = session.user",
+        "$updatedBy.identity = session.identity",
+        "$deletedBy = session.user",
+        "$deletedBy.account = session.user",
+        "$deletedBy.identity = session.identity",
+    ];
+    let magic: Vec<(&str, &str)> = MAGIC.iter().map(|&source| ("todos", source)).collect();
+    for &(table, source) in CONSTRUCTS.iter().chain(magic.iter()) {
+        cases.push(
+            serde_json::json!({ "name": source, "permissions": file_for(table, source.into()) }),
+        );
+    }
+    // `updateTo`'s `old`: one condition object compares several columns with
+    // the old row's, in one self-`exists`.
+    cases.push(serde_json::json!({
+        "name": "update.new comparing several columns with the old row",
+        "permissions": {
+            "tables": {
+                "todos": {
+                    "read": "true",
+                    "update": {
+                        "old": "owner = session.user",
+                        "new": "exists todos(id = this.id, name = this.name, owner = this.owner)",
+                    },
+                },
+                "shares": { "read": "true", "update": "true" },
+            },
+        },
+    }));
+    let variant = every_policy_variant();
+    let mut exprs = vec![("every policy variant".to_string(), variant.clone())];
+    if let PolicyExpr::And(items) | PolicyExpr::Or(items) = &variant {
+        for (i, item) in items.iter().enumerate() {
+            exprs.push((format!("every policy variant, item {i}"), item.clone()));
+        }
+    }
+    for (name, expr) in exprs {
+        let mut permissions = crate::catalogue::Permissions::new();
+        permissions.insert(
+            TableName::from("todos"),
+            TablePolicies {
+                select: OperationPolicy::using(expr),
+                ..Default::default()
+            },
+        );
+        permissions.insert(
+            TableName::from("shares"),
+            TablePolicies {
+                select: OperationPolicy::using(PolicyExpr::True),
+                update: OperationPolicy::using_and_check(PolicyExpr::True, PolicyExpr::True),
+                ..Default::default()
+            },
+        );
+        let file = permissions_file::write(&permissions, &current, &relations).unwrap();
+        let text = json::print(&file);
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        cases.push(serde_json::json!({ "name": name, "permissions": value }));
+    }
+    let corpus = serde_json::json!({ "app": written.app, "cases": cases });
+    let text = format!("{}\n", serde_json::to_string_pretty(&corpus).unwrap());
+    let path = format!("{FIXTURES}/policy-corpus.json");
+    if std::env::var_os("JAZZ_UPDATE_FIXTURES").is_some() {
+        std::fs::write(&path, &text).unwrap();
+    }
+    let committed = std::fs::read_to_string(&path)
+        .unwrap_or_else(|_| panic!("{path} is missing; run with JAZZ_UPDATE_FIXTURES=1"));
+    assert_eq!(
+        text, committed,
+        "policy-corpus.json differs from its fixture"
     );
 }
 

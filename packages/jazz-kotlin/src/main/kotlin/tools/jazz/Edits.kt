@@ -10,12 +10,17 @@ import kotlinx.serialization.json.put
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 
-/** What a splice's positions count. */
+/**
+ * What a text or bytes position counts. Kotlin's positions are [Utf16], the
+ * default wherever there is one: `String` and `CharSequence` indices, as
+ * Android's `EditText` selections and `Spannable` ranges count. [Utf8] is
+ * for byte offsets from elsewhere.
+ */
 public enum class SpliceUnits(internal val wire: String) {
     /** UTF-8 bytes of a text value. */
     Utf8("utf8"),
 
-    /** UTF-16 code units of a text value (Kotlin's `String` indices). */
+    /** UTF-16 code units of a text value: Kotlin's `String` indices (the default). */
     Utf16("utf16"),
 
     /** Bytes of a `bytea` value. */
@@ -54,6 +59,14 @@ public class Edits internal constructor() {
             put("editedFrom", editedFrom)
         }
     }
+
+    /**
+     * Applies text [splices] to [column]'s value within `[from, to)`, in
+     * UTF-16 code units (`String` indices, as an `EditText` selection);
+     * each splice's `at` and `delete` count from [from] in the same units.
+     */
+    public fun splice(column: Column<out String?>, from: Long, to: Long, vararg splices: Splice): Unit =
+        splice(column, SpliceUnits.Utf16, from, to, *splices)
 
     /** Applies [splices] to [column]'s value within `[from, to)`, in [units]; each splice's `at` counts from [from]. */
     public fun splice(column: Column<*>, units: SpliceUnits, from: Long, to: Long, vararg splices: Splice) {

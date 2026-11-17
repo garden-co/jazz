@@ -76,9 +76,9 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Check jazz.app.json (and jazz.permissions.json) and write the
-    /// committed bindings; with --check (for CI), fail when they are stale
-    /// and change nothing.
+    /// With --check (for CI): check the committed jazz.app.json (and
+    /// jazz.permissions.json) and fail when the bindings are stale, changing
+    /// nothing. Writing them is `npx jazz-tools generate`'s, from schema.ts.
     Generate {
         /// The directory holding jazz.app.json.
         #[arg(long, default_value = ".")]
@@ -97,7 +97,8 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Manage the migrations in jazz.app.json.
+    /// Migrations are written from schema.ts by `npx jazz-tools migrations
+    /// create`; this binary refuses.
     Migrations {
         #[command(subcommand)]
         action: MigrationsAction,
@@ -299,8 +300,8 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum MigrationsAction {
-    /// Write the migration from the version the committed bindings were
-    /// generated from to the edited `tables`, leaving TODOs to resolve.
+    /// Refused: run `npx jazz-tools migrations create --name <name>`, which
+    /// writes the migration from schema.ts.
     Create {
         /// The migration's name.
         #[arg(long)]
@@ -347,34 +348,57 @@ fn ts_schema(dir: &std::path::Path) -> Option<std::path::PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// Refuse to write an app's files when it is authored in TypeScript: there
-/// `jazz.app.json` and `jazz.permissions.json` are generated from
-/// `schema.ts` by `npx jazz-tools generate`, which this binary can't run.
-fn refuse_ts_authored(dir: &std::path::Path, command: &str) -> Result<(), String> {
-    let Some(schema) = ts_schema(dir) else {
-        return Ok(());
-    };
-    Err(format!(
-        "{} exists: this app is authored in TypeScript, and its jazz.app.json and \
-         jazz.permissions.json are generated from it. Run `npx jazz-tools {command}` instead \
-         (the standalone binary can't read TypeScript)",
-        schema.display()
-    ))
+/// The refusal of `jazz.app.json`-only apps (alpha.66 makes TypeScript the
+/// only authoring source): shared with `npx jazz-tools`
+/// (`packages/jazz-tools/src/dev/ts-project.ts`).
+const JSON_ONLY_APP: &str = "TS is the source in alpha.66: this app has jazz.app.json but no \
+     schema.ts. Run `npx jazz-tools upgrade` to write schema.ts from it (it keeps the schema \
+     hashes and bundle id), then edit schema.ts beside your app's manifest (package.json, \
+     Cargo.toml, go.mod, Package.swift, build.gradle, …) and run `npx jazz-tools generate`.";
+
+/// Refuse to write an app's files: TypeScript is the only authoring source,
+/// so `jazz.app.json`, `jazz.permissions.json` and the bindings are written
+/// from `schema.ts` by `npx jazz-tools generate` (and migrations by `npx
+/// jazz-tools migrations create`), which this binary can't run. An app
+/// with `jazz.app.json` but no `schema.ts` is pointed at `npx jazz-tools
+/// upgrade`, which writes its `schema.ts`.
+fn refuse_writing(dir: &std::path::Path, command: &str) -> String {
+    if let Some(schema) = ts_schema(dir) {
+        return format!(
+            "{} exists: this app is authored in TypeScript, and its jazz.app.json and \
+             jazz.permissions.json are generated from it. Run `npx jazz-tools {command}` instead \
+             (the standalone binary can't read TypeScript)",
+            schema.display()
+        );
+    }
+    if dir
+        .join(jazz::tools::deployment::artifact::APP_FILE)
+        .is_file()
+    {
+        return JSON_ONLY_APP.to_owned();
+    }
+    format!(
+        "no schema.ts in {} (looked in {}): write the app's schema in schema.ts and run `npx \
+         jazz-tools {command}` (the standalone binary only checks committed files, with \
+         `generate --check`)",
+        dir.display(),
+        SCHEMA_ROOTS.join(", ")
+    )
 }
 
-/// `generate` in `dir`. For an app authored in TypeScript only `--check`
-/// runs: it checks the committed files (their validity and their
-/// `$generated` digests) and the bindings against them, but can't check
-/// that the files are fresh from the TypeScript.
+/// `generate --check` in `dir`: checks the committed files (their validity
+/// and, when written from TypeScript, their `$generated` digests) and the
+/// bindings against them, but can't check that the files are fresh from
+/// the TypeScript. Without `--check` it refuses: see [`refuse_writing`].
 fn generate(
     dir: &std::path::Path,
     names: &[String],
     check: bool,
 ) -> Result<jazz_cli::app_files::Outcome, String> {
-    let ts = ts_schema(dir);
-    if ts.is_some() && !check {
-        refuse_ts_authored(dir, "generate")?;
+    if !check {
+        return Err(refuse_writing(dir, "generate"));
     }
+    let ts = ts_schema(dir);
     if ts.is_some() {
         check_generated_digests(dir)?;
     }
@@ -464,7 +488,7 @@ async fn run() {
             std::process::exit(code);
         }
         Commands::Validate { .. } => finish_app_files(Err(
-            "`jazz-tools validate` is renamed to `jazz-tools generate` (`--check` for CI)".into(),
+            "`jazz-tools validate` is renamed to `jazz-tools generate`: run `npx jazz-tools generate` (`jazz-tools generate --check` for CI)".into(),
         )),
         Commands::Generate {
             dir,
@@ -472,17 +496,8 @@ async fn run() {
             check,
         } => finish_app_files(generate(&dir, &name, check)),
         Commands::Migrations {
-            action:
-                MigrationsAction::Create {
-                    name,
-                    dir,
-                    lang: language,
-                },
-        } => finish_app_files(
-            refuse_ts_authored(&dir, "migrations create")
-                .and_then(|()| langs(&dir, &language))
-                .and_then(|langs| jazz_cli::app_files::migrations_create(&dir, &langs, &name)),
-        ),
+            action: MigrationsAction::Create { dir, .. },
+        } => finish_app_files(Err(refuse_writing(&dir, "migrations create"))),
         Commands::Create { resource } => match resource {
             CreateResource::App { name } => {
                 let app_id = name.map_or_else(AppId::random, |name| AppId::from_name(&name));

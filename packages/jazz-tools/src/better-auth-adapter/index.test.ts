@@ -17,7 +17,7 @@ import {
   wasmSchema as wasmSchemaExample,
 } from "./fixtures/app.js";
 import { jazzAdapter } from "./index.js";
-import { betterAuthAppFileNotes } from "./schema.js";
+import { UnsupportedBetterAuthQueryError } from "./utils.js";
 import { accountRegistryUrl } from "../accounts/context.js";
 import { readAccountAssignment, requestVouchedAccount } from "../accounts/registry-client.js";
 
@@ -323,15 +323,18 @@ describe("jazzAdapter", () => {
     },
   });
 
-  // The adapter writes no policies for its tables. Deny-all must hold for a
-  // client both as the adapter leaves the app (the tables absent from
-  // jazz.permissions.json) and once the entries it prints are pasted in.
+  // Deny-all must hold for a client both for tables absent from
+  // jazz.permissions.json and as the generated schema-better-auth/schema.ts
+  // writes them (`false` for each operation).
   it.each([
     ["absent from jazz.permissions.json", {}],
     [
-      "given the entries the adapter prints",
-      JSON.parse(
-        `{${betterAuthAppFileNotes(Object.keys(fixtureAppFile.tables)).split("jazz.permissions.json:\n")[1]}}`,
+      "as schema-better-auth/schema.ts writes them",
+      Object.fromEntries(
+        Object.keys(fixtureAppFile.tables).map((name) => [
+          name,
+          { read: "false", insert: "false", update: "false", delete: "false" },
+        ]),
       ),
     ],
   ])(
@@ -576,6 +579,7 @@ describe("jazzAdapter", () => {
         }),
       ).resolves.toBeNull();
 
+      // OR is refused rather than answered by loading the whole table.
       await expect(
         adapter.deleteMany({
           model: "user",
@@ -583,6 +587,13 @@ describe("jazzAdapter", () => {
             { field: "email", operator: "eq", value: "missing@example.com", connector: "AND" },
             { field: "name", operator: "contains", value: "mm", connector: "OR" },
           ],
+        }),
+      ).rejects.toThrow(UnsupportedBetterAuthQueryError);
+
+      await expect(
+        adapter.deleteMany({
+          model: "user",
+          where: [{ field: "name", operator: "contains", value: "mm", connector: "AND" }],
         }),
       ).resolves.toBe(1);
 
@@ -594,6 +605,124 @@ describe("jazzAdapter", () => {
       });
 
       expect(remaining.map((row) => row.id)).toEqual([beta.id]);
+    });
+
+    it("sorts and pages in the engine: byte order, nulls first ascending, Date equality", async () => {
+      const users = [];
+      for (const [name, image] of [
+        ["charlie", "c.png"],
+        ["Zulu", null],
+        ["alpha", "a.png"],
+        ["Bravo", "b.png"],
+      ] as const) {
+        users.push(
+          await adapter.create<any>({
+            model: "user",
+            data: { name, email: `${name}@sort.example`, emailVerified: false, image },
+          }),
+        );
+      }
+      const ids = users.map((user) => user.id);
+      const names = (rows: any[]) => rows.map((row) => row.name);
+      const page = (
+        sortBy: { field: string; direction: "asc" | "desc" },
+        limit?: number,
+        offset?: number,
+      ) =>
+        adapter.findMany<any>({
+          model: "user",
+          where: [{ field: "id", operator: "in", value: ids, connector: "AND" }],
+          sortBy,
+          limit,
+          offset,
+        });
+
+      // Bytewise, uppercase sorts before lowercase (`localeCompare` would give alpha, Bravo, charlie, Zulu).
+      expect(names(await page({ field: "name", direction: "asc" }))).toEqual([
+        "Bravo",
+        "Zulu",
+        "alpha",
+        "charlie",
+      ]);
+      expect(names(await page({ field: "name", direction: "asc" }, 2, 1))).toEqual([
+        "Zulu",
+        "alpha",
+      ]);
+      expect(names(await page({ field: "name", direction: "desc" }, 2))).toEqual([
+        "charlie",
+        "alpha",
+      ]);
+      // NULL sorts first ascending and last descending.
+      expect(names(await page({ field: "image", direction: "asc" }, 1))).toEqual(["Zulu"]);
+      expect(names(await page({ field: "image", direction: "desc" }, 1, 3))).toEqual(["Zulu"]);
+
+      // A Date compares by instant, not by object identity.
+      await expect(
+        adapter.findMany<any>({
+          model: "user",
+          where: [
+            { field: "id", operator: "in", value: ids, connector: "AND" },
+            {
+              field: "createdAt",
+              operator: "eq",
+              value: new Date(users[2]!.createdAt.getTime()),
+              connector: "AND",
+            },
+          ],
+        }),
+      ).resolves.toMatchObject([{ id: users[2]!.id }]);
+    });
+
+    it("checks starts_with and ends_with exactly, then sorts and pages", async () => {
+      for (const name of ["ann-1", "ann-2", "ann-3", "joann-4", "ann-5x"]) {
+        await adapter.create<any>({
+          model: "user",
+          data: { name, email: `${name}@prefix.example`, emailVerified: false, image: null },
+        });
+      }
+
+      const prefixed = await adapter.findMany<any>({
+        model: "user",
+        where: [
+          { field: "name", operator: "starts_with", value: "ann-", connector: "AND" },
+          { field: "email", operator: "ends_with", value: "@prefix.example", connector: "AND" },
+        ],
+        sortBy: { field: "name", direction: "desc" },
+        limit: 2,
+        offset: 1,
+      });
+      expect(prefixed.map((row) => row.name)).toEqual(["ann-3", "ann-2"]);
+
+      await expect(
+        adapter.count({
+          model: "user",
+          where: [{ field: "name", operator: "ends_with", value: "x", connector: "AND" }],
+        }),
+      ).resolves.toBe(1);
+    });
+
+    it("refuses where shapes the engine cannot answer with a typed error", async () => {
+      await expect(
+        adapter.findMany<any>({
+          model: "user",
+          where: [
+            { field: "name", operator: "eq", value: "a", connector: "AND" },
+            { field: "name", operator: "eq", value: "b", connector: "OR" },
+          ],
+        }),
+      ).rejects.toMatchObject({
+        code: "unsupported_better_auth_query",
+        message:
+          'Reading "better_auth_user" with an OR connector is not supported by the Jazz Better Auth adapter yet',
+      });
+      await expect(
+        adapter.findMany<any>({
+          model: "user",
+          where: [
+            { field: "emailVerified", operator: "starts_with", value: "t", connector: "AND" },
+          ],
+        }),
+      ).rejects.toThrow(UnsupportedBetterAuthQueryError);
     });
 
     it("supports findMany, count, select, sort, limit, and offset on Jazz ids", async () => {
@@ -1250,8 +1379,7 @@ describe("jazzAdapter", () => {
       });
     });
 
-    it("creates jazz.app.json output for Better Auth CLI generation", async () => {
-      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    it("creates schema-better-auth/schema.ts for Better Auth CLI generation", async () => {
       const generated = await (adapter as any).createSchema({
         tables: {
           user: {
@@ -1265,23 +1393,17 @@ describe("jazzAdapter", () => {
           },
         },
       });
-      const notes = String(log.mock.calls[0]?.[0]);
-      log.mockRestore();
 
       expect(generated).toMatchObject({
-        path: "./jazz.app.json",
+        path: "./schema-better-auth/schema.ts",
         overwrite: true,
       });
-      const file = JSON.parse(generated.code);
-      expect(file).toMatchObject({
-        $schema: "https://jazz.tools/schemas/jazz.app.v1.json",
-        tables: { better_auth_user: { columns: { name: "string" } } },
-      });
-      expect(file).not.toHaveProperty("format");
-      expect(Object.keys(file.tables).every((name) => name.startsWith("better_auth_"))).toBe(true);
-      // No policies: every client read and write of the table is denied.
-      expect(notes).toContain(
-        '"better_auth_user": { "read": "false", "insert": "false", "update": "false", "delete": "false" }',
+      expect(generated.code).toContain("export const tables = {");
+      expect(generated.code).toContain("better_auth_user: s.table(");
+      expect(generated.code).toContain("name: s.string(),");
+      // No client may read or write the table.
+      expect(generated.code).toContain(
+        "better_auth_user: { read: false, insert: false, update: false, delete: false },",
       );
     });
   });

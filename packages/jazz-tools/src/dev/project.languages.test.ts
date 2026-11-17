@@ -2,11 +2,11 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createCliFixtures } from "../../tests/cli/fixtures.js";
-import { createMigration, generate, langFlags } from "../cli.js";
+import { generate, langFlags } from "../cli.js";
 import { generateForDir } from "./codegen-napi.js";
 import { generateApp } from "./project.js";
 
-const { createWorkspace, fileExists, writeAppFiles, captureConsoleLogs } = createCliFixtures(
+const { createWorkspace, fileExists, writeTsApp, captureConsoleLogs } = createCliFixtures(
   import.meta.url,
 );
 
@@ -27,7 +27,7 @@ describe("generate picks the app's languages as the binary does", () => {
     it(`writes no jazz.generated.ts for an app with only a ${marker}`, async () => {
       const { root } = await createWorkspace();
       const dir = join(root, "app");
-      await writeAppFiles(dir);
+      await writeTsApp(dir);
       await writeFile(join(dir, marker), text);
 
       // The workspace's package.json is two levels up: not this app's.
@@ -41,7 +41,7 @@ describe("generate picks the app's languages as the binary does", () => {
   it("assumes TS where nothing names a language, as running the npm CLI says", async () => {
     const { root } = await createWorkspace();
     const dir = join(root, "schema");
-    await writeAppFiles(dir);
+    await writeTsApp(dir);
 
     const result = await generateApp({ cwd: dir });
 
@@ -51,7 +51,7 @@ describe("generate picks the app's languages as the binary does", () => {
 
   it("writes the bytes the shared code writes, for a TS app", async () => {
     const { root } = await createWorkspace();
-    await writeAppFiles(root);
+    await writeTsApp(root);
     await writeFile(join(root, "Package.swift"), MARKERS["Package.swift"]!);
 
     const result = await generateApp({ cwd: root });
@@ -77,7 +77,7 @@ describe("npm CLI flags and messages from the shared code", () => {
 
   it("generates the languages --lang names, and refuses one that isn't available", async () => {
     const { root } = await createWorkspace();
-    await writeAppFiles(root);
+    await writeTsApp(root);
     await captureConsoleLogs(() => generate({ schemaDir: root, lang: ["rust"] }));
     expect(await fileExists(join(root, "src", "jazz_app.rs"))).toBe(true);
     expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(false);
@@ -87,23 +87,6 @@ describe("npm CLI flags and messages from the shared code", () => {
         /not (supported|available) yet/,
       );
     }
-  });
-
-  it("prints the shared code's note when only indexes changed", async () => {
-    const { root } = await createWorkspace();
-    const app = { format: 1, tables: { todos: { columns: { title: "string" } } } };
-    await writeAppFiles(root, app, { format: 1, tables: { todos: { read: "true" } } });
-    await captureConsoleLogs(() => generate({ schemaDir: root }));
-    await writeAppFiles(
-      root,
-      { format: 1, tables: { todos: { columns: { title: "string" }, indexes: ["title"] } } },
-      { format: 1, tables: { todos: { read: "true" } } },
-    );
-    const { result, logs } = await captureConsoleLogs(() =>
-      createMigration({ schemaDir: root, name: "index-title" }),
-    );
-    expect(result).toBeNull();
-    expect(logs.join("\n")).toContain("Only single-column indexes changed: no migration needed");
   });
 });
 
@@ -120,7 +103,7 @@ describe("generate in a Swift app", () => {
   it("writes JazzApp.swift and no jazz.generated.ts, and --check passes on it", async () => {
     const { root } = await createWorkspace();
     const dir = join(root, "app");
-    await writeAppFiles(dir);
+    await writeTsApp(dir);
     await writeFile(join(dir, "Package.swift"), SWIFT_PACKAGE);
 
     const result = await generateApp({ cwd: dir });
@@ -142,7 +125,7 @@ describe("generate in a Kotlin app", () => {
   it("writes src/main/kotlin/JazzApp.kt and no jazz.generated.ts, and --check passes on it", async () => {
     const { root } = await createWorkspace();
     const dir = join(root, "app");
-    await writeAppFiles(dir);
+    await writeTsApp(dir);
     await writeFile(join(dir, "build.gradle.kts"), KOTLIN_BUILD);
 
     const result = await generateApp({ cwd: dir });

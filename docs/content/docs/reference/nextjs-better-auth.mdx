@@ -32,188 +32,82 @@ export default nextConfig;
 
 ## 2. Schema
 
-Write your own tables in `jazz.app.json`, then let the Better Auth CLI add its tables to the same
-file, as described in
+Let the Better Auth CLI write its tables into a `schema-better-auth/schema.ts` module, as described in
 [Better Auth](/docs/setup/auth/better-auth#store-better-auths-tables-in-jazz):
 
 ```bash title="Terminal"
-npx @better-auth/cli generate --config ./auth-generate.ts --yes
+npx @better-auth/cli generate --config ./auth-generate.ts --output ./schema-better-auth/schema.ts --yes
 ```
 
-It writes the `better_auth_*` tables and leaves `messages` alone:
+It writes the `better_auth_*` tables. Spread them into your `schema.ts`, next to your own
+`messages` table:
 
-```json title="jazz.app.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
-  "tables": {
-    "better_auth_account": {
-      "columns": {
-        "accountId": "string",
-        "providerId": "string",
-        "userId": "uuid",
-        "accessToken": "string?",
-        "refreshToken": "string?",
-        "idToken": "string?",
-        "accessTokenExpiresAt": "timestamp?",
-        "refreshTokenExpiresAt": "timestamp?",
-        "scope": "string?",
-        "password": "string?",
-        "createdAt": "timestamp",
-        "updatedAt": "timestamp"
-      },
-      "relations": {
-        "user": { "rel": "better_auth_user", "column": "userId" }
-      }
-    },
-    "better_auth_jwks": {
-      "columns": {
-        "publicKey": "string",
-        "privateKey": "string",
-        "createdAt": "timestamp",
-        "expiresAt": "timestamp?",
-        "alg": "string?",
-        "crv": "string?"
-      }
-    },
-    "better_auth_session": {
-      "columns": {
-        "expiresAt": "timestamp",
-        "token": "string",
-        "createdAt": "timestamp",
-        "updatedAt": "timestamp",
-        "ipAddress": "string?",
-        "userAgent": "string?",
-        "userId": "uuid",
-        "impersonatedBy": "string?"
-      },
-      "relations": {
-        "user": { "rel": "better_auth_user", "column": "userId" }
-      }
-    },
-    "better_auth_user": {
-      "columns": {
-        "name": "string",
-        "email": "string",
-        "emailVerified": "boolean",
-        "image": "string?",
-        "createdAt": "timestamp",
-        "updatedAt": "timestamp",
-        "role": "string?",
-        "banned": "boolean?",
-        "banReason": "string?",
-        "banExpires": "timestamp?"
-      },
-      "relations": {
-        "better_auth_accountViaUser": { "reverse": "better_auth_account", "relation": "user" },
-        "better_auth_sessionViaUser": { "reverse": "better_auth_session", "relation": "user" }
-      }
-    },
-    "better_auth_verification": {
-      "columns": {
-        "identifier": "string",
-        "value": "string",
-        "expiresAt": "timestamp",
-        "createdAt": "timestamp",
-        "updatedAt": "timestamp"
-      }
-    },
-    "messages": {
-      "columns": {
-        "author_name": "string",
-        "chat_id": "string",
-        "text": "string",
-        "sent_at": "timestamp"
-      }
-    }
-  }
-}
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+import { tables as authTables, permissions as authPermissions } from "./schema-better-auth/schema";
+
+export const schema = s.defineSchema({
+  ...authTables,
+  messages: s.table({
+    author_name: s.string(),
+    chat_id: s.string(),
+    text: s.string(),
+    sent_at: s.timestamp(),
+  }),
+});
 ```
 
 See [Defining Tables](/docs/schemas/defining-tables).
 
 ## 3. Permissions
 
-Policies decide who may read and write each row. Deny everything on Better Auth's tables, so
-browsers can't reach them (the adapter writes through `jazz.db`, with backend authority), and add
-your own:
+Policies decide who may read and write each row, and live in `schema.ts` too. Deny everything on
+Better Auth's tables, so browsers can't reach them (the adapter writes through `jazz.db`, with
+backend authority): the generated `authPermissions` do that. Then add your own:
 
-```json title="jazz.permissions.json"
-{
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
-  "tables": {
-    "better_auth_account": {
-      "read": "false",
-      "insert": "false",
-      "update": "false",
-      "delete": "false"
-    },
-    "better_auth_jwks": {
-      "read": "false",
-      "insert": "false",
-      "update": "false",
-      "delete": "false"
-    },
-    "better_auth_session": {
-      "read": "false",
-      "insert": "false",
-      "update": "false",
-      "delete": "false"
-    },
-    "better_auth_user": {
-      "read": "false",
-      "insert": "false",
-      "update": "false",
-      "delete": "false"
-    },
-    "better_auth_verification": {
-      "read": "false",
-      "insert": "false",
-      "update": "false",
-      "delete": "false"
-    },
-    "messages": {
-      "read": "chat_id in ['announcements', 'chat-01']",
-      "insert": {
-        "anyOf": [
-          "chat_id = 'announcements' and session.claims.role = 'admin'",
-          "chat_id = 'chat-01'"
-        ]
-      },
-      "update": {
-        "anyOf": [
-          "chat_id = 'announcements' and session.claims.role = 'admin'",
-          "chat_id = 'chat-01' and $createdBy.account = session.user"
-        ]
-      },
-      "delete": {
-        "anyOf": [
-          "chat_id = 'announcements' and session.claims.role = 'admin'",
-          "chat_id = 'chat-01' and $createdBy.account = session.user"
-        ]
-      }
-    }
-  }
-}
+```ts title="schema.ts"
+const { definePermissions, session, anyOf, allOf, eq } = schema;
+
+const isAdmin = eq(session.claims.role, "admin");
+
+export const permissions = definePermissions({
+  // Denies every operation on the better_auth_* tables
+  ...authPermissions,
+  messages: {
+    read: { chat_id: ["announcements", "chat-01"] },
+    insert: anyOf(allOf({ chat_id: "announcements" }, isAdmin), { chat_id: "chat-01" }),
+    update: anyOf(allOf({ chat_id: "announcements" }, isAdmin), {
+      chat_id: "chat-01",
+      $createdBy: session.user,
+    }),
+    delete: anyOf(allOf({ chat_id: "announcements" }, isAdmin), {
+      chat_id: "chat-01",
+      $createdBy: session.user,
+    }),
+  },
+});
 ```
 
 Here anyone signed in reads both rooms and writes in the general one (`chat-01`), only admins post
 announcements, and people change only their own messages; the role comes from the claims
-`authenticate` returns. An `update` policy without `old` and `new` must hold for both the old
-and the new row, so a message can't be moved into the announcements room. See
+`authenticate` returns. A plain `update` policy (rather than `updateIf` and `updateTo`) must hold
+for both the old and the new row, so a message can't be moved into the announcements room. See
 [Declarative Permissions](/docs/schemas/policies).
 
-The chat ids are literals: policies are data, so a value that varies per deployment belongs in
-`session.claims` (set by your `authenticate`), not in the file.
+The chat ids are literals: `generate` compiles policies into `jazz.permissions.json`, so a value
+that varies per deployment belongs in `session.claims` (set by your `authenticate`), not in
+`schema.ts`.
 
-Then generate the typed bindings:
+Then generate the app files and typed bindings:
 
 ```bash title="Terminal"
 npx jazz-tools generate
 ```
 
-It checks both files and writes `jazz.generated.ts`, which exports `app`. Run it again after each
-change. When you change tables a deployed version already has, it asks you to run
-`npx jazz-tools migrations create --name <name>` first; see [Migrations](/docs/schemas/migrations).
+It reads `schema.ts` and writes `jazz.app.json`, `jazz.permissions.json` and `jazz.generated.ts`,
+which exports `app`. Commit all of them, and run it again after each change. When you change tables
+a deployed version already has, it asks you to run `npx jazz-tools migrations create --name <name>`
+first; see [Migrations](/docs/schemas/migrations).
 
 ## 4. Jazz and Better Auth in your backend
 

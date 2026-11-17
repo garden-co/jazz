@@ -65,12 +65,13 @@ pub fn read(lang: Lang, bindings: &str) -> Result<Recorded, CodegenError> {
 fn read_ts(bindings: &str) -> Result<Recorded, CodegenError> {
     let refuse = |what: &str| {
         CodegenError::new(format!(
-            "{}: {what}; regenerate it with `jazz-tools generate`",
+            "{}: {what}; regenerate it with `npx jazz-tools generate`",
             ts::FILE
         ))
     };
     let bindings = bindings.strip_prefix('\u{feff}').unwrap_or(bindings);
-    if !bindings.trim_start().starts_with(ts::HEADER) {
+    let first = bindings.trim_start();
+    if !first.starts_with(ts::HEADER) && !first.starts_with(ts::LEGACY_HEADER) {
         return Err(refuse(
             "not a module jazz-tools generated (its first line differs)",
         ));
@@ -280,11 +281,11 @@ pub enum Staleness {
 impl Staleness {
     pub fn message(&self, lang: Lang) -> String {
         match self {
-            Staleness::Missing => format!("no {}: run `jazz-tools generate`", lang.file()),
+            Staleness::Missing => format!("no {}: run `npx jazz-tools generate`", lang.file()),
             Staleness::SchemaChanged => "the schema changed since the last version: run \
-                 `jazz-tools migrations create --name <name>`"
+                 `npx jazz-tools migrations create --name <name>`"
                 .into(),
-            Staleness::OutOfDate => "bindings out of date: run `jazz-tools generate`".into(),
+            Staleness::OutOfDate => "bindings out of date: run `npx jazz-tools generate`".into(),
             Staleness::Unreadable(why) => why.clone(),
         }
     }

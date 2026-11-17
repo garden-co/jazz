@@ -1,0 +1,47 @@
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  // #region schema-todo-client-ts
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      priority: s.int().optional(),
+      description: s.string().optional(),
+      owner_id: s.uuid().optional(),
+      parentId: s.uuid().optional(),
+      projectId: s.uuid().optional(),
+    },
+    {
+      parent: s.rel("todos", "parentId"),
+      project: s.rel("projects", "projectId"),
+      children: s.reverse("todos", "parent"),
+    },
+  ),
+  projects: s.table(
+    {
+      name: s.string(),
+    },
+    { todos: s.reverse("todos", "project") },
+  ),
+  // #endregion schema-todo-client-ts
+});
+
+// #endregion schema-define-app-ts
+
+// #region quickstart-permissions-ts
+const { definePermissions } = schema;
+
+export const permissions = definePermissions({
+  projects: {
+    read: true,
+    insert: true,
+  },
+  todos: {
+    read: true,
+    insert: true,
+    update: true,
+    delete: true,
+  },
+});
+// #endregion quickstart-permissions-ts

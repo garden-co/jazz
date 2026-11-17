@@ -54,6 +54,16 @@ export const ciPartitionJobs = Object.freeze({
   "kotlin-android": "test-kotlin-android",
 });
 
+/** The published API crates whose docs CI builds with warnings denied (`Rust API rustdoc`). */
+export const RUSTDOC_PACKAGES = Object.freeze([
+  "jazz-app-support",
+  "jazz-codegen",
+  "jazz-ffi",
+  "jazz-native-transport",
+  "jazz-core",
+  "jazz-server",
+]);
+
 const command = (label, executable, args, options = {}) =>
   Object.freeze({ label, executable, args: Object.freeze(args), ...options });
 
@@ -106,6 +116,8 @@ export const ciPartitions = Object.freeze({
     ]),
     // npm packages, published Rust crates and the Go module share one version.
     command("lockstep versions", "node", ["dev/scripts/check-lockstep-versions.mjs"]),
+    // Every tracked path must check out on Windows (the windows-x86_64 release jobs clone the repo).
+    command("Windows-valid paths", "node", ["dev/gates/windows-paths.mjs"]),
     command("CI workflow contracts", "pnpm", ["test:ci-workflow"]),
     command("Turbo cache-input contracts", "pnpm", ["test:turbo-cache-inputs"]),
     command("invariant registry", "bash", ["dev/gates/invariant-registry.sh"]),
@@ -123,6 +135,29 @@ export const ciPartitions = Object.freeze({
       "--features",
       RUST_CI_FEATURES,
     ]),
+    // The published API crates' docs are their Rust reference: broken
+    // intra-doc links (a feature-gated item linked from the default build,
+    // a private item linked from a public one) only show in rustdoc, which
+    // nothing else runs. One invocation for the default builds, and
+    // jazz-app-support again with its feature-gated endpoint.
+    command(
+      "Rust API rustdoc",
+      "cargo",
+      ["doc", "--no-deps", ...RUSTDOC_PACKAGES.flatMap((name) => ["-p", name])],
+      { env: { RUSTDOCFLAGS: "-D warnings" } },
+    ),
+    // jazz-core again on its own: in the shared run, cargo unifies its
+    // features with what jazz-app-support turns on, which hides links that
+    // break in jazz-core's own default build (the one docs.rs builds).
+    command("jazz-core rustdoc", "cargo", ["doc", "--no-deps", "-p", "jazz-core"], {
+      env: { RUSTDOCFLAGS: "-D warnings" },
+    }),
+    command(
+      "jazz-app-support rustdoc (unstable-endpoint)",
+      "cargo",
+      ["doc", "-p", "jazz-app-support", "--no-deps", "--features", "unstable-endpoint"],
+      { env: { RUSTDOCFLAGS: "-D warnings" } },
+    ),
     // Cold-load phase attribution is opt-in and off in every other build, so
     // without this its cfg'd spans and counters would rot unnoticed.
     command("cold-settle attribution compile", "cargo", [
@@ -323,12 +358,15 @@ export const ciPartitions = Object.freeze({
   ]),
   // jazz-ffi's generated Kotlin and Swift, compiled with smoke programs and
   // run against the library (needs a JDK and swiftc: the runner image); then
-  // the Jazz Swift package and the StagePlan Swift example on top of it.
+  // the Jazz Swift package, the StagePlan Swift example and the docs Swift
+  // snippets on top of it.
   "jazz-ffi-bindings": Object.freeze([
     command("jazz-ffi Kotlin and Swift bindings", "bash", [
       "dev/gates/jazz-ffi-compile-bindings.sh",
     ]),
-    command("Jazz Swift package and StagePlan Swift example", "bash", ["dev/gates/jazz-swift.sh"]),
+    command("Jazz Swift package, StagePlan Swift example and docs Swift snippets", "bash", [
+      "dev/gates/jazz-swift.sh",
+    ]),
   ]),
   // Every crate publish-jazz-crates-alpha.yml publishes packages and builds from its
   // .crate against the others, as crates.io will see them.
@@ -360,8 +398,8 @@ export const ciPartitions = Object.freeze({
       env: { JAZZ_GO_TS_MAIN_BACKEND: "1" },
     }),
   ]),
-  // jazz-kotlin over jazz-ffi, and the StagePlan Kotlin CLI end to end
-  // against `jazz-tools server`, on the JVM.
+  // jazz-kotlin over jazz-ffi, and the StagePlan Kotlin CLI and the docs todo
+  // app's Kotlin snippets end to end against `jazz-tools server`, on the JVM.
   kotlin: Object.freeze([
     command("Kotlin runtime and example", "bash", ["dev/scripts/test-kotlin.sh"]),
   ]),

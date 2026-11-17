@@ -4,6 +4,7 @@ import * as TabsComponents from "./components/mdx/tabs";
 import type { MDXComponents } from "mdx/types";
 import type { ReactNode } from "react";
 import { CloudConfig } from "./components/mdx/cloud-config";
+import { ExperimentalBadge } from "./components/mdx/experimental-badge";
 import { DeployCommand } from "./components/mdx/deploy-command";
 import { LensDiagram } from "./components/mdx/lens-diagram";
 import { TierSyncDiagram } from "./components/mdx/tier-sync-diagram";
@@ -53,6 +54,7 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
     pre: CodeBlockPre,
     ...TabsComponents,
     CloudConfig,
+    ExperimentalBadge,
     DeployCommand,
     LensDiagram,
     TierSyncDiagram,

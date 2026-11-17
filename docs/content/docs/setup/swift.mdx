@@ -1,67 +1,69 @@
 ---
 title: Swift
-description: "Build Jazz apps in Swift: an end-user client of your app, with typed bindings generated from jazz.app.json."
+description: "Build Jazz apps in Swift: an end-user client of your app, with typed bindings generated from your app's schema."
 ---
 
 For apps: run your backend in TypeScript.
 
-A Swift app is an end-user client of your app. It opens the same `jazz.app.json` as every other
-language, with typed bindings generated from it, signs a user in, and syncs through your backend's
-Jazz endpoint. The Swift package wraps the Jazz core, built from Rust, through UniFFI. Calls are
+A Swift app is an end-user client of your app. It uses the same schema as every other language,
+with typed bindings generated from your app's schema with `npx jazz-tools generate`, signs a user
+in, and syncs through your backend's Jazz endpoint. The Swift package wraps the Jazz core, built from Rust, through UniFFI. Calls are
 `async`, and subscriptions are `AsyncSequence`s.
 
-CI builds and tests the Swift package on Linux only, with command-line tools and servers. It
-should work on macOS, but isn't tested there yet. iOS and macOS UI apps aren't built or tested yet
-(see [Not supported yet](#not-supported-yet)).
+Jazz for Swift is for macOS and iOS apps (Swift 6.0 or newer, Xcode 16 or newer; macOS 13 and iOS
+16 or newer). Each release's package runs its tests on macOS and on an iPhone simulator against the
+prebuilt core, and the StagePlan SwiftUI example (`examples/stage-plan/apps/swiftui`) is built for
+macOS and UI-tested on the iPhone simulator.
 
 ## Install
 
-The Swift package is the Jazz repository itself: its root `Package.swift` has the `Jazz` product.
-The package doesn't ship the Jazz core, `libjazz_ffi`, a static library built from Rust, so build
-it once from a checkout at the same release tag (this needs Rust and Swift 6.0 or newer) and point
-pkg-config at it:
-
-```bash
-git clone --depth 1 --branch v2.0.0-alpha.66 https://github.com/garden-co/jazz
-jazz/packages/jazz-swift/scripts/build-ffi.sh --lib-only   # builds libjazz_ffi.a and jazz_ffi.pc
-export PKG_CONFIG_PATH="$PWD/jazz/target/release/jazz-ffi-static"
-```
-
-Then depend on the package by URL at that tag (or by path, `.package(path: "../jazz")`, on the
-checkout), and build with `PKG_CONFIG_PATH` set:
+Add the package `https://github.com/garden-co/jazz-swift` at version `2.0.0-alpha.66` with the `Jazz`
+product: in Xcode under **File → Add Package Dependencies…**, or in your `Package.swift`:
 
 ```swift title="Package.swift"
 dependencies: [
-    .package(url: "https://github.com/garden-co/jazz", exact: "2.0.0-alpha.66")
+    .package(url: "https://github.com/garden-co/jazz-swift", exact: "2.0.0-alpha.66")
 ],
 targets: [
     .target(
         name: "MyApp",
-        dependencies: [.product(name: "Jazz", package: "jazz")],
+        dependencies: [.product(name: "Jazz", package: "jazz-swift")],
         path: ".",
         sources: ["JazzApp.swift", "Sources/MyApp"]
     ),
 ]
 ```
 
-```bash
-swift build
-```
+That's all: the package brings the Jazz core prebuilt, and SwiftPM checks it against the checksum
+the release pins. There's nothing to build besides your app.
 
-If `swift build` warns "couldn't find pc file for jazz_ffi" and then fails to link, `PKG_CONFIG_PATH`
-isn't set. The library and the package must come from the same tag. Linux is built and tested in CI. macOS
-follows the same steps but isn't tested yet, and there are no prebuilt binaries or XCFrameworks yet
-(see [Not supported yet](#not-supported-yet)).
+Swift on Linux has no prebuilt core: if you need it, ask on
+[Discord](https://discord.gg/RN9UKh52be).
 
 ## Generate the bindings
 
-With a `Package.swift` that uses the `Jazz` product beside `jazz.app.json`, `jazz-tools generate`
-writes `JazzApp.swift` next to them:
+The bindings are generated from your app's schema with `npx jazz-tools generate`. Write the schema
+and permissions in a `schema.ts` (see [Defining Tables](/docs/schemas/defining-tables) and
+[Declarative Permissions](/docs/schemas/policies)) beside a `Package.swift` that uses the `Jazz`
+product (no `package.json` is needed) and run it there: it writes `jazz.app.json`,
+`jazz.permissions.json` and `JazzApp.swift` next to them.
 
 ```bash
-npx jazz-tools generate            # checks the files, writes JazzApp.swift
-npx jazz-tools generate --check    # in CI: fails if JazzApp.swift is stale
+npx jazz-tools generate            # writes the app files and JazzApp.swift
+npx jazz-tools generate --check    # in CI: fails if any of them is stale
 ```
+
+A Swift client of an app whose schema lives elsewhere (its TypeScript backend's, say) gets a
+two-line `schema.ts` that re-exports it, as StagePlan's Swift example does:
+
+```ts
+export { schema, permissions } from "../react-localfirst/schema";
+```
+
+Detection picks Swift from the `Package.swift`; `--lang swift` selects it explicitly. Edit only
+`schema.ts`: the JSON files and `JazzApp.swift` are generated, so commit them and regenerate after
+each schema change. Run `generate` with `npx`: the standalone `jazz-tools` binary refuses to write
+beside a `schema.ts`, though its `generate --check` still works.
 
 Commit `JazzApp.swift` and add it to your target's sources. Everything in it sits inside
 `public enum JazzApp`, so a table's names never hide Swift's own types: StagePlan's `tasks` table
@@ -98,24 +100,56 @@ tab for each example. `examples/stage-plan/apps/swift-cli` in the repository is 
 command-line client of StagePlan: it signs in with a device account, whose key it keeps in a file
 only its user can read, or with a bearer token, and creates a show, lists, adds and moves tasks.
 
-A device key is the account: keep it as a password in the Keychain on Apple platforms, and in a
-file only its user can read on Linux. The Jazz Swift package has no helper for either yet.
+A device key is the account: keep it as a password in the Keychain. The Jazz Swift package has no
+helper for that yet.
 
 ## Sessions
 
-`JazzSession` follows who is signed in, as TypeScript's `JazzSession`: it hands out a `Client` for
-the user signed in now and replaces it when the user changes. Start it as a device account (a guest
-who needs no sign-in), from your sign-in's bearer token, or signed out:
+A session follows who is signed in, as TypeScript's `JazzSession`, and hands out the client of the
+user signed in now. Start it as a device account (a guest who needs no sign-in), from your sign-in's
+bearer token, or signed out.
+
+In SwiftUI, `JazzRoot` does the rest, as `<JazzProvider>` does in React. It shows your views with the
+signed-in user's client, `signedOut` while no one is signed in, and rebuilds the views when the user
+changes; `@JazzAll` is a live query, like `useAll`:
+
+```swift
+@main
+struct MyApp: App {
+    let session = JazzApp.session(
+        appId: appId, serverUrl: "https://myapp.example/jazz",
+        bearer: { _ in try await MySignIn.currentToken() })  // nil while signed out
+
+    var body: some Scene {
+        WindowGroup {
+            JazzRoot(session) { TasksView() } signedOut: { SignInView() }
+        }
+    }
+}
+
+struct TasksView: View {
+    @JazzAll(JazzApp.tasks.query().orderBy(JazzApp.tasks.rank)) var tasks
+    @Environment(\.jazz) var jazz                // the signed-in user's client, like useDb
+    @Environment(\.jazzSession) var session      // user, status, signOut(), like useJazzSession
+
+    var body: some View {
+        List(tasks, id: \.id) { Text($0.title) }
+    }
+}
+```
+
+Outside SwiftUI, `try await session.client()` waits while the session starts and returns the
+signed-in user's client, and `session.clients` gives the next one each time the user changes, and
+`nil` on sign-out (TypeScript's `followDb`):
 
 <include cwd lang="swift" meta='title="Sources/StagePlan/DocsSnippets.swift"'>
   ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#context-setup-swift-session
 </include>
 
-`session.snapshots` yields a `SessionSnapshot` (`status`: `.starting`, `.ready`, `.signedOut`,
-`.transitioning`, `.error` or `.closed`; `user`; `clientEpoch`; `error` and `recovery`) each time it
-changes, and ends with `JazzError.closed` when the session closes. `session.client()` gives the same
-client until `clientEpoch` changes; a client kept from before throws `JazzError.replaced`, and while
-no one is signed in `client()` throws `JazzError.noUser`.
+`client()` throws `JazzError.noUser` while no one is signed in, and a client kept past a change of
+user throws `JazzError.replaced`. `session.snapshots` yields each `SessionSnapshot` (`status`,
+`user`, `clientEpoch`, `error` and `recovery`), and ends with `JazzError.closed` when the session
+closes.
 
 When your sign-in changes, call `session.refresh()`: the session asks `bearer` again and follows
 the user it names (`nil`: signed out). With `linkGuest` (the default, as TypeScript), a user who has
@@ -127,7 +161,7 @@ no account yet takes over the device account signed in before; with `linkGuest: 
 
 ## Computed fields and transforms
 
-If `jazz.app.json` declares computed fields or transforms, the bindings declare a
+If your schema declares computed fields or transforms, the bindings declare a
 `JazzApp.Computed` protocol. It has one method per computed field (`tasksPriority(score:)`) and a
 `View`/`Stored` pair per transform (`isoDateView(_:)`, `isoDateStored(_:)`).
 `JazzApp.open(_:computed:)` takes your implementation, so a missing method is a compile error:
@@ -147,8 +181,10 @@ the view form and write the stored one. Filters on a transformed column compare 
 
 ## SwiftUI and errors
 
-On Apple platforms (macOS 14, iOS 17), `JazzQuery` is an `@Observable` live result for a view, like
-`useAll` in TypeScript:
+On Apple platforms (macOS 14, iOS 17), `@JazzAll(query)` (see [Sessions](#sessions)) keeps a
+view's rows current, and `$tasks` is its `JazzQuery`, for `isLoading` and `error`. Without
+`JazzRoot`, put a client in the environment yourself with `.environment(\.jazz, client)`, or hold a
+`JazzQuery` directly:
 
 ```swift
 @State var tasks = JazzQuery(jazz, JazzApp.tasks.query().orderBy(JazzApp.tasks.rank))
@@ -189,6 +225,14 @@ handle:
   ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#writing-mergeable-text-swift
 </include>
 
+Positions are Swift's own: `String.Index` and `Range<String.Index>` of `notes.current`
+(`notes.current.range(of: "draft")`, say), so an edit can't land inside a character. Take them from
+`current` just before the edit: another string's index is taken at its UTF-8 offset. From a
+`UITextView` or `NSAttributedString`, pass their `NSRange` (UTF-16) to `notes.replace(range, with:)`
+as it is, even when it splits a character (a backspace removing one combining mark);
+`replace(utf16:with:)` takes raw UTF-16 offsets. A UTF-16 position inside a surrogate pair is
+refused.
+
 `notes.changes` yields the merged text each time the row changes. Lower level, `jazz.edit(id,
 patch, edits: [.text(…), .splice(…), .jsonSet(…)])` makes several partial edits as one write.
 
@@ -214,16 +258,13 @@ you try. They return `true`, `false`, or `nil` when there's nothing to ask, such
 
 Not supported yet:
 
-- iOS, iPadOS, watchOS and macOS UI apps. The package declares those platforms, but it isn't built
-  or tested for them yet, and there are no prebuilt XCFrameworks.
-- Prebuilt `libjazz_ffi` and XCFrameworks: build the library from the release's source, as above.
+- watchOS, tvOS and visionOS: they aren't built (the Jazz core's Rust targets for them are tier 3).
+- Linux: there's no prebuilt core. Ask on [Discord](https://discord.gg/RN9UKh52be) if you need it.
 - A SwiftUI `Binding` for `JazzText`.
 - Running a backend in Swift (publishing permissions, acting for users) or serving the app's Jazz
   endpoint: run your backend in TypeScript.
 - Keychain (or file) storage for device keys: keep the key from `Jazz.generateDeviceKey()` with
   your own code.
-- An `@Observable` session model for SwiftUI: follow `jazz.session`. (`JazzQuery` exists for Apple
-  platforms only, and CI, which runs on Linux, doesn't build or test it.)
 - Anonymous (guest) users, as in TypeScript.
 - Subscribing to history queries.
 - Parts of large values inside includes: parts are for root queries.
