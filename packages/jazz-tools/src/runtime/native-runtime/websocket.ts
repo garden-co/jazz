@@ -241,11 +241,19 @@ const WIRE_FRAME_HEARTBEAT = 7;
  * upstream rather than have it validated against the wrong rows (jazz#5806).
  */
 export const FEATURE_SERIALIZABLE_BRANCH_READS = 1 << 12;
+/**
+ * `FEATURE_TEXT_AFFIX_PREDICATES` in `crates/jazz/layers/protocol/src/wire.rs`:
+ * the server decodes the text prefix/suffix query predicates. Without it, the
+ * core refuses a read or commit using them rather than send what an older
+ * server cannot decode (and would drop the link over).
+ */
+export const FEATURE_TEXT_AFFIX_PREDICATES = 1 << 13;
 export const CLIENT_WIRE_FEATURES =
   FEATURE_PAYLOAD_ZSTD |
   FEATURE_AUTHORIZATION_SCOPE_VIEWS |
   FEATURE_AUXILIARY_CHUNKS |
-  FEATURE_SERIALIZABLE_BRANCH_READS;
+  FEATURE_SERIALIZABLE_BRANCH_READS |
+  FEATURE_TEXT_AFFIX_PREDICATES;
 
 // The server route accepts WebSocket messages up to one MiB. Reserve enough
 // postcard framing bytes that a burst of otherwise-valid wire frames remains

@@ -2405,7 +2405,10 @@ fn validate_predicate(
             | Predicate::Gt(left, right)
             | Predicate::Gte(left, right)
             | Predicate::Lt(left, right)
-            | Predicate::Lte(left, right) => {
+            | Predicate::Lte(left, right)
+            // Text against text, so a parameter takes the other side's type.
+            | Predicate::StartsWith(left, right)
+            | Predicate::EndsWith(left, right) => {
                 domain.relationship(table, left, right, ParameterRelationship::Compare)
             }
             Predicate::In(left, values) if values.is_empty() => {
@@ -2424,7 +2427,11 @@ fn validate_predicate(
                 Ok(())
             }
             Predicate::IsNull(_) => Ok(()),
-            _ => unreachable!("recursive predicates handled by the shared traversal"),
+            // Listed, not `_`: a new variant must be placed here to compile.
+            Predicate::All(_) | Predicate::Any(_) | Predicate::Not(_) => {
+                unreachable!("recursive predicates handled by the shared traversal")
+            }
+            Predicate::Removed(removed) => match *removed {},
         };
     }
     let ParameterPhase::Check(params) = params else {
