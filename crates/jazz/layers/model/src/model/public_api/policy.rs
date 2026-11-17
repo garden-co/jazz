@@ -27,6 +27,14 @@ pub enum PolicyValue {
     Literal(#[serde(with = "value_payload")] Value),
     /// Reference to a session variable, e.g., ["user_id"] or ["claims", "teams"].
     SessionRef(#[serde(with = "path_payload")] Vec<String>),
+    /// The catalogue identity of table `table` (its stored name within the
+    /// policy's schema): the `uuid` the authority mints for it, the same on
+    /// every store and for the table's whole life. Written `table_id('T')`
+    /// in `jazz.permissions.json`. Resolved when the policy is compiled for
+    /// evaluation; while a store does not know it (a replica whose
+    /// catalogue mirror has not confirmed the names), it is no value, so a
+    /// comparison with it holds for no row.
+    TableIdentity { table: String },
 }
 
 /// Database operation type for policy evaluation.
@@ -153,6 +161,32 @@ pub enum PolicyExpr {
         /// Zero performs no inheritance hop and therefore cannot grant access.
         max_depth: Option<usize>,
     },
+
+    /// Inherit `operation` from the row named by a (table identity, row id)
+    /// pair: `table_column` holds a catalogue table identity
+    /// ([`PolicyValue::TableIdentity`]), `id_column` a row id of that
+    /// table. Only the tables in `tables` are candidates.
+    ///
+    /// It holds iff, for some `T` in `tables`, `table_column` is `T`'s
+    /// identity and the non-deleted row of `T` whose `id` is `id_column`
+    /// passes `T`'s policy for `operation`, compiled at the full depth a
+    /// direct check of that row uses (this is not a hop of an inheritance
+    /// chain). For `Update` it is both clauses of `T`'s update policy on
+    /// the same row image, `USING` and (`WITH CHECK`, or `USING` when there
+    /// is none): a save of the row that changes nothing. A row naming any
+    /// other table, or a missing or deleted row, passes nothing.
+    InheritsFrom {
+        operation: Operation,
+        table_column: String,
+        id_column: String,
+        tables: Vec<String>,
+    },
+
+    /// Inside an `Exists`, true iff the unit being checked inserts that
+    /// `Exists`'s row: a fresh insert of a row that had no version before
+    /// the unit, not a restore or an update. Everywhere else (a read
+    /// policy, a single write, outside an `Exists`) it is false.
+    InsertedByThisTransaction,
 
     /// Logical AND of multiple expressions.
     And(#[serde(with = "exprs_payload")] Vec<PolicyExpr>),

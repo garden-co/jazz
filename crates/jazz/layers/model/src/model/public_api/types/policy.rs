@@ -310,6 +310,8 @@ pub mod policy_expr {
     pub enum PolicyValueInput {
         Literal(Value),
         Session(Vec<String>),
+        /// A table's catalogue identity ([`PolicyValue::TableIdentity`]).
+        TableIdentity(String),
     }
 
     impl From<PolicyValueInput> for PolicyValue {
@@ -317,6 +319,7 @@ pub mod policy_expr {
             match value {
                 PolicyValueInput::Literal(value) => PolicyValue::Literal(value),
                 PolicyValueInput::Session(path) => PolicyValue::SessionRef(path),
+                PolicyValueInput::TableIdentity(table) => PolicyValue::TableIdentity { table },
             }
         }
     }
@@ -326,6 +329,7 @@ pub mod policy_expr {
             match value {
                 PolicyValue::Literal(value) => PolicyValueInput::Literal(value),
                 PolicyValue::SessionRef(path) => PolicyValueInput::Session(path),
+                PolicyValue::TableIdentity { table } => PolicyValueInput::TableIdentity(table),
             }
         }
     }

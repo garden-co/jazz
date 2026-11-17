@@ -794,6 +794,20 @@ pub enum Operand {
     Claim(String),
     /// Typed literal value.
     Literal(Value),
+    /// The catalogue identity (a `uuid`) of the table with this stored name,
+    /// as a lowered policy's `table_id('T')` names it. Only the lowering of
+    /// policies produces it: it carries the name, not the identity, which
+    /// the SQL compiler binds when it compiles the policy. A query from a
+    /// peer that carries it is refused (see [`Operand::is_policy_only`]).
+    TableIdentity(String),
+}
+
+impl Operand {
+    /// Whether this operand exists only in lowered policies, never in a
+    /// query an application or a peer sends.
+    pub fn is_policy_only(&self) -> bool {
+        matches!(self, Operand::TableIdentity(_))
+    }
 }
 
 /// Collision-proof internal namespace for raw identity-provider claims.

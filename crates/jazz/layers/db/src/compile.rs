@@ -213,6 +213,14 @@ struct LargeColumn {
     inline_max: usize,
 }
 
+/// Where a policy's catalogue identities come from: the namespace the
+/// authority mints them in (`names::identity`), once this store knows it
+/// and its schema's names are the authority's, else `None`. It never mints
+/// one.
+pub trait IdentitySource {
+    fn identity_namespace(&self) -> Result<Option<[u8; 16]>, Error>;
+}
+
 /// SQL text plus its positional parameters.
 pub struct Ctx<'a> {
     pub schema: &'a Schema,
@@ -250,6 +258,15 @@ pub struct Ctx<'a> {
     /// rows keeps it rather than listing every row the policy grants.
     lift_row_keys: bool,
     next_alias: usize,
+    /// Where catalogue identities ([`PolicyValue::TableIdentity`]) come
+    /// from: asked once, the first time a policy names one. Without a
+    /// source, or while it knows no namespace, no identity is bound, so a
+    /// comparison with one holds for no row.
+    catalogue: Option<&'a dyn IdentitySource>,
+    namespace: Option<Option<[u8; 16]>>,
+    /// Compiling a table's policy for an `InheritsFrom`: one inside it is
+    /// refused rather than followed (it could recurse without end).
+    in_inherits_from: bool,
 }
 
 /// A frozen snapshot: every version at or before position `seq`, plus the
@@ -270,6 +287,10 @@ pub struct Cut {
     /// A write check's evidence (SPEC 7, WITH CHECK): which of the
     /// versions at `own` are overlaid. `None` overlays them all.
     pub overlay: Option<Overlay>,
+    /// A write check's unit's fresh inserts, by stored table: the rows
+    /// [`PolicyExpr::InsertedByThisTransaction`] holds for. Empty outside a
+    /// write check.
+    pub inserted: std::sync::Arc<BTreeMap<String, BTreeSet<[u8; 16]>>>,
 }
 
 /// The versions at a write check's `own` that its policy sees (SPEC 7);
@@ -387,7 +408,16 @@ impl<'a> Ctx<'a> {
             overlay_tables: BTreeSet::new(),
             lift_row_keys: false,
             next_alias: 0,
+            catalogue: None,
+            namespace: None,
+            in_inherits_from: false,
         }
+    }
+
+    /// Bind catalogue identities from `catalogue` (see [`Ctx::catalogue`]).
+    pub fn with_catalogue(mut self, catalogue: &'a dyn IdentitySource) -> Self {
+        self.catalogue = Some(catalogue);
+        self
     }
 
     pub fn with_history_origin(mut self, origin: Option<[u8; 16]>) -> Self {
@@ -1995,6 +2025,12 @@ impl<'a> Ctx<'a> {
                 self.present(value)
             }
             Operand::Literal(value) => self.value_term(value),
+            // Only Jazz's lowering of policies makes one; a query naming
+            // one (an application's or a peer's) is refused.
+            Operand::TableIdentity(_) => Err(query_error(
+                "a table identity is not supported in a query: only a policy's \
+                 `table_id('…')` names one",
+            )),
         }
     }
 
@@ -2215,7 +2251,29 @@ impl<'a> Ctx<'a> {
                 let value = session.resolve(path);
                 self.present(value)
             }
+            PolicyValue::TableIdentity { table } => self.table_identity(table),
         }
+    }
+
+    /// Table `name`'s catalogue identity, a `uuid`, or no value while this
+    /// store does not know it. It reads no rows, so the table is no
+    /// dependency.
+    fn table_identity(&mut self, name: &str) -> Result<Term, Error> {
+        let stored = &self.schema.table(name)?.stored;
+        let namespace = match self.namespace {
+            Some(namespace) => namespace,
+            None => {
+                let namespace = match self.catalogue {
+                    Some(catalogue) => catalogue.identity_namespace()?,
+                    None => None,
+                };
+                self.namespace = Some(namespace);
+                namespace
+            }
+        };
+        let identity =
+            namespace.map(|namespace| Value::Uuid(crate::names::identity(namespace, stored, None)));
+        self.present(identity)
     }
 
     fn policy_expr(
@@ -2478,7 +2536,107 @@ impl<'a> Ctx<'a> {
                     ],
                 )
             }
+            PolicyExpr::InheritsFrom {
+                operation,
+                table_column,
+                id_column,
+                tables,
+            } => self.inherits_from(
+                table,
+                alias,
+                *operation,
+                table_column,
+                id_column,
+                tables,
+                session,
+            )?,
+            // The unit's fresh inserts into the `Exists`'s table: a row read
+            // through the cut is one of them only once it is grounded, so
+            // the node never grants on a row that is not yet evidence.
+            PolicyExpr::InsertedByThisTransaction => {
+                match (outer, self.cut.as_ref().map(|cut| cut.inserted.clone())) {
+                    (Some(_), Some(inserted)) => match inserted.get(&table.stored) {
+                        Some(ids) if !ids.is_empty() => {
+                            let ids = if ids.len() > BOUND_LIST_MAX {
+                                let array = self.bind(json_ids(ids.iter().map(|id| id.as_slice())));
+                                format!("SELECT unhex(value) FROM json_each({array})")
+                            } else {
+                                ids.iter()
+                                    .map(|id| self.bind(Sql::Blob(id.to_vec())))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            };
+                            format!("({alias}.id IN ({ids}))")
+                        }
+                        _ => "0".to_owned(),
+                    },
+                    _ => "0".to_owned(),
+                }
+            }
         })
+    }
+
+    /// [`PolicyExpr::InheritsFrom`] on the row at `alias` of `table`: for
+    /// some candidate `T`, `table_column` is `T`'s identity and the live
+    /// row of `T` whose id is `id_column` passes `T`'s `operation` policy,
+    /// compiled as a direct check of that row (full depth). `Update` is
+    /// both clauses, as a save that changes nothing: `USING` and
+    /// (`WITH CHECK`, or `USING` without one).
+    #[allow(clippy::too_many_arguments)]
+    fn inherits_from(
+        &mut self,
+        table: &Table,
+        alias: &str,
+        operation: Operation,
+        table_column: &str,
+        id_column: &str,
+        tables: &[String],
+        session: &Session,
+    ) -> Result<String, Error> {
+        if self.in_inherits_from {
+            return Err(unsupported(
+                "an `InheritsFrom` policy inside a table policy an `InheritsFrom` reads",
+            ));
+        }
+        let mut arms = Vec::with_capacity(tables.len());
+        for name in tables {
+            let target = self.table(name)?;
+            let left = self.column_term(table, alias, table_column)?;
+            let right = self.table_identity(name)?;
+            let named = self.cmp(CmpOp::Eq, left, right)?;
+            let p = self.alias("p");
+            let clauses: Vec<Option<&PolicyExpr>> = match operation {
+                Operation::Update => {
+                    let update = &target.policies.update;
+                    vec![
+                        update.using.as_ref(),
+                        update.with_check.as_ref().or(update.using.as_ref()),
+                    ]
+                }
+                operation => vec![target.policy(operation)],
+            };
+            self.in_inherits_from = true;
+            let compiled = clauses
+                .into_iter()
+                .map(|clause| match clause {
+                    None => Ok("0".to_owned()),
+                    Some(policy) => {
+                        self.policy_expr(policy, target, &p, None, session, DEFAULT_INHERITS_DEPTH)
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>();
+            self.in_inherits_from = false;
+            let mut conds = vec![
+                self.join_key((target, &p, "id"), (table, alias, id_column))?,
+                format!("({p}._state & {STATE_DELETED}) = 0"),
+            ];
+            conds.extend(compiled?);
+            arms.push(and(&[
+                named,
+                semi_join(format!("{} AS {p}", self.source(target)?), conds),
+            ]));
+        }
+        Ok(or(&arms))
     }
 
     /// A row's ancestors through its own reference `via`, up to `bound`
@@ -4420,10 +4578,13 @@ struct ParentChain<'p> {
 
 fn inherits(policy: &PolicyExpr) -> bool {
     match policy {
-        PolicyExpr::Inherits { .. } | PolicyExpr::InheritsReferencing { .. } => true,
+        PolicyExpr::Inherits { .. }
+        | PolicyExpr::InheritsReferencing { .. }
+        | PolicyExpr::InheritsFrom { .. } => true,
         PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts.iter().any(inherits),
         PolicyExpr::Not(inner) => inherits(inner),
         PolicyExpr::Exists { condition, .. } => inherits(condition),
+        PolicyExpr::InsertedByThisTransaction => false,
         _ => false,
     }
 }

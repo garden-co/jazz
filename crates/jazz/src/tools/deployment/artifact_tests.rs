@@ -1351,6 +1351,10 @@ fn policy_variants(expr: &PolicyExpr, seen: &mut BTreeSet<&'static str>) {
         }
         PolicyExpr::Inherits { .. } => "Inherits",
         PolicyExpr::InheritsReferencing { .. } => "InheritsReferencing",
+        // Jazz derives these for its system tables; the file has no
+        // spelling for them, so they are not among the variants above.
+        PolicyExpr::InheritsFrom { .. } => "InheritsFrom",
+        PolicyExpr::InsertedByThisTransaction => "InsertedByThisTransaction",
         PolicyExpr::And(all) => {
             all.iter().for_each(|e| policy_variants(e, seen));
             "And"
@@ -1434,6 +1438,70 @@ fn only_strings(file: &json::Json, text: &str) {
             };
             ops.iter().for_each(|(_, p)| policy(p, text));
         }
+    }
+}
+
+/// `table_id('T')` reads as table `T`'s catalogue identity, compared with
+/// a `uuid` column, and the file writes it back so; a table the schema lacks,
+/// or a column that is no `uuid`, is refused where it is written.
+#[test]
+fn a_table_identity_reads_and_writes_as_table_id() {
+    let expr = read_policy("todos", "owner = table_id('shares')").unwrap();
+    assert_eq!(
+        expr,
+        PolicyExpr::Cmp {
+            column: "owner".into(),
+            op: CmpOp::Eq,
+            value: PolicyValue::TableIdentity {
+                table: "shares".into(),
+            },
+        }
+    );
+    assert_eq!(printed("todos", &expr), "owner = table_id('shares')");
+    through_the_permissions_file(&expr);
+
+    let error = read_policy("todos", "owner = table_id('notes')").unwrap_err();
+    assert!(
+        error.contains("`table_id('notes')` names no table"),
+        "{error}"
+    );
+    let error = read_policy("todos", "name = table_id('shares')").unwrap_err();
+    assert!(error.contains("a table identity is a uuid"), "{error}");
+}
+
+/// The nodes Jazz derives for its system tables have no spelling in the
+/// file: writing one is refused, naming it, rather than written as text that
+/// would read back as something else.
+#[test]
+fn derived_policy_nodes_are_not_written_to_the_file() {
+    let codegen = shared_todos().codegen;
+    let relations = codegen.relations();
+    let loaded = loaded(shared_todos());
+    let context = expr::Context {
+        schema: loaded.current_schema(),
+        relations: &relations,
+        computed: &expr::ComputedNames::new(),
+    };
+    for (expr, name) in [
+        (
+            PolicyExpr::InheritsFrom {
+                operation: Operation::Select,
+                table_column: "owner".into(),
+                id_column: "owner".into(),
+                tables: vec!["shares".into()],
+            },
+            "InheritsFrom",
+        ),
+        (
+            PolicyExpr::Exists {
+                table: "shares".into(),
+                condition: Box::new(PolicyExpr::InsertedByThisTransaction),
+            },
+            "InsertedByThisTransaction",
+        ),
+    ] {
+        let error = expr::print(&expr, &context, "todos").unwrap_err();
+        assert!(error.contains(&format!("`{name}`")), "{error}");
     }
 }
 

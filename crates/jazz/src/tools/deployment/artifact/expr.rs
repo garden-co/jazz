@@ -394,6 +394,8 @@ pub enum Operand {
     Typed(Value, Span),
     Null(Span),
     Session(Vec<String>, Span),
+    /// `table_id('T')`: table `T`'s catalogue identity.
+    TableId(String, Span),
 }
 
 impl Operand {
@@ -403,7 +405,8 @@ impl Operand {
             | Operand::Literal(_, span)
             | Operand::Typed(_, span)
             | Operand::Null(span)
-            | Operand::Session(_, span) => *span,
+            | Operand::Session(_, span)
+            | Operand::TableId(_, span) => *span,
         }
     }
 }
@@ -1022,6 +1025,19 @@ impl Parser<'_> {
         {
             let (value, span) = self.typed_literal()?;
             return Ok(Operand::Typed(value, span));
+        }
+        if let Tok::Ident(word) = &token.tok
+            && word == "table_id"
+            && self.peek_at(1) == Some(&Tok::LParen)
+        {
+            self.at += 1;
+            self.expect(Tok::LParen, "`(`")?;
+            let (table, _) = self.string_arg().map_err(|error| {
+                error
+                    .example("exists projects(id = this.projectId, scopeId = table_id('projects'))")
+            })?;
+            let end = self.expect(Tok::RParen, "`)`")?;
+            return Ok(Operand::TableId(table, (span.0, end.1)));
         }
         self.at += 1;
         match token.tok {
@@ -2274,6 +2290,27 @@ fn policy_value(
 ) -> Result<PolicyValue, ExprError> {
     match operand {
         Operand::Session(path, _) => Ok(PolicyValue::SessionRef(path.clone())),
+        Operand::TableId(table, span) => {
+            if !context.schema.contains_key(&TableName::new(table.clone())) {
+                let names = context.schema.keys().map(TableName::as_str);
+                return Err(ExprError::new(
+                    *span,
+                    format!(
+                        "`table_id('{table}')` names no table{}",
+                        did_you_mean(table, names)
+                    ),
+                ));
+            }
+            if !matches!(ty, Some(ColumnType::Uuid) | None) {
+                return Err(ExprError::new(
+                    *span,
+                    "a table identity is a uuid: compare it with an `s.uuid()` column",
+                ));
+            }
+            Ok(PolicyValue::TableIdentity {
+                table: table.clone(),
+            })
+        }
         Operand::Column { span, .. } => match classify(operand, context, scope)? {
             Ref::Outer(column) => Ok(outer_ref(column)),
             _ => Err(ExprError::new(
@@ -2512,6 +2549,14 @@ fn relation_predicate(
                 })
             }
             Operand::Session(path, _) => RelationValueRef::SessionRef(path.clone()),
+            Operand::TableId(_, span) => {
+                return Err(ExprError::new(
+                    *span,
+                    "`table_id(…)` is not supported in a hop's conditions yet: compare it in \
+                     an `exists` condition",
+                )
+                .example("exists members(scopeId = table_id('projects'), identifier = this.id)"));
+            }
             Operand::Literal(Literal::Str(s), _) => {
                 RelationValueRef::Literal(serde_json::Value::String(s.clone()))
             }
@@ -2682,6 +2727,11 @@ pub fn print(expr: &PolicyExpr, context: &Context<'_>, table: &str) -> Result<St
     if let Some(refusal) = outer_row_refusal(expr, 0) {
         return Err(refusal.into());
     }
+    if let Some(node) = derived_only(expr) {
+        return Err(unsupported(&format!(
+            "`{node}` in `jazz.permissions.json` (Jazz derives it for its system tables)"
+        )));
+    }
     let mut last = String::new();
     // Shortest first (hops as `exists t(…).rel(…)`), then without hops, then
     // explicit.
@@ -2712,6 +2762,19 @@ pub const NESTED_OUTER_ROW: &str = "not supported in policies yet: an `exists` i
 /// And one outside any `exists`.
 pub const OUTSIDE_OUTER_ROW: &str = "outer row reference outside EXISTS: only a condition of `exists` can refer to the checked row's columns";
 
+/// A node only Jazz's derived policies hold, which the permissions file
+/// cannot spell.
+fn derived_only(expr: &PolicyExpr) -> Option<&'static str> {
+    match expr {
+        PolicyExpr::InheritsFrom { .. } => Some("InheritsFrom"),
+        PolicyExpr::InsertedByThisTransaction => Some("InsertedByThisTransaction"),
+        PolicyExpr::And(items) | PolicyExpr::Or(items) => items.iter().find_map(derived_only),
+        PolicyExpr::Not(inner) => derived_only(inner),
+        PolicyExpr::Exists { condition, .. } => derived_only(condition),
+        _ => None,
+    }
+}
+
 fn outer_row_refusal(expr: &PolicyExpr, depth: usize) -> Option<&'static str> {
     let refuse = |v: &PolicyValue| match v {
         PolicyValue::SessionRef(path)
@@ -2733,6 +2796,8 @@ fn outer_row_refusal(expr: &PolicyExpr, depth: usize) -> Option<&'static str> {
             items.iter().find_map(|i| outer_row_refusal(i, depth))
         }
         PolicyExpr::Not(inner) => outer_row_refusal(inner, depth),
+        // Names only the checked row's columns.
+        PolicyExpr::InheritsFrom { .. } | PolicyExpr::InsertedByThisTransaction => None,
         _ => None,
     }
 }
@@ -2745,7 +2810,7 @@ pub fn too_deep(expr: &PolicyExpr, depth: usize) -> bool {
     }
     let value = |v: &PolicyValue| match v {
         PolicyValue::Literal(v) => value_too_deep(v, depth + 1),
-        PolicyValue::SessionRef(_) => false,
+        PolicyValue::SessionRef(_) | PolicyValue::TableIdentity { .. } => false,
     };
     match expr {
         PolicyExpr::And(items) | PolicyExpr::Or(items) => {
@@ -2762,6 +2827,7 @@ pub fn too_deep(expr: &PolicyExpr, depth: usize) -> bool {
         PolicyExpr::SessionInList { values, .. } => {
             values.iter().any(|v| value_too_deep(v, depth + 1))
         }
+        PolicyExpr::InheritsFrom { .. } | PolicyExpr::InsertedByThisTransaction => false,
         _ => false,
     }
 }
@@ -2953,6 +3019,7 @@ impl Printer<'_, '_> {
                 format!("this.{}", column_text(&path[1]))
             }
             PolicyValue::SessionRef(path) => session_text(path),
+            PolicyValue::TableIdentity { table } => format!("table_id({})", quoted(table)),
         }
     }
 
@@ -3090,6 +3157,10 @@ impl Printer<'_, '_> {
                     });
                 allowed_text(*operation, &relation, *max_depth)
             }
+            // No spelling: Jazz derives these for its system tables, and
+            // `print` refuses them first (see `derived_only`).
+            PolicyExpr::InheritsFrom { .. } => "inheritsFrom(…)".into(),
+            PolicyExpr::InsertedByThisTransaction => "insertedByThisTransaction".into(),
         }
     }
 }

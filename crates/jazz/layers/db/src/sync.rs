@@ -4060,6 +4060,10 @@ impl Inner {
                     parts.iter().for_each(|part| clauses(part, out))
                 }
                 PolicyExpr::Not(part) => clauses(part, out),
+                // No support ships for an `InheritsFrom` in a read policy
+                // (Jazz derives it for write policies only): a replica
+                // lacking the candidate row grants less, never more.
+                PolicyExpr::InheritsFrom { .. } | PolicyExpr::InsertedByThisTransaction => {}
                 _ => {}
             }
         }
@@ -4109,6 +4113,8 @@ impl Inner {
                 PolicyExpr::And(parts) | PolicyExpr::Or(parts) => {
                     parts.iter().for_each(|part| hops(part, out))
                 }
+                // Not a hop through a reference column (see `clauses`).
+                PolicyExpr::InheritsFrom { .. } => {}
                 _ => {}
             }
         }
@@ -6698,6 +6704,17 @@ impl Inner {
     /// that has received none yet. Stored identities are derived from it
     /// (see [`crate::names::identity`]), so two apps' tables never share one.
     pub(super) fn namespace(&self) -> Result<Option<[u8; 16]>, Error> {
+        let stored = self.stored_namespace()?;
+        if stored.is_some() || !self.publishes_catalogue() {
+            return Ok(stored);
+        }
+        let minted = *uuid::Uuid::new_v4().as_bytes();
+        self.persist_namespace(minted)?;
+        Ok(Some(minted))
+    }
+
+    /// The namespace this store holds, if any; it mints none.
+    fn stored_namespace(&self) -> Result<Option<[u8; 16]>, Error> {
         let stored = match self.conn.cached_row(
             "SELECT v FROM _jazz_meta WHERE k = ?1",
             [NAMESPACE_META],
@@ -6711,12 +6728,7 @@ impl Inner {
             Err(rusqlite::Error::QueryReturnedNoRows) => None,
             Err(error) => return Err(storage(error)),
         };
-        if stored.is_some() || !self.publishes_catalogue() {
-            return Ok(stored);
-        }
-        let minted = *uuid::Uuid::new_v4().as_bytes();
-        self.persist_namespace(minted)?;
-        Ok(Some(minted))
+        Ok(stored)
     }
 
     pub(super) fn persist_namespace(&self, namespace: [u8; 16]) -> Result<(), Error> {
@@ -15820,6 +15832,26 @@ fn pruned_txs_created(conn: &rusqlite::Connection, known: &std::cell::Cell<Optio
         holds: true,
         rollbacks: crate::values::rollbacks(conn),
     }));
+}
+
+/// A policy's catalogue identities on this store: as [`Db::table_identity`]
+/// has them, the authority's namespace once this store holds it and its
+/// schema's names are confirmed (on the authority, always once a version is
+/// admitted). Before that, none: such a policy grants nothing through an
+/// identity until the names are confirmed, when it is compiled again.
+impl crate::compile::IdentitySource for Inner {
+    fn identity_namespace(&self) -> Result<Option<[u8; 16]>, Error> {
+        let Some(namespace) = self.stored_namespace()? else {
+            return Ok(None);
+        };
+        // The owner's version id is kept; hashing a schema per check is not.
+        let version = if Rc::ptr_eq(&self.schema, &self.owner) {
+            self.owner_version
+        } else {
+            self.schema.jazz.version_id()
+        };
+        Ok(self.names_confirmed(&version).then_some(namespace))
+    }
 }
 
 #[cfg(test)]

@@ -378,6 +378,10 @@ fn canonical_operand_key(operand: &Operand) -> Vec<u8> {
             bytes.push(b'l');
             put_value(&mut bytes, value);
         }
+        Operand::TableIdentity(table) => {
+            bytes.push(b't');
+            put_str(&mut bytes, table);
+        }
     }
     bytes
 }

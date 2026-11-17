@@ -2608,10 +2608,13 @@ pub(super) fn policy_pins(
                     | PolicyExpr::ExistsRel { .. }
                     | PolicyExpr::Inherits { .. }
                     | PolicyExpr::InheritsReferencing { .. }
+                    | PolicyExpr::InheritsFrom { .. }
                     | PolicyExpr::Not(_)
                     | PolicyExpr::Or(_) => {
                         return false;
                     }
+                    // Narrows which rows hold, reading none.
+                    PolicyExpr::InsertedByThisTransaction => {}
                     _ => {}
                 }
             }
@@ -2625,9 +2628,13 @@ pub(super) fn policy_pins(
             }
             true
         }
+        // `InheritsFrom` reads another row, through a policy that can change.
         PolicyExpr::ExistsRel { .. }
         | PolicyExpr::Inherits { .. }
-        | PolicyExpr::InheritsReferencing { .. } => false,
+        | PolicyExpr::InheritsReferencing { .. }
+        | PolicyExpr::InheritsFrom { .. } => false,
+        // False outside a write check: it reads no row.
+        PolicyExpr::InsertedByThisTransaction => true,
         // Everything else reads only the protected row (and the session).
         _ => true,
     }
@@ -2714,6 +2721,8 @@ impl EvidenceWalk<'_> {
                     None => false,
                 }
             }
+            // A table identity is fixed: it reads no row.
+            PolicyValue::TableIdentity { .. } => true,
             _ => true,
         };
         let column = |column: &str, own: &mut BTreeSet<String>| {
@@ -2801,6 +2810,43 @@ impl EvidenceWalk<'_> {
                 let mut columns = BTreeSet::new();
                 column(via_column, &mut columns) && self.inherit(source, *operation, columns)
             }
+            // The address columns are this row's; each candidate's rows are
+            // read by id through its policy for the operation (both update
+            // clauses for an update).
+            PolicyExpr::InheritsFrom {
+                operation,
+                table_column,
+                id_column,
+                tables,
+            } => {
+                if !column(table_column, own) || !column(id_column, own) {
+                    return false;
+                }
+                for name in tables {
+                    let Ok(target) = self.policies.table(name) else {
+                        return false;
+                    };
+                    let clauses = match operation {
+                        Operation::Update => {
+                            let update = &target.policies.update;
+                            [
+                                update.using.as_ref(),
+                                update.with_check.as_ref().or(update.using.as_ref()),
+                            ]
+                            .into_iter()
+                            .flatten()
+                            .collect()
+                        }
+                        operation => target.policy(*operation).into_iter().collect(),
+                    };
+                    if !self.inherit_clauses(target, *operation, clauses, BTreeSet::new()) {
+                        return false;
+                    }
+                }
+                true
+            }
+            // Reads no row: false outside a write check.
+            PolicyExpr::InsertedByThisTransaction => true,
             PolicyExpr::ExistsRel { .. } => false,
         }
     }
@@ -2809,10 +2855,19 @@ impl EvidenceWalk<'_> {
     /// `columns` of them: one occurrence, pinned when the policy requires
     /// `column = session value` of the row. A chain back to a table already
     /// being read through (a parent chain) is watched whole.
-    fn inherit(
+    fn inherit(&mut self, table: &Table, operation: Operation, columns: BTreeSet<String>) -> bool {
+        let clauses = table.policy(operation).into_iter().collect();
+        self.inherit_clauses(table, operation, clauses, columns)
+    }
+
+    /// [`Self::inherit`] through `clauses`, all of which a row must pass
+    /// (an `InheritsFrom` update's two): a pin any of them requires bounds
+    /// the rows.
+    fn inherit_clauses(
         &mut self,
         table: &Table,
         operation: Operation,
+        clauses: Vec<&PolicyExpr>,
         mut columns: BTreeSet<String>,
     ) -> bool {
         let key = (table.stored.clone(), operation);
@@ -2820,19 +2875,23 @@ impl EvidenceWalk<'_> {
             add_evidence(&mut self.out, &table.stored, None);
             return true;
         }
-        let Some(policy) = table.policy(operation) else {
+        if clauses.is_empty() {
             // No policy: the inherited check is false whatever the rows.
             return true;
-        };
+        }
         self.through.push(key);
-        let read = self.walk(policy, table, &mut columns, &mut BTreeSet::new());
+        let read = clauses
+            .iter()
+            .all(|policy| self.walk(policy, table, &mut columns, &mut BTreeSet::new()));
         self.through.pop();
         if !read {
             return false;
         }
-        let pin = conjuncts(policy)
-            .into_iter()
-            .find_map(|c| value_pin(table, c, self.session, self.kept));
+        let pin = clauses.iter().find_map(|policy| {
+            conjuncts(policy)
+                .into_iter()
+                .find_map(|c| value_pin(table, c, self.session, self.kept))
+        });
         self.occurrence(table, pin, columns);
         true
     }

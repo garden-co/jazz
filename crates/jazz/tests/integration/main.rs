@@ -75,6 +75,8 @@ mod history_reads;
 mod host_tables;
 #[path = "../include_live.rs"]
 mod include_live;
+#[path = "../inherits_from_policies.rs"]
+mod inherits_from_policies;
 #[path = "../large_value_append.rs"]
 mod large_value_append;
 #[path = "../large_value_chunk_store.rs"]
@@ -241,6 +243,8 @@ mod sync_untrusted_clients;
 mod sync_wire_corpus;
 #[path = "../sync_write_only.rs"]
 mod sync_write_only;
+#[path = "../system_table_joins.rs"]
+mod system_table_joins;
 #[path = "../text_merge.rs"]
 mod text_merge;
 #[path = "../text_splices.rs"]

@@ -182,7 +182,7 @@ fn outer_row_reference(expr: &PolicyExpr) -> Option<String> {
     };
     let value = |value: &PolicyValue| match value {
         PolicyValue::SessionRef(path) => outer(path),
-        PolicyValue::Literal(_) => None,
+        PolicyValue::Literal(_) | PolicyValue::TableIdentity { .. } => None,
     };
     match expr {
         PolicyExpr::Cmp { value: v, .. } | PolicyExpr::Contains { value: v, .. } => value(v),
@@ -198,6 +198,8 @@ fn outer_row_reference(expr: &PolicyExpr) -> Option<String> {
         }
         PolicyExpr::Not(inner) => outer_row_reference(inner),
         PolicyExpr::Exists { condition, .. } => outer_row_reference(condition),
+        // Its columns are the checked row's own, never an outer row's.
+        PolicyExpr::InheritsFrom { .. } | PolicyExpr::InsertedByThisTransaction => None,
         _ => None,
     }
 }
@@ -245,6 +247,8 @@ fn refuse_nested_outer_rows(
             }
             refuse_nested_outer_rows(condition, &format!("{path}.condition"), true)
         }
+        // Neither has an `Exists` condition of its own to nest one in.
+        PolicyExpr::InheritsFrom { .. } | PolicyExpr::InsertedByThisTransaction => Ok(()),
         _ => Ok(()),
     }
 }
@@ -1201,10 +1205,12 @@ fn policy_requires_branch(expr: &PolicyExpr) -> bool {
     match expr {
         PolicyExpr::Inherits { max_depth: _, .. }
         | PolicyExpr::InheritsReferencing { .. }
+        | PolicyExpr::InheritsFrom { .. }
         | PolicyExpr::Exists { .. }
         | PolicyExpr::ExistsRel { .. } => true,
         PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => exprs.iter().any(policy_requires_branch),
         PolicyExpr::Not(expr) => policy_requires_branch(expr),
+        PolicyExpr::InsertedByThisTransaction => false,
         _ => false,
     }
 }
@@ -1302,6 +1308,22 @@ fn append_policy_clause(
         PolicyExpr::ExistsRel { rel } => {
             append_exists_rel_policy_clause(schema, table, path, query, rel)
         }
+        PolicyExpr::InheritsFrom {
+            operation,
+            table_column,
+            id_column,
+            tables,
+        } => append_inherits_from_clause(
+            schema,
+            table,
+            path,
+            query,
+            *operation,
+            table_column,
+            id_column,
+            tables,
+            expansion_path,
+        ),
         PolicyExpr::Or(exprs) if exprs.iter().any(policy_requires_branch) => {
             let existing_branches = PolicyBranch::alternatives_from_query(query);
             let mut query = Query::from(table.as_str()).filter(Predicate::Any(Vec::new()));
@@ -1777,6 +1799,8 @@ fn validate_exists_rel_policy_join_conditions(
         PolicyExpr::Exists { condition, .. } => {
             validate_exists_rel_policy_join_conditions(table, &format!("{path}.Exists"), condition)
         }
+        // A candidate table's own policies are validated as that table's.
+        PolicyExpr::InheritsFrom { .. } | PolicyExpr::InsertedByThisTransaction => Ok(()),
         _ => Ok(()),
     }
 }
@@ -2850,6 +2874,99 @@ fn rel_value_to_policy_operand(
     }
 }
 
+/// [`PolicyExpr::InheritsFrom`], expanded: one policy alternative per
+/// candidate `T`, each `table_column = table_id(T)` and an existence join
+/// on `T` by `T.id = this.<id_column>` whose condition is `T`'s own policy
+/// for `operation` (both update clauses for `Update`), lowered as a direct
+/// policy of `T`. A candidate without that policy grants nothing. Each
+/// alternative is conjoined with every alternative `query` already holds.
+#[allow(clippy::too_many_arguments)]
+fn append_inherits_from_clause(
+    schema: &Schema,
+    table: &TableName,
+    path: &str,
+    query: Query,
+    operation: Operation,
+    table_column: &str,
+    id_column: &str,
+    tables: &[String],
+    expansion_path: &mut Vec<(String, Operation)>,
+) -> Result<Query, SchemaConversionError> {
+    let existing = PolicyBranch::alternatives_from_query(query);
+    let mut combined = Query::from(table.as_str()).filter(Predicate::Any(Vec::new()));
+    for candidate in tables {
+        let path = format!("{path}.InheritsFrom[{candidate}]");
+        let candidate_name = TableName::new(candidate.clone());
+        let candidate_schema = schema.get(&candidate_name).ok_or_else(|| {
+            err(
+                policy_path(table, &path),
+                format!("InheritsFrom names unknown table '{candidate}'"),
+            )
+        })?;
+        let policies = &candidate_schema.policies;
+        let clause = match operation {
+            Operation::Update => policies.update.using.as_ref().map(|using| {
+                PolicyExpr::And(vec![
+                    using.clone(),
+                    policies.update.with_check.as_ref().unwrap_or(using).clone(),
+                ])
+            }),
+            operation => source_operation_policy(candidate_schema, operation).cloned(),
+        };
+        let Some(clause) = clause else {
+            continue;
+        };
+        let lowered = append_inherited_policy_expanded_fallback(
+            schema,
+            candidate_schema,
+            table,
+            &path,
+            Query::from(table.as_str()),
+            &candidate_name,
+            id_column,
+            &clause,
+            operation,
+            expansion_path,
+        )?;
+        let named = Predicate::Eq(
+            Operand::Column(table_column.to_owned()),
+            Operand::TableIdentity(candidate.clone()),
+        );
+        for alternative in PolicyBranch::alternatives_from_query(lowered) {
+            for before in &existing {
+                combined = combined.policy_branch(PolicyBranch {
+                    filters: before
+                        .filters
+                        .iter()
+                        .cloned()
+                        .chain(std::iter::once(named.clone()))
+                        .chain(alternative.filters.iter().cloned())
+                        .collect(),
+                    joins: before
+                        .joins
+                        .iter()
+                        .chain(alternative.joins.iter())
+                        .cloned()
+                        .collect(),
+                    reachable: before
+                        .reachable
+                        .iter()
+                        .chain(alternative.reachable.iter())
+                        .cloned()
+                        .collect(),
+                    inherits: before
+                        .inherits
+                        .iter()
+                        .chain(alternative.inherits.iter())
+                        .cloned()
+                        .collect(),
+                });
+            }
+        }
+    }
+    Ok(combined)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn append_inherited_policy(
     schema: &Schema,
@@ -3244,6 +3361,14 @@ fn convert_policy_predicate(
                 convert_session_path_operand(table, path, path_segments)
                     .map(|operand| Predicate::In(operand, values))
             }),
+        // The lowered form is the query form, read outside any write check,
+        // where the node is false (only a unit's write checks evaluate it).
+        PolicyExpr::InsertedByThisTransaction => Ok(Predicate::Any(Vec::new())),
+        PolicyExpr::InheritsFrom { .. } => Err(err(
+            policy_path(table, path),
+            "core schema policies support `InheritsFrom` only as a conjunct or disjunct, \
+             not as a plain predicate (under `Not`)",
+        )),
         other => Err(err(
             policy_path(table, path),
             format!("core schema policies do not support {other:?} yet"),
@@ -3263,6 +3388,9 @@ fn convert_policy_operand(
         PolicyValue::Literal(value) => Ok(Operand::Literal(convert_policy_literal(
             table, path, value,
         )?)),
+        // The name, not the identity: the lowering stays a pure function of
+        // the schema, and the SQL compiler binds the identity.
+        PolicyValue::TableIdentity { table } => Ok(Operand::TableIdentity(table.clone())),
     }
 }
 
