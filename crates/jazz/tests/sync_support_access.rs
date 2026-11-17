@@ -365,7 +365,7 @@ fn a_remote_read_after_losing_access_evicts_the_cached_rows() {
 /// Through a relay, a `Remote` read by id after the reader lost access leaves
 /// the row out: the relay serves the upstream's answer, not its cached copy.
 #[test]
-fn a_remote_read_through_an_edge_after_losing_access_leaves_the_row_out() {
+fn a_remote_read_through_a_relay_after_losing_access_leaves_the_row_out() {
     let server = open(0, AuthorSubject::SYSTEM);
     let me = Value::String(alice().principal_parts().1);
     server
@@ -386,22 +386,22 @@ fn a_remote_read_through_an_edge_after_losing_access_leaves_the_row_out() {
         .unwrap();
     // The reader's own durable store relays for its foreground, as a
     // browser worker does for its tabs.
-    let edge = open(5, alice());
-    let (edge_side, server_side) = duplex();
-    let _edge_upstream = block_on(edge.connect_upstream(edge_side));
+    let relay = open(5, alice());
+    let (relay_side, server_side) = duplex();
+    let _relay_upstream = block_on(relay.connect_upstream(relay_side));
     server.accept_subscriber(server_side, alice()).unwrap();
-    edge.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
     let client = open(1, alice());
-    let (client_side, edge_client_side) = duplex();
+    let (client_side, relay_client_side) = duplex();
     let _upstream = block_on(client.connect_upstream(client_side));
-    edge.accept_subscriber(edge_client_side, alice()).unwrap();
+    relay.accept_subscriber(relay_client_side, alice()).unwrap();
     client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
     let pump_all = || {
         for _ in 0..4 {
             block_on(client.tick()).unwrap();
-            block_on(edge.tick()).unwrap();
+            block_on(relay.tick()).unwrap();
             block_on(server.tick()).unwrap();
-            block_on(edge.tick()).unwrap();
+            block_on(relay.tick()).unwrap();
         }
         block_on(client.tick()).unwrap();
     };
