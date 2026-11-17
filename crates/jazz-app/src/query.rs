@@ -5,6 +5,12 @@ use std::marker::PhantomData;
 use jazz::query::{self as q, OrderDirection, Predicate};
 
 /// What part of a large value a query reads: see [`Query::part`].
+/// What part of a large value [`Query::part`] reads. On a text column,
+/// [`ValuePart::text`] (`TextUtf8`) is the Rust way: UTF-8 byte offsets,
+/// `str` indices. `TextUtf16` counts UTF-16 code units instead, for interop
+/// with hosts that count those. A text range that splits a code point is
+/// refused (a query error: "UTF-8 range splits a code point"); one past the
+/// end is clamped to the value.
 pub use jazz::query::Part as ValuePart;
 use jazz::records::Value as CoreValue;
 use jazz::tools::{ObjectId, Value};
@@ -78,8 +84,10 @@ impl<T: Table> Query<T> {
 }
 
 impl<T: Row> Query<T> {
-    /// Reads `column` only in `part`: a byte range of a bytes column, a
-    /// UTF-8 or UTF-16 range of a text one, or the subtree at a JSON
+    /// Reads `column` only in `part`: a byte range of a bytes column
+    /// ([`ValuePart::bytes`]), a UTF-8 byte range of a text one
+    /// ([`ValuePart::text`]: `str` indices; one that splits a code point is
+    /// refused), or the subtree at a JSON
     /// pointer of a json one, as TS's partial select does. The row's value
     /// for `column` holds that part, and only the chunks it covers are
     /// read. On a transformed column, the view transform applies to the
@@ -88,7 +96,9 @@ impl<T: Row> Query<T> {
     /// include's query it reads the included rows' column in part.
     ///
     /// ```ignore
-    /// let head = jazz.one(tasks::query().id(id).part(tasks::attachment(), ValuePart::Bytes { from: 0, to: 1024 })).await?;
+    /// let head = jazz.one(tasks::query().id(id).part(tasks::attachment(), ValuePart::bytes(0..1024))).await?;
+    /// // "héllo wörld": "héllo" is bytes 0..6.
+    /// let word = jazz.one(notes::query().id(id).part(notes::body(), ValuePart::text(0..6))).await?;
     /// ```
     pub fn part<V: ColumnValue>(
         self,

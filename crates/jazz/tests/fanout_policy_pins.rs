@@ -191,6 +191,26 @@ fn reran(db: &Db) -> u64 {
     db.fanout_stats().reran
 }
 
+/// Groups refreshed during `write` by either path (a full re-run, or a
+/// re-check and re-nest of the rows the write reached), with every result
+/// checked after it: what the filter decides is whether a group wakes,
+/// not how it refreshes.
+fn refreshes(
+    db: &Db,
+    lives: &mut [Live],
+    what: &str,
+    write: impl FnOnce(),
+) -> (u64, Vec<Snapshot>) {
+    let count = |db: &Db| {
+        let stats = db.fanout_stats();
+        stats.reran + stats.rechecked
+    };
+    let before = count(db);
+    write();
+    let now = check(db, lives, what);
+    (count(db) - before, now)
+}
+
 /// Re-runs during `write`, with every result checked after it.
 fn reruns(db: &Db, lives: &mut [Live], what: &str, write: impl FnOnce()) -> (u64, Vec<Snapshot>) {
     let before = reran(db);
@@ -550,11 +570,11 @@ fn another_persons_membership_skips_unless_it_shares_a_room() {
     let mut world = seed(&db);
     let mut lives = lives_of(&db, &[0]);
     let opened = check(&db, &mut lives, "subscribe");
-    let (woke, _) = reruns(&db, &mut lives, "person 2 joins room 3", || {
+    let (woke, _) = refreshes(&db, &mut lives, "person 2 joins room 3", || {
         join(&db, &mut world, 3, 2);
     });
     assert_eq!(woke, 0, "room 3 is not alice's: her results skip it");
-    let (woke, now) = reruns(&db, &mut lives, "person 2 joins room 0", || {
+    let (woke, now) = refreshes(&db, &mut lives, "person 2 joins room 0", || {
         join(&db, &mut world, 0, 2);
     });
     assert_eq!(woke, 2, "room 0 is alice's: both rosters change");
@@ -565,7 +585,7 @@ fn another_persons_membership_skips_unless_it_shares_a_room() {
         .find(|(_, (r, p))| *r == 0 && *p == 0)
         .unwrap()
         .0;
-    let (woke, _) = reruns(&db, &mut lives, "alice pins room 0", || {
+    let (woke, _) = refreshes(&db, &mut lives, "alice pins room 0", || {
         update(
             &db,
             "members",
@@ -1530,6 +1550,730 @@ fn evidence_watched_results_match_on_replicas_under_batched_pushes() {
             (Topology::DirectAs, 3),
             (Topology::RelayAs, 19),
             (Topology::Local, 37),
+        ] {
+            replica_run(&fixture, topology, seed_of);
+        }
+    }
+}
+
+// ---- linked evidence: a reader read at a nested id-keyed level ----------
+//
+// `people` is readable through `INHERITS_REFERENCING` of a source table: a
+// person is visible when some readable source row names them (`members`
+// by a scalar `person`, or `groups` by a `people` array). A post list nests
+// each post's author. A source row can only change whether the people it
+// names are visible, so it matters to the post list only when a held post
+// names one of them.
+
+const L_PERSON: u8 = 0x31;
+const L_POST: u8 = 0x32;
+const L_SOURCE: u8 = 0x33;
+const L_PEOPLE: usize = 5;
+
+fn linked_schema(array: bool) -> jazz::schema::JazzSchema {
+    use jazz::tools::{Operation, PolicyExpr};
+    let (source, via) = if array {
+        ("groups", "people")
+    } else {
+        ("members", "person")
+    };
+    let source_table = if array {
+        TableSchemaBuilder::new("groups").array_fk_column("people", "people")
+    } else {
+        TableSchemaBuilder::new("members").fk_column("person", "people")
+    };
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("people")
+                    .column("name", ColumnType::Text)
+                    .policies(read_and_allow_all_writes(PolicyExpr::inherits_referencing(
+                        Operation::Select,
+                        source,
+                        via,
+                    ))),
+            )
+            .table(source_table.policies(allow_all_policies()))
+            .table(
+                TableSchemaBuilder::new("posts")
+                    .fk_column("author", "people")
+                    .column("body", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
+}
+
+fn posts_with_authors() -> Query {
+    Query::from("posts")
+        .order_by("body", OrderDirection::Asc)
+        .array_subquery(ArraySubquery::new("author_of", "people", "id", "author"))
+}
+
+fn l_person(n: usize) -> RowUuid {
+    id(L_PERSON, n)
+}
+
+/// People 0..L_PEOPLE, posts by people 0 and 1, no source row: every
+/// author is hidden.
+fn seed_linked(db: &Db) -> Vec<Live> {
+    for p in 0..L_PEOPLE {
+        insert(
+            db,
+            "people",
+            l_person(p),
+            &[("name", text(&format!("p{p}")))],
+        );
+    }
+    for (n, p) in [0, 1].into_iter().enumerate() {
+        insert(
+            db,
+            "posts",
+            id(L_POST, n),
+            &[
+                ("author", uuid(l_person(p))),
+                ("body", text(&format!("post {n}"))),
+            ],
+        );
+    }
+    let mut lives = vec![subscribe(
+        db,
+        "posts with authors",
+        posts_with_authors(),
+        Some(user(0)),
+    )];
+    check(db, &mut lives, "subscribe");
+    lives
+}
+
+/// A source row naming `people` (one for a scalar via).
+fn name_people(db: &Db, array: bool, row: usize, people: &[usize]) {
+    if array {
+        let list = Value::Array(people.iter().map(|p| uuid(l_person(*p))).collect());
+        insert(db, "groups", id(L_SOURCE, row), &[("people", list)]);
+    } else {
+        insert(
+            db,
+            "members",
+            id(L_SOURCE, row),
+            &[("person", uuid(l_person(people[0])))],
+        );
+    }
+}
+
+/// Some post by person `p` nests them as its author.
+fn author_shown(now: &Snapshot, p: usize) -> bool {
+    let author = uuid(l_person(p));
+    now.iter().any(|(_, cells)| {
+        let cell = |name: &str| {
+            cells
+                .iter()
+                .find(|(n, _)| n == name)
+                .and_then(|(_, v)| v.as_ref())
+        };
+        cell("author") == Some(&author)
+            && matches!(cell("author_of"), Some(Value::Array(rows)) if !rows.is_empty())
+    })
+}
+
+/// A grant: a source row names the author of a held post. The post list
+/// never held that person (hidden), but it holds the post naming them, so
+/// the write wakes it and the author appears.
+fn grant_shows_a_held_posts_author(array: bool) {
+    let db = open(linked_schema(array), 1);
+    let mut lives = seed_linked(&db);
+    name_people(&db, array, 0, &[1]);
+    let now = check(&db, &mut lives, "a source row names person 1");
+    assert!(
+        author_shown(&now[0], 1),
+        "person 1 is now visible under post 1"
+    );
+}
+
+#[test]
+fn a_linked_grant_shows_a_held_posts_author() {
+    grant_shows_a_held_posts_author(false);
+}
+
+#[test]
+fn a_linked_grant_through_an_array_shows_a_held_posts_author() {
+    grant_shows_a_held_posts_author(true);
+}
+
+/// A revocation and a retarget: the source row naming person 0 moves to
+/// person 1 (both authors of held posts), then is deleted.
+fn retarget_and_revoke(array: bool) {
+    let db = open(linked_schema(array), 1);
+    let mut lives = seed_linked(&db);
+    name_people(&db, array, 0, &[0]);
+    check(&db, &mut lives, "a source row names person 0");
+    let moved = if array {
+        ("people", Value::Array(vec![uuid(l_person(1))]))
+    } else {
+        ("person", uuid(l_person(1)))
+    };
+    update(
+        &db,
+        if array { "groups" } else { "members" },
+        id(L_SOURCE, 0),
+        &[moved],
+    );
+    let now = check(&db, &mut lives, "the source row moves to person 1");
+    assert!(!author_shown(&now[0], 0) && author_shown(&now[0], 1));
+    delete(
+        &db,
+        if array { "groups" } else { "members" },
+        id(L_SOURCE, 0),
+    );
+    let now = check(&db, &mut lives, "the source row is deleted");
+    assert!(!author_shown(&now[0], 1));
+}
+
+#[test]
+fn a_linked_retarget_and_revocation_follow_the_source_row() {
+    retarget_and_revoke(false);
+}
+
+#[test]
+fn a_linked_retarget_and_revocation_through_an_array_follow_the_source_row() {
+    retarget_and_revoke(true);
+}
+
+/// Engagement: a source row naming only a person no held post names
+/// cannot change the post list, and does not refresh it.
+fn unrelated_source_row_skips(array: bool) {
+    let db = open(linked_schema(array), 1);
+    let mut lives = seed_linked(&db);
+    let before = db.fanout_stats();
+    name_people(&db, array, 0, &[L_PEOPLE - 1]);
+    check(
+        &db,
+        &mut lives,
+        "a source row names person 4, who wrote nothing",
+    );
+    let after = db.fanout_stats();
+    assert_eq!(
+        (after.reran + after.rechecked) - (before.reran + before.rechecked),
+        0,
+        "the post list was refreshed for a person it cannot hold"
+    );
+    assert!(
+        after.unevidenced > before.unevidenced,
+        "the write was skipped as unevidenced"
+    );
+}
+
+#[test]
+fn a_linked_source_row_naming_no_held_author_skips() {
+    unrelated_source_row_skips(false);
+}
+
+#[test]
+fn a_linked_source_row_through_an_array_naming_no_held_author_skips() {
+    unrelated_source_row_skips(true);
+}
+
+/// Differential: random source inserts, retargets and deletes and random
+/// post writes; the maintained post list equals a fresh read after each.
+fn linked_differential(array: bool, seed_of: u64) {
+    let db = open(linked_schema(array), 1);
+    let mut lives = seed_linked(&db);
+    let mut rng = Rng(seed_of);
+    let mut sources: Vec<usize> = Vec::new();
+    let mut posts: Vec<usize> = vec![0, 1];
+    let (mut next_source, mut next_post) = (0, 2);
+    let source = if array { "groups" } else { "members" };
+    let named = |rng: &mut Rng| -> Value {
+        if array {
+            let n = rng.next(3);
+            Value::Array((0..n).map(|_| uuid(l_person(rng.next(L_PEOPLE)))).collect())
+        } else {
+            uuid(l_person(rng.next(L_PEOPLE)))
+        }
+    };
+    let via = if array { "people" } else { "person" };
+    for step in 0..200 {
+        let what = match rng.next(6) {
+            0 | 1 => {
+                let value = named(&mut rng);
+                insert(&db, source, id(L_SOURCE, next_source), &[(via, value)]);
+                sources.push(next_source);
+                next_source += 1;
+                "insert source"
+            }
+            2 if !sources.is_empty() => {
+                let s = sources[rng.next(sources.len())];
+                let value = named(&mut rng);
+                update(&db, source, id(L_SOURCE, s), &[(via, value)]);
+                "retarget source"
+            }
+            3 if !sources.is_empty() => {
+                let s = sources.remove(rng.next(sources.len()));
+                delete(&db, source, id(L_SOURCE, s));
+                "delete source"
+            }
+            4 => {
+                let p = rng.next(L_PEOPLE);
+                insert(
+                    &db,
+                    "posts",
+                    id(L_POST, next_post),
+                    &[
+                        ("author", uuid(l_person(p))),
+                        ("body", text(&format!("post {next_post}"))),
+                    ],
+                );
+                posts.push(next_post);
+                next_post += 1;
+                "insert post"
+            }
+            5 if !posts.is_empty() => {
+                let n = posts[rng.next(posts.len())];
+                update(
+                    &db,
+                    "posts",
+                    id(L_POST, n),
+                    &[("author", uuid(l_person(rng.next(L_PEOPLE))))],
+                );
+                "retarget post"
+            }
+            _ => continue,
+        };
+        check(
+            &db,
+            &mut lives,
+            &format!("step {step} (seed {seed_of}): {what}"),
+        );
+    }
+}
+
+#[test]
+fn linked_evidence_matches_one_shot_reads_under_random_writes() {
+    for seed_of in 1..=8 {
+        linked_differential(false, seed_of);
+        linked_differential(true, seed_of);
+    }
+}
+
+// ---- linked evidence under a pinned source policy -----------------------
+//
+// The same reader, but a source row is readable only to its holder
+// (`holder = claims.name`), so a linked occurrence is also pinned and has
+// a column (`holder`) besides `via`. People also have a `mentor`: a third
+// query reads people at a level not keyed by `id`, and a fourth reads them
+// as its root, where the narrowing must not apply.
+
+fn linked_pinned_schema(array: bool) -> jazz::schema::JazzSchema {
+    use jazz::tools::{Operation, PolicyExpr};
+    let (source, via) = if array {
+        ("groups", "people")
+    } else {
+        ("members", "person")
+    };
+    let source_table = if array {
+        TableSchemaBuilder::new("groups").array_fk_column("people", "people")
+    } else {
+        TableSchemaBuilder::new("members").fk_column("person", "people")
+    };
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("people")
+                    .column("name", ColumnType::Text)
+                    .nullable_fk_column("mentor", "people")
+                    .policies(read_and_allow_all_writes(PolicyExpr::inherits_referencing(
+                        Operation::Select,
+                        source,
+                        via,
+                    ))),
+            )
+            .table(source_table.column("holder", ColumnType::Text).policies(
+                read_and_allow_all_writes(session_eq("holder", &["claims", "name"])),
+            ))
+            .table(
+                TableSchemaBuilder::new("posts")
+                    .fk_column("author", "people")
+                    .column("body", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
+}
+
+fn linked_queries(u: usize) -> Vec<(String, Query)> {
+    vec![
+        (
+            format!("user {u}: posts with authors"),
+            posts_with_authors(),
+        ),
+        (
+            format!("user {u}: posts with authors and their mentees"),
+            posts_with_authors()
+                .array_subquery(ArraySubquery::new("mentees", "people", "mentor", "author")),
+        ),
+        (
+            format!("user {u}: people"),
+            Query::from("people").order_by("name", OrderDirection::Asc),
+        ),
+    ]
+}
+
+fn linked_claims(db: &Db) {
+    for u in 0..PEOPLE {
+        db.set_identity_claims(user(u), team_claims(u, ROLES[0], 0));
+    }
+}
+
+/// The source table, its `via` column, and a random `via` value.
+fn linked_via(array: bool, rng: &mut Rng) -> (&'static str, &'static str, Value) {
+    if array {
+        let n = rng.next(3);
+        let list = (0..n).map(|_| uuid(l_person(rng.next(L_PEOPLE)))).collect();
+        ("groups", "people", Value::Array(list))
+    } else {
+        ("members", "person", uuid(l_person(rng.next(L_PEOPLE))))
+    }
+}
+
+/// A person `value` (a `via` cell) names, or any person when it names none.
+fn named_person(value: &Value, rng: &mut Rng) -> usize {
+    let person = |v: &Value| match v {
+        Value::Uuid(u) => (0..L_PEOPLE).find(|p| l_person(*p).0 == *u),
+        _ => None,
+    };
+    match value {
+        Value::Array(items) => items.iter().find_map(person),
+        v => person(v),
+    }
+    .unwrap_or_else(|| rng.next(L_PEOPLE))
+}
+
+/// A holder: one of four readers, or nobody's.
+fn linked_holder(rng: &mut Rng) -> Value {
+    text(&name(rng.next(5)))
+}
+
+fn linked_seed(db: &Db, array: bool) -> Writer {
+    linked_claims(db);
+    for p in 0..L_PEOPLE {
+        insert(
+            db,
+            "people",
+            l_person(p),
+            &[
+                ("name", text(&format!("p{p}"))),
+                (
+                    "mentor",
+                    Value::Nullable(Some(Box::new(uuid(l_person((p + 1) % L_PEOPLE))))),
+                ),
+            ],
+        );
+    }
+    for (n, p) in [0, 1, 2].into_iter().enumerate() {
+        insert(
+            db,
+            "posts",
+            id(L_POST, n),
+            &[
+                ("author", uuid(l_person(p))),
+                ("body", text(&format!("post {n}"))),
+            ],
+        );
+    }
+    let mut sources: Vec<usize> = Vec::new();
+    let mut posts: Vec<usize> = vec![0, 1, 2];
+    let (mut next_source, mut next_post) = (0usize, 3usize);
+    Box::new(move |db, rng, step, _replica| match rng.next(10) {
+        0 | 1 => {
+            let (table, via, value) = linked_via(array, rng);
+            let holder = linked_holder(rng);
+            insert(
+                db,
+                table,
+                id(L_SOURCE, next_source),
+                &[(via, value), ("holder", holder)],
+            );
+            sources.push(next_source);
+            next_source += 1;
+            format!("source {} inserted", next_source - 1)
+        }
+        2 if !sources.is_empty() => {
+            let s = sources[rng.next(sources.len())];
+            let (table, via, value) = linked_via(array, rng);
+            update(db, table, id(L_SOURCE, s), &[(via, value)]);
+            format!("source {s} retargeted")
+        }
+        3 if !sources.is_empty() => {
+            let s = sources[rng.next(sources.len())];
+            let (table, _, _) = linked_via(array, rng);
+            update(
+                db,
+                table,
+                id(L_SOURCE, s),
+                &[("holder", linked_holder(rng))],
+            );
+            format!("source {s} changed holder")
+        }
+        4 if !sources.is_empty() => {
+            let s = sources.remove(rng.next(sources.len()));
+            let (table, _, _) = linked_via(array, rng);
+            delete(db, table, id(L_SOURCE, s));
+            format!("source {s} deleted")
+        }
+        5 => {
+            let p = rng.next(L_PEOPLE);
+            insert(
+                db,
+                "posts",
+                id(L_POST, next_post),
+                &[
+                    ("author", uuid(l_person(p))),
+                    ("body", text(&format!("post {next_post}"))),
+                ],
+            );
+            posts.push(next_post);
+            next_post += 1;
+            format!("post {} by {p}", next_post - 1)
+        }
+        6 if !posts.is_empty() => {
+            let n = posts[rng.next(posts.len())];
+            update(
+                db,
+                "posts",
+                id(L_POST, n),
+                &[("author", uuid(l_person(rng.next(L_PEOPLE))))],
+            );
+            format!("post {n} retargeted")
+        }
+        7 => {
+            let p = rng.next(L_PEOPLE);
+            let mentor = match rng.next(L_PEOPLE + 1) {
+                m if m == L_PEOPLE => Value::Nullable(None),
+                m => Value::Nullable(Some(Box::new(uuid(l_person(m))))),
+            };
+            update(db, "people", l_person(p), &[("mentor", mentor)]);
+            format!("person {p} mentor changed")
+        }
+        // One transaction: a source row retargeted twice, and a post by a
+        // person it ends naming (any person when it names none).
+        8 if !sources.is_empty() => {
+            let s = sources[rng.next(sources.len())];
+            let (table, via, first) = linked_via(array, rng);
+            let (_, _, second) = linked_via(array, rng);
+            let p = named_person(&second, rng);
+            let post = next_post;
+            next_post += 1;
+            posts.push(post);
+            block_on(db.transaction(async |tx| {
+                tx.update(
+                    table,
+                    id(L_SOURCE, s),
+                    cells(&[(via, first)]),
+                    Default::default(),
+                )
+                .await?;
+                tx.update(
+                    table,
+                    id(L_SOURCE, s),
+                    cells(&[(via, second)]),
+                    Default::default(),
+                )
+                .await?;
+                tx.insert(
+                    "posts",
+                    cells(&[
+                        ("author", uuid(l_person(p))),
+                        ("body", text(&format!("post {post}"))),
+                    ]),
+                    InsertOptions {
+                        row_id: Some(id(L_POST, post)),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+                Ok(())
+            }))
+            .unwrap();
+            format!("tx: source {s} retargeted twice, post {post} by {p}")
+        }
+        // One transaction: a new source row, written once, and a post by a
+        // person it names: the grant and the parent naming its row land in
+        // one dispatch.
+        9 => {
+            let (table, via, value) = linked_via(array, rng);
+            let holder = linked_holder(rng);
+            let p = named_person(&value, rng);
+            let (source, post) = (next_source, next_post);
+            next_source += 1;
+            next_post += 1;
+            sources.push(source);
+            posts.push(post);
+            block_on(db.transaction(async |tx| {
+                tx.insert(
+                    "posts",
+                    cells(&[
+                        ("author", uuid(l_person(p))),
+                        ("body", text(&format!("post {post}"))),
+                    ]),
+                    InsertOptions {
+                        row_id: Some(id(L_POST, post)),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+                tx.insert(
+                    table,
+                    cells(&[(via, value), ("holder", holder)]),
+                    InsertOptions {
+                        row_id: Some(id(L_SOURCE, source)),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+                Ok(())
+            }))
+            .unwrap();
+            format!("tx: source {source} inserted with post {post} by {p}")
+        }
+        _ => format!("step {step}: nothing"),
+    })
+}
+
+/// A grant and the parent naming its row in one transaction: a post by
+/// person 4 (whom nothing names yet) and a source row naming person 4,
+/// readable to user 0. The post list must show person 4 under the post.
+fn grant_with_its_parent_in_one_transaction(array: bool) {
+    let db = open(linked_pinned_schema(array), 1);
+    linked_claims(&db);
+    for p in 0..L_PEOPLE {
+        insert(
+            &db,
+            "people",
+            l_person(p),
+            &[("name", text(&format!("p{p}")))],
+        );
+    }
+    let mut lives = vec![subscribe(
+        &db,
+        "posts with authors",
+        posts_with_authors(),
+        Some(user(0)),
+    )];
+    check(&db, &mut lives, "subscribe");
+    let (table, via, value) = if array {
+        ("groups", "people", Value::Array(vec![uuid(l_person(4))]))
+    } else {
+        ("members", "person", uuid(l_person(4)))
+    };
+    block_on(db.transaction(async |tx| {
+        tx.insert(
+            "posts",
+            cells(&[("author", uuid(l_person(4))), ("body", text("post 0"))]),
+            InsertOptions {
+                row_id: Some(id(L_POST, 0)),
+                ..Default::default()
+            },
+        )
+        .await?;
+        tx.insert(
+            table,
+            cells(&[(via, value), ("holder", text(&name(0)))]),
+            InsertOptions {
+                row_id: Some(id(L_SOURCE, 0)),
+                ..Default::default()
+            },
+        )
+        .await?;
+        Ok(())
+    }))
+    .unwrap();
+    let now = check(
+        &db,
+        &mut lives,
+        "a post by person 4 and a grant of person 4 in one tx",
+    );
+    assert!(
+        author_shown(&now[0], 4),
+        "person 4 is visible under the new post"
+    );
+}
+
+#[test]
+fn a_linked_grant_with_its_parent_in_one_transaction_shows_the_author() {
+    grant_with_its_parent_in_one_transaction(false);
+}
+
+#[test]
+fn a_linked_grant_through_an_array_with_its_parent_in_one_transaction_shows_the_author() {
+    grant_with_its_parent_in_one_transaction(true);
+}
+
+fn linked_fixture(array: bool) -> Fixture {
+    if array {
+        Fixture {
+            name: "linked array",
+            schema: || linked_pinned_schema(true),
+            tables: &["people", "groups", "posts"],
+            queries: linked_queries,
+            seed: |db| linked_seed(db, true),
+            claims: linked_claims,
+        }
+    } else {
+        Fixture {
+            name: "linked scalar",
+            schema: || linked_pinned_schema(false),
+            tables: &["people", "members", "posts"],
+            queries: linked_queries,
+            seed: |db| linked_seed(db, false),
+            claims: linked_claims,
+        }
+    }
+}
+
+/// The linked fixtures on one store: every result equals a fresh read
+/// after every write, with evidence watches on and off, both runs end
+/// equal, and the watched run refreshes less. (The source pin alone can
+/// make it refresh less; the link's own engagement is pinned by the
+/// `…naming_no_held_author_skips` gates.)
+#[test]
+fn linked_fixtures_match_one_shot_reads_under_random_writes() {
+    for array in [false, true] {
+        let fixture = linked_fixture(array);
+        let (mut watched, mut whole, mut skipped) = (0, 0, 0);
+        for seed_of in [5, 23, 61, 97] {
+            let on = store_run(&fixture, seed_of, true);
+            let off = store_run(&fixture, seed_of, false);
+            assert_eq!(
+                on.0, off.0,
+                "{} seed {seed_of}: watched and whole runs differ",
+                fixture.name
+            );
+            watched += on.1.reran + on.1.rechecked;
+            whole += off.1.reran + off.1.rechecked;
+            skipped += on.1.unevidenced;
+        }
+        assert!(
+            skipped > 0,
+            "{}: evidence watches skipped changes: {skipped}",
+            fixture.name
+        );
+        assert!(
+            watched < whole,
+            "{}: {watched} refreshes against {whole}",
+            fixture.name
+        );
+    }
+}
+
+/// The linked fixtures through each topology, with batched pushes.
+#[test]
+fn linked_fixtures_match_on_replicas_under_batched_pushes() {
+    for array in [false, true] {
+        let fixture = linked_fixture(array);
+        for (topology, seed_of) in [
+            (Topology::DirectAs, 11),
+            (Topology::RelayAs, 29),
+            (Topology::Local, 53),
         ] {
             replica_run(&fixture, topology, seed_of);
         }

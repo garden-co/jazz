@@ -1,9 +1,10 @@
 name: Publish Jazz crates alpha
 
 # Publishes Jazz's Rust crates to crates.io at the version npm just got, in
-# dependency order (dev/scripts/publish-crates.mjs). Runs after "Publish
-# jazz-tools alpha" succeeds on release, from that run's commit, once npm has
-# jazz-tools at that version and the v<version> tag points at the commit.
+# dependency order (dev/scripts/publish-crates.mjs). "Publish jazz-tools
+# alpha" dispatches it (mode=publish, tag=v<version>) once npm has the
+# release; it publishes that tag's commit. crates.io trusted publishing
+# refuses workflow_run, so this workflow is only ever dispatched.
 #
 # Auth, per crate (the script asks crates.io):
 # - a crate that exists on crates.io: trusted publishing (OIDC), bound to this
@@ -17,13 +18,9 @@ name: Publish Jazz crates alpha
 #
 # The filename is what the crates.io trusted publishers are bound to; keep it.
 # The publish job waits for the `publish` environment's required reviewer
-# whatever triggered it, workflow_run included.
+# however it was dispatched.
 
 on:
-  workflow_run:
-    workflows: ["Publish jazz-tools alpha"]
-    types: [completed]
-    branches: [release]
   workflow_dispatch:
     inputs:
       mode:
@@ -49,9 +46,6 @@ permissions:
 jobs:
   resolve:
     name: Resolve release
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     # Up to 15 minutes waiting for npm to list the release.
     timeout-minutes: 20
@@ -66,23 +60,25 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          EVENT: ${{ github.event_name }}
-          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
           DISPATCH_SHA: ${{ github.sha }}
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'dry-run' }}
+          DRY_RUN: ${{ inputs.mode == 'dry-run' }}
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          if [ "${EVENT}" = "workflow_dispatch" ] && [ "${DRY_RUN}" = "true" ]; then
+          RC=false
+          if [ "${DRY_RUN}" = "true" ]; then
             SHA="${DISPATCH_SHA}"
-          elif [ "${EVENT}" = "workflow_dispatch" ]; then
-            if ! [[ "${TAG}" =~ ^v2\.0\.0-alpha\.[0-9]+$ ]]; then
-              echo "::error::A real publish needs tag=v2.0.0-alpha.N, got '${TAG}'."
+          else
+            # A release candidate (v2.0.0-alpha.N.K-rc.M, named to sort
+            # below 2.0.0-alpha.N+1) is never on npm: its crates publish
+            # without waiting for jazz-tools there. Every other check holds.
+            if [[ "${TAG}" =~ ^v2\.0\.0-alpha\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
+              RC=true
+            elif ! [[ "${TAG}" =~ ^v2\.0\.0-alpha\.[0-9]+$ ]]; then
+              echo "::error::A real publish needs tag=v2.0.0-alpha.N (or v2.0.0-alpha.N.K-rc.M), got '${TAG}'."
               exit 1
             fi
             SHA=$(gh api "repos/${REPO}/commits/${TAG}" --jq .sha)
-          else
-            SHA="${RUN_SHA}"
           fi
           VERSION=$(gh api "repos/${REPO}/contents/packages/jazz-tools/package.json?ref=${SHA}" --jq .content | base64 -d | jq -r .version)
           # Only a release commit whose crates are versioned with npm publishes
@@ -92,8 +88,10 @@ jobs:
           # API error fails the run rather than skipping a release.
           CRATES=false
           if probe=$(gh api "repos/${REPO}/contents/dev/scripts/publish-crates.mjs?ref=${SHA}" --silent 2>&1); then
+            # awk reads to the end (no `exit`): closing the pipe early fails
+            # base64 with EPIPE under pipefail.
             CRATE_VERSION=$(gh api "repos/${REPO}/contents/Cargo.toml?ref=${SHA}" --jq .content | base64 -d \
-              | awk '/^\[workspace\.package\]/{p=1; next} /^\[/{p=0} p && /^version *=/{gsub(/[" ]/, "", $0); sub(/^version=/, "", $0); print; exit}')
+              | awk '/^\[workspace\.package\]/{p=1; next} /^\[/{p=0} p && !found && /^version *=/{gsub(/[" ]/, "", $0); sub(/^version=/, "", $0); print; found=1}')
             if [ "${CRATE_VERSION}" != "${VERSION}" ]; then
               echo "::error::The crates at ${SHA} are '${CRATE_VERSION}', not jazz-tools' ${VERSION}. Run dev/scripts/sync-crate-versions.mjs on the release branch."
               exit 1
@@ -112,6 +110,10 @@ jobs:
             # registry can lag the npm job by minutes, so wait for it.
             listed=false
             for _ in $(seq 1 30); do
+              if [ "${RC}" = "true" ]; then
+                listed=true
+                break
+              fi
               if curl -sfo /dev/null --max-time 20 "https://registry.npmjs.org/jazz-tools/${VERSION}"; then
                 listed=true
                 break

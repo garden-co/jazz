@@ -59,7 +59,7 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-25`: A resumed subscription MUST leave the replica with the same rows as a fresh subscription to the same query.
 - `INV-SYNC-27`: Per-session delivery state MUST live only in the serving process and be released on disconnect.
 - `INV-SYNC-28`: Results MUST travel as rows and be assembled into result trees by the receiver.
-- `INV-SYNC-30`: A replica MUST treat a subscription as settled only when its connected upstream has confirmed that subscription with its own `Settled`; a node with no upstream settles locally.
+- `INV-SYNC-30`: A replica MUST treat a subscription as settled only once an upstream has confirmed that subscription with its own `Settled`, and reports the last such confirmation, at its tier, until another replaces it (through an outage too); what waits for the server (a first load, a `Remote` opening, a relay settling its own sessions' reads) waits for the current connection's `Settled`. A node with no upstream settles locally.
 - `INV-SYNC-44`: The read protocol MUST be rows plus settlement.
 - `INV-SYNC-45`: Rows MUST be shipped raw, by the authority's stored table and column names, whatever schema version the subscriber declared; a replica mirrors its upstream's catalogue and applies the lenses locally.
 - `INV-SYNC-46`: A replica missing the chunks of a large value MUST request them and install the row only once its chunks are present; a writer pushes a value's new chunks before the commit that uses them.
@@ -209,6 +209,17 @@ as its first WebSocket message (text, or binary with the same bytes). The
 server then requires one binary message that decodes to exactly one
 `WireFrame::Hello`. The prelude and that Hello each have the two-second
 handshake read deadline. Only the first message is a prelude.
+
+A client may send more binary messages right behind its `Hello`, without
+waiting for the server's. The server reads none of them until it has
+admitted the connection and sent its own `Hello`. Then it reads them in the
+order sent, as on any open connection. A connection refused before the
+server's `Hello` (a `WireFrame::Error`, then close) never reads them, so
+nothing sent ahead takes effect, and the client sends it again on its next
+connection. The prelude and the `Hello` stay messages of their own, and the
+`Hello`'s message holds the `Hello` alone. The `createJazz` relay and the
+HTTP stream transport keep this order: they pass a session's messages on one
+at a time, behind the prelude's admission.
 
 The prelude object has these server-owned fields:
 
@@ -415,6 +426,14 @@ not hold them either way).
 `Read { id, query, binding, include_deleted, tier, wait, view, span }` asks
 for one query's result:
 
+- `query` may hold text prefix/suffix predicates (`StartsWith`/`EndsWith`,
+  in `Predicate` tags 13/14 and `RelationPredicate` tags 11/12; bytewise on
+  UTF-8, NULL never matches). An older server cannot decode them and drops
+  the link, so a client sends such a read, or a serializable commit whose
+  reads hold one, only over a link that negotiated
+  `FEATURE_TEXT_AFFIX_PREDICATES` (`1 << 13`). On any other link it refuses
+  the read (`Refused`, "not supported yet by this server") or the commit (a
+  rejected fate) itself, without sending it.
 - `view` is the read view the result is of: the current state, a branch view
   (head over an optional live or frozen base), or a snapshot. It is part of
   the read's identity (`INV-BVIEW-12`): the server keeps a live read in its
@@ -496,7 +515,12 @@ opening, never before it; later ones carry only changes, after the tick's
 `Rows` and `AccessLost` and before its `Settled`. The replica keeps each live
 read's set in memory and across reconnects, replacing it with the read's
 first `Holds` on the new connection; neither side stores it. A row a
-replacing `Holds` drops stays cached until a later `members` leaves it out.
+replacing `Holds` drops that no live read holds, and that no `members` listing
+evicted, is no longer kept current for the reader: the replica asks for it
+again with `ResendWhole`, and the server ships it whole if the reader may still
+read it, else its `AccessLost`. So support the reader lost while the replica
+was away (a deleted membership row, say) leaves with the read that rested on
+it (`INV-SYNC-14`).
 `global` says the answer is the global authority's (directly, or through
 relays that settle by their upstream), not a relay's own store.
 
@@ -541,9 +565,14 @@ for each row, its newest version at or before the lowest position a live read
 or `known` reads at; a table that keeps less (latest-only) cannot be read
 through a cut.
 
-A replica treats a read as settled only once its connected upstream confirmed
-it with `Settled`; while the upstream is unanswered, offline or failing the
-read stays unsettled, and a node with no upstream settles locally
+A replica treats a read as settled only once an upstream confirmed it with
+`Settled`, and a subscription keeps reporting the last confirmation, at its
+tier, while the link is down: a client tells a current result as one that is
+settled while its link is up. Each connection starts every read over (its
+answer, refusal and first `Holds` are that connection's alone, a transport
+swapped in without a detach included), so what waits for the server (a first
+load, a `Remote` opening, a relay's settles to its own sessions) waits for the
+current connection's `Settled`. A node with no upstream settles locally
 (`INV-SYNC-30`). A `Remote` read never reports rows the answer no longer lists
 (`INV-SYNC-48`); `LocalFirst` and `LocalOnly` reads keep them.
 
@@ -1058,7 +1087,12 @@ those bytes are refused with it at once until the fetch backoff ends.
   declare it. Every later request is resolved against that admitted version,
   governed by the current schema's policies, as a sync session's declared
   version is (§8.9). A version the store has not admitted is refused with
-  `SchemaNotDeployed`; nothing else is served before a version.
+  `SchemaNotDeployed`; nothing else is served before a version. The server
+  runs a session's requests in order, so a client may send its schema and
+  first requests together, right behind its `Hello` (§8.1.2), and each
+  resolves against the schema declared before it. The TypeScript thin client
+  sends its schema and live queries this way, and other requests once the
+  schema is bound.
 - Request options are the JSON the native bindings take for the same call:
   read options (`tier`, `include_deleted`, `read_view` with branch head and
   frozen base, ...) on `Query` and `Subscribe`, and write options (`rowId`,
@@ -1129,11 +1163,59 @@ those bytes are refused with it at once until the fetch backoff ends.
   unknown.
 - `Begin` opens a mergeable or serializable transaction under a
   client-chosen open-transaction id, owned by that session. A write naming it
-  is staged and answered `Staged`; a refusal while staging is kept and
-  reported by `Commit`, as the bindings report it. A `Query` naming it reads
-  the transaction's own staged writes. `Commit` answers `Written` with the
-  commit's seq; `Rollback` abandons it. A connection that closes abandons its
-  open transactions.
+  is staged and answered `Staged`; a refusal decided by the row's state, or a
+  serializable conflict, is kept and reported by `Commit`, as the bindings
+  report it. A `Query` naming it reads the transaction's own staged writes.
+  `Commit` answers `Written` with the commit's seq; `Rollback` abandons it. A
+  connection that closes abandons its open transactions.
+- The app's backend (`createJazz`, the Rust endpoint) serves a thin
+  connection's transaction requests itself, so the core never holds a
+  transaction open between calls: `Begin`, `Commit`, `Rollback`, every
+  request naming an open transaction, and the chunks, finish and abort of a
+  stream begun in one. It splits the connection's frames
+  (`jazz::thin_transactions::ThinRouter`) and passes the rest to the core
+  unchanged, keeping the client's order: a request for the backend waits
+  until the core answered every earlier one it answers (a live query and
+  its closing excepted), and frames for the core wait until the backend
+  answered every earlier request for it. The transaction requests are
+  served (`ThinTransactions`) by a client of the session's own, in memory,
+  started on its first transaction request and ended with the connection,
+  linked to the core with the admission the backend gave the connection
+  (the same vouched session, a device account's own token, or, for a
+  trusted backend client, the backend's link) and acting with its identity.
+  So the core reads and checks for it exactly as for the session, and only
+  accepts the finished transaction, as an upload (§8.2):
+  - A mergeable transaction's read fetches from the core first, then reads
+    in the transaction, so it sees the core's current rows with the
+    transaction's staged writes; a serializable one's read hydrates at the
+    transaction's snapshot, as on any replica.
+  - A write to an existing row loads the row from the core first. A staged
+    write the backend refuses outright (invalid values, a row that does not
+    exist) is answered with its refusal, and the transaction's commit fails
+    with it.
+  - The core checks the transaction as a whole when it is committed, in the
+    state it leaves behind (SPEC 7): the order of its writes does not
+    matter.
+  - `Commit` answers once the core accepted the upload, or with the core's
+    refusal; a serializable refusal is answered `transaction_conflict`. A
+    commit the core does not confirm within 30 s is answered
+    `commit_outcome_unknown`: it may have applied. Any other request waiting
+    on the core that long is answered `not_observed`.
+  - A connection whose requests wait 60 s past the last answer for one that
+    does not come is closed (1011), and the client reconnects.
+  - A backend serves at most so many sessions' transactions at once (256 by
+    default); past that, a session's transaction requests are refused with
+    `backpressure`.
+  - The session's client opens on the schema version the connection bound
+    (`ThinOp::Schema`), which the core serves pinned to it, as for an older
+    replica (§8.9): a client built against an earlier version of the app
+    is served as before.
+
+  This holds for a thin connection through the app's backend. The core
+  still serves thin transactions itself for one that reaches it otherwise
+  (or through a backend from before this), staging each write in order,
+  until such connections are gone.
+
 - `CaptureSnapshot` answers `Snapshot` with the persisted snapshot reference
   of the authority's current frontier, for frozen branch bases.
 - `BeginStream` starts a large-value insert, update or upsert of one

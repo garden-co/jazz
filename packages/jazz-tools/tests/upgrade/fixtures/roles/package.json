@@ -1,0 +1,19 @@
+{
+  "name": "t3-permissions",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#app": "./schema.ts",
+    "#permissions": "./permissions.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1",
+    "hono": "^4",
+    "jazz-napi": "2.0.0-alpha.65",
+    "jazz-tools": "2.0.0-alpha.65",
+    "jazz-wasm": "2.0.0-alpha.65",
+    "tsx": "^4",
+    "typescript": "^5",
+    "ws": "^8"
+  }
+}

@@ -54,7 +54,15 @@ export type NativeForegroundModule = Pick<
  * commit/rollback.
  */
 export class NativeForegroundDb {
-  private closed = false;
+  /**
+   * Only moves forward: `open`, then `storeDeleted` (the relay closed this
+   * foreground with its store; the JSI handle is still held), then `closed`
+   * (the handle is released).
+   */
+  private phase: "open" | "storeDeleted" | "closed" = "open";
+  private get closed(): boolean {
+    return this.phase !== "open";
+  }
   private mutationErrorCallback: ((event: MutationErrorEvent) => void) | undefined;
   private authRejectedCallback: ((reason: string) => void) | undefined;
   /** The sequence of the refusal last reported, so each is reported once. */
@@ -219,9 +227,16 @@ export class NativeForegroundDb {
   }
 
   close(): boolean {
-    if (this.closed) return false;
-    this.closed = true;
+    if (this.phase === "closed") return false;
+    const storeDeleted = this.phase === "storeDeleted";
+    this.phase = "closed";
     this.transactions.clear();
+    if (storeDeleted) {
+      // The relay already closed this foreground with its store: only the
+      // JSI handle is left to release.
+      this.runtime.close();
+      return false;
+    }
     try {
       const response = this.executeAllowClosed("close");
       if (response.type !== "closed") return unexpected("close", response.type);
@@ -286,9 +301,10 @@ export class NativeForegroundDb {
    * had not confirmed it dropped.
    */
   deleteNativeStore(): { pendingUploads: number } {
+    if (this.closed) throw new Error("React Native native foreground runtime is closed");
     const response = this.execute({ type: "deleteStore" });
     if (response.type !== "storeDeleted") return unexpected("deleteStore", response.type);
-    this.closed = true;
+    this.phase = "storeDeleted";
     return { pendingUploads: response.pendingUploads };
   }
 

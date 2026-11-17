@@ -37,16 +37,13 @@ public enum DocsSnippets {
         // until your sign-in names a user, who takes the guest's account
         // over if they have none yet. Call `session.refresh()` when your
         // sign-in changes.
-        let session = try await JazzSession.open(
-            app: JazzApp.app, appId: appId, serverUrl: endpoint,
+        let session = JazzApp.session(
+            appId: appId, serverUrl: endpoint,
             bearer: { _ in try await MySignIn.currentToken() },  // nil while signed out
             start: .device, dataDir: dataDir)
-        for try await snapshot in session.snapshots where snapshot.status == .ready {
-            print("signed in as", snapshot.user?.account ?? "-")
-            break
-        }
-        // The client for the user signed in now. Get it again when
-        // `clientEpoch` changes: one kept from before throws `.replaced`.
+        // The signed-in user's client, once the session is ready (it throws
+        // .noUser if no one is). `session.clients` gives the next one each
+        // time the user changes, and nil on sign-out.
         let jazz = try await session.client()
         // #endregion context-setup-swift-session
         return (session, jazz)
@@ -64,8 +61,12 @@ public enum DocsSnippets {
         // Edits of a text-merge column (`"merge": "text"`) merge with others'
         // changes instead of replacing the whole value.
         let notes = try await jazz.text(task, JazzApp.tasks.notes)
-        try await notes.insert("Bring gaffer tape. ", at: 0) // UTF-16 offsets
-        try await notes.replace(0..<5, with: "Pack")
+        // Positions are String.Index of `notes.current`.
+        try await notes.insert("Bring gaffer tape. ", at: notes.current.startIndex)
+        if let bring = notes.current.range(of: "Bring") {
+            try await notes.replace(bring, with: "Pack")
+        }
+        // From a UITextView: `notes.replace(range, with: text)` takes its NSRange.
         // #endregion writing-mergeable-text-swift
         return notes.current
     }

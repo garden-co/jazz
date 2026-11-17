@@ -54,6 +54,10 @@ import {
   type ValueHandle as Value,
   type Rel,
   type ColumnHandle,
+  type Inherits,
+  type InheritsIn,
+  type NestedPolicy,
+  type PermissionError,
 } from "./types.js";
 
 // ============================================================================
@@ -161,7 +165,8 @@ function makeSession(): Session<AnyClaims> {
 // Policy helpers
 // ============================================================================
 
-type PolicyOf<A extends readonly unknown[]> = Policy<ConditionsIn<A[number]>>;
+type PolicyOf<A extends readonly unknown[]> = Policy<ConditionsIn<A[number]>> &
+  InheritsIn<A[number]>;
 
 /** Any of the policies holds. */
 export function anyOf<const A extends readonly PolicyInput[]>(...items: A): PolicyOf<A> {
@@ -171,10 +176,18 @@ export function anyOf<const A extends readonly PolicyInput[]>(...items: A): Poli
 export function allOf<const A extends readonly PolicyInput[]>(...items: A): PolicyOf<A> {
   return node({ k: "and", items }) as unknown as PolicyOf<A>;
 }
-/** The policy doesn't hold. */
-export function not<const A extends PolicyInput>(item: A): Policy<ConditionsIn<A>> {
+/** The policy doesn't hold. Not of `allowedTo`, which is not supported yet. */
+export function not<const A extends PolicyInput>(
+  item: A & NotOfInherits<A>,
+): Policy<ConditionsIn<A>> {
   return node({ k: "not", item }) as unknown as Policy<ConditionsIn<A>>;
 }
+
+/** A refusal for `not` of a policy that inherits with `allowedTo`, else `unknown`. */
+type NotOfInherits<A> =
+  InheritsIn<A> extends Inherits
+    ? PermissionError<"`not allowedTo…` is not supported yet: write the rule without negating inheritance">
+    : unknown;
 
 type Comparable = Value<any, any> | string | number | boolean | bigint | Date | Uint8Array | null;
 
@@ -291,11 +304,15 @@ export interface ExistsPolicy<S, T extends keyof S> extends Policy {
   ): ExistsPolicy<S, RelationTarget<S, T, R> & keyof S>;
 }
 
+/**
+ * What `exists.<t>(…)` takes: condition objects and policies, but no
+ * `allowedTo` (not supported inside an `exists` yet).
+ */
 type ExistsCondition<S, T extends keyof S> =
   | Conditions<S, T>
-  | Policy<Conditions<S, T>>
+  | NestedPolicy<Conditions<S, T>>
   | boolean
-  | ((row: Row<S, T>) => Conditions<S, T> | Policy<any> | boolean);
+  | ((row: Row<S, T>) => Conditions<S, T> | NestedPolicy | boolean);
 
 /** `exists.<table>(conditions…)`: some row of the table meets them; `exists(query)` for any relation. */
 export type Exists<S> = {
@@ -340,13 +357,21 @@ function makeExists<S>(tables: readonly string[]): Exists<S> {
 
 /** What `allowedTo.<op>` inherits through: a relation, a reference column of the row, or `schema.tables.t.col`. */
 export type AllowedTarget = Rel<any> | ColumnHandle<string, "uuid" | "array", string>;
+/**
+ * `allowedTo.<op>(target)`: the rows `target` leads to allow `op`. A rule
+ * takes it (alone or in `anyOf` / `allOf`); an `exists` and `not` don't yet:
+ * repeat the other table's rule there instead.
+ */
 export interface AllowedTo {
   /** The rows `target` leads to may be read. */
-  read(target: AllowedTarget, options?: { maxDepth?: number }): Policy;
-  insert(target: AllowedTarget, options?: { maxDepth?: number }): Policy;
-  update(target: AllowedTarget, options?: { maxDepth?: number }): Policy;
-  delete(target: AllowedTarget, options?: { maxDepth?: number }): Policy;
+  read(target: AllowedTarget, options?: { maxDepth?: number }): AllowedPolicy;
+  insert(target: AllowedTarget, options?: { maxDepth?: number }): AllowedPolicy;
+  update(target: AllowedTarget, options?: { maxDepth?: number }): AllowedPolicy;
+  delete(target: AllowedTarget, options?: { maxDepth?: number }): AllowedPolicy;
 }
+
+/** What `allowedTo.<op>(…)` gives: a policy for a rule, not for inside an `exists`. */
+export type AllowedPolicy = Policy & Inherits;
 
 function makeAllowedTo(): AllowedTo {
   const make =
@@ -357,11 +382,13 @@ function makeAllowedTo(): AllowedTo {
         throw new PermissionsDslError(
           `allowedTo.${operation}(…) takes a relation (row.chat), a reference column (row.chatId) or schema.tables.<t>.<column>`,
         );
+      const at = userFrame(new Error());
       return node({
         k: "allowed",
         op: operation,
         target: data,
         ...(options?.maxDepth === undefined ? {} : { maxDepth: options.maxDepth }),
+        ...(at === undefined ? {} : { at }),
       });
     };
   return Object.freeze({
@@ -436,7 +463,8 @@ export function compilePermissions(
   const fault = (path: string, error: unknown): never => {
     if (error instanceof PermissionsError) throw error;
     const reason = error instanceof Error ? error.message : String(error);
-    throw new PermissionsError(path, reason, userFrame(error) ?? callSite);
+    const at = error instanceof PermissionsDslError ? error.location : undefined;
+    throw new PermissionsError(path, reason, at ?? userFrame(error) ?? callSite);
   };
   if (!rules || typeof rules !== "object" || Array.isArray(rules))
     fault(

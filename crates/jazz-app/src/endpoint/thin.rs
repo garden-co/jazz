@@ -24,8 +24,9 @@ pub(crate) use jazz::thin_transactions::{ThinRouter, answer_frames};
 pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a thin socket's requests may wait on an answer, from the core
-/// or the backend, before the socket is closed: past the backend's own
-/// [`REQUEST_TIMEOUT`], an answer is lost, and the client reconnects.
+/// or the backend, since the last one came, before the socket is closed:
+/// past the backend's own [`REQUEST_TIMEOUT`], an answer is lost, and the
+/// client reconnects.
 pub(crate) const ANSWER_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Who the session's client connects to the core as: what the socket's
