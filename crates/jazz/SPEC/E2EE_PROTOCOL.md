@@ -2497,7 +2497,7 @@ small record per held version that refers to it by depth:
 lineage record:
 { format: "jazz-e2ee-held-lineage-v1",
   binding: { application: Dₐ(self), device: deviceId, keys: <device hash> },
-  scopeTable, root: <space root row, bytes as arrays>,
+  root: <space root row, bytes as arrays>,
   successors: [ <space successor row>, … ],
   signature: [..] }
 
@@ -2505,22 +2505,33 @@ held-key record (one per epoch):
 { format: "jazz-e2ee-held-key-v3",
   binding: { application: Dₐ(self), device: deviceId, keys: <device hash> },
   rootId, epochId, depth: "<decimal>",
-  prefix: sha256hex(canonical([root, successors[0 .. depth]])),
+  prefix: <lineage prefix hash>,
   unpublished?: { transaction: "<durable transaction identity>" },
   refused?: true,
   envelope: [..], signature: [..] }
 ```
 
-`<device hash>` is `sha256hex(canonical([publicKey, signingPublicKey,
-envelopeMechanism, signingMechanism]))`. `root` is the original space root
-(its own row ID, address and creator domain); `successors` are the accepted
-successor rows from the root's epoch onward in chain order, as far as the
-deepest held epoch, appended as deeper keys are kept. A held-key record names
-its exact `epochId`, its `depth` (§5.2) and the hash of the lineage prefix up
-to it. `canonical` sorts object keys by code unit, drops undefined, and
+`canonical` sorts object keys by code unit, drops undefined, and
 encodes bytes as arrays and big integers as decimal strings; `B(f, x) =
-UTF8(json(canonical([f, x])))` with `f` the record's format. The lineage
-record is signed by the device over `B(format, record without signature)`.
+UTF8(json(canonical([f, x])))` with `f` the record's format. `sha256hex` is
+the lowercase hex of SHA-256. `<device hash>` is
+`sha256hex(B("jazz-e2ee-held-device-v1", [publicKey, signingPublicKey,
+envelopeMechanism, signingMechanism]))`, the two public keys as their raw
+bytes (as in the device document) and each mechanism written as the object
+`{ "id": <mechanism id>, "version": <version> }`. `root` is the space root
+row and each of `successors` a space successor row, each a JSON object whose
+fields are the row's columns as named in §1.3 plus `id` for its row ID,
+`version` a number; the creator's domain is derived from `creatorAccountId`
+as elsewhere. `successors` are the accepted successor rows from the root's
+epoch onward in chain order, as far as the deepest held epoch, appended as
+deeper keys are kept. A held-key record names its exact `epochId`, its
+`depth` (§5.2) and the hash of the lineage prefix up to it,
+`<lineage prefix hash>` = `sha256hex(B("jazz-e2ee-held-prefix-v1", [root,
+[s₁, …, s_depth]]))`, where the list holds exactly the first `depth`
+successors in chain order (at depth 0, the root and an empty list). `signature`, `envelope` and every bytes
+column of a stored row are complete common envelopes (§0), stored as byte
+arrays. The lineage record is signed by the device over `B(format, record
+without signature)`.
 A key is sealed to the device: `envelope = seal(device.pub, B(format, body),
 K)` with `body` the record without envelope and signature; then `signature =
 sign(device.signingKey, B(format, body + envelope))`. Storage grows linearly
@@ -2548,9 +2559,9 @@ record of the same device, root and epoch. `unpublished` is present only for
 a space creation not yet accepted (§5.4), carries the creation's durable
 transaction identity for reconciliation after a restart, and is removed by
 rewriting the record. `refused` marks the key of a refused or lost creation
-(§3.2, §5.4): it is never chosen for a write (§5.2) and is kept only until
-the device's rows under it are repaired. The lineage records also give the runtime its
-epoch-to-space lookup ([migrations](E2EE_MIGRATIONS.md) §3.9).
+(§3.2, §5.4): it is kept for good, is never chosen for a write (§5.2), and
+still opens the cells this device wrote under it. The lineage records also
+give the runtime its epoch-to-space lookup ([migrations](E2EE_MIGRATIONS.md) §3.9).
 
 ### 6.3 Binding
 
