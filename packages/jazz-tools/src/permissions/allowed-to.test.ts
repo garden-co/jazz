@@ -38,7 +38,7 @@ describe("allowedTo inside exists", () => {
         ),
       (p: any) =>
         exists.members({ accountId: p.accountId }, ((m: any) =>
-          anyOf({ accountId: session.user }, not(allowedTo.read(m.group)))) as never),
+          anyOf({ accountId: session.user }, not(allowedTo.read(m.group) as never))) as never),
     ];
     for (const rule of rules) {
       let error: Error | undefined;
@@ -93,6 +93,68 @@ describe("allowedTo inside exists", () => {
       profiles: {
         read: "exists members(accountId = this.accountId, accountId = session.user)",
       },
+    });
+  });
+});
+
+describe("not allowedTo", () => {
+  const notRefusal = (op: string, rule: string) =>
+    `jazz.permissions.json: tables.${rule}: \`not allowedTo.${op}(…)\` is not supported yet: ` +
+    "write the rule without negating inheritance (`not` works on this row's columns and session values)";
+  const firstLine = (build: () => unknown) => {
+    try {
+      build();
+    } catch (e) {
+      return (e as Error).message.split("\n")[0];
+    }
+    return undefined;
+  };
+
+  it("is refused at any depth, naming the rule", () => {
+    const negated = (m: any) => not(allowedTo.read(m.group) as never);
+    const rules = [
+      negated,
+      (m: any) => anyOf({ accountId: session.user }, negated(m)),
+      (m: any) => not(anyOf({ accountId: session.user }, allowedTo.read(m.group)) as never),
+      (m: any) => not(not(allowedTo.read(m.group) as never) as never),
+    ];
+    for (const rule of rules)
+      expect(
+        firstLine(() =>
+          definePermissions({
+            groups: { read: true },
+            members: { read: rule as never },
+            profiles: {},
+          }),
+        ),
+      ).toBe(notRefusal("read", "members.read"));
+  });
+
+  it("is refused in updates, both forms", () => {
+    const build = (rules: Record<string, unknown>) => () =>
+      definePermissions({ groups: { update: true }, members: rules as never, profiles: {} });
+    expect(firstLine(build({ update: (m: any) => not(allowedTo.update(m.group) as never) }))).toBe(
+      notRefusal("update", "members.update"),
+    );
+    expect(
+      firstLine(
+        build({
+          updateIf: true,
+          updateTo: (m: any) =>
+            anyOf({ accountId: session.user }, not(allowedTo.update(m.group) as never)),
+        }),
+      ),
+    ).toBe(notRefusal("update", "members.updateTo"));
+  });
+
+  it("leaves `not` of the row's own columns alone", () => {
+    const permissions = definePermissions({
+      groups: {},
+      members: { read: (m) => anyOf(not({ accountId: session.user }), allowedTo.read(m.group)) },
+      profiles: {},
+    });
+    expect(readablePermissions(permissions)!.tables.members).toEqual({
+      read: { anyOf: ["not accountId = session.user", "allowedTo.read(group)"] },
     });
   });
 });

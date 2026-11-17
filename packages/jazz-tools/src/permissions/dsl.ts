@@ -57,6 +57,7 @@ import {
   type Inherits,
   type InheritsIn,
   type NestedPolicy,
+  type PermissionError,
 } from "./types.js";
 
 // ============================================================================
@@ -175,10 +176,18 @@ export function anyOf<const A extends readonly PolicyInput[]>(...items: A): Poli
 export function allOf<const A extends readonly PolicyInput[]>(...items: A): PolicyOf<A> {
   return node({ k: "and", items }) as unknown as PolicyOf<A>;
 }
-/** The policy doesn't hold. */
-export function not<const A extends PolicyInput>(item: A): Policy<ConditionsIn<A>> & InheritsIn<A> {
-  return node({ k: "not", item }) as unknown as Policy<ConditionsIn<A>> & InheritsIn<A>;
+/** The policy doesn't hold. Not of `allowedTo`, which is not supported yet. */
+export function not<const A extends PolicyInput>(
+  item: A & NotOfInherits<A>,
+): Policy<ConditionsIn<A>> {
+  return node({ k: "not", item }) as unknown as Policy<ConditionsIn<A>>;
 }
+
+/** A refusal for `not` of a policy that inherits with `allowedTo`, else `unknown`. */
+type NotOfInherits<A> =
+  InheritsIn<A> extends Inherits
+    ? PermissionError<"`not allowedTo…` is not supported yet: write the rule without negating inheritance">
+    : unknown;
 
 type Comparable = Value<any, any> | string | number | boolean | bigint | Date | Uint8Array | null;
 
@@ -350,7 +359,7 @@ function makeExists<S>(tables: readonly string[]): Exists<S> {
 export type AllowedTarget = Rel<any> | ColumnHandle<string, "uuid" | "array", string>;
 /**
  * `allowedTo.<op>(target)`: the rows `target` leads to allow `op`. A rule
- * takes it (alone or in `anyOf` / `allOf` / `not`); an `exists` doesn't yet:
+ * takes it (alone or in `anyOf` / `allOf`); an `exists` and `not` don't yet:
  * repeat the other table's rule there instead.
  */
 export interface AllowedTo {

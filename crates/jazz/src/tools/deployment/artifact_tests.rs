@@ -2703,6 +2703,73 @@ fn allowed_to_inside_exists_is_refused_by_the_reader() {
     read_policy("shares", "allowedTo.read(todoRow)").unwrap();
 }
 
+/// `not allowedTo…` (directly or through `anyOf` / `allOf` / `not`) is
+/// refused where the file is read, naming the rule and pointing at the
+/// `allowedTo`: the engine checks inheritance only as a grant.
+#[test]
+fn negated_allowed_to_is_refused_by_the_reader() {
+    let message = "`not allowedTo.read(…)` is not supported yet: write the rule without \
+                   negating inheritance (`not` works on this row's columns and session values)";
+    for source in [
+        "not allowedTo.read(todoRow)",
+        "anyOf(user = session.user, not allowedTo.read(todoRow))",
+        "not anyOf(user = session.user, allOf(user != null, allowedTo.read(todoRow)))",
+        "not not allowedTo.read(via todo)",
+    ] {
+        let error = read_policy("shares", source).expect_err(source);
+        assert!(
+            error.starts_with("jazz.permissions.json: tables.shares.read: "),
+            "{source}:\n{error}"
+        );
+        assert!(error.contains(message), "{source}:\n{error}");
+        let lines: Vec<&str> = error.lines().collect();
+        let at = lines.iter().position(|l| l.trim() == source).unwrap();
+        let caret = lines[at + 1];
+        let start = lines[at].find("allowedTo").unwrap();
+        assert_eq!(caret.find('^'), Some(start), "{error}");
+        assert_eq!(
+            caret.trim().len(),
+            lines[at][start..].find(')').unwrap() + 1,
+            "{error}"
+        );
+    }
+    // An update, both forms.
+    let written = write(shared_todos()).unwrap();
+    for (update, rule) in [
+        (
+            serde_json::json!("not allowedTo.update(todoRow)"),
+            "tables.shares.update",
+        ),
+        (
+            serde_json::json!({ "old": "true", "new": "anyOf(user = session.user, not allowedTo.update(todoRow))" }),
+            "tables.shares.update.new",
+        ),
+    ] {
+        let file = serde_json::json!({
+            "format": 1,
+            "tables": { "shares": { "update": update }, "todos": { "update": "true" } },
+        });
+        let error = load(written.app.as_bytes(), file.to_string().as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with(&format!("jazz.permissions.json: {rule}: ")),
+            "{error}"
+        );
+        assert!(
+            error.contains("`not allowedTo.update(…)` is not supported yet"),
+            "{error}"
+        );
+    }
+    // `not` on the row's own columns and session values still compiles.
+    read_policy("shares", "not user = session.user").unwrap();
+    read_policy(
+        "shares",
+        "anyOf(not user = session.user, allowedTo.read(todoRow))",
+    )
+    .unwrap();
+}
+
 /// A policy the engine refuses when the schema compiles is named by the
 /// rule it is in (table and operation, as the file names them), not by the
 /// table an `exists` in it reads.

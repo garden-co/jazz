@@ -4672,6 +4672,114 @@ mod tests {
         assert!(error.message.contains("got session.sub"));
     }
 
+    // Internal because what it pins is the error's path and rule, which the
+    // loader turns into `jazz.permissions.json: tables.<t>.<op>`: a
+    // condition refused inside an `exists` (or a reverse inheritance's
+    // source policy) is the rule's, not the other table's.
+    #[test]
+    fn a_refusal_inside_another_tables_condition_names_the_rule() {
+        let level_above_3 = PolicyExpr::SessionCmp {
+            path: vec!["claims".to_owned(), "level".to_owned()],
+            op: CmpOp::Gt,
+            value: Value::Integer(3),
+        };
+        let schema = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("chats").column("name", ColumnType::Text))
+            .table(
+                TableSchemaBuilder::new("chatMembers")
+                    .fk_column("chatId", "chats")
+                    .column("userId", ColumnType::Text),
+            )
+            .table(
+                TableSchemaBuilder::new("messages")
+                    .fk_column("chatId", "chats")
+                    .policies(TablePolicies::new().with_insert(PolicyExpr::Exists {
+                        table: "chatMembers".to_owned(),
+                        condition: Box::new(PolicyExpr::And(vec![
+                            PolicyExpr::Cmp {
+                                column: "chatId".to_owned(),
+                                op: CmpOp::Eq,
+                                value: PolicyValue::SessionRef(vec![
+                                    "__jazz_outer_row".to_owned(),
+                                    "chatId".to_owned(),
+                                ]),
+                            },
+                            level_above_3.clone(),
+                        ])),
+                    })),
+            )
+            .build();
+        let error = convert_public_schema(&schema).expect_err("SessionCmp Gt is refused");
+        assert_eq!(
+            error.path,
+            "$.messages.policies.insert.with_check.Exists[1]"
+        );
+        assert_eq!(error.rule(), Some(("messages", "insert.with_check")));
+
+        // A reverse inheritance's source policy, refused while `documents`
+        // (sorted before `zshares`, so converted first) reads it.
+        let schema =
+            SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("documents").policies(
+                    TablePolicies::new().with_select(PolicyExpr::InheritsReferencing {
+                        operation: Operation::Select,
+                        source_table: "zshares".to_owned(),
+                        via_column: "documentId".to_owned(),
+                        max_depth: None,
+                    }),
+                ))
+                .table(
+                    TableSchemaBuilder::new("zshares")
+                        .fk_column("documentId", "documents")
+                        .policies(TablePolicies::new().with_select(level_above_3)),
+                )
+                .build();
+        let error = convert_public_schema(&schema).expect_err("SessionCmp Gt is refused");
+        assert_eq!(
+            error.path,
+            "$.documents.policies.select.using.InheritsReferencing[zshares]"
+        );
+        assert_eq!(error.rule(), Some(("documents", "select.using")));
+
+        // A forward inheritance inside that source policy, expanded there:
+        // the path is under the policy being expanded (`zshares`'), not the
+        // parent's (`zzfolders`), and the rule is still `documents.read`.
+        let schema =
+            SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("documents").policies(
+                    TablePolicies::new().with_select(PolicyExpr::InheritsReferencing {
+                        operation: Operation::Select,
+                        source_table: "zshares".to_owned(),
+                        via_column: "documentId".to_owned(),
+                        max_depth: None,
+                    }),
+                ))
+                .table(
+                    TableSchemaBuilder::new("zshares")
+                        .fk_column("documentId", "documents")
+                        .fk_column("folderId", "zzfolders")
+                        .policies(TablePolicies::new().with_select(PolicyExpr::Inherits {
+                            operation: Operation::Select,
+                            via_column: "folderId".to_owned(),
+                            max_depth: None,
+                        })),
+                )
+                .table(TableSchemaBuilder::new("zzfolders").policies(
+                    TablePolicies::new().with_select(PolicyExpr::SessionCmp {
+                        path: vec!["claims".to_owned(), "level".to_owned()],
+                        op: CmpOp::Gt,
+                        value: Value::Integer(3),
+                    }),
+                ))
+                .build();
+        let error = convert_public_schema(&schema).expect_err("SessionCmp Gt is refused");
+        assert_eq!(
+            error.path,
+            "$.zshares.policies.select.using.InheritsReferencing[zshares].Inherits[zzfolders]"
+        );
+        assert_eq!(error.rule(), Some(("documents", "select.using")));
+    }
+
     #[test]
     fn relation_session_references_obey_the_public_policy_contract() {
         let table = TableName::new("todos");

@@ -1195,7 +1195,10 @@ n | fixpoint)` is `Gather`. In a predicate, a column is `scope.col` or
   refuses it there ("`allowedTo.op(…)` inside `exists` is not supported
   yet"), naming the rule and pointing at the `allowedTo`; the TS DSL's
   types and builder refuse it too. Repeat the other table's rule inside
-  the `exists` instead.
+  the `exists` instead. Nor is `allowedTo` supported under `not` (through
+  `anyOf` / `allOf` / `not`), since the engine checks inheritance only as
+  a grant: the reader refuses it with "`not allowedTo.op(…)` is not
+  supported yet", the same way.
 - `anyOf(…)` and `allOf(…)` inside an expression are `Or`/`And` of any
   number of items; the writer uses them only for fewer than two.
 - Nesting deeper than 64 levels is refused.

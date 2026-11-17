@@ -538,10 +538,12 @@ TypeScript only offers relations of the rule's table, and `jazz-tools generate` 
 direction and target.
 
 `allowedTo` can't be used inside an `exists` yet (in its conditions, a `.hop`, a relation's
-`.where` or a relation query): it is only a rule's own check, alone or in `anyOf`, `allOf` and
-`not`. TypeScript rejects it there, and `jazz-tools generate` refuses a file that has it, with
-"`allowedTo.read(…)` inside `exists` is not supported yet". Repeat the other table's rule inside
-the `exists` instead, sharing it as a helper:
+`.where` or a relation query), nor under `not`: it is only a rule's own check, alone or in `anyOf`
+and `allOf`. TypeScript rejects it in both places, and `jazz-tools generate` refuses a file that
+has it, with "`allowedTo.read(…)` inside `exists` is not supported yet" or "`not allowedTo.read(…)`
+is not supported yet". Write a rule that would negate inheritance without it (`not` works on the
+row's own columns and session values). Inside an `exists`, repeat the other table's rule instead,
+sharing it as a helper:
 
 ```ts title="schema.ts"
 // Who may read a project, shared by the rules that need it.

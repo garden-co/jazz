@@ -127,6 +127,36 @@ function fail(message: string, location?: string): never {
   throw new PermissionsDslError(message, location);
 }
 
+/** The first `allowedTo` under a `not`, through `anyOf` / `allOf` / `not`. */
+function negatedAllowed(input: unknown): (NodeData & { k: "allowed" }) | undefined {
+  if (!isNode(input)) return undefined;
+  const data = input[NODE];
+  switch (data.k) {
+    case "allowed":
+      return data;
+    case "and":
+    case "or":
+      for (const item of data.items) {
+        const found = negatedAllowed(item);
+        if (found) return found;
+      }
+      return undefined;
+    case "not":
+      return negatedAllowed(data.item);
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Why `not allowedTo…` is refused: the engine checks inheritance only as a
+ * grant, never negated (and negating the other table's rule would take
+ * `not exists`, which it refuses too). The loader says the same.
+ */
+export function notAllowed(op: string): string {
+  return `\`not allowedTo.${op}(…)\` is not supported yet: write the rule without negating inheritance (\`not\` works on this row's columns and session values)`;
+}
+
 /**
  * Why `allowedTo` inside an `exists` is refused: the engine checks
  * inheritance only on the row a rule is for, not on rows an `exists`
@@ -559,8 +589,12 @@ export function text(input: unknown, ctx: Ctx): string {
       const items = data.items.map((item) => text(item, ctx));
       return `${data.k === "and" ? "allOf" : "anyOf"}(${items.join(", ")})`;
     }
-    case "not":
+    case "not": {
+      // Inside an `exists` (or a relation), its own refusal names the problem.
+      const negated = ctx.depth === 0 && !ctx.relation ? negatedAllowed(data.item) : undefined;
+      if (negated) fail(notAllowed(negated.op), negated.at);
       return `not ${text(data.item, ctx)}`;
+    }
     case "exists":
       return existsText(data, ctx);
     case "relWhere":

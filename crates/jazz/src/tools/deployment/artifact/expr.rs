@@ -1924,9 +1924,15 @@ fn compile_in(ast: &Ast, context: &Context<'_>, scope: &Scope) -> Result<PolicyE
         Ast::Bool(false) => Ok(PolicyExpr::False),
         Ast::Or(items) => Ok(PolicyExpr::Or(compile_all(items, context, scope)?)),
         Ast::And(items) => Ok(PolicyExpr::And(compile_all(items, context, scope)?)),
-        Ast::Not(inner) => Ok(PolicyExpr::Not(Box::new(compile_in(
-            inner, context, scope,
-        )?))),
+        Ast::Not(inner) => {
+            // Inside an `exists`, its own refusal names the problem.
+            if let Some((op, span)) = negated_allowed(inner).filter(|_| scope.depth() == 0) {
+                return Err(ExprError::new(span, not_allowed(op)));
+            }
+            Ok(PolicyExpr::Not(Box::new(compile_in(
+                inner, context, scope,
+            )?)))
+        }
         Ast::Cmp {
             left,
             op,
@@ -2038,16 +2044,42 @@ fn compile_in(ast: &Ast, context: &Context<'_>, scope: &Scope) -> Result<PolicyE
     }
 }
 
-/// Why `allowedTo` inside an `exists` is refused: the engine checks
-/// inheritance only on the row a rule is for, not on rows an `exists`
-/// reaches, so it would refuse the policy when the schema compiles.
-pub fn allowed_in_exists(op: Operation) -> String {
-    let op = match op {
+/// The first `allowedTo` under a `not`, through `anyOf` / `allOf` / `not`
+/// (an `exists` refuses its own), with its operation and span.
+fn negated_allowed(ast: &Ast) -> Option<(Operation, Span)> {
+    match ast {
+        Ast::Allowed { op, span, .. } => Some((*op, *span)),
+        Ast::Or(items) | Ast::And(items) => items.iter().find_map(negated_allowed),
+        Ast::Not(inner) => negated_allowed(inner),
+        _ => None,
+    }
+}
+
+/// Why `not allowedTo…` is refused: the engine checks inheritance only as
+/// a grant, never negated. (Negating the other table's rule would take
+/// `not exists`, which the engine refuses too.)
+pub fn not_allowed(op: Operation) -> String {
+    let op = operation_name(op);
+    format!(
+        "`not allowedTo.{op}(…)` is not supported yet: write the rule without negating \
+         inheritance (`not` works on this row's columns and session values)"
+    )
+}
+
+fn operation_name(op: Operation) -> &'static str {
+    match op {
         Operation::Select => "read",
         Operation::Insert => "insert",
         Operation::Update => "update",
         Operation::Delete => "delete",
-    };
+    }
+}
+
+/// Why `allowedTo` inside an `exists` is refused: the engine checks
+/// inheritance only on the row a rule is for, not on rows an `exists`
+/// reaches, so it would refuse the policy when the schema compiles.
+pub fn allowed_in_exists(op: Operation) -> String {
+    let op = operation_name(op);
     format!(
         "`allowedTo.{op}(…)` inside `exists` is not supported yet: repeat the other table's \
          {op} rule there instead (e.g. share it as a helper function)"

@@ -106,9 +106,10 @@ export interface Policy<X = never> {
 }
 
 /**
- * What `allowedTo.<op>(…)` gives, and `anyOf` / `allOf` / `not` of it: a
- * policy a rule takes, but not one inside an `exists` (its conditions, a
- * hop's, a relation's `.where`), where inheritance is not supported yet.
+ * What `allowedTo.<op>(…)` gives, and `anyOf` / `allOf` of it: a policy a
+ * rule takes, but neither one inside an `exists` (its conditions, a hop's,
+ * a relation's `.where`) nor one under `not`, where inheritance is not
+ * supported yet.
  */
 export interface Inherits {
   readonly [inheritsBrand]: true;
@@ -117,8 +118,15 @@ export interface Inherits {
 /** A policy an `exists` takes in its conditions: any but one inheriting with `allowedTo`. */
 export type NestedPolicy<X = any> = Policy<X> & { readonly [inheritsBrand]?: never };
 
-/** `Inherits` when any of the inputs `I` (a union) inherits, else `unknown`. */
-export type InheritsIn<I> = [Extract<I, Inherits>] extends [never] ? unknown : Inherits;
+/**
+ * `Inherits` when any of the inputs `I` (a union) inherits, else `unknown`.
+ * An `any` input (a helper's untyped value) counts as not inheriting.
+ */
+export type InheritsIn<I> = 0 extends 1 & I
+  ? unknown
+  : [Extract<I, Inherits>] extends [never]
+    ? unknown
+    : Inherits;
 
 /** A comparison helper's value for a condition object: `{ joinCode: ne(null) }`. */
 export interface CompareOp<X = unknown> {
