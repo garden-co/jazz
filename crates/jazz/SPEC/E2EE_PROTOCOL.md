@@ -1931,6 +1931,10 @@ successor already superseded; the space is then marked although no key was
 transferred. This reveals no key to anyone who is not a member; it costs a
 rotation, and the member can repeat it for each new version. It is a
 member-induced availability and cost limit, like bad deliveries (§3.4, §8).
+A member whose own account history contradicts itself (§3.4, "A member
+this client cannot evaluate") can do the same without naming anyone else:
+a junk delivery to itself names it for the current version, and it marks
+the space; again at most one rotation per version.
 A rotation clears the mark it answers, since the new version is delivered
 to current members' current account epochs only, unless such a record is
 written again for the new version.
@@ -2780,7 +2784,9 @@ Limits:
   removed. A member
   can also mark
   the space as needing rotation with a junk delivery naming a superseded
-  account epoch (§3.5), which costs one rotation per version it names. The
+  account epoch (§3.5), which costs one rotation per version it names. A member
+  whose own account history contradicts itself can do the same with a junk
+  delivery to itself. The
   mark is conservative evidence, not proof of key possession. The
   application's remedy is removing that member.
 - **Supported size.** The first release supports up to 1,000 members per
