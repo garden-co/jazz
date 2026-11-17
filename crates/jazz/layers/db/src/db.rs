@@ -2,7 +2,7 @@
 
 use crate::values::CachedRow;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::task::{Poll, Waker};
@@ -188,6 +188,9 @@ impl PreparedQuery {
         self
     }
 }
+
+/// How many validated query shapes a db remembers before it starts over.
+const VALIDATED_SHAPES_MAX: usize = 4096;
 
 fn short(hash: jazz_types::sha256::Hash) -> [u8; 16] {
     hash.as_bytes()[..16].try_into().expect("16 bytes")
@@ -650,6 +653,10 @@ pub struct SchemaPublication {
 
 struct Inner {
     conn: Connection,
+    /// Query shapes (with their binding) `prepare` has already validated
+    /// against this schema version: it validates each once. Cleared when
+    /// it reaches [`VALIDATED_SHAPES_MAX`].
+    validated_shapes: HashSet<([u8; 16], [u8; 16])>,
     /// One-way, owner-wide fence for new application mutations during close.
     mutation_admission_closed: bool,
     /// Enum variants a write may hold though its schema does not declare
@@ -2156,6 +2163,7 @@ impl Db {
             defer_fetches: false,
             inner: Rc::new(Store::new(Inner {
                 conn,
+                validated_shapes: HashSet::new(),
                 mutation_admission_closed: false,
                 kept_variants: BTreeMap::new(),
                 #[cfg(any(test, feature = "testing"))]
@@ -3335,18 +3343,28 @@ impl Db {
         query: &Query,
         binding: BTreeMap<String, Value>,
     ) -> Result<PreparedQuery, Error> {
-        let inner = self.inner();
+        let mut inner = self.inner();
         let normalized = normalize_relation(query, &inner.schema)?;
         let query = normalized.as_ref().unwrap_or(query);
-        // Validate: tables, columns, parameters, supported forms. Read
-        // options are not known yet: validate the widest read (deleted rows
-        // included, so their metadata columns are accepted).
-        let session = Session::system();
-        Ctx::new(&inner.schema, None, &session, &binding).compile_query(query, true)?;
         let shape = jazz_types::sha256::hash(
             format!("{query:?}{:?}", inner.schema.jazz.version_id()).as_bytes(),
         );
         let bound = jazz_types::sha256::hash(format!("{binding:?}").as_bytes());
+        let key = (short(shape), short(bound));
+        if !inner.validated_shapes.contains(&key) {
+            // Validate: tables, columns, parameters, supported forms, and
+            // every relation as its reads will compile it. Read options are
+            // not known yet: validate the widest read (deleted rows
+            // included, so their metadata columns are accepted). Once per
+            // shape: reads, fanout and paging don't validate again.
+            let session = Session::system();
+            Ctx::new(&inner.schema, None, &session, &binding).compile_query(query, true)?;
+            Ctx::new(&inner.schema, None, &session, &binding).validate_relations(query)?;
+            if inner.validated_shapes.len() >= VALIDATED_SHAPES_MAX {
+                inner.validated_shapes.clear();
+            }
+            inner.validated_shapes.insert(key);
+        }
         Ok(PreparedQuery {
             query: query.clone(),
             binding,
