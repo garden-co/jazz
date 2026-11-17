@@ -403,7 +403,7 @@ const SIGNED_DIGESTS: &[(&str, &str)] = &[
     ),
     (
         "proof",
-        "37be290f12cb75e3bb785edc30be786055f207889aa7362b9997104ff23afea3",
+        "e2261b34d59669409c5d7651e83d1fc55fc002303ab1bebfa3161f5da6f86a96",
     ),
     (
         "private approval",
@@ -419,7 +419,7 @@ const SIGNED_DIGESTS: &[(&str, &str)] = &[
     ),
     (
         "challenge signature",
-        "27f260092a435e90a2bc8de9480beaee2a60f5c33561992090d3d96e4696a86a",
+        "66dcc1263d1b81ee5336be9cfbf1fde64a846d1a83c42ebafb6b481fe56c9471",
     ),
     (
         "public successor",
@@ -585,8 +585,8 @@ fn signed_bytes() {
     };
     cases.push((
         "proof",
-        proof_signed_bytes(&da, ALICE, challenge, b"proof").unwrap(),
-        append(p("proof-signature"), &[b"proof"]),
+        proof_signed_bytes(&da, ALICE, challenge, b"proof", &[0x44; 32]).unwrap(),
+        append(p("proof-signature"), &[b"proof", &[0x44; 32]]),
     ));
     cases.push((
         "private approval",
@@ -613,15 +613,33 @@ fn signed_bytes() {
             D1,
         ),
     ));
+    // The requester's nonce n_R = 0x44…, committed in its request; the
+    // approver's nonce n_A = 0x33….
+    let mut commitment_input = b"jazz.e2ee.approval-nonce.v1\0".to_vec();
+    commitment_input.extend_from_slice(&frame_record(&[D2.as_bytes(), &[0x44; 32]]).unwrap());
+    let commitment = sodium_sha256(&commitment_input);
+    assert_eq!(nonce_commitment(D2, &[0x44; 32]).unwrap(), commitment);
+    assert_eq!(
+        to_hex(&commitment),
+        "f373b64180843c618627c47d75257653afdf41ab2e31403e62a4ff6f9fe37ad0"
+    );
+    let request = DeviceRequest {
+        id: D2.into(),
+        keys: keys(),
+        nonce_commitment: commitment.to_vec(),
+    };
     cases.push((
         "challenge signature",
-        challenge_signed_bytes(&da, ALICE, challenge, D1, &keys(), b"sealed").unwrap(),
+        challenge_signed_bytes(&da, ALICE, challenge, D1, &request, b"sealed", &[0x33; 32])
+            .unwrap(),
         append(
             p(&format!("challenge-signature:{D1}")),
             &[
                 &env("jazz.sodium.sign", &[0x22; 32]),
                 &env("jazz.wrap.hpke-x25519", &[0x11; 32]),
+                &commitment,
                 b"sealed",
+                &[0x33; 32],
             ],
         ),
     ));
@@ -632,6 +650,8 @@ fn signed_bytes() {
         &[
             &env("jazz.sodium.sign", &[0x22; 32]),
             &env("jazz.wrap.hpke-x25519", &[0x11; 32]),
+            &[0x33; 32],
+            &[0x44; 32],
         ],
     );
     let digest = sodium_sha256(&code_bytes);
@@ -640,10 +660,10 @@ fn signed_bytes() {
         u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) % 1_000_000
     );
     assert_eq!(
-        approval_code(&da, ALICE, challenge, &keys()).unwrap(),
+        approval_code(&da, ALICE, challenge, &keys(), &[0x33; 32], &[0x44; 32]).unwrap(),
         expected_code
     );
-    assert_eq!(expected_code, "201514");
+    assert_eq!(expected_code, "797911");
     let membership = json::encode_id_list([D1]).unwrap();
     let public_successor = PublicAccountSuccessor {
         id: R1.into(),

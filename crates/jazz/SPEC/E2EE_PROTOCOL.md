@@ -365,12 +365,12 @@ wherever it enters JSON. Optional columns
 
 | Table                              | Columns                                                                                                                                                                                   | Row ID          | Visibility | Meaning and writer                                                                                      |
 | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- | ---------- | ------------------------------------------------------------------------------------------------------- |
-| `__e2ee_device_requests`           | `publicKey`, `mechanism`, `version`, `signingPublicKey`, `signingMechanism`, `signingVersion`                                                                                             | device ID       | private    | A device's identity, written by that device.                                                            |
+| `__e2ee_device_requests`           | `publicKey`, `mechanism`, `version`, `signingPublicKey`, `signingMechanism`, `signingVersion`, `nonceCommitment`                                                                          | device ID       | private    | A device's identity, written by that device.                                                            |
 | `__e2ee_device_keys`               | `deviceId` and the six key columns of the request                                                                                                                                         | random          | public     | Public projection of the request's keys; must equal it. Written by the device.                          |
 | `__e2ee_account_identities`        | `ledgerVersion` (1), `generation`, `deviceId`, `epochId`, `envelope`, `verification`                                                                                                      | identity ID     | private    | Private account root: root epoch key sealed to the first device, plus its marker. Written at bootstrap. |
 | `__e2ee_account_roots`             | `ledgerVersion` (1), `generation`, `accountId`, `deviceId`, `epochId`, `kind`, `localFirstPublicKey?`, `localFirstSignature?`                                                             | random          | public     | Public account root. Written at bootstrap in the same transaction as the identity.                      |
-| `__e2ee_device_challenges`         | `deviceId`, `epochId`, `envelope`, `signerId`, `signature`                                                                                                                                | challenge ID    | private    | An approval challenge to a requesting device. Written by the approving device.                          |
-| `__e2ee_device_proofs`             | `challengeId`, `proof`, `signature`                                                                                                                                                       | challenge ID    | private    | The requesting device's possession proof.                                                               |
+| `__e2ee_device_challenges`         | `deviceId`, `epochId`, `envelope`, `nonce`, `signerId`, `signature`                                                                                                                       | challenge ID    | private    | An approval challenge to a requesting device. Written by the approving device.                          |
+| `__e2ee_device_proofs`             | `challengeId`, `proof`, `nonce`, `signature`                                                                                                                                              | challenge ID    | private    | The requesting device's possession proof.                                                               |
 | `__e2ee_device_approvals`          | `challengeId`, `signerId`, `verification`, `signature`                                                                                                                                    | challenge ID    | private    | Private approval with its account-key marker.                                                           |
 | `__e2ee_device_deliveries`         | `challengeId`, `envelope`, `verification`                                                                                                                                                 | challenge ID    | private    | Account epoch key sealed to the approved device.                                                        |
 | `__e2ee_public_device_approvals`   | `accountId`, `epochId`, `deviceId`, `signerId`, `signature`, `recoveryRootId?`, `recoverySignature?`                                                                                      | challenge ID    | public     | Key-free signed approval: admits the device.                                                            |
@@ -802,7 +802,12 @@ one device per scope. Loading a stored device requires its original mechanisms.
 ### 2.2 Device request
 
 Stage `request`. Insert the request row (ID = device ID) and a device-keys row
-if absent. An existing row whose keys differ refuses ("immutable device
+if absent. The request carries `nonceCommitment = SHA-256(UTF8(
+"jazz.e2ee.approval-nonce.v1\0") ‖ frame[deviceId, n_R])` of the device's
+random 32-byte **approval nonce** `n_R`, which the device keeps until its
+approval (§2.5). A nonce serves one approval attempt: a device whose attempt
+failed or was cancelled after it revealed `n_R` starts again as a new local
+device (§2.1), with a new ID and request. An existing row whose keys differ refuses ("immutable device
 identity differs"). A request is not an approval.
 
 ### 2.3 Bootstrap of the first device
@@ -1051,21 +1056,25 @@ challenge.deviceId}`.
 1. **Challenge** (stage `challenge`, approving device). The approver is active
    and holds the authenticated current account key; the requester is not
    removed and its request matches its keys. Generate a 32-byte secret `S`,
-   kept only in memory. Insert challenge `{id, deviceId, epochId: current,
-envelope: E = seal(requester.pub, P("challenge"), S), signerId,
-signature: sign(P("challenge-signature:" ‖ signerId) ‖
-frame[env(signingMechanism, signingPublicKey), env(mechanism, publicKey),
-E])}`, signed over the requester's key columns as the approver was shown
-   them.
+   kept only in memory, and a random 32-byte nonce `n_A`. Insert challenge
+   `{id, deviceId, epochId: current, envelope: E = seal(requester.pub,
+P("challenge"), S), nonce: n_A, signerId, signature:
+sign(P("challenge-signature:" ‖ signerId) ‖ frame[env(signingMechanism,
+signingPublicKey), env(mechanism, publicKey), nonceCommitment, E, n_A])}`,
+   signed over the requester's key columns and nonce commitment as the
+   approver was shown them. A challenge is created only on an explicit user
+   action, one per approval: the runtime never re-challenges silently.
 2. **Response** (stage `proof`, requesting device). The challenge targets this
    device in the current epoch, and its `signerId` is an active device whose
-   signature verifies over this device's own key columns; otherwise the
-   requester refuses it (`invalid-challenge`): the approver was shown other
-   keys. Open `S` (32 bytes). Insert proof `{id:
-challengeId, proof: wrap(S, P("proof"), Z32), signature:
-sign(P("proof-signature") ‖ frame[proof])}`.
+   signature verifies over this device's own key columns and nonce
+   commitment; otherwise the requester refuses it (`invalid-challenge`): the
+   approver was shown other keys. Open `S` (32 bytes). Insert proof `{id:
+challengeId, proof: wrap(S, P("proof"), Z32), nonce: n_R, signature:
+sign(P("proof-signature") ‖ frame[proof, n_R])}`, revealing the approval
+   nonce.
 3. **Completion** (stage `approval`, approving device). The challenge epoch
    equals both the challenge's and the current epoch. Possession is verified:
+   the proof's `nonce` opens the request's `nonceCommitment`,
    `unwrap(S, P("proof"), proof)` yields `Z32` and the proof signature verifies
    under the request's signing key; anything else refuses ("invalid device
    possession proof"). With the current account key `K`, insert atomically:
@@ -1090,24 +1099,34 @@ frame[E], Z32)}`.
    submission. The secret is erased when the operation ends.
 
 **Approval code.** The keys row of a requesting device is unsigned (R4), so
-the approver sees the requester's keys only as the server shows them. Both
-devices therefore display a six-digit **approval code**: the first four
-bytes (big-endian) of `SHA-256(P("approval-code") ‖ frame[env(signingMechanism,
-signingPublicKey), env(mechanism, publicKey)])` modulo 10⁶, zero-padded,
-with the requester's key columns: the approver's from the keys it was shown
-and its challenge, the requester's from its own keys and the challenge it
-accepted. The SDK shows the code on both devices and asks the user to
-confirm they match before approving; a mismatch means the server showed the
-approver other keys, and the user cancels. The challenge signature makes the
-code meaningful: a server that substituted keys must fix them before the
-approver chooses the challenge ID, and cannot present the requester a
-challenge for its real keys, so it matches the code only by a one in a
-million chance. An approval made without comparing the codes trusts the
-server's view of the requester's keys (§8). Private verification (§2.4)
-accepts an approval only if its challenge's signature verifies under the
-approval signer's key over the requester's keys. A recovery (§2.9) signs its
-own challenge, the device being both approver and requester; its recovery
-root is what authorises it.
+the approver sees the requester's keys only as the server shows them; and a
+new device of an `app` account knows the account's devices only as the
+server shows them (§8). Both devices therefore display a six-digit
+**approval code**: the first four bytes (big-endian) of
+`SHA-256(P("approval-code") ‖ frame[env(signingMechanism, signingPublicKey),
+env(mechanism, publicKey), n_A, n_R])` modulo 10⁶, zero-padded, with the
+requester's key columns. The requester computes it from its own keys, the
+challenge's `n_A` and its own `n_R` once it has accepted the challenge (and
+shows an error, never a code, if it refused one); the approver from the keys
+it was shown, its `n_A` and the revealed `n_R` once possession is verified,
+and only for the challenge it completes. The SDK asks the user to confirm
+the two codes match before the approval is inserted; a mismatch means
+someone between the devices substituted keys, and the user cancels.
+
+The code is a short authentication string with commitments: each side fixes
+its nonce before it learns the other's (the requester commits to `n_R` in
+its request, before any challenge exists; the approver signs `n_A` in the
+challenge, before `n_R` is revealed). Whoever sits between the devices, the
+server included, must therefore choose what it shows each side before
+learning the value that decides the other side's code, and matches the codes
+only by a one in a million chance, even when it plays the account's devices
+towards a new device it meets first. An approval made without comparing the
+codes trusts the server's view of the requester's keys (§8). Private
+verification (§2.4) accepts an approval only if its challenge's signature
+verifies under the approval signer's key over the requester's keys and
+nonce commitment, and the proof's nonce opens that commitment. A recovery
+(§2.9) signs its own challenge, the device being both approver and
+requester; its recovery root is what authorises it.
 
 Approval delivers the **account epoch key**, not any device private key.
 Space keys reach the new device through its account: they are sealed to the
@@ -2842,11 +2861,13 @@ Limits:
   older version's key may write under it until it obtains a newer one or
   Jazz permissions refuse (§5.1).
 - **Approving a device trusts its keys unless the codes are compared.** The
-  approver sees a requesting device's keys as the server shows them. Both
-  devices display an approval code (§2.5); a user who confirms they match
-  defeats a substitution, except by a one in a million chance. An approval
-  made without comparing them lets a dishonest server approve its own keys
-  under the requesting device's ID and receive the account key.
+  approver sees a requesting device's keys as the server shows them, and a
+  new device of an `app` account sees the account's devices as the server
+  shows them. Both devices display an approval code (§2.5) built with
+  committed nonces; a user who confirms they match defeats a substitution,
+  except by a one in a million chance. An approval made without comparing
+  them lets a dishonest server approve its own keys under the requesting
+  device's ID and receive the account key.
 - **App account roots are trusted on first use.** A local-first account's
   root is signed by the key its account ID derives from, so no one without
   the secret can forge or replace it, or reset the account (§2.3, §2.4),

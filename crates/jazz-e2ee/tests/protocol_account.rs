@@ -16,7 +16,10 @@ use jazz_e2ee::protocol::error::{
     IntrinsicContradiction, ProtocolError, RecoveryFailure, RefusalCode, UnsupportedCapability,
 };
 use jazz_e2ee::protocol::ids::IdForm;
-use jazz_e2ee::protocol::records::account::{AccountKind, AccountRoot};
+use jazz_e2ee::protocol::records::account::{
+    AccountKind, AccountRoot, approval_code, challenge_signed_bytes, nonce_commitment,
+    proof_signed_bytes,
+};
 use jazz_e2ee::protocol::{Accepted, Position, ids, signing};
 
 fn refused(code: RefusalCode) -> ProtocolError {
@@ -2005,11 +2008,11 @@ fn when_both_devices_request_removal_one_remains() {
 }
 
 /// A server that shows the approver other keys for a pending device (its
-/// own, under the device's ID) gets a challenge signed over those keys. The
-/// real device refuses it (`invalid-challenge`), and the comparison codes
-/// the two devices show differ, so the user does not approve (§2.5, §8).
+/// own, under the device's ID, with its own nonce commitment) gets a
+/// challenge signed over those. The real device refuses it
+/// (`invalid-challenge`) and shows no code (§2.5, §8).
 #[test]
-fn a_challenge_over_substituted_requester_keys_is_refused_and_codes_differ() {
+fn a_challenge_over_substituted_requester_keys_is_refused() {
     let env = Env::new(ALICE);
     let mut rng = TestRandom(31);
     let laptop = env.device(&mut rng);
@@ -2021,7 +2024,7 @@ fn a_challenge_over_substituted_requester_keys_is_refused_and_codes_differ() {
     ledger.request(&phone, &mut rng);
     let real = ledger.state(&env);
 
-    // The approver's view: phone's keys row and request carry mallory's keys.
+    // The approver's view: phone's keys row and request carry mallory's.
     let mut shown = ledger.public.clone();
     for row in &mut shown.keys {
         if row.row.device_id == phone.id {
@@ -2035,6 +2038,9 @@ fn a_challenge_over_substituted_requester_keys_is_refused_and_codes_differ() {
     let fake_request = jazz_e2ee::protocol::records::account::DeviceRequest {
         id: phone.id.clone(),
         keys: mallory.keys(),
+        nonce_commitment: nonce_commitment(&phone.id, &mallory.approval_nonce.0[..])
+            .unwrap()
+            .to_vec(),
     };
     let writer = env.writer();
     let challenge =
@@ -2043,29 +2049,18 @@ fn a_challenge_over_substituted_requester_keys_is_refused_and_codes_differ() {
         build::respond(&writer, &real, &phone, &challenge.challenge, &mut rng).unwrap_err(),
         refused(RefusalCode::InvalidChallenge)
     );
-    let coordinates = challenge.challenge.coordinates();
-    let on_approver = jazz_e2ee::protocol::records::account::approval_code(
-        &env.application(),
-        ALICE,
-        coordinates,
-        &fake_request.keys,
-    )
-    .unwrap();
-    let on_phone = jazz_e2ee::protocol::records::account::approval_code(
-        &env.application(),
-        ALICE,
-        coordinates,
-        &phone.keys(),
-    )
-    .unwrap();
-    assert_ne!(on_approver, on_phone);
 }
 
-/// In an honest approval both devices show the same six-digit code, and a
-/// challenge whose signature fails, or that a device without standing
-/// signed, is refused by the requester.
+/// The approval code depends on both nonces, and each side commits to its
+/// own before it learns the other's (§2.5): the requester's in its request,
+/// the approver's in its signed challenge. In an honest approval both
+/// devices show the same code: the approver once the proof revealed `n_R`,
+/// the requester once it accepted the challenge. A challenge whose nonce or
+/// signature was altered is refused, and a proof whose nonce does not open
+/// the request's commitment is refused, so neither nonce can be changed
+/// after the fact to search for a matching code.
 #[test]
-fn honest_codes_match_and_bad_challenges_are_refused() {
+fn approval_codes_match_and_neither_nonce_can_be_changed() {
     let env = Env::new(ALICE);
     let mut rng = TestRandom(32);
     let laptop = env.device(&mut rng);
@@ -2078,56 +2073,93 @@ fn honest_codes_match_and_bad_challenges_are_refused() {
     ledger.request(&stranger, &mut rng);
     let state = ledger.state(&env);
     let writer = env.writer();
-    let challenge = build::challenge(&writer, &state, &laptop, &phone.request(), &mut rng)
-        .unwrap()
-        .challenge;
-    let coordinates = challenge.coordinates();
-    let code = |keys: &jazz_e2ee::protocol::records::KeyColumns| {
-        jazz_e2ee::protocol::records::account::approval_code(
-            &env.application(),
-            ALICE,
-            coordinates,
-            keys,
-        )
-        .unwrap()
-    };
     let request = phone.request();
-    let on_approver = code(&request.keys);
-    assert_eq!(on_approver, code(&phone.keys()));
+    let challenge = build::challenge(&writer, &state, &laptop, &request, &mut rng).unwrap();
+    let proof = build::respond(&writer, &state, &phone, &challenge.challenge, &mut rng).unwrap();
+    build::verify_possession(
+        &writer,
+        &challenge.challenge,
+        &proof,
+        &request,
+        &challenge.secret,
+    )
+    .unwrap();
+    let coordinates = challenge.challenge.coordinates();
+    let code = |keys: &jazz_e2ee::protocol::records::KeyColumns, n_a: &[u8], n_r: &[u8]| {
+        approval_code(&env.application(), ALICE, coordinates, keys, n_a, n_r).unwrap()
+    };
+    let on_approver = code(&request.keys, &challenge.challenge.nonce, &proof.nonce);
+    let on_phone = code(
+        &phone.keys(),
+        &challenge.challenge.nonce,
+        &phone.approval_nonce.0[..],
+    );
+    assert_eq!(on_approver, on_phone);
     assert_eq!(on_approver.len(), 6);
     assert!(on_approver.bytes().all(|byte| byte.is_ascii_digit()));
-    build::respond(&writer, &state, &phone, &challenge, &mut rng).unwrap();
+    assert_ne!(
+        on_phone,
+        code(&phone.keys(), &[0; 32], &phone.approval_nonce.0[..])
+    );
+    assert_ne!(
+        on_phone,
+        code(&phone.keys(), &challenge.challenge.nonce, &[0; 32])
+    );
 
-    let mut tampered = challenge.clone();
+    let mut other_nonce = challenge.challenge.clone();
+    other_nonce.nonce = vec![7; 32];
+    let mut tampered = challenge.challenge.clone();
     let last = tampered.signature.len() - 1;
     tampered.signature[last] ^= 1;
-    assert_eq!(
-        build::respond(&writer, &state, &phone, &tampered, &mut rng).unwrap_err(),
-        refused(RefusalCode::InvalidChallenge)
-    );
-    let mut by_stranger = challenge;
+    let mut by_stranger = challenge.challenge.clone();
     by_stranger.signer_id = stranger.id.clone();
-    let bytes = jazz_e2ee::protocol::records::account::challenge_signed_bytes(
+    let bytes = challenge_signed_bytes(
         &env.application(),
         ALICE,
         by_stranger.coordinates(),
         &stranger.id,
-        &phone.keys(),
+        &request,
         &by_stranger.envelope,
+        &by_stranger.nonce,
     )
     .unwrap();
     by_stranger.signature = signing::sign(&signature::Builtin, &stranger.signing, &bytes).unwrap();
+    for bad in [other_nonce, tampered, by_stranger] {
+        assert_eq!(
+            build::respond(&writer, &state, &phone, &bad, &mut rng).unwrap_err(),
+            refused(RefusalCode::InvalidChallenge)
+        );
+    }
+
+    let mut swapped = proof.clone();
+    swapped.nonce = vec![9; 32];
+    let bytes = proof_signed_bytes(
+        &env.application(),
+        ALICE,
+        coordinates,
+        &swapped.proof,
+        &swapped.nonce,
+    )
+    .unwrap();
+    swapped.signature = signing::sign(&signature::Builtin, &phone.signing, &bytes).unwrap();
     assert_eq!(
-        build::respond(&writer, &state, &phone, &by_stranger, &mut rng).unwrap_err(),
-        refused(RefusalCode::InvalidChallenge)
+        build::verify_possession(
+            &writer,
+            &challenge.challenge,
+            &swapped,
+            &request,
+            &challenge.secret,
+        )
+        .unwrap_err(),
+        refused(RefusalCode::InvalidPossessionProof)
     );
 }
 
-/// Private verification requires the challenge to be signed, over the
-/// requester's keys, by the approval's signer: a challenge signed by another
-/// active device leaves the approval unverified.
+/// Private verification requires the challenge to be signed by the
+/// approval's signer over the requester's keys and nonce commitment, and the
+/// proof's nonce to open that commitment.
 #[test]
-fn private_verification_requires_the_approvers_challenge_signature() {
+fn private_verification_requires_the_signed_challenge_and_the_nonce() {
     let env = Env::new(ALICE);
     let mut rng = TestRandom(33);
     let laptop = env.device(&mut rng);
@@ -2153,13 +2185,14 @@ fn private_verification_requires_the_approvers_challenge_signature() {
     let mut resigned = ledger.clone();
     let challenge = &mut resigned.private.challenges.last_mut().unwrap().row;
     challenge.signer_id = tablet.id.clone();
-    let bytes = jazz_e2ee::protocol::records::account::challenge_signed_bytes(
+    let bytes = challenge_signed_bytes(
         &env.application(),
         ALICE,
         challenge.coordinates(),
         &tablet.id,
-        &phone.keys(),
+        &phone.request(),
         &challenge.envelope,
+        &challenge.nonce,
     )
     .unwrap();
     challenge.signature = signing::sign(&signature::Builtin, &tablet.signing, &bytes).unwrap();
@@ -2176,4 +2209,27 @@ fn private_verification_requires_the_approvers_challenge_signature() {
     let last = signature.len() - 1;
     signature[last] ^= 1;
     assert_eq!(count(&tampered), 1);
+
+    // A proof re-signed with another nonce: its signature verifies, but the
+    // nonce does not open the request's commitment.
+    let mut renonced = ledger.clone();
+    let proof = &mut renonced.private.proofs.last_mut().unwrap().row;
+    proof.nonce = vec![9; 32];
+    let coordinates = renonced
+        .private
+        .challenges
+        .last()
+        .unwrap()
+        .row
+        .coordinates();
+    let bytes = proof_signed_bytes(
+        &env.application(),
+        ALICE,
+        coordinates,
+        &proof.proof,
+        &proof.nonce,
+    )
+    .unwrap();
+    proof.signature = signing::sign(&signature::Builtin, &phone.signing, &bytes).unwrap();
+    assert_eq!(count(&renonced), 1);
 }
