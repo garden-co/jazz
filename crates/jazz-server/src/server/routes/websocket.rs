@@ -671,21 +671,15 @@ async fn ws_admission(
     // off both so the skip never rests on the header alone.)
     let backend_stated = backend_credential && has_session_header;
     if !backend_stated {
-        let account = peer_identity
-            .account_id()
-            .ok_or("public sessions require an enrolled account identity")?;
-        let principal = jazz::account_registry::Principal {
-            issuer: session.issuer.clone(),
-            subject: session.user_id.clone(),
-        };
+        // The steps of `crate::portable::guest::admit_guest`, in its order,
+        // with the registry reached through its owner thread.
+        let account = crate::portable::guest::enrolled_account(peer_identity)?;
+        let principal = crate::portable::guest::principal_of(&session);
         if session.issuer == jazz::tools::identity::LOCAL_FIRST_ISSUER {
             super::accounts::admit_local_founder(state, &principal, &headers).await?;
         }
         let assignment = super::accounts::resolve_assignment(state, principal).await?;
-        if assignment != account {
-            return Err("account does not match authenticated identity assignment".into());
-        }
-        session.account_id = Some(account);
+        crate::portable::guest::bind_account(&mut session, account, assignment)?;
     }
     ws_validate_session_identity(&session, peer_identity)?;
     let revocation = backend_stated.then(|| SessionRevocation {

@@ -738,6 +738,15 @@ mod smoke {
         serde_json::to_string(&request).expect("deploy request JSON")
     }
 
+    /// A user's identity (`issuer`, `subject`), as a prelude names its peer.
+    #[wasm_bindgen(js_name = testUserIdentity)]
+    pub fn test_user_identity(issuer: &str, subject: &str) -> String {
+        AuthorSubject::authenticated(issuer, subject)
+            .expect("a user identity")
+            .canonical()
+            .to_owned()
+    }
+
     /// The system identity, as a prelude names its peer.
     #[wasm_bindgen(js_name = testSystemIdentity)]
     pub fn test_system_identity() -> String {
@@ -935,7 +944,7 @@ mod core_host {
         self, AccountRoute, RouteAuthority, RouteBody, RouteContext,
     };
     use jazz_server::portable::admission::{
-        admit_by_core_secret, UpgradeCredential, WebSocketPrelude,
+        admit_by_core_secret, same_secret, SessionRevocation, UpgradeCredential, WebSocketPrelude,
     };
     use jazz_server::portable::catalogue::{CatalogueIndex, DeploymentResponse};
     use jazz_server::portable::deployment::{self, DeployError, DeployRequest};
@@ -964,27 +973,43 @@ mod core_host {
         held_bytes: usize,
         /// Why the socket ends: its error frame goes out with its output.
         failed: Option<jazz::wire::WireError>,
+        /// For a user session the backend stated: what a revocation of its
+        /// user's sessions is checked against.
+        revocation: Option<SessionRevocation>,
     }
 
-    /// The most input a socket may have held for room (twice a session's
-    /// ingress budget, 2 × 8 MiB): a peer sending faster than the engine
-    /// takes it is ended with `Backpressure` (it reconnects later) instead
-    /// of growing the object's memory toward the isolate's limit.
-    const HELD_LIMIT: usize = 16 * 1024 * 1024;
+    /// The most input a socket may have held for room (one session's
+    /// ingress budget, 8 MiB): a peer sending faster than the engine takes
+    /// it is ended with `Backpressure` (it reconnects later) instead of
+    /// growing the object's memory toward the isolate's limit.
+    const HELD_LIMIT: usize = 8 * 1024 * 1024;
+
+    /// The most input all sockets together may have held (an isolate has
+    /// about 128 MiB, and a saturated socket also has a session's ingress
+    /// and taken egress besides): past it the socket holding most is ended
+    /// with `Backpressure`, as the engine sheds egress.
+    const GLOBAL_HELD_LIMIT: usize = 32 * 1024 * 1024;
 
     impl Socket {
-        fn hold(&mut self, input: Held, bytes: usize) {
+        fn hold(&mut self, input: Held, bytes: usize, limit: usize) {
             self.held.push_back(input);
             self.held_bytes += bytes;
-            if self.held_bytes > HELD_LIMIT && self.failed.is_none() {
-                self.held.clear();
-                self.held_bytes = 0;
-                self.failed = Some(jazz::wire::WireError::new(
+            if self.held_bytes > limit {
+                self.shed();
+            }
+        }
+
+        /// End the socket for sending more than the core could take.
+        fn shed(&mut self) {
+            self.held.clear();
+            self.held_bytes = 0;
+            self.failed.get_or_insert_with(|| {
+                jazz::wire::WireError::new(
                     jazz::wire::WireErrorCode::Backpressure,
                     jazz::wire::WireRetry::Later,
                     "the connection sent more than the core could take: reconnect later",
-                ));
-            }
+                )
+            });
         }
 
         fn fail(&mut self, message: impl std::fmt::Display) {
@@ -1016,6 +1041,12 @@ mod core_host {
         secret: String,
         sockets: HashMap<u32, Socket>,
         next_socket: u32,
+        /// [`HELD_LIMIT`] and [`GLOBAL_HELD_LIMIT`] (smaller in tests).
+        held_limit: usize,
+        global_held_limit: usize,
+        /// Tests only: the engine takes no input and does not tick, so
+        /// input piles up as held.
+        paused: bool,
         /// The account registry's tables exist (made on first use).
         accounts_open: bool,
     }
@@ -1023,10 +1054,37 @@ mod core_host {
     /// What `accept` answers: the frames to send, and the socket's number
     /// (absent when the connection was refused and is to be closed after
     /// sending them).
-    #[wasm_bindgen(getter_with_clone)]
-    pub struct Accepted {
-        pub socket: Option<u32>,
-        pub frames: Vec<js_sys::Uint8Array>,
+    struct Accepted {
+        socket: Option<u32>,
+        frames: Vec<js_sys::Uint8Array>,
+    }
+
+    // What the host is handed back is plain JS, never an object owned by
+    // the wasm instance: after a trap the host drops the instance for a
+    // fresh one, and nothing of the old one may outlive it (its finalizer
+    // would free into the new instance's memory).
+    fn object(fields: &[(&str, JsValue)]) -> JsValue {
+        let object = js_sys::Object::new();
+        for (key, value) in fields {
+            let _ = js_sys::Reflect::set(&object, &JsValue::from_str(key), value);
+        }
+        object.into()
+    }
+
+    fn array(items: Vec<js_sys::Uint8Array>) -> JsValue {
+        items.into_iter().collect::<js_sys::Array>().into()
+    }
+
+    impl Accepted {
+        fn into_js(self) -> JsValue {
+            object(&[
+                (
+                    "socket",
+                    self.socket.map_or(JsValue::UNDEFINED, JsValue::from),
+                ),
+                ("frames", array(self.frames)),
+            ])
+        }
     }
 
     fn error_frame(error: &jazz::wire::WireError) -> Vec<u8> {
@@ -1051,13 +1109,17 @@ mod core_host {
         /// JSON) is served until a published catalogue replaces it.
         pub fn open(
             storage: ObjectStorage,
-            app_id: String,
             secret: String,
             schema: Option<String>,
         ) -> Result<DurableObjectCore, JsValue> {
             if secret.len() < 32 {
                 return Err(js("the core secret must be at least 32 characters"));
             }
+            // Admit the store (stamping a new one as Jazz's) before keeping
+            // anything of the host's in it.
+            jazz::host::StoreFile::from_storage(durable_object_storage(storage.clone()))
+                .map_err(js)?;
+            let app_id = stored_app_id(&durable_object_storage(storage.clone())).map_err(js)?;
             let mut this = Self {
                 storage,
                 app_id,
@@ -1065,6 +1127,9 @@ mod core_host {
                 secret,
                 sockets: HashMap::new(),
                 next_socket: 1,
+                held_limit: HELD_LIMIT,
+                global_held_limit: GLOBAL_HELD_LIMIT,
+                paused: false,
                 accounts_open: false,
             };
             this.open_core(schema.as_deref())?;
@@ -1074,6 +1139,16 @@ mod core_host {
         /// Admit a new connection: its prelude (JSON) and first frame batch
         /// (its `Hello`), and the credential its upgrade carried, if any.
         pub fn accept(
+            &mut self,
+            prelude: &str,
+            first: &[u8],
+            credential: Option<String>,
+            access: Option<String>,
+        ) -> JsValue {
+            self.admit(prelude, first, credential, access).into_js()
+        }
+
+        fn admit(
             &mut self,
             prelude: &str,
             first: &[u8],
@@ -1105,11 +1180,31 @@ mod core_host {
                     );
                 }
             };
-            let upgrade = match (&credential, &access) {
-                (Some(credential), Some(access)) => Some(UpgradeCredential { credential, access }),
-                _ => None,
+            let upgrade = credential.as_deref().map(|credential| UpgradeCredential {
+                credential,
+                access: access.as_deref(),
+            });
+            let now = js_sys::Date::now() as u64;
+            // A guest the backend relays proves who it is itself: its proof
+            // is checked, and its account founded or found, in the object's
+            // account registry, as native admits it.
+            let secret = self.secret.clone();
+            let app_id = jazz::tools::AppId::from_string(&self.app_id);
+            let mut guest = |token: &str, peer, audience: Option<&str>| {
+                let app_id = app_id.clone().map_err(|error| error.to_string())?;
+                let storage = self.registry()?;
+                jazz_server::portable::guest::admit_guest(
+                    &storage,
+                    token,
+                    peer,
+                    audience,
+                    app_id,
+                    now / 1000,
+                )
+                .map_err(|refusal| refusal.to_string())
             };
-            let admission = match admit_by_core_secret(&prelude, upgrade, &self.secret) {
+            let admission = match admit_by_core_secret(&prelude, upgrade, &secret, now, &mut guest)
+            {
                 Ok(admission) => admission,
                 Err(message) => return fail(jazz::wire::WireErrorCode::AuthFailed, message),
             };
@@ -1121,6 +1216,24 @@ mod core_host {
                 Ok(link) => link,
                 Err(error) => return refused(error_frame(&error)),
             };
+            // A stated session of a user whose sessions were revoked after
+            // the backend authenticated it is refused, as native refuses it.
+            let revocation = admission.revocation.clone();
+            if let Some(revocation) = &revocation {
+                match self.revocation_mark(&revocation.principal) {
+                    Ok(mark) if accounts::session_revoked(mark, revocation.authenticated_at_ms) => {
+                        return refused(error_frame(&revoked()));
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        return refused(error_frame(&jazz::wire::WireError::new(
+                            jazz::wire::WireErrorCode::NotReady,
+                            jazz::wire::WireRetry::Later,
+                            error,
+                        )));
+                    }
+                }
+            }
             let Some(core) = self.core.as_mut() else {
                 return refused(error_frame(&jazz::wire::WireError::new(
                     jazz::wire::WireErrorCode::NotReady,
@@ -1160,6 +1273,7 @@ mod core_host {
                     held: VecDeque::new(),
                     held_bytes: 0,
                     failed: None,
+                    revocation,
                 },
             );
             let hello = encode_ws_frame_batches(&[link.server_hello])
@@ -1182,10 +1296,11 @@ mod core_host {
             if state.failed.is_some() {
                 return Ok(());
             }
-            if let Err(error) = Self::read(state, message) {
+            if let Err(error) = Self::read(state, message, self.held_limit) {
                 state.fail(error);
             }
             self.admit_held(socket);
+            self.shed_held();
             Ok(())
         }
 
@@ -1194,6 +1309,9 @@ mod core_host {
         /// while `wantsTick`: a host returns to its event loop between
         /// ticks, so output goes out as it is made.
         pub fn tick(&mut self) {
+            if self.paused {
+                return;
+            }
             let Some(core) = self.core.as_mut() else {
                 return;
             };
@@ -1207,7 +1325,7 @@ mod core_host {
         /// Whether the core wants a tick now (see `ServerCore::wants_tick`).
         #[wasm_bindgen(js_name = wantsTick)]
         pub fn wants_tick(&self) -> bool {
-            self.core.as_ref().is_some_and(ServerCore::wants_tick)
+            !self.paused && self.core.as_ref().is_some_and(ServerCore::wants_tick)
         }
 
         /// How often to tick while sockets are open, in milliseconds.
@@ -1218,7 +1336,12 @@ mod core_host {
 
         /// What to send on `socket` now: frame batches, in order. `ended`
         /// says whether the session ended (close the socket after sending).
-        pub fn output(&mut self, socket: u32) -> Output {
+        pub fn output(&mut self, socket: u32) -> JsValue {
+            let Output { batches, ended } = self.take(socket);
+            object(&[("batches", array(batches)), ("ended", JsValue::from(ended))])
+        }
+
+        fn take(&mut self, socket: u32) -> Output {
             let Some(state) = self.sockets.get(&socket) else {
                 return Output {
                     batches: Vec::new(),
@@ -1272,10 +1395,10 @@ mod core_host {
 
     impl DurableObjectCore {
         /// Decode `message` into the socket's held input.
-        fn read(state: &mut Socket, message: &[u8]) -> Result<(), String> {
+        fn read(state: &mut Socket, message: &[u8], limit: usize) -> Result<(), String> {
             let frames = decode_ws_encoded_frame_batch(message).map_err(|e| e.to_string())?;
             if !state.thin {
-                state.hold(Held::Frames(frames, message.len()), message.len());
+                state.hold(Held::Frames(frames, message.len()), message.len(), limit);
                 return Ok(());
             }
             for frame in frames {
@@ -1299,16 +1422,68 @@ mod core_host {
                     _ => return Err("a thin connection sends only thin requests".to_owned()),
                 };
                 if let Some((request, bytes, split)) = request {
-                    state.hold(Held::Thin(request, bytes, split), bytes);
+                    state.hold(Held::Thin(request, bytes, split), bytes, limit);
                 }
             }
             Ok(())
+        }
+
+        /// Test-only routes (`durable-object-tests` builds), for the admin:
+        /// `POST test/panic` panics in the core; `POST test/limits` sets
+        /// the held limits and pauses or resumes the engine.
+        #[cfg(feature = "durable-object-tests")]
+        fn test_route(
+            &mut self,
+            method: &str,
+            route: &str,
+            credentials: &HttpCredentials,
+            body: &[u8],
+        ) -> Option<HttpAnswer> {
+            #[derive(serde::Deserialize)]
+            struct Limits {
+                socket: usize,
+                global: usize,
+                paused: bool,
+            }
+            if method != "POST" || !route.starts_with("test/") {
+                return None;
+            }
+            if let Err(refused) = credentials.admin(&self.secret) {
+                return Some(refused);
+            }
+            match route {
+                "test/panic" => panic!("a test asked the core to panic"),
+                "test/limits" => {
+                    let limits: Limits = serde_json::from_slice(body).expect("limits JSON");
+                    self.held_limit = limits.socket;
+                    self.global_held_limit = limits.global;
+                    self.paused = limits.paused;
+                    Some(no_content())
+                }
+                _ => None,
+            }
+        }
+
+        /// While all sockets together hold more than the object may, end
+        /// the one holding most.
+        fn shed_held(&mut self) {
+            while self.sockets.values().map(|s| s.held_bytes).sum::<usize>()
+                > self.global_held_limit
+            {
+                let Some(largest) = self.sockets.values_mut().max_by_key(|s| s.held_bytes) else {
+                    return;
+                };
+                largest.shed();
+            }
         }
 
         /// Hand the engine what `socket` holds, oldest first, while its
         /// session's budget has room. An input the engine refuses (a thin
         /// request over the most one takes) ends that socket alone.
         fn admit_held(&mut self, socket: u32) {
+            if self.paused {
+                return;
+            }
             let Some(core) = self.core.as_mut() else {
                 return;
             };
@@ -1371,20 +1546,45 @@ mod core_host {
     }
 
     /// What `http` answers: a status and a JSON body (empty for 204).
-    #[wasm_bindgen(getter_with_clone)]
-    pub struct HttpAnswer {
-        pub status: u16,
-        pub body: String,
+    struct HttpAnswer {
+        status: u16,
+        body: String,
         /// The body's content type (empty for no body).
-        #[wasm_bindgen(js_name = contentType)]
-        pub content_type: String,
+        content_type: &'static str,
+    }
+
+    impl HttpAnswer {
+        fn into_js(self) -> JsValue {
+            object(&[
+                ("status", JsValue::from(self.status)),
+                ("body", JsValue::from_str(&self.body)),
+                ("contentType", JsValue::from_str(self.content_type)),
+            ])
+        }
     }
 
     fn answer(status: u16, body: impl serde::Serialize) -> HttpAnswer {
         HttpAnswer {
             status,
             body: serde_json::to_string(&body).unwrap_or_default(),
-            content_type: "application/json".to_owned(),
+            content_type: "application/json",
+        }
+    }
+
+    /// What a revoked session is told, as native tells it.
+    fn revoked() -> jazz::wire::WireError {
+        jazz::wire::WireError::new(
+            jazz::wire::WireErrorCode::AuthFailed,
+            jazz::wire::WireRetry::AfterAuth,
+            "session revoked: jazz.revokeUser ended this user's sessions",
+        )
+    }
+
+    fn no_content() -> HttpAnswer {
+        HttpAnswer {
+            status: 204,
+            body: String::new(),
+            content_type: "",
         }
     }
 
@@ -1392,58 +1592,66 @@ mod core_host {
         answer(status, error)
     }
 
-    /// Compare two secrets in time independent of where they differ.
-    fn same_secret(expected: &str, given: &str) -> bool {
-        let (a, b) = (expected.as_bytes(), given.as_bytes());
-        a.len() == b.len() && a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
-    }
-
     /// The secrets an HTTP request carried: native's headers
     /// (`X-Jazz-Admin-Secret`, `X-Jazz-Backend-Secret`) or the credential
     /// pair a trusted caller vouches with (`X-Jazz-Backend-Credential` +
     /// `X-Jazz-Backend-Access`).
-    #[wasm_bindgen]
     #[derive(Default)]
-    pub struct HttpCredentials {
+    struct HttpCredentials {
         admin_secret: Option<String>,
         backend_secret: Option<String>,
         credential: Option<String>,
         access: Option<String>,
     }
 
-    #[wasm_bindgen]
-    impl HttpCredentials {
-        #[wasm_bindgen(constructor)]
-        pub fn new(
-            admin_secret: Option<String>,
-            backend_secret: Option<String>,
-            credential: Option<String>,
-            access: Option<String>,
-        ) -> HttpCredentials {
-            Self {
-                admin_secret,
-                backend_secret,
-                credential,
-                access,
-            }
-        }
+    /// What a backend credential (`X-Jazz-Backend-Credential`) vouched
+    /// for: the access stated next to it, `session` when none is.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Vouched {
+        Admin,
+        Backend,
+        Session,
     }
 
     impl HttpCredentials {
-        fn vouched(&self, secret: &str, access: &[&str]) -> bool {
-            match (&self.credential, &self.access) {
-                (Some(credential), Some(given)) => {
-                    same_secret(secret, credential) && access.contains(&given.as_str())
-                }
-                _ => false,
+        /// The credential pair, if one was sent: as native's workload gate,
+        /// a credential that holds decides the access and the secret
+        /// headers are ignored; one that does not, or an access no route
+        /// knows, is refused.
+        fn vouched(&self, secret: &str) -> Result<Option<Vouched>, HttpAnswer> {
+            use jazz::tools::transport_error::ErrorResponse;
+            let Some(credential) = &self.credential else {
+                return Ok(None);
+            };
+            if !same_secret(secret, credential) {
+                return Err(refusal(
+                    401,
+                    ErrorResponse::unauthorized("Invalid backend credential"),
+                ));
+            }
+            match self.access.as_deref() {
+                Some("admin") => Ok(Some(Vouched::Admin)),
+                Some("backend") => Ok(Some(Vouched::Backend)),
+                None => Ok(Some(Vouched::Session)),
+                Some(other) => Err(refusal(
+                    401,
+                    ErrorResponse::unauthorized(format!("unknown backend access `{other}`")),
+                )),
             }
         }
 
         /// As native's `validate_admin_secret`, by the core secret.
         fn admin(&self, secret: &str) -> Result<(), HttpAnswer> {
             use jazz::tools::transport_error::ErrorResponse;
-            if self.vouched(secret, &["admin"]) {
-                return Ok(());
+            match self.vouched(secret)? {
+                Some(Vouched::Admin) => return Ok(()),
+                Some(_) => {
+                    return Err(refusal(
+                        401,
+                        ErrorResponse::unauthorized("Admin secret required for this operation"),
+                    ));
+                }
+                None => {}
             }
             match &self.admin_secret {
                 Some(given) if same_secret(secret, given) => Ok(()),
@@ -1461,8 +1669,15 @@ mod core_host {
         /// As native's `validate_backend_secret`, by the core secret.
         fn backend(&self, secret: &str) -> Result<(), HttpAnswer> {
             use jazz::tools::transport_error::ErrorResponse;
-            if self.vouched(secret, &["admin", "backend"]) {
-                return Ok(());
+            match self.vouched(secret)? {
+                Some(Vouched::Admin | Vouched::Backend) => return Ok(()),
+                Some(Vouched::Session) => {
+                    return Err(refusal(
+                        401,
+                        ErrorResponse::unauthorized("Backend secret required for backend access"),
+                    ));
+                }
+                None => {}
             }
             match &self.backend_secret {
                 Some(given) if same_secret(secret, given) => Ok(()),
@@ -1476,13 +1691,156 @@ mod core_host {
                 )),
             }
         }
+
+        /// Whoever holds the core secret, in any role: the backend's
+        /// credential with any access, or either secret header.
+        fn holder(&self, secret: &str) -> Result<(), HttpAnswer> {
+            if self.vouched(secret)?.is_some() {
+                return Ok(());
+            }
+            if self.admin_secret.is_some() {
+                return self.admin(secret);
+            }
+            self.backend(secret)
+        }
+    }
+
+    /// The route a request's `path` names: `app` for `/app`, else the part
+    /// after `/apps/{x}/`. The object serves its one app, whatever `x` is.
+    fn route_of(path: &str) -> Option<&str> {
+        if path == "/app" {
+            return Some("app");
+        }
+        let rest = path.strip_prefix("/apps/")?;
+        let (app, route) = rest.split_once('/')?;
+        (!app.is_empty() && !route.is_empty()).then_some(route)
+    }
+
+    /// The app id the object keeps in its own SQL, made on its first open
+    /// (as a native core keeps `<data-dir>/app-id`): nobody configures it.
+    fn stored_app_id(storage: &jazz::storage::Storage) -> Result<String, String> {
+        use jazz::storage::OptionalExtension;
+        storage
+            .execute_batch("CREATE TABLE IF NOT EXISTS _jazz_host_app (id TEXT NOT NULL)")
+            .map_err(|error| error.to_string())?;
+        let stored = storage
+            .prepare_cached("SELECT id FROM _jazz_host_app LIMIT 1")
+            .and_then(|mut statement| {
+                statement
+                    .query_row([], |row| row.get::<_, String>(0))
+                    .optional()
+            })
+            .map_err(|error| error.to_string())?;
+        if let Some(id) = stored {
+            return Ok(id);
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        storage
+            .execute("INSERT INTO _jazz_host_app (id) VALUES (?1)", [&id])
+            .map_err(|error| error.to_string())?;
+        Ok(id)
     }
 
     #[wasm_bindgen]
     impl DurableObjectCore {
-        /// Serve an HTTP request to `route` (the path after
-        /// `/apps/{appId}/`), as the native server serves it.
+        /// The app id this object serves (see `stored_app_id`).
+        #[wasm_bindgen(js_name = appId)]
+        pub fn app_id(&self) -> String {
+            self.app_id.clone()
+        }
+
+        /// Check an HTTP request to `path` before its body is read: the
+        /// refusal to answer (404, 401), or `undefined` when `http` may
+        /// serve it. The secrets are what it carried: native's headers
+        /// (`X-Jazz-Admin-Secret`, `X-Jazz-Backend-Secret`) or the
+        /// backend's credential (`X-Jazz-Backend-Credential`, with
+        /// `X-Jazz-Backend-Access`).
+        pub fn authorize(
+            &self,
+            method: &str,
+            path: &str,
+            admin_secret: Option<String>,
+            backend_secret: Option<String>,
+            credential: Option<String>,
+            access: Option<String>,
+        ) -> JsValue {
+            let credentials = HttpCredentials {
+                admin_secret,
+                backend_secret,
+                credential,
+                access,
+            };
+            match self.check(method, path, &credentials) {
+                Ok(_) => JsValue::UNDEFINED,
+                Err(refused) => refused.into_js(),
+            }
+        }
+
+        /// Serve an HTTP request to `path` as the native server serves it
+        /// (checked again as `authorize` checks it).
+        #[allow(clippy::too_many_arguments)]
         pub fn http(
+            &mut self,
+            method: &str,
+            path: &str,
+            admin_secret: Option<String>,
+            backend_secret: Option<String>,
+            credential: Option<String>,
+            access: Option<String>,
+            body: &[u8],
+        ) -> JsValue {
+            let credentials = HttpCredentials {
+                admin_secret,
+                backend_secret,
+                credential,
+                access,
+            };
+            match self.check(method, path, &credentials) {
+                Ok(route) => self.serve(method, route, &credentials, body).into_js(),
+                Err(refused) => refused.into_js(),
+            }
+        }
+    }
+
+    impl DurableObjectCore {
+        /// The route `path` names, if it exists and the request's secrets
+        /// grant it.
+        fn check<'p>(
+            &self,
+            method: &str,
+            path: &'p str,
+            credentials: &HttpCredentials,
+        ) -> Result<&'p str, HttpAnswer> {
+            use jazz::tools::transport_error::ErrorResponse;
+            let not_found = || refusal(404, ErrorResponse::not_found("route not found"));
+            let route = route_of(path).ok_or_else(not_found)?;
+            let account = route
+                .strip_prefix("admin/accounts/")
+                .and_then(AccountRoute::from_path);
+            match (method, route) {
+                ("GET", "app") => credentials.holder(&self.secret)?,
+                ("POST", "backend/admit") => credentials.backend(&self.secret)?,
+                // As native: the admin secret, or for the routes a backend
+                // vouches for (resolve, login-or-register,
+                // found-local-first), the backend's when no admin secret is
+                // sent; link, revoke and revoke-sessions are the admin's.
+                ("POST", _) if account.is_some() => match account.expect("matched").authority() {
+                    RouteAuthority::VouchingBackend if credentials.admin_secret.is_none() => {
+                        credentials.backend(&self.secret)?
+                    }
+                    _ => credentials.admin(&self.secret)?,
+                },
+                ("GET", "admin/migrations/graph" | "admin/bundles") | ("POST", "admin/bundles") => {
+                    credentials.admin(&self.secret)?
+                }
+                #[cfg(feature = "durable-object-tests")]
+                ("POST", "test/panic" | "test/limits") => credentials.admin(&self.secret)?,
+                _ => return Err(not_found()),
+            }
+            Ok(route)
+        }
+
+        fn serve(
             &mut self,
             method: &str,
             route: &str,
@@ -1490,37 +1848,23 @@ mod core_host {
             body: &[u8],
         ) -> HttpAnswer {
             use jazz::tools::transport_error::ErrorResponse;
-            let account = route
+            #[cfg(feature = "durable-object-tests")]
+            if let Some(answer) = self.test_route(method, route, credentials, body) {
+                return answer;
+            }
+            #[cfg(not(feature = "durable-object-tests"))]
+            let _ = credentials;
+            // `check` found the route and its secrets hold.
+            if let Some(account) = route
                 .strip_prefix("admin/accounts/")
-                .and_then(AccountRoute::from_path);
-            let checked = match (method, route) {
-                ("POST", "backend/admit") => credentials.backend(&self.secret),
-                // As native: the admin secret, or for the routes a backend
-                // vouches for, the backend's when no admin secret is sent.
-                ("POST", _) if account.is_some() => match account.expect("matched").authority() {
-                    RouteAuthority::VouchingBackend if credentials.admin_secret.is_none() => {
-                        credentials.backend(&self.secret)
-                    }
-                    _ => credentials.admin(&self.secret),
-                },
-                ("GET", "admin/migrations/graph" | "admin/bundles") | ("POST", "admin/bundles") => {
-                    credentials.admin(&self.secret)
-                }
-                _ => {
-                    return refusal(404, ErrorResponse::not_found("route not found"));
-                }
-            };
-            if let Err(refused) = checked {
-                return refused;
+                .and_then(AccountRoute::from_path)
+            {
+                return self.account(account, body);
             }
             match (method, route) {
+                ("GET", "app") => answer(200, serde_json::json!({ "appId": self.app_id })),
                 // The backend's credential holds: it may open sessions.
-                ("POST", "backend/admit") => HttpAnswer {
-                    status: 204,
-                    body: String::new(),
-                    content_type: String::new(),
-                },
-                ("POST", _) if account.is_some() => self.account(account.expect("matched"), body),
+                ("POST", "backend/admit") => no_content(),
                 ("GET", "admin/migrations/graph") => match self.catalogue_index() {
                     Ok(index) => answer(200, index.migration_graph()),
                     Err(error) => refusal(500, ErrorResponse::internal(error)),
@@ -1584,24 +1928,42 @@ mod core_host {
             }
         }
 
-        /// Serve an account route (`admin/accounts/...`) on the store's
-        /// account registry, as native does. Its effects on live sessions
-        /// are not needed here: the object admits no user credential
-        /// (JWT or local-first proof) a revocation could end, only its
-        /// backend, which states its users' sessions itself.
-        fn account(&mut self, route: AccountRoute, body: &[u8]) -> HttpAnswer {
-            use jazz::tools::transport_error::ErrorResponse;
+        /// The account registry over the object's SQL, its tables made on
+        /// first use.
+        fn registry(&mut self) -> Result<jazz::storage::Storage, String> {
             let storage = durable_object_storage(self.storage.clone());
             if !self.accounts_open {
-                if let Err(error) = accounts::open(&storage) {
-                    return refusal(503, ErrorResponse::internal(error.to_string()));
-                }
+                accounts::open(&storage).map_err(|error| error.to_string())?;
                 self.accounts_open = true;
             }
+            Ok(storage)
+        }
+
+        /// The revocation mark of `principal`'s sessions, if any.
+        fn revocation_mark(
+            &mut self,
+            principal: &jazz::account_registry::Principal,
+        ) -> Result<Option<u64>, String> {
+            let storage = self.registry()?;
+            accounts::sessions_revoked_before(&storage, principal)
+                .map_err(|error| error.to_string())
+        }
+
+        /// Serve an account route (`admin/accounts/...`) on the store's
+        /// account registry, as native does. A revocation of a user's
+        /// sessions ends the stated sessions of that user authenticated
+        /// before its mark (their sockets get native's error and close);
+        /// later ones are refused at admission.
+        fn account(&mut self, route: AccountRoute, body: &[u8]) -> HttpAnswer {
+            use jazz::tools::transport_error::ErrorResponse;
+            let storage = match self.registry() {
+                Ok(storage) => storage,
+                Err(error) => return refusal(503, ErrorResponse::internal(error)),
+            };
             let Ok(app_id) = uuid::Uuid::parse_str(&self.app_id) else {
                 return refusal(500, ErrorResponse::internal("the app id is not a UUID"));
             };
-            let (reply, _effects) = accounts::serve(
+            let (reply, effects) = accounts::serve(
                 &storage,
                 route,
                 body,
@@ -1611,6 +1973,19 @@ mod core_host {
                     fresh_id: &mut uuid::Uuid::new_v4,
                 },
             );
+            if let Some((principal, mark)) = effects.sessions_revoked {
+                for state in self.sockets.values_mut() {
+                    let ends = state.revocation.as_ref().is_some_and(|revocation| {
+                        revocation.principal == principal
+                            && accounts::session_revoked(Some(mark), revocation.authenticated_at_ms)
+                    });
+                    if ends {
+                        state.held.clear();
+                        state.held_bytes = 0;
+                        state.failed.get_or_insert_with(revoked);
+                    }
+                }
+            }
             let (body, content_type) = match reply.body {
                 RouteBody::Empty => (String::new(), ""),
                 RouteBody::Json(body) => (body, "application/json"),
@@ -1619,7 +1994,7 @@ mod core_host {
             HttpAnswer {
                 status: reply.status,
                 body,
-                content_type: content_type.to_owned(),
+                content_type,
             }
         }
 
@@ -1685,9 +2060,8 @@ mod core_host {
     }
 
     /// What `output` answers.
-    #[wasm_bindgen(getter_with_clone)]
-    pub struct Output {
-        pub batches: Vec<js_sys::Uint8Array>,
-        pub ended: bool,
+    struct Output {
+        batches: Vec<js_sys::Uint8Array>,
+        ended: bool,
     }
 }

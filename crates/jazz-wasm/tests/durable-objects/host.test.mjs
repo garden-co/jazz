@@ -16,7 +16,8 @@ import * as fixture from "./pkg/jazz_wasm.js";
 const here = fileURLToPath(new URL(".", import.meta.url));
 fixture.initSync({ module: readFileSync(join(here, "pkg/jazz_wasm_bg.wasm")) });
 
-const APP = "00000000-0000-0000-0000-00000000a001";
+// Any non-empty segment names the object's one app.
+const APP = "my-app";
 const SECRET = "s".repeat(40);
 const SCHEMA = fixture.testNotesSchema();
 
@@ -32,7 +33,7 @@ function start(persist) {
     compatibilityDate: "2026-04-01",
     durableObjects: { JAZZ: { className: "JazzCore", useSQLite: true } },
     durableObjectsPersist: persist,
-    bindings: { JAZZ_APP_ID: APP, JAZZ_CORE_SECRET: SECRET, JAZZ_SCHEMA: SCHEMA },
+    bindings: { JAZZ_CORE_SECRET: SECRET, JAZZ_SCHEMA: SCHEMA },
   });
 }
 
@@ -51,8 +52,10 @@ async function connect(mf, headers = {}) {
       (waiting.shift() ?? ((a) => answers.push(a)))(answer);
     }
   });
-  ws.addEventListener("close", () => {
+  let closeCode = null;
+  ws.addEventListener("close", (event) => {
     closed = true;
+    closeCode = event.code;
   });
   ws.accept();
   return {
@@ -65,6 +68,7 @@ async function connect(mf, headers = {}) {
             setTimeout(() => reject(new Error("no answer within 5 s")), 5000);
           }),
     closed: () => closed,
+    closeCode: () => closeCode,
     close: () => ws.close(),
   };
 }
@@ -84,7 +88,7 @@ test("a Durable Object core without a published schema answers health and admits
     compatibilityDate: "2026-04-01",
     durableObjects: { JAZZ: { className: "JazzCore", useSQLite: true } },
     // As the docs deploy it: no JAZZ_SCHEMA.
-    bindings: { JAZZ_APP_ID: APP, JAZZ_CORE_SECRET: SECRET },
+    bindings: { JAZZ_CORE_SECRET: SECRET },
   });
   try {
     assert.equal(await (await mf.dispatchFetch("http://core/health")).text(), "ok");
@@ -95,6 +99,36 @@ test("a Durable Object core without a published schema answers health and admits
     assert.equal(wrong.status, 401);
     assert.equal((await wrong.json()).error, "Invalid backend secret");
     assert.equal((await admit({})).status, 401);
+    // The object's own app id, for the backend's credential alone.
+    const app = await mf.dispatchFetch("http://core/app", {
+      headers: { "X-Jazz-Backend-Credential": SECRET },
+    });
+    assert.equal(app.status, 200);
+    const { appId } = await app.json();
+    assert.match(appId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    assert.equal((await mf.dispatchFetch("http://core/app")).status, 401);
+    const stranger = await mf.dispatchFetch("http://core/app", {
+      headers: { "X-Jazz-Backend-Credential": "w".repeat(40) },
+    });
+    assert.equal(stranger.status, 401);
+    // Its app answers under its id as under any other name.
+    const byId = await mf.dispatchFetch(`http://core/apps/${appId}/backend/admit`, {
+      method: "POST",
+      headers: { "X-Jazz-Backend-Secret": SECRET },
+    });
+    assert.equal(byId.status, 204);
+    assert.equal(
+      (await mf.dispatchFetch("http://core/apps//backend/admit", { method: "POST" })).status,
+      404,
+    );
+    // A body is read only once the route and secret hold, and at most 8 MiB.
+    const big = new Uint8Array(9 * 1024 * 1024);
+    const unread = await mf.dispatchFetch(`http://core/apps/${APP}/admin/bundles`, {
+      method: "POST",
+      headers: { "X-Jazz-Admin-Secret": SECRET },
+      body: big,
+    });
+    assert.equal(unread.status, 413);
     const graph = await mf.dispatchFetch(`http://core/apps/${APP}/admin/migrations/graph`);
     assert.equal(graph.status, 401, "admin routes need the admin secret");
 
@@ -165,7 +199,7 @@ test("a backend publishes its schema to a Durable Object core, which then serves
       compatibilityDate: "2026-04-01",
       durableObjects: { JAZZ: { className: "JazzCore", useSQLite: true } },
       durableObjectsPersist: persist,
-      bindings: { JAZZ_APP_ID: APP, JAZZ_CORE_SECRET: SECRET },
+      bindings: { JAZZ_CORE_SECRET: SECRET },
     });
   const admin = { "X-Jazz-Admin-Secret": SECRET };
   const get = (mf, route) =>
@@ -178,6 +212,15 @@ test("a backend publishes its schema to a Durable Object core, which then serves
     });
   try {
     let mf = open();
+    const appId = async () =>
+      (
+        await (
+          await mf.dispatchFetch("http://core/app", {
+            headers: { "X-Jazz-Backend-Credential": SECRET, "X-Jazz-Backend-Access": "backend" },
+          })
+        ).json()
+      ).appId;
+    const firstId = await appId();
     const empty = await get(mf, "admin/migrations/graph");
     assert.equal(empty.status, 200);
     assert.deepEqual((await (await get(mf, "admin/bundles")).json()).bundles, []);
@@ -214,6 +257,7 @@ test("a backend publishes its schema to a Durable Object core, which then serves
 
     // The next instance opens on what was published.
     mf = open();
+    assert.equal(await appId(), firstId, "the object keeps its app id");
     assert.equal((await (await publish(mf, request)).json()).changed, false);
     const later = await connect(mf, backend);
     later.send(prelude);
@@ -230,6 +274,145 @@ test("a backend publishes its schema to a Durable Object core, which then serves
   }
 });
 
+/** Until `check()` holds, or fail after 5 s. */
+async function eventually(check, what) {
+  for (let waited = 0; !check(); waited += 20) {
+    if (waited > 5000) throw new Error(`not within 5 s: ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+/** An admin request to a test-only route (`durable-object-tests` builds). */
+function testRoute(mf, route, body) {
+  return mf.dispatchFetch(`http://core/apps/${APP}/test/${route}`, {
+    method: "POST",
+    headers: { "X-Jazz-Admin-Secret": SECRET, "content-type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+}
+
+/** A backend's thin connection, past its Hello and schema. */
+async function ready(mf) {
+  const socket = await connect(mf, backend);
+  socket.send(prelude);
+  socket.send(fixture.testThinHello());
+  assert.deepEqual(await socket.next(), { hello: true });
+  socket.send(fixture.testThinSchema(1n, SCHEMA));
+  assert.deepEqual(await socket.next(), { id: 1, ok: true });
+  return socket;
+}
+
+/** Send `bytes` of inserts (64 KiB titles) from id `from` on. */
+function flood(socket, bytes, from = 100) {
+  const title = "x".repeat(64 * 1024);
+  let id = BigInt(from);
+  for (let sent = 0; sent < bytes; sent += title.length) {
+    try {
+      socket.send(fixture.testThinInsertNote(id++, title));
+    } catch {
+      return;
+    }
+  }
+}
+
+const MiB = 1024 * 1024;
+
+test("a Durable Object core ends a socket that sends more than it can hold, and serves the others", async () => {
+  const mf = start(mkdtempSync(join(tmpdir(), "jazz-do-held-")));
+  try {
+    const flooding = await ready(mf);
+    const other = await ready(mf);
+    // The engine takes nothing: up to 1 MiB is held, then the socket is shed.
+    assert.equal(
+      (await testRoute(mf, "limits", { socket: MiB, global: 64 * MiB, paused: true })).status,
+      204,
+    );
+    flood(flooding, 2 * MiB);
+    const shed = await flooding.next();
+    assert.match(shed.error ?? "", /reconnect later/, JSON.stringify(shed));
+    await eventually(() => flooding.closed(), "the flooding socket closes");
+    assert.equal(other.closed(), false);
+
+    await testRoute(mf, "limits", { socket: 8 * MiB, global: 32 * MiB, paused: false });
+    other.send(fixture.testThinInsertNote(2n, "still served"));
+    assert.deepEqual(await other.next(), { id: 2, written: true });
+    other.close();
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("a Durable Object core sheds the socket holding most when all together hold too much", async () => {
+  const mf = start(mkdtempSync(join(tmpdir(), "jazz-do-global-")));
+  try {
+    const modest = await ready(mf);
+    const greedy = await ready(mf);
+    await testRoute(mf, "limits", { socket: 3 * MiB, global: 4 * MiB, paused: true });
+    // Modest holds 1.5 MiB; greedy passes the 4 MiB both may hold together
+    // while still under its own 3.
+    flood(modest, 1.5 * MiB);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    flood(greedy, 2.9 * MiB);
+    const shed = await greedy.next();
+    assert.match(shed.error ?? "", /reconnect later/, JSON.stringify(shed));
+    await eventually(() => greedy.closed(), "the greedy socket closes");
+
+    await testRoute(mf, "limits", { socket: 8 * MiB, global: 32 * MiB, paused: false });
+    const answer = await modest.next();
+    assert.equal(answer.written, true, JSON.stringify(answer));
+    assert.equal(modest.closed(), false);
+    modest.close();
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("a malformed message ends its own socket alone", async () => {
+  const mf = start(mkdtempSync(join(tmpdir(), "jazz-do-malformed-")));
+  try {
+    const broken = await ready(mf);
+    const other = await ready(mf);
+    broken.send(new Uint8Array([0xff, 0x00, 0x13, 0x37]));
+    const error = await broken.next();
+    assert.ok(error.error, JSON.stringify(error));
+    await eventually(() => broken.closed(), "the malformed socket closes");
+    other.send(fixture.testThinInsertNote(2n, "still served"));
+    assert.deepEqual(await other.next(), { id: 2, written: true });
+    other.close();
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("after a panic the object starts afresh on its storage", async () => {
+  const mf = start(mkdtempSync(join(tmpdir(), "jazz-do-panic-")));
+  try {
+    const before = await ready(mf);
+    before.send(fixture.testThinInsertNote(2n, "before the panic"));
+    assert.deepEqual(await before.next(), { id: 2, written: true });
+
+    const panicked = await testRoute(mf, "panic").catch((error) => error);
+    assert.ok(panicked instanceof Error || panicked.status >= 500, String(panicked?.status));
+    await eventually(() => before.closed(), "sockets close after the panic");
+    assert.equal(before.closeCode(), 1011);
+
+    // A fresh core, on a fresh wasm instance, over the same storage.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        const after = await ready(mf);
+        after.send(fixture.testThinQueryNotes(2n));
+        assert.deepEqual(await after.next(), { id: 2, titles: ["before the panic"] });
+        after.close();
+        break;
+      } catch (error) {
+        if (attempt >= 2) throw error;
+      }
+    }
+    assert.equal(await (await mf.dispatchFetch("http://core/health")).text(), "ok");
+  } finally {
+    await mf.dispose();
+  }
+});
 test("a Durable Object core keeps its app's accounts", async () => {
   const persist = mkdtempSync(join(tmpdir(), "jazz-do-accounts-"));
   const open = () =>
@@ -244,7 +427,7 @@ test("a Durable Object core keeps its app's accounts", async () => {
       compatibilityDate: "2026-04-01",
       durableObjects: { JAZZ: { className: "JazzCore", useSQLite: true } },
       durableObjectsPersist: persist,
-      bindings: { JAZZ_APP_ID: APP, JAZZ_CORE_SECRET: SECRET },
+      bindings: { JAZZ_CORE_SECRET: SECRET },
     });
   const post = (mf, path, headers, body) =>
     mf.dispatchFetch(`http://core/apps/${APP}/admin/accounts/${path}`, {
@@ -296,5 +479,109 @@ test("a Durable Object core keeps its app's accounts", async () => {
   } finally {
     await mf?.dispose();
     rmSync(persist, { recursive: true, force: true });
+  }
+});
+
+test("each account route takes the secrets native's does", async () => {
+  const mf = start(mkdtempSync(join(tmpdir(), "jazz-do-account-auth-")));
+  const wrong = "w".repeat(40);
+  const as = {
+    none: {},
+    wrong: { "X-Jazz-Backend-Secret": wrong },
+    "wrong admin, right backend": { "X-Jazz-Admin-Secret": wrong, "X-Jazz-Backend-Secret": SECRET },
+    backend: { "X-Jazz-Backend-Secret": SECRET },
+    admin: { "X-Jazz-Admin-Secret": SECRET },
+    both: { "X-Jazz-Admin-Secret": SECRET, "X-Jazz-Backend-Secret": SECRET },
+    "credential, backend": {
+      "X-Jazz-Backend-Credential": SECRET,
+      "X-Jazz-Backend-Access": "backend",
+    },
+    "credential, admin": { "X-Jazz-Backend-Credential": SECRET, "X-Jazz-Backend-Access": "admin" },
+    "credential, no access": { "X-Jazz-Backend-Credential": SECRET },
+    "wrong credential": { "X-Jazz-Backend-Credential": wrong, "X-Jazz-Backend-Access": "admin" },
+  };
+  const admits = {
+    vouching: ["backend", "admin", "both", "credential, backend", "credential, admin"],
+    admin: ["admin", "both", "credential, admin"],
+  };
+  const routes = {
+    resolve: "vouching",
+    "login-or-register": "vouching",
+    "found-local-first": "vouching",
+    link: "admin",
+    revoke: "admin",
+    "revoke-sessions": "admin",
+  };
+  try {
+    for (const [route, authority] of Object.entries(routes)) {
+      for (const [who, headers] of Object.entries(as)) {
+        // No body: the secrets are checked first, and an admitted request
+        // then fails on its (missing) JSON.
+        const response = await mf.dispatchFetch(`http://core/apps/${APP}/admin/accounts/${route}`, {
+          method: "POST",
+          headers,
+        });
+        const expected = admits[authority].includes(who) ? 400 : 401;
+        assert.equal(response.status, expected, `${route} as ${who}`);
+      }
+    }
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("revoking a user's sessions ends their stated sessions and refuses older ones", async () => {
+  const mf = start(mkdtempSync(join(tmpdir(), "jazz-do-revoke-")));
+  const identity = { issuer: "https://idp.example", subject: "alice" };
+  let bundle;
+  const statedAt = (authenticatedAt) =>
+    JSON.stringify({
+      peer_identity: fixture.testUserIdentity(identity.issuer, identity.subject),
+      bundle,
+      auth: {
+        backend_session: {
+          issuer: identity.issuer,
+          user_id: identity.subject,
+          claims: {},
+          authenticatedAt,
+        },
+      },
+    });
+  const as = async (authenticatedAt) => {
+    const socket = await connect(mf, backend);
+    socket.send(statedAt(authenticatedAt));
+    socket.send(fixture.testThinHello());
+    return [socket, await socket.next()];
+  };
+  try {
+    // A user session is pinned to the permissions the backend published.
+    const published = await mf.dispatchFetch(`http://core/apps/${APP}/admin/bundles`, {
+      method: "POST",
+      headers: { "X-Jazz-Admin-Secret": SECRET, "content-type": "application/json" },
+      body: fixture.testDeployRequest(SCHEMA),
+    });
+    bundle = (await published.json()).bundle;
+    const [alice, hello] = await as(1000);
+    assert.deepEqual(hello, { hello: true });
+
+    const revoked = await mf.dispatchFetch(
+      `http://core/apps/${APP}/admin/accounts/revoke-sessions`,
+      {
+        method: "POST",
+        headers: { "X-Jazz-Admin-Secret": SECRET, "content-type": "application/json" },
+        body: JSON.stringify({ identity, revokedBefore: 2000 }),
+      },
+    );
+    assert.equal(revoked.status, 200);
+    assert.match((await alice.next()).error ?? "", /session revoked/);
+    await eventually(() => alice.closed(), "alice's socket closes");
+
+    const [, older] = await as(1500);
+    assert.match(older.error ?? "", /session revoked/);
+    const [later, fresh] = await as(3000);
+    assert.deepEqual(fresh, { hello: true }, "a session authenticated after the mark is admitted");
+    later.close();
+  } finally {
+    await mf.dispose();
   }
 });
