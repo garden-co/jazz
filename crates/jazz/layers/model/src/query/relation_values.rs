@@ -221,6 +221,22 @@ pub(crate) fn lower_relation_conjuncts<'a>(
                 None,
             )])
         }
+        RelationPredicate::StartsWith { left, right } => {
+            let right = operand(lower_value(right)?, "StartsWith tests")?;
+            Ok(vec![leaf(
+                Predicate::StartsWith(Operand::Column(left.column.clone()), right),
+                left,
+                None,
+            )])
+        }
+        RelationPredicate::EndsWith { left, right } => {
+            let right = operand(lower_value(right)?, "EndsWith tests")?;
+            Ok(vec![leaf(
+                Predicate::EndsWith(Operand::Column(left.column.clone()), right),
+                left,
+                None,
+            )])
+        }
         RelationPredicate::In { left, values } => {
             let values = values
                 .iter()

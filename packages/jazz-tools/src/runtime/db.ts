@@ -7,7 +7,7 @@ import { Utf8Decoder } from "./utf8.js";
 import { parseSnapshotRef, type SnapshotRef } from "./snapshot-ref.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import type { AccountHandle } from "../accounts/state.js";
-import { GracefulShutdownSyncError } from "./graceful-shutdown-error.js";
+import { DbClosedError, GracefulShutdownSyncError } from "./graceful-shutdown-error.js";
 import { accountToken, accountRegistry } from "../accounts/enrollment.js";
 import { assertAccountConfig, copyAccountConfigAdmission } from "../accounts/config-capability.js";
 /**
@@ -80,6 +80,7 @@ import {
   type ColumnTransformMap,
   type ColumnTransformRegistry,
 } from "./column-transforms.js";
+
 export type {
   ColumnTransform,
   ColumnTransformMap,
@@ -94,7 +95,9 @@ import {
 } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import { AuthRenewalBackoff } from "./auth-renewal-backoff.js";
+import { accountAppId } from "../accounts/local-first.js";
 import {
+  LOCAL_FIRST_JWT_ISSUER,
   parseJwtPayload,
   internalSessionFromVerifiedReservedJwtPayload,
   resolveClientInternalSessionSync,
@@ -132,6 +135,9 @@ import { toError } from "./util.js";
 import { isThinDb, upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-first-upgrade.js";
 import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 import { RuntimeClosedError } from "./runtime-closed-error.js";
+
+/** `getLocalFirstIdentityProof` hands out a session's sync proof only with this long left. */
+const SESSION_PROOF_MIN_REMAINING_SECONDS = 30;
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyRuntimeSource = RuntimeSource<any>;
@@ -2245,18 +2251,6 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * Read data is scoped to this transaction.
    */
   all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    // The core's transaction read path does not apply a branch view yet: it
-    // would return rows outside the requested branch (jazz#5806). Refuse
-    // rather than silently answer from the wrong view. Branch writes inside a
-    // transaction are unaffected.
-    const candidate = options as { branch?: unknown; base?: unknown } | undefined;
-    if (candidate?.branch !== undefined || candidate?.base !== undefined) {
-      return Promise.reject(
-        new Error(
-          "Reading through a branch (`branch`/`base`) inside a transaction is not supported yet (jazz#5806). Read outside the transaction with db.all/db.one instead.",
-        ),
-      );
-    }
     const reading = this.readAll(query, options);
     this.pendingReads.add(reading);
     const settled = () => this.pendingReads.delete(reading);
@@ -2352,6 +2346,23 @@ export interface ShutdownOptions {
   waitForSync?: boolean;
 }
 
+/**
+ * Where a {@link Db} is in its life. It only moves forward:
+ *
+ * - `open`: it reads and writes. A graceful shutdown (`waitForSync`) drains
+ *   here first: while it waits for pending writes to upload, the Db takes no
+ *   new work, but its connection stays up and keeps recovering, since the
+ *   upload needs it. A drain that fails or is cancelled rejects with a
+ *   {@link GracefulShutdownSyncError} and leaves the Db open: the shutdown
+ *   never started, so nothing moved back, and the app may retry it (an
+ *   offline sign-out does).
+ * - `closing`: teardown started. Final: nothing reopens the Db, and its
+ *   connection manager stops recovering its connection.
+ * - `closed`: teardown ended. If it failed, the shutdown promise says so;
+ *   the Db stays closed either way.
+ */
+export type DbPhase = "open" | "closing" | "closed";
+
 export class Db {
   private config: DbConfig;
   private readonly runtimeSource: AnyRuntimeSource;
@@ -2361,7 +2372,17 @@ export class Db {
   private localFirstRefreshOwned = false;
   private readonly localFirstRenewals = new AuthRenewalBackoff();
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-  private shutdownPromise: Promise<void> | null = null;
+  /** See {@link DbPhase}. Only {@link beginTeardown} and its end move it. */
+  private phase: DbPhase = "open";
+  /** A graceful shutdown waiting for pending writes, while still `open`. */
+  private gracefulDrain: {
+    done: Promise<void>;
+    cancel(): void;
+    /** A plain shutdown arrived meanwhile: a failed drain still tears down. */
+    teardownAnyway: boolean;
+  } | null = null;
+  /** Teardown's outcome, from the moment the Db enters `closing`. */
+  private teardown: Promise<void> | null = null;
   /** Set once the session that owned this Db moved on to another one. */
   private replaced: DbReplacedError | null = null;
   /** Ends each live subscription with a terminal error. */
@@ -2445,8 +2466,11 @@ export class Db {
       get runtimeSource() {
         return thisDb.runtimeSource;
       },
-      get isShuttingDown() {
-        return thisDb.shutdownPromise !== null;
+      get phase() {
+        return thisDb.phase;
+      },
+      get draining() {
+        return thisDb.gracefulDrain !== null;
       },
       markUnauthenticated: (reason) => this.markUnauthenticated(reason),
       renewsCredential: (reason) =>
@@ -2538,7 +2562,7 @@ export class Db {
   }
 
   private refreshLocalFirstToken(): void {
-    if (!this._localFirstSecret || this.shutdownPromise) return;
+    if (!this._localFirstSecret || this.stopping) return;
 
     try {
       const ttlSeconds = 3600;
@@ -2819,12 +2843,32 @@ export class Db {
   }
 
   /**
-   * Mint a short-lived local-first JWT proving possession of the current identity.
-   * Returns `null` if the current session is not local-first.
+   * A short-lived local-first JWT proving possession of the current identity:
+   * what a device account sends its own backend's routes as
+   * `Authorization: Bearer` (`jazz.forReqUser(request)` there). Returns
+   * `null` if the current session is not local-first.
+   *
+   * A Db opened by a session (`createJazzClient`, a provider) doesn't hold the
+   * device key: it returns the session's current sync proof, which lasts up
+   * to an hour and is for this app, so `ttlSeconds` doesn't apply and any
+   * other `audience` returns `null`, as does one with under 30 seconds left
+   * (the session renews it). Ask for one per request, and don't log or
+   * forward it: until it expires it also opens this account's sync.
    */
   getLocalFirstIdentityProof(options?: { ttlSeconds?: number; audience?: string }): string | null {
     if (!this._localFirstSecret) {
-      return null;
+      const token = this.config.jwtToken;
+      const payload = token ? parseJwtPayload(token) : null;
+      if (
+        !token ||
+        payload?.iss !== LOCAL_FIRST_JWT_ISSUER ||
+        typeof payload.exp !== "number" ||
+        // One about to expire could lapse on its way to the backend.
+        payload.exp <= Date.now() / 1000 + SESSION_PROOF_MIN_REMAINING_SECONDS ||
+        (options?.audience !== undefined && payload.aud !== accountAppId(options.audience))
+      )
+        return null;
+      return token;
     }
 
     const ttl = options?.ttlSeconds ?? 60;
@@ -3034,7 +3078,7 @@ export class Db {
    * {@link reconnect} to resume sync using the same Db instance.
    */
   async disconnect(): Promise<void> {
-    if (this.shutdownPromise) {
+    if (this.stopping) {
       throw new Error("Cannot disconnect a Db that is shutting down.");
     }
 
@@ -3049,7 +3093,7 @@ export class Db {
   async reconnect(): Promise<void> {
     // Sync recovery is safe before teardown starts; it must remain available
     // while a graceful transition waits for previously committed writes.
-    if (this.shutdownPromise && !this.cancelSyncShutdown) {
+    if (this.phase !== "open") {
       throw new Error("Cannot reconnect a Db that is shutting down.");
     }
 
@@ -3665,7 +3709,7 @@ export class Db {
    * sign-out or sign-in failed keeps a usable Db rather than ending in error.
    */
   isUsable(): boolean {
-    return !this.shutdownPromise && !this.replaced && this.connection.isUsable();
+    return !this.stopping && !this.replaced && this.connection.isUsable();
   }
 
   /**
@@ -4024,7 +4068,7 @@ export class Db {
         // Native initial snapshots may arrive synchronously. Defer the next
         // generation to avoid recursive installation as new inputs are found.
         queueMicrotask(() => {
-          if (!this.shutdownPromise) startNativeSubscription(replacement);
+          if (!this.stopping) startNativeSubscription(replacement);
         });
       }
     };
@@ -4123,7 +4167,7 @@ export class Db {
     };
     const ready = initialReadiness
       ?.then(() => {
-        if (unsubscribed || terminalized || activeSubscription === null || this.shutdownPromise) {
+        if (unsubscribed || terminalized || activeSubscription === null || this.stopping) {
           return;
         }
         deliveryReady = true;
@@ -4133,7 +4177,7 @@ export class Db {
         }
       })
       .catch((error: unknown) => {
-        if (unsubscribed || terminalized || activeSubscription === null || this.shutdownPromise) {
+        if (unsubscribed || terminalized || activeSubscription === null || this.stopping) {
           return;
         }
         // Admission failed after native registration. Terminalize the same
@@ -4163,7 +4207,7 @@ export class Db {
       void this.ensureReady(requirement, readyAbort.signal)
         .then(() => startNativeSubscription(initialSubscription))
         .catch((error: unknown) => {
-          if (unsubscribed || readyAbort.signal.aborted || this.shutdownPromise) return;
+          if (unsubscribed || readyAbort.signal.aborted || this.stopping) return;
           terminalizeSubscription(initialSubscription, error);
         });
     } else {
@@ -4386,68 +4430,121 @@ export class Db {
    * Shutdown the Db and release all resources.
    * Closes the Db's runtime client.
    *
+   * With `waitForSync`, pending writes upload first (see {@link DbPhase}): if
+   * that fails, this rejects with a `GracefulShutdownSyncError` and the Db
+   * stays open. Otherwise, or once they uploaded, the Db moves to `closing`
+   * and on to `closed`, for good.
+   *
+   * A plain shutdown (no `waitForSync`) always ends `closed`. One asked for
+   * while a drain runs waits for that drain, as before, but if the drain
+   * fails it tears down anyway: the drain's own caller still gets the
+   * `GracefulShutdownSyncError`, but the Db no longer stays open.
+   *
    * Idempotent: concurrent or repeated calls share the same in-flight promise.
    */
   shutdown(options: ShutdownOptions = {}): Promise<void> {
-    if (this.shutdownPromise) return this.shutdownPromise;
-    // Publish the promise before teardown can synchronously call back into Db.
-    let resolveShutdown!: (result: Promise<void>) => void;
-    const shutdown = new Promise<void>((resolve) => {
-      resolveShutdown = resolve;
+    if (this.teardown) return this.teardown;
+    if (this.gracefulDrain) {
+      if (options.waitForSync) return this.gracefulDrain.done;
+      this.gracefulDrain.teardownAnyway = true;
+      return this.gracefulDrain.done.catch(() => this.beginTeardown());
+    }
+    if (!options.waitForSync) return this.beginTeardown();
+    // Publish the drain before it starts: waiting can call back into the Db.
+    let resolveDrain!: (result: Promise<void>) => void;
+    const done = new Promise<void>((resolve) => {
+      resolveDrain = resolve;
     });
-    this.shutdownPromise = shutdown;
-    resolveShutdown(this.runShutdown(options));
-    return shutdown;
+    const syncAbort = new AbortController();
+    let rejectCancelled!: (error: Error) => void;
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      rejectCancelled = reject;
+    });
+    const drain = {
+      done,
+      cancel: () => {
+        syncAbort.abort();
+        rejectCancelled(new Error("Graceful shutdown cancelled"));
+      },
+      teardownAnyway: false,
+    };
+    this.gracefulDrain = drain;
+    resolveDrain(
+      (async () => {
+        try {
+          await Promise.race([
+            this.runtimeSource.waitForPendingWrites?.(syncAbort.signal) ??
+              this.connection.waitForPendingWrites({
+                inFlightStreams: this.streamsMayFinish?.signal,
+              }),
+            cancelled,
+          ]);
+        } catch (error) {
+          syncAbort.abort();
+          if (this.gracefulDrain === drain) this.gracefulDrain = null;
+          // The Db never left `open`, and takes work again, unless a plain
+          // shutdown asked for it meanwhile: that one closes it now, with no
+          // moment in between where it reads as open.
+          if (drain.teardownAnyway) void this.beginTeardown().catch(() => {});
+          throw new GracefulShutdownSyncError(error);
+        }
+        // Teardown takes over from here: a caller that shares this promise
+        // waits for it, and the Db is no longer draining but closing.
+        const teardown = this.beginTeardown();
+        if (this.gracefulDrain === drain) this.gracefulDrain = null;
+        return teardown;
+      })(),
+    );
+    void cancelled.catch(() => {});
+    return done;
   }
-
-  private cancelSyncShutdown: (() => void) | undefined;
 
   /** @internal Credential invalidation must interrupt a graceful sync wait. */
   abortGracefulShutdown(): void {
-    this.cancelSyncShutdown?.();
+    this.gracefulDrain?.cancel();
+  }
+
+  /** Whether the Db takes no new work: it is draining for a shutdown, or past `open`. */
+  private get stopping(): boolean {
+    return this.phase !== "open" || this.gracefulDrain !== null;
   }
 
   protected assertOpen(): void {
     if (this.replaced) throw this.replaced;
-    if (this.shutdownPromise) {
-      throw new Error("Cannot operate on a Db that is shutting down or closed.");
-    }
+    if (this.phase !== "open") throw new DbClosedError(this.phase);
+    if (this.gracefulDrain) throw new DbClosedError("draining");
   }
 
   private readonly shutdownListeners = new Set<() => void>();
 
   /** @internal Dispose account refresh and invalidation observers with the context. */
   onShutdown(listener: () => void): () => void {
-    if (this.shutdownPromise) listener();
+    // A drain may fail and leave the Db open: a listener registered during
+    // one waits for the teardown, if it comes.
+    if (this.phase !== "open") listener();
     else this.shutdownListeners.add(listener);
     return () => this.shutdownListeners.delete(listener);
   }
 
-  private async runShutdown(options: ShutdownOptions): Promise<void> {
-    if (options.waitForSync) {
-      const syncAbort = new AbortController();
-      const cancelled = new Promise<never>((_resolve, reject) => {
-        this.cancelSyncShutdown = () => {
-          syncAbort.abort();
-          reject(new Error("Graceful shutdown cancelled"));
-        };
-      });
-      try {
-        await Promise.race([
-          this.runtimeSource.waitForPendingWrites?.(syncAbort.signal) ??
-            this.connection.waitForPendingWrites({
-              inFlightStreams: this.streamsMayFinish?.signal,
-            }),
-          cancelled,
-        ]);
-      } catch (error) {
-        syncAbort.abort();
-        this.shutdownPromise = null;
-        throw new GracefulShutdownSyncError(error);
-      } finally {
-        this.cancelSyncShutdown = undefined;
-      }
-    }
+  /** Move `open` → `closing`, and to `closed` once teardown ends, however it ends. */
+  private beginTeardown(): Promise<void> {
+    if (this.teardown) return this.teardown;
+    this.phase = "closing";
+    // Publish the promise before teardown can synchronously call back into Db.
+    let resolveTeardown!: (result: Promise<void>) => void;
+    const teardown = new Promise<void>((resolve) => {
+      resolveTeardown = resolve;
+    });
+    this.teardown = teardown;
+    resolveTeardown(
+      this.runTeardown().finally(() => {
+        this.phase = "closed";
+      }),
+    );
+    return teardown;
+  }
+
+  private async runTeardown(): Promise<void> {
     for (const listener of this.shutdownListeners) {
       try {
         listener();

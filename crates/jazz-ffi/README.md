@@ -156,7 +156,10 @@ Not yet: deleting a session account's store through its handle (refused).
 - `watch_mutation_errors(listener)` / `jazz_watch(h, "mutationErrors", …)`:
   each write the server refused that no durable wait (a `global` tier,
   `wait_for_sync`) reported, as TS's `onMutationError`:
-  `{"transaction", "message", "denied", "serializable"}`. Refusals from
+  `{"transaction", "message", "code", "reason", "denied", "serializable"}`,
+  where `code` and `reason` are TS's `MutationErrorEvent`'s (`code`:
+  `permission_denied`, `serialization_conflict`, `transaction_conflict`,
+  `client_clock_too_far_ahead` or `write_rejected`). Refusals from
   before the first watch come first.
 - Every watch (session, sync, mutation errors) ends when the app closes,
   whichever way (`shutdown`, `sign_out`, `delete_client_storage`): a last
@@ -289,7 +292,9 @@ row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
     table to itself, up to `maxDepth` (default 10).
   - `{"union": [Q, …], "orderBy"?, "limit"?, "offset"?}`: every arm's rows,
     as TS's union: a row matched by two arms comes twice, and `limit` /
-    `offset` count every occurrence; arms read one table, with `where` only.
+    `offset` count every occurrence; arms read one table, with `where` and
+    an optional `"label"` only. An arm without a label is labelled by what
+    it reads, as every client labels it, so two identical arms need labels.
     Subscribing to a union whose arms overlap can mis-apply removals (deltas
     name rows by id), as in jazz-app-support.
   - `{"table", "history": true, "where"?, "orderBy"?, "limit"?}`: the

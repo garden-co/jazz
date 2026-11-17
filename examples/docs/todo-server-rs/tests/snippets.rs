@@ -326,11 +326,76 @@ async fn durable_snippets_run_against_a_server() {
         .await
         .expect("the server answers")
         .unwrap();
+    // Accepted, the error snippets return what they wrote.
+    let inserted = within(snippets::insert_todo_and_wait(&jazz))
+        .await
+        .expect("the server answers")
+        .unwrap();
+    assert_eq!(
+        inserted.map(|todo| todo.title).as_deref(),
+        Some("Ship review fixes")
+    );
+    assert!(
+        within(snippets::complete_todo_in_transaction(&jazz, existing.id))
+            .await
+            .expect("the server answers")
+            .unwrap()
+    );
+
     let staged = jazz
         .all(todos::query().filter(todos::title().eq("Review staged changes")))
         .await
         .unwrap();
     assert_eq!(staged.len(), 1);
+
+    jazz.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+/// The error snippets against a server whose permissions refuse every
+/// write: each reports the rejection rather than failing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn error_snippets_report_rejections() {
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .expect("start a Jazz server");
+    let data = TempDir::new().unwrap();
+    let backend = Backend::new(server.backend_secret(), server.admin_secret(), "alice")
+        .permissions(include_bytes!("fixtures/read-only.permissions.json").as_slice());
+    let jazz = jazz_app::open(
+        Config::new(app_id)
+            .server(server.base_url())
+            .storage(Storage::Dir(data.path().to_path_buf()))
+            .backend(backend),
+    )
+    .await
+    .expect("open as Alice's backend");
+
+    let refused = within(snippets::insert_todo_and_wait(&jazz))
+        .await
+        .expect("the server answers")
+        .unwrap();
+    assert!(refused.is_none());
+
+    // A plain insert lands locally (the server refuses it later); the
+    // transaction's update of it is refused too.
+    let todo = jazz
+        .insert(NewTodo::new("Local only", false))
+        .await
+        .unwrap();
+    let committed = within(snippets::complete_todo_in_transaction(&jazz, todo.id))
+        .await
+        .expect("the server answers")
+        .unwrap();
+    assert!(!committed);
+    let remote = within(jazz.all_with(todos::query(), jazz_app::ReadTier::Remote))
+        .await
+        .expect("the server answers")
+        .unwrap();
+    assert!(remote.is_empty());
 
     jazz.shutdown().await.unwrap();
     server.shutdown().await;

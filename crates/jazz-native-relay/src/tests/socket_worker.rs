@@ -60,6 +60,9 @@ enum Step {
     /// Refuse the attempt's credential, as Core refuses an expired bearer
     /// (`AuthFailed`, `WireRetry::Never`).
     RejectAuth,
+    /// Answer before hello that the server is still starting
+    /// (`NotReady`, `WireRetry::Later`).
+    NotReady,
 }
 
 /// Plays [`Step`]s in order and records each attempt's bearer; further
@@ -119,6 +122,13 @@ impl NativeTransportConnector for ScriptedConnector {
                 Some(Step::RejectAuth) => Err(NativeTransportError::AuthRejected(
                     "websocket rejected: AuthFailed: token expired".into(),
                 )),
+                Some(Step::NotReady) => {
+                    Err(NativeTransportError::Wire(jazz::wire::WireError::new(
+                        jazz::wire::WireErrorCode::NotReady,
+                        jazz::wire::WireRetry::Later,
+                        "server is still starting",
+                    )))
+                }
                 None => std::future::pending().await,
             }
         })
@@ -304,6 +314,45 @@ fn a_refused_connection_is_surfaced_and_retried() {
     assert_eq!(host.tick_foreground(alice), Ok(()));
 }
 
+/// The server is still starting and answers alice's first attempt with
+/// `NotReady` before its hello. The worker retries without publishing an
+/// outage, and alice's reads keep waiting on the attempt rather than
+/// giving up on the server, as on the web and Node transports (#5927 R10:
+/// the shared link classifies the wire error; before, this host read it as
+/// a network failure and reads stopped waiting).
+///
+/// ```text
+/// alice ─open─► relay ══socket══► edge   NotReady (still starting)
+///                 │                      (link Attempting, no failure)
+///                 │ ══socket══► edge     (connected)
+/// ```
+#[test]
+fn a_server_still_starting_keeps_reads_waiting_and_is_retried() {
+    let root = tempfile::tempdir().unwrap();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let connector = ScriptedConnector::new([Step::NotReady, Step::ConnectWhenReleased(released)]);
+    let (mut host, _, alice) =
+        scripted_foreground(root.path(), "not-ready-upstream", connector.clone());
+    let scope = host.foregrounds[&alice].scope.clone();
+    wait_for(&host, "the attempt is retried", |_| {
+        connector.bearers().len() == 2
+    });
+    assert_eq!(tick_events(&mut host, alice), (None, None), "not a failure");
+    assert!(host.private_scope_terminal_error(&scope).is_none());
+    host.sync_foreground_remote_link(alice);
+    assert_eq!(
+        host.foregrounds[&alice].remote_link_hint,
+        Some(RemoteLinkHint::Attempting),
+        "reads keep waiting for a server that is still starting"
+    );
+
+    release.send(()).unwrap();
+    wait_for(&host, "the retried connection lands", |host| {
+        connected(host, &scope)
+    });
+    assert_eq!(host.tick_foreground(alice), Ok(()));
+}
+
 /// #4248: alice's bearer expires while the app is in the background, so the
 /// worker's reconnect after the link drops is refused. The worker stops
 /// instead of resending the dead bearer forever, the status tells the host
@@ -354,11 +403,10 @@ fn an_expired_bearer_stops_the_worker_and_a_renewed_one_recovers() {
         Some(RemoteLinkHint::Failed),
         "reads must not wait on an upstream that refused the credential"
     );
-    assert!(
-        rejected
-            .as_deref()
-            .is_some_and(|reason| reason.contains("token expired")),
-        "the status names the refused credential: {rejected:?}"
+    assert_eq!(
+        rejected.as_deref(),
+        Some("expired"),
+        "the status names the classified refusal, not the server's wording"
     );
     thread::sleep(Duration::from_millis(50));
     assert_eq!(
@@ -445,7 +493,9 @@ fn a_renewed_bearer_refused_for_the_same_reason_is_a_new_refusal() {
         host.private_scope_workers[&scope].terminally_stopped()
     });
     let first = tick_auth_rejection(&mut host, alice).expect("the first refusal");
-    assert!(first.reason.contains("token expired"), "{first:?}");
+    // The relay forwards the link's classification (`AuthFailureReason`),
+    // so the host never re-reads "AuthFailed: token expired".
+    assert_eq!(first.reason, "expired", "{first:?}");
     assert_eq!(
         tick_auth_rejection(&mut host, alice),
         Some(first.clone()),
