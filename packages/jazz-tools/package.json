@@ -59,6 +59,10 @@
       "types": "./dist/backend/index.d.ts",
       "default": "./dist/backend/index.js"
     },
+    "./durable-object": {
+      "types": "./dist/durable-object/index.d.ts",
+      "workerd": "./dist/durable-object/index.js"
+    },
     "./better-auth-adapter": {
       "types": "./dist/better-auth-adapter/index.d.ts",
       "default": "./dist/better-auth-adapter/index.js"

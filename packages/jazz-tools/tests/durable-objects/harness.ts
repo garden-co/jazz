@@ -24,6 +24,8 @@ export async function startDurableObjectCore(
     secret?: string;
     /** A directory the object's storage outlives a restart in. */
     persist?: string;
+    /** More bindings for the Worker. */
+    bindings?: Record<string, string>;
   } = {},
 ): Promise<DurableObjectCore> {
   const script = options.script ?? join(here, "mock-core.mjs");
@@ -40,7 +42,7 @@ export async function startDurableObjectCore(
     compatibilityDate: "2026-04-01",
     durableObjects: { JAZZ: { className: "JazzCore", useSQLite: true } },
     ...(options.persist ? { durableObjectsPersist: options.persist } : {}),
-    bindings: { JAZZ_CORE_SECRET: secret, JAZZ_APP_ID: appId },
+    bindings: { ...options.bindings, JAZZ_CORE_SECRET: secret, JAZZ_APP_ID: appId },
     host: "127.0.0.1",
     port: 0,
   });
