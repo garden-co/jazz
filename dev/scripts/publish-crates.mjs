@@ -42,7 +42,9 @@ function cargo(args, env = {}) {
  * just "after 00:06:08 GMT"). Null if `output` isn't a rate-limit refusal.
  */
 export function rateLimitRetryAt(output, now = new Date()) {
-  if (!/429|Too Many Requests/.test(output)) return null;
+  // cargo reports the registry's answer as "(status 429 Too Many Requests)";
+  // a bare "429" can be anything (a size like 429.1KiB).
+  if (!/status 429\b|Too Many Requests/.test(output)) return null;
   const after = output.match(/try again after ([^\n]*?GMT)/);
   if (!after) return new Date(now.getTime() + 10 * 60_000);
   const full = Date.parse(after[1]);
@@ -56,6 +58,18 @@ export function rateLimitRetryAt(output, now = new Date()) {
 }
 
 /**
+ * CRATES_IO_MAX_WAIT_MINUTES as a whole number of minutes: unset or empty
+ * means the default (180); anything else that isn't a non-negative integer
+ * is refused, so a typo can't remove the cap.
+ */
+export function maxWaitMinutes(value) {
+  if (value === undefined || value.trim() === "") return 180;
+  if (!/^\d+$/.test(value.trim()))
+    throw new Error(`CRATES_IO_MAX_WAIT_MINUTES must be a whole number of minutes, got '${value}'`);
+  return Number(value.trim());
+}
+
+/**
  * `cargo publish` for one crate. On crates.io's rate limit (new crates: a
  * burst of 5, then 1 per 10 minutes) it waits until the time crates.io names,
  * plus a margin, and tries again, for at most CRATES_IO_MAX_WAIT_MINUTES
@@ -63,7 +77,7 @@ export function rateLimitRetryAt(output, now = new Date()) {
  */
 let waitedMs = 0;
 async function publishCrate(name, token) {
-  const maxWaitMs = Number(process.env.CRATES_IO_MAX_WAIT_MINUTES ?? 180) * 60_000;
+  const maxWaitMs = maxWaitMinutes(process.env.CRATES_IO_MAX_WAIT_MINUTES) * 60_000;
   const args = ["publish", "--allow-dirty", "--no-verify", "-p", name];
   for (;;) {
     console.log(`==> cargo ${args.join(" ")}`);

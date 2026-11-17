@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { rateLimitRetryAt } from "./publish-crates.mjs";
+import { maxWaitMinutes, rateLimitRetryAt } from "./publish-crates.mjs";
 
 const now = new Date("2026-11-17T00:02:00Z");
 
@@ -30,4 +30,25 @@ test("a 429 without a time waits ten minutes", () => {
 
 test("other failures are not retried", () => {
   assert.equal(rateLimitRetryAt("error: crate version `2.0.0` is already uploaded", now), null);
+});
+
+test("a full date on another day is used as is, not as a time of day", () => {
+  const output =
+    "the remote server responded with an error (status 429 Too Many Requests): Please try again after Wed, 18 Nov 2026 09:30:00 GMT";
+  assert.equal(rateLimitRetryAt(output, now).toISOString(), "2026-11-18T09:30:00.000Z");
+});
+
+test("a 429 elsewhere in cargo's output is not a rate limit", () => {
+  const output =
+    "   Packaged 12 files, 429.1KiB (98.0KiB compressed)\nerror: failed to publish: the remote server responded with an error (status 500 Internal Server Error)";
+  assert.equal(rateLimitRetryAt(output, now), null);
+});
+
+test("the wait cap defaults when unset or empty, and refuses anything else", () => {
+  assert.equal(maxWaitMinutes(undefined), 180);
+  assert.equal(maxWaitMinutes(""), 180);
+  assert.equal(maxWaitMinutes(" 45 "), 45);
+  assert.equal(maxWaitMinutes("0"), 0);
+  assert.throws(() => maxWaitMinutes("3h"), /whole number of minutes/);
+  assert.throws(() => maxWaitMinutes("-5"), /whole number of minutes/);
 });
