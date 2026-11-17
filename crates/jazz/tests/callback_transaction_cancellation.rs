@@ -308,3 +308,33 @@ fn rolling_back_a_callback_keeps_seq_floors_raised_while_it_ran() {
         assert!(receipt.0 > floor, "cancel: {cancel}");
     }
 }
+
+/// While Alice's callback transaction is suspended, a standalone write
+/// under another identity (a session) on the same store would join that
+/// transaction's commit and upload under its author. It is refused, and
+/// the transaction commits only its own write.
+#[test]
+fn a_write_as_another_identity_is_refused_while_a_transaction_is_open() {
+    use jazz::db::{InsertOptions, WriteIdentity};
+    let alice = open(1, AuthorSubject::SYSTEM);
+    let carol = AuthorSubject::for_test_bytes([7; 16]);
+    let (resume, resumed) = futures_channel::oneshot::channel::<()>();
+    let mut transaction = Box::pin(alice.transaction(async |tx| {
+        tx.insert("notes", body("own"), Default::default()).await?;
+        resumed.await.unwrap();
+        Ok(())
+    }));
+    poll_pending(transaction.as_mut());
+    let joined = block_on(alice.insert(
+        "notes",
+        body("carol's"),
+        InsertOptions {
+            identity: WriteIdentity::Session(carol),
+            ..Default::default()
+        },
+    ));
+    assert!(joined.is_err(), "{joined:?}");
+    resume.send(()).unwrap();
+    block_on(transaction).unwrap();
+    assert_eq!(bodies(&alice), [Value::String("own".to_owned())]);
+}

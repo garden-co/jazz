@@ -800,6 +800,10 @@ struct Inner {
     trusted_rows: RefCell<BTreeMap<String, BTreeSet<[u8; 16]>>>,
     /// The open transaction's seq and the tables it wrote.
     tx: Option<(u64, BTreeSet<String>)>,
+    /// The identity the open callback transaction writes as. A write as
+    /// any other identity while it is open would join its commit, and
+    /// upload under its author and claims, so it is refused.
+    tx_identity: Option<WriteIdentity>,
     publications: Vec<SchemaPublication>,
     /// Set once connected upstream: this store is a replica.
     client: Option<sync::Client>,
@@ -2030,6 +2034,7 @@ impl Db {
                 deferred: RefCell::new(None),
                 trusted_rows: RefCell::new(BTreeMap::new()),
                 tx: None,
+                tx_identity: None,
                 publications: Vec::new(),
                 client: None,
                 non_durable: false,
@@ -3520,6 +3525,15 @@ impl Db {
     /// upload: it is recorded for the authority, which decides its fate.
     fn write_op(&self, mut op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
         self.inner().require_mutation_admission()?;
+        // A write while a callback transaction is open joins its commit:
+        // only one made as that transaction's identity may (its own).
+        if let (Some(open), Some(identity)) = (self.inner().tx_identity, op.identity())
+            && identity != open
+        {
+            return Err(unsupported(
+                "a write as another identity while a transaction is open",
+            ));
+        }
         self.with_upload(|| {
             let table = op.table().to_owned();
             let (prior, mark) = {
@@ -3703,6 +3717,7 @@ impl Db {
             inner.changed.borrow_mut().clear();
             let seq = inner.fresh_seq();
             inner.tx = Some((seq, BTreeSet::new()));
+            inner.tx_identity = Some(identity);
         }
         // Until the unit commits or is rolled back below, dropping this
         // future (cancellation) or unwinding out of the callback rolls it
@@ -3722,6 +3737,7 @@ impl Db {
         let changed = {
             let mut inner = self.inner();
             let (seq, tables) = inner.tx.take().expect("open transaction");
+            inner.tx_identity = None;
             captured = std::mem::take(&mut inner.capture);
             prior = inner.seq;
             match &result {
@@ -4723,6 +4739,7 @@ impl Inner {
     /// so it closes mutation admission.
     fn roll_back_callback_tx(&mut self, restore_seq: Option<u64>) -> Result<(), Error> {
         self.tx = None;
+        self.tx_identity = None;
         self.capture.clear();
         self.writer = None;
         self.clear_derived();

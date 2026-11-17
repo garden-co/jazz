@@ -8502,6 +8502,10 @@ impl Db {
                 .map(|op| inner.stored_op(op, &schema))
                 .collect::<Result<Vec<_>, _>>()?;
             if inner.tx.is_some() {
+                // Callback transactions never write as a session
+                // (`Db::write_op` refuses a joining write of another
+                // identity), so no session claims travel with `capture`.
+                debug_assert!(!ops.iter().any(StagedOp::is_session));
                 inner.capture.extend(ops);
                 return Ok(());
             }
