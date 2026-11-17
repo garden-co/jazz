@@ -932,7 +932,7 @@ mod smoke {
 mod core_host {
     use super::{durable_object_storage, ObjectStorage};
     use jazz_server::portable::admission::{
-        admit_by_core_secret, UpgradeCredential, WebSocketPrelude,
+        admit_by_core_secret, same_secret, UpgradeCredential, WebSocketPrelude,
     };
     use jazz_server::portable::catalogue::{CatalogueIndex, DeploymentResponse};
     use jazz_server::portable::deployment::{self, DeployError, DeployRequest};
@@ -1092,13 +1092,17 @@ mod core_host {
         /// JSON) is served until a published catalogue replaces it.
         pub fn open(
             storage: ObjectStorage,
-            app_id: String,
             secret: String,
             schema: Option<String>,
         ) -> Result<DurableObjectCore, JsValue> {
             if secret.len() < 32 {
                 return Err(js("the core secret must be at least 32 characters"));
             }
+            // Admit the store (stamping a new one as Jazz's) before keeping
+            // anything of the host's in it.
+            jazz::host::StoreFile::from_storage(durable_object_storage(storage.clone()))
+                .map_err(js)?;
+            let app_id = stored_app_id(&durable_object_storage(storage.clone())).map_err(js)?;
             let mut this = Self {
                 storage,
                 app_id,
@@ -1513,12 +1517,6 @@ mod core_host {
         answer(status, error)
     }
 
-    /// Compare two secrets in time independent of where they differ.
-    fn same_secret(expected: &str, given: &str) -> bool {
-        let (a, b) = (expected.as_bytes(), given.as_bytes());
-        a.len() == b.len() && a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
-    }
-
     /// The secrets an HTTP request carried: native's headers
     /// (`X-Jazz-Admin-Secret`, `X-Jazz-Backend-Secret`) or the credential
     /// pair a trusted caller vouches with (`X-Jazz-Backend-Credential` +
@@ -1531,21 +1529,54 @@ mod core_host {
         access: Option<String>,
     }
 
+    /// What a backend credential (`X-Jazz-Backend-Credential`) vouched
+    /// for: the access stated next to it, `session` when none is.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Vouched {
+        Admin,
+        Backend,
+        Session,
+    }
+
     impl HttpCredentials {
-        fn vouched(&self, secret: &str, access: &[&str]) -> bool {
-            match (&self.credential, &self.access) {
-                (Some(credential), Some(given)) => {
-                    same_secret(secret, credential) && access.contains(&given.as_str())
-                }
-                _ => false,
+        /// The credential pair, if one was sent: as native's workload gate,
+        /// a credential that holds decides the access and the secret
+        /// headers are ignored; one that does not, or an access no route
+        /// knows, is refused.
+        fn vouched(&self, secret: &str) -> Result<Option<Vouched>, HttpAnswer> {
+            use jazz::tools::transport_error::ErrorResponse;
+            let Some(credential) = &self.credential else {
+                return Ok(None);
+            };
+            if !same_secret(secret, credential) {
+                return Err(refusal(
+                    401,
+                    ErrorResponse::unauthorized("Invalid backend credential"),
+                ));
+            }
+            match self.access.as_deref() {
+                Some("admin") => Ok(Some(Vouched::Admin)),
+                Some("backend") => Ok(Some(Vouched::Backend)),
+                None => Ok(Some(Vouched::Session)),
+                Some(other) => Err(refusal(
+                    401,
+                    ErrorResponse::unauthorized(format!("unknown backend access `{other}`")),
+                )),
             }
         }
 
         /// As native's `validate_admin_secret`, by the core secret.
         fn admin(&self, secret: &str) -> Result<(), HttpAnswer> {
             use jazz::tools::transport_error::ErrorResponse;
-            if self.vouched(secret, &["admin"]) {
-                return Ok(());
+            match self.vouched(secret)? {
+                Some(Vouched::Admin) => return Ok(()),
+                Some(_) => {
+                    return Err(refusal(
+                        401,
+                        ErrorResponse::unauthorized("Admin secret required for this operation"),
+                    ));
+                }
+                None => {}
             }
             match &self.admin_secret {
                 Some(given) if same_secret(secret, given) => Ok(()),
@@ -1563,8 +1594,15 @@ mod core_host {
         /// As native's `validate_backend_secret`, by the core secret.
         fn backend(&self, secret: &str) -> Result<(), HttpAnswer> {
             use jazz::tools::transport_error::ErrorResponse;
-            if self.vouched(secret, &["admin", "backend"]) {
-                return Ok(());
+            match self.vouched(secret)? {
+                Some(Vouched::Admin | Vouched::Backend) => return Ok(()),
+                Some(Vouched::Session) => {
+                    return Err(refusal(
+                        401,
+                        ErrorResponse::unauthorized("Backend secret required for backend access"),
+                    ));
+                }
+                None => {}
             }
             match &self.backend_secret {
                 Some(given) if same_secret(secret, given) => Ok(()),
@@ -1578,20 +1616,98 @@ mod core_host {
                 )),
             }
         }
+
+        /// Whoever holds the core secret, in any role: the backend's
+        /// credential with any access, or either secret header.
+        fn holder(&self, secret: &str) -> Result<(), HttpAnswer> {
+            if self.vouched(secret)?.is_some() {
+                return Ok(());
+            }
+            if self.admin_secret.is_some() {
+                return self.admin(secret);
+            }
+            self.backend(secret)
+        }
+    }
+
+    /// The route a request's `path` names: `app` for `/app`, else the part
+    /// after `/apps/{x}/`. The object serves its one app, whatever `x` is.
+    fn route_of(path: &str) -> Option<&str> {
+        if path == "/app" {
+            return Some("app");
+        }
+        let rest = path.strip_prefix("/apps/")?;
+        let (app, route) = rest.split_once('/')?;
+        (!app.is_empty() && !route.is_empty()).then_some(route)
+    }
+
+    /// The app id the object keeps in its own SQL, made on its first open
+    /// (as a native core keeps `<data-dir>/app-id`): nobody configures it.
+    fn stored_app_id(storage: &jazz::storage::Storage) -> Result<String, String> {
+        use jazz::storage::OptionalExtension;
+        storage
+            .execute_batch("CREATE TABLE IF NOT EXISTS _jazz_host_app (id TEXT NOT NULL)")
+            .map_err(|error| error.to_string())?;
+        let stored = storage
+            .prepare_cached("SELECT id FROM _jazz_host_app LIMIT 1")
+            .and_then(|mut statement| {
+                statement
+                    .query_row([], |row| row.get::<_, String>(0))
+                    .optional()
+            })
+            .map_err(|error| error.to_string())?;
+        if let Some(id) = stored {
+            return Ok(id);
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        storage
+            .execute("INSERT INTO _jazz_host_app (id) VALUES (?1)", [&id])
+            .map_err(|error| error.to_string())?;
+        Ok(id)
     }
 
     #[wasm_bindgen]
     impl DurableObjectCore {
-        /// Serve an HTTP request to `route` (the path after
-        /// `/apps/{appId}/`), as the native server serves it, with the
-        /// secrets it carried: native's headers (`X-Jazz-Admin-Secret`,
-        /// `X-Jazz-Backend-Secret`) or the pair a trusted caller vouches
-        /// with (`X-Jazz-Backend-Credential` + `X-Jazz-Backend-Access`).
+        /// The app id this object serves (see `stored_app_id`).
+        #[wasm_bindgen(js_name = appId)]
+        pub fn app_id(&self) -> String {
+            self.app_id.clone()
+        }
+
+        /// Check an HTTP request to `path` before its body is read: the
+        /// refusal to answer (404, 401), or `undefined` when `http` may
+        /// serve it. The secrets are what it carried: native's headers
+        /// (`X-Jazz-Admin-Secret`, `X-Jazz-Backend-Secret`) or the
+        /// backend's credential (`X-Jazz-Backend-Credential`, with
+        /// `X-Jazz-Backend-Access`).
+        pub fn authorize(
+            &self,
+            method: &str,
+            path: &str,
+            admin_secret: Option<String>,
+            backend_secret: Option<String>,
+            credential: Option<String>,
+            access: Option<String>,
+        ) -> JsValue {
+            let credentials = HttpCredentials {
+                admin_secret,
+                backend_secret,
+                credential,
+                access,
+            };
+            match self.check(method, path, &credentials) {
+                Ok(_) => JsValue::UNDEFINED,
+                Err(refused) => refused.into_js(),
+            }
+        }
+
+        /// Serve an HTTP request to `path` as the native server serves it
+        /// (checked again as `authorize` checks it).
         #[allow(clippy::too_many_arguments)]
         pub fn http(
             &mut self,
             method: &str,
-            route: &str,
+            path: &str,
             admin_secret: Option<String>,
             backend_secret: Option<String>,
             credential: Option<String>,
@@ -1604,7 +1720,36 @@ mod core_host {
                 credential,
                 access,
             };
-            self.serve(method, route, &credentials, body).into_js()
+            match self.check(method, path, &credentials) {
+                Ok(route) => self.serve(method, route, &credentials, body).into_js(),
+                Err(refused) => refused.into_js(),
+            }
+        }
+    }
+
+    impl DurableObjectCore {
+        /// The route `path` names, if it exists and the request's secrets
+        /// grant it.
+        fn check<'p>(
+            &self,
+            method: &str,
+            path: &'p str,
+            credentials: &HttpCredentials,
+        ) -> Result<&'p str, HttpAnswer> {
+            use jazz::tools::transport_error::ErrorResponse;
+            let not_found = || refusal(404, ErrorResponse::not_found("route not found"));
+            let route = route_of(path).ok_or_else(not_found)?;
+            match (method, route) {
+                ("GET", "app") => credentials.holder(&self.secret)?,
+                ("POST", "backend/admit") => credentials.backend(&self.secret)?,
+                ("GET", "admin/migrations/graph" | "admin/bundles") | ("POST", "admin/bundles") => {
+                    credentials.admin(&self.secret)?
+                }
+                #[cfg(feature = "durable-object-tests")]
+                ("POST", "test/panic" | "test/limits") => credentials.admin(&self.secret)?,
+                _ => return Err(not_found()),
+            }
+            Ok(route)
         }
 
         fn serve(
@@ -1619,7 +1764,8 @@ mod core_host {
             if let Some(answer) = self.test_route(method, route, credentials, body) {
                 return answer;
             }
-            let checked = match (method, route) {
+            let checked: Result<(), HttpAnswer> = match (method, route) {
+                ("GET", "app") => Ok(()),
                 ("POST", "backend/admit") => credentials.backend(&self.secret),
                 ("GET", "admin/migrations/graph" | "admin/bundles") | ("POST", "admin/bundles") => {
                     credentials.admin(&self.secret)
@@ -1632,6 +1778,7 @@ mod core_host {
                 return refused;
             }
             match (method, route) {
+                ("GET", "app") => answer(200, serde_json::json!({ "appId": self.app_id })),
                 // The backend's credential holds: it may open sessions.
                 ("POST", "backend/admit") => HttpAnswer {
                     status: 204,

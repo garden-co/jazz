@@ -16,7 +16,8 @@ import * as fixture from "./pkg/jazz_wasm.js";
 const here = fileURLToPath(new URL(".", import.meta.url));
 fixture.initSync({ module: readFileSync(join(here, "pkg/jazz_wasm_bg.wasm")) });
 
-const APP = "00000000-0000-0000-0000-00000000a001";
+// Any non-empty segment names the object's one app.
+const APP = "my-app";
 const SECRET = "s".repeat(40);
 const SCHEMA = fixture.testNotesSchema();
 
@@ -32,7 +33,7 @@ function start(persist) {
     compatibilityDate: "2026-04-01",
     durableObjects: { JAZZ: { className: "JazzCore", useSQLite: true } },
     durableObjectsPersist: persist,
-    bindings: { JAZZ_APP_ID: APP, JAZZ_CORE_SECRET: SECRET, JAZZ_SCHEMA: SCHEMA },
+    bindings: { JAZZ_CORE_SECRET: SECRET, JAZZ_SCHEMA: SCHEMA },
   });
 }
 
@@ -87,7 +88,7 @@ test("a Durable Object core without a published schema answers health and admits
     compatibilityDate: "2026-04-01",
     durableObjects: { JAZZ: { className: "JazzCore", useSQLite: true } },
     // As the docs deploy it: no JAZZ_SCHEMA.
-    bindings: { JAZZ_APP_ID: APP, JAZZ_CORE_SECRET: SECRET },
+    bindings: { JAZZ_CORE_SECRET: SECRET },
   });
   try {
     assert.equal(await (await mf.dispatchFetch("http://core/health")).text(), "ok");
@@ -98,6 +99,36 @@ test("a Durable Object core without a published schema answers health and admits
     assert.equal(wrong.status, 401);
     assert.equal((await wrong.json()).error, "Invalid backend secret");
     assert.equal((await admit({})).status, 401);
+    // The object's own app id, for the backend's credential alone.
+    const app = await mf.dispatchFetch("http://core/app", {
+      headers: { "X-Jazz-Backend-Credential": SECRET },
+    });
+    assert.equal(app.status, 200);
+    const { appId } = await app.json();
+    assert.match(appId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    assert.equal((await mf.dispatchFetch("http://core/app")).status, 401);
+    const stranger = await mf.dispatchFetch("http://core/app", {
+      headers: { "X-Jazz-Backend-Credential": "w".repeat(40) },
+    });
+    assert.equal(stranger.status, 401);
+    // Its app answers under its id as under any other name.
+    const byId = await mf.dispatchFetch(`http://core/apps/${appId}/backend/admit`, {
+      method: "POST",
+      headers: { "X-Jazz-Backend-Secret": SECRET },
+    });
+    assert.equal(byId.status, 204);
+    assert.equal(
+      (await mf.dispatchFetch("http://core/apps//backend/admit", { method: "POST" })).status,
+      404,
+    );
+    // A body is read only once the route and secret hold, and at most 8 MiB.
+    const big = new Uint8Array(9 * 1024 * 1024);
+    const unread = await mf.dispatchFetch(`http://core/apps/${APP}/admin/bundles`, {
+      method: "POST",
+      headers: { "X-Jazz-Admin-Secret": SECRET },
+      body: big,
+    });
+    assert.equal(unread.status, 413);
     const graph = await mf.dispatchFetch(`http://core/apps/${APP}/admin/migrations/graph`);
     assert.equal(graph.status, 401, "admin routes need the admin secret");
 
@@ -168,7 +199,7 @@ test("a backend publishes its schema to a Durable Object core, which then serves
       compatibilityDate: "2026-04-01",
       durableObjects: { JAZZ: { className: "JazzCore", useSQLite: true } },
       durableObjectsPersist: persist,
-      bindings: { JAZZ_APP_ID: APP, JAZZ_CORE_SECRET: SECRET },
+      bindings: { JAZZ_CORE_SECRET: SECRET },
     });
   const admin = { "X-Jazz-Admin-Secret": SECRET };
   const get = (mf, route) =>
@@ -181,6 +212,15 @@ test("a backend publishes its schema to a Durable Object core, which then serves
     });
   try {
     let mf = open();
+    const appId = async () =>
+      (
+        await (
+          await mf.dispatchFetch("http://core/app", {
+            headers: { "X-Jazz-Backend-Credential": SECRET, "X-Jazz-Backend-Access": "backend" },
+          })
+        ).json()
+      ).appId;
+    const firstId = await appId();
     const empty = await get(mf, "admin/migrations/graph");
     assert.equal(empty.status, 200);
     assert.deepEqual((await (await get(mf, "admin/bundles")).json()).bundles, []);
@@ -217,6 +257,7 @@ test("a backend publishes its schema to a Durable Object core, which then serves
 
     // The next instance opens on what was published.
     mf = open();
+    assert.equal(await appId(), firstId, "the object keeps its app id");
     assert.equal((await (await publish(mf, request)).json()).changed, false);
     const later = await connect(mf, backend);
     later.send(prelude);

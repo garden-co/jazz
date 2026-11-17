@@ -168,7 +168,7 @@ pub fn ws_link_admission(
 }
 
 /// Compare two secrets in time independent of where they differ.
-fn same_secret(expected: &str, given: &str) -> bool {
+pub fn same_secret(expected: &str, given: &str) -> bool {
     let (a, b) = (expected.as_bytes(), given.as_bytes());
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
 }

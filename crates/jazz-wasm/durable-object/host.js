@@ -1,21 +1,29 @@
 // The Jazz core a Cloudflare Durable Object hosts, around the Rust core in
-// jazz-wasm's `durable-object` build (`DurableObjectCore`). One object per
-// app (named by its app id) holds the app's store in its own SQL and serves
-// the native server's routes for it:
+// jazz-wasm's `durable-object` build (`DurableObjectCore`). The Worker
+// sends everything to one object, which holds the app's store in its own
+// SQL and serves the native server's routes for it:
 //
-//   GET  /health                           200 once the store is open
-//   GET  /apps/{appId}/ws                  WebSocket: prelude, Hello, then wire frames
-//   POST /apps/{appId}/backend/admit       204 for the app's backend
-//   GET  /apps/{appId}/admin/migrations/graph, GET|POST /apps/{appId}/admin/bundles
+//   GET  /health                       200 once the store is open
+//   GET  /app                          {"appId"}: for the backend's credential
+//   GET  /apps/{x}/ws                  WebSocket: prelude, Hello, then wire frames
+//   POST /apps/{x}/backend/admit       204 for the app's backend
+//   GET  /apps/{x}/admin/migrations/graph, GET|POST /apps/{x}/admin/bundles
 //
-// Bindings: JAZZ (this class's namespace), JAZZ_APP_ID, JAZZ_CORE_SECRET,
-// and optionally JAZZ_SCHEMA (a public schema's JSON, served until one is
-// published).
+// Nobody configures an app id: the object makes one on its first open and
+// keeps it in its SQL (as a native core keeps `<data-dir>/app-id`), and
+// serves its app whatever `{x}` is. Routes are checked, with the request's
+// secrets, before a body (at most 8 MiB) is read.
+//
+// Bindings: JAZZ (this class's namespace), JAZZ_CORE_SECRET, and optionally
+// JAZZ_SCHEMA (a public schema's JSON, served until one is published).
 //
 // What a deployment should know:
 // - One secret, JAZZ_CORE_SECRET, admits the app's backend in every role a
 //   native core keeps separate secrets for: backend links, admin routes
-//   (publication) and authority links. Keep it to the app's backend.
+//   (publication, accounts) and authority links. The admin/backend split
+//   (`X-Jazz-Backend-Access`, or which secret header is sent) is a
+//   convention between the backend's own calls, not a boundary: whoever
+//   holds the secret is admin. Keep it to the app's backend.
 // - Sockets are held open by the object (`accept()`, no WebSocket
 //   hibernation yet): they drop when the object is evicted, and clients
 //   reconnect. A peer must send its prelude and Hello within
@@ -27,6 +35,9 @@
 import { DurableObject } from "cloudflare:workers";
 
 const decoder = new TextDecoder();
+
+/** The longest request body read (native's catalogue limit). */
+const MAX_REQUEST_BYTES = 8 << 20;
 
 /** How long a new socket may take to send its prelude and Hello (native's). */
 const HANDSHAKE_TIMEOUT_MS = 2000;
@@ -43,6 +54,32 @@ async function bytes(data) {
   if (typeof Blob !== "undefined" && data instanceof Blob)
     return new Uint8Array(await data.arrayBuffer());
   return null;
+}
+
+/** `request`'s body, or null when it is longer than `limit` bytes. */
+async function readBody(request, limit) {
+  if (Number(request.headers.get("content-length") ?? 0) > limit) return null;
+  if (request.body === null) return new Uint8Array();
+  const chunks = [];
+  let length = 0;
+  const reader = request.body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    length += value.byteLength;
+    if (length > limit) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const body = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
 }
 
 function close(ws, code, reason) {
@@ -77,7 +114,6 @@ export function jazzCoreClass(wasm) {
         this.core = this.guard(() =>
           wasm.DurableObjectCore.open(
             this.ctx.storage,
-            this.env.JAZZ_APP_ID,
             this.env.JAZZ_CORE_SECRET,
             this.env.JAZZ_SCHEMA,
           ),
@@ -124,27 +160,27 @@ export function jazzCoreClass(wasm) {
         this.open();
         return new Response("ok");
       }
-      const prefix = `/apps/${this.env.JAZZ_APP_ID}/`;
-      if (!path.startsWith(prefix)) {
-        return failure(404, "not_found", "route not found");
-      }
-      if (path !== `${prefix}ws`) {
-        const body = new Uint8Array(await request.arrayBuffer());
-        const core = this.open();
+      if (!/^\/apps\/[^/]+\/ws$/.test(path)) {
         const header = (name) => request.headers.get(name) ?? undefined;
-        const answer = this.guard(() =>
-          core.http(
-            request.method,
-            path.slice(prefix.length),
-            header("X-Jazz-Admin-Secret"),
-            header("X-Jazz-Backend-Secret"),
-            header("X-Jazz-Backend-Credential"),
-            header("X-Jazz-Backend-Access"),
-            body,
-          ),
-        );
-        // A deployment may end sessions pinned to older bundles: tell them.
-        this.flush();
+        const secrets = [
+          header("X-Jazz-Admin-Secret"),
+          header("X-Jazz-Backend-Secret"),
+          header("X-Jazz-Backend-Credential"),
+          header("X-Jazz-Backend-Access"),
+        ];
+        const core = this.open();
+        // The route and secrets are checked before the body is read.
+        let answer = this.guard(() => core.authorize(request.method, path, ...secrets));
+        if (answer === undefined) {
+          const body = await readBody(request, MAX_REQUEST_BYTES);
+          if (body === null) {
+            return failure(413, "payload_too_large", "the request body is too large");
+          }
+          const current = this.open();
+          answer = this.guard(() => current.http(request.method, path, ...secrets, body));
+          // A deployment may end sessions pinned to older bundles: tell them.
+          this.flush();
+        }
         return answer.status === 204
           ? new Response(null, { status: 204 })
           : new Response(answer.body, {
@@ -278,5 +314,5 @@ export function jazzCoreClass(wasm) {
 
 /** The Worker's fetch: everything goes to the app's one object. */
 export function routeJazzRequest(request, env) {
-  return env.JAZZ.get(env.JAZZ.idFromName(env.JAZZ_APP_ID)).fetch(request);
+  return env.JAZZ.get(env.JAZZ.idFromName("jazz")).fetch(request);
 }
