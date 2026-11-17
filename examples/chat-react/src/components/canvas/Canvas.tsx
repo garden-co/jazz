@@ -1,9 +1,9 @@
 import { type PointerEvent, useEffect, useMemo, useRef, useState } from "react";
-import { useAll, useSession } from "jazz-tools/react";
+import { useAll, useJazzSession } from "jazz-tools/react";
 import { Eraser, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Toggle } from "@/components/ui/toggle";
-import { app } from "../../../schema.js";
+import { app } from "../../../jazz.generated.js";
 import { CollaboratorBadge } from "./CollaboratorBadge";
 import { useResponsiveCanvas } from "./useResponsiveCanvas";
 import {
@@ -27,8 +27,8 @@ export function CollaborativeCanvas({
   showControls?: boolean;
   className?: string;
 }) {
-  const session = useSession();
-  const userId = session?.user ?? null;
+  const session = useJazzSession();
+  const userId = session.user?.accountId ?? null;
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRefs = useRef<Map<string, HTMLCanvasElement | null>>(new Map());
   const drawingRef = useRef(false);

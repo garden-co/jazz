@@ -974,7 +974,11 @@ test("the emitted React Native graph cannot reach browser WASM through barrel ex
   // graph, unlike a direct source-import scan, and must discover its WASM
   // loader through runtime/index.
   const oldBarrel = fs.readFileSync(entry, "utf8");
-  const planted = new Map([[entry, oldBarrel.replace("../schema-namespace.js", "../index.js")]]);
+  assert.ok(
+    oldBarrel.includes("../removed-schema-api.js"),
+    "the RN entry re-exports the removed-API stubs",
+  );
+  const planted = new Map([[entry, oldBarrel.replace("../removed-schema-api.js", "../index.js")]]);
   assert.throws(
     () => assertEmittedRnGraphHasNoBrowserWasm(emittedRelativeModuleGraph(entry, planted)),
     /browser\/Node runtime loading|browser WASM package/,

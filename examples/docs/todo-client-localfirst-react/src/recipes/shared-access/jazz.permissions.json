@@ -1,0 +1,35 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "9c3cced83140c48a78cff1ce10e64baa5f6a074e16dff50d17cd6048d37e9897"
+  },
+  "tables": {
+    "todoShares": {
+      "read": {
+        "anyOf": [
+          "user_id = session.user",
+          "exists todos(id = this.todoId, $createdBy = session.user)"
+        ]
+      },
+      "insert": "exists todos(id = this.todoId, $createdBy = session.user)",
+      "delete": "exists todos(id = this.todoId, $createdBy = session.user)"
+    },
+    "todos": {
+      "read": {
+        "anyOf": [
+          "$createdBy = session.user",
+          "exists todoShares(todoId = this.id, user_id = session.user)"
+        ]
+      },
+      "insert": "true",
+      "update": {
+        "anyOf": [
+          "$createdBy = session.user",
+          "exists todoShares(todoId = this.id, user_id = session.user, can_edit = true)"
+        ]
+      },
+      "delete": "$createdBy = session.user"
+    }
+  }
+}

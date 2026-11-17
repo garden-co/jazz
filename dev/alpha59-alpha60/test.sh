@@ -25,7 +25,7 @@ app=0a590000-0000-4000-8000-000000000059
     -p jazz-alpha59-alpha60-export -p jazz-alpha59-alpha60-dump &&
   CARGO_TARGET_DIR="$t59" cargo test --release -p jazz-alpha59-alpha60-export)
 # The importer as self-hosters download it.
-(cd "$root" && CARGO_TARGET_DIR="$t60" cargo build --release -p jazz-cli --bin jazz-alpha59-alpha60-import)
+(cd "$root" && CARGO_TARGET_DIR="$t60" cargo build --release -p jazz-tools --bin jazz-alpha59-alpha60-import)
 import=("$t60/release/jazz-alpha59-alpha60-import")
 
 "$t59/release/a59-produce" --out "$work/a59" --server-bin "$t59/release/jazz-tools"
@@ -46,7 +46,7 @@ wait "$holder" || true
 "$t59/release/dump-census" "$work/census" | tee "$work/census.json"
 grep -q '"unsupported_by_sqlite":\[\]' "$work/census.json"
 
-(cd "$root" && CARGO_TARGET_DIR="$t60" cargo test --release -p jazz-cli --lib alpha59_alpha60)
+(cd "$root" && CARGO_TARGET_DIR="$t60" cargo test --release -p jazz-tools --lib alpha59_alpha60)
 # The import refuses another spelling of the app id than alpha.59 served.
 if "${import[@]}" import --dump "$work/dump" --data-dir "$work/wrong-app" --app-id "${app^^}" 2>"$work/wrong-app.err"; then
   echo "the import took another app id" >&2

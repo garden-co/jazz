@@ -1,1065 +1,357 @@
-import { mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
+/**
+ * `jazz-tools migrations create` and `generate` on a TS app's history:
+ * snapshots in migrations/snapshots, `m.defineMigration` stubs beside them
+ * (the .64 model, restored for alpha.66).
+ */
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { assert, vi } from "vitest";
-import {
-  createMigration as createCatalogueMigration,
-  compileSchema as saveBaseline,
-} from "./dev/catalogue-project.js";
 import { describe, expect, it } from "vitest";
-import { validate } from "./cli.js";
 import { createCliFixtures } from "../tests/cli/fixtures.js";
+import { UNFILLED_STUB_TODO } from "./dev/migrations.js";
+import { createAppMigration, generateApp } from "./dev/project.js";
 
-const {
-  APP_ID,
-  createMigration,
-  createWorkspace,
-  fileExists,
-  typecheckGeneratedMigration,
-  captureConsoleLogs,
-  rootPermissionsSchema,
-  rootSchemaWithoutInlinePermissions,
-  rootSchemaWithTodoNotes,
-  storedRootSchema,
-  storedBooleanTodoSchemaWithDefaultFalse,
-  storedRootSchemaWithReorderedColumns,
-  storedCounterSchema,
-  storedSchemaResponse,
-} = createCliFixtures(import.meta.url);
+const { createWorkspace } = createCliFixtures(import.meta.url);
 
-describe("cli migrations", () => {
-  it.each(["empty-server", "failed-server"])(
-    "does not save an initial snapshot without a usable baseline (%s)",
-    async (kind) => {
-      const { root } = await createWorkspace();
-      const migrationsDir = join(root, "migrations");
-      await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
-      const fetchMock = vi.fn(async () =>
-        kind === "failed-server"
-          ? new Response("unavailable", { status: 503 })
-          : Response.json({ latestBundleSchemaHash: null, schemas: [], migrations: [] }),
-      );
-      vi.stubGlobal("fetch", fetchMock);
-      await expect(
-        createCatalogueMigration({
-          schemaDir: root,
-          migrationsDir,
-          appId: APP_ID,
-          ...(kind === "offline"
-            ? {}
-            : { serverUrl: "http://localhost:1625", adminSecret: "admin-secret" }),
-        }),
-      ).rejects.toThrow(
-        kind === "failed-server" ? "Migration graph fetch failed" : "No local schema snapshot",
-      );
-      expect(await fileExists(join(migrationsDir, "snapshots"))).toBe(false);
-      expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toEqual([]);
-    },
-  );
+/** A schema.ts with these tables (each `name: s.table(…)`), every table denying everything. */
+async function writeSchema(dir: string, tables: Record<string, string>): Promise<void> {
+  const lines = [
+    'import { schema as s } from "jazz-tools";',
+    "",
+    "export const schema = s.defineSchema({",
+    ...Object.entries(tables).map(([name, table]) => `  ${name}: ${table},`),
+    "});",
+    "",
+    "export const permissions = schema.definePermissions({",
+    ...Object.keys(tables).map((name) => `  ${name}: {},`),
+    "});",
+    "",
+  ];
+  await writeFile(join(dir, "schema.ts"), lines.join("\n"));
+}
 
-  // An app on its own store (`sqlite()`) has no server to fetch a baseline
-  // from: the docs' first step snapshots schema.ts, and the next schema
-  // change migrates from it, with migrations/index.ts kept up to date
-  // (alpha.60 adopter pass V4).
-  it("snapshots schema.ts on the first offline run and migrates from it next", async () => {
+const TODOS = "s.table({ title: s.string(), done: s.boolean() }, {})";
+
+async function stubs(dir: string): Promise<string[]> {
+  return (await readdir(join(dir, "migrations"))).filter((name) => name.endsWith(".ts")).sort();
+}
+
+async function stubText(dir: string, file: string | undefined): Promise<string> {
+  if (!file) throw new Error("no migration stub was written");
+  return readFile(file, "utf8");
+}
+
+/** A project whose current schema is snapshotted (as its first `generate` does). */
+async function baseline(tables: Record<string, string>): Promise<string> {
+  const { root } = await createWorkspace();
+  await writeSchema(root, tables);
+  await generateApp({ cwd: root });
+  expect((await readdir(join(root, "migrations", "snapshots"))).length).toBe(1);
+  return root;
+}
+
+describe("migrations create", () => {
+  it("snapshots the schema first, migrates from it next, and no-ops when rerun", async () => {
     const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    const shipping = (source: string) =>
-      `import { migrations } from "./migrations/index.ts";\n` +
-      source.replace('{ migrations: "none" }', "{ migrations }");
-    await writeFile(join(root, "schema.ts"), shipping(rootSchemaWithoutInlinePermissions()));
-    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
-    // The generated stub imports jazz-tools, as in an app.
-    await mkdir(join(root, "node_modules"), { recursive: true });
-    await symlink(
-      fileURLToPath(new URL("..", import.meta.url)),
-      join(root, "node_modules", "jazz-tools"),
-      "dir",
-    );
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
+    await writeSchema(root, { todos: TODOS });
+    const first = await createAppMigration({ cwd: root, name: "initial" });
+    expect(first.file).toBeUndefined();
+    expect(first.snapshot).toMatch(/snapshots[\\/]\d{8}T\d{6}-[0-9a-f]{12}\.json$/);
+    expect(await stubs(root)).toEqual([]);
 
-    const { logs: firstValidate } = await captureConsoleLogs(() => validate({ schemaDir: root }));
-    expect(firstValidate.join("\n")).toContain("no schema snapshot yet");
-
-    const first = await createCatalogueMigration({ schemaDir: root, migrationsDir });
-    assert(first.status === "initial-snapshot");
-    expect(await fileExists(first.snapshotPath)).toBe(true);
-    const index = () => readFile(join(migrationsDir, "index.ts"), "utf8");
-    expect(await index()).toContain(first.hash);
-    // Unchanged schema: validate says what it found, and that permissions
-    // never need a migration (#4773).
-    const { logs: unchangedValidate } = await captureConsoleLogs(() =>
-      validate({ schemaDir: root }),
-    );
-    expect(unchangedValidate).toContain(
-      "schema.ts matches its latest snapshot, so no migration is needed. " +
-        "Changes to permissions.ts never need one, but run `jazz-tools validate` after them and commit the " +
-        "jazz.permissions.json it writes: with the files committed, your backend refuses to start on an out-of-date one.",
-    );
-
-    await writeFile(join(root, "schema.ts"), shipping(rootSchemaWithTodoNotes()));
-    const { logs: changedValidate } = await captureConsoleLogs(() => validate({ schemaDir: root }));
-    expect(changedValidate.join("\n")).toContain("changed since the latest snapshot");
-    // After a schema change, nothing about permissions reads as a diagnosis
-    // of it (#4773).
-    expect(changedValidate.join("\n")).not.toMatch(/Permission-only|Changes to permissions\.ts/);
-
-    const second = await createCatalogueMigration({
-      schemaDir: root,
-      migrationsDir,
-      name: "add-notes",
+    await writeSchema(root, {
+      todos: "s.table({ title: s.string(), done: s.boolean(), notes: s.string().optional() }, {})",
     });
-    assert(second.status === "generated");
-    expect(second.fromHash).toBe(first.hash);
-    // The stub is in migrations/index.ts without another `validate`.
-    const bundled = await index();
-    expect(bundled).toContain(`"fromHash": "${first.hash}"`);
-    expect(bundled).toContain(`"toHash": "${second.toHash}"`);
-    expect(fetchMock).not.toHaveBeenCalled();
+    const second = await createAppMigration({ cwd: root, name: "add-notes" });
+    expect(second.changed).toBe(true);
+    expect(second.file).toMatch(/add-notes/);
+    const stub = await stubText(root, second.file);
+    expect(stub).toContain('import { schema as s, migration as m } from "jazz-tools";');
+    expect(stub).toContain("m.defineMigration({");
+    expect(stub).toMatch(/"?notes"?: m\.add\.string\(\{ default: null \}\)/);
+    expect(second.todos).toEqual([]);
+
+    const again = await createAppMigration({ cwd: root, name: "add-notes-again" });
+    expect(again.changed).toBe(false);
+    expect(await stubs(root)).toHaveLength(1);
+
+    await generateApp({ cwd: root });
+    const app = JSON.parse(await readFile(join(root, "jazz.app.json"), "utf8"));
+    expect(Object.keys(app.history)).toHaveLength(1);
+    expect(app.migrations).toHaveLength(1);
+    expect(app.migrations[0].migrate.todos.notes).toEqual({ add: "string", default: null });
   });
 
-  // An app still on `{ migrations: "none" }` got snapshots and a stub but no
-  // migrations/index.ts, and nothing said why (alpha.61 adopter round).
-  it("tells an app on migrations: none to import its migrations, then writes index.ts", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    const index = join(root, "migrations", "index.ts");
-    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
-    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
-    const hint = 'Add `import { migrations } from "./migrations";` to schema.ts';
-
-    // Nothing to ship yet: no hint before the first snapshot, and looking
-    // for snapshots creates no migrations directory.
-    const { logs: fresh } = await captureConsoleLogs(() => validate({ schemaDir: root }));
-    expect(fresh.join("\n")).not.toContain(hint);
-    expect(await fileExists(migrationsDir)).toBe(false);
-
-    const { logs: created } = await captureConsoleLogs(() =>
-      createMigration({ schemaDir: root, migrationsDir }),
-    );
-    expect(created.join("\n")).toContain(hint);
-    expect(await fileExists(index)).toBe(false);
-
-    const { logs: validated } = await captureConsoleLogs(() => validate({ schemaDir: root }));
-    expect(validated.join("\n")).toContain(hint);
-    expect(await fileExists(index)).toBe(false);
-
-    // Following the hint: the import, then validate, writes the module.
-    await writeFile(
-      join(root, "schema.ts"),
-      `import { migrations } from "./migrations";\n` +
-        rootSchemaWithoutInlinePermissions().replace('{ migrations: "none" }', "{ migrations }"),
-    );
-    const { logs: shipped } = await captureConsoleLogs(() => validate({ schemaDir: root }));
-    expect(shipped.join("\n")).not.toContain(hint);
-    const module = await readFile(index, "utf8");
-    expect(module).toContain("`jazz-tools validate` and `jazz-tools migrations create` rewrite it");
-    expect(module).not.toContain("`deploy`");
-  });
-
-  it("counts the steps a stub leaves to fill in", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
-    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
-    await createCatalogueMigration({ schemaDir: root, migrationsDir });
-    await writeFile(
-      join(root, "schema.ts"),
-      rootSchemaWithTodoNotes().replace("notes: s.string().optional()", "points: s.int()"),
-    );
-    const { logs } = await captureConsoleLogs(() =>
-      createMigration({ schemaDir: root, migrationsDir, name: "add-points" }),
-    );
-    expect(logs).toContain("1. Fill in migrate: 1 step marked TODO.");
-  });
-
-  // A migration validate passed used to fail only at deploy (adopter b22):
-  // renaming an optional column to a required one.
-  it("refuses in validate a migration that a deploy would refuse, naming the column", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    const shipping = (source: string) =>
-      `import { migrations } from "./migrations/index.ts";\n` +
-      source.replace('{ migrations: "none" }', "{ migrations }");
-    await writeFile(join(root, "schema.ts"), shipping(rootSchemaWithTodoNotes()));
-    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
-    await mkdir(join(root, "node_modules"), { recursive: true });
-    await symlink(
-      fileURLToPath(new URL("..", import.meta.url)),
-      join(root, "node_modules", "jazz-tools"),
-      "dir",
-    );
-    vi.stubGlobal("fetch", vi.fn());
-    const first = await createCatalogueMigration({ schemaDir: root, migrationsDir });
-    assert(first.status === "initial-snapshot");
-
-    await writeFile(
-      join(root, "schema.ts"),
-      shipping(
-        rootSchemaWithTodoNotes().replace(
-          "notes: s.string().optional(),",
-          'body: s.string().default(""),',
-        ),
-      ),
-    );
-    const second = await createCatalogueMigration({
-      schemaDir: root,
-      migrationsDir,
-      name: "notes-to-body",
+  it("counts the steps a stub leaves to fill in, and generate refuses it until they are", async () => {
+    const root = await baseline({ todos: TODOS });
+    await writeSchema(root, {
+      todos: "s.table({ title: s.string(), done: s.boolean(), priority: s.int() }, {})",
     });
-    assert(second.status === "generated");
-    await validate({ schemaDir: root });
+    const created = await createAppMigration({ cwd: root, name: "add-priority" });
+    expect(created.todos).toHaveLength(1);
+    const stub = await stubText(root, created.file);
+    const todo = stub.split("\n").find((line) => UNFILLED_STUB_TODO.test(line));
+    expect(todo).toMatch(/Added required column "priority" needs an explicit default/);
 
-    // The author keeps the values by renaming, but the column's optionality
-    // changes with it, which no migration step does.
-    const stub = await readFile(second.filePath, "utf8");
-    await writeFile(
-      second.filePath,
-      stub
-        .split("\n")
-        .filter((line) => !line.includes('"notes": m.drop'))
-        .map((line) =>
-          line.includes('"body": m.add') ? '      "body": m.renameFrom("notes"),' : line,
-        )
-        .join("\n"),
+    await expect(generateApp({ cwd: root })).rejects.toThrow(
+      /has 1 unresolved TODO left by `jazz-tools migrations create`: line \d+: Added required column "priority" needs an explicit default/,
     );
-    await expect(validate({ schemaDir: root })).rejects.toThrow(
-      /The migrations in migrations would not deploy: .*table "todos".*"body" comes out optional but is required/,
-    );
+
+    const filled = stub
+      .split("\n")
+      .map((line) =>
+        UNFILLED_STUB_TODO.test(line) ? '      "priority": m.add.int({ default: 0 }),' : line,
+      )
+      .join("\n");
+    await writeFile(created.file!, filled);
+    await generateApp({ cwd: root });
+    const app = JSON.parse(await readFile(join(root, "jazz.app.json"), "utf8"));
+    expect(app.migrations[0].migrate.todos.priority).toEqual({ add: "int", default: 0 });
   });
 
-  // #5056: an enum column (or an array of enums) may gain variants at the
-  // end of its list, with nothing to fill in: its rows pass unchanged and
-  // sort as before. A variant missing from the new list (removed, or
-  // renamed, which reads the same) still has no migration step, and moving
-  // one (a reorder, or an addition before the end) would change how rows
-  // sort and rewrite every stored value, so it is refused too.
-  it("adds enum variants with a stub that needs nothing filled in, and refuses dropping one", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    const tasks = (status: string, labels: string) => `
-import { schema as s } from ${JSON.stringify(fileURLToPath(new URL("./index.ts", import.meta.url)))};
-import { migrations } from "./migrations/index.ts";
-
-const schema = {
-  tasks: s.table({
-    title: s.string(),
-    status: s.enum(${status}),
-    labels: s.array(s.enum(${labels})).optional(),
-  }, {}),
-};
-
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
-`;
-    await writeFile(join(root, "schema.ts"), tasks('"todo", "done"', '"bug"'));
-    await writeFile(
-      join(root, "permissions.ts"),
-      `import { schema as s } from ${JSON.stringify(fileURLToPath(new URL("./index.ts", import.meta.url)))};
-import { app } from "./schema.ts";
-
-export default s.definePermissions(app, ({ policy }) => [policy.tasks.allowRead.always()]);
-`,
+  it("refuses a same-column nullability change instead of writing a stub", async () => {
+    const root = await baseline({ todos: TODOS });
+    await writeSchema(root, {
+      todos: "s.table({ title: s.string().optional(), done: s.boolean() }, {})",
+    });
+    await expect(createAppMigration({ cwd: root, name: "optional-title" })).rejects.toThrow(
+      /title/,
     );
-    await mkdir(join(root, "node_modules"), { recursive: true });
-    await symlink(
-      fileURLToPath(new URL("..", import.meta.url)),
-      join(root, "node_modules", "jazz-tools"),
-      "dir",
-    );
-    vi.stubGlobal("fetch", vi.fn());
-    const first = await createCatalogueMigration({ schemaDir: root, migrationsDir });
-    assert(first.status === "initial-snapshot");
-
-    await writeFile(join(root, "schema.ts"), tasks('"todo", "done", "blocked"', '"bug", "ui"'));
-    const { result: added, logs } = await captureConsoleLogs(() =>
-      createCatalogueMigration({ schemaDir: root, migrationsDir, name: "add-blocked" }),
-    );
-    assert(added.status === "generated");
-    expect(added.unfilledSteps).toBe(0);
-    const stub = await readFile(added.filePath, "utf8");
-    expect(stub).toContain(
-      '// Column "status" gains enum variant "blocked": existing rows are unchanged, so it needs no step.',
-    );
-    expect(stub).toContain(
-      '// Column "labels" gains enum variant "ui": existing rows are unchanged, so it needs no step.',
-    );
-    expect(stub).not.toContain("TODO");
-    expect(logs.join("\n")).not.toContain("Fill in migrate");
-    await typecheckGeneratedMigration(added.filePath);
-    // validate runs the checks a deploy runs on the migrations bundle.
-    await validate({ schemaDir: root });
-
-    for (const [status, labels, column, variant] of [
-      ['"todo", "blocked"', '"bug", "ui"', "status", "done"],
-      ['"open", "done", "blocked"', '"bug", "ui"', "status", "todo"],
-      ['"todo", "done", "blocked"', '"ui"', "labels", "bug"],
-    ] as const) {
-      await writeFile(join(root, "schema.ts"), tasks(status, labels));
-      await expect(
-        createCatalogueMigration({ schemaDir: root, migrationsDir, name: "drop-variant" }),
-      ).rejects.toThrow(
-        `Changing the enum variants of column "tasks.${column}" is not supported yet: ` +
-          `it no longer declares "${variant}". A migration can add enum variants, but renaming ` +
-          "or removing one is planned for a later release.",
-      );
-    }
-    for (const [status, labels, column] of [
-      ['"blocked", "todo", "done"', '"bug", "ui"', "status"],
-      ['"todo", "archived", "done", "blocked"', '"bug", "ui"', "status"],
-      ['"todo", "done", "blocked"', '"ui", "bug"', "labels"],
-    ] as const) {
-      await writeFile(join(root, "schema.ts"), tasks(status, labels));
-      await expect(
-        createCatalogueMigration({ schemaDir: root, migrationsDir, name: "drop-variant" }),
-      ).rejects.toThrow(
-        `Changing the order of the enum variants of column "tasks.${column}" is not supported: ` +
-          "add new variants at the end of the list.",
-      );
-    }
-    expect((await readdir(migrationsDir)).filter((name) => name.includes("drop-variant"))).toEqual(
-      [],
-    );
-  }, 60_000);
-
-  it.each([false, true])(
-    "uses the active server schema on first run (unchanged=%s)",
-    async (unchanged) => {
-      const { root } = await createWorkspace();
-      const migrationsDir = join(root, "migrations");
-      await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
-      const baseline = await saveBaseline({
-        schemaDir: root,
-        migrationsDir: join(root, "server-fixture"),
-      });
-      if (!unchanged) await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
-      const fetchMock = vi.fn(async (url: string) => {
-        if (url.endsWith("/migrations/graph"))
-          return Response.json({
-            latestBundleSchemaHash: baseline.hash,
-            schemas: [baseline.hash],
-            migrations: [],
-          });
-        expect(url).toBe(`http://localhost:1625/apps/${APP_ID}/schema/${baseline.hash}`);
-        return Response.json({
-          schema: { tables: baseline.schema },
-          publishedAt: Date.UTC(2026, 0, 1),
-        });
-      });
-      vi.stubGlobal("fetch", fetchMock);
-      const result = await createCatalogueMigration({
-        schemaDir: root,
-        migrationsDir,
-        appId: APP_ID,
-        serverUrl: "http://localhost:1625",
-        adminSecret: "admin-secret",
-      });
-      expect(result.status).toBe(unchanged ? "unchanged" : "generated");
-      const snapshots = (await readdir(join(migrationsDir, "snapshots"))).sort();
-      expect(snapshots).toHaveLength(unchanged ? 1 : 2);
-      expect(
-        JSON.parse(await readFile(join(migrationsDir, "snapshots", snapshots[0]!), "utf8")),
-      ).toEqual(baseline.schema);
-      if (result.status === "generated") {
-        expect(result.fromHash).toBe(baseline.hash);
-        expect(await readFile(result.filePath, "utf8")).toContain(
-          '"notes": m.add.string({ default: null }),',
-        );
-      }
-      fetchMock.mockClear();
-      expect(await createCatalogueMigration({ schemaDir: root, migrationsDir })).toEqual({
-        status: "unchanged",
-      });
-      expect(fetchMock).not.toHaveBeenCalled();
-    },
-  );
-
-  it("creates a migration from the latest committed snapshot and then no-ops when rerun", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    const snapshotsDir = join(migrationsDir, "snapshots");
-    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
-
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(new Date("2026-08-25T06:00:00.000Z"));
-    try {
-      await saveBaseline({ schemaDir: root, migrationsDir });
-
-      await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
-
-      const { result: filePath, logs } = await captureConsoleLogs(() =>
-        createMigration({
-          schemaDir: root,
-          serverUrl: "http://localhost:1625",
-          adminSecret: "admin-secret",
-          migrationsDir,
-        }),
-      );
-
-      expect(filePath).not.toBeNull();
-      if (!filePath) {
-        throw new Error("Expected createMigration() to return a migration file path.");
-      }
-      const generated = await readFile(filePath, "utf8");
-      expect(generated).toContain('"notes": m.add.string({ default: null }),');
-      const snapshotFiles = (await readdir(snapshotsDir))
-        .filter((name) => name.endsWith(".json"))
-        .sort();
-      expect(snapshotFiles).toEqual([
-        expect.stringMatching(/^20260825T060000-[0-9a-f]{12}\.json$/i),
-        expect.stringMatching(/^20260825T060001-[0-9a-f]{12}\.json$/i),
-      ]);
-      expect(logs.some((line) => line.startsWith("Generated:"))).toBe(true);
-      // An optional column's stub is complete: nothing to fill in.
-      expect(logs).toContain("1. Review migrate: it is complete as generated, nothing to fill in.");
-
-      const filesBeforeNoop = await readdir(snapshotsDir);
-      const { result: noopResult, logs: noopLogs } = await captureConsoleLogs(() =>
-        createMigration({
-          schemaDir: root,
-          serverUrl: "http://localhost:1625",
-          adminSecret: "admin-secret",
-          migrationsDir,
-        }),
-      );
-
-      expect(noopResult).toBeNull();
-      expect(await readdir(snapshotsDir)).toEqual(filesBeforeNoop);
-      expect(noopLogs).toContain("No schema changes detected.");
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(await stubs(root)).toEqual([]);
   });
 
-  it("skips creating a migration file when hashes differ but no row transforms are required", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    const snapshotsDir = join(migrationsDir, "snapshots");
-    const fromHash = "7070707070707070707070707070707070707070707070707070707070707070";
-    const toHash = "7171717171717171717171717171717171717171717171717171717171717171";
-
-    const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
-        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
-        return storedSchemaResponse({
-          todos: {
-            columns: [
-              { name: "title", column_type: { type: "Text" }, nullable: false },
-              { name: "done", column_type: { type: "Boolean" }, nullable: false },
-            ],
-          },
-        });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
-        return storedSchemaResponse(storedBooleanTodoSchemaWithDefaultFalse());
-      }
-
-      throw new Error(`Unexpected fetch: ${input}`);
+  // Whether a stub is needed is Rust's `schemasAreCompatible`: the rule a
+  // deployment connects versions by. Rows of an enum gaining variants pass
+  // unchanged, but the deployment needs the (empty) migration to reach them.
+  it("writes an empty stub to add enum variants, and refuses dropping one", async () => {
+    const root = await baseline({
+      todos: 's.table({ title: s.string(), status: s.enum("todo", "done") }, {})',
     });
-    vi.stubGlobal("fetch", fetchMock);
+    await writeSchema(root, {
+      todos: 's.table({ title: s.string(), status: s.enum("todo", "done", "archived") }, {})',
+    });
+    const added = await createAppMigration({ cwd: root, name: "archived" });
+    expect(added.file).toMatch(/archived/);
+    expect(added.todos).toEqual([]);
+    await generateApp({ cwd: root });
+    const app = JSON.parse(await readFile(join(root, "jazz.app.json"), "utf8"));
+    expect(app.migrations).toHaveLength(1);
 
-    const { result, logs } = await captureConsoleLogs(() =>
-      createMigration({
-        schemaDir: root,
-        serverUrl: "http://localhost:1625",
-        adminSecret: "admin-secret",
-        migrationsDir,
-        fromHash: fromHash.slice(0, 12),
-        toHash: toHash.slice(0, 12),
-      }),
-    );
-
-    expect(result).toBeNull();
-    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(0);
-    expect((await readdir(snapshotsDir)).filter((name) => name.endsWith(".json"))).toHaveLength(2);
-    expect(logs).toContain(
-      "No reviewed migration file needed because this schema change does not require row transformations.",
-    );
-    expect(logs.some((line) => line.includes("createJazz publishes"))).toBe(true);
+    await writeSchema(root, {
+      todos: 's.table({ title: s.string(), status: s.enum("todo", "archived") }, {})',
+    });
+    await expect(createAppMigration({ cwd: root, name: "drop-done" })).rejects.toThrow(/status/);
   });
 
-  it("skips creating a migration file for reordered columns across explicit schema hashes", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    const fromHash = "1010101010101010101010101010101010101010101010101010101010101010";
-    const toHash = "2020202020202020202020202020202020202020202020202020202020202020";
-    const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
-        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
-      }
+  it("writes a stub when a table gains branchBy, not for a default outside it", async () => {
+    const notes = (options: { branchBy: boolean; titleDefault: string }) =>
+      `s.table({ title: s.string().default(${JSON.stringify(options.titleDefault)}), ` +
+      `branch: s.string().default("main") }, {})` +
+      (options.branchBy ? '.branchBy("branch")' : "");
+    const root = await baseline({ notes: notes({ branchBy: false, titleDefault: "x" }) });
 
-      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
-        return storedSchemaResponse(storedRootSchema());
-      }
+    await writeSchema(root, { notes: notes({ branchBy: false, titleDefault: "y" }) });
+    const titleDefault = await createAppMigration({ cwd: root, name: "title-default" });
+    expect(titleDefault.file).toBeUndefined();
+    expect(titleDefault.snapshot).toBeDefined();
 
-      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
-        return storedSchemaResponse(storedRootSchemaWithReorderedColumns());
-      }
-
-      throw new Error(`Unexpected fetch: ${input}`);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const { result, logs } = await captureConsoleLogs(() =>
-      createMigration({
-        schemaDir: root,
-        serverUrl: "http://localhost:1625",
-        adminSecret: "admin-secret",
-        migrationsDir,
-        fromHash: fromHash.slice(0, 12),
-        toHash: toHash.slice(0, 12),
-      }),
-    );
-
-    expect(result).toBeNull();
-    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(0);
-    expect(logs).toContain(
-      "No reviewed migration file needed because this schema change does not require row transformations.",
-    );
+    await writeSchema(root, { notes: notes({ branchBy: true, titleDefault: "y" }) });
+    const branched = await createAppMigration({ cwd: root, name: "branch-by" });
+    expect(branched.file).toMatch(/branch-by/);
+    expect(await stubs(root)).toHaveLength(1);
   });
 
-  it("skips creating a migration file for merge-strategy-only schema changes", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    const fromHash = "2121212121212121212121212121212121212121212121212121212121212121";
-    const toHash = "3131313131313131313131313131313131313131313131313131313131313131";
-
-    const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith("/schemas")) {
-        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
-      }
-
-      if (input.endsWith(`/schema/${fromHash}`)) {
-        return storedSchemaResponse({
-          counters: {
-            columns: [{ name: "value", column_type: { type: "Integer" }, nullable: false }],
-          },
-        });
-      }
-
-      if (input.endsWith(`/schema/${toHash}`)) {
-        return storedSchemaResponse(storedCounterSchema());
-      }
-
-      throw new Error(`Unexpected fetch: ${input}`);
+  // Rust's diff (jazz-napi `migrationDiff`) decides the steps; TS only renders them.
+  it("refuses moving a kept column's reference to another table", async () => {
+    const tables = (target: string) => ({
+      lists: "s.table({ name: s.string() }, {})",
+      boards: "s.table({ name: s.string() }, {})",
+      todos: `s.table({ title: s.string(), parent: s.uuid() }, { parentRel: s.rel(${JSON.stringify(target)}, "parent") })`,
     });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const { result, logs } = await captureConsoleLogs(() =>
-      createMigration({
-        schemaDir: root,
-        serverUrl: "http://localhost:1625",
-        adminSecret: "admin-secret",
-        migrationsDir,
-        fromHash: fromHash.slice(0, 12),
-        toHash: toHash.slice(0, 12),
-      }),
+    const root = await baseline(tables("lists"));
+    await writeSchema(root, tables("boards"));
+    await expect(createAppMigration({ cwd: root, name: "move-parent" })).rejects.toThrow(
+      /Moving the reference of column `todos.parent` from lists to boards is not supported yet/,
     );
-
-    expect(result).toBeNull();
-    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(0);
-    expect(logs).toContain(
-      "No reviewed migration file needed because this schema change does not require row transformations.",
-    );
+    expect(await stubs(root)).toEqual([]);
   });
 
-  // The assertion intentionally launches `tsc`. On a contended CI worker the
-  // compiler startup can exceed Vitest's normal 5s unit-test budget, while the
-  // child process itself remains bounded above.
-  it("renders a type-valid BIGINT counter migration", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    const fromHash = "4141414141414141414141414141414141414141414141414141414141414141";
-    const toHash = "5151515151515151515151515151515151515151515151515151515151515151";
-
-    const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith("/schemas")) {
-        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
-      }
-
-      if (input.endsWith(`/schema/${fromHash}`)) {
-        return storedSchemaResponse({
-          counters: {
-            columns: [
-              {
-                name: "value",
-                column_type: { type: "BigInt" },
-                nullable: false,
-                merge_strategy: "Counter",
-              },
-              { name: "removedValue", column_type: { type: "BigInt" }, nullable: true },
-              { name: "label", column_type: { type: "Text" }, nullable: false },
-            ],
-          },
-        });
-      }
-
-      if (input.endsWith(`/schema/${toHash}`)) {
-        return storedSchemaResponse({
-          counters: {
-            columns: [
-              {
-                name: "value",
-                column_type: { type: "BigInt" },
-                nullable: false,
-                merge_strategy: "Counter",
-              },
-              // Another type than removedValue, so it can't be its rename.
-              { name: "addedValue", column_type: { type: "Text" }, nullable: true },
-              { name: "label", column_type: { type: "Text" }, nullable: false },
-            ],
-          },
-        });
-      }
-
-      throw new Error(`Unexpected fetch: ${input}`);
+  it("says what changed when rows pass unchanged, and the stub loads", async () => {
+    const root = await baseline({
+      notes: 's.table({ title: s.string(), branch: s.string().default("main") }, {})',
     });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const { result: filePath } = await captureConsoleLogs(() =>
-      createMigration({
-        schemaDir: root,
-        serverUrl: "http://localhost:1625",
-        adminSecret: "admin-secret",
-        migrationsDir,
-        fromHash: fromHash.slice(0, 12),
-        toHash: toHash.slice(0, 12),
-      }),
-    );
-
-    expect(filePath).not.toBeNull();
-    if (!filePath) {
-      throw new Error("Expected createMigration() to return a migration file path.");
-    }
-
-    const generated = await readFile(filePath, "utf8");
-    expect(generated).toContain('"addedValue": m.add.string({ default: null }),');
-    expect(generated).toContain('"removedValue": m.drop.bigint({ backwardsDefault: null }),');
-    expect(generated).toContain('"value": s.bigint().merge("counter"),');
-    await typecheckGeneratedMigration(filePath);
-  }, 30_000);
-
-  it("refuses a same-column nullability change instead of emitting a stub that cannot typecheck", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    const fromHash = "3030303030303030303030303030303030303030303030303030303030303030";
-    const toHash = "4040404040404040404040404040404040404040404040404040404040404040";
-
-    const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
-        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
-        return storedSchemaResponse({
-          todos: {
-            columns: [{ name: "done", column_type: { type: "Boolean" }, nullable: false }],
-          },
-        });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
-        return storedSchemaResponse({
-          todos: {
-            columns: [{ name: "done", column_type: { type: "Boolean" }, nullable: true }],
-          },
-        });
-      }
-
-      throw new Error(`Unexpected fetch: ${input}`);
+    await writeSchema(root, {
+      notes:
+        's.table({ title: s.string(), branch: s.string().default("main") }, {}).branchBy("branch")',
     });
-    vi.stubGlobal("fetch", fetchMock);
-
-    // #2163: no migration step changes a kept column's optionality.
-    await expect(
-      createMigration({
-        schemaDir: root,
-        serverUrl: "http://localhost:1625",
-        adminSecret: "admin-secret",
-        migrationsDir,
-        fromHash: fromHash.slice(0, 12),
-        toHash: toHash.slice(0, 12),
-      }),
-    ).rejects.toThrow(
-      'Changing column "todos.done" from required to optional is not supported yet. A migration can add, drop or rename a column but not convert its values',
-    );
-    expect(
-      (await readdir(migrationsDir).catch(() => [])).filter((name) => name.endsWith(".ts")),
-    ).toHaveLength(0);
+    const created = await createAppMigration({ cwd: root, name: "branch-by" });
+    const stub = await stubText(root, created.file);
+    expect(stub).toContain("// Rows pass unchanged: only branchBy changed.");
+    expect(created.todos).toEqual([]);
+    await generateApp({ cwd: root });
+    const app = JSON.parse(await readFile(join(root, "jazz.app.json"), "utf8"));
+    expect(app.migrations).toHaveLength(1);
   });
 
-  it.each([
-    {
-      change: "the JSON Schema of",
-      from: { type: "Json", schema: { type: "object" } },
-      to: { type: "Json", schema: { type: "object", required: ["state"] } },
-    },
-    {
-      change: "the type of",
-      from: { type: "Text" },
-      to: { type: "Integer" },
-    },
-  ])(
-    "refuses changing $change a kept column, which no migration step can do",
-    async ({ change, from, to }) => {
-      const { root } = await createWorkspace();
-      const migrationsDir = join(root, "migrations");
-      const fromHash = "5050505050505050505050505050505050505050505050505050505050505050";
-      const toHash = "6060606060606060606060606060606060606060606060606060606060606060";
-      const fetchMock = vi.fn(async (input: string) => {
-        if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
-          return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
-        }
-        for (const [hash, columnType] of [
-          [fromHash, from],
-          [toHash, to],
-        ] as const) {
-          if (input.endsWith(`/apps/${APP_ID}/schema/${hash}`)) {
-            return storedSchemaResponse({
-              todos: { columns: [{ name: "state", column_type: columnType, nullable: false }] },
-            });
-          }
-        }
-        throw new Error(`Unexpected fetch: ${input}`);
-      });
-      vi.stubGlobal("fetch", fetchMock);
-
-      await expect(
-        createMigration({
-          schemaDir: root,
-          serverUrl: "http://localhost:1625",
-          adminSecret: "admin-secret",
-          migrationsDir,
-          fromHash: fromHash.slice(0, 12),
-          toHash: toHash.slice(0, 12),
-        }),
-      ).rejects.toThrow(
-        `Changing ${change} column "todos.state" is not supported yet. A migration can add, drop or rename a column but not convert its values`,
-      );
-      expect(
-        (await readdir(migrationsDir).catch(() => [])).filter((name) => name.endsWith(".ts")),
-      ).toHaveLength(0);
-    },
-  );
-
-  it("uses --name to generate a named migration file and skips the rename reminder", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
-
-    await saveBaseline({ schemaDir: root, migrationsDir });
-
-    await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
-
-    const { result: filePath, logs } = await captureConsoleLogs(() =>
-      createMigration({
-        schemaDir: root,
-        serverUrl: "http://localhost:1625",
-        adminSecret: "admin-secret",
-        migrationsDir,
-        name: "Add Todo Notes",
-      }),
+  // A deployment refuses to change a row's branch columns, so create refuses first.
+  it("refuses removing branchBy or changing a branch column's default", async () => {
+    const notes = (branchBy: boolean, branchDefault: string) =>
+      `s.table({ title: s.string(), branch: s.string().default(${JSON.stringify(branchDefault)}) }, {})` +
+      (branchBy ? '.branchBy("branch")' : "");
+    const root = await baseline({ notes: notes(true, "main") });
+    await writeSchema(root, { notes: notes(false, "main") });
+    await expect(createAppMigration({ cwd: root, name: "unbranch" })).rejects.toThrow(
+      /Removing `branch` from the branchBy of table `notes` is not supported/,
     );
-
-    expect(filePath).not.toBeNull();
-    assert(filePath, "Expected createMigration() to return a migration file path.");
-
-    expect(filePath).toContain("-add-todo-notes-");
-    expect(filePath).not.toContain("-unnamed-");
-    expect(logs).not.toContain("2. Rename the file by replacing 'unnamed'.");
+    await writeSchema(root, { notes: notes(true, "draft") });
+    await expect(createAppMigration({ cwd: root, name: "draft" })).rejects.toThrow(
+      /Changing the default of branch column `notes.branch` is not supported/,
+    );
+    expect(await stubs(root)).toEqual([]);
   });
 
-  it("generates a typed migration stub from an explicit historical fromHash to the current schema", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    const snapshotsDir = join(migrationsDir, "snapshots");
-    await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
-    const fromHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const fromShortHash = fromHash.slice(0, 12);
-
-    const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
-        return new Response(JSON.stringify({ hashes: [fromHash] }), { status: 200 });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
-        return storedSchemaResponse({
-          todos: {
-            columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
-          },
-        });
-      }
-
-      throw new Error(`Unexpected fetch: ${input}`);
+  it("writes createTables and dropTables for added and removed tables", async () => {
+    const root = await baseline({
+      todos: TODOS,
+      tags: "s.table({ label: s.string() }, {})",
     });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const { result: filePath, logs } = await captureConsoleLogs(() =>
-      createMigration({
-        schemaDir: root,
-        serverUrl: "http://localhost:1625",
-        adminSecret: "admin-secret",
-        migrationsDir,
-        fromHash: fromShortHash,
-      }),
-    );
-
-    if (!filePath) {
-      throw new Error("Expected createMigration() to return a migration file path.");
-    }
-    const generated = await readFile(filePath, "utf8");
-    expect(filePath).toContain(`-unnamed-${fromShortHash}-`);
-    expect(generated).toContain("m.defineMigration");
-    expect(generated).toContain(`fromHash: "${fromShortHash}"`);
-    expect(generated).toContain("migrate: {");
-    expect(generated).toContain('"notes": m.add.string({ default: null }),');
-    const snapshotFiles = (await readdir(snapshotsDir)).filter((name) => name.endsWith(".json"));
-    expect(snapshotFiles).toHaveLength(2);
-    expect(
-      snapshotFiles.some(
-        (name) => /^\d{8}T\d{6}-/.test(name) && name.endsWith(`-${fromShortHash}.json`),
-      ),
-    ).toBe(true);
-    // A stub is for a schema change: its output says nothing about
-    // permissions (#4773).
-    expect(logs.join("\n")).not.toMatch(/Permission-only|Changes to permissions\.ts/);
-  });
-
-  it("renders createTables and dropTables when inferring table add/drop steps", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    const fromHash = "abababababababababababababababababababababababababababababababab";
-    const toHash = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
-    const fromShortHash = fromHash.slice(0, 12);
-    const toShortHash = toHash.slice(0, 12);
-
-    const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
-        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
-        return storedSchemaResponse({
-          todos: {
-            columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
-          },
-          legacy_users: {
-            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
-          },
-        });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
-        return storedSchemaResponse({
-          todos: {
-            columns: [
-              { name: "title", column_type: { type: "Text" }, nullable: false },
-              { name: "notes", column_type: { type: "Text" }, nullable: true },
-            ],
-          },
-          users: {
-            columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-          },
-        });
-      }
-
-      throw new Error(`Unexpected fetch: ${input}`);
+    await writeSchema(root, {
+      todos: TODOS,
+      projects: "s.table({ name: s.string(), archived: s.boolean() }, {})",
     });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const filePath = await createMigration({
-      schemaDir: root,
-      serverUrl: "http://localhost:1625",
-      adminSecret: "admin-secret",
-      migrationsDir,
-      fromHash: fromShortHash,
-      toHash: toShortHash,
-    });
-
-    if (!filePath) {
-      throw new Error("Expected createMigration() to return a migration file path.");
-    }
-    const generated = await readFile(filePath, "utf8");
-    expect(generated).toContain('"todos": {');
-    expect(generated).toContain('"notes": m.add.string({ default: null }),');
-    expect(generated).toContain("createTables: {");
-    expect(generated).toContain('"users": true,');
-    expect(generated).toContain("dropTables: {");
-    expect(generated).toContain('"legacy_users": true,');
+    const created = await createAppMigration({ cwd: root, name: "projects-not-tags" });
+    const stub = await stubText(root, created.file);
+    expect(stub).toMatch(/createTables: \{\s*"projects": true,?\s*\}/);
+    expect(stub).toMatch(/dropTables: \{\s*"tags": true,?\s*\}/);
+    expect(stub).not.toContain("renameTables");
   });
 
   it("suggests renameTables for a single exact table rename", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    const fromHash = "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef";
-    const toHash = "1212121212121212121212121212121212121212121212121212121212121212";
-    const fromShortHash = fromHash.slice(0, 12);
-    const toShortHash = toHash.slice(0, 12);
-
-    const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
-        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
-        return storedSchemaResponse({
-          users: {
-            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
-          },
-        });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
-        return storedSchemaResponse({
-          people: {
-            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
-          },
-        });
-      }
-
-      throw new Error(`Unexpected fetch: ${input}`);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const filePath = await createMigration({
-      schemaDir: root,
-      serverUrl: "http://localhost:1625",
-      adminSecret: "admin-secret",
-      migrationsDir,
-      fromHash: fromShortHash,
-      toHash: toShortHash,
-    });
-    assert(filePath);
-
-    const generated = await readFile(filePath, "utf8");
-    expect(generated).toContain("renameTables: {");
-    expect(generated).toContain('people: m.renameTableFrom("users"),');
-    expect(generated).toContain("from: {");
-    expect(generated).toContain('"users": s.table({');
-    expect(generated).toContain("to: {");
-    expect(generated).toContain('"people": s.table({');
-    expect(generated).not.toContain("migrate: {");
+    const root = await baseline({ todos: TODOS });
+    await writeSchema(root, { tasks: TODOS });
+    const created = await createAppMigration({ cwd: root, name: "rename" });
+    const stub = await stubText(root, created.file);
+    expect(stub).toMatch(/renameTables: \{\s*tasks: m\.renameTableFrom\("todos"\),?\s*\}/);
+    expect(stub).not.toContain("createTables");
+    expect(stub).not.toContain("dropTables");
   });
 
-  it("suggests renameTables for multiple exact unambiguous table renames", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    const fromHash = "3434343434343434343434343434343434343434343434343434343434343434";
-    const toHash = "5656565656565656565656565656565656565656565656565656565656565656";
-    const fromShortHash = fromHash.slice(0, 12);
-    const toShortHash = toHash.slice(0, 12);
-
-    const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
-        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
-        return storedSchemaResponse({
-          users: {
-            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
-          },
-          orgs: {
-            columns: [{ name: "slug", column_type: { type: "Text" }, nullable: false }],
-          },
-        });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
-        return storedSchemaResponse({
-          companies: {
-            columns: [{ name: "slug", column_type: { type: "Text" }, nullable: false }],
-          },
-          people: {
-            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
-          },
-        });
-      }
-
-      throw new Error(`Unexpected fetch: ${input}`);
+  it("suggests renameTables for several exact, unambiguous table renames", async () => {
+    const root = await baseline({
+      todos: TODOS,
+      tags: "s.table({ label: s.string() }, {})",
     });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const filePath = await createMigration({
-      schemaDir: root,
-      serverUrl: "http://localhost:1625",
-      adminSecret: "admin-secret",
-      migrationsDir,
-      fromHash: fromShortHash,
-      toHash: toShortHash,
+    await writeSchema(root, {
+      tasks: TODOS,
+      labels: "s.table({ label: s.string() }, {})",
     });
-    assert(filePath);
-
-    const generated = await readFile(filePath, "utf8");
-    expect(generated).toContain("renameTables: {");
-    expect(generated).toContain('companies: m.renameTableFrom("orgs"),');
-    expect(generated).toContain('people: m.renameTableFrom("users"),');
-    expect(generated).not.toContain("createTables: {");
-    expect(generated).not.toContain("dropTables: {");
-    expect(generated).toContain('"orgs": s.table({');
-    expect(generated).toContain('"users": s.table({');
-    expect(generated).toContain('"companies": s.table({');
-    expect(generated).toContain('"people": s.table({');
-    expect(generated).not.toContain("migrate: {");
+    const created = await createAppMigration({ cwd: root, name: "renames" });
+    const stub = await stubText(root, created.file);
+    expect(stub).toContain('tasks: m.renameTableFrom("todos")');
+    expect(stub).toContain('labels: m.renameTableFrom("tags")');
   });
 
-  it("keeps duplicate-shape table changes as add/drop instead of guessing a rename", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    const fromHash = "7878787878787878787878787878787878787878787878787878787878787878";
-    const toHash = "9090909090909090909090909090909090909090909090909090909090909090";
-    const fromShortHash = fromHash.slice(0, 12);
-    const toShortHash = toHash.slice(0, 12);
-
-    const fetchMock = vi.fn(async (input: string) => {
-      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
-        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
-        return storedSchemaResponse({
-          archived_users: {
-            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
-          },
-          users: {
-            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
-          },
-        });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
-        return storedSchemaResponse({
-          people: {
-            columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
-          },
-        });
-      }
-
-      throw new Error(`Unexpected fetch: ${input}`);
+  it("keeps duplicate-shape table changes as add and drop instead of guessing a rename", async () => {
+    const root = await baseline({
+      first: "s.table({ label: s.string() }, {})",
+      second: "s.table({ label: s.string() }, {})",
     });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const filePath = await createMigration({
-      schemaDir: root,
-      serverUrl: "http://localhost:1625",
-      adminSecret: "admin-secret",
-      migrationsDir,
-      fromHash: fromShortHash,
-      toHash: toShortHash,
+    await writeSchema(root, {
+      third: "s.table({ label: s.string() }, {})",
+      fourth: "s.table({ label: s.string() }, {})",
     });
-    assert(filePath);
+    const created = await createAppMigration({ cwd: root, name: "ambiguous" });
+    const stub = await stubText(root, created.file);
+    expect(stub).not.toContain("renameTableFrom");
+    expect(stub).toMatch(/createTables:/);
+    expect(stub).toMatch(/dropTables:/);
+  });
 
-    const generated = await readFile(filePath, "utf8");
-    expect(generated).not.toContain("renameTables: {");
-    expect(generated).toContain("createTables: {");
-    expect(generated).toContain('"people": true,');
-    expect(generated).toContain("dropTables: {");
-    expect(generated).toContain('"archived_users": true,');
-    expect(generated).toContain('"users": true,');
+  it("names the stub after --name and refuses a name it can't use", async () => {
+    const root = await baseline({ todos: TODOS });
+    await writeSchema(root, {
+      todos: "s.table({ title: s.string(), done: s.boolean(), due: s.timestamp().optional() }, {})",
+    });
+    const created = await createAppMigration({ cwd: root, name: "add-due-date" });
+    expect(created.file).toMatch(/add-due-date[^/\\]*\.ts$/);
+    await expect(createAppMigration({ cwd: root, name: "" })).rejects.toThrow(/--name <name>/);
+  });
+
+  it("refuses changing a kept column's type", async () => {
+    const root = await baseline({ todos: TODOS });
+    await writeSchema(root, { todos: "s.table({ title: s.int(), done: s.boolean() }, {})" });
+    await expect(createAppMigration({ cwd: root, name: "int-title" })).rejects.toThrow(/title/);
+    expect(await stubs(root)).toEqual([]);
+  });
+
+  it("asks for a dropped required column's backwardsDefault", async () => {
+    const root = await baseline({ todos: TODOS });
+    await writeSchema(root, { todos: "s.table({ title: s.string() }, {})" });
+    const created = await createAppMigration({ cwd: root, name: "drop-done" });
+    expect(created.todos).toEqual([
+      expect.stringMatching(/Removed required column "done" needs an explicit backwardsDefault/),
+    ]);
+  });
+
+  it("writes a complete migration for a defaulted bigint counter column", async () => {
+    const root = await baseline({ todos: TODOS });
+    await writeSchema(root, {
+      todos:
+        's.table({ title: s.string(), done: s.boolean(), views: s.bigint().default(0n).merge("counter") }, {})',
+    });
+    const created = await createAppMigration({ cwd: root, name: "views" });
+    expect(created.todos).toEqual([]);
+    expect(await stubText(root, created.file)).toMatch(
+      /"?views"?: m\.add\.bigint\(\{ default: 0n \}\)/,
+    );
+    await generateApp({ cwd: root });
+    const app = JSON.parse(await readFile(join(root, "jazz.app.json"), "utf8"));
+    expect(app.migrations[0].migrate.todos.views).toEqual({ add: "bigint", default: "0" });
+  });
+
+  it("refuses in generate a step a deploy would refuse, naming the column", async () => {
+    const root = await baseline({ todos: TODOS });
+    await writeSchema(root, {
+      todos: "s.table({ title: s.string(), done: s.boolean(), notes: s.string().optional() }, {})",
+    });
+    const created = await createAppMigration({ cwd: root, name: "notes" });
+    const stub = await stubText(root, created.file);
+    // Hand-edited to add the wrong column: the lens no longer leads to the schema.
+    await writeFile(created.file!, stub.replace(/"?notes"?: m\.add/, '"memo": m.add'));
+    await expect(generateApp({ cwd: root })).rejects.toThrow(/notes/);
+  });
+
+  it("offers a same-shape column as a rename, which keeps its values once chosen", async () => {
+    const root = await baseline({ todos: TODOS });
+    await writeSchema(root, { todos: "s.table({ name: s.string(), done: s.boolean() }, {})" });
+    const created = await createAppMigration({ cwd: root, name: "rename-title" });
+    expect(created.todos).toEqual([
+      expect.stringContaining('Added column "name" may be a rename of "title"'),
+    ]);
+    const stub = await stubText(root, created.file);
+    expect(stub).toContain('m.renameFrom("title")');
+    expect(stub).not.toMatch(/m\.(add|drop)\.string\(/);
+    await expect(generateApp({ cwd: root })).rejects.toThrow(/may be a rename of "title"/);
+
+    await writeFile(
+      created.file!,
+      stub
+        .split("\n")
+        .map((line) =>
+          UNFILLED_STUB_TODO.test(line) ? '      "name": m.renameFrom("title"),' : line,
+        )
+        .join("\n"),
+    );
+    await generateApp({ cwd: root });
+    const app = JSON.parse(await readFile(join(root, "jazz.app.json"), "utf8"));
+    expect(app.migrations[0].migrate.todos).toEqual({ name: { renameFrom: "title" } });
+  });
+
+  it("doesn't offer a rename for a column of another shape", async () => {
+    const root = await baseline({ todos: TODOS });
+    await writeSchema(root, { todos: "s.table({ count: s.int(), done: s.boolean() }, {})" });
+    const created = await createAppMigration({ cwd: root, name: "count-not-title" });
+    const stub = await stubText(root, created.file);
+    expect(stub).not.toContain("renameFrom");
+    expect(created.todos.join("\n")).not.toContain("may be a rename");
   });
 });

@@ -20,7 +20,11 @@ before relay delivery; assertions wait for concrete rows/subscription markers.
 Mobile device acceptance remains a separate test surface.
 
 Use `withNativeRelayFixture(app, permissions, async fixture => { ... })` for public API tests.
-`app` comes from `schema.defineApp`; `fixture.createDb()` makes another RN root
+`app` comes from `testApp({ tables: { … } })` (an inline `jazz.app.json`) and
+`permissions` from `testPermissions(app, { tables: { … } })` (an inline
+`jazz.permissions.json`, compiled to the engine's policies); a test about types
+imports a committed app's bindings from `apps/<name>/jazz.generated.ts`
+(regenerate with `node scripts/generate-test-apps.mjs`). `fixture.createDb()` makes another RN root
 on the same real relay and tracks its shutdown. The helper attempts all cleanup
 steps and preserves both test and cleanup failures. `createNativeRelayFixture`
 is available for tests that need explicit lifecycle control.
@@ -37,6 +41,6 @@ transport or row engine.
 The local query and subscription matrix imports scenarios from `tests/shared`.
 Browser tests run the same operator, BYTEA, UUID, pagination, tie-break, no-op,
 null, and moving-window assertions. These cases retain the browser suite's
-explicit query fixtures; public schema-builder coverage is provided separately.
+explicit query fixtures, committed under `tests/shared/apps/`.
 RN subscription cases observe public `Db.subscribe` snapshots. Browser tests
 retain their internal delta/reset checks alongside the shared snapshot scenarios.

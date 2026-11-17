@@ -395,9 +395,87 @@ fn user_id_from_public_key(pub_key_bytes: &[u8; 32]) -> Uuid {
     Uuid::new_v5(&KEY_NAMESPACE, pub_key_bytes)
 }
 
+/// The domain a local-first challenge proof signs under, as the TypeScript
+/// `signChallenge` (`local-first-auth/identity.ts`).
+const CHALLENGE_DOMAIN: &str = "local-first-auth-challenge-v1\0";
+
+/// Sign a challenge a server issued, proving control of the seed's identity
+/// for that one challenge (linking a device account to a provider account).
+/// Returns `<public key>.<signature>`, both base64url, as TypeScript's
+/// `signChallenge`.
+pub fn sign_local_first_challenge(seed: &[u8; 32], challenge: &str) -> Result<String, String> {
+    if challenge.is_empty() {
+        return Err("challenge must be a non-empty string".to_owned());
+    }
+    let key = derive_signing_key(seed, SIGN_DOMAIN);
+    let message = format!("{CHALLENGE_DOMAIN}{challenge}");
+    let signature = key.sign(message.as_bytes());
+    Ok(format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(key.verifying_key().as_bytes()),
+        URL_SAFE_NO_PAD.encode(signature.to_bytes())
+    ))
+}
+
+/// Verify a [`sign_local_first_challenge`] proof for `challenge`: the
+/// local-first user id it proves.
+pub fn verify_local_first_challenge(proof: &str, challenge: &str) -> Result<Uuid, String> {
+    let invalid = || "invalid local-first challenge proof".to_owned();
+    let (public_key, signature) = proof.split_once('.').ok_or_else(invalid)?;
+    let public_key: [u8; 32] = URL_SAFE_NO_PAD
+        .decode(public_key)
+        .map_err(|_| invalid())?
+        .try_into()
+        .map_err(|_| invalid())?;
+    let signature: [u8; 64] = URL_SAFE_NO_PAD
+        .decode(signature)
+        .map_err(|_| invalid())?
+        .try_into()
+        .map_err(|_| invalid())?;
+    let key = VerifyingKey::from_bytes(&public_key).map_err(|_| invalid())?;
+    let message = format!("{CHALLENGE_DOMAIN}{challenge}");
+    key.verify_strict(
+        message.as_bytes(),
+        &ed25519_dalek::Signature::from_bytes(&signature),
+    )
+    .map_err(|_| invalid())?;
+    Ok(user_id_from_public_key(&public_key))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_challenge_proof_proves_its_seed_for_that_challenge_only() {
+        let seed = [9u8; 32];
+        let proof = sign_local_first_challenge(&seed, "nonce-1").unwrap();
+        assert_eq!(
+            verify_local_first_challenge(&proof, "nonce-1").unwrap(),
+            derive_user_id(&seed)
+        );
+        assert!(verify_local_first_challenge(&proof, "nonce-2").is_err());
+        assert!(verify_local_first_challenge("junk", "nonce-1").is_err());
+        // Another key's signature under this key's name proves nothing.
+        let (public_key, _) = proof.split_once('.').unwrap();
+        let other = sign_local_first_challenge(&[8u8; 32], "nonce-1").unwrap();
+        let (_, other_signature) = other.split_once('.').unwrap();
+        let forged = format!("{public_key}.{other_signature}");
+        assert!(verify_local_first_challenge(&forged, "nonce-1").is_err());
+        assert!(sign_local_first_challenge(&seed, "").is_err());
+    }
+
+    /// The proof TypeScript's `signChallenge` makes for the same seed and
+    /// challenge (checked against Node's Ed25519 over the same key
+    /// derivation): Ed25519 signatures are deterministic.
+    #[test]
+    fn a_challenge_proof_matches_typescripts() {
+        assert_eq!(
+            sign_local_first_challenge(&[9u8; 32], "nonce-1").unwrap(),
+            "A1uPXwSr13S50jYgA8SsmizcMj7X8nzPP2ZF5kRHTEY.\
+             4Jhi3T41b6IRZoE5RJ3RsIcQM8sSW3dzReMniTu4TR5TvN3rtKxe9zkfQLmK6vhGJrKDE-cMnBdTf343VIRyCw"
+        );
+    }
 
     fn alice_seed() -> [u8; 32] {
         let mut seed = [0u8; 32];

@@ -1,7 +1,7 @@
 import { createPolicyTestApp, type PolicyTestApp } from "jazz-tools/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { app } from "../../schema.js";
-import permissions from "../../permissions.js";
+import { app } from "../../jazz.generated.js";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
 
 const alice = "00000000-0000-4000-8000-00000000000a";
 const bob = "00000000-0000-4000-8000-00000000000b";

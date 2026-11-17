@@ -7,7 +7,6 @@ import type {
   WasmSchema,
 } from "../drivers/types.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
-import { normalizePermissionsForWasm } from "../schema-permissions.js";
 import { appScopedUrl, fetchAdminJson } from "../runtime/url.js";
 
 export interface FetchStoredWasmSchemaOptions {
@@ -160,7 +159,6 @@ export type PublishedMigrationValue =
   | { type: "Bytea"; value: number[] }
   | { type: "Array"; value: PublishedMigrationValue[] }
   | { type: "Row"; value: { id?: string; values: PublishedMigrationValue[] } }
-  | { type: "Enum"; value: { case: string; values: PublishedMigrationValue[] } }
   | { type: "Null" };
 
 export type PublishedMigrationOp =
@@ -215,28 +213,9 @@ export function encodePublishedMigrationValue(value: WasmValue): PublishedMigrat
           values: value.value.values.map(encodePublishedMigrationValue),
         },
       };
-    case "Enum":
-      return {
-        type: "Enum",
-        value: {
-          case: value.value.case,
-          values: value.value.values.map(encodePublishedMigrationValue),
-        },
-      };
     default:
       return value;
   }
-}
-
-export interface DeploymentArtifacts {
-  targetSchemaHash: string;
-  schemas: Array<{ hash: string; schema: WasmSchema }>;
-  migrations: Array<{ fromHash: string; toHash: string; forward: PublishedTableLens[] }>;
-  permissions: CompiledPermissionsMap;
-}
-
-export interface DeploymentRequest extends Omit<DeploymentArtifacts, "schemas"> {
-  schemas: Array<{ hash: string; schema: { tables: WasmSchema } }>;
 }
 
 export interface DeploymentResponse {
@@ -261,13 +240,23 @@ export class DeploymentError extends Error {
   }
 }
 
+/**
+ * The body of a deployment, as the server's `POST admin/bundles` takes it and
+ * as Jazz's Rust loader builds it from an app's files (jazz-napi
+ * `loadBackendApp(...).deployment`).
+ */
+export interface DeploymentBody {
+  targetSchemaHash: string;
+  schemas: Array<{ hash: string; schema: unknown }>;
+  migrations: Array<{ fromHash: string; toHash: string; forward: unknown[] }>;
+  permissions: unknown;
+  allowDroppingHistory?: boolean;
+}
+
 export async function publishDeployment(
   serverUrl: string,
-  options: {
-    appId: string;
-    adminSecret: string;
-    allowDroppingHistory?: boolean;
-  } & DeploymentArtifacts,
+  options: { appId: string; adminSecret: string },
+  deployment: DeploymentBody,
 ): Promise<DeploymentResponse> {
   // A core that predates bundles has no `/bundles` route, so it refuses the
   // publish instead of activating it.
@@ -278,16 +267,7 @@ export async function publishDeployment(
       "Content-Type": "application/json",
       "X-Jazz-Admin-Secret": options.adminSecret,
     },
-    body: JSON.stringify(
-      {
-        targetSchemaHash: options.targetSchemaHash,
-        schemas: options.schemas.map(({ hash, schema }) => ({ hash, schema: { tables: schema } })),
-        migrations: options.migrations,
-        permissions: normalizePermissionsForWasm(options.permissions),
-        ...(options.allowDroppingHistory ? { allowDroppingHistory: true } : {}),
-      },
-      runtimeSchemaJsonReplacer,
-    ),
+    body: JSON.stringify(deployment, runtimeSchemaJsonReplacer),
   });
   if (!response.ok) {
     const text = await response.text();

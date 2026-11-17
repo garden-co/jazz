@@ -1,13 +1,13 @@
 <script lang="ts">
-	import { getSession, QuerySubscription } from 'jazz-tools/svelte';
+	import { getJazzSession, QuerySubscription } from 'jazz-tools/svelte';
 	import { toast } from 'svelte-sonner';
-	import { app } from './lib/schema.js';
+	import { app } from './lib/jazz.generated.js';
 
 	// #region reading-reactive-svelte
 	const todos = new QuerySubscription(app.todos);
 	// #endregion reading-reactive-svelte
-	const session = getSession();
-	const sessionUserId = $derived(session.current?.user ?? null);
+	const session = getJazzSession();
+	const sessionUserId = $derived($session.user?.accountId ?? null);
 	let title = $state('');
 
 	function handleSubmit(e: SubmitEvent) {

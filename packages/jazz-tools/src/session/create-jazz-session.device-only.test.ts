@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { schema as s } from "../schema-namespace.js";
+import { testApp } from "../testing/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb, type LocalFirstLoader } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
@@ -8,7 +8,7 @@ import {
   type BrowserJazzSession,
 } from "./create-jazz-session.js";
 
-const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
+const app = testApp({ tables: { notes: { columns: { text: "string" } } } });
 
 const sessions: BrowserJazzSession[] = [];
 

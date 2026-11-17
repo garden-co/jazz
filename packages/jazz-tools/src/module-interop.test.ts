@@ -3,12 +3,12 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { schema as s } from "./index.js";
 import {
   mergePermissionsIntoWasmSchema,
   type CompiledPermissionsMap,
 } from "./schema-permissions.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "./schema-source.js";
+import { testApp, testPermissions } from "./testing/index.js";
 
 const dir = mkdtempSync(join(tmpdir(), "jazz-cjs-interop-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -34,55 +34,45 @@ exports.default = globalThis[Symbol.for(${JSON.stringify(key.description)})];
   return require(file) as T;
 }
 
-const app = s.defineApp(
-  { todos: s.table({ title: s.string() }, {}), notes: s.table({ body: s.string() }, {}) },
-  { migrations: "none" },
-);
-const permissions = s.definePermissions(app, ({ policy }) => {
-  policy.todos.allowRead.always();
-  policy.notes.allowRead.always();
+const app = testApp({
+  tables: {
+    todos: { columns: { title: "string" } },
+    notes: { columns: { body: "string" } },
+  },
 });
 const schema = resolveSchemaSource(app);
 
 const wrapperError = (file: string) =>
   new RegExp(`^${file} arrived as \\{ default: … \\}.*\\{"type": "module"\\}`);
 
-describe("a schema or permissions module imported as CommonJS from ESM", () => {
+describe("an app module imported as CommonJS from ESM", () => {
   it("names the mismatch for a wrapped schema", () => {
     const wrapped = asCommonJsModule(app);
     expect(Object.keys(wrapped)).toEqual(["default"]);
     expect(() => resolveSchemaSource(wrapped as SchemaSourceInput)).toThrow(
-      wrapperError("schema.ts"),
+      wrapperError("jazz.generated.ts"),
     );
   });
 
-  it("names the mismatch for wrapped permissions, not an unknown table `default`", () => {
-    const wrapped = asCommonJsModule(permissions);
-    expect(() => mergePermissionsIntoWasmSchema(schema, wrapped)).toThrow(
-      wrapperError("permissions.ts"),
-    );
-  });
-
-  it("keeps a real table named `default` working, and still spots its wrapped permissions", () => {
-    const withDefault = s.defineApp(
-      { default: s.table({ title: s.string() }, {}), todos: s.table({ title: s.string() }, {}) },
-      { migrations: "none" },
-    );
-    const itsPermissions = s.definePermissions(withDefault, ({ policy }) => {
-      policy.default.allowRead.always();
-      policy.todos.allowRead.always();
+  it("keeps a real table named `default` working", () => {
+    const withDefault = testApp({
+      tables: {
+        default: { columns: { title: "string" } },
+        todos: { columns: { title: "string" } },
+      },
+    });
+    const itsPermissions = testPermissions(withDefault, {
+      format: 1,
+      tables: { default: { read: "true" }, todos: { read: "true" } },
     });
     const resolved = resolveSchemaSource(withDefault);
     expect(Object.keys(resolved)).toContain("default");
     const merged = mergePermissionsIntoWasmSchema(resolved, itsPermissions);
     expect(merged.default.policies?.select).toBeDefined();
-    // Only a `default` table's policies, as a permissions map: no wrapper.
+    // Only a `default` table's policies, as a permissions map.
     expect(() =>
       mergePermissionsIntoWasmSchema(resolved, { default: itsPermissions.default }),
     ).not.toThrow();
-    expect(() =>
-      mergePermissionsIntoWasmSchema(resolved, asCommonJsModule(itsPermissions)),
-    ).toThrow(wrapperError("permissions.ts"));
   });
 
   it("leaves other unknown tables to the usual error", () => {
@@ -90,7 +80,7 @@ describe("a schema or permissions module imported as CommonJS from ESM", () => {
       mergePermissionsIntoWasmSchema(schema, {
         default: { select: { using: { type: "True" } } },
       } as CompiledPermissionsMap),
-    ).toThrow("permissions.ts defines permissions for unknown table(s): default.");
+    ).toThrow("jazz.permissions.json defines permissions for unknown table(s): default.");
     expect(() =>
       mergePermissionsIntoWasmSchema(schema, {
         default: { todos: {}, archive: {} },

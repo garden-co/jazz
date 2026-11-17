@@ -1,6 +1,5 @@
 import { expect, it } from "vitest";
-import { schema as s } from "../schema-namespace.js";
-import { definePermissions } from "../permissions/index.js";
+import { testApp } from "../testing/test-app.js";
 import { PersistedWriteRejectedError } from "./client.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
@@ -10,22 +9,29 @@ import { startTestJazz } from "../testing/index.js";
 // same transaction inserts or updates, so the server accepts the transaction the
 // client already applied optimistically. A committed row the transaction deletes
 // still counts; a row it both inserts and deletes never does.
-const app = s.defineApp(
-  {
-    shows: s.table({ chiefAccount: s.uuid() }, {}),
-    tasks: s.table({ showId: s.uuid(), title: s.string() }, { show: s.rel("shows", "showId") }),
+const app = testApp({
+  tables: {
+    shows: { columns: { chiefAccount: "uuid" } },
+    tasks: {
+      columns: { showId: "uuid", title: "string" },
+      relations: { show: { rel: "shows", column: "showId" } },
+    },
   },
-  { migrations: "none" },
-);
-const permissions = definePermissions(app, ({ policy, session }) => {
-  policy.shows.allowRead.where({ chiefAccount: session.user });
-  policy.shows.allowInsert.where({ chiefAccount: session.user });
-  policy.shows.allowDelete.where({ chiefAccount: session.user });
-  policy.tasks.allowRead.always();
-  policy.tasks.allowInsert.where((task) =>
-    policy.shows.exists.where({ id: task.showId, chiefAccount: session.user }),
-  );
 });
+const permissions = {
+  format: 1,
+  tables: {
+    shows: {
+      read: "chiefAccount = session.user",
+      insert: "chiefAccount = session.user",
+      delete: "chiefAccount = session.user",
+    },
+    tasks: {
+      read: "true",
+      insert: "exists shows(id = this.showId, chiefAccount = session.user)",
+    },
+  },
+} as const;
 
 async function withChief(
   run: (db: Awaited<ReturnType<typeof createDb>>, me: string) => Promise<void>,

@@ -1,0 +1,393 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "title": "jazz.app.json",
+  "description": "An app's tables, relations, computed fields, transforms, schema history and migrations. The app and its clients ship this file. See https://jazz.tools/docs/reference/app-files",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "tables"],
+  "properties": {
+    "$schema": {
+      "const": "https://jazz.tools/schemas/jazz.app.v1.json",
+      "description": "The file's version: this JSON Schema's URL. A newer Jazz may write a later version."
+    },
+    "$generated": {
+      "$ref": "#/$defs/generated"
+    },
+    "$comment": {
+      "type": "string"
+    },
+    "tables": {
+      "$ref": "#/$defs/tables",
+      "description": "The current schema."
+    },
+    "history": {
+      "type": "object",
+      "description": "Earlier versions the app still ships, oldest first, by name.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tables"],
+        "properties": {
+          "tables": {
+            "$ref": "#/$defs/tables"
+          },
+          "$comment": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "migrations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/migration"
+      }
+    },
+    "transforms": {
+      "type": "object",
+      "description": "Transforms columns name with \"transform\": a type the engine stores and the type code reads and writes. Every language implements each one.",
+      "propertyNames": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["stored", "view"],
+        "properties": {
+          "stored": {
+            "$ref": "#/$defs/plainType"
+          },
+          "view": {
+            "$ref": "#/$defs/plainType"
+          },
+          "$comment": {
+            "type": "string"
+          }
+        },
+        "description": "e.g. { \"stored\": \"timestamp\", \"view\": \"string\" }"
+      }
+    }
+  },
+  "$defs": {
+    "generated": {
+      "type": "object",
+      "description": "Written by the tool that generated this file (npx jazz-tools generate, from the app's TypeScript); loaders ignore it. by says what wrote the file; sha256 is the hex SHA-256 of the file's canonical text without this member, so a file whose digest no longer matches was edited by hand since.",
+      "additionalProperties": false,
+      "required": ["by", "sha256"],
+      "properties": {
+        "by": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "tables": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/table"
+      }
+    },
+    "table": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["columns"],
+      "properties": {
+        "$comment": {
+          "type": "string"
+        },
+        "columns": {
+          "type": "object",
+          "description": "Columns in declared order, e.g. { \"userId\": \"uuid\", \"avatar\": \"string?\" }.",
+          "additionalProperties": {
+            "$ref": "#/$defs/column"
+          }
+        },
+        "relations": {
+          "type": "object",
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["rel", "column"],
+                "properties": {
+                  "rel": {
+                    "type": "string",
+                    "description": "The table this table's column points to."
+                  },
+                  "column": {
+                    "type": "string"
+                  }
+                },
+                "description": "e.g. { \"rel\": \"chats\", \"column\": \"chatId\" }"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["reverse", "relation"],
+                "properties": {
+                  "reverse": {
+                    "type": "string"
+                  },
+                  "relation": {
+                    "type": "string",
+                    "description": "The forward relation on that table that points here."
+                  }
+                },
+                "description": "e.g. { \"reverse\": \"messages\", \"relation\": \"chat\" }"
+              }
+            ]
+          }
+        },
+        "indexes": {
+          "type": "array",
+          "description": "A column name is a single-column index (listing any makes them the only ones); an array of names is a composite index.",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1
+              }
+            ]
+          }
+        },
+        "branchBy": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "history": {
+          "const": "latest",
+          "description": "Keep only each row's newest version."
+        },
+        "computed": {
+          "type": "object",
+          "description": "Fields computed in code from stored columns, not stored. Every language implements each one.",
+          "propertyNames": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "from"],
+            "properties": {
+              "type": {
+                "$ref": "#/$defs/columnType"
+              },
+              "from": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Stored columns of this table (or id), in the order the implementation takes them."
+              },
+              "$comment": {
+                "type": "string"
+              }
+            },
+            "description": "e.g. { \"type\": { \"enum\": [\"low\", \"high\"] }, \"from\": [\"score\"] }"
+          }
+        }
+      }
+    },
+    "column": {
+      "description": "A type string (\"string\", \"uuid?\", …) or an object with one of type / enum / json / array and options.",
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(string|int|bigint|float|boolean|timestamp|uuid|bytes)\\??$"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "enum": ["string", "int", "bigint", "float", "boolean", "timestamp", "uuid", "bytes"]
+            },
+            "enum": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "json": {},
+            "array": {
+              "$ref": "#/$defs/columnType"
+            },
+            "optional": {
+              "type": "boolean"
+            },
+            "default": {},
+            "merge": {
+              "enum": ["counter", "g-set", "text", "markdown", "html"]
+            },
+            "references": {
+              "type": "string"
+            },
+            "transform": {
+              "type": "string",
+              "description": "A transform of the top-level transforms that this column's stored value goes through."
+            },
+            "$comment": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "columnType": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(string|int|bigint|float|boolean|timestamp|uuid|bytes)\\??$"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "enum": ["string", "int", "bigint", "float", "boolean", "timestamp", "uuid", "bytes"]
+            },
+            "enum": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "json": {},
+            "array": {
+              "$ref": "#/$defs/columnType"
+            }
+          }
+        }
+      ]
+    },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "What `migrations create --name` recorded."
+        },
+        "$comment": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string",
+          "description": "A version of `history`."
+        },
+        "to": {
+          "type": "string",
+          "description": "A version of `history`; absent means the current tables."
+        },
+        "createTables": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "dropTables": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "renameTables": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "new name → old name"
+        },
+        "migrate": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["add"],
+                  "properties": {
+                    "add": {
+                      "$ref": "#/$defs/columnType"
+                    },
+                    "default": {}
+                  },
+                  "description": "e.g. { \"add\": \"string\", \"default\": \"\" }"
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["drop"],
+                  "properties": {
+                    "drop": {
+                      "$ref": "#/$defs/columnType"
+                    },
+                    "backwardsDefault": {}
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["renameFrom"],
+                  "properties": {
+                    "renameFrom": {
+                      "type": "string"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "plainType": {
+      "description": "A type without `?` or options.",
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(string|int|bigint|float|boolean|timestamp|uuid|bytes)$"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "maxProperties": 1,
+          "properties": {
+            "type": {
+              "enum": ["string", "int", "bigint", "float", "boolean", "timestamp", "uuid", "bytes"]
+            },
+            "enum": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "json": {},
+            "array": {
+              "$ref": "#/$defs/columnType"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

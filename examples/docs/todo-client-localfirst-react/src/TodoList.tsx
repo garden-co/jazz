@@ -1,7 +1,7 @@
 import { useState } from "react";
 // #region reading-reactive-hooks-react
 import { useAll } from "jazz-tools/react";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 
 export function TodoList() {
   // #region read-write-react

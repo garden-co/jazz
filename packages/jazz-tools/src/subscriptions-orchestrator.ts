@@ -376,9 +376,15 @@ export class SubscriptionsOrchestrator {
       subscribe: (callbacks) => {
         this.cancelCleanup(entry);
         entry.listeners.add(callbacks);
-        if (entry.parked) this.unparkEntry(entry);
+        // A resubscription that fails at once already told every listener,
+        // this one included.
+        let told = false;
+        if (entry.parked) {
+          this.unparkEntry(entry);
+          told = entry.state.status === "rejected";
+        }
 
-        if (entry.state.status === "rejected") {
+        if (entry.state.status === "rejected" && !told) {
           callbacks.onError?.(entry.state.error);
         }
 

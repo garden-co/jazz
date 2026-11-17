@@ -2,7 +2,7 @@ import { Effect, Layer, Option } from "effect";
 import { createJazzClient } from "jazz-tools";
 import { Jazz } from "jazz-tools/effect";
 import { afterEach, describe, expect, it } from "vitest";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated.js";
 import {
   canCreateTodo,
   clearNullableTodoFields,

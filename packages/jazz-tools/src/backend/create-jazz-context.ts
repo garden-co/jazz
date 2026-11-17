@@ -11,7 +11,7 @@ import {
 } from "jazz-napi";
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
-import type { CompiledPermissions } from "../permissions/index.js";
+import type { CompiledPermissionsMap as CompiledPermissions } from "../schema-permissions.js";
 import { JazzClient, type MutationErrorEvent, type Runtime, type TxId } from "../runtime/client.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
@@ -607,6 +607,17 @@ class BackendDb extends Db implements BackendMutationErrorSink {
     this.coreSource.assertOpen();
     this.assertOpen();
     return this.client;
+  }
+
+  /**
+   * The backend's connection manager holds no client, so wait on this
+   * `Db`'s: for the writes it makes as its session (or as the backend),
+   * reporting only their rejections. With no server this runtime is the
+   * authority, and writes settle when made.
+   */
+  protected override async waitForUpstreamSync(signal: AbortSignal): Promise<void> {
+    if (!this.getConfig().serverUrl) return;
+    await this.client.waitForSyncAs(this.accessContext?.writeSession ?? undefined, signal);
   }
 
   private readonly backendMutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
