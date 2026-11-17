@@ -296,6 +296,10 @@ impl ServerCore {
     /// ([`crate::portable::catalogue::StagedDeployment::expected`]): if the
     /// store's catalogue no longer reads the same, the change is refused,
     /// as native refuses a deployment whose catalogue moved under it.
+    /// Stage it on this core's own catalogue: `expected` must be
+    /// `CatalogueIndex::from_rows(&core.db().catalogue()?, None)`, read from
+    /// this core. An index of the store read before the core opened differs
+    /// (a core admits the schema it opens on), and is refused.
     pub fn apply_catalogue(
         &mut self,
         expected: &crate::portable::catalogue::CatalogueIndex,
