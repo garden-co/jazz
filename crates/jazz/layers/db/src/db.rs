@@ -857,6 +857,12 @@ struct Inner {
     /// Rows a unit's trusted writes (no write check) left behind, by stored
     /// table: they need no evidence, so its grounding starts from them.
     trusted_rows: RefCell<BTreeMap<String, BTreeSet<[u8; 16]>>>,
+    /// The inherited rows the unit being applied (or the staging overlay)
+    /// copied into a branch head: (stored table, row, head key) to the base
+    /// key it acted on. The unit's later writes to the head row act on that
+    /// base row (SPEC 7). Cleared at every unit and overlay boundary
+    /// ([`Inner::start_unit_heads`]), never left to another unit.
+    inherited_heads: RefCell<InheritedHeads>,
     /// The open transaction's seq and the tables it wrote.
     tx: Option<(u64, BTreeSet<String>)>,
     /// The identity the open callback transaction writes as. A write as
@@ -2264,6 +2270,7 @@ impl Db {
                 changed: RefCell::new(Vec::new()),
                 deferred: RefCell::new(None),
                 trusted_rows: RefCell::new(BTreeMap::new()),
+                inherited_heads: RefCell::new(HashMap::new()),
                 tx: None,
                 tx_identity: None,
                 client: None,
@@ -7080,6 +7087,12 @@ impl Inner {
         }
     }
 
+    /// Start applying a unit, or replaying a staging overlay: no head row
+    /// another unit copied is this one's ([`Inner::inherited_heads`]).
+    pub(crate) fn start_unit_heads(&self) {
+        self.inherited_heads.borrow_mut().clear();
+    }
+
     /// Drop a unit's pending checks (it rolled back).
     pub(crate) fn abandon_checks(&self) {
         *self.deferred.borrow_mut() = None;
@@ -7383,6 +7396,56 @@ impl Inner {
             self.existing_at(&table.stored, row, key, Some(&cut))?,
             Some((_, false))
         ))
+    }
+
+    /// A USING or read-for-write check of the row a write acts on
+    /// (SPEC 7, INV-RLS-9). While a unit is decided
+    /// ([`Inner::defer_checks`]: at the authority on upload, in a relay's
+    /// admission, and in a node's own commit) such a check reads committed
+    /// state, as the grounding's first round does: the row as it stood
+    /// before the unit and the policy's other rows likewise, never the
+    /// unit's own earlier writes. So the unit's decision does not depend on
+    /// the order of its writes, and no write vouches for another's USING.
+    /// A branch-head row the unit copied from its base acts on that base
+    /// row, as the unit's first write to it did. A row the unit created or
+    /// revived has no committed state to act on: the end-state check of
+    /// its first write ([`Inner::write_check`]) decides it. For such a row,
+    /// and outside a unit, this returns `None`: the caller checks the
+    /// current version.
+    fn holds_on_acted_row(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        seq: u64,
+        policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
+    ) -> Result<Option<bool>, Error> {
+        if self.deferred.borrow().is_none() {
+            return Ok(None);
+        }
+        let acted = if self.was_live_before(table, row, key, seq)? {
+            key.to_vec()
+        } else {
+            let base = self
+                .inherited_heads
+                .borrow()
+                .get(&(table.stored.clone(), *row.0.as_bytes(), key.to_vec()))
+                .cloned();
+            match base {
+                Some(from) if self.was_live_before(table, row, &from, seq)? => from,
+                _ => return Ok(None),
+            }
+        };
+        let key = &acted[..];
+        let cut = Cut {
+            unsettled: false,
+            seq: self.own_pos(seq.saturating_sub(1)),
+            own: self.own_rank(seq),
+            extra: Vec::new(),
+            overlay: Some(CutOverlay::Grounded(Arc::default())),
+        };
+        self.holds_as_of(&self.schema, table, row, key, cut, policy)
+            .map(Some)
     }
 
     /// Whether `row`'s current version on branch `key` is a tombstone.
@@ -8498,6 +8561,10 @@ impl Inner {
         at: Option<&Cut>,
         seq: u64,
     ) -> Result<(), Error> {
+        self.inherited_heads
+            .borrow_mut()
+            .entry((table.stored.clone(), *row.0.as_bytes(), to.to_vec()))
+            .or_insert_with(|| from.to_vec());
         let columns = self.columns_list(table);
         let id = row.0.as_bytes().to_vec();
         // A frozen base is copied as it was at the cut.
@@ -8800,6 +8867,7 @@ impl Inner {
         };
         self.changed.borrow_mut().truncate(overlay.mark);
         end_savepoint(&self.conn, "overlay", false).expect("rolling back a transaction overlay");
+        self.start_unit_heads();
     }
 
     fn checked(&self, who: Who) -> Option<AuthorSubject> {
@@ -8857,21 +8925,25 @@ impl Inner {
         key: &[u8],
         who: &Who,
         verb: &str,
+        seq: u64,
     ) -> Result<(), Error> {
-        if let Some(author) = self.checked(*who)
-            && !self.check(table, row, key, author, Operation::Select)?
-        {
+        let Some(author) = self.checked(*who) else {
+            return Ok(());
+        };
+        let readable = self.holds_on_acted_row(table, row, key, seq, |ctx| {
+            ctx.operation_policy(table, Operation::Select, "a", &self.session(author))
+        })?;
+        if !readable.map_or_else(
+            || self.check(table, row, key, author, Operation::Select),
+            Ok,
+        )? {
             return Err(unreadable_target(verb, &table.name));
         }
-        if let Some(author) = self.checked(*who)
-            && !self.check_clause(
-                table,
-                row,
-                key,
-                author,
-                table.policies.update.using.as_ref(),
-            )?
-        {
+        let using = table.policies.update.using.as_ref();
+        let usable = self.holds_on_acted_row(table, row, key, seq, |ctx| {
+            ctx.policy_clause(using, table, "a", &self.session(author))
+        })?;
+        if !usable.map_or_else(|| self.check_clause(table, row, key, author, using), Ok)? {
             return Err(denied(format_args!(
                 "{verb} policy (USING) denied the target row"
             )));
@@ -8988,7 +9060,7 @@ impl Inner {
                         cells.insert(column.name.clone(), value);
                     }
                 } else {
-                    self.authorize_patch(table, row, &key, &who, verb)?;
+                    self.authorize_patch(table, row, &key, &who, verb, seq)?;
                 }
                 if cells.is_empty() && !staged_tombstone {
                     return Ok(WriteHandle {
@@ -9019,7 +9091,7 @@ impl Inner {
                 head_cells,
                 at,
             } => {
-                self.authorize_patch(table, row, &from, &who, verb)?;
+                self.authorize_patch(table, row, &from, &who, verb, seq)?;
                 let cells = self.merged_cells(table, row, Some(&from), Some((&to, seq)), cells)?;
                 self.copy_on_write(table, row, &from, &to, &head_cells, at.as_ref(), seq)?;
                 self.set_cells(table, row, &to, &cells, Cells::Authored, seq, None, true)?;
@@ -9095,10 +9167,16 @@ impl Inner {
         // A delete by row id reads no user data (SPEC 7): its DELETE policy
         // alone decides, so a write-only principal may delete.
         let check = |inner: &Self, key: &[u8]| -> Result<(), Error> {
-            if let Some(author) = inner.checked(who)
-                && !inner.check(table, row, key, author, Operation::Delete)?
-            {
-                return Err(delete_denied());
+            if let Some(author) = inner.checked(who) {
+                let allowed = inner.holds_on_acted_row(table, row, key, seq, |ctx| {
+                    ctx.operation_policy(table, Operation::Delete, "a", &inner.session(author))
+                })?;
+                if !allowed.map_or_else(
+                    || inner.check(table, row, key, author, Operation::Delete),
+                    Ok,
+                )? {
+                    return Err(delete_denied());
+                }
             }
             Ok(())
         };
@@ -9241,6 +9319,9 @@ impl Inner {
         })
     }
 }
+
+/// See [`Inner::inherited_heads`].
+type InheritedHeads = HashMap<(String, [u8; 16], Vec<u8>), Vec<u8>>;
 
 /// A write's own policy check, deferred to the end of its unit.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -10999,6 +11080,7 @@ impl Db {
             // commits here exactly when the authority accepts it: a row the
             // unit deleted is no evidence, and rows can't ground each other
             // in a cycle.
+            inner.start_unit_heads();
             inner.defer_checks();
             let applied = inner
                 .apply_with_edits(ops, &batch.edits, 0, seq)
@@ -11095,6 +11177,7 @@ impl Db {
         inner.pending_nodes.extend(edits.pending_nodes);
         if let Some(ops) = ops {
             inner.settle_overlay();
+            inner.start_unit_heads();
             begin_savepoint(&inner.conn, "overlay")?;
             #[cfg(any(test, feature = "testing"))]
             {
@@ -11119,6 +11202,8 @@ impl Db {
             return Err(error);
         }
         let mark = inner.changed.borrow().len();
+        // A step that is undone leaves no head rows behind.
+        let heads = inner.inherited_heads.borrow().clone();
         let joins = extra.is_some();
         let applied = match extra {
             Some(op) => inner.counter_deltas(op).and_then(|()| {
@@ -11146,6 +11231,7 @@ impl Db {
         let keep = joins && result.is_ok();
         if !keep {
             inner.changed.borrow_mut().truncate(mark);
+            *inner.inherited_heads.borrow_mut() = heads;
         }
         if let Err(error) = end_savepoint(&inner.conn, "overlay_step", keep) {
             inner.settle_overlay();
