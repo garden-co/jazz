@@ -574,11 +574,6 @@ export function coreInitial(initial: unknown): "local-first" | "signed-out" | un
 }
 
 /**
- * @internal A session's operations, bound and without its state, for the
- * framework hooks (never a spread: `db` is a getter that throws while there
- * is no client).
- */
-/**
  * What a provider's `error` view receives, in every framework, while the
  * session has no usable client (`status: "error"`).
  */
@@ -609,6 +604,11 @@ export function jazzSessionErrorViewProps(
   };
 }
 
+/**
+ * @internal A session's operations, bound and without its state, for the
+ * framework hooks (never a spread: `db` is a getter that throws while there
+ * is no client).
+ */
 export function jazzSessionActions<Client>(
   session: JazzSession<Client>,
 ): Omit<JazzSession<Client>, "getSnapshot" | "subscribe" | "db"> {

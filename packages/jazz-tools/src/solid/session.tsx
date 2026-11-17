@@ -1,7 +1,6 @@
 import {
   createContext,
   createEffect,
-  createMemo,
   createSignal,
   onCleanup,
   onMount,
@@ -158,19 +157,13 @@ export function JazzProvider(props: JazzProviderProps) {
     // Solid's synchronous keyed Show disposal and cleanup run before this queued acknowledgement.
     queueMicrotask(() => lease.acknowledge(observed));
   });
-  // A new view only when the failure itself changes, so the keyed error view
-  // keeps its state across unrelated snapshot updates.
-  const errorView = createMemo(
-    () => {
-      const observed = snapshot();
-      return observed.status === "error" ? jazzSessionErrorViewProps(session, observed) : undefined;
-    },
-    undefined,
-    { equals: (a, b) => a?.error === b?.error && a?.recovery === b?.recovery },
-  );
+  // The session publishes a snapshot only when something in it changed, so
+  // a new one in `error` is a new failure (or recovery) for the view to show.
   const fallback = () => (
     <Show
-      when={errorView()}
+      when={
+        snapshot().status === "error" ? jazzSessionErrorViewProps(session, snapshot()) : undefined
+      }
       keyed
       fallback={
         <Switch fallback={props.loading ?? <p role="status">Loading...</p>}>

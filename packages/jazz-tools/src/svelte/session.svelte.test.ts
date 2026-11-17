@@ -138,6 +138,36 @@ describe("Svelte Jazz session", () => {
     await settle();
     create.mockRestore();
   });
+  it('gives the error snippet recovery: "action" when a failed operation can be repeated', async () => {
+    const events: string[] = [];
+    const { session, clients } = await setup(events);
+    // The old client's teardown fails after it began: the link can't be
+    // offered again on that client, so the session errors with the link to repeat.
+    vi.mocked(clients[0]!.shutdown).mockRejectedValueOnce(new Error("teardown failed"));
+    const seen: JazzSessionErrorViewProps[] = [];
+    const target = document.createElement("div");
+    const component = mount(JazzProvider, {
+      target,
+      props: {
+        session,
+        children: createRawSnippet(() => ({ render: () => "<p>Ready</p>" })),
+        error: createRawSnippet((view: () => JazzSessionErrorViewProps) => {
+          seen.push(view());
+          return { render: () => `<p>${view().error.message} (${view().recovery})</p>` };
+        }),
+      },
+    });
+    await settle();
+    expect(target.textContent).toBe("Ready");
+    await expect(session.linkDeviceAccount()).rejects.toThrow("teardown failed");
+    await settle();
+    expect(session.getSnapshot()).toMatchObject({ status: "error", recovery: "action" });
+    expect(target.textContent).toBe("teardown failed (action)");
+    expect(seen.at(-1)!.recovery).toBe("action");
+    await unmount(component);
+    await settle();
+    await session.close();
+  });
   it("detaches the rendered subtree before syncing and linking", async () => {
     const events: string[] = [];
     const { session, clients } = await setup(events);
