@@ -1597,51 +1597,7 @@ impl ServerRuntimeHandle {
         supersedes: Option<jazz::catalogue::BundleId>,
     ) -> Result<(), CatalogueApplyError> {
         let (ended, result) = self
-            .run(move |owner| {
-                let mut ended = 0;
-                let result = (|| {
-                    if change.activate.is_some() {
-                        return Err(CatalogueApplyError::Rejected(
-                            "a server never makes a schema current: sessions pin bundles"
-                                .to_owned(),
-                        ));
-                    }
-                    block_on(owner.db.apply_catalogue(change)).map_err(|error| {
-                        if error.code == jazz::db::ErrorCode::Storage {
-                            CatalogueApplyError::Failed(error.to_string())
-                        } else {
-                            CatalogueApplyError::Rejected(error.to_string())
-                        }
-                    })?;
-                    if let Some(published) = supersedes {
-                        ended = owner.end_pinned_sessions(
-                            &|bundle| *bundle != published,
-                            &superseded_error(&published),
-                        );
-                        if ended > 0 {
-                            tracing::info!(
-                                bundle = %published,
-                                ended,
-                                "new permissions bundle: sessions pinned to others reconnect"
-                            );
-                        }
-                    }
-                    #[cfg(test)]
-                    if std::mem::take(&mut owner.fail_next_reload) {
-                        // As a reload that failed partway: the runtime's
-                        // view of the catalogue is no longer the store's.
-                        owner.catalogue = Catalogue::default();
-                        return Err(CatalogueApplyError::Failed(
-                            "injected catalogue reload failure".to_owned(),
-                        ));
-                    }
-                    owner
-                        .reload_catalogue()
-                        .map_err(CatalogueApplyError::Failed)?;
-                    Ok(())
-                })();
-                Ok((ended, result))
-            })
+            .run(move |owner| Ok(owner.apply_catalogue(change, supersedes)))
             .await
             .unwrap_or_else(|error| (0, Err(CatalogueApplyError::Failed(error))));
         // Sessions that ended are gone even when a later step failed: the
