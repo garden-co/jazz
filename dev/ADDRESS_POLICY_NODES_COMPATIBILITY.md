@@ -70,19 +70,16 @@ variant`) and refuses it, so a downgrade fails closed rather than dropping
 - **Activation digest.** The digest recorded when a schema becomes current
   hashes the Debug form of the lowered read policies. Only a policy that
   uses a new node prints differently; existing policies keep their digest.
-- **Replicas.** A replica that compiles a policy with a table identity binds
-  it only once its catalogue mirror has confirmed the schema version's names
-  (as `Db::table_identity` answers); until then the identity is no value, a
-  comparison with it holds for no row, and the policy grants nothing through
-  it. Policies are compiled per check and per read (a live result each time
-  it is run again), so each one compiled after the names are confirmed binds
-  the identity. The rows a replica ships to a client because a read policy
-  consults them (its support) are chosen once per subscription. A
-  subscription taken before the names are confirmed leaves the unknown
-  identity out of the key those rows are matched by: it then follows, for
-  example, the member rows of every space sharing the row ID, which the
-  session's policies still filter, and the client receives what its read
-  rests on before and after confirmation. The authority always knows it.
+- **Where identities bind.** Core is the only place policies are
+  evaluated, and it always knows its own names, so a table identity always
+  binds there. A database that is not the authority but serves subscribers
+  (used only in tests) binds an identity only once its catalogue mirror has
+  confirmed the schema version's names; until then the identity is no value
+  and the policy grants nothing through it. Policies are compiled per check
+  and per read, so each one compiled after confirmation binds it. Support
+  chosen for a subscription taken before confirmation leaves the unknown
+  identity out of its key: it is wider, the session's policies still filter
+  it, and nothing the read rests on is missing.
 - **Clients.** A client never evaluates write policies. `table_id('T')` is
   read by the permissions reader of this version and later; an older reader
   does not accept it, so a permissions file using it needs this version's
