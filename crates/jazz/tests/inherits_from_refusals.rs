@@ -387,6 +387,7 @@ fn inserted_by_this_transaction_outside_a_write_check_exists_is_refused() {
 /// ```text
 /// members.insert = IF(scopeId, identifiers: [uuid])     ✗
 /// members.insert = IF(scopeIds: [uuid], identifier)     ✗
+/// members.insert = EXISTS members(IF(scopeId, identifiers: [uuid]))   ✗
 /// ```
 #[test]
 fn an_inherits_from_with_a_non_scalar_address_column_is_refused() {
@@ -439,4 +440,22 @@ fn an_inherits_from_with_a_non_scalar_address_column_is_refused() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("must be a scalar column"), "{error}");
+
+    // Inside an `exists`, the address columns are the consulted table's: a
+    // scalar pair passes, a non-scalar one is refused there too.
+    let within = |table_column: &str, id_column: &str| PolicyExpr::Exists {
+        table: MEMBERS.to_owned(),
+        condition: Box::new(address(table_column, id_column)),
+    };
+    check_deployable_policies(&members(within("scopeId", "identifier"))).unwrap();
+    assert_refused(
+        &members(within("scopeId", "identifiers")),
+        refused,
+        &format!("{insert_path}.Exists.condition.InheritsFrom.id_column"),
+    );
+    assert_refused(
+        &members(within("scopeIds", "identifier")),
+        refused,
+        &format!("{insert_path}.Exists.condition.InheritsFrom.table_column"),
+    );
 }
