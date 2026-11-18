@@ -6,7 +6,6 @@ export interface BandChatConfig {
   betterAuthSecret: string | undefined;
   remote: { url: string; adminSecret: string | undefined } | undefined;
   dataPath: string;
-  durableObject: { url: string; secret: string | undefined } | undefined;
 }
 export declare const LOCAL_ORIGIN: string;
 export declare const LOCAL_APP_ID: string;
