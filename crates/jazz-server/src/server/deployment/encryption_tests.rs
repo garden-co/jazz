@@ -565,60 +565,9 @@ async fn a_raw_deploy_of_a_foreign_system_table_is_refused() {
 }
 
 /// An encrypted schema as a deploy body: tasks encrypt their title in their
-/// project's space.
+/// project's space, whose read rule comes from the members table.
 fn encrypted_body() -> Value {
-    use jazz::tools::deployment::artifact::DeclaredEncryption;
-    use jazz::tools::deployment::artifact::system_tables::with_e2ee_fragment;
-    use jazz::tools::public_schema::{EncryptedColumn, EncryptionEntry, PlainType, SweepBy};
-    use std::collections::BTreeMap;
-    let schema = with_e2ee_fragment(
-        &SchemaBuilder::new()
-            .table(TableSchema::builder("projects").column("ownerId", ColumnType::Uuid))
-            .table(
-                TableSchema::builder("tasks")
-                    .fk_column("projectId", "projects")
-                    .column("title", ColumnType::Bytea),
-            )
-            .build(),
-    );
-    let hash = SchemaHash::compute(&schema).to_string();
-    let entries = BTreeMap::from([(
-        "tasks".to_owned(),
-        EncryptionEntry {
-            space: "projectId".to_owned(),
-            scope: "projects".to_owned(),
-            columns: BTreeMap::from([(
-                "title".to_owned(),
-                EncryptedColumn {
-                    plain: PlainType {
-                        column_type: ColumnType::Text,
-                        nullable: false,
-                        default: None,
-                    },
-                    sealed_type: None,
-                    from: None,
-                    to: None,
-                    convert: None,
-                    reverse: None,
-                },
-            )]),
-            equality: Vec::new(),
-            backfill: Vec::new(),
-            rehome: None,
-            sweep: SweepBy::Updaters,
-        },
-    )]);
-    let declared = DeclaredEncryption {
-        settings: Default::default(),
-        versions: BTreeMap::from([(hash.clone(), entries)]),
-    };
-    json!({
-        "targetSchemaHash": hash,
-        "schemas": [{ "hash": hash, "schema": schema }],
-        "migrations": [],
-        "permissions": {},
-        "encryption": declared,
-    })
+    loaded("ownerId = session.user").deployment_body(false)
 }
 
 /// A server with its account registry deploys an encrypted schema to a
