@@ -162,4 +162,32 @@ describe("acceptance: the reference renderings", () => {
     });
     await expect(load(app, JSON.stringify(tree))).resolves.toBeTruthy();
   });
+
+  it("refuses comparing session.authMode with the pre-rename local-first", () => {
+    const { schema } = chatReact;
+    const render = (read: () => unknown) =>
+      readablePermissions(
+        schema.definePermissions({
+          ...Object.fromEntries(Object.keys(schema.tables).map((t) => [t, {}])),
+          chats: { read },
+        } as never),
+      )!.tables.chats!.read;
+    const { session, eq, ne, isIn } = schema;
+    // `ne(…, "local-first")` would otherwise let every device account in.
+    for (const read of [
+      () => ne(session.authMode, "local-first" as never),
+      () => eq(session.authMode, "local-first" as never),
+      () => isIn(session.authMode, ["external", "local-first" as never]),
+    ]) {
+      expect(() => render(read)).toThrow(
+        /never "local-first" any more.*compare with "device-account"/,
+      );
+    }
+    expect(render(() => eq(session.authMode, "device-account"))).toBe(
+      "session.authMode = 'device-account'",
+    );
+    expect(render(() => isIn(session.authMode, ["device-account", "external"]))).toBe(
+      "session.authMode in ['device-account', 'external']",
+    );
+  });
 });

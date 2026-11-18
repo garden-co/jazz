@@ -155,7 +155,7 @@ pub fn self_signed_session(
         })?;
     let auth_mode = match issuer {
         identity::ANONYMOUS_ISSUER => AuthMode::Anonymous,
-        _ => AuthMode::LocalFirst,
+        _ => AuthMode::DeviceAccount,
     };
     Ok(Session {
         account_id: None,
@@ -339,7 +339,7 @@ mod tests {
                 assert_eq!(session.account_id, peer.account_id(), "{name}");
                 assert_eq!(session.issuer, identity::DEVICE_ACCOUNT_ISSUER, "{name}");
                 assert_eq!(session.user_id, subject(&guest), "{name}");
-                assert_eq!(session.auth_mode, AuthMode::LocalFirst, "{name}");
+                assert_eq!(session.auth_mode, AuthMode::DeviceAccount, "{name}");
                 assert_eq!(session.author_subject().unwrap(), peer, "{name}");
             }
             let principal = Principal {

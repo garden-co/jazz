@@ -9,7 +9,7 @@ import { makeFakeClient } from "./test-utils.js";
 describe("useSyncStatus", () => {
   it("renders the Db's status and follows its changes", () => {
     const client = makeFakeClient({
-      authMode: "local-first",
+      authMode: "device-account",
       userId: "u-1",
       claims: {},
     });

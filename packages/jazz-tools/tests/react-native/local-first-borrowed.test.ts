@@ -39,7 +39,7 @@ it("opens a borrowed local-first account foreground and subscribes without brows
     lease = await createNativeAccountTestSession(config, serializeSchemaSource(app.wasmSchema));
     client = await openJazzClient({ ...config, nativeRelay: { capability: lease.capability } });
     expect(client.session).toMatchObject({
-      authMode: "local-first",
+      authMode: "device-account",
       user: account.id,
       identity: account.identity,
     });

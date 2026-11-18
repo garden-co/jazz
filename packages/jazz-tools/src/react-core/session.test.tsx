@@ -24,7 +24,7 @@ async function setup() {
   const accounts = new AccountManager(enrollment, account);
   const clients: ReturnType<typeof makeFakeClient>[] = [];
   const openClient = vi.fn(async () => {
-    const client = makeFakeClient({ authMode: "local-first", userId: "test", claims: {} });
+    const client = makeFakeClient({ authMode: "device-account", userId: "test", claims: {} });
     client.shutdown = vi.fn(async () => {});
     clients.push(client);
     return client;
