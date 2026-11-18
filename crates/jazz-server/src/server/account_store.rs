@@ -168,12 +168,11 @@ impl RegistryFounders {
         account: AccountId,
         identities: Result<Vec<(String, String)>, jazz::db::Error>,
     ) -> Result<Option<bool>, String> {
-        let identities = match identities {
-            Ok(identities) => identities,
-            // A store whose registry never opened knows no account.
-            Err(error) if error.to_string().contains("no such table") => return Ok(None),
-            Err(error) => return Err(error.to_string()),
-        };
+        // A registry that cannot be read, a missing table included, is an
+        // error that refuses the write: never "an account nobody founded",
+        // which would let the session's issuer decide.
+        let identities =
+            identities.map_err(|error| format!("the account registry cannot be read: {error}"))?;
         if identities.is_empty() {
             return Ok(None);
         }
