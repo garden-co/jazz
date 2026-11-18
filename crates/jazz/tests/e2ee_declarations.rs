@@ -773,27 +773,31 @@ fn equality_changes_across_versions_follow_the_migrations_spec() {
     load_app(app(dropped, tagged, drop_tag).as_bytes()).unwrap_or_else(|e| panic!("{e}"));
 }
 
-/// An equality token has an encoding only for the types the equality
-/// format defines, and an encrypted column's stored default is the empty
-/// ciphertext: a declaration the format can't encode, or a stored default
-/// that is not empty, is refused.
+/// An equality token has an encoding for the scalar and enum types, JSON
+/// and arrays of any of them, and an encrypted column's stored default is
+/// the empty ciphertext: a stored default that is not empty is refused, and
+/// the types the format can't encode are refused in
+/// `equality_follows_the_types_the_format_encodes`.
 #[test]
 fn equality_and_stored_defaults_follow_their_formats() {
-    let json_equality = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
-        "tables": { "notes": { "columns": { "data": "bytes", "__e2ee_eq_data": "bytes" },
-            "encryption": { "space": "id", "scope": "notes", "columns": { "data": { "json": {} } },
-                "equality": ["data"] } } } }"#;
-    let error = refusal(load_app(json_equality.as_bytes()));
-    assert!(
-        error.contains("equality is not supported for json"),
-        "{error}"
-    );
-    load_app(
-        json_equality
-            .replace(r#""data": { "json": {} }"#, r#""data": "string""#)
-            .as_bytes(),
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
+    let with_type = |ty: &str| {
+        format!(
+            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": {{ "notes": {{ "columns": {{ "data": "bytes", "__e2ee_eq_data": "bytes" }},
+                "encryption": {{ "space": "id", "scope": "notes", "columns": {{ "data": {ty} }},
+                    "equality": ["data"] }} }} }} }}"#
+        )
+    };
+    for accepted in [
+        r#"{ "json": true }"#,
+        r#"{ "json": {} }"#,
+        r#"{ "array": "string" }"#,
+        r#"{ "array": { "json": true } }"#,
+        r#"{ "array": { "array": "int" } }"#,
+        r#""string""#,
+    ] {
+        load_app(with_type(accepted).as_bytes()).unwrap_or_else(|e| panic!("{accepted}: {e}"));
+    }
 
     let stored_default = |default: &str| {
         format!(
@@ -835,4 +839,74 @@ fn a_client_refuses_an_encrypted_app_until_it_has_hooks() {
         error.to_string().contains("declares end-to-end encryption"),
         "{error}"
     );
+}
+
+/// Equality follows the types the equality format encodes: JSON and arrays
+/// of any searchable element type are accepted, while a row, a
+/// transaction ID and an array of either are refused, naming what stops it.
+#[test]
+fn equality_follows_the_types_the_format_encodes() {
+    use jazz::tools::deployment::artifact::encryption::check_entry;
+    use jazz::tools::public_schema::{
+        ColumnDescriptor, EncryptedColumn, EncryptionEntry, PlainType, RowDescriptor, Schema,
+        SweepBy, TableSchema,
+    };
+    use std::collections::BTreeMap;
+    let schema: Schema = Schema::from([(
+        TableName::new("notes"),
+        TableSchema::new(RowDescriptor::new(vec![
+            ColumnDescriptor::new("data", ColumnType::Bytea),
+            ColumnDescriptor::new("__e2ee_eq_data", ColumnType::Bytea),
+        ])),
+    )]);
+    let entry = |ty: ColumnType| EncryptionEntry {
+        space: "id".to_owned(),
+        scope: "notes".to_owned(),
+        columns: BTreeMap::from([(
+            "data".to_owned(),
+            EncryptedColumn {
+                plain: PlainType::new(ty, false),
+                sealed_type: None,
+                from: None,
+                to: None,
+                convert: None,
+                reverse: None,
+            },
+        )]),
+        equality: vec!["data".to_owned()],
+        backfill: Vec::new(),
+        rehome: None,
+        sweep: SweepBy::Updaters,
+    };
+    let array = |element: ColumnType| ColumnType::Array {
+        element: Box::new(element),
+    };
+    let row = ColumnType::Row {
+        columns: Box::new(RowDescriptor::new(vec![ColumnDescriptor::new(
+            "x",
+            ColumnType::Text,
+        )])),
+    };
+    for accepted in [
+        ColumnType::Json { schema: None },
+        array(ColumnType::Text),
+        array(ColumnType::Json { schema: None }),
+        array(array(ColumnType::Integer)),
+    ] {
+        check_entry("notes", &entry(accepted.clone()), &schema)
+            .unwrap_or_else(|(at, e)| panic!("{accepted:?}: {at}: {e}"));
+    }
+    for (refused, named) in [
+        (row.clone(), "row columns"),
+        (ColumnType::TransactionId, "transaction-ID columns"),
+        (array(row), "array of row columns"),
+        (
+            array(array(ColumnType::TransactionId)),
+            "array of array of transaction-ID",
+        ),
+    ] {
+        let (_, message) = check_entry("notes", &entry(refused.clone()), &schema)
+            .expect_err("a type the format can't encode");
+        assert!(message.contains(named), "{refused:?}: {message}");
+    }
 }
