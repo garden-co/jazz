@@ -322,15 +322,13 @@ async fn session_not_revoked(
     let (Some(revocation), Some(registry)) = (revocation, state.accounts.as_ref()) else {
         return Ok(());
     };
-    match registry
+    let mark = registry
         .sessions_revoked_before(revocation.principal.clone())
-        .await?
-    {
-        Some(before) if before > revocation.authenticated_at_ms => {
-            Err(super::accounts::AdmissionError::Revoked)
-        }
-        _ => Ok(()),
+        .await?;
+    if crate::portable::accounts::session_revoked(mark, revocation.authenticated_at_ms) {
+        return Err(super::accounts::AdmissionError::Revoked);
     }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
