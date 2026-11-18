@@ -6,7 +6,12 @@
  * file.
  */
 import { colref, handle, name, PermissionsDslError, text, type Ctx } from "./compile.js";
-import type { ValueHandle } from "./types.js";
+import type { Inherits, PermissionError, ValueHandle } from "./types.js";
+
+/** A refusal for a predicate that inherits with `allowedTo`, else `unknown`. */
+type NotInherits<P> = [Extract<P, Inherits>] extends [never]
+  ? unknown
+  : PermissionError<"`allowedTo` inside `exists` is not supported yet: repeat the other table's rule there instead">;
 
 const QUERY: unique symbol = Symbol("jazz.permissions.query") as never;
 
@@ -74,8 +79,12 @@ export class RelationQuery implements RelationSource {
     });
   }
 
-  /** `where predicate`: an object of `"a.col": value` (AND-ed) or anyOf/allOf/not of them. */
-  where(predicate: unknown): RelationQuery {
+  /**
+   * `where predicate`: an object of `"a.col": value` (AND-ed) or
+   * anyOf/allOf/not of them; not `allowedTo` (not supported inside an
+   * `exists` yet).
+   */
+  where<const P>(predicate: P & NotInherits<P>): RelationQuery {
     return this.with((ctx) => `where ${text(predicate, { ...ctx, relation: true })}`);
   }
 

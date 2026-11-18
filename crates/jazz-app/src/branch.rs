@@ -362,7 +362,7 @@ impl OnBranch {
                 "subscribing to history; read it with OnBranch::all".into(),
             ));
         }
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::channel(subscription::SUBSCRIPTION_ITEMS);
         let implementations = self.jazz.info.implementations.clone();
         self.with_branch(move |client| async move {
             let stream = client.subscribe_with_opts(query, opts).await?;

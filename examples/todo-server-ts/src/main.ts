@@ -211,7 +211,7 @@ export async function createServer(
 
   // Sign in: returns the caller's Jazz account, creating it on their first
   // sign-in. Jazz never creates one by itself on the backend; this API has
-  // no browser client (and so no local-first guest to link), so it does.
+  // no browser client (and so no guest's device account to link), so it does.
   app.post("/sign-in", async (req: Request, res: Response, next: NextFunction) => {
     try {
       const user = await authenticate(toRequest(req));

@@ -40,10 +40,19 @@ export function attachInspectorCacheRuntime(
       started: boolean;
     }
   >();
+  // The worker's auth refusal as of the first link fate; `undefined` before.
+  // A refusal the worker already held at attach doesn't close this runtime,
+  // only one that arrives while it is attached does.
+  let authFailure: string | null | undefined;
   const receive = ({ data }: MessageEvent<BrowserFollowerPortEvent>) => {
+    let refused = false;
+    if (data.type === "link-fate") {
+      refused = authFailure === null && data.fate.authFailure !== null;
+      authFailure = data.fate.authFailure;
+    }
     if (
       data.type === "error" ||
-      data.type === "auth-failure" ||
+      refused ||
       data.type === "storage-invalidated" ||
       data.type === "storage-reset"
     ) {

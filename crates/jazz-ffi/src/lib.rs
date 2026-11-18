@@ -347,8 +347,10 @@ impl JazzHandle {
 
     /// Calls `listener` with each write the server refused that no durable
     /// wait (a `global` tier, `wait_for_sync`) reported, as TS's
-    /// `onMutationError`: `{"transaction", "message", "denied",
-    /// "serializable"}`. Refusals from before the first watch come first.
+    /// `onMutationError`: `{"transaction", "message", "code", "reason",
+    /// "denied", "serializable"}`, `code` and `reason` as TS's
+    /// `MutationErrorEvent`. Refusals from before the first watch come
+    /// first.
     pub fn watch_mutation_errors(&self, listener: Arc<dyn StateListener>) -> Result<Arc<Watch>> {
         self.watch("mutationErrors", listener)
     }

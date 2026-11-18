@@ -982,7 +982,7 @@ mod client_transport {
                     .start()
                     .await
                     .expect("start test server");
-                // A local-first guest, relayed by the app's backend: its own
+                // A device account, relayed by the app's backend: its own
                 // proof expires an hour after the server's test clock reads now.
                 let seed = [0xa7; 32];
                 let subject = jazz::tools::identity::derive_user_id(&seed).to_string();
@@ -990,14 +990,14 @@ mod client_transport {
                 context.jwt_token = Some(
                     jazz::tools::identity::mint_jazz_self_signed_token_at(
                         &seed,
-                        jazz::tools::identity::LOCAL_FIRST_ISSUER,
+                        jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
                         &server.app_id().to_string(),
                         3600,
                         auth_clock.now_seconds(),
                     )
                     .expect("mint guest proof"),
                 );
-                context.account_id = Some(jazz::account_registry::local_first_account_id(
+                context.account_id = Some(jazz::account_registry::device_account_id(
                     *server.app_id().uuid(),
                     &subject,
                 ));

@@ -205,6 +205,7 @@ function fakeSandbox(appId: string, issuer: string, guestsOff = false) {
   let coreUrl = "http://127.0.0.1:9";
   const handle = (): SandboxHandle => ({
     status: "running",
+    region: "iad1",
     domain: () => coreUrl,
     currentSession: () => ({
       startedAt: new Date(),
@@ -257,7 +258,7 @@ function fakeSandbox(appId: string, issuer: string, guestsOff = false) {
     Drive: {
       async getOrCreate() {
         state.drive = true;
-        return {};
+        return { region: "iad1" };
       },
     },
   };
@@ -303,6 +304,7 @@ async function deployment(
       authenticate: auth,
       store: vercel({
         namespace: ({ environment }) => environment,
+        region: "iad1",
         sdk,
         backendCredential: () => oidcToken(issuer),
       }),
@@ -548,7 +550,7 @@ it("never opens a guest's session on the core when the app doesn't accept device
   await vi.waitFor(
     () =>
       expect(
-        warn.mock.calls.filter((call) => /refused a local-first guest/.test(call.join(" "))),
+        warn.mock.calls.filter((call) => /refused a device account/.test(call.join(" "))),
       ).toHaveLength(1),
     { timeout: 20_000 },
   );

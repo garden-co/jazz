@@ -470,7 +470,7 @@ impl Jazz {
         opts: ReadOpts,
     ) -> Result<Subscription<T>> {
         let query = query.into_untyped()?;
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::channel(subscription::SUBSCRIPTION_ITEMS);
         let implementations = self.info.implementations.clone();
         self.with_client(move |client| async move {
             let stream = client.subscribe_with_opts(query, opts).await?;
@@ -927,7 +927,7 @@ async fn connect_user(
             let client = JazzClient::connect_with_native_transport(context, connector).await?;
             let user = User {
                 account,
-                issuer: jazz::tools::identity::LOCAL_FIRST_ISSUER.to_owned(),
+                issuer: jazz::tools::identity::DEVICE_ACCOUNT_ISSUER.to_owned(),
                 subject: key.user_id(),
                 claims: serde_json::json!({}),
                 kind: UserKind::Device,

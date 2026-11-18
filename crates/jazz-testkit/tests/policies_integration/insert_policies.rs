@@ -463,3 +463,32 @@ async fn insert_then_delete_checks_candidate_content_and_provenance() {
         })
         .await;
 }
+
+/// A write the client's store refuses before it leaves (here, an insert
+/// reusing a live row's id) fails at once with TS's code, as TS's
+/// synchronous writes do; the core's detail is its reason.
+#[tokio::test]
+async fn a_locally_refused_write_is_coded() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let client = jazz::tools::JazzClient::test_client(rebac_test_schema()).await;
+            let row = || {
+                crate::row_input!(
+                    "owner_id" => super::ALICE_ID,
+                    "title" => "Mine",
+                    "folder_id" => Value::Null,
+                )
+            };
+            let id = uuid::Uuid::now_v7();
+            client.insert_with_id("documents", id, row()).unwrap();
+            match client.insert_with_id("documents", id, row()) {
+                Err(jazz::tools::JazzError::WriteRejected { code, reason, .. }) => {
+                    assert_eq!(code, "write_rejected");
+                    assert!(!reason.is_empty());
+                }
+                other => panic!("expected a coded local refusal, got {other:?}"),
+            }
+            client.shutdown().await.unwrap();
+        })
+        .await;
+}
