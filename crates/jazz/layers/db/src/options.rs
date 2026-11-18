@@ -209,6 +209,12 @@ pub struct ReadOpts {
     /// also carry as splices from the row's previous result (SPEC 19.12).
     #[serde(default)]
     pub splices: Vec<String>,
+    /// A subscription's backlog limit, overriding the store's
+    /// ([`crate::db::Db::set_subscription_backlog_limit`]): how many changed
+    /// rows its undelivered deltas may hold before they coalesce into one
+    /// reset of the current result.
+    #[serde(default)]
+    pub backlog_rows: Option<std::num::NonZeroUsize>,
 }
 
 impl Default for ReadOpts {
@@ -218,6 +224,7 @@ impl Default for ReadOpts {
             read_view: ReadViewSpec::default(),
             first_load: FirstLoad::Deliver,
             splices: Vec::new(),
+            backlog_rows: None,
         }
     }
 }
@@ -234,6 +241,13 @@ impl ReadOpts {
     /// Deliver `columns`' changes in updated rows as splices too.
     pub fn with_splices(mut self, columns: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.splices = columns.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Coalesce this subscription's undelivered deltas past `rows` changed
+    /// rows (see [`ReadOpts::backlog_rows`]).
+    pub fn with_backlog_rows(mut self, rows: std::num::NonZeroUsize) -> Self {
+        self.backlog_rows = Some(rows);
         self
     }
 
@@ -504,11 +518,16 @@ pub enum Reason {
     /// A store configured as one user was asked to serve a session of
     /// another identity (code `Protocol`): relays serve one identity.
     IdentityMismatch,
+    /// An upstream's catalogue named a schema version this build cannot read
+    /// (a column type or other variant it does not know): the version is
+    /// skipped and the store keeps syncing the versions it knows (code
+    /// `Schema`).
+    SchemaVersionUnsupported,
 }
 
 impl Reason {
     /// Every reason, in declaration order.
-    pub const ALL: [Reason; 12] = [
+    pub const ALL: [Reason; 13] = [
         Reason::AuthorizationDenied,
         Reason::ClientClockTooFarAhead,
         Reason::SerializationConflict,
@@ -521,6 +540,7 @@ impl Reason {
         Reason::PredecessorRejected,
         Reason::SchemaVersionNotDeployed,
         Reason::IdentityMismatch,
+        Reason::SchemaVersionUnsupported,
     ];
 
     /// The stable, snake_case name of this reason.
@@ -543,6 +563,7 @@ impl Reason {
             Reason::PredecessorRejected => "predecessor_rejected",
             Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
             Reason::IdentityMismatch => "identity_mismatch",
+            Reason::SchemaVersionUnsupported => "schema_version_unsupported",
         }
     }
 
