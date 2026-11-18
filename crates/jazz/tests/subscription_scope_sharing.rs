@@ -129,9 +129,10 @@ fn registry_and_fixed_claims_do_not_share_across_registry_change() {
     }
 }
 
-/// A refreshed group must be found by its current SQL, not the SQL it was
-/// opened with: a new fixed-claims member whose SQL matches the group's
-/// original key must not join a result that now follows different claims.
+/// After a refresh, a new member whose claims match the group's current
+/// claims shares it. A fixed-claims member whose SQL matches the group's
+/// original SQL stays out (the claim-source split already guarantees that;
+/// see `stale_key_does_not_admit_a_same_scope_member` for re-keying).
 #[test]
 fn refreshed_group_is_not_joined_by_its_stale_key() {
     let db = open();
@@ -223,4 +224,42 @@ fn claim_scopes_in_one_store_follow_their_own_source() {
             );
         }
     }
+}
+
+/// Within one claim source, two queries reading different claims can
+/// compile to the same SQL and parameters once those claims' values swap.
+/// A refreshed group must then be found by what it now compiles to: a
+/// member that matches only its original key must not join it and see rows
+/// its own claims exclude.
+#[test]
+fn stale_key_does_not_admit_a_same_scope_member() {
+    let db = open();
+    let registry = |body: &str, alt: &str| {
+        BTreeMap::from([
+            (provider_claim_key("body"), Value::String(body.into())),
+            (provider_claim_key("alt"), Value::String(alt.into())),
+        ])
+    };
+    let by = |key: &str| {
+        db.prepare_query(
+            &Query::from("notes").filter(eq(col("body"), claim(provider_claim_key(key)))),
+        )
+        .unwrap()
+    };
+    let (by_body, by_alt) = (by("body"), by("alt"));
+    db.set_identity_claims(alice(), registry("other", "secret"));
+    let mut body_stream = subscribe(&db, &by_body);
+    assert_eq!(count(&mut body_stream, 0), 0);
+
+    // Swap the values: `by_body` now compiles to what `by_alt` did, and
+    // `by_alt` to what `by_body` was opened with.
+    db.set_identity_claims(alice(), registry("secret", "other"));
+    assert_eq!(count(&mut body_stream, 0), 1);
+    assert_eq!(oracle(&db, &by_alt), 0);
+    let mut alt_stream = subscribe(&db, &by_alt);
+    assert_eq!(
+        count(&mut alt_stream, 0),
+        0,
+        "alt claim 'other' joined the refreshed 'secret' result through its stale key"
+    );
 }
