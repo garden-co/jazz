@@ -13,5 +13,10 @@ It builds jazz-wasm with the test-only `durable-object-tests` feature into
 persisted storage), reads them again, and has a callback transaction
 refused (a core there accepts finished transactions only).
 
-The full Durable Object host (sessions, sockets, admission, publication)
-builds on this once jazz-server's runtime compiles for wasm.
+`host.test.mjs` runs the Jazz core a Durable Object hosts
+(`durable-object/host.js` over `DurableObjectCore`), spoken to over a
+WebSocket as the app's backend speaks to a core: a connection without the
+app's core secret is refused; the backend's connection says Hello,
+declares its schema, writes and reads a note; after a restart (same
+storage) the note is read back. Publication on the object (the admin
+routes) comes next; until then the object serves `JAZZ_SCHEMA`.
