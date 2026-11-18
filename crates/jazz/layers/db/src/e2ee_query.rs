@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use crate::e2ee::{E2eeRefusal, EncryptionEntry, EpochSetId, QueryPlan, Residual, SpaceAddress};
 use crate::options::Error;
-use crate::query::{ArraySubquery, Operand, Predicate, Query};
+use crate::query::{ArraySubquery, JoinVia, Operand, Predicate, Query, ReachableVia};
 use crate::schema::history::history_source_table;
 use crate::values::unsupported;
 
@@ -84,14 +84,14 @@ impl Inner {
             return Ok((query.clone(), None));
         };
         self.refuse_unopened(&hooks.declarations().tables, query)?;
-        refuse_unplannable(&hooks.declarations().tables, query)?;
+        refuse_unplannable(&hooks.declarations().tables, query, true)?;
         let plan = hooks.plan_query(query)?;
-        // Whatever the hook returns, a filter on an encrypted column must
-        // not go upstream as written.
+        // Whatever the hook returns, a condition on an encrypted column must
+        // not go upstream as written: the query it returns may keep none.
         match &plan {
-            QueryPlan::Plain => refuse_unplannable_filters(&hooks.declarations().tables, query)?,
+            QueryPlan::Plain => refuse_unplannable(&hooks.declarations().tables, query, false)?,
             QueryPlan::Rewritten { physical, .. } => {
-                refuse_unplannable_filters(&hooks.declarations().tables, physical)?
+                refuse_unplannable(&hooks.declarations().tables, physical, false)?
             }
             QueryPlan::NeedsKey { .. } => {}
         }
@@ -177,10 +177,18 @@ impl Inner {
 /// equality nested in Any, Not or All would compare or return sealed
 /// cells, or send the plaintext literal upstream, so they fail naming the
 /// table and column.
+///
+/// Conditions of joins, nested joins, correlations, reachability, parent
+/// inheritance and policy branches are refused whenever they name an
+/// encrypted column of the table they run on: the hook plans none of them.
+/// With `plannable` false even the top-level equality is refused, which is
+/// how a query the hook returned is checked.
 fn refuse_unplannable(
     encrypted: &BTreeMap<String, EncryptionEntry>,
     query: &Query,
+    plannable: bool,
 ) -> Result<(), Error> {
+    refuse_in_relations(encrypted, query)?;
     let Some(entry) = encrypted.get(&query.table) else {
         return Ok(());
     };
@@ -195,7 +203,8 @@ fn refuse_unplannable(
     for filter in &query.filters {
         // A top-level equality of an equality column with a value is the
         // one shape the hook plans.
-        if let Predicate::Eq(Operand::Column(column), value) = filter
+        if plannable
+            && let Predicate::Eq(Operand::Column(column), value) = filter
             && entry.equality.contains(column)
             && matches!(
                 value,
@@ -269,19 +278,125 @@ fn refused_in_predicate(
     })
 }
 
-/// Refuse a planned query that still names an encrypted column in a
-/// filter: the hook must have rewritten or removed it, and a plaintext
-/// literal never goes upstream.
-fn refuse_unplannable_filters(
+/// Refuse a condition that names an encrypted column of `table` in one of
+/// the places a query runs conditions on other tables than its own.
+fn refuse_column(
+    encrypted: &BTreeMap<String, EncryptionEntry>,
+    table: &str,
+    column: &str,
+    place: &str,
+) -> Result<(), Error> {
+    if encrypted
+        .get(table)
+        .is_some_and(|entry| entry.columns.contains_key(column))
+    {
+        return Err(unsupported(format!(
+            "Reading encrypted column `{table}.{column}` in {place}"
+        )));
+    }
+    Ok(())
+}
+
+fn refuse_filters(
+    encrypted: &BTreeMap<String, EncryptionEntry>,
+    table: &str,
+    filters: &[Predicate],
+    place: &str,
+) -> Result<(), Error> {
+    let Some(entry) = encrypted.get(table) else {
+        return Ok(());
+    };
+    for filter in filters {
+        if let Some(column) = first_encrypted_column(entry, filter) {
+            return Err(unsupported(format!(
+                "Reading encrypted column `{table}.{column}` in {place}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn first_encrypted_column(entry: &EncryptionEntry, predicate: &Predicate) -> Option<String> {
+    let mut named = None;
+    predicate.any_operand(&mut |operand| {
+        if let Operand::Column(column) = operand
+            && entry.columns.contains_key(column.as_str())
+        {
+            named = Some(column.clone());
+        }
+        named.is_some()
+    });
+    named
+}
+
+/// Refuse conditions of joins, reachability, inheritance and policy
+/// branches that name an encrypted column of the table they run on.
+fn refuse_in_relations(
     encrypted: &BTreeMap<String, EncryptionEntry>,
     query: &Query,
 ) -> Result<(), Error> {
-    let Some(entry) = encrypted.get(&query.table) else {
-        return Ok(());
-    };
-    for filter in &query.filters {
-        if let Some(error) = refused_in_predicate(entry, &query.table, filter) {
-            return Err(error);
+    let root = query.table.as_str();
+    refuse_joins(encrypted, root, &query.joins)?;
+    refuse_reachable(encrypted, &query.reachable)?;
+    for inherit in &query.inherits {
+        refuse_column(encrypted, root, &inherit.parent_column, "an inheritance")?;
+    }
+    for branch in &query.policy_branches {
+        refuse_joins(encrypted, root, &branch.joins)?;
+        refuse_reachable(encrypted, &branch.reachable)?;
+        for inherit in &branch.inherits {
+            refuse_column(encrypted, root, &inherit.parent_column, "an inheritance")?;
+        }
+    }
+    Ok(())
+}
+
+/// `parent` is the table the joins are evaluated against.
+fn refuse_joins(
+    encrypted: &BTreeMap<String, EncryptionEntry>,
+    parent: &str,
+    joins: &[JoinVia],
+) -> Result<(), Error> {
+    for join in joins {
+        let table = join.table.as_str();
+        refuse_column(encrypted, table, &join.on_column, "a join")?;
+        if let Some(column) = &join.source_column {
+            refuse_column(encrypted, parent, column, "a join")?;
+        }
+        if let Some(lookup) = &join.source_lookup {
+            refuse_column(encrypted, parent, &lookup.row_id_source_column, "a join")?;
+            refuse_column(encrypted, &lookup.table, &lookup.value_column, "a join")?;
+        }
+        for correlation in &join.correlated_filters {
+            refuse_column(encrypted, table, &correlation.join_column, "a join")?;
+            refuse_column(encrypted, parent, &correlation.source_column, "a join")?;
+        }
+        refuse_filters(encrypted, table, &join.filters, "a join filter")?;
+        refuse_joins(encrypted, table, &join.nested_joins)?;
+    }
+    Ok(())
+}
+
+fn refuse_reachable(
+    encrypted: &BTreeMap<String, EncryptionEntry>,
+    reachable: &[ReachableVia],
+) -> Result<(), Error> {
+    for via in reachable {
+        let place = "a reachability";
+        let (access, edge) = (via.access_table.as_str(), via.edge_table.as_str());
+        refuse_column(encrypted, access, &via.access_row_column, place)?;
+        refuse_column(encrypted, access, &via.access_team_column, place)?;
+        refuse_column(encrypted, edge, &via.edge_member_column, place)?;
+        refuse_column(encrypted, edge, &via.edge_parent_column, place)?;
+        refuse_filters(encrypted, access, &via.access_filters, place)?;
+        refuse_filters(encrypted, edge, &via.edge_filters, place)?;
+        if let Some(seed) = &via.seed {
+            let table = seed.table.as_str();
+            refuse_column(encrypted, table, &seed.team_column, place)?;
+            if let Some(column) = &seed.user_column {
+                refuse_column(encrypted, table, column, place)?;
+            }
+            refuse_filters(encrypted, table, &seed.filters, place)?;
         }
     }
     Ok(())

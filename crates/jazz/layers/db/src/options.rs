@@ -78,6 +78,13 @@ impl DbConfig {
     /// Seal writes and open reads with `hooks`, the client's end-to-end
     /// encryption ([`crate::e2ee`]), from the moment the database opens.
     /// A database with hooks never serves as the authority.
+    ///
+    /// The hooks must be built from the app's own declarations, the ones
+    /// its files declare for the schema this configuration opens: the
+    /// database cannot compare them (the schema carries none), and hooks
+    /// built from other declarations would leave declared columns unsealed.
+    /// Opening an encrypted app ([`crate::binding_host::refuse_encrypted_app`])
+    /// checks only that the hooks declare some table.
     #[cfg(feature = "e2ee-client")]
     pub fn with_e2ee(mut self, hooks: std::rc::Rc<dyn crate::e2ee::E2eeHooks>) -> Self {
         self.e2ee = Some(hooks);

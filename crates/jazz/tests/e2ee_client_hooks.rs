@@ -215,6 +215,9 @@ struct Fake {
     /// Plan as offline: no tokens, the space filter alone, the residual
     /// doing all the filtering (protocol §4.5).
     offline: Cell<bool>,
+    /// Return a query that still filters the encrypted column: 1 keeps the
+    /// filter in a rewritten query, 2 plans nothing at all.
+    leak: Cell<u8>,
 }
 
 impl Fake {
@@ -473,8 +476,13 @@ impl E2eeHooks for Fake {
                 space: address(space),
             });
         }
+        if self.leak.get() == 2 {
+            return Ok(QueryPlan::Plain);
+        }
         let mut physical = query.clone();
-        if self.offline.get() {
+        if self.leak.get() == 1 {
+            // The filter stays as written.
+        } else if self.offline.get() {
             physical.filters.remove(searched);
         } else {
             physical.filters[searched] = Predicate::In(
@@ -1834,6 +1842,120 @@ fn reads_that_would_compare_or_return_sealed_cells_are_refused() {
         direction: OrderDirection::Asc,
     });
     alice.prepare_query(&by_title).unwrap();
+}
+
+/// Contract: a condition on an encrypted column is refused wherever a
+/// query runs one, not only on the query's own table: in a join, a nested
+/// join, a correlation, a join's `on` column, reachability and a policy
+/// branch. Each would send the plaintext literal upstream or compare
+/// sealed cells. The same conditions on a plain column stay allowed.
+#[test]
+fn conditions_of_joins_and_reachability_on_encrypted_columns_are_refused() {
+    use jazz::query::{JoinCorrelation, PolicyBranch};
+    let hooks = Fake::new();
+    let alice = client(&hooks);
+    let secret = || eq(col("body"), lit(text("SECRET-JOIN")));
+    let plain = || eq(col("title"), lit(text("t")));
+    let nested = |filter: Predicate| {
+        Query::from("projects").join_via_with_nested_joins(
+            "comments",
+            "noteId",
+            [],
+            Query::from("x")
+                .join_via("notes", "projectId", [filter])
+                .joins,
+        )
+    };
+    let mut branch = Query::from("projects");
+    branch.policy_branches.push(PolicyBranch {
+        filters: Vec::new(),
+        joins: Query::from("x")
+            .join_via("notes", "projectId", [secret()])
+            .joins,
+        reachable: Vec::new(),
+        inherits: Vec::new(),
+    });
+    let refused = [
+        (
+            Query::from("projects").join_via("notes", "projectId", [secret()]),
+            "notes.body",
+        ),
+        (nested(secret()), "notes.body"),
+        (
+            Query::from("projects").join_via_column_with_correlations(
+                "notes",
+                "projectId",
+                "id",
+                [JoinCorrelation {
+                    join_column: "body".to_owned(),
+                    source_column: "name".to_owned(),
+                }],
+                [],
+            ),
+            "notes.body",
+        ),
+        (
+            Query::from("projects").join_via("notes", "body", []),
+            "notes.body",
+        ),
+        (
+            Query::from("projects").reachable_via_with_access_filters(
+                "notes",
+                "projectId",
+                "projectId",
+                Operand::Claim("team".to_owned()),
+                [secret()],
+                "projects",
+                "id",
+                "id",
+                [],
+            ),
+            "notes.body",
+        ),
+        (branch, "notes.body"),
+    ];
+    for (query, column) in refused {
+        let error = alice.prepare_query(&query).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Query, "{query:?}");
+        assert!(
+            error
+                .message
+                .starts_with(&format!("Reading encrypted column `{column}`"))
+                && error.message.ends_with("is not supported yet"),
+            "{query:?}: {}",
+            error.message
+        );
+    }
+    alice
+        .prepare_query(&Query::from("projects").join_via("notes", "projectId", [plain()]))
+        .unwrap();
+}
+
+/// Contract: whatever a hook returns, a query that still filters an
+/// encrypted column is refused, so the plaintext never goes upstream: a
+/// rewritten query that kept the filter, and a plan that is no plan at all.
+#[test]
+fn a_hook_cannot_return_a_query_that_still_filters_an_encrypted_column() {
+    let hooks = Fake::new();
+    let alice = client(&hooks);
+    let space = uuid::Uuid::new_v4();
+    hooks.hold(space);
+    let query = Query::from("notes")
+        .filter(eq(col("projectId"), lit(Value::Uuid(space))))
+        .filter(eq(col("body"), lit(text("SECRET-LEAK"))));
+    alice.prepare_query(&query).unwrap();
+    for leak in [1, 2] {
+        hooks.leak.set(leak);
+        let error = alice.prepare_query(&query).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Query, "leak {leak}");
+        assert!(
+            error
+                .message
+                .starts_with("Reading encrypted column `notes.body`"),
+            "leak {leak}: {}",
+            error.message
+        );
+    }
 }
 
 /// Contract: an app that declares encryption (its schema holds Jazz's
