@@ -290,31 +290,27 @@ pub(super) async fn resolve_assignment(
     Err(AdmissionError::Unavailable)
 }
 
-/// Offline local founding becomes durable on the first authenticated connection.
-/// The namespace a device-account founder's account id derives from: the
-/// audience its proof was verified against (see
+/// Offline local founding becomes durable on the first authenticated
+/// connection: what [`crate::portable::guest::founding_command`] runs for a
+/// local-first guest, in the namespace of the audience its proof was
+/// verified against (see
 /// [`crate::middleware::auth::DEVICE_ACCOUNT_AUDIENCE_HEADER`]).
-fn founding_app(state: &ServerState, headers: &HeaderMap) -> Result<Uuid, UnauthenticatedResponse> {
-    let audience = crate::middleware::auth::device_account_audience(
-        headers,
-        state.app_id,
-        &state.auth_config,
-    )?;
-    Ok(*crate::middleware::auth::device_account_founding_app(&audience).uuid())
-}
-
 pub(super) async fn admit_local_founder(
     state: &ServerState,
     principal: &Principal,
     headers: &HeaderMap,
 ) -> Result<(), AdmissionError> {
-    let app = founding_app(state, headers)?;
+    let audience = crate::middleware::auth::device_account_audience(
+        headers,
+        state.app_id,
+        &state.auth_config,
+    )?;
+    let Some(command) = crate::portable::guest::founding_command(principal, &audience) else {
+        return Ok(());
+    };
     if let Some(registry) = &state.accounts {
         registry
-            .execute(AccountCommand::FoundDeviceAccount {
-                principal: principal.clone(),
-                app,
-            })
+            .execute(command)
             .await
             .map_err(AdmissionError::from)?;
         return Ok(());
