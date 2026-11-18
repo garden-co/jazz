@@ -323,9 +323,12 @@ test("a Durable Object core ends a socket that sends more than it can hold, and 
     const flooding = await ready(mf);
     const other = await ready(mf);
     // The engine takes nothing: up to 1 MiB is held, then the socket is shed.
-    assert.equal(
-      (await testRoute(mf, "limits", { socket: MiB, global: 64 * MiB, paused: true })).status,
-      204,
+    const limits = await testRoute(mf, "limits", { socket: MiB, global: 64 * MiB, paused: true });
+    assert.equal(limits.status, 200);
+    assert.deepEqual(
+      await limits.json(),
+      { socket: 8 * MiB, global: 32 * MiB },
+      "the default limits",
     );
     flood(flooding, 2 * MiB);
     const shed = await flooding.next();
@@ -396,18 +399,16 @@ test("after a panic the object starts afresh on its storage", async () => {
     await eventually(() => before.closed(), "sockets close after the panic");
     assert.equal(before.closeCode(), 1011);
 
+    // The write the panic interrupted, inside the object's storage
+    // transaction, did not stay.
+    const rows = await testRoute(mf, "panic-rows");
+    assert.deepEqual(await rows.json(), { rows: 0 });
+
     // A fresh core, on a fresh wasm instance, over the same storage.
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        const after = await ready(mf);
-        after.send(fixture.testThinQueryNotes(2n));
-        assert.deepEqual(await after.next(), { id: 2, titles: ["before the panic"] });
-        after.close();
-        break;
-      } catch (error) {
-        if (attempt >= 2) throw error;
-      }
-    }
+    const after = await ready(mf);
+    after.send(fixture.testThinQueryNotes(2n));
+    assert.deepEqual(await after.next(), { id: 2, titles: ["before the panic"] });
+    after.close();
     assert.equal(await (await mf.dispatchFetch("http://core/health")).text(), "ok");
   } finally {
     await mf.dispose();
@@ -624,6 +625,21 @@ test("a guest the backend relays syncs by its own proof, until its identity is r
     socket.send(fixture.testThinInsertNote(2n, "by a guest"));
     assert.deepEqual(await socket.next(), { id: 2, written: true });
 
+    // Another identity's assignment changing leaves the guest's socket be.
+    const other = await mf.dispatchFetch(
+      `http://core/apps/${APP}/admin/accounts/login-or-register`,
+      {
+        method: "POST",
+        headers: { "X-Jazz-Backend-Secret": SECRET, "content-type": "application/json" },
+        body: JSON.stringify({
+          identity: { issuer: "https://idp.example", subject: "someone-else" },
+        }),
+      },
+    );
+    assert.equal(other.status, 200);
+    socket.send(fixture.testThinInsertNote(3n, "still a guest"));
+    assert.deepEqual(await socket.next(), { id: 3, written: true });
+
     // Revoking the guest's identity ends its live socket.
     const revoked = await mf.dispatchFetch(`http://core/apps/${APP}/admin/accounts/revoke`, {
       method: "POST",
@@ -631,7 +647,7 @@ test("a guest the backend relays syncs by its own proof, until its identity is r
       body: JSON.stringify({ approver: principal, target: principal }),
     });
     assert.equal(revoked.status, 204, await revoked.clone().text());
-    assert.match((await socket.next()).error ?? "", /account identity revoked/);
+    assert.match((await socket.next()).error ?? "", /identity is not authorized/);
     await eventually(() => socket.closed(), "the guest's socket closes");
   } finally {
     await mf.dispose();

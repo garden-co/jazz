@@ -115,7 +115,7 @@ pub(super) async fn found_local_first_for_admin(
     let app =
         accounts::founding_app(request.audience.as_deref(), *state.app_id.uuid()).map_err(fail)?;
     let result = registry
-        .execute(AccountCommand::FoundLocalFirst {
+        .execute(AccountCommand::FoundDeviceAccount {
             principal: request.identity.clone(),
             app,
         })
@@ -139,7 +139,7 @@ pub(super) async fn link_for_admin(
     accounts::require_external_identity(&request.to).map_err(fail)?;
     let registry = owner(&state)?;
     // `from` names an account that already exists (a user the backend signed
-    // in, or a local-first guest founded from its own key proof): linking
+    // in, or a device account founded from its own key proof): linking
     // never creates it.
     registry
         .login(request.from.clone())
@@ -154,7 +154,7 @@ pub(super) async fn link_for_admin(
 
 /// The app's backend vouches for `approver`, an identity of the account, and
 /// revokes `target`, another of its identities, as the approver's own
-/// credential would (`createJazz` revokes a local-first guest's key once it
+/// credential would (`createJazz` revokes a device account's key once it
 /// links to a signed-in user, when the app asks for that). The assignment
 /// stays: the target can no longer sign in, and is never reassigned.
 pub(super) async fn revoke_for_admin(
@@ -294,14 +294,17 @@ pub(super) async fn resolve_assignment(
 /// connection: what [`crate::portable::guest::founding_command`] runs for a
 /// local-first guest, in the namespace of the audience its proof was
 /// verified against (see
-/// [`crate::middleware::auth::LOCAL_FIRST_AUDIENCE_HEADER`]).
+/// [`crate::middleware::auth::DEVICE_ACCOUNT_AUDIENCE_HEADER`]).
 pub(super) async fn admit_local_founder(
     state: &ServerState,
     principal: &Principal,
     headers: &HeaderMap,
 ) -> Result<(), AdmissionError> {
-    let audience =
-        crate::middleware::auth::local_first_audience(headers, state.app_id, &state.auth_config)?;
+    let audience = crate::middleware::auth::device_account_audience(
+        headers,
+        state.app_id,
+        &state.auth_config,
+    )?;
     let Some(command) = crate::portable::guest::founding_command(principal, &audience) else {
         return Ok(());
     };
@@ -552,7 +555,7 @@ mod tests {
         let user =
             |subject: &str| serde_json::json!({ "issuer": "jazz:app:test", "subject": subject });
         let guest = serde_json::json!({
-            "issuer": jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            "issuer": jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
             "subject": "6f9619ff-8b86-5011-b42d-00c04fc964ff",
         });
         let post = |path: &str, body: serde_json::Value, secret: Option<&str>| {
@@ -564,7 +567,7 @@ mod tests {
         };
         let secret = Some(core.admin_secret());
 
-        // Founding needs the admin secret, and only founds local-first guests.
+        // Founding needs the admin secret, and only founds device accounts.
         let denied = post(
             "found-local-first",
             serde_json::json!({ "identity": guest }),
@@ -684,7 +687,7 @@ mod tests {
         let user =
             |subject: &str| serde_json::json!({ "issuer": "jazz:app:test", "subject": subject });
         let guest = serde_json::json!({
-            "issuer": jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            "issuer": jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
             "subject": "6f9619ff-8b86-5011-b42d-00c04fc964ff",
         });
         let nonce = Uuid::new_v4();

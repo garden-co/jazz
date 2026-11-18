@@ -748,7 +748,7 @@ mod smoke {
         let seed = [seed; 32];
         let proof = identity::mint_jazz_self_signed_token_at(
             &seed,
-            identity::LOCAL_FIRST_ISSUER,
+            identity::DEVICE_ACCOUNT_ISSUER,
             audience,
             3600,
             now_seconds,
@@ -756,9 +756,9 @@ mod smoke {
         .expect("a proof");
         let subject = identity::derive_user_id(&seed).to_string();
         let founding = jazz_server::portable::accounts::local_first_founding_app(audience);
-        let peer = AuthorSubject::reserved(identity::LOCAL_FIRST_ISSUER, &subject)
+        let peer = AuthorSubject::reserved(identity::DEVICE_ACCOUNT_ISSUER, &subject)
             .expect("a local-first author")
-            .with_account(jazz::account_registry::local_first_account_id(
+            .with_account(jazz::account_registry::device_account_id(
                 *founding.uuid(),
                 &subject,
             ));
@@ -766,7 +766,7 @@ mod smoke {
             "proof": proof,
             "peer": peer.canonical(),
             "subject": subject,
-            "issuer": identity::LOCAL_FIRST_ISSUER,
+            "issuer": identity::DEVICE_ACCOUNT_ISSUER,
         })
         .to_string()
     }
@@ -994,6 +994,13 @@ mod core_host {
         JsValue::from_str(&error.to_string())
     }
 
+    #[cfg(feature = "durable-object-tests")]
+    thread_local! {
+        /// Tests only: a thread-local `test/panic` leaves borrowed, as a
+        /// trap leaves the core's (an instance that trapped is not reused).
+        static TRAPPED_BORROW: std::cell::RefCell<()> = const { std::cell::RefCell::new(()) };
+    }
+
     /// What a connection's socket is.
     struct Socket {
         session: ServerSession,
@@ -1153,6 +1160,12 @@ mod core_host {
             if secret.len() < 32 {
                 return Err(js("the core secret must be at least 32 characters"));
             }
+            #[cfg(feature = "durable-object-tests")]
+            TRAPPED_BORROW.with(|cell| {
+                cell.try_borrow_mut().map(drop).map_err(|_| {
+                    js("this wasm instance trapped holding a borrow: reinstantiate it")
+                })
+            })?;
             // Admit the store (stamping a new one as Jazz's) before keeping
             // anything of the host's in it.
             jazz::host::StoreFile::from_storage(durable_object_storage(storage.clone()))
@@ -1492,14 +1505,60 @@ mod core_host {
             if let Err(refused) = credentials.admin(&self.secret) {
                 return Some(refused);
             }
+            let storage = durable_object_storage(self.storage.clone());
             match route {
-                "test/panic" => panic!("a test asked the core to panic"),
+                // Panic mid-write, inside a storage transaction (the
+                // object's `transactionSync`, its callback live and the
+                // storage bridge borrowed): the write must not stay, and
+                // the object must start afresh on a new instance.
+                "test/panic" => {
+                    let _ = storage.scope::<()>("jazz_test_panic", |storage| {
+                        // As a panic inside the core leaves a thread-local
+                        // borrowed (the trap never unwinds it): only a new
+                        // instance has it free again (see `open`).
+                        TRAPPED_BORROW.with(|cell| std::mem::forget(cell.borrow_mut()));
+                        storage
+                            .execute_batch(
+                                "CREATE TABLE IF NOT EXISTS _jazz_test_panic (x INTEGER); \
+                                 INSERT INTO _jazz_test_panic (x) VALUES (1);",
+                            )
+                            .map_err(|error| {
+                                jazz::db::Error::new(
+                                    jazz::db::ErrorCode::Storage,
+                                    error.to_string(),
+                                )
+                            })?;
+                        panic!("a test asked the core to panic inside a storage transaction")
+                    });
+                    unreachable!("the scope panics")
+                }
+                // How many rows a panicked write left (none).
+                "test/panic-rows" => {
+                    use jazz::storage::OptionalExtension;
+                    let rows = storage
+                        .prepare_cached("SELECT count(*) FROM _jazz_test_panic")
+                        .and_then(|mut statement| {
+                            statement
+                                .query_row([], |row| row.get::<_, i64>(0))
+                                .optional()
+                        })
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0);
+                    Some(answer(200, serde_json::json!({ "rows": rows })))
+                }
+                // Set the held limits and pause or resume the engine; the
+                // answer is the limits that were in force.
                 "test/limits" => {
                     let limits: Limits = serde_json::from_slice(body).expect("limits JSON");
+                    let before = serde_json::json!({
+                        "socket": self.held_limit,
+                        "global": self.global_held_limit,
+                    });
                     self.held_limit = limits.socket;
                     self.global_held_limit = limits.global;
                     self.paused = limits.paused;
-                    Some(no_content())
+                    Some(answer(200, before))
                 }
                 _ => None,
             }
@@ -1875,7 +1934,9 @@ mod core_host {
                     credentials.admin(&self.secret)?
                 }
                 #[cfg(feature = "durable-object-tests")]
-                ("POST", "test/panic" | "test/limits") => credentials.admin(&self.secret)?,
+                ("POST", "test/panic" | "test/panic-rows" | "test/limits") => {
+                    credentials.admin(&self.secret)?
+                }
                 _ => return Err(not_found()),
             }
             Ok(route)
@@ -1990,29 +2051,39 @@ mod core_host {
         /// After an assignment may have changed: end every guest socket
         /// whose identity no longer holds its account, as native ends it.
         fn recheck_guests(&mut self, storage: &jazz::storage::Storage) {
+            use jazz::wire::{WireError, WireErrorCode, WireRetry};
             for state in self.sockets.values_mut() {
                 let Some(identity) = state.guest else {
                     continue;
                 };
                 let (issuer, subject) = identity.principal_parts();
                 let principal = jazz::account_registry::Principal { issuer, subject };
-                let holds = match (identity.account_id(), accounts::login(storage, &principal)) {
-                    (Some(account), Ok(assignment)) => assignment.account == account,
-                    // The registry could not be read: the next change
-                    // checks again.
-                    (Some(_), Err(accounts::RegistryError::Unavailable(_))) => true,
-                    _ => false,
+                // As native's `account_still_admitted`: the assignment must
+                // still be the account the guest was admitted as; a refusal
+                // is told as the registry words it, and a registry that
+                // cannot be read closes the socket for a later retry.
+                let ends = match (identity.account_id(), accounts::login(storage, &principal)) {
+                    (Some(account), Ok(assignment)) if assignment.account == account => None,
+                    (_, Err(accounts::RegistryError::Unavailable(_))) => Some(WireError::new(
+                        WireErrorCode::NotReady,
+                        WireRetry::Later,
+                        "account registry unavailable",
+                    )),
+                    (_, Err(accounts::RegistryError::Decision(error))) => Some(WireError::new(
+                        WireErrorCode::AuthFailed,
+                        WireRetry::Never,
+                        error.to_string(),
+                    )),
+                    _ => Some(WireError::new(
+                        WireErrorCode::AuthFailed,
+                        WireRetry::Never,
+                        "account identity revoked",
+                    )),
                 };
-                if !holds {
+                if let Some(error) = ends {
                     state.held.clear();
                     state.held_bytes = 0;
-                    state.failed.get_or_insert_with(|| {
-                        jazz::wire::WireError::new(
-                            jazz::wire::WireErrorCode::AuthFailed,
-                            jazz::wire::WireRetry::Never,
-                            "account identity revoked",
-                        )
-                    });
+                    state.failed.get_or_insert(error);
                 }
             }
         }

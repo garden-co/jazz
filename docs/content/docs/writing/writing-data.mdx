@@ -409,7 +409,7 @@ lasts. Both choices apply the initial mutation locally and upload it when connec
 
 A `global` wait fails early only when the client stops trying to reach Core: a
 protocol error, a closed client, or a credential the server refuses that nothing
-renews. Only an account context's refresh cycle and a local-first token the Db
+renews. Only an account context's refresh cycle and a device account's token the Db
 mints itself count as renewing a credential, so their waits outlast an expired
 token. With a static token or a backend secret, a refused credential ends the
 wait. To bound how long you wait, pass `timeoutMs`. The wait then rejects with

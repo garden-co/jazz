@@ -50,7 +50,7 @@ object DocsSnippets {
     suspend fun openClient(endpoint: String, appId: String, deviceKey: String): Jazz {
         // #region context-setup-kotlin-client
         // An end user's app: it syncs through your backend's Jazz endpoint, signed in
-        // with a local-first device account (keep the key in the platform keychain).
+        // with a device account (keep the key in the platform keychain).
         val jazz = jazzapp.open(
             JazzConfig(
                 appId = appId,

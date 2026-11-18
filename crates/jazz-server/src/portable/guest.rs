@@ -96,7 +96,7 @@ pub fn self_signed_issuer(token: &str) -> Option<&'static str> {
     }
     let claims = serde_json::from_slice::<IssOnly>(&claims_bytes).ok()?;
     match claims.iss.as_deref() {
-        Some(identity::LOCAL_FIRST_ISSUER) => Some(identity::LOCAL_FIRST_ISSUER),
+        Some(identity::DEVICE_ACCOUNT_ISSUER) => Some(identity::DEVICE_ACCOUNT_ISSUER),
         Some(identity::ANONYMOUS_ISSUER) => Some(identity::ANONYMOUS_ISSUER),
         _ => None,
     }
@@ -126,11 +126,11 @@ pub fn guest_audience(
     };
     let audience = Some(audience.trim())
         .filter(|audience| !audience.is_empty())
-        .ok_or_else(|| UnauthenticatedResponse::invalid("Invalid local-first audience"))?;
+        .ok_or_else(|| UnauthenticatedResponse::invalid("Invalid device account audience"))?;
     backend_vouched().map_err(|message| {
         UnauthenticatedResponse::invalid(match message {
             "Invalid backend secret" => message,
-            _ => "A local-first audience must be vouched for with the backend secret",
+            _ => "A device account audience must be vouched for with the backend secret",
         })
     })?;
     Ok(audience.to_owned())
@@ -191,9 +191,11 @@ pub fn principal_of(session: &Session) -> Principal {
 /// `audience` its proof was verified against (a no-op once founded).
 /// Nothing for any other issuer.
 pub fn founding_command(principal: &Principal, audience: &str) -> Option<AccountCommand> {
-    (principal.issuer == identity::LOCAL_FIRST_ISSUER).then(|| AccountCommand::FoundLocalFirst {
-        principal: principal.clone(),
-        app: *accounts::local_first_founding_app(audience).uuid(),
+    (principal.issuer == identity::DEVICE_ACCOUNT_ISSUER).then(|| {
+        AccountCommand::FoundDeviceAccount {
+            principal: principal.clone(),
+            app: *accounts::local_first_founding_app(audience).uuid(),
+        }
     })
 }
 
@@ -277,7 +279,7 @@ mod tests {
     fn proof(seed: &[u8; 32], audience: &str) -> String {
         identity::mint_jazz_self_signed_token_at(
             seed,
-            identity::LOCAL_FIRST_ISSUER,
+            identity::DEVICE_ACCOUNT_ISSUER,
             audience,
             TTL,
             NOW,
@@ -293,9 +295,9 @@ mod tests {
     /// with the account founded in `audience`'s namespace.
     fn peer(seed: &[u8; 32], audience: &str) -> AuthorSubject {
         let subject = subject(seed);
-        AuthorSubject::reserved(identity::LOCAL_FIRST_ISSUER, &subject)
+        AuthorSubject::reserved(identity::DEVICE_ACCOUNT_ISSUER, &subject)
             .unwrap()
-            .with_account(jazz::account_registry::local_first_account_id(
+            .with_account(jazz::account_registry::device_account_id(
                 *accounts::local_first_founding_app(audience).uuid(),
                 &subject,
             ))
@@ -335,13 +337,13 @@ mod tests {
                 )
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
                 assert_eq!(session.account_id, peer.account_id(), "{name}");
-                assert_eq!(session.issuer, identity::LOCAL_FIRST_ISSUER, "{name}");
+                assert_eq!(session.issuer, identity::DEVICE_ACCOUNT_ISSUER, "{name}");
                 assert_eq!(session.user_id, subject(&guest), "{name}");
                 assert_eq!(session.auth_mode, AuthMode::LocalFirst, "{name}");
                 assert_eq!(session.author_subject().unwrap(), peer, "{name}");
             }
             let principal = Principal {
-                issuer: identity::LOCAL_FIRST_ISSUER.into(),
+                issuer: identity::DEVICE_ACCOUNT_ISSUER.into(),
                 subject: subject(&guest),
             };
             assert_eq!(
@@ -363,7 +365,7 @@ mod tests {
             accounts::found_local_first(
                 &storage,
                 serde_json::from_value(serde_json::json!({
-                    "identity": { "issuer": identity::LOCAL_FIRST_ISSUER, "subject": subject(&guest) },
+                    "identity": { "issuer": identity::DEVICE_ACCOUNT_ISSUER, "subject": subject(&guest) },
                 }))
                 .unwrap(),
                 *app.uuid(),
@@ -412,7 +414,7 @@ mod tests {
             .unwrap_err();
             assert_eq!(
                 unauthenticated(refused).message,
-                "Invalid local-first audience",
+                "Invalid device account audience",
                 "{name}"
             );
         }
@@ -450,7 +452,7 @@ mod tests {
             );
 
             let principal = Principal {
-                issuer: identity::LOCAL_FIRST_ISSUER.into(),
+                issuer: identity::DEVICE_ACCOUNT_ISSUER.into(),
                 subject: subject(&guest),
             };
             assert!(
@@ -549,7 +551,7 @@ mod tests {
             );
 
             let unenrolled =
-                AuthorSubject::reserved(identity::LOCAL_FIRST_ISSUER, &subject(&guest)).unwrap();
+                AuthorSubject::reserved(identity::DEVICE_ACCOUNT_ISSUER, &subject(&guest)).unwrap();
             let refused = admit_guest(&storage, &token, unenrolled, None, app, NOW).unwrap_err();
             assert_eq!(
                 denied(refused),
@@ -640,7 +642,7 @@ mod tests {
             ))
             .unwrap_err()
             .message,
-            "A local-first audience must be vouched for with the backend secret"
+            "A device account audience must be vouched for with the backend secret"
         );
     }
 }

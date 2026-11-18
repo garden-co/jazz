@@ -64,7 +64,7 @@ impl ServerCore {
     pub const IDLE_TICK: std::time::Duration = std::time::Duration::from_secs(1);
 
     /// Open the core on `file` (whose store a host opened, e.g. on a
-    /// Durable Object's SQL: [`StoreFile::from_storage`]). A store with no
+    /// Durable Object's SQL, through `StoreFile::from_storage`). A store with no
     /// published schema yet serves `schema`; `any_stored_catalogue` says
     /// whether the store already holds one. `app` names it in logs.
     pub fn open(
@@ -285,8 +285,8 @@ impl ServerCore {
     }
 
     /// Apply `change` to the store's catalogue in one transaction, as the
-    /// native runtime does: a change that fails leaves nothing behind, and
-    /// one that makes a schema current is refused. With `supersedes`, the
+    /// native runtime does: a change that fails leaves nothing behind.
+    /// With `supersedes`, the
     /// change publishes that bundle new to this store, and every session
     /// pinned to another bundle ends, told to reconnect later (sessions
     /// that ended stay ended even when a later step failed). The
@@ -296,6 +296,10 @@ impl ServerCore {
     /// ([`crate::portable::catalogue::StagedDeployment::expected`]): if the
     /// store's catalogue no longer reads the same, the change is refused,
     /// as native refuses a deployment whose catalogue moved under it.
+    /// Stage it on this core's own catalogue: `expected` must be
+    /// `CatalogueIndex::from_rows(&core.db().catalogue()?, None)`, read from
+    /// this core. An index of the store read before the core opened differs
+    /// (a core admits the schema it opens on), and is refused.
     pub fn apply_catalogue(
         &mut self,
         expected: &crate::portable::catalogue::CatalogueIndex,
@@ -935,27 +939,5 @@ mod tests {
             "{refused:?}"
         );
         assert_eq!(core.db().catalogue().unwrap(), moved, "nothing was applied");
-    }
-
-    /// A change that would make a schema current is refused: a server's
-    /// sessions pin bundles, it never activates one.
-    #[test]
-    fn a_change_that_activates_a_schema_is_refused() {
-        let mut core = core();
-        let rows = core.db().catalogue().unwrap();
-        let index = crate::portable::catalogue::CatalogueIndex::from_rows(&rows, None);
-        let deployment =
-            crate::portable::deployment::prepare(&index, deploy_request(&source()), 1).unwrap();
-        let mut change = deployment.catalogue_change(&rows).unwrap();
-        let schema = deployment.genesis().unwrap();
-        change.activate = Some((1, schema, Vec::new()));
-        let refused = core
-            .apply_catalogue(deployment.staged.expected(), change, None)
-            .unwrap_err();
-        assert!(
-            matches!(refused, CatalogueApplyError::Rejected(_)),
-            "{refused:?}"
-        );
-        assert_eq!(core.db().catalogue().unwrap(), rows, "nothing was applied");
     }
 }

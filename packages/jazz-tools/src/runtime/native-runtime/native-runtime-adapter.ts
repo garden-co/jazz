@@ -12,6 +12,7 @@ export { formatUuid };
 import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
 import { stripColumnQualifier } from "../query-column-name.js";
 import { writeRow } from "../write-row.js";
+import { assertBacklogRows } from "../backlog-rows.js";
 import { RemoteLinkStatePublisher, type RemoteLinkState } from "../remote-link-state.js";
 import {
   CONNECTED,
@@ -489,6 +490,8 @@ type NativeDb = {
   takeSlowQueryReport?(app?: string): string[];
   /** Report query runs of at least `ms` milliseconds; 0 turns the log off. */
   setSlowQueryThresholdMs?(ms: number): void;
+  /** Coalesce a subscription's undelivered deltas past `rows` changed rows. */
+  setSubscriptionBacklogRows?(rows: number): void;
   close?(): void;
   free?(): void;
 };
@@ -1096,7 +1099,7 @@ export class NativeRuntimeAdapter implements Runtime {
     historyComplete: boolean,
     opts?: Pick<
       NonNullable<ConstructorParameters<typeof NativeRuntimeAdapter>[6]>,
-      "selfSignedClientProof" | "scopeIsolatedRelay" | "slowQueryLog"
+      "selfSignedClientProof" | "scopeIsolatedRelay" | "slowQueryLog" | "subscriptionBacklogRows"
     >,
   ): NativeRuntimeAdapter {
     return new NativeRuntimeAdapter(null, schema, node, author, sourceId, historyComplete, {
@@ -1104,6 +1107,7 @@ export class NativeRuntimeAdapter implements Runtime {
       selfSignedClientProof: opts?.selfSignedClientProof,
       scopeIsolatedRelay: opts?.scopeIsolatedRelay,
       slowQueryLog: opts?.slowQueryLog,
+      subscriptionBacklogRows: opts?.subscriptionBacklogRows,
     });
   }
 
@@ -1146,6 +1150,8 @@ export class NativeRuntimeAdapter implements Runtime {
       owner?: NativeRuntimeAdapter;
       /** Where slow queries are reported (`console.warn`): see {@link SlowQueryLogOptions}. */
       slowQueryLog?: SlowQueryLogOptions;
+      /** See {@link DbConfig.subscriptionBacklogRows}. */
+      subscriptionBacklogRows?: number;
       /** How this runtime opens its server socket, when not the platform's own WebSocket. */
       webSocket?: WebSocketConstructor;
       /** The app's versions and migrations: see {@link ClientMigrations}. */
@@ -1216,6 +1222,11 @@ export class NativeRuntimeAdapter implements Runtime {
         throw new Error("slowQueryThresholdMs must be a non-negative number of milliseconds");
       }
       this.db.setSlowQueryThresholdMs?.(threshold);
+    }
+    const backlogRows = opts?.subscriptionBacklogRows;
+    if (backlogRows !== undefined) {
+      assertBacklogRows(backlogRows, "subscriptionBacklogRows");
+      this.db.setSubscriptionBacklogRows?.(backlogRows);
     }
     if (typeof this.db.setTickScheduler !== "function") {
       throw new Error("Native runtime requires db.setTickScheduler");
@@ -3979,10 +3990,10 @@ export class NativeRuntimeAdapter implements Runtime {
       !session.account_id ||
       !isTrustedReservedSession(session, trustedReservedSessionToken(session))
     ) {
-      throw new Error("Local-first native admission requires a verified account session");
+      throw new Error("Device account native admission requires a verified account session");
     }
     if (!this.db.admitLocalFirstSession)
-      throw new Error("Native runtime lacks local-first session admission");
+      throw new Error("Native runtime lacks device account session admission");
     this.db.admitLocalFirstSession(
       token,
       appId,
@@ -4490,6 +4501,7 @@ export class NativeRuntimeAdapter implements Runtime {
       this.schema,
       chunk.reset === true,
       subscription.outputColumns,
+      chunk.coalesced === true,
     );
     delta.terminalOperations = decodeRuntimeTerminalOperations(
       chunk.terminalOperations,
@@ -7125,6 +7137,7 @@ export function decodeSubscriptionDelta(
   schema: WasmSchema,
   reset = false,
   outputColumns: SubscriptionOutputColumns | null = null,
+  coalesced = false,
 ): RuntimeSubscriptionDelta {
   const decodeRows = (
     batches: NativeRowBatch[],
@@ -7171,6 +7184,7 @@ export function decodeSubscriptionDelta(
           ],
     ),
     ...(reset ? { reset: true } : {}),
+    ...(reset && coalesced ? { reason: "backlog" as const } : {}),
   };
 }
 
@@ -7453,6 +7467,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
   | {
       type: "delta";
       reset?: boolean;
+      coalesced?: boolean;
       delta: NativeSubscriptionDelta;
       terminalOperations?: NativeTerminalOperation[];
     }
@@ -7471,6 +7486,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
     delta?: unknown;
     reason?: unknown;
     reset?: unknown;
+    coalesced?: unknown;
     terminalOperations?: unknown;
   };
   if (record.type === "closed" || record.type === "Closed") {
@@ -7480,6 +7496,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
     return {
       type: "delta",
       reset: record.reset === true,
+      coalesced: record.coalesced === true,
       delta: readNativeSubscriptionDelta(
         new PostcardReader(assertBytes(record.delta, "subscription delta")),
       ),

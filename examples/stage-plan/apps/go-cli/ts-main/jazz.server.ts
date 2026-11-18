@@ -2,7 +2,7 @@
 // (JAZZ_MAIN_BACKEND=ts): createJazz on a memory store, serving /jazz.
 //
 // - End users sign in with "Bearer token-<user>" (as <user>), like
-//   jazz-app-support's test relay; device accounts sync as local-first guests.
+//   jazz-app-support's test relay; device accounts sync as guests.
 // - Backend clients: a loopback OIDC issuer here mints workload tokens;
 //   "go-trusted" is trusted (as: "backend"), "go-scoped" acts as the user
 //   "agent".

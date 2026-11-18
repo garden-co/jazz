@@ -17,11 +17,11 @@ Invariant digest:
 - `INV-LENS-4`: Every stored content/register history row MUST carry a schema-version alias, and every wire `VersionRecord` MUST expose the full `SchemaVersionId`.
 - `INV-LENS-5`: Unknown-schema commit units MUST park without ingesting a transaction and MUST drain when the corresponding `SchemaVersion` catalogue value arrives.
 - `INV-LENS-6`: Unknown-schema shape registrations MUST park and MUST register only after the named schema-version catalogue value arrives.
-- `INV-LENS-7`: `CurrentWriteSchema` updates MUST be monotone by `revision`; stale revisions MUST leave `current_write_schema` unchanged.
-- `INV-LENS-8`: Durable catalogue schemas, lenses, current-write pointer, schema-version aliases, and physical mappings MUST survive node restart; installing an authority snapshot MUST preserve the node-local storage identity of an already-open schema so pre-snapshot local writes remain addressable.
+- `INV-LENS-7`: A deployment MUST NOT make any schema or permissions current, and a running store MUST NOT switch its current schema: a deployment admits its schemas and publishes a bundle, and a store's schema is installed when it opens (a legacy server store starts under the permissions revision it recorded; no new revision is written). Sessions write by the bundle they pin to.
+- `INV-LENS-8`: Durable catalogue schemas, lenses, the current schema, schema-version aliases, and physical mappings MUST survive node restart; installing an authority snapshot MUST preserve the node-local storage identity of an already-open schema so pre-snapshot local writes remain addressable.
 - `INV-LENS-9`: Publishing a non-genesis schema and its lineage-defining lens MUST durably stage the complete ordered bundle, keep it invisible while every physical table and schema variant is registered, then durably activate it before acknowledging or draining parked work; one activation batch MUST replace its durable pending obligation with the schema, lens, physical mapping, and active receipt; reopen MUST resume staged activation idempotently.
-- `INV-LENS-10`: New local writes MUST retain `current_write_schema.schema` as their schema discriminator and resolve storage through that schema's durable physical mapping.
-- `INV-LENS-11`: Incoming commit units MUST retain their authored schema discriminator and resolve storage through that schema's durable physical mapping, even when the current write pointer names another schema.
+- `INV-LENS-10`: New local writes MUST retain the store's current schema as their schema discriminator and resolve storage through that schema's durable physical mapping.
+- `INV-LENS-11`: Incoming commit units MUST retain their authored schema discriminator and resolve storage through that schema's durable physical mapping, even when the store's current schema is another one.
 - `INV-LENS-12`: Natural lens reads MUST select winners from the shared physical lineage before projecting rows into the requested schema.
 - `INV-LENS-13`: Natural lens projection MUST apply supported operations deterministically in both directions and MUST reject unsupported transformations.
 - `INV-LENS-14`: For every non-rejected natural lens delta sequence, translating then applying MUST equal applying then translating for all known schema materializations.
@@ -32,7 +32,7 @@ Invariant digest:
 - `INV-LENS-20`: Published physical lineages and authored schema variants MUST NOT be automatically garbage-collected.
 - `INV-LENS-21`: A compatible table rename MUST retain its `PhysicalTableId`; deletion history and combined-current state therefore continue under that id without copying, rewriting, or rescanning unrelated lineages.
 - `INV-LENS-23`: A store MUST be reopened only by the storage format it was written in (`_jazz_format`); another format, an unstamped or damaged file, or a pre-SQLite store MUST be refused with a typed error, the file left unchanged.
-- `INV-LENS-25`: The deploy catalogue MUST be the store's typed catalogue tables (§10.2), written in the same transaction as the admission and activation they describe. A change that fails leaves no rows; nothing is recovered from blobs or replayed on open; every permissions revision is kept.
+- `INV-LENS-25`: The deploy catalogue MUST be the store's typed catalogue tables (§10.2), written in the same transaction as the admission they describe. A change that fails leaves no rows; nothing is recovered from blobs or replayed on open; permissions revisions a store recorded before are kept and read.
 - `INV-LENS-22`: A content version's explicit authored-column presence MUST be stored only as a nullable, strictly increasing array of nonzero local `PhysicalColumnId`s; the exact authored schema/table mapping converts it to or from logical wire names, and malformed or unmapped ids MUST fail before any derived current row is persisted.
 - `INV-LENS-24`: A stored table or column name MUST never be reused for another logical column; only a compatible re-addition keeps its predecessor's identity (§10.7).
 
@@ -91,14 +91,13 @@ before it. Every revision is kept. A server's store has no revisions: its
 sessions are governed by the bundle they pin (SPEC 8), never by a current
 schema.
 
-`Db::apply_catalogue(CatalogueChange { put, admit, activate })` writes new
-definition rows, admits versions with their lenses and makes a write schema
-current at a revision in one savepoint: a change that fails leaves neither
-rows nor in-memory state behind. A server deploy computes that change from
+`Db::apply_catalogue(CatalogueChange { put, admit })` writes new
+definition rows and admits versions with their lenses in one savepoint: a
+change that fails leaves neither rows nor in-memory state behind. A change
+cannot make a schema current: there is no operation that does. A server deploy computes that change from
 the stored rows (`prepare_catalogue_change`) and applies it in one
 transaction, so a deploy is never half written. A deploy only puts and admits
-(the store's first version included); it never activates, and a server
-refuses a change that does (`INV-LENS-7`). Admitted versions are
+(the store's first version included); it never activates (`INV-LENS-7`). Admitted versions are
 immutable: a deploy that gives an admitted version a new incoming lens is
 refused and must publish a new convergent target instead. Lenses are needed
 only at admission, because the cells they produce are persisted in
@@ -216,9 +215,10 @@ earlier request. A separate `PublishLens` operation is the only way to add an
 agreeing cross-lens. Reusing a request id, sequence, or target for different
 canonical content fails before id allocation, registration, or durable mutation.
 
-`CurrentWriteSchema` is the single moving write pointer. Updates are monotone by
-`revision`, and a stale revision is acknowledged with `applied: false` without
-changing the pointer (`INV-LENS-7`).
+A store's current write schema is the one it was opened under (or, for a
+server, its genesis; sessions write by the bundle they pin). Core ships with
+its backend, so a new deployment's schema, permissions and migrations take
+effect when the store opens, never by a runtime switch (`INV-LENS-7`).
 
 A commit unit or shape registration that names an unknown schema version cannot
 be interpreted yet, so it **parks** as a catalogue orphan. The orphan drains
@@ -234,7 +234,7 @@ uses the caller schema to decode the unavailable unit, and a retransmit with
 the same `tx_id` but different canonical content fails as a conflicting commit
 unit.
 
-Current-pointer messages and child schema bundles whose dependencies are not
+Child schema bundles whose dependencies are not
 Active park durably across reopen. They retry after each activation, in
 catalogue order; a transient missing dependency is not a terminal rejection and
 never exposes the pointer early.
@@ -447,7 +447,7 @@ context; the serialized `author` field is provenance and cannot let a forged
 client self-declare `SYSTEM` authority.
 
 _Further invariants._ `INV-LENS-8` — durable catalogue schemas, lenses, the
-current-write pointer, aliases, and physical mappings survive node restart and
+current schema, aliases, and physical mappings survive node restart and
 are recovered before the full Groove database is constructed. Aliases are
 node-local, while physical UUID identities are global and immutable. When a
 client has already opened and written under a schema before receiving an
@@ -504,12 +504,12 @@ record. Commit units carry no union cells.
 
 ### 10.4 Writes: authored schema variants
 
-New local writes carry the schema selected by `current_write_schema` as their
+New local writes carry the store's current schema as their
 Groove discriminator and resolve their table and columns through that schema's
 durable physical mapping (`INV-LENS-10`).
 
 Incoming work retains the schema under which it was authored, regardless of the
-current write pointer (`INV-LENS-11`). Before ingest, Jazz verifies that every
+store's current schema (`INV-LENS-11`). Before ingest, Jazz verifies that every
 known authored schema has a local alias, physical mapping, and registered Groove
 descriptor variant. A schema-and-lineage bundle normally installs those facts
 atomically before the schema becomes Active; the ingest preflight also closes
@@ -729,8 +729,7 @@ and no other store ever sees one.
   follows its file: a savepoint that rolls back puts back the tags it
   interned or renumbered.
 - **The current schema's order is tag order.** When a store makes a version
-  current (activation, or opening under a version newer than any it
-  admitted), it renumbers each of that version's enum columns so its
+  current (by opening under a version newer than any it admitted), it renumbers each of that version's enum columns so its
   declared variants are tags `0..n` in declaration order and every other
   name follows in its previous tag order, rewriting the column's cells in
   every row version in the same transaction. Appending a variant changes
@@ -1278,33 +1277,31 @@ supported alternative.
 Fixtures: `crates/jazz/fixtures/app-artifact/`; generated bindings:
 `crates/jazz-codegen/tests/apps/`.
 
-### Active schema and local schema
+### Current schema and local schema
 
-The authority's **active schema** selects one structural schema and one explicit
-permission bundle at a single monotone revision. Policy-only updates advance
-that revision without changing structural schema identity or creating migration
-lenses. Admitting structural schemas or lenses does not activate them. Activation
-requires an admitted migration path, traversing each lens in either direction.
-For example, `A → B` and `A → C` permit switching from B to C through A.
-An explicit empty permission bundle is a valid deny-all selection. The node's local API schema remains independent, so
-older clients retain their schema view across authority activations.
+A store's current schema is installed when it opens; nothing switches it while
+it runs. Core is deployed together with its backend: a deployment's schemas,
+lenses and permission bundle ship with the binary, are admitted at startup
+(`prepare_catalogue_change`), and sessions write by the bundle they pin. No
+production path (deploy, HTTP or admin endpoint, sync) activates a schema,
+bumps a revision or switches policies at runtime.
 
-The server catalogue retains the existing permissions-bundle/head encodings and
-HTTP endpoints as compatibility boundaries. Internally they describe the active
-schema. Runtime activation persists its selection and authorization source in
-one batch before installing the new authorization view. Structural catalogue
-entries do not need to be rewritten with permissions on policy updates.
+Opening under a version newer than any the store admitted installs it: along
+the app's lenses when they lead to it (all or nothing), else named against the
+latest admitted version. Either way its declaration order becomes tag order
+(§10.8), and a version that drops a branch column of the one it follows is
+refused. Opening under an older admitted version (an older client, a server
+under its genesis) installs nothing.
 
-Opening a legacy store without an active-schema record recovers its selected
-schema and grants from the old write pointer and schema payload, then persists
-an active-schema record at revision zero. The old independent write counter is
-not an authority revision. Server startup installs the durable administrative
-selection before serving traffic. Reopening the upgraded store preserves its
-active revision; snapshots have no legacy revision exception. Standalone schema
-publications cannot replace grants, and standalone write pointers cannot change
-the active selection. Interoperation with old running nodes is not supported.
-The existing snapshot wire layout is retained: the active authorization source
-is projected into its schema payload at serialization and extracted on receipt.
+Admitting a schema never makes it current, and older clients keep their own
+local schema view: a client reads and writes by its version's names through
+the lenses (§10.5), whatever schema the backend opened under.
+
+Legacy stores remain readable. `_jazz_permissions` and its `activated_seq` and
+`read_digest` columns keep their layout; a server whose store holds a
+permissions revision from before this change starts under that revision's
+schema and policies, and a subscription resume still opens fresh when it began
+at or before the last recorded `activated_seq`. No new revision is activated.
 
 ## Open Questions
 
@@ -1313,18 +1310,12 @@ is projected into its schema payload at serialization and extracted on receipt.
 ### Detailed issue context
 
 - **Binding-facing lens facade.** TS/WASM/NAPI should expose published
-  schemas, migration lenses, current-write-schema movement, and catalogue acks
+  schemas, migration lenses, and catalogue acks
   as stable facade operations rather than leaking branch-key storage details. The
   ABI should use opaque `SchemaVersionId`/`MigrationLensId` bytes plus structured
   validation errors and deterministic golden fixtures for natural lens behavior.
 - **Catalogue admin set.** `AuthorSubject::SYSTEM` is the catalogue admin; the
   implementation has no broader admin set.
-- **Policy pin movement validation.** Schema versions/lenses may be published
-  ahead of the permission-evaluation pin moving, but policy stays on the pinned
-  schema until the admin moves the pin — at which point the new current schema
-  must have a valid bundle, and a lens that drops a column referenced by the
-  active bundle is rejected at publish (same family as the
-  missing-backwards-default check).
 - **Explicit schema-version GC.** `INV-LENS-20` forbids automatic deletion of
   published physical lineages or authored variants. If explicit GC is ever added, what completeness,
   branch-key/history, lens, and audit evidence must authorize it?
@@ -1334,10 +1325,8 @@ is projected into its schema payload at serialization and extracted on receipt.
   identities from multiple independently evolved parents, define an atomic
   multi-parent lineage proof rather than making arrival order authoritative.
 - **Catalogue sequence unification.** Schema-lineage activation requires an
-  authoritative database-wide monotone catalogue sequence. Current-write
-  pointers and later ordered catalogue mutations should enter the same sequence;
-  the remaining work is migrating the pointer API from its legacy independent
-  revision field to the common committed envelope.
+  authoritative database-wide monotone catalogue sequence; later ordered
+  catalogue mutations should enter the same sequence.
 - **`RenameTable` payload.** `RenameTable`'s payload is ignored in favor of
   `TableLens` source/target during evaluation. Decide whether the op should be
   removed or the redundant payload should be validated.

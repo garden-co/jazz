@@ -320,9 +320,9 @@ fn account_of(n: u8) -> jazz::account_registry::AccountId {
     user(n).account_id().expect("a test user has an account")
 }
 
-/// A local-first guest of account `n`, as the account registry admits it.
+/// A device account of account `n`, as the account registry admits it.
 fn guest_of(n: u8) -> AuthorSubject {
-    AuthorSubject::reserved(AuthorSubject::LOCAL_FIRST_ISSUER, &format!("key-{n}"))
+    AuthorSubject::reserved(AuthorSubject::DEVICE_ACCOUNT_ISSUER, &format!("key-{n}"))
         .unwrap()
         .with_account(account_of(n))
 }
@@ -384,7 +384,7 @@ fn commit_as(
     fates[0] == (tx, true)
 }
 
-/// A local-first guest that signs up keeps its account and its store, and
+/// A device account that signs up keeps its account and its store, and
 /// so its node: the signed-in principal takes the node over, and from then
 /// on the guest's key no longer writes as it.
 #[test]
