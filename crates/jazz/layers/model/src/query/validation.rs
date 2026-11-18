@@ -1902,7 +1902,17 @@ fn validate_join(
         }
     } else if let Some(source_column) = &join.source_column {
         if source_column == "id" {
-            root_table.to_owned()
+            // Two system tables whose rows share their ids (a record's
+            // private and public halves) join id to id; every other
+            // table's ids name its own rows only.
+            if join.target == JoinTarget::RowId
+                && crate::schema::is_system_table(&root.name)
+                && crate::schema::is_system_table(&join.table)
+            {
+                join.table.clone()
+            } else {
+                root_table.to_owned()
+            }
         } else {
             planner_column_type(root, source_column)?;
             match root.references.get(source_column) {

@@ -265,6 +265,8 @@ mod sync_wire_corpus;
 mod sync_write_only;
 #[path = "../system_table_joins.rs"]
 mod system_table_joins;
+#[path = "../system_table_row_id_joins.rs"]
+mod system_table_row_id_joins;
 #[path = "../text_affix_predicates.rs"]
 mod text_affix_predicates;
 #[path = "../text_merge.rs"]

@@ -16,10 +16,12 @@
 //! the nearest names.
 
 mod app_file;
+pub mod encryption;
 pub mod expr;
 pub mod json;
 mod permissions_file;
 pub mod relations;
+pub mod system_tables;
 
 use std::collections::BTreeMap;
 
@@ -37,6 +39,8 @@ use super::published::{
 };
 use super::{DeploymentRequest, structural};
 use json::Json;
+
+pub use encryption::DeclaredEncryption;
 
 /// The version of both files this version of Jazz reads and writes. A file
 /// names its version in `$schema`, the URL of its JSON Schema
