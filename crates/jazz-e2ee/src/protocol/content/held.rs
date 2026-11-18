@@ -9,9 +9,9 @@
 //! `unpublished` until the creation is accepted as the space's root,
 //! `refused` for good once it is not (§3.2, §5.4).
 //!
-//! - A write uses the held key of greatest depth that is not `refused`; an
-//!   `unpublished` key never wins a tie against a published key at the same
-//!   depth (§5.2, §5.4).
+//! - A write uses the held key of greatest depth that is not `refused`, of
+//!   one root only: the root of the chain the device read, or before any
+//!   read the one root it holds such keys of (§5.2, §5.4).
 //! - A read uses any held key of the epoch its cell names, of any mark
 //!   (§4.2, §3.2): a refused key always opens the cells this device wrote
 //!   under it. Only a key of the address's own root (the root of the chain
@@ -50,16 +50,6 @@ pub enum KeyMark {
     /// This device's creation, refused, failed, cancelled or lost to
     /// another root. Kept for good; never used for a new write (§3.2).
     Refused,
-}
-
-impl KeyMark {
-    fn rank(&self) -> u8 {
-        match self {
-            Self::Refused => 0,
-            Self::Unpublished { .. } => 1,
-            Self::Published => 2,
-        }
-    }
 }
 
 /// What became of the transaction that carried this device's space root
@@ -507,14 +497,13 @@ impl HeldKeys {
     }
 
     /// The key a write to `address` uses (§5.2): the held key of greatest
-    /// depth that is not `refused`; at equal depth a published key wins
-    /// over an unpublished one, then the smaller root ID. Once the device
-    /// has read the address's chain, only keys of that chain's root count:
-    /// a creation that lost to it never takes a write. Without one, keys of
-    /// more than one root that are not `refused` take no write either (the
-    /// chain read is kept in memory only, so this holds after a restart
-    /// until a read): the write fails `space-pending`. Keys of one root
-    /// alone write without a read. Otherwise, with no key, the write fails
+    /// depth that is not `refused`, of one root. Once the device has read
+    /// the address's chain, that is the chain's root: a creation that lost
+    /// to it never takes a write. Before a read, keys of more than one root
+    /// that are not `refused` take no write (the chain read is kept in
+    /// memory only, so this holds after a restart until a read): the write
+    /// fails `space-pending`. Keys of one root alone write without a read.
+    /// Otherwise, with no key, the write fails
     /// `space-pending` when `creation_refused` (this device's creation of
     /// the space was refused while the client runs, §3.2) and no valid
     /// root of the address is known, and needs a key when not.
@@ -523,32 +512,26 @@ impl HeldKeys {
         address: &SpaceAddress,
         creation_refused: bool,
     ) -> WriteChoice<'k> {
-        let mut best: Option<WriteKey<'k>> = None;
-        let known_root = self.known.get(address).map(KnownChain::root_id);
-        let roots = self.roots_of(address);
-        let competing = roots
-            .iter()
-            .filter(|space| space.held().any(|(_, mark)| *mark != KeyMark::Refused))
-            .count()
-            > 1;
-        if known_root.is_none() && competing {
-            return WriteChoice::SpacePending;
-        }
-        for space in roots {
-            if known_root.is_some_and(|root_id| root_id != space.root.id) {
-                continue;
-            }
-            for (depth, mark) in space.held() {
-                if *mark == KeyMark::Refused {
-                    continue;
+        let writable = |space: &&HeldSpace| space.held().any(|(_, mark)| *mark != KeyMark::Refused);
+        let mut roots = self.roots_of(address).into_iter().filter(writable);
+        let space = match self.known.get(address) {
+            Some(known) => roots.find(|space| space.root.id == known.root_id),
+            None => {
+                let first = roots.next();
+                if roots.next().is_some() {
+                    return WriteChoice::SpacePending;
                 }
-                let better =
-                    best.is_none_or(|held| (depth, mark.rank()) > (held.depth, held.mark().rank()));
-                if better {
-                    best = Some(WriteKey { space, depth });
-                }
+                first
             }
-        }
+        };
+        let best = space.and_then(|space| {
+            let depth = space
+                .held()
+                .filter(|(_, mark)| **mark != KeyMark::Refused)
+                .map(|(depth, _)| depth)
+                .max()?;
+            Some(WriteKey { space, depth })
+        });
         match best {
             Some(key) => WriteChoice::Key(key),
             None if creation_refused && !self.known.contains_key(address) => {

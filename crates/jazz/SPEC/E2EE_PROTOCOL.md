@@ -2409,8 +2409,9 @@ only from an updater (R15), and a refusal fails that transaction alone. The
 new key is stored as a held key before commit, with a persisted
 `unpublished` mark (§6.2) carrying the creation's durable transaction
 identity, and the mark is cleared once the creation is accepted as the
-space's root. An unpublished key never wins a tie against a published key at
-the same depth, including after a restart.
+space's root. An unpublished key is never chosen over a key of another root:
+a device holding both writes only after it has read the space's chain, and
+then only under the chain's root (§5.2), including after a restart.
 
 Later writes under an unpublished key are ordinary transactions of their
 own. They do not depend on the creation and are not held back or refused

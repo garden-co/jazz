@@ -814,27 +814,19 @@ fn a_write_uses_the_deepest_key_and_old_cells_stay_readable() {
     assert_eq!(write_key(&before, &address).epoch_id(), first);
 }
 
+/// A creation that lost is marked `refused` and never writes, alone or
+/// beside the space's root; with only a refused key, the write needs a key,
+/// or is `space-pending` after this device's creation was refused in this
+/// run and while no valid root is known.
 #[test]
-fn an_unpublished_key_never_wins_a_tie_and_a_refused_key_never_writes() {
+fn a_refused_key_never_writes() {
     let world = world(14);
     let address = space(ROW);
     let lost = root_from(&world, ROW, root_random(4, 5, 6));
+    let space_root = chain_of(&world, ROW).root.row.id.clone();
     let mut held = HeldKeys::new();
     held.hold(creation(&world, &lost, "tx-lost")).unwrap();
     assert!(held.holds_unpublished(&address));
-    // Alone, the unpublished key writes.
-    assert_eq!(write_key(&held, &address).root_id(), lost.root.id);
-    // With the space's root at the same depth, no write before a read of
-    // the chain; then the space's root, whichever root ID sorts first.
-    held.hold(acquire_held(&world, ALICE, ROW)).unwrap();
-    assert!(matches!(
-        held.write_key(&address, false),
-        WriteChoice::SpacePending
-    ));
-    held.observe_chain(&chain_of(&world, ROW));
-    let space_root = chain_of(&world, ROW).root.row.id.clone();
-    assert_eq!(write_key(&held, &address).root_id(), space_root);
-    // Refused: never chosen, alone or not.
     held.space_mut(&lost.root.id)
         .unwrap()
         .settle(CreationFate::Accepted, Some(&space_root));
@@ -843,6 +835,10 @@ fn an_unpublished_key_never_wins_a_tie_and_a_refused_key_never_writes() {
         held.space(&lost.root.id).unwrap().mark(0),
         Some(&KeyMark::Refused)
     );
+    // Beside the space's root, without a read: the refused key does not
+    // compete, and the space's root writes.
+    held.hold(acquire_held(&world, ALICE, ROW)).unwrap();
+    assert_eq!(write_key(&held, &address).root_id(), space_root);
     let mut only_refused = HeldKeys::new();
     let mut refused = creation(&world, &lost, "tx-lost");
     refused.settle(CreationFate::NotAccepted, None);
