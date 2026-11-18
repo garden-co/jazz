@@ -3310,6 +3310,21 @@ mod tests {
     /// ```
     #[test]
     fn an_account_root_must_name_how_the_registry_says_its_account_was_founded() {
+        let dir = tempfile::tempdir().unwrap();
+        account_root_follows_the_registry(
+            AppStore::open(&StorageConfig::data_dir(dir.path())).unwrap(),
+        );
+    }
+
+    /// The same on a memory store, a shared in-memory database without a
+    /// write-ahead log: the registry is read on a second connection while
+    /// the store's own connection holds the upload's write transaction.
+    #[test]
+    fn an_account_root_is_checked_against_the_registry_on_a_memory_store() {
+        account_root_follows_the_registry(AppStore::memory().unwrap());
+    }
+
+    fn account_root_follows_the_registry(store: AppStore) {
         use crate::server::account_store::StoredAccountRegistry;
         use jazz::db::{InsertOptions, WriteIdentity};
         use jazz::ids::RowUuid;
@@ -3320,8 +3335,6 @@ mod tests {
         use jazz::tools::public_schema::{EncryptedColumn, EncryptionEntry, PlainType, SweepBy};
 
         let app = "founders-view-test";
-        let dir = tempfile::tempdir().unwrap();
-        let store = AppStore::open(&StorageConfig::data_dir(dir.path())).unwrap();
         store.set_app(app);
         let mut registry = StoredAccountRegistry::open(store.sql().unwrap()).unwrap();
         let alice = registry
