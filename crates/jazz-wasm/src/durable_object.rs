@@ -1017,7 +1017,7 @@ mod core_host {
         WebSocketCredential, WebSocketPrelude,
     };
     use jazz_server::portable::catalogue::{CatalogueIndex, DeploymentResponse};
-    use jazz_server::portable::deployment::{self, CoreHost as _, DeployBody, DeployError};
+    use jazz_server::portable::deployment::{self, DeployBody, DeployError};
     use jazz_server::portable::handshake::{link, negotiate_hello};
     use jazz_server::portable::websocket_codec::{
         decode_ws_encoded_frame_batch, encode_ws_frame_batches, ws_foreign_version_refusal,
