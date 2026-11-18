@@ -430,6 +430,9 @@ async fn a_racing_deploy_with_conflicting_declarations_is_refused_without_its_ca
 /// ```
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_deploy_whose_declarations_conflict_at_apply_leaves_nothing_live() {
+    use jazz::host::HostTables;
+    use jazz::tools::deployment::artifact::encryption::encode_stored;
+    use jazz::tools::public_schema::ColumnType;
     use std::sync::mpsc;
     use std::time::Duration;
     let server = ServerBuilder::new(app_id())
@@ -459,17 +462,40 @@ async fn a_deploy_whose_declarations_conflict_at_apply_leaves_nothing_live() {
         .unwrap();
     let runtime = state.runtime().expect("a runtime after the first deploy");
 
-    // Hold the store thread, so the deploy passes its checks and then waits
-    // for it before applying.
+    // Declarations another instance keeps for v2: well formed, and different
+    // from the deploy's (the title's type), so a deploy that sees them is
+    // refused at its check and one that applies over them at its apply.
+    let v2_hash = v2.current_hash();
+    let mut other_entries = v2
+        .encryption()
+        .entries(&v2_hash.to_string())
+        .unwrap()
+        .clone();
+    other_entries
+        .get_mut("tasks")
+        .unwrap()
+        .columns
+        .get_mut("title")
+        .unwrap()
+        .plain
+        .column_type = ColumnType::Integer;
+    let other = encode_stored(&other_entries).unwrap();
+
+    // Hold the store thread so the deploy passes its checks and then waits
+    // for it. The held job writes the other instance's declarations itself
+    // (store-thread work, so no race with its release), once told to.
     let (entered_tx, entered_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let (go_tx, go_rx) = mpsc::channel::<()>();
     let held = {
         let runtime = runtime.clone();
+        let other = other.clone();
         tokio::spawn(async move {
             runtime
-                .with_db_for_test(move |_| {
+                .with_db_for_test(move |db| {
                     entered_tx.send(()).unwrap();
-                    let _ = release_rx.recv();
+                    let _ = go_rx.recv();
+                    db.host_put_if_absent(super::DECLARATIONS, &v2_hash.0, &other)
+                        .map_err(|error| error.to_string())?;
                     Ok(())
                 })
                 .await
@@ -483,22 +509,13 @@ async fn a_deploy_whose_declarations_conflict_at_apply_leaves_nothing_live() {
         let body = v2.deployment_body(false);
         tokio::spawn(async move { publish(&router, body).await })
     };
+    // No signal says the deploy has reached its apply, so wait for it. A slow
+    // machine can only make the other instance's declarations land before the
+    // deploy's check, which refuses it the same way (422, v2 not live): the
+    // test never fails for being slow, it only stops reaching the apply.
     tokio::time::sleep(Duration::from_millis(500)).await;
-    // Another instance keeps different declarations for v2 meanwhile (host
-    // work runs ahead of the deploy's queued runtime work).
-    let v2_hash = v2.current_hash();
-    let other = tokio::task::spawn_blocking({
-        let kept = kept;
-        move || {
-            kept.put_if_absent(&v2_hash.0, b"declarations another instance kept")
-                .unwrap();
-            kept
-        }
-    });
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    release_tx.send(()).unwrap();
+    go_tx.send(()).unwrap();
     held.await.unwrap().unwrap();
-    let kept = other.await.unwrap();
     let (status, refusal) = deploying.await.unwrap();
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
     state.catalogue_store.refresh().unwrap();
@@ -510,10 +527,7 @@ async fn a_deploy_whose_declarations_conflict_at_apply_leaves_nothing_live() {
         .schemas
         .len();
     assert_eq!(schemas, 1, "v2 is not live: only v1 is in the catalogue");
-    assert_eq!(
-        kept.get(&v2_hash.0).unwrap(),
-        Some(b"declarations another instance kept".to_vec())
-    );
+    assert_eq!(kept.get(&v2_hash.0).unwrap(), Some(other));
 }
 
 /// Decrypting a column puts its plaintext on the server, so the deploy
