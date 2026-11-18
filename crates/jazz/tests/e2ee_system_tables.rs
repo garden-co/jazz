@@ -24,8 +24,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use duplex_transport::duplex;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, ReadOpts, UpdateOptions, WriteIdentity,
-    block_on,
+    Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, ReadOpts, RestoreOptions,
+    UpdateOptions, WriteIdentity, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
@@ -620,7 +620,7 @@ fn derived_policies_admit_the_creator_and_updaters_and_refuse_everyone_else() {
         .expect("the owner rotates");
 }
 
-/// No writer updates a system row or deletes one other than a member row:
+/// No writer updates or restores a system row or deletes one other than a member row:
 /// not a session, and not the system, which policies don't bind.
 #[test]
 fn system_rows_are_immutable_for_every_writer() {
@@ -661,6 +661,21 @@ fn system_rows_are_immutable_for_every_writer() {
             .delete(MEMBERS, member, DeleteOptions::default()),
     )
     .expect("member rows are deleted under their policies, and the system bypasses them");
+
+    // Nor is a deleted member row written back, with other content or as it was.
+    for content in [
+        Some(BTreeMap::from([("accountId".to_owned(), account(bob()))])),
+        None,
+    ] {
+        let restore = block_on(world.server.restore(
+            MEMBERS,
+            member,
+            content,
+            RestoreOptions::default(),
+        ))
+        .expect_err("a deleted system row stays deleted");
+        assert!(restore.message.contains("never restored"), "{restore:?}");
+    }
 }
 
 /// A public device approval is admitted only with the private approval

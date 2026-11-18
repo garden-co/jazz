@@ -9524,6 +9524,11 @@ impl Inner {
         who: Who,
         seq: u64,
     ) -> Result<WriteHandle, Error> {
+        // A system row is never updated, so a deleted one is not restored
+        // either, with content or without: a restore writes the row back.
+        if jazz_model::schema::is_system_table(table_name) {
+            return Err(system_row_immutable(table_name, "restored"));
+        }
         let schema = self.schema.clone();
         let table = schema.table(table_name)?;
         let key = match self.locate(table, row, target)? {
