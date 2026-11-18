@@ -149,6 +149,27 @@ pub fn check_entry(
     }
     for (name, declared) in &entry.columns {
         let at = format!(".columns.{name}");
+        // The `__e2ee_` column names are Jazz's: an equality column's token
+        // column (`__e2ee_eq_<column>`) is Jazz's, not an encrypted column
+        // of the app's, and neither is any other reserved name.
+        for (what, used) in [
+            ("an encrypted column", Some(name)),
+            ("a conversion's `from` column", declared.from.as_ref()),
+            ("a conversion's `to` column", declared.to.as_ref()),
+        ] {
+            if let Some(used) = used
+                && used.starts_with("__e2ee_")
+            {
+                return Err((
+                    at,
+                    format!(
+                        "`{used}` starts with `__e2ee_`, which Jazz reserves for its own columns \
+                         (an equality column's tokens are `{EQUALITY_PREFIX}<column>`); it can't \
+                         be {what}"
+                    ),
+                ));
+            }
+        }
         let Some(stored) = column(schema, table, name) else {
             return Err((at, format!("table {table} has no column {name}")));
         };

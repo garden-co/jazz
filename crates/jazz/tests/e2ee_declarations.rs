@@ -1001,3 +1001,30 @@ fn a_new_equality_column_in_an_existing_table_starts_in_backfill() {
     assert!(error.contains("`backfill`"), "{error}");
     load_app(first(r#", "backfill": ["body"]"#).as_bytes()).unwrap_or_else(|e| panic!("{e}"));
 }
+
+/// The `__e2ee_` column names are Jazz's: the token column of an equality
+/// column (`__e2ee_eq_<column>`), or any other reserved name, can't be
+/// declared as an encrypted column, nor named as a conversion's source or
+/// target.
+#[test]
+fn reserved_column_names_cannot_be_encrypted_columns() {
+    let with_columns = |declared: &str| {
+        format!(
+            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": {{ "notes": {{
+                "columns": {{ "title": "bytes", "__e2ee_eq_title": "bytes", "plain": "string?" }},
+                "encryption": {{ "space": "id", "scope": "notes",
+                    "columns": {{ {declared} }}, "equality": ["title"] }} }} }} }}"#
+        )
+    };
+    load_app(with_columns(r#""title": "string""#).as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    for declared in [
+        r#""title": "string", "__e2ee_eq_title": "string""#,
+        r#""title": "string", "__e2ee_other": "string""#,
+        r#""title": { "type": "string", "from": "__e2ee_eq_title" }"#,
+        r#""title": { "type": "string", "to": "__e2ee_plain" }"#,
+    ] {
+        let error = refusal(load_app(with_columns(declared).as_bytes()));
+        assert!(error.contains("`__e2ee_`"), "{declared}: {error}");
+    }
+}
