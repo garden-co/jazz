@@ -669,7 +669,7 @@ pub struct RuntimeStats {
 }
 
 struct Inner {
-    conn: Connection,
+    conn: crate::storage::Storage,
     /// Query shapes (with their binding) `prepare` has already validated
     /// against this schema version: it validates each once. Cleared when
     /// it reaches [`VALIDATED_SHAPES_MAX`].
@@ -2226,7 +2226,7 @@ impl Db {
             view: None,
             defer_fetches: false,
             inner: Rc::new(Store::new(Inner {
-                conn,
+                conn: conn.into(),
                 validated_shapes: HashSet::new(),
                 mutation_admission_closed: false,
                 kept_variants: BTreeMap::new(),
