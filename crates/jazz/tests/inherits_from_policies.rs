@@ -948,7 +948,6 @@ fn an_existing_project_s_creator_is_added_by_an_updater() {
 ///                          both read the members as before the unit
 /// ```
 #[test]
-#[ignore = "needs pre-state delete checks from main"]
 fn an_updater_removes_itself_and_another_member_in_one_unit() {
     for via in EVERY_VIA {
         for own_first in [true, false] {
@@ -1397,7 +1396,6 @@ fn the_creator_clause_names_the_branch_the_unit_inserted() {
 /// unit to that row cannot grant the delete. A row the unit itself inserted
 /// has no earlier version and is judged as the unit left it.
 #[test]
-#[ignore = "needs pre-state delete checks from main"]
 fn a_delete_judges_the_row_as_it_stood_before_the_unit() {
     let schema = compile_schema(
         &SchemaBuilder::new()

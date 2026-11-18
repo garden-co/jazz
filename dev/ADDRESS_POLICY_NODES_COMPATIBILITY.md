@@ -77,7 +77,10 @@ variant`) and refuses it, so a downgrade fails closed rather than dropping
   confirmed the schema version's names; until then the identity is no value
   and the policy grants nothing through it: a comparison with it holds for
   no row, and a `NOT` whose operand compares with it is false. Policies are compiled per check
-  and per read, so each one compiled after confirmation binds it.
+  and per read, so each one compiled after confirmation binds it. Support
+  chosen for a subscription taken before confirmation leaves the unknown
+  identity out of its key: it is wider, the session's policies still filter
+  it, and nothing the read rests on is missing.
 - **Clients.** A client never evaluates write policies. `table_id('T')` is
   read by the permissions reader of this version and later; an older reader
   does not accept it, so a permissions file using it needs this version's

@@ -206,7 +206,6 @@ fn person(n: u8) -> Value {
 /// server: + dave@P1, + erin@P2  ──► alice gets dave@P1 only
 /// ```
 #[test]
-#[ignore = "needs multi-column sync support from main"]
 fn a_two_column_correlation_loads_and_watches_one_space() {
     let server = block_on(Db::open_history_complete(DbConfig::new(
         compile_schema(&space_tables().build()),
@@ -489,7 +488,6 @@ fn a_relay_subscribed_before_confirming_its_names_ships_the_membership() {
 /// server: + dave@project X, + erin@team X ──► alice gets dave@project X only
 /// ```
 #[test]
-#[ignore = "needs multi-column sync support from main"]
 fn table_identity_correlation_follows_one_tables_spaces() {
     let member_of_this_team = exists(
         MEMBERS,
