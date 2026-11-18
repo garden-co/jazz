@@ -275,21 +275,15 @@ pub fn check_entry(
             ));
         }
         if let Some(declared) = entry.columns.get(name)
-            && !has_equality_encoding(&declared.plain.column_type)
+            && let Some(unsupported) = without_equality_encoding(&declared.plain.column_type)
         {
             return Err((
                 at,
                 format!(
-                    "equality is not supported for {} columns: only boolean, integer, bigint, \
-                     timestamp, double, text, bytes, uuid and enum values have an equality token \
-                     encoding (equality format, column types)",
-                    match declared.plain.column_type {
-                        ColumnType::Json { .. } => "json",
-                        ColumnType::Array { .. } => "array",
-                        ColumnType::Row { .. } => "row",
-                        ColumnType::TransactionId => "transaction-ID",
-                        _ => "this type of",
-                    }
+                    "equality is not supported for {unsupported} columns: only boolean, integer, \
+                     bigint, timestamp, double, text, bytes, uuid, enum and json values, and \
+                     arrays of them, have an equality token encoding (equality format, column \
+                     types)"
                 ),
             ));
         }
@@ -324,21 +318,29 @@ fn is_empty_cell(value: &Value) -> bool {
     }
 }
 
-/// Whether the equality format defines a value encoding for columns of
-/// `column_type`: array, row, JSON and transaction-ID columns have none.
-fn has_equality_encoding(column_type: &ColumnType) -> bool {
-    matches!(
-        column_type,
+/// What stops the equality format encoding values of `column_type`, if
+/// anything: a row or transaction-ID column, or an array of either (an array
+/// has an encoding when its element type does). JSON and the scalar and
+/// enum types have one.
+fn without_equality_encoding(column_type: &ColumnType) -> Option<String> {
+    match column_type {
         ColumnType::Boolean
-            | ColumnType::Integer
-            | ColumnType::BigInt
-            | ColumnType::Timestamp
-            | ColumnType::Double
-            | ColumnType::Text
-            | ColumnType::Bytea
-            | ColumnType::Uuid
-            | ColumnType::Enum { .. }
-    )
+        | ColumnType::Integer
+        | ColumnType::BigInt
+        | ColumnType::Timestamp
+        | ColumnType::Double
+        | ColumnType::Text
+        | ColumnType::Bytea
+        | ColumnType::Uuid
+        | ColumnType::Enum { .. }
+        | ColumnType::Json { .. } => None,
+        ColumnType::Array { element } => {
+            without_equality_encoding(element).map(|inner| format!("array of {inner}"))
+        }
+        ColumnType::Row { .. } => Some("row".to_owned()),
+        ColumnType::TransactionId => Some("transaction-ID".to_owned()),
+        _ => Some("this type of".to_owned()),
+    }
 }
 
 /// `convert` is required when a conversion changes the type, and refused

@@ -873,12 +873,12 @@ fn equality_values() {
         token(E::Float(-0.0)),
         "4a45324501146a617a7a2e736f6469756d2e657175616c69747900000001cd771c3a1e2f0e55f0cfe1cfc6f1ff86eb4ae15f9b5c9270e769602f74f956f6"
     );
-    // Arrays, rows, JSON and transaction IDs cannot be equality-indexed: the
-    // declaration is refused, naming the type.
+    // Rows and transaction IDs cannot be equality-indexed, and neither can an
+    // array declared without its element type: the declaration is refused,
+    // naming the type.
     for column in [
         records::EqualityColumnType::Array,
         records::EqualityColumnType::Row,
-        records::EqualityColumnType::Json,
         records::EqualityColumnType::TransactionId,
     ] {
         let refused = records::EqualityColumn::declare(column).unwrap_err();
@@ -898,10 +898,10 @@ fn equality_values() {
         "Equality indexes are not supported for transaction-id columns"
     );
     assert_eq!(
-        records::EqualityColumn::declare(records::EqualityColumnType::Json)
+        records::EqualityColumn::declare(records::EqualityColumnType::Array)
             .unwrap_err()
             .to_string(),
-        "Equality indexes are not supported for json columns"
+        "Equality indexes are not supported for array columns"
     );
     // An equality identity is checked like a cell identity.
     assert_eq!(
@@ -914,4 +914,135 @@ fn equality_values() {
         ),
         Err(Error::InvalidInput)
     );
+}
+
+/// The equality value encoding of JSON and arrays (value encoding 1,
+/// extended; `E2EE_EQUALITY_FORMAT.md`): JSON is its stored text's exact
+/// bytes with no canonicalisation, and an array is its element count and
+/// each element's own encoding framed by its length. Pinned byte for byte,
+/// with the encodings that existed before unchanged.
+#[test]
+fn equality_values_of_json_and_arrays() {
+    use records::{EqualityItems as Items, EqualityValue as E, equality_value};
+    let hex = |value: &E<'_>| to_hex(&equality_value(value));
+    // JSON: `01` and the text's bytes; differently written JSON differs.
+    assert_eq!(hex(&E::Json(r#"{"a":1}"#)), "017b2261223a317d");
+    assert_eq!(hex(&E::Json(r#"{"a": 1}"#)), "017b2261223a20317d");
+    // No trimming, no reordering: the text is hashed as written.
+    assert_eq!(hex(&E::Json(" {\"a\":1}\n")), "01207b2261223a317d0a");
+    assert_eq!(
+        hex(&E::Json(r#"{"b":1,"a":2}"#)),
+        "017b2262223a312c2261223a327d"
+    );
+    assert_eq!(hex(&E::Json("")), "01");
+    assert_eq!(hex(&E::Null), "00");
+    // Arrays: `01`, the count, then each element's `V` behind its length.
+    let a = [E::Text("a"), E::Text("b")];
+    assert_eq!(
+        hex(&E::Array(Items::Values(&a))),
+        "0100000002000000020161000000020162"
+    );
+    assert_eq!(hex(&E::Array(Items::Values(&[]))), "0100000000");
+    let with_null = [E::Null, E::Text("a")];
+    assert_eq!(
+        hex(&E::Array(Items::Values(&with_null))),
+        "01000000020000000100000000020161"
+    );
+    // The framing keeps ["a", "bc"] apart from ["ab", "c"].
+    let (left, right) = ([E::Text("a"), E::Text("bc")], [E::Text("ab"), E::Text("c")]);
+    assert_eq!(
+        hex(&E::Array(Items::Values(&left))),
+        "010000000200000002016100000003016263"
+    );
+    assert_eq!(
+        hex(&E::Array(Items::Values(&right))),
+        "010000000200000003016162000000020163"
+    );
+    let ints = [E::Int(1), E::Int(-2)];
+    assert_eq!(
+        hex(&E::Array(Items::Values(&ints))),
+        "0100000002000000090100000000000000010000000901fffffffffffffffe"
+    );
+    // Arrays nest: each inner array is an element behind its length.
+    let (inner_a, inner_empty) = ([E::Text("a")], [E::Array(Items::Values(&[]))]);
+    let nested = [E::Array(Items::Values(&inner_a)), inner_empty[0]];
+    assert_eq!(
+        hex(&E::Array(Items::Values(&nested))),
+        "01000000020000000b0100000001000000020161000000050100000000"
+    );
+    // An owned array encodes as the borrowed one does.
+    let owned = vec![
+        jazz_e2ee::protocol::content::EqualityValueBuf::Text("a".to_owned()),
+        jazz_e2ee::protocol::content::EqualityValueBuf::Text("b".to_owned()),
+    ];
+    assert_eq!(
+        hex(&E::Array(Items::Bufs(&owned))),
+        "0100000002000000020161000000020162"
+    );
+
+    // Declared columns take JSON, and arrays of a searchable element type.
+    let identity = records::EqualityIdentity {
+        application: IDENTITY.application,
+        scope_id: IDENTITY.scope_id,
+        identifier: IDENTITY.identifier,
+        table_id: IDENTITY.table_id,
+        column_id: IDENTITY.column_id,
+        epoch_id: IDENTITY.epoch_id,
+    };
+    let declare = records::EqualityColumn::declare;
+    let json = declare(records::EqualityColumnType::Json).unwrap();
+    let texts =
+        records::EqualityColumn::array_of(declare(records::EqualityColumnType::Text).unwrap())
+            .unwrap();
+    let ints32 =
+        records::EqualityColumn::array_of(declare(records::EqualityColumnType::Integer).unwrap())
+            .unwrap();
+    let nested_texts = records::EqualityColumn::array_of(texts).unwrap();
+    assert_eq!(json.column_type(), records::EqualityColumnType::Json);
+    assert_eq!(texts.column_type(), records::EqualityColumnType::Array);
+    let token = |column: &records::EqualityColumn, value: E<'_>| {
+        records::equality_token_of(
+            &equality::Builtin,
+            &root(),
+            &identity,
+            br#"{"column_type":{"type":"Json","schema":null},"nullable":false}"#,
+            column,
+            &value,
+        )
+        .map(|token| to_hex(&token))
+    };
+    assert_ne!(
+        token(&json, E::Json(r#"{"a":1}"#)).unwrap(),
+        token(&json, E::Json(r#"{"a": 1}"#)).unwrap()
+    );
+    assert_eq!(
+        token(&json, E::Json(r#"{"a":1}"#)).unwrap(),
+        token(&json, E::Json(r#"{"a":1}"#)).unwrap()
+    );
+    assert_ne!(
+        token(&texts, E::Array(Items::Values(&left))).unwrap(),
+        token(&texts, E::Array(Items::Values(&right))).unwrap()
+    );
+    // A value of another shape is refused: JSON in a text column, an array
+    // in a scalar column, a scalar in an array column, an element beyond an
+    // integer column's 32 bits, an array one level too deep or too shallow.
+    let text_column = declare(records::EqualityColumnType::Text).unwrap();
+    assert_eq!(token(&text_column, E::Json("{}")), Err(Error::InvalidInput));
+    assert_eq!(
+        token(&text_column, E::Array(Items::Values(&a))),
+        Err(Error::InvalidInput)
+    );
+    assert_eq!(token(&texts, E::Text("a")), Err(Error::InvalidInput));
+    assert_eq!(token(&json, E::Text("{}")), Err(Error::InvalidInput));
+    let big = [E::Int(1 << 40)];
+    assert_eq!(
+        token(&ints32, E::Array(Items::Values(&big))),
+        Err(Error::InvalidInput)
+    );
+    assert_eq!(
+        token(&nested_texts, E::Array(Items::Values(&a))),
+        Err(Error::InvalidInput)
+    );
+    assert!(token(&nested_texts, E::Array(Items::Values(&nested))).is_ok());
+    assert!(token(&texts, E::Null).is_ok());
 }

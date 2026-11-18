@@ -58,6 +58,8 @@ followed by:
 | Bytes                 | the bytes                                             |
 | UUID                  | the 16 bytes                                          |
 | Enum                  | the exact UTF-8 bytes of the value's variant name     |
+| JSON (`json.v1`)      | the exact UTF-8 bytes of the stored JSON text         |
+| Array (`array.v1`)    | the element count, then each element framed (below)   |
 
 The canonical bit pattern of a float is a design choice of the token
 encoding: every NaN is encoded as `7ff8000000000000` and `-0.0` as `0.0`, so
@@ -84,16 +86,42 @@ the variant `open` encodes as `016f70656e` and `done` as `01646f6e65`. The
 column's type bytes `T`, which list the variants, keep an enum column's
 tokens apart from a text column's.
 
+A JSON value is hashed as the text Jazz stores, exactly as written: there is
+no canonicalisation, trimming or key ordering, because Jazz's own equality on
+a JSON column compares that text, so differently written JSON (`{"a":1}` and
+`{"a": 1}`) are different values and have different tokens. `{"a":1}` encodes
+as `017b2261223a317d`.
+
+An array is encoded as `01`, its element count as four big-endian bytes, and
+then, for each element in order, the length of the element's own encoding `V`
+as four big-endian bytes followed by that `V` (a null element is the one byte
+`00`, so its frame is `00000001 00`). The length frames keep `["a", "bc"]`
+apart from `["ab", "c"]`; without them the concatenation would not be
+injective. The elements are compared in order, as Jazz compares arrays. An
+array's element type must itself have a value encoding, and nested arrays
+apply the rule recursively. Fixtures (asserted by the crate's
+`equality_values_of_json_and_arrays` test): `["a", "b"]` encodes as
+`0100000002000000020161000000020162`, the empty array as `0100000000`,
+`[null, "a"]` as `01000000020000000100000000020161`, and `[["a"], []]` as
+`01000000020000000b0100000001000000020161000000050100000000`.
+
+The JSON and array encodings are the version 1 value encodings of those
+types, named `json.v1` and `array.v1`. They add types and change none of
+the encodings above, so no existing token changes; the token mechanism
+(`jazz.sodium.equality` 1) and the context policy (`jazz.e2ee.equality.v1`)
+are as they were. Compatibility is in `dev/E2EE_EQUALITY_JSON_ARRAY_COMPATIBILITY.md`.
+
 ## Column types
 
 An equality index is declared per column, and its type decides the
 encoding: boolean, integer (32-bit, values must fit), bigint, timestamp,
-double, text, bytes, UUID and enum columns, as in the table above. Array,
-row, JSON and transaction-ID columns have no value encoding and cannot be
-equality-indexed: a declaration naming one is refused when it is declared,
-with a typed error that names the type (`records::EqualityColumn::declare`,
-`UnsupportedEqualityColumn`: "Equality indexes are not supported for json
-columns"), never at write time. Tokens are computed only through a declared
+double, text, bytes, UUID, enum and JSON columns, and arrays of any of them
+(`records::EqualityColumn::array_of`; arrays of arrays too), as in the table
+above. Row and transaction-ID columns, and arrays of them, have no value
+encoding and cannot be equality-indexed: a declaration naming one is refused
+when it is declared, with a typed error that names the type
+(`records::EqualityColumn::declare`, `UnsupportedEqualityColumn`: "Equality
+indexes are not supported for row columns"), never at write time. Tokens are computed only through a declared
 column (`records::equality_token_of`), which refuses a value of another
 type with `InvalidInput`; there is no public entry point that hashes
 caller-supplied bytes, so every token hashes the canonical encoding.

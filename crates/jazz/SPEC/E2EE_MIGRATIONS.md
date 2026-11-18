@@ -466,10 +466,12 @@ backend), because the server and every replica then hold the plaintext. Rows in 
   the cells of an encrypted column are sealed under its type, which a
   conversion in place would leave unreadable. The same holds for a version
   redeployed with other declarations.
-- **Equality types.** Equality is declared only on boolean, integer, bigint,
-  timestamp, double, text, bytes, uuid and enum columns, the types the
-  equality format encodes; array, row, JSON and transaction-ID columns are
-  refused.
+- **Equality types.** Equality is declared only on the types the equality
+  format encodes: boolean, integer, bigint, timestamp, double, text, bytes,
+  uuid, enum and JSON columns, and arrays of any of them (also nested);
+  row and transaction-ID columns, and arrays of them, are refused. JSON is
+  matched by its exact stored text and arrays element by element, as Jazz's
+  own equality matches them.
 
 ### 4.4 Changing the space: re-homes, moves, splits and merges
 

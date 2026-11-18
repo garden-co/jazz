@@ -2016,6 +2016,15 @@ impl Error {
 }
 
 impl Db {
+    /// Open an in-memory database on `config`.
+    ///
+    /// This is the low-level open that servers, relays and tests use, and it
+    /// does not refuse an app whose schema holds Jazz's system tables (an
+    /// encrypted app): a server stores and serves encrypted cells as they
+    /// are. Only the client open paths refuse such a schema until the
+    /// client's encryption hooks are installed
+    /// ([`crate::binding_host::refuse_encrypted_app`]); the same holds for
+    /// the other `open_*` constructors.
     pub async fn open(config: DbConfig) -> Result<Self, Error> {
         #[cfg(not(feature = "managed-storage-emulation"))]
         let conn = Storage::open_in_memory().map_err(storage)?;

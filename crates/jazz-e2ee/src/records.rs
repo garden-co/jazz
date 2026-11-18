@@ -308,8 +308,9 @@ pub fn decrypt_stream_value(
 }
 
 /// A column type as an equality-index declaration names it
-/// (`E2EE_EQUALITY_FORMAT.md`, "Column types"). The scalar and enum types
-/// have a value encoding; arrays, rows, JSON and transaction IDs do not, and
+/// (`E2EE_EQUALITY_FORMAT.md`, "Column types"). The scalar, enum and JSON
+/// types have a value encoding, and an array has one when its element type
+/// does ([`EqualityColumn::array_of`]); rows and transaction IDs do not, and
 /// a declaration naming one is refused ([`EqualityColumn::declare`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EqualityColumnType {
@@ -365,51 +366,89 @@ pub struct UnsupportedEqualityColumn {
 /// encoding of a value of the column's type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EqualityColumn {
+    /// The type of the values at the bottom of the arrays, if any.
     column_type: EqualityColumnType,
+    /// How many arrays wrap it: 0 for a scalar, enum or JSON column.
+    depth: u8,
 }
 
 impl EqualityColumn {
-    /// Declares an equality index on a column of `column_type`. Arrays, rows,
-    /// JSON and transaction IDs are refused with the type named.
+    /// Declares an equality index on a column of `column_type`. Rows and
+    /// transaction IDs are refused with the type named, and so is an array
+    /// declared here without its element type: use [`Self::array_of`].
     pub fn declare(
         column_type: EqualityColumnType,
     ) -> core::result::Result<Self, UnsupportedEqualityColumn> {
         match column_type {
             EqualityColumnType::Array
             | EqualityColumnType::Row
-            | EqualityColumnType::Json
             | EqualityColumnType::TransactionId => Err(UnsupportedEqualityColumn { column_type }),
-            column_type => Ok(Self { column_type }),
+            column_type => Ok(Self {
+                column_type,
+                depth: 0,
+            }),
         }
     }
 
+    /// Declares an equality index on an array column whose elements are
+    /// `element` columns (itself an array, for an array of arrays).
+    pub fn array_of(
+        element: EqualityColumn,
+    ) -> core::result::Result<Self, UnsupportedEqualityColumn> {
+        let depth = element
+            .depth
+            .checked_add(1)
+            .ok_or(UnsupportedEqualityColumn {
+                column_type: EqualityColumnType::Array,
+            })?;
+        Ok(Self {
+            column_type: element.column_type,
+            depth,
+        })
+    }
+
+    /// The column's type: `Array` for an array column.
     pub fn column_type(&self) -> EqualityColumnType {
-        self.column_type
+        if self.depth > 0 {
+            EqualityColumnType::Array
+        } else {
+            self.column_type
+        }
     }
 
     /// `V` for `value`, which must be null or of the column's type (an
     /// integer column's values fit 32 bits); anything else is
     /// [`Error::InvalidInput`].
     pub fn encode(&self, value: &EqualityValue<'_>) -> Result<Vec<u8>> {
-        let fits = match (self.column_type, value) {
-            (_, EqualityValue::Null) => true,
-            (EqualityColumnType::Boolean, EqualityValue::Bool(_)) => true,
-            (EqualityColumnType::Integer, EqualityValue::Int(value)) => {
-                i32::try_from(*value).is_ok()
-            }
-            (EqualityColumnType::BigInt, EqualityValue::Int(_)) => true,
-            (EqualityColumnType::Timestamp, EqualityValue::Timestamp(_)) => true,
-            (EqualityColumnType::Double, EqualityValue::Float(_)) => true,
-            (EqualityColumnType::Text, EqualityValue::Text(_)) => true,
-            (EqualityColumnType::Bytes, EqualityValue::Bytes(_)) => true,
-            (EqualityColumnType::Uuid, EqualityValue::Uuid(_)) => true,
-            (EqualityColumnType::Enum, EqualityValue::Enum(_)) => true,
-            _ => false,
-        };
-        if fits {
+        if self.fits(self.depth, value) {
             Ok(equality_value(value))
         } else {
             Err(Error::InvalidInput)
+        }
+    }
+
+    /// Whether `value` is null or a value of this column's type, `depth`
+    /// arrays down (every element of an array fits one level further down).
+    fn fits(&self, depth: u8, value: &EqualityValue<'_>) -> bool {
+        match (depth, value) {
+            (_, EqualityValue::Null) => true,
+            (0, _) => match (self.column_type, value) {
+                (EqualityColumnType::Boolean, EqualityValue::Bool(_)) => true,
+                (EqualityColumnType::Integer, EqualityValue::Int(value)) => {
+                    i32::try_from(*value).is_ok()
+                }
+                (EqualityColumnType::BigInt, EqualityValue::Int(_)) => true,
+                (EqualityColumnType::Timestamp, EqualityValue::Timestamp(_)) => true,
+                (EqualityColumnType::Double, EqualityValue::Float(_)) => true,
+                (EqualityColumnType::Text, EqualityValue::Text(_)) => true,
+                (EqualityColumnType::Bytes, EqualityValue::Bytes(_)) => true,
+                (EqualityColumnType::Uuid, EqualityValue::Uuid(_)) => true,
+                (EqualityColumnType::Enum, EqualityValue::Enum(_)) => true,
+                (EqualityColumnType::Json, EqualityValue::Json(_)) => true,
+                _ => false,
+            },
+            (_, EqualityValue::Array(items)) => items.all(|item| self.fits(depth - 1, item)),
+            _ => false,
         }
     }
 }
@@ -432,6 +471,63 @@ pub enum EqualityValue<'a> {
     Uuid([u8; 16]),
     /// An enum value, by its variant name; compared by exact UTF-8 bytes.
     Enum(&'a str),
+    /// A JSON value as Jazz stores it, the text as written: compared by
+    /// exact UTF-8 bytes, with no canonicalisation (Jazz itself treats
+    /// differently written JSON as different).
+    Json(&'a str),
+    /// An array: its elements, in order, each an equality value of the
+    /// element type (null elements included).
+    Array(EqualityItems<'a>),
+}
+
+/// The elements of an [`EqualityValue::Array`], borrowed either as
+/// equality values or as the owned values of [`EqualityValueBuf`]. Its
+/// `Debug` output names no element.
+#[derive(Clone, Copy)]
+pub enum EqualityItems<'a> {
+    Values(&'a [EqualityValue<'a>]),
+    Bufs(&'a [crate::protocol::content::EqualityValueBuf]),
+}
+
+impl EqualityItems<'_> {
+    /// The number of elements.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Values(items) => items.len(),
+            Self::Bufs(items) => items.len(),
+        }
+    }
+
+    /// Whether there is no element.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Whether `test` holds for every element, in order.
+    pub fn all(&self, mut test: impl FnMut(&EqualityValue<'_>) -> bool) -> bool {
+        match self {
+            Self::Values(items) => items.iter().all(&mut test),
+            Self::Bufs(items) => items.iter().all(|item| test(&item.as_value())),
+        }
+    }
+}
+
+impl PartialEq for EqualityItems<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && {
+            let mut mine = Vec::new();
+            self.all(|item| {
+                mine.push(equality_value(item));
+                true
+            });
+            let mut theirs = Vec::new();
+            other.all(|item| {
+                theirs.push(equality_value(item));
+                true
+            });
+            mine == theirs
+        }
+    }
 }
 
 impl core::fmt::Debug for EqualityValue<'_> {
@@ -446,6 +542,8 @@ impl core::fmt::Debug for EqualityValue<'_> {
             Self::Bytes(_) => "Bytes(..)",
             Self::Uuid(_) => "Uuid(..)",
             Self::Enum(_) => "Enum(..)",
+            Self::Json(_) => "Json(..)",
+            Self::Array(_) => "Array(..)",
         })
     }
 }
@@ -460,7 +558,10 @@ const CANONICAL_NAN: u64 = 0x7ff8_0000_0000_0000;
 /// eight big-endian bytes for an integer (two's complement), a timestamp or
 /// a float (its canonical bit pattern), the exact UTF-8 bytes of a text,
 /// the bytes of a byte string, the 16 bytes of a UUID, the exact UTF-8
-/// bytes of an enum value's variant name.
+/// bytes of an enum value's variant name, the exact UTF-8 bytes of a JSON
+/// text as stored, and for an array the element count (four bytes,
+/// big-endian) followed by each element as its own `V` framed by its length
+/// (four bytes, big-endian), in order.
 pub fn equality_value(value: &EqualityValue<'_>) -> Vec<u8> {
     let mut out = vec![1u8];
     match *value {
@@ -482,6 +583,16 @@ pub fn equality_value(value: &EqualityValue<'_>) -> Vec<u8> {
         EqualityValue::Bytes(value) => out.extend_from_slice(value),
         EqualityValue::Uuid(value) => out.extend_from_slice(&value),
         EqualityValue::Enum(variant) => out.extend_from_slice(variant.as_bytes()),
+        EqualityValue::Json(text) => out.extend_from_slice(text.as_bytes()),
+        EqualityValue::Array(items) => {
+            out.extend_from_slice(&(items.len() as u32).to_be_bytes());
+            items.all(|item| {
+                let element = equality_value(item);
+                out.extend_from_slice(&(element.len() as u32).to_be_bytes());
+                out.extend_from_slice(&element);
+                true
+            });
+        }
     }
     out
 }

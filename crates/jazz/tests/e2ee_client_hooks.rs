@@ -1844,6 +1844,77 @@ fn reads_that_would_compare_or_return_sealed_cells_are_refused() {
     alice.prepare_query(&by_title).unwrap();
 }
 
+/// Contract: JSON and array columns are encrypted columns like any other
+/// to the refusal walk: a top-level equality on an equality-indexed one of
+/// the query's own table is left to the hook, and every other condition on
+/// them is refused before the hook is asked.
+#[test]
+fn json_and_array_columns_are_refused_like_any_encrypted_column() {
+    use jazz::query::{OrderBy, OrderDirection};
+    let mut declared = declarations();
+    let notes = declared.tables.get_mut("notes").unwrap();
+    notes.columns.insert(
+        "meta".to_owned(),
+        encrypted(ColumnType::Json { schema: None }, true),
+    );
+    notes.columns.insert(
+        "tags".to_owned(),
+        encrypted(
+            ColumnType::Array {
+                element: Box::new(ColumnType::Text),
+            },
+            true,
+        ),
+    );
+    notes
+        .equality
+        .extend(["meta".to_owned(), "tags".to_owned()]);
+    let hooks = Rc::new(Fake {
+        declarations: Some(declared),
+        ..Fake::default()
+    });
+    let alice = client(&hooks);
+    let value = || Operand::Literal(text("x"));
+    let on = |column: &str| Operand::Column(column.to_owned());
+    for column in ["meta", "tags"] {
+        let asked = hooks.plans.get();
+        // The one plannable shape reaches the hook (which here plans
+        // nothing for it, and its answer is then refused).
+        let _ = alice.prepare_query(&Query::from("notes").filter(eq(col(column), lit(text("x")))));
+        assert_eq!(hooks.plans.get(), asked + 1, "{column}: the hook is asked");
+
+        let mut ordered = Query::from("notes");
+        ordered.order_by.push(OrderBy {
+            column: column.to_owned(),
+            direction: OrderDirection::Asc,
+        });
+        for query in [
+            Query::from("notes").filter(Predicate::Contains(on(column), value())),
+            Query::from("notes").filter(Predicate::Ne(on(column), value())),
+            Query::from("notes").filter(Predicate::IsNull(on(column))),
+            Query::from("notes").filter(Predicate::In(on(column), vec![value()])),
+            Query::from("notes").filter(Predicate::Any(vec![Predicate::Eq(on(column), value())])),
+            Query::from("projects").join_via(
+                "notes",
+                "projectId",
+                [Predicate::Eq(on(column), value())],
+            ),
+            ordered,
+        ] {
+            let asked = hooks.plans.get();
+            let error = alice.prepare_query(&query).unwrap_err();
+            assert!(
+                error
+                    .message
+                    .contains(&format!("encrypted column `notes.{column}`")),
+                "{query:?}: {}",
+                error.message
+            );
+            assert_eq!(hooks.plans.get(), asked, "{column}: the hook is not asked");
+        }
+    }
+}
+
 /// Contract: a condition on an encrypted column is refused wherever a
 /// query runs one, not only on the query's own table: in a join, a nested
 /// join, a correlation, a join's `on` column, reachability and a policy
