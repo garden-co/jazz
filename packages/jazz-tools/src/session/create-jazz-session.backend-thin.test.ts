@@ -653,6 +653,150 @@ describe("browser session against the app's backend", () => {
     expect(session.getSnapshot().status).toBe("signed-out");
   }, 60_000);
 
+  // A revoked tab in the background used to wait for focus before signing
+  // out. The refusal says why (link.authReason "revoked"), and a revoked
+  // background tab signs out as a visible one does: at the second
+  // signed-out answer, after onSignedOut.
+  for (const variant of ["thin", "local-first"] as const)
+    it(`signs a revoked ${variant} tab in the background out, and says it was revoked`, async () => {
+      const auth = tokenAuth("alice:1");
+      const jazz = await createJazz({
+        app,
+        permissions,
+        store: memory(),
+        authenticate: auth.authenticate,
+      }).ready();
+      cleanups.push(() => jazz.close());
+      const served = await listen(jazz);
+      cookies(served.origin, "alice:1");
+      vi.stubGlobal("document", { visibilityState: "hidden" });
+      const onSignedOut = vi.fn(() => "sign-out" as const);
+      const session = await createJazzClient({
+        serverUrl: `${served.origin}/jazz`,
+        store: memoryStore(),
+        driver: { type: "memory" },
+        onSignedOut,
+        ...(variant === "local-first"
+          ? { client: async () => ({ createClient: createLocalFirstDb }) }
+          : {}),
+      });
+      cleanups.push(() => session.close());
+      await session.loginWithBackend();
+      if (variant === "local-first")
+        await expect
+          .poll(() => isThinDb(session.getSnapshot().client!.db), { timeout: 15_000 })
+          .toBe(false);
+      const client = session.getSnapshot().client!;
+      const owner = client.session!.user!;
+      await client.db.insert(app.todos, { title: "private", owner }).wait({ tier: "global" });
+      const links: unknown[] = [];
+      const stop = client.db.onSyncStatusChange(({ link }) => links.push(link));
+      cleanups.push(async () => stop());
+
+      auth.valid.delete("alice:1");
+      expect(await jazz.revokeUser("alice")).toBe(1);
+      await expect
+        .poll(() => session.getSnapshot().status, { timeout: 15_000, interval: 20 })
+        .toBe("signed-out");
+      expect(onSignedOut).toHaveBeenCalledOnce();
+      expect(links).toContainEqual({
+        state: "offline",
+        reason: "auth",
+        retrying: false,
+        authReason: "revoked",
+      });
+    }, 60_000);
+
+  // A revoke the backend doesn't follow with a sign-out (say to make the
+  // user sign in again) leaves the tab signed in and connected again. The
+  // refusal's reason must not outlive that: a later ordinary refusal (an
+  // expired cookie) in the background waits for focus, as any does.
+  for (const variant of ["thin", "local-first"] as const)
+    it(`forgets a ${variant} tab's revoked refusal once it is admitted again`, async () => {
+      const auth = tokenAuth("alice:1");
+      const jazz = await createJazz({
+        app,
+        permissions,
+        store: memory(),
+        authenticate: auth.authenticate,
+      }).ready();
+      cleanups.push(() => jazz.close());
+      const served = await listen(jazz);
+      cookies(served.origin, "alice:1");
+      vi.stubGlobal("document", { visibilityState: "hidden" });
+      // The backend's "who is signed in" answers, as the browser sees them.
+      const answers: Array<{ signedIn: boolean }> = [];
+      const cookieFetch = globalThis.fetch;
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const response = await cookieFetch(input, init);
+        if (String(input instanceof Request ? input.url : input).includes("backend-user")) {
+          const body = (await response
+            .clone()
+            .json()
+            .catch(() => null)) as { identity?: unknown } | null;
+          answers.push({ signedIn: response.ok && !!body?.identity });
+        }
+        return response;
+      }) as typeof fetch;
+      cleanups.push(async () => void (globalThis.fetch = cookieFetch));
+      const onSignedOut = vi.fn(() => "sign-out" as const);
+      const session = await createJazzClient({
+        serverUrl: `${served.origin}/jazz`,
+        store: memoryStore(),
+        driver: { type: "memory" },
+        onSignedOut,
+        ...(variant === "local-first"
+          ? { client: async () => ({ createClient: createLocalFirstDb }) }
+          : {}),
+      });
+      cleanups.push(() => session.close());
+      await session.loginWithBackend();
+      if (variant === "local-first")
+        await expect
+          .poll(() => isThinDb(session.getSnapshot().client!.db), { timeout: 15_000 })
+          .toBe(false);
+      const client = session.getSnapshot().client!;
+      const owner = client.session!.user!;
+      await client.db.insert(app.todos, { title: "first", owner }).wait({ tier: "global" });
+
+      // Revoked, but her cookie still holds: the tab is admitted again as
+      // her, and the admission clears the refusal's reason.
+      expect(await jazz.revokeUser("alice")).toBe(1);
+      await expect
+        .poll(
+          () => ({
+            link: client.db.getSyncStatus().link,
+            error: client.db.getAuthState().error,
+          }),
+          { timeout: 15_000, interval: 20 },
+        )
+        .toEqual({ link: { state: "connected" }, error: undefined });
+
+      // Later her cookie expires and the server restarts: an ordinary refusal.
+      const links: unknown[] = [];
+      const stop = client.db.onSyncStatusChange(({ link }) => links.push(link));
+      cleanups.push(async () => stop());
+      auth.valid.delete("alice:1");
+      await served.close();
+      const before = answers.length;
+      await listen(jazz, Number(new URL(served.origin).port));
+      // The refusal says why, and the session asks the backend, which names
+      // no one now.
+      await expect
+        .poll(() => client.db.getSyncStatus().link, { timeout: 15_000, interval: 20 })
+        .toMatchObject({ state: "offline", reason: "auth", authReason: "missing" });
+      await expect
+        .poll(() => answers.slice(before).some((answer) => !answer.signedIn), {
+          timeout: 15_000,
+          interval: 20,
+        })
+        .toBe(true);
+      // In the background, it waits for focus: not signed out, never "revoked".
+      expect(session.getSnapshot().status).toBe("ready");
+      expect(onSignedOut).not.toHaveBeenCalled();
+      expect(links).not.toContainEqual(expect.objectContaining({ authReason: "revoked" }));
+    }, 60_000);
+
   // E12: a revoked tab with a write that can never upload used to hang in
   // `transitioning` (signOut) for good, its write's wait neither resolving
   // nor rejecting: sign-out waited for an upload the server will never take.

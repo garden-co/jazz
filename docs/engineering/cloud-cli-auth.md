@@ -175,7 +175,7 @@ Logged in to https://v2.dashboard.jazz.tools as ada@example.com.
 $ jazz-tools apps create "Todo" --region eu-central-1 --json
 {"appId":"…","teamId":"org_…","name":"Todo","region":"eu-central-1","adminSecret":"…","backendSecret":"…"}
 
-$ jazz-tools apps auth set "$APP" --allow-local-first-auth false
+$ jazz-tools apps auth set "$APP" --allow-device-accounts false
 $ jazz-tools apps status "$APP" --wait
 ```
 

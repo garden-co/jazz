@@ -1262,6 +1262,7 @@ async function initialize(context: RuntimeContext): Promise<void> {
           // End users see a browser's console: plan and SQL go to debug.
           consoleDetail: "summary",
         },
+        subscriptionBacklogRows: options.subscriptionBacklogRows,
       },
     );
     context.runtime = runtime;

@@ -143,6 +143,15 @@ export type JazzStore =
       readonly backendCredential: BackendCredential;
       /** The app's secret, when `remote()` was given one: agent tokens are signed with a key derived from it. */
       readonly secret?: string;
+      /** What runs the core, when a store other than `remote()` made this one (`durableObjects()`). */
+      readonly host?: "durable-objects";
+    }
+  | {
+      readonly kind: "durableObjects";
+      /** The Worker's origin. */
+      readonly url: string;
+      /** The Worker's `JAZZ_CORE_SECRET`. */
+      readonly secret: string;
     }
   | {
       readonly kind: "vercel";
@@ -251,6 +260,122 @@ export function remote(
   };
 }
 
+/** The shortest core secret a Durable Object core accepts. */
+const DURABLE_OBJECT_SECRET_MIN_LENGTH = 32;
+/** The hosts a `durableObjects()` url may reach over plain http. */
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+/** How long the store waits for the core to name its app. */
+const DURABLE_OBJECT_APP_TIMEOUT_MS = 30_000;
+/** An app id the core may name: no path separators, dots or line breaks. */
+const DURABLE_OBJECT_APP_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * A core running in a Cloudflare Durable Object: one SQLite-backed object per
+ * app, in a Worker you deploy that exports `JazzCore` and forwards requests to
+ * it with `routeJazzRequest` (both from `jazz-tools/durable-object`). `url` is
+ * that Worker's origin (e.g. `https://my-app-jazz.example.workers.dev`) and
+ * `secret` its `JAZZ_CORE_SECRET`: a random string of at least 32 characters
+ * that stays the same across deployments. The object keeps its own app id,
+ * which this backend asks it for when the store opens.
+ *
+ * The core admits only this backend, which holds the secret; browsers keep
+ * talking to your backend. A Durable Object core doesn't run thin-client
+ * transactions (your backend runs them, as with any core) and has no
+ * HTTP-stream fallback for the backend's own sockets.
+ *
+ * @experimental Durable Object cores are new; the options and the Worker's
+ * bindings may still change.
+ */
+export function durableObjects(options: {
+  url: string;
+  secret: string;
+  appId?: never;
+}): Extract<JazzStore, { kind: "durableObjects" }> {
+  if (typeof options === "object" && options !== null && "appId" in options) {
+    throw new Error(
+      "durableObjects(): appId is not an option: the store keeps its own app id, in the Worker's Durable Object",
+    );
+  }
+  const { url, secret } = options ?? ({} as typeof options);
+  let origin: URL | undefined;
+  try {
+    origin = new URL(url);
+  } catch {
+    // Refused below.
+  }
+  if (
+    !origin ||
+    (origin.protocol !== "https:" && origin.protocol !== "http:") ||
+    origin.pathname.replace(/\/+$/, "") !== "" ||
+    origin.search ||
+    origin.hash
+  ) {
+    throw new Error(
+      `durableObjects(): url must be the Worker's origin, like "https://my-app-jazz.example.workers.dev"; got ${JSON.stringify(url)}`,
+    );
+  }
+  if (origin.username || origin.password) {
+    throw new Error(
+      "durableObjects(): url must not carry a user name or password; the core secret is the only credential",
+    );
+  }
+  // The secret goes with every request: in the clear only to this machine
+  // (`wrangler dev`, tests).
+  if (origin.protocol === "http:" && !LOOPBACK_HOSTS.has(origin.hostname)) {
+    throw new Error(
+      `durableObjects(): url must be https:// (http:// only for localhost, 127.0.0.1 or [::1]); got ${JSON.stringify(url)}`,
+    );
+  }
+  if (typeof secret !== "string" || secret.length < DURABLE_OBJECT_SECRET_MIN_LENGTH) {
+    throw new Error(
+      `durableObjects(): secret must be the Worker's JAZZ_CORE_SECRET, a random string of at least ${DURABLE_OBJECT_SECRET_MIN_LENGTH} characters`,
+    );
+  }
+  return { kind: "durableObjects", url: origin.origin, secret };
+}
+
+/**
+ * The `remote()` store a `durableObjects()` store opens as: the Worker's
+ * object tells this backend its app id (`GET /app`, with the core secret).
+ */
+async function durableObjectCore(
+  store: Extract<JazzStore, { kind: "durableObjects" }>,
+): Promise<Extract<JazzStore, { kind: "remote" }>> {
+  let response: Response;
+  let body: { appId?: unknown } | undefined;
+  try {
+    response = await fetch(`${store.url}/app`, {
+      headers: { [CREDENTIAL_HEADER]: store.secret },
+      redirect: "manual",
+      signal: AbortSignal.timeout(DURABLE_OBJECT_APP_TIMEOUT_MS),
+    });
+    body = (await response.json().catch(() => undefined)) as typeof body;
+  } catch (error) {
+    if ((error as { name?: unknown } | null)?.name === "TimeoutError") {
+      throw new Error(
+        `createJazz: the Durable Object core at ${store.url} did not answer within ${DURABLE_OBJECT_APP_TIMEOUT_MS / 1000}s; this Jazz tries again on its next use`,
+        { cause: error },
+      );
+    }
+    throw unreachableCore(store.url, error);
+  }
+  if (response.status === 401 || response.status === 403) {
+    throw new Error(
+      `createJazz: the Durable Object core at ${store.url} refused the secret: durableObjects()'s secret must be the Worker's JAZZ_CORE_SECRET`,
+    );
+  }
+  // The id goes into request paths and log lines: only a plain one.
+  if (!response.ok || typeof body?.appId !== "string" || !DURABLE_OBJECT_APP_ID.test(body.appId)) {
+    throw new Error(
+      `createJazz: ${store.url} did not answer as a Jazz Durable Object core (GET /app: ${response.status}); is url the Worker that exports JazzCore, on this jazz-tools version?`,
+    );
+  }
+  return {
+    ...remote({ url: store.url, appId: body.appId, secret: store.secret }),
+    host: "durable-objects",
+  };
+}
+
 /**
  * The store for apps deployed on Vercel. Use it in dev too: outside a
  * production or preview deployment (`next dev`, `vercel dev`, tests) it runs
@@ -320,14 +445,20 @@ function blobOptions(blobs: BlobStore): {
 declare const localFirstGuestBrand: unique symbol;
 
 /**
- * `authenticate`'s answer for a request from a local-first guest: an account
- * a browser made on its own, before (or without) signing in. Return
- * {@link acceptDeviceAccounts} for the requests you let guests make; any other
- * answer refuses a guest.
+ * `authenticate`'s answer for a request from a device account: an account a
+ * browser made on its own, before (or without) signing in, as guests have.
+ * Return {@link acceptDeviceAccounts} for the requests you let device accounts
+ * make; any other answer refuses them.
  */
-export interface LocalFirstGuest {
+export interface DeviceAccountsAnswer {
   readonly [localFirstGuestBrand]: true;
 }
+
+/**
+ * @deprecated Renamed to {@link DeviceAccountsAnswer}; this alias goes in a later release.
+ * An interface (not a type alias), so code that merges declarations into it keeps compiling.
+ */
+export interface LocalFirstGuest extends DeviceAccountsAnswer {}
 
 /**
  * The marker's brand, registered globally like `createJazz`'s store registry:
@@ -339,10 +470,10 @@ const LOCAL_FIRST_GUEST_BRAND = Symbol.for("jazz-tools.acceptDeviceAccounts.gues
 const LOCAL_FIRST_GUEST = Object.freeze({
   [LOCAL_FIRST_GUEST_BRAND]: true,
   kind: "jazz:local-first-guest",
-}) as unknown as LocalFirstGuest;
+}) as unknown as DeviceAccountsAnswer;
 
 /** Whether `answer` is {@link acceptDeviceAccounts}'s marker, from any copy of this module. */
-function isLocalFirstGuest(answer: unknown): answer is LocalFirstGuest {
+function isDeviceAccountsAnswer(answer: unknown): answer is DeviceAccountsAnswer {
   return (
     typeof answer === "object" &&
     answer !== null &&
@@ -430,7 +561,7 @@ function withoutCredentials(request: Request): Request {
  * naming that user) plus the device key's proof of a one-time challenge, so
  * it works even when your app doesn't accept device accounts for sync.
  */
-export function acceptDeviceAccounts(_request: Request): LocalFirstGuest {
+export function acceptDeviceAccounts(_request: Request): DeviceAccountsAnswer {
   return LOCAL_FIRST_GUEST;
 }
 
@@ -524,9 +655,9 @@ export interface CreateJazzOptions {
     request: Request,
   ) =>
     | AuthenticatedUser
-    | LocalFirstGuest
+    | DeviceAccountsAnswer
     | null
-    | Promise<AuthenticatedUser | LocalFirstGuest | null>;
+    | Promise<AuthenticatedUser | DeviceAccountsAnswer | null>;
   /**
    * Refresh the app's own session, as middleware: Jazz runs it on the one
    * ordinary request a browser makes to ask who is signed in, before a sync
@@ -584,7 +715,7 @@ export interface CreateJazzOptions {
    * on a renewal request (a browser on your cookie renews its open session
    * in place) or on its client's new connection. Defaults to one hour.
    * A signed-in user's session ends sooner if the `expiresAt` `authenticate`
-   * returned comes first; a local-first guest is let in anew each time. So
+   * returned comes first; a device account is let in anew each time. So
    * a sign-out elsewhere, a ban or a changed role reaches an open session
    * within this long, or at once with `jazz.revokeUser(userId)`.
    */
@@ -784,7 +915,7 @@ export interface Jazz {
    *
    * When `authenticate` answers {@link acceptDeviceAccounts} for the request,
    * it acts as the device account whose proof the request carries as
-   * `Authorization: Bearer <proof>`, from `db.getLocalFirstIdentityProof()`
+   * `Authorization: Bearer <proof>`, from `db.getDeviceAccountProof()`
    * in the browser. The proof is checked as a sync connection's is (its
    * signature, expiry, and an audience of this app or `publicUrl`), and a
    * key a link revoked is refused. A proof that doesn't pass throws a
@@ -863,9 +994,9 @@ export interface Jazz {
   /**
    * Make `to` another identity of the account `from` already uses: after
    * this, `authenticate` returning `to` opens that same account and its data.
-   * Call it once your own auth has verified both, as when an anonymous or
-   * local-first user signs up, or a user adds a second sign-in method. `to`
-   * must not have its own account yet. Returns the account id.
+   * Call it once your own auth has verified both, as when an anonymous user
+   * or a guest (a device account) signs up, or a user adds a second sign-in
+   * method. `to` must not have its own account yet. Returns the account id.
    */
   linkIdentity(link: { from: string; to: string }): Promise<{ account: string }>;
   /** Close every session, the backend database and the core. */
@@ -1423,6 +1554,8 @@ function openRemoteCore(
     async handle(method, path, headers, body, access = "session") {
       const response = await fetch(`${target.url}${path}`, {
         method,
+        // The request carries this backend's credential: never to another URL.
+        redirect: "error",
         headers: [...withoutStated(headers), ...(await credentialHeaders(access))].map(
           ([name, value]) => [name!, value!] as [string, string],
         ),
@@ -1615,9 +1748,11 @@ function runningStore(store: JazzStore): JazzStore {
 }
 
 /** The line a store logs when it opens (a `vercel()` core logs its own). */
-function storeOpenedLine(store: Exclude<JazzStore, { kind: "vercel" }>): string {
+function storeOpenedLine(store: Exclude<JazzStore, { kind: "vercel" | "durableObjects" }>): string {
   if (store.kind === "sqlite") return `jazz: store sqlite at ${store.path}`;
   if (store.kind === "memory") return "jazz: store memory (its data lasts as long as this process)";
+  if (store.host === "durable-objects")
+    return `jazz: store durableObjects at ${store.url} (app ${store.appId})`;
   return `jazz: store remote at ${store.url} (app ${store.appId})`;
 }
 
@@ -1636,7 +1771,8 @@ interface OpenedJazz extends Omit<Jazz, "ready" | "db" | "attach"> {
  * Open `store` and apply the schema, migrations and permissions `options`
  * declare to its core.
  */
-async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<OpenedJazz> {
+async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise<OpenedJazz> {
+  const store = opening.kind === "durableObjects" ? await durableObjectCore(opening) : opening;
   let options = initial;
   let { basePath, publicUrls, allowedOrigins } = jazzSettings(options);
   // The bundle this backend published: every socket to the core carries it,
@@ -1804,7 +1940,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         : null;
     const answer = await askAuthenticate(request);
     if (answer === null) return null;
-    if (isLocalFirstGuest(answer)) return "device-account";
+    if (isDeviceAccountsAnswer(answer)) return "device-account";
     const user = withCheckedExpiry(checkedUser(answer));
     // An answer that has already expired names no one, here and in every
     // other place that asks (who is signed in, sign-in, forReqUser), so a
@@ -1816,7 +1952,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     return user;
   }
 
-  async function askAuthenticate(request: Request): Promise<JazzUser | LocalFirstGuest | null> {
+  async function askAuthenticate(
+    request: Request,
+  ): Promise<JazzUser | DeviceAccountsAnswer | null> {
     if (!options.authenticate) return null;
     try {
       return (await options.authenticate(request)) ?? null;
@@ -1834,30 +1972,30 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   let warnedGuestsOff = false;
   async function acceptsGuest(request: Request): Promise<boolean> {
     const answer = await askAuthenticate(request);
-    if (isLocalFirstGuest(answer)) return true;
+    if (isDeviceAccountsAnswer(answer)) return true;
     // A user is signed in on this browser too: one who just signed up, whose
     // guest still uploads its writes before it links to them. A guest is
     // bound to its own key, never to that user, and whether the app lets
     // guests in doesn't depend on who else is signed in: ask as the request
     // would be without the user's credentials.
-    if (answer && isLocalFirstGuest(await askAuthenticate(withoutCredentials(request))))
+    if (answer && isDeviceAccountsAnswer(await askAuthenticate(withoutCredentials(request))))
       return true;
     if (!warnedGuestsOff) {
       warnedGuestsOff = true;
       console.warn(
-        "createJazz: refused a local-first guest. To let guests sync, return acceptDeviceAccounts(request) from authenticate for them.",
+        "createJazz: refused a device account. To let guests sync, return acceptDeviceAccounts(request) from authenticate for them.",
       );
     }
     return false;
   }
 
-  /** Say once that the core turns every local-first guest away, whatever `authenticate` says. */
+  /** Say once that the core turns every device account away, whatever `authenticate` says. */
   let warnedGuestsOffOnCore = false;
   function warnGuestsOffOnCore() {
     if (warnedGuestsOffOnCore) return;
     warnedGuestsOffOnCore = true;
     console.error(
-      "createJazz: the core refuses local-first guests (local_first_auth_disabled), so device accounts can't sync or link. It runs an older jazz-tools with local-first auth off: upgrade it (a vercel() core is restarted on the newer version by the next deployment), or turn it on for a Jazz Cloud app with `jazz-tools apps auth set <appId> --allow-local-first-auth true`.",
+      "createJazz: the core refuses device accounts (local_first_auth_disabled), so they can't sync or link. It runs an older jazz-tools with device accounts off: upgrade it (a vercel() core is restarted on the newer version by the next deployment), or turn them on for a Jazz Cloud app with `jazz-tools apps auth set <appId> --allow-device-accounts true`.",
     );
   }
 
@@ -1922,7 +2060,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   /**
    * The user's account, or null while they have none. Never creates one:
    * only a client's sign-in (`backend-sign-in`), a guest's link
-   * (`backend-link`) and `createAccountFor` do, so a local-first guest can
+   * (`backend-link`) and `createAccountFor` do, so a device account can
    * still link to a user the backend has only looked up or acted for (V9).
    */
   async function existingAccountOf(userId: string): Promise<string | null> {
@@ -1993,7 +2131,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
    * `authenticate` names, and whether the core already holds an account for
    * them. A browser's session asks this to follow the backend; only a sign-in
    * (`backend-sign-in`) or a link (`backend-link`) assigns an account, so a
-   * local-first guest whose user has none yet can still link to them. No one
+   * device account whose user has none yet can still link to them. No one
    * signed in answers 200 `{ user: null }`, not 401.
    */
   async function backendUser(request: Request): Promise<Response> {
@@ -2182,9 +2320,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   }
 
   /**
-   * A local-first guest who just signed up: link the guest's identity to the
+   * A guest who just signed up: link their device account's identity to the
    * user `authenticate` now names, so the account and its data carry over.
-   * The guest proves itself by signing a challenge issued for this user
+   * The device account proves itself by signing a challenge issued for this user
    * (see {@link issueLinkChallenge}).
    */
   async function backendLink(request: Request): Promise<Response> {
@@ -2757,7 +2895,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   /**
    * Turn a browser prelude into one the core admits on this backend's word:
    * the user `authenticate` finds on this request, with their account and
-   * claims, vouched for with the backend secret. A local-first guest's
+   * claims, vouched for with the backend secret. A device account's
    * prelude passes through: the core verifies its self-signed token. Any
    * other credential, or a prelude naming another user, is refused: with
    * {@link UNVERIFIED_CREDENTIAL} when the client sent a token or backend
@@ -2777,7 +2915,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         access: BackendAccess;
         trusted: boolean;
         expiresAt?: number;
-        /** A local-first guest, let in by `acceptDeviceAccounts`. */
+        /** A device account, let in by `acceptDeviceAccounts`. */
         guest?: true;
         /** The client renews this user's session in place (`session-renewal-wire.ts`). */
         renewal?: true;
@@ -3347,7 +3485,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   /**
    * The device account a plain request proves it is, for a request
    * `authenticate` let in as one: its local-first token as `Authorization:
-   * Bearer` (`db.getLocalFirstIdentityProof()`), checked as a socket's is.
+   * Bearer` (`db.getDeviceAccountProof()`), checked as a socket's is.
    * Its signature, issuer and expiry, and an audience of this app or one of
    * this endpoint's URLs (`guestAudience`, so a proof for another endpoint
    * is refused); then the core admits it (`found-local-first`), which
@@ -3439,12 +3577,12 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     if (warnedAudiences.has(named) || warnedAudiences.size > 100) return;
     warnedAudiences.add(named);
     console.warn(
-      `createJazz: refused a local-first guest whose proof is for ${named}; this endpoint accepts ${JSON.stringify([appId, ...accepted])}. If browsers reach Jazz through a proxy that changes the host or path, set publicUrl to the URL they use.`,
+      `createJazz: refused a device account whose proof is for ${named}; this endpoint accepts ${JSON.stringify([appId, ...accepted])}. If browsers reach Jazz through a proxy that changes the host or path, set publicUrl to the URL they use.`,
     );
   }
 
   /**
-   * What a guest's local-first proof is for: this app (an app whose browser
+   * What a device account's proof is for: this app (an app whose browser
    * clients still name its id, or carry it as their `scope`), one of this
    * endpoint's URLs, or neither (null).
    */
@@ -3464,7 +3602,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         if (!publicUrls.length && !warnedHeaderAudience && !isLocalEndpoint(endpoint)) {
           warnedHeaderAudience = true;
           console.warn(
-            `createJazz: vouched for a local-first guest of ${endpoint}, taken from the request's headers. Set publicUrl to the URL browsers use so a caller can't name another host.`,
+            `createJazz: vouched for a device account of ${endpoint}, taken from the request's headers. Set publicUrl to the URL browsers use so a caller can't name another host.`,
           );
         }
         return { endpoint, subject };

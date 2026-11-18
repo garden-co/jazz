@@ -1,1 +1,5 @@
-{ "title": "Main Backend", "defaultOpen": true, "pages": ["vercel", "jazz-cloud", "own-server"] }
+{
+  "title": "Main Backend",
+  "defaultOpen": true,
+  "pages": ["vercel", "jazz-cloud", "own-server", "cloudflare-durable-objects"]
+}

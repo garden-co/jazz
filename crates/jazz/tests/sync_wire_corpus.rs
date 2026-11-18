@@ -881,7 +881,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
         }],
     )
     .unwrap();
-    block_on(server.activate_schema_with_lenses(copied.clone(), &[lens])).unwrap();
+    block_on(server.admit_schema_with_lenses(copied.clone(), &[lens])).unwrap();
     pump(&[&alice, &server, &alice]);
 
     // Schema: alice writes through a view of the version she just

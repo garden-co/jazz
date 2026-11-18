@@ -1081,7 +1081,7 @@ fn seed_of(key: &DeviceKey) -> [u8; 32] {
 }
 
 fn sign(seed: &[u8; 32], challenge: &str) -> String {
-    jazz_app_support::jazz::tools::identity::sign_local_first_challenge(seed, challenge).unwrap()
+    jazz_app_support::jazz::tools::identity::sign_device_account_challenge(seed, challenge).unwrap()
 }
 
 /// A link challenge `endpoint` issues for `user`.

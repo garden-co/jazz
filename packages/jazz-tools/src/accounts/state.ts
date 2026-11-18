@@ -159,11 +159,7 @@ export class AccountManager<Auth> {
     const account = this.snapshot.account;
     return this.run("linkWithBackend", () => {
       if (!account)
-        throw new AccountAuthError(
-          "local_first_account_required",
-          undefined,
-          LINK_NEEDS_GUEST_MESSAGE,
-        );
+        throw new AccountAuthError("device_account_required", undefined, LINK_NEEDS_GUEST_MESSAGE);
       if (!this.enrollment.linkWithBackend)
         throw new Error("Backend sign-in is unavailable on this host");
       return this.enrollment.linkWithBackend(account);

@@ -29,7 +29,7 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
     /**
      * Not for a client: the app id belongs to your backend's store
      * (`remote({ appId })`, or the id a store keeps). A client is scoped by its
-     * `serverUrl`; use `scope` to keep local-first users created under an
+     * `serverUrl`; use `scope` to keep guests' device accounts created under an
      * app id.
      */
     appId?: never;
@@ -82,6 +82,7 @@ const NATIVE_SESSION_OPTIONS = {
   telemetryCollectorUrl: true,
   devMode: true,
   slowQueryThresholdMs: true,
+  subscriptionBacklogRows: true,
   store: true,
   bearer: true,
   nativeRelay: true,

@@ -2436,7 +2436,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         claims: {},
         authMode:
           issuer === LOCAL_FIRST_JWT_ISSUER
-            ? "local-first"
+            ? "device-account"
             : issuer === ANONYMOUS_JWT_ISSUER
               ? "anonymous"
               : "external",
@@ -2454,7 +2454,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const authors: string[] = [];
     const trustedSession = internalSessionFromVerifiedReservedJwtPayload(
       { iss: LOCAL_FIRST_JWT_ISSUER, sub: "verified-user" },
-      "local-first",
+      "device-account",
     )!;
     const runtimeSessionJson = JSON.stringify({
       ...trustedSession,
@@ -2536,7 +2536,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     for (const [issuer, authMode] of [
-      [LOCAL_FIRST_JWT_ISSUER, "local-first"],
+      [LOCAL_FIRST_JWT_ISSUER, "device-account"],
       [ANONYMOUS_JWT_ISSUER, "anonymous"],
     ] as const) {
       const trustedSession = internalSessionFromVerifiedReservedJwtPayload(
@@ -2564,7 +2564,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           issuer: LOCAL_FIRST_JWT_ISSUER,
           user_id: "forged-browser-user",
           claims: {},
-          authMode: "local-first",
+          authMode: "device-account",
         }),
         "local-first",
       ),
@@ -2922,6 +2922,24 @@ describe("NativeRuntimeAdapter server transport", () => {
         expect(callbacks[0]).not.toHaveBeenCalled();
         expect(callbacks[1]).toHaveBeenCalledWith(expect.objectContaining({ reset: true }));
         expect(callbacks[2]).not.toHaveBeenCalled();
+      } finally {
+        await runtime.close();
+      }
+    });
+
+    it("marks a reset the core coalesced from a backlog with reason backlog", async () => {
+      const { runtime, native, pump } = pooledRuntime();
+      try {
+        const callback = vi.fn();
+        runtime.executeSubscription(runtime.createSubscription(app.todos._build()), callback);
+        native[0]!.queue.push(subscriptionReset([row(1)]));
+        native[0]!.queue.push({ ...subscriptionReset([row(2)]), coalesced: true });
+        pump();
+        expect(callback).toHaveBeenCalledTimes(2);
+        expect(callback.mock.calls[0]![0]).not.toHaveProperty("reason");
+        expect(callback.mock.calls[1]![0]).toEqual(
+          expect.objectContaining({ reset: true, reason: "backlog" }),
+        );
       } finally {
         await runtime.close();
       }
@@ -6555,7 +6573,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         iss: LOCAL_FIRST_JWT_ISSUER,
         sub: "verified-attribution",
       },
-      "local-first",
+      "device-account",
     )!;
     session.account_id = "00000000-0000-4000-8000-000000000001";
     const token = trustedReservedSessionToken(session);
@@ -6692,7 +6710,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     );
     const trustedSession = internalSessionFromVerifiedReservedJwtPayload(
       { iss: LOCAL_FIRST_JWT_ISSUER, sub: "verified-writer" },
-      "local-first",
+      "device-account",
     )!;
     const runtime = new NativeRuntimeAdapter(
       {

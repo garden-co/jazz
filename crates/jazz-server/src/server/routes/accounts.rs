@@ -1,17 +1,17 @@
 //! Account control endpoints, for the app's backend: it vouches for the
 //! identities it names with its admin secret.
+use crate::portable::accounts::{
+    self, AccountResponse, FoundDeviceAccountRequest, IdentityRequest, LinkRequest, RegistryError,
+    RevokeRequest, RevokeSessionsRequest, RevokeSessionsResponse, RouteFailure, registry_failure,
+};
 use crate::server::ServerState;
-use crate::server::account_store::RegistryError;
 use axum::{
     Json,
     extract::State,
     http::{HeaderMap, StatusCode},
 };
-use jazz::account_registry::{
-    AccountCommand, AccountCommandResult, AccountId, Assignment, Principal,
-};
+use jazz::account_registry::{AccountCommand, AccountId, Assignment, Principal};
 use jazz::tools::transport_error::{UnauthenticatedCode, UnauthenticatedResponse};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -56,38 +56,17 @@ fn owner(state: &ServerState) -> Result<&crate::server::accounts::AccountRegistr
         "account operation requires the core authority",
     ))
 }
+
+/// A refusal decided in [`crate::portable::accounts`], as axum answers it.
+fn fail(failure: RouteFailure) -> Failure {
+    (
+        StatusCode::from_u16(failure.status).expect("an account route status"),
+        failure.body,
+    )
+}
+
 fn failure(error: RegistryError) -> Failure {
-    use jazz::account_registry::AccountError;
-    match error {
-        RegistryError::Decision(AccountError::NotAssigned) => {
-            (StatusCode::NOT_FOUND, "identity_not_assigned")
-        }
-        RegistryError::Decision(AccountError::AlreadyAssigned) => {
-            (StatusCode::CONFLICT, "identity_already_assigned")
-        }
-        RegistryError::Decision(AccountError::NotAuthorized) => {
-            (StatusCode::FORBIDDEN, "identity_not_authorized")
-        }
-        RegistryError::Decision(_) => (StatusCode::BAD_REQUEST, "invalid_link_intent"),
-        RegistryError::Unavailable(_) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "account_registry_unavailable",
-        ),
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct IdentityRequest {
-    identity: Principal,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct AccountResponse {
-    account: Uuid,
-    identity: Principal,
-    generation: u64,
+    fail(registry_failure(error))
 }
 
 /// Read-only administrative lookup;
@@ -115,8 +94,7 @@ pub(super) async fn login_or_register_for_admin(
     Json(request): Json<IdentityRequest>,
 ) -> Result<Json<AccountResponse>, Failure> {
     validate_vouching_backend(&headers, &state)?;
-    jazz::ids::AuthorSubject::authenticated(&request.identity.issuer, &request.identity.subject)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_external_identity"))?;
+    accounts::require_external_identity(&request.identity).map_err(fail)?;
     let assignment = owner(&state)?
         .login_or_register(request.identity.clone())
         .await
@@ -124,59 +102,26 @@ pub(super) async fn login_or_register_for_admin(
     Ok(response(request.identity, assignment))
 }
 
-/// The app's backend vouches for a local-first guest: it checked the
-/// guest's proof of its key itself (`createJazz` links a guest only on a
-/// fresh, single-use challenge the guest signed). The core founds the
-/// guest's account deterministically, as `found-local-first` would for the
-/// guest's own token.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct AdminFoundLocalFirst {
-    identity: Principal,
-    /// The namespace the guest's account was founded in, when it is not
-    /// this app: the endpoint an app-less client's proofs are for.
-    #[serde(default)]
-    audience: Option<String>,
-}
-
-pub(super) async fn found_local_first_for_admin(
+/// The app's backend vouches for a local-first guest
+/// ([`FoundDeviceAccountRequest`]).
+pub(super) async fn found_device_account_for_admin(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
-    Json(request): Json<AdminFoundLocalFirst>,
+    Json(request): Json<FoundDeviceAccountRequest>,
 ) -> Result<Json<AccountResponse>, Failure> {
     validate_vouching_backend(&headers, &state)?;
-    if request.identity.issuer != jazz::tools::identity::LOCAL_FIRST_ISSUER {
-        return Err((StatusCode::BAD_REQUEST, "local_first_identity_required"));
-    }
-    let result = owner(&state)?
-        .execute(AccountCommand::FoundLocalFirst {
+    accounts::require_device_account_identity(&request.identity).map_err(fail)?;
+    let registry = owner(&state)?;
+    let app =
+        accounts::founding_app(request.audience.as_deref(), *state.app_id.uuid()).map_err(fail)?;
+    let result = registry
+        .execute(AccountCommand::FoundDeviceAccount {
             principal: request.identity.clone(),
-            app: match request.audience.as_deref().map(str::trim) {
-                Some("") => return Err((StatusCode::BAD_REQUEST, "invalid_local_first_audience")),
-                Some(audience) => {
-                    *crate::middleware::auth::local_first_founding_app(audience).uuid()
-                }
-                None => *state.app_id.uuid(),
-            },
+            app,
         })
         .await
         .map_err(failure)?;
-    let AccountCommandResult::Assignment(assignment) = result else {
-        unreachable!("founding result")
-    };
-    Ok(response(request.identity, assignment))
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct AdminLink {
-    from: Principal,
-    to: Principal,
-    /// The link's single-use intent id, when the backend has one (the nonce
-    /// of the challenge a guest signed): a second link with the same nonce
-    /// is refused, whoever it names.
-    #[serde(default)]
-    nonce: Option<Uuid>,
+    Ok(response(request.identity, accounts::assignment_of(result)))
 }
 
 /// The app's backend vouches for both identities: link `to` to the account
@@ -185,67 +130,37 @@ pub(super) struct AdminLink {
 pub(super) async fn link_for_admin(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
-    Json(request): Json<AdminLink>,
+    Json(request): Json<LinkRequest>,
 ) -> Result<Json<AccountResponse>, Failure> {
     crate::middleware::auth::validate_admin_secret(
         super::http::admin_secret_header(&headers),
         &state.auth_config,
     )?;
-    jazz::ids::AuthorSubject::authenticated(&request.to.issuer, &request.to.subject)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_external_identity"))?;
+    accounts::require_external_identity(&request.to).map_err(fail)?;
     let registry = owner(&state)?;
     // `from` names an account that already exists (a user the backend signed
-    // in, or a local-first guest founded from its own key proof): linking
+    // in, or a device account founded from its own key proof): linking
     // never creates it.
     registry
         .login(request.from.clone())
         .await
         .map_err(failure)?;
     let now = state.auth_config.clock.now_seconds();
-    let expires_at = now
-        .checked_add(300)
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "invalid_clock"))?;
-    let nonce = request.nonce.unwrap_or_else(Uuid::new_v4);
-    registry
-        .execute(AccountCommand::RequestLink {
-            approver: request.from,
-            candidate: request.to.clone(),
-            nonce,
-            now,
-            expires_at,
-        })
-        .await
-        .map_err(failure)?;
-    let result = registry
-        .execute(AccountCommand::AcceptLink {
-            candidate: request.to.clone(),
-            nonce,
-            now,
-        })
-        .await
-        .map_err(failure)?;
-    let AccountCommandResult::Assignment(assignment) = result else {
-        unreachable!("accept result")
-    };
-    Ok(response(request.to, assignment))
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct AdminRevoke {
-    approver: Principal,
-    target: Principal,
+    let steps = accounts::link_steps(&request, now, Uuid::new_v4).map_err(fail)?;
+    registry.execute(steps.request).await.map_err(failure)?;
+    let result = registry.execute(steps.accept).await.map_err(failure)?;
+    Ok(response(request.to, accounts::assignment_of(result)))
 }
 
 /// The app's backend vouches for `approver`, an identity of the account, and
 /// revokes `target`, another of its identities, as the approver's own
-/// credential would (`createJazz` revokes a local-first guest's key once it
+/// credential would (`createJazz` revokes a device account's key once it
 /// links to a signed-in user, when the app asks for that). The assignment
 /// stays: the target can no longer sign in, and is never reassigned.
 pub(super) async fn revoke_for_admin(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
-    Json(request): Json<AdminRevoke>,
+    Json(request): Json<RevokeRequest>,
 ) -> Result<StatusCode, Failure> {
     crate::middleware::auth::validate_admin_secret(
         super::http::admin_secret_header(&headers),
@@ -266,25 +181,6 @@ pub(super) async fn revoke_for_admin(
 pub(super) const SESSION_REVOKED: &str =
     "session revoked: jazz.revokeUser ended this user's sessions";
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct AdminRevokeSessions {
-    identity: Principal,
-    /// Unix milliseconds on the backend's clock: sessions its `authenticate`
-    /// admitted before this end.
-    #[serde(rename = "revokedBefore")]
-    revoked_before: u64,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct RevokeSessionsResponse {
-    identity: Principal,
-    /// The mark now in force: never earlier than one recorded before.
-    #[serde(rename = "revokedBefore")]
-    revoked_before: u64,
-}
-
 /// `jazz.revokeUser`: end the identity's sessions authenticated before
 /// `revokedBefore`, on every backend instance. Each live session of the
 /// user closes as revoked, and the core refuses those the backend states
@@ -293,7 +189,7 @@ pub(super) struct RevokeSessionsResponse {
 pub(super) async fn revoke_sessions_for_admin(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
-    Json(request): Json<AdminRevokeSessions>,
+    Json(request): Json<RevokeSessionsRequest>,
 ) -> Result<Json<RevokeSessionsResponse>, Failure> {
     crate::middleware::auth::validate_admin_secret(
         super::http::admin_secret_header(&headers),
@@ -423,28 +319,27 @@ pub(super) async fn resolve_assignment(
     Err(AdmissionError::Unavailable)
 }
 
-/// Offline local founding becomes durable on the first authenticated connection.
-/// The namespace a local-first founder's account id derives from: the
-/// audience its proof was verified against (see
-/// [`crate::middleware::auth::LOCAL_FIRST_AUDIENCE_HEADER`]).
-fn founding_app(state: &ServerState, headers: &HeaderMap) -> Result<Uuid, UnauthenticatedResponse> {
-    let audience =
-        crate::middleware::auth::local_first_audience(headers, state.app_id, &state.auth_config)?;
-    Ok(*crate::middleware::auth::local_first_founding_app(&audience).uuid())
-}
-
+/// Offline local founding becomes durable on the first authenticated
+/// connection: what [`crate::portable::guest::founding_command`] runs for a
+/// local-first guest, in the namespace of the audience its proof was
+/// verified against (see
+/// [`crate::middleware::auth::DEVICE_ACCOUNT_AUDIENCE_HEADER`]).
 pub(super) async fn admit_local_founder(
     state: &ServerState,
     principal: &Principal,
     headers: &HeaderMap,
 ) -> Result<(), AdmissionError> {
-    let app = founding_app(state, headers)?;
+    let audience = crate::middleware::auth::device_account_audience(
+        headers,
+        state.app_id,
+        &state.auth_config,
+    )?;
+    let Some(command) = crate::portable::guest::founding_command(principal, &audience) else {
+        return Ok(());
+    };
     if let Some(registry) = &state.accounts {
         registry
-            .execute(AccountCommand::FoundLocalFirst {
-                principal: principal.clone(),
-                app,
-            })
+            .execute(command)
             .await
             .map_err(AdmissionError::from)?;
         return Ok(());
@@ -452,11 +347,7 @@ pub(super) async fn admit_local_founder(
     Err(AdmissionError::Unavailable)
 }
 fn response(identity: Principal, assignment: Assignment) -> Json<AccountResponse> {
-    Json(AccountResponse {
-        account: assignment.account.0,
-        identity,
-        generation: assignment.generation,
-    })
+    Json(AccountResponse::new(identity, assignment))
 }
 
 #[cfg(all(test, feature = "embedded-server"))]
@@ -693,7 +584,7 @@ mod tests {
         let user =
             |subject: &str| serde_json::json!({ "issuer": "jazz:app:test", "subject": subject });
         let guest = serde_json::json!({
-            "issuer": jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            "issuer": jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
             "subject": "6f9619ff-8b86-5011-b42d-00c04fc964ff",
         });
         let post = |path: &str, body: serde_json::Value, secret: Option<&str>| {
@@ -705,7 +596,7 @@ mod tests {
         };
         let secret = Some(core.admin_secret());
 
-        // Founding needs the admin secret, and only founds local-first guests.
+        // Founding needs the admin secret, and only founds device accounts.
         let denied = post(
             "found-local-first",
             serde_json::json!({ "identity": guest }),
@@ -825,7 +716,7 @@ mod tests {
         let user =
             |subject: &str| serde_json::json!({ "issuer": "jazz:app:test", "subject": subject });
         let guest = serde_json::json!({
-            "issuer": jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            "issuer": jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
             "subject": "6f9619ff-8b86-5011-b42d-00c04fc964ff",
         });
         let nonce = Uuid::new_v4();

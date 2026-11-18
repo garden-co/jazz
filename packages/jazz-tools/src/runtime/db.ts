@@ -57,6 +57,7 @@ import {
   validateWriteWaitTimeout,
   WriteWaitTimeoutError,
 } from "./client.js";
+import { assertBacklogRows } from "./backlog-rows.js";
 import { sameSyncStatus, type SyncStatus } from "./sync-status.js";
 import type { TextAnchors } from "./text-anchors.js";
 import {
@@ -136,7 +137,7 @@ import { isThinDb, upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-
 import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 import { RuntimeClosedError } from "./runtime-closed-error.js";
 
-/** `getLocalFirstIdentityProof` hands out a session's sync proof only with this long left. */
+/** `getDeviceAccountProof` hands out a session's sync proof only with this long left. */
 const SESSION_PROOF_MIN_REMAINING_SECONDS = 30;
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
@@ -195,6 +196,14 @@ export type DbConfig = {
    * log off).
    */
   slowQueryThresholdMs?: number;
+  /**
+   * How many changed rows a subscription's undelivered deltas may hold before
+   * they are coalesced into one update of its current result, marked
+   * `reason: "backlog"` (default 10000). It bounds the memory a subscriber
+   * that falls behind a fast writer holds, and cannot be turned off. A query
+   * can set its own with `backlogRows`.
+   */
+  subscriptionBacklogRows?: number;
 } & (
   | {
       /** Local-first auth via a local seed. */
@@ -277,6 +286,13 @@ export type QueryOptions = ReadTierOptions & {
    * (see {@link DbSubscriptionUpdate}). One-shot reads ignore it.
    */
   splices?: readonly string[];
+  /**
+   * How many changed rows a subscription's undelivered deltas may hold before
+   * they are replaced by one update of the current result (marked
+   * `reason: "backlog"`). Overrides {@link DbConfig.subscriptionBacklogRows}
+   * (default 10000). A whole number, at least 1. One-shot reads ignore it.
+   */
+  backlogRows?: number;
 };
 
 type InternalDbQueryOptions = Omit<QueryOptions, "tier"> & {
@@ -311,6 +327,13 @@ export interface DbSubscriptionUpdate {
    * say): read its new value from the rows instead.
    */
   splices: ReadonlyMap<string, ValueSplices>;
+  /**
+   * `"backlog"` when this update replaced the result wholesale because the
+   * subscriber fell too far behind to be told every change (more than
+   * `backlogRows` changed rows waited undelivered): the rows are current,
+   * the intermediate states were skipped, and `splices` is empty.
+   */
+  reason?: "backlog";
 }
 
 /** Package-internal callbacks for incremental subscription consumers. */
@@ -347,6 +370,11 @@ function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptio
       throw new Error("splices must be an array of column names.");
     }
     if (splices.length > 0) lowered.splices = [...splices];
+  }
+  const backlogRows = (candidate as { backlogRows?: unknown }).backlogRows;
+  if (backlogRows !== undefined) {
+    assertBacklogRows(backlogRows, "backlogRows");
+    lowered.backlogRows = backlogRows;
   }
   if (isInspectorLocalQueryOptions(options)) lowered.tier = "local-only";
   return lowered;
@@ -399,6 +427,7 @@ const FORWARDED_TO_SUCCESSOR = [
   "updateAuthToken",
   "updateCookieSession",
   "getAuthState",
+  "getDeviceAccountProof",
   "getLocalFirstIdentityProof",
   "onAuthChanged",
   "onMutationError",
@@ -2573,15 +2602,15 @@ export class Db {
       );
       const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
         parseJwtPayload(newToken) ?? {},
-        "local-first",
+        "device-account",
       );
       if (!trustedReservedSession) {
-        throw new Error("Minted local-first token is missing its reserved session identity");
+        throw new Error("Minted device account token is missing its reserved session identity");
       }
       this.applyAuthUpdate(newToken, trustedReservedSession);
       this.scheduleLocalFirstRefresh(ttlSeconds);
     } catch (e) {
-      console.error("Failed to refresh local-first token:", e);
+      console.error("Failed to refresh device account token:", e);
     }
   }
 
@@ -2817,7 +2846,7 @@ export class Db {
         account.identity.issuer === "urn:jazz:local-first"
           ? internalSessionFromVerifiedReservedJwtPayload(
               parseJwtPayload(token) ?? {},
-              "local-first",
+              "device-account",
             )
           : undefined;
       if (!this.authStateStore.validateJwtToken(token, reserved ?? undefined)) return token;
@@ -2843,10 +2872,10 @@ export class Db {
   }
 
   /**
-   * A short-lived local-first JWT proving possession of the current identity:
-   * what a device account sends its own backend's routes as
+   * A short-lived JWT proving possession of the current device account: what
+   * a device account sends its own backend's routes as
    * `Authorization: Bearer` (`jazz.forReqUser(request)` there). Returns
-   * `null` if the current session is not local-first.
+   * `null` if the current session is not a device account.
    *
    * A Db opened by a session (`createJazzClient`, a provider) doesn't hold the
    * device key: it returns the session's current sync proof, which lasts up
@@ -2855,7 +2884,7 @@ export class Db {
    * (the session renews it). Ask for one per request, and don't log or
    * forward it: until it expires it also opens this account's sync.
    */
-  getLocalFirstIdentityProof(options?: { ttlSeconds?: number; audience?: string }): string | null {
+  getDeviceAccountProof(options?: { ttlSeconds?: number; audience?: string }): string | null {
     if (!this._localFirstSecret) {
       const token = this.config.jwtToken;
       const payload = token ? parseJwtPayload(token) : null;
@@ -2874,6 +2903,11 @@ export class Db {
     const ttl = options?.ttlSeconds ?? 60;
     const audience = options?.audience ?? clientScope(this.config);
     return this.mintLocalFirstToken(this._localFirstSecret, audience, ttl);
+  }
+
+  /** @deprecated Renamed to {@link getDeviceAccountProof}; this alias goes in a later release. */
+  getLocalFirstIdentityProof(options?: { ttlSeconds?: number; audience?: string }): string | null {
+    return this.getDeviceAccountProof(options);
   }
 
   /** @internal This Db's own runtime's auth state changes, which never move to a successor. */
@@ -2955,7 +2989,7 @@ export class Db {
    * agents and tests read the same through `window.__jazz.status()`.
    */
   getSyncStatus(): SyncStatus {
-    const next = this.connection.syncStatus();
+    const next = withAuthReason(this.connection.syncStatus(), this.authStateStore.getState().error);
     if (this.syncStatusSnapshot && sameSyncStatus(next, this.syncStatusSnapshot)) {
       return this.syncStatusSnapshot;
     }
@@ -2998,12 +3032,17 @@ export class Db {
       { once: true },
     );
     let published = this.getSyncStatus();
-    this.connection.onSyncStatusChange(() => {
+    const publish = () => {
       const status = this.getSyncStatus();
       if (status === published) return;
       published = status;
       listener(status);
-    }, subscription.signal);
+    };
+    this.connection.onSyncStatusChange(publish, subscription.signal);
+    // Why the server refused the credential may be known after the link
+    // went offline: the status says it then (`authReason`).
+    const stopAuth = this.authStateStore.onChange(publish);
+    subscription.signal.addEventListener("abort", stopAuth, { once: true });
     return end;
   }
 
@@ -3826,7 +3865,10 @@ export class Db {
             splices.set(change.id, change.splices);
           }
         }
-        onUpdate(update.all, { splices });
+        onUpdate(update.all, {
+          splices,
+          ...(update.reset && update.reason ? { reason: update.reason } : {}),
+        });
       },
       ...(onError === undefined ? {} : { onError }),
     };
@@ -4836,7 +4878,7 @@ async function openDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
       );
       const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
         parseJwtPayload(jwtToken) ?? {},
-        "local-first",
+        "device-account",
       );
       resolvedConfig = { ...configWithoutAuth, jwtToken };
       setTrustedReservedSession(resolvedConfig, trustedReservedSession);
@@ -4924,4 +4966,11 @@ function isRuntimeClosed(error: unknown): boolean {
   for (let current = error; current instanceof Error; current = current.cause)
     if (current instanceof RuntimeClosedError) return true;
   return false;
+}
+
+/** The status with why the server refused the credential, while the link is offline for it. */
+function withAuthReason(status: SyncStatus, reason: AuthFailureReason | undefined): SyncStatus {
+  const { link } = status;
+  if (link.state !== "offline" || link.reason !== "auth" || reason === undefined) return status;
+  return { ...status, link: { ...link, authReason: reason } };
 }

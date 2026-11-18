@@ -27,7 +27,7 @@ first started with the wrong one, or your app's id changed, stop the backend and
 npx jazz-tools store set-app-id ./data <app id>
 ```
 
-Local-first guests' accounts are derived from the app id, so after a change they no longer match
+Guests' device accounts are derived from the app id, so after a change they no longer match
 the ones their devices hold: change it only for a store whose users haven't relied on the old one.
 
 If your chunks are in another directory (`files({ dir })`) or a bucket (`s3()`), they're part of the
@@ -86,6 +86,119 @@ deployment isn't a fallback: the core always runs the newest `jazz-tools` its Dr
 once the new deployment has woken it, promoting the old deployment again doesn't roll back its data.
 To try an upgrade first, deploy it to a preview branch: with the per-branch setup, that preview gets
 a core of its own, separate from production's (a dry run with its own data, not a copy).
+
+## Upgrading from alpha.68
+
+Local-first auth is called device accounts now, and alpha.69 renames the last names that still
+said so. **Search your app for each name below and replace it.** The search patterns are precise,
+so you, or an AI coding assistant you point at this section, can make every change in one pass.
+
+### `session.authMode` is `"device-account"` (was `"local-first"`)
+
+A device account's `session.authMode` is `"device-account"`. Every comparison of
+`session.authMode` with `"local-first"` must change. alpha.69 refuses the old value rather than let
+the comparison quietly stop matching, since `session.authMode != 'local-first'` would otherwise
+start letting device accounts in:
+
+- `jazz-tools generate` and `validate` (and a deployment) refuse it, with the error
+  `session.authMode is never "local-first" any more: local-first auth was renamed to device accounts, so compare with "device-account"`;
+- in `schema.ts`, `eq`, `ne` and `isIn` with `session.authMode` and `"local-first"` are type
+  errors.
+
+**Permissions published before alpha.69 stop working on an alpha.69 core.** What counts is the
+version of the core your permissions run on (your self-hosted server, or the Jazz Cloud core), not
+your backend's. On an alpha.69 core, a policy that still compares `session.authMode` with
+`"local-first"` no longer compiles. Every query whose policy contains that comparison then fails,
+for **every** user, signed-in ones included, until you deploy the renamed permissions.
+
+**Upgrade the core and redeploy your backend together.** On Jazz Cloud you upgrade your app's core
+separately from your deployment (`npx jazz-tools apps upgrade`), so the two can be out of step for a
+while:
+
+- an alpha.69 core with your old permissions: the tables those policies guard fail for everyone,
+  as above;
+- your new permissions on a core still on alpha.68: `eq(session.authMode, "device-account")` never
+  matches, which locks device accounts (guests) out, and `ne(session.authMode, "device-account")`
+  always matches, which lets them in.
+
+To stay correct across that window, check the issuer instead of `authMode`. It's the same on both
+versions: `eq(session.identity.issuer, "urn:jazz:local-first")` holds exactly for a device account
+(`ne(…)` for everyone else). Switch to `session.authMode` once both sides are on alpha.69.
+
+**Where to change it.** Only where the value is compared with an `authMode`:
+
+| Where                   | Before                                                     | After                                                    |
+| ----------------------- | ---------------------------------------------------------- | -------------------------------------------------------- |
+| `schema.ts` permissions | `eq(session.authMode, "local-first")`                      | `eq(session.authMode, "device-account")`                 |
+|                         | `ne(session.authMode, "local-first")`                      | `ne(session.authMode, "device-account")`                 |
+|                         | `isIn(session.authMode, ["external", "local-first"])`      | `isIn(session.authMode, ["external", "device-account"])` |
+| App code                | `session.authMode === "local-first"` (or `!==`)            | `session.authMode === "device-account"`                  |
+|                         | `case "local-first":` in a `switch` on `authMode`          | `case "device-account":`                                 |
+| Policy tests            | `createPolicyTestApp(app).as({ authMode: "local-first" })` | `.as({ authMode: "device-account" })`                    |
+
+`jazz.permissions.json` follows from `schema.ts` when you run `generate`: don't edit it by hand.
+
+To find them, search for `local-first` next to `authMode`, and for `case "local-first":`:
+
+```bash
+grep -rnE "authMode.{0,40}local-first|local-first.{0,40}authMode|case ['\"]local-first" \
+  --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' --include='*.mjs' \
+  --include='*.svelte' --include='*.vue' . --exclude-dir=node_modules
+```
+
+A search can't find them all: a call your formatter wrapped over several lines, or a value kept in a
+variable (`const mode = "local-first"; … eq(session.authMode, mode)`). So after making the changes,
+**run your typecheck and `npx jazz-tools generate`**: the typecheck flags `"local-first"` compared
+with an `authMode`, and `generate` refuses whatever is left, naming it.
+
+**Leave every other `"local-first"` as it is.** These are about where data is stored, not how a
+session signed in:
+
+- the read tier `tier: "local-first"`;
+- `jazz-tools/local-first` and `upgradeToLocalFirst`;
+- the device-account JWT issuer `urn:jazz:local-first` and the `X-Jazz-Local-First-Audience`
+  header;
+- `allowLocalFirstAuth`;
+- claims you named yourself, such as `session.claims.mode = 'local-first'`.
+
+Then run `npx jazz-tools generate`, commit `jazz.app.json` and `jazz.permissions.json`, and
+redeploy your backend. The permissions bundle changes with the new value; the schema hashes don't.
+
+### `AccountAuthError` codes
+
+Three codes are renamed. Replace them wherever your app compares `error.code`:
+
+| Before                             | After                                 |
+| ---------------------------------- | ------------------------------------- |
+| `local_first_account_required`     | `device_account_required`             |
+| `local_first_recovery_unavailable` | `device_account_recovery_unavailable` |
+| `local_first_restore_unavailable`  | `device_account_restore_unavailable`  |
+
+`grep -rnE "local_first_(account_required|recovery_unavailable|restore_unavailable)" .` finds them.
+The HTTP error codes `local_first_auth_disabled`, `invalid_local_first_proof` and
+`local_first_proof_required` are unchanged: leave them.
+
+### Renamed APIs (the old names still work)
+
+These old names are deprecated aliases. They keep working, but rename them now so a later release
+that removes them doesn't break your app:
+
+| Before                                              | After                                                 |
+| --------------------------------------------------- | ----------------------------------------------------- |
+| `db.getLocalFirstIdentityProof(options)`            | `db.getDeviceAccountProof(options)` (same options)    |
+| type `LocalFirstGuest` from `jazz-tools/backend`    | type `DeviceAccountsAnswer` from `jazz-tools/backend` |
+| `jazz-tools apps auth set --allow-local-first-auth` | `jazz-tools apps auth set --allow-device-accounts`    |
+
+Look for the CLI flag in `package.json` scripts, shell scripts and CI workflows. Rename
+`LocalFirstGuest` only where it's imported from `jazz-tools/backend`: a type of your own with that
+name is unaffected.
+
+### For an AI coding assistant
+
+To have an assistant make these changes, give it this section and a prompt such as: "Upgrade this
+app to jazz-tools alpha.69 following the 'Upgrading from alpha.68' section. Change only the
+comparisons it lists, leave every other `local-first` alone, then run `npx jazz-tools generate` and
+the typecheck, and show me the diff." Review the diff before you deploy.
 
 ## Upgrading from alpha.66
 
@@ -406,7 +519,7 @@ in: after your own sign-in or sign-out, `refresh()` follows it.
   `useJazzSession()` (Svelte: `getJazzSession()`), also in the provider's `signedOut`, `loading` and
   `error` views. `session.db` is the signed-in user's Db; it throws while there is none.
 - **Device accounts** are how you do guests, and a local-first friendly way to sign in: an account
-  whose key lives on the device. See [Device Accounts](/docs/setup/auth/local-first).
+  whose key lives on the device. See [Device Accounts](/docs/setup/auth/device-accounts).
 - **Errors.** A failed operation that leaves the client usable keeps the session `ready`, with
   `error` set. `status: "error"` now means there is no usable client.
 - **`window.__jazz` is Jazz's page handle**, set by every browser client: `status()`,
@@ -622,7 +735,7 @@ Then:
 
 5. **Start your new backend** on alpha.65 with `sqlite({ path: "./data-new" })`, then deploy the
    new client, also on alpha.65.
-   If your alpha.59 app had local-first guests, pass your old app ID as `scope` to the client, so
+   If your alpha.59 app had guests on device accounts, pass your old app ID as `scope` to the client, so
    each guest's device finds its account again:
 
    ```ts
@@ -632,7 +745,7 @@ Then:
    (`<JazzProvider config={{ scope: "…" }}>` in React.) With `scope` set, each guest's browser finds its
    alpha.59 account by itself, on the same origin; there's nothing else to do. Without it, those
    guests can't open their accounts. The import prints the exact `scope` line when it brings
-   local-first guests over. If the alpha.59 app was reached through more than one Jazz server URL
+   guests' device accounts over. If the alpha.59 app was reached through more than one Jazz server URL
    on that origin, guests aren't picked up automatically.
    Keep `./data` and the dump until you're happy with the result.
 
@@ -641,7 +754,7 @@ Then:
 
 `--app-id` is your app's ID exactly as before, case included: the import uses it to link each
 returning user's old sign-in to their account, as `jazz:backend` with their old `sub` (as [`fromJWT()`](/docs/setup/auth/custom) returns it), and to keep
-local-first guests on their accounts once the client is scoped to the alpha.59 app ID (step 5). The store keeps it in `jazz.sqlite`, so your code never needs
+guests on their device accounts once the client is scoped to the alpha.59 app ID (step 5). The store keeps it in `jazz.sqlite`, so your code never needs
 it: `sqlite({ path })` runs as the old app. Pass
 `--no-backend-identity-links` to skip that. The dump holds all your app's data, so store it like the
 data directory and delete it when you're done.

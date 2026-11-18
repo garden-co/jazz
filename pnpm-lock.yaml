@@ -200,7 +200,11 @@ importers:
 
   crates/jazz-rn/npm/ios: {}
 
-  crates/jazz-wasm: {}
+  crates/jazz-wasm:
+    devDependencies:
+      miniflare:
+        specifier: 4.20260401.0
+        version: 4.20260401.0
 
   dev/benchmarks/example-load-times:
     devDependencies:
@@ -2448,6 +2452,9 @@ importers:
       libsodium-wrappers:
         specifier: 0.8.3
         version: 0.8.3
+      miniflare:
+        specifier: 4.20260401.0
+        version: 4.20260401.0
       prettier:
         specifier: ^3.9.5
         version: 3.9.5

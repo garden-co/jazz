@@ -38,8 +38,206 @@ use super::*;
 use crate::schema::history::{history_source_table, is_history_table};
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
 
-pub(super) type Queue = Rc<RefCell<VecDeque<SubscriptionEvent>>>;
+pub(super) type Queue = Rc<RefCell<EventQueue>>;
+
+/// The default for [`crate::db::Db::set_subscription_backlog_limit`]: how
+/// many changed rows a subscription's undelivered deltas may hold before
+/// they are coalesced into one reset of the current result.
+pub const DEFAULT_SUBSCRIPTION_BACKLOG_LIMIT: NonZeroUsize = NonZeroUsize::new(10_000).unwrap();
+
+/// One member's undelivered events.
+///
+/// A local reader's queue is bounded: once its deltas hold more than
+/// `limit` changed rows, they are dropped and the reader is told the
+/// current result instead, as one reset marked `coalesced` (built when it
+/// next reads, from the group's rows then). A result is a set, so the
+/// current one supersedes every delta that led to it: what the reader
+/// holds is never more than its limit, one dispatch's deltas, and the
+/// result it asked for. A reset counts for nothing, as the result is that
+/// size anyway.
+///
+/// Only a reader that fell behind is coalesced: it takes two queued
+/// deltas, so one big delta a drained reader has not had the chance to
+/// read yet (a bulk import) is delivered as it is.
+///
+/// A replica's queue (a sync session's) is not bounded here: it is drained
+/// every tick, and must see every removal, which a reset would not list.
+pub(super) struct EventQueue {
+    events: VecDeque<SubscriptionEvent>,
+    /// Changed rows the queued deltas hold (a delta counts at least one).
+    rows: usize,
+    /// Deltas queued (resets included).
+    deltas: usize,
+    /// `None`: never coalesced (a replica's).
+    limit: Option<NonZeroUsize>,
+    /// Coalesced: a reset of the current result is due after the events
+    /// queued ahead of it.
+    stale: Option<Stale>,
+    /// Counts coalescings, for [`FanoutStats::coalesced`].
+    coalesced: Rc<std::cell::Cell<u64>>,
+}
+
+/// A due coalesced reset.
+#[derive(Clone, Copy)]
+struct Stale {
+    /// The last dropped delta's settlement, which the reset carries.
+    settled: bool,
+    tier: DurabilityTier,
+    /// Events queued before the dropped deltas (an error ending the
+    /// stream), read before the reset.
+    ahead: usize,
+}
+
+impl EventQueue {
+    fn new(
+        limit: Option<NonZeroUsize>,
+        coalesced: Rc<std::cell::Cell<u64>>,
+        first: Option<SubscriptionEvent>,
+    ) -> Self {
+        let mut queue = Self {
+            events: VecDeque::new(),
+            rows: 0,
+            deltas: 0,
+            limit,
+            stale: None,
+            coalesced,
+        };
+        if let Some(first) = first {
+            queue.deltas += usize::from(matches!(first, SubscriptionEvent::Delta { .. }));
+            queue.events.push_back(first);
+        }
+        queue
+    }
+
+    fn weight(event: &SubscriptionEvent) -> usize {
+        match event {
+            SubscriptionEvent::Delta { reset: true, .. } => 0,
+            SubscriptionEvent::Delta {
+                added,
+                updated,
+                removed,
+                ..
+            } => (added.len() + updated.len() + removed.len()).max(1),
+            _ => 0,
+        }
+    }
+
+    pub(super) fn push_back(&mut self, event: SubscriptionEvent, table: &str) {
+        if let SubscriptionEvent::Delta { settled, tier, .. } = &event
+            && let Some(stale) = &mut self.stale
+        {
+            // Superseded by the reset the reader is told next.
+            stale.settled = *settled;
+            stale.tier = *tier;
+            return;
+        }
+        let stamp = match &event {
+            SubscriptionEvent::Delta { settled, tier, .. } => Some((*settled, *tier)),
+            _ => None,
+        };
+        self.rows += Self::weight(&event);
+        self.deltas += usize::from(stamp.is_some());
+        self.events.push_back(event);
+        let (Some(limit), Some((settled, tier))) = (self.limit, stamp) else {
+            return;
+        };
+        if self.rows <= limit.get() || self.deltas < 2 {
+            return;
+        }
+        let dropped = self.rows;
+        // Deltas go. An error or close keeps its place: ahead of the reset
+        // if it was queued before the dropped deltas, after it otherwise.
+        let ahead = self
+            .events
+            .iter()
+            .position(|event| matches!(event, SubscriptionEvent::Delta { .. }))
+            .unwrap_or(self.events.len());
+        self.events
+            .retain(|event| !matches!(event, SubscriptionEvent::Delta { .. }));
+        self.rows = 0;
+        self.deltas = 0;
+        self.stale = Some(Stale {
+            settled,
+            tier,
+            ahead,
+        });
+        self.coalesced.set(self.coalesced.get() + 1);
+        tracing::warn!(
+            target: "jazz::subscription",
+            table,
+            rows = dropped,
+            limit = limit.get(),
+            "subscription reader fell behind: its undelivered changes are coalesced \
+             into one reset of the current result",
+        );
+    }
+
+    /// Whether a coalesced reset is due next, which [`Self::pop_front`]
+    /// builds from the group's rows.
+    pub(super) fn reset_due(&self) -> bool {
+        self.stale.is_some_and(|stale| stale.ahead == 0)
+    }
+
+    /// The next event. A due coalesced reset reads as a reset of `rows`:
+    /// `None` when the group cannot be read now, and the reset then waits
+    /// for the next read instead of being lost.
+    pub(super) fn pop_front(&mut self, rows: Option<&[CurrentRow]>) -> Option<SubscriptionEvent> {
+        if let Some(stale) = &mut self.stale {
+            if stale.ahead > 0 {
+                stale.ahead -= 1;
+                return self.events.pop_front();
+            }
+            let rows = rows?;
+            let Stale { settled, tier, .. } = *stale;
+            self.stale = None;
+            let mut event = opening(rows);
+            if let SubscriptionEvent::Delta {
+                settled: s,
+                tier: t,
+                coalesced,
+                ..
+            } = &mut event
+            {
+                *s = settled;
+                *t = tier;
+                *coalesced = true;
+            }
+            return Some(event);
+        }
+        let event = self.events.pop_front()?;
+        self.rows = self.rows.saturating_sub(Self::weight(&event));
+        if matches!(event, SubscriptionEvent::Delta { .. }) {
+            self.deltas -= 1;
+        }
+        Some(event)
+    }
+
+    /// Every queued event, for a replica's tick (never coalesced).
+    pub(super) fn drain_all(&mut self) -> Vec<SubscriptionEvent> {
+        debug_assert!(self.stale.is_none(), "a replica's queue is not coalesced");
+        self.rows = 0;
+        self.deltas = 0;
+        self.events.drain(..).collect()
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.events.clear();
+        self.rows = 0;
+        self.deltas = 0;
+        self.stale = None;
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.events.is_empty() && self.stale.is_none()
+    }
+
+    /// Changed rows the queued deltas hold, for tests.
+    pub(super) fn backlog_rows(&self) -> usize {
+        self.rows
+    }
+}
 
 /// What a group reads.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -236,7 +434,10 @@ struct GroupKey {
     sql: String,
     params: String,
     /// Set only when the SQL depends on the identity's session (array
-    /// relations, read as the identity, always may).
+    /// relations, read as the identity, always may): the identity and where
+    /// its claims come from. A registry-following read and one carrying
+    /// fixed request claims can compile to the same SQL today, but only the
+    /// first follows a later registry change.
     identity: Option<String>,
     /// The array relations nested in each row: queries that differ only
     /// in them compile to the same root SQL.
@@ -251,8 +452,18 @@ struct GroupKey {
     position: String,
 }
 
+/// Whose queue a member's events go to.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Backlog {
+    /// A local reader's ([`crate::db::SubscriptionStream`]): bounded at its
+    /// read's limit, or the store's ([`Fanout::backlog_limit`]).
+    Reader(Option<NonZeroUsize>),
+    /// A sync session's: drained every tick, never coalesced.
+    Replica,
+}
+
 struct Member {
-    queue: Weak<RefCell<VecDeque<SubscriptionEvent>>>,
+    queue: Weak<RefCell<EventQueue>>,
     shape: Shape,
     bound: bool,
     /// Where this member's `settled` flag comes from, and the tier it was
@@ -463,6 +674,9 @@ pub struct FanoutStats {
     /// skipped: no occurrence of it in the group's policies could see the
     /// change.
     pub unevidenced: u64,
+    /// Times a local reader's undelivered deltas passed its backlog limit
+    /// and were coalesced into one reset.
+    pub coalesced: u64,
 }
 
 #[derive(Default)]
@@ -478,6 +692,10 @@ pub(super) struct Fanout {
     stats: FanoutStats,
     /// Bumped by every dropped stream, so `collect` scans only when needed.
     pub(super) dropped: Rc<std::cell::Cell<usize>>,
+    /// Bumped by every coalesced backlog ([`EventQueue`]).
+    coalesced: Rc<std::cell::Cell<u64>>,
+    /// A local reader's backlog limit when its read sets none.
+    pub(super) backlog_limit: Option<NonZeroUsize>,
 }
 
 /// The canonical form of a stored SQL value, for watch matching.
@@ -595,7 +813,11 @@ impl Fanout {
     fn drop_group(&mut self, gid: u64) {
         if let Some(group) = self.groups.remove(&gid) {
             let group = group.borrow();
-            self.by_key.remove(&group.key);
+            // A refreshed group may have converged on a key another group
+            // already owns: that owner's entry stays.
+            if self.by_key.get(&group.key) == Some(&gid) {
+                self.by_key.remove(&group.key);
+            }
             self.unindex(gid, &group.watches);
         }
     }
@@ -645,6 +867,7 @@ impl Fanout {
             });
         FanoutStats {
             groups: self.groups.len(),
+            coalesced: self.coalesced.get(),
             kept_plans,
             kept_root_plans,
             ..self.stats.clone()
@@ -678,7 +901,7 @@ impl Fanout {
                         *settled = true;
                         *tier = now;
                     }
-                    queue.borrow_mut().push_back(event);
+                    queue.borrow_mut().push_back(event, &group.query().table);
                 }
             }
         }
@@ -686,6 +909,29 @@ impl Fanout {
 }
 
 impl Inner {
+    /// The key subscriptions share a group by (see [`GroupKey`]).
+    fn group_key(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+        compiled: &Compiled,
+        session_used: bool,
+    ) -> GroupKey {
+        let effective = identity.unwrap_or(self.identity.author);
+        GroupKey {
+            renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
+            sql: compiled.sql.clone(),
+            params: format!("{:?}", compiled.params),
+            identity: (session_used || !prepared.query.array_subqueries.is_empty())
+                .then(|| format!("{identity:?} {:?}", prepared.fixed_claims_for(effective))),
+            relations: format!("{:?}", prepared.query.array_subqueries),
+            partial: format!("{:?}", compiled.partial),
+            splices: read.splices.clone(),
+            position: format!("{:?}", read.position),
+        }
+    }
+
     /// Open a subscription: join the group with identical SQL, or start one.
     pub(super) fn subscribe_member(
         &mut self,
@@ -693,20 +939,27 @@ impl Inner {
         identity: Option<AuthorSubject>,
         read: ReadSpec,
         settled: sync::SettledBy,
+        backlog: Backlog,
     ) -> Result<(Queue, Weak<RefCell<Group>>), Error> {
+        let limit = match backlog {
+            Backlog::Replica => None,
+            Backlog::Reader(limit) => Some(
+                limit
+                    .or(self.fan.backlog_limit)
+                    .unwrap_or(DEFAULT_SUBSCRIPTION_BACKLOG_LIMIT),
+            ),
+        };
+        let coalesced = self.fan.coalesced.clone();
+        let new_queue = |first: Option<SubscriptionEvent>| -> Queue {
+            Rc::new(RefCell::new(EventQueue::new(
+                limit,
+                coalesced.clone(),
+                first,
+            )))
+        };
         self.check_splices(&prepared.query, &read.splices)?;
         let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
-        let key = GroupKey {
-            renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
-            sql: compiled.sql.clone(),
-            params: format!("{:?}", compiled.params),
-            identity: (session_used || !prepared.query.array_subqueries.is_empty())
-                .then(|| format!("{identity:?}")),
-            relations: format!("{:?}", prepared.query.array_subqueries),
-            partial: format!("{:?}", compiled.partial),
-            splices: read.splices.clone(),
-            position: format!("{:?}", read.position),
-        };
+        let key = self.group_key(prepared, identity, &read, &compiled, session_used);
         let now = settled.get();
         // `opened`: the member's queue starts with an opening.
         let member = |queue: &Queue, opened: bool| Member {
@@ -744,11 +997,7 @@ impl Inner {
             // While the group awaits chunks its rows may be stale: the
             // joiner opens with the group's next successful run instead.
             let opened = group.opened && !group.awaiting;
-            let queue: Queue = Rc::new(RefCell::new(if opened {
-                VecDeque::from([open(&group.rows)])
-            } else {
-                VecDeque::new()
-            }));
+            let queue = new_queue(opened.then(|| open(&group.rows)));
             group.members.push(member(&queue, opened));
             self.fan.stats.shared_joins += 1;
             return Ok((queue, Rc::downgrade(&handle)));
@@ -796,11 +1045,7 @@ impl Inner {
         );
         let projected = order_projected(&prepared.query, &compiled);
         let includes = self.output_only_includes(prepared, identity, &read, &compiled)?;
-        let queue: Queue = Rc::new(RefCell::new(if awaiting {
-            VecDeque::new()
-        } else {
-            VecDeque::from([open(&rows)])
-        }));
+        let queue = new_queue((!awaiting).then(|| open(&rows)));
         let gid = self.fan.next;
         self.fan.next += 1;
         self.fan.index(gid, &watches);
@@ -1733,10 +1978,25 @@ impl Inner {
             // which a schema change can rename or renumber: they are
             // rebuilt with the watches, and dropped (the tables watched
             // whole) when the watches cannot be.
+            // The group is found by what it now compiles to: its old key
+            // may name SQL (claim values, policies) it no longer runs.
+            if self.fan.by_key.get(&group.key) == Some(&gid) {
+                self.fan.by_key.remove(&group.key);
+            }
             let (watches, correlations, evidence) = self
-                .compile(&group.prepared, group.identity, &group.read)
-                .and_then(|compiled| {
-                    self.watch_plan(&group.prepared, group.identity, &group.read, &compiled)
+                .compile_tracked(&group.prepared, group.identity, &group.read)
+                .and_then(|(compiled, session_used)| {
+                    let plan =
+                        self.watch_plan(&group.prepared, group.identity, &group.read, &compiled)?;
+                    group.key = self.group_key(
+                        &group.prepared,
+                        group.identity,
+                        &group.read,
+                        &compiled,
+                        session_used,
+                    );
+                    self.fan.by_key.entry(group.key.clone()).or_insert(gid);
+                    Ok(plan)
                 })
                 .unwrap_or_else(|_| {
                     let watches = old
@@ -1808,9 +2068,8 @@ impl Inner {
             let mut names: Vec<String> = Vec::new();
             let rows = statement.query_map(params, |r| {
                 if names.is_empty() {
-                    let statement = r.as_ref();
-                    names = (0..statement.column_count())
-                        .map(|i| statement.column_name(i).map(str::to_owned))
+                    names = (0..r.column_count())
+                        .map(|i| r.column_name(i).map(str::to_owned))
                         .collect::<Result<_, _>>()?;
                 }
                 let mut seq = 0i64;
@@ -2895,6 +3154,8 @@ fn compose(
         removed,
         settled,
         tier,
+        // Composed from plain deltas only: never a coalesced reset.
+        coalesced: false,
     }]
 }
 
@@ -3011,7 +3272,7 @@ impl Group {
                 }
                 member.told.set(told);
             }
-            queue.borrow_mut().push_back(event);
+            queue.borrow_mut().push_back(event, &query.table);
         }
     }
 }
@@ -4734,6 +4995,97 @@ fn cut_of(read: &ReadSpec) -> Option<(sync::Pos, usize)> {
         .then_some(read.cut.as_ref())
         .flatten()
         .map(|cut| (cut.seq, cut.extra.len()))
+}
+
+/// The queue's own order rules, white-box: a subscription only rejects
+/// when its query fails or its server refuses it, which no public API
+/// makes happen in the middle of a backlog on demand.
+#[cfg(test)]
+mod event_queue_tests {
+    use super::*;
+
+    fn one_row_delta() -> SubscriptionEvent {
+        delta(false, Vec::new(), Vec::new(), vec![removed()])
+    }
+
+    fn removed() -> RemovedRow {
+        RemovedRow {
+            table: "notes".to_owned(),
+            row_uuid: RowUuid::from_bytes([1; 16]),
+            joined: Vec::new(),
+            version: None,
+            union_arm: None,
+            index: 0,
+        }
+    }
+
+    fn rejected() -> SubscriptionEvent {
+        SubscriptionEvent::Rejected {
+            code: ErrorCode::Storage,
+            message: "gone".to_owned(),
+            reason: "gone".to_owned(),
+        }
+    }
+
+    fn queue(limit: usize) -> EventQueue {
+        EventQueue::new(
+            NonZeroUsize::new(limit),
+            Rc::new(std::cell::Cell::new(0)),
+            None,
+        )
+    }
+
+    fn is_reset(event: &Option<SubscriptionEvent>) -> bool {
+        matches!(
+            event,
+            Some(SubscriptionEvent::Delta {
+                reset: true,
+                coalesced: true,
+                ..
+            })
+        )
+    }
+
+    /// A rejection queued before the deltas that are coalesced is read
+    /// before the reset; one queued after them, after it.
+    #[test]
+    fn a_rejection_keeps_its_place_around_the_coalesced_reset() {
+        let mut before = queue(2);
+        before.push_back(rejected(), "notes");
+        for _ in 0..3 {
+            before.push_back(one_row_delta(), "notes");
+        }
+        assert!(matches!(
+            before.pop_front(Some(&[])),
+            Some(SubscriptionEvent::Rejected { .. })
+        ));
+        assert!(is_reset(&before.pop_front(Some(&[]))));
+        assert!(before.pop_front(Some(&[])).is_none());
+
+        let mut after = queue(2);
+        for _ in 0..3 {
+            after.push_back(one_row_delta(), "notes");
+        }
+        after.push_back(rejected(), "notes");
+        assert!(is_reset(&after.pop_front(Some(&[]))));
+        assert!(matches!(
+            after.pop_front(Some(&[])),
+            Some(SubscriptionEvent::Rejected { .. })
+        ));
+    }
+
+    /// A due reset that cannot be built now (its group is busy) stays due.
+    #[test]
+    fn a_reset_that_cannot_be_built_stays_due() {
+        let mut queue = queue(1);
+        queue.push_back(one_row_delta(), "notes");
+        queue.push_back(one_row_delta(), "notes");
+        assert!(queue.reset_due());
+        assert!(queue.pop_front(None).is_none());
+        assert!(queue.reset_due());
+        assert!(is_reset(&queue.pop_front(Some(&[]))));
+        assert!(queue.is_empty());
+    }
 }
 
 #[cfg(test)]
