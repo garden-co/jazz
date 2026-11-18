@@ -137,3 +137,34 @@ pub fn physical_column(conn: &rusqlite::Connection, table: &str, column: &str) -
 pub fn stored(db: &jazz::db::Db, table: &str, column: &str) -> String {
     db.stored_column_for_test(table, column).1
 }
+
+/// Reopen `db`'s store file at `path` under `config`, shipping the schema
+/// `db` runs under and `lenses` as the app's migrations: how a deployment
+/// installs a newer schema, when the store opens. A running store never
+/// switches schema. An authority stays one.
+pub fn reinstall(
+    db: jazz::db::Db,
+    path: &std::path::Path,
+    mut config: jazz::db::DbConfig,
+    lenses: Vec<jazz::protocol::MigrationLens>,
+) -> jazz::db::Db {
+    let source = db.current_schema();
+    let authority = db.is_authority();
+    drop(db);
+    // With no lens, the store names the new version against the ones it
+    // admitted, as for a store opened under an unshipped schema.
+    if !lenses.is_empty() && source.version_id() != config.schema.version_id() {
+        config.migrations.schemas.push(source);
+    }
+    config.migrations.lenses.extend(lenses);
+    let db = jazz::db::block_on(jazz::db::Db::open_at(
+        config,
+        path,
+        jazz::db::FileOptions::default(),
+    ))
+    .unwrap();
+    if authority {
+        db.set_authority();
+    }
+    db
+}
