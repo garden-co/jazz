@@ -468,3 +468,79 @@ fn the_founders_view_reads_on_the_objects_connection_inside_a_scope() {
         })
         .unwrap();
 }
+
+/// A host whose registry install leaves the core without one.
+struct NoRegistryHost(FileHost);
+
+impl CoreHost for NoRegistryHost {
+    fn store(&self) -> Result<StoreFile, String> {
+        self.0.store()
+    }
+
+    fn install_registry(&self, _: &mut ServerCore) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// A core that serves an encrypting app without the account registry its
+/// checks read is refused, as native refuses it: at open (a host whose
+/// install left no registry), and at deploy (a core opened without one).
+/// An app without encryption does not need it.
+#[test]
+fn an_encrypting_app_is_not_served_without_the_account_registry() {
+    // At open: the deploy opens the core, and the install left no registry.
+    let mut host = Host::new(Box::new(NoRegistryHost(FileHost::new())));
+    let error = host
+        .deploy(&loaded(APP).deployment_body(false))
+        .unwrap_err();
+    assert_eq!(error.0, 500, "{error:?}");
+    assert!(
+        error.1["error"]
+            .as_str()
+            .unwrap()
+            .contains("account registry"),
+        "{error:?}"
+    );
+    assert!(host.core.is_none(), "no core is kept without its registry");
+    // Without encryption such a host deploys.
+    let mut host = Host::new(Box::new(NoRegistryHost(FileHost::new())));
+    host.deploy(&plain().deployment_body(false)).unwrap();
+
+    // At deploy: a core opened for no app has no registry to install.
+    let files = FileHost::new();
+    let app = loaded(APP);
+    let mut core = ServerCore::open(
+        JazzSchema::new(app.current_schema()).unwrap(),
+        files.store().unwrap(),
+        false,
+        None,
+    )
+    .unwrap();
+    assert!(!core.has_account_registry());
+    let refused = apply_to_core(
+        &mut core,
+        &files.store().unwrap(),
+        app.deployment_body(false).to_string().as_bytes(),
+        1,
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(refused.status.as_u16(), 422, "{:?}", refused.body);
+    assert!(
+        refused.body["error"]
+            .as_str()
+            .unwrap()
+            .contains("needs the account registry"),
+        "{:?}",
+        refused.body
+    );
+    assert_eq!(
+        files
+            .store()
+            .unwrap()
+            .host_get(DECLARATIONS, &app.current_hash().0)
+            .unwrap(),
+        None,
+        "nothing was kept"
+    );
+}

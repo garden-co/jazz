@@ -2213,10 +2213,12 @@ mod core_host {
         /// Keep `core` as the open core, with the account registry its
         /// checks read installed (see [`ObjectHost`]).
         fn install(&mut self, mut core: ServerCore) -> Result<(), String> {
-            ObjectHost {
-                storage: self.storage.clone(),
-            }
-            .install_registry(&mut core)?;
+            deployment::install_registry(
+                &ObjectHost {
+                    storage: self.storage.clone(),
+                },
+                &mut core,
+            )?;
             self.core = Some(core);
             Ok(())
         }
@@ -2242,8 +2244,11 @@ mod core_host {
                 .map_err(|error| error.to_string())?;
             // The core's checks read the registry on the object's own SQL,
             // which sees what the registry wrote.
-            core.install_account_registry(durable_object_storage(self.storage.clone()));
-            Ok(())
+            if core.install_account_registry(durable_object_storage(self.storage.clone())) {
+                Ok(())
+            } else {
+                Err("the account registry needs the core opened for an app".to_owned())
+            }
         }
     }
 

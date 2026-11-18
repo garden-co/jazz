@@ -100,6 +100,20 @@ impl ServerCore {
         self.owner.encrypts()
     }
 
+    /// Refuse a core that serves an encrypting app without the account
+    /// registry its checks read installed, as native refuses to open one
+    /// (`Owner::open`).
+    pub fn require_account_registry(&self) -> Result<(), String> {
+        if self.owner.registry_missing()? {
+            return Err(
+                "this app encrypts columns, which needs the account registry of \
+                 an app's store; this core has none installed"
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
+
     /// Whether the account registry the checks beside the E2EE account
     /// tables' policies read is installed.
     pub fn has_account_registry(&self) -> bool {

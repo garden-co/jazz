@@ -345,6 +345,15 @@ fn staging_error(error: jazz::db::Error) -> String {
 }
 
 impl Deployment {
+    /// Whether any version this deployment publishes has Jazz's system
+    /// tables.
+    pub fn encrypts(&self) -> bool {
+        self.prepared.schemas().iter().any(|schema| {
+            jazz::tools::deployment::artifact::system_tables::check_e2ee_fragment(schema)
+                .unwrap_or(false)
+        })
+    }
+
     /// The schema a runtime that does not exist yet starts with: the
     /// deployment's first.
     pub fn genesis(&self) -> Result<JazzSchema, DeployError> {
@@ -369,6 +378,11 @@ impl Deployment {
 /// version may not change them in a way that breaks its sealed cells
 /// (migrations §3.1), even though the schema is unchanged.
 pub const DECLARATIONS: jazz::host::HostTable = jazz::host::HostTable::new("e2ee_declarations");
+
+/// Why a deployment that brings an encrypting app to a runtime without the
+/// account registry its checks read is refused before anything is applied.
+pub const REGISTRY_REQUIRED: &str = "this app encrypts columns, which needs the account registry of an app's store; \
+     the server's runtime has none";
 
 /// Parse a deploy body (a [`DeployRequest`] and its encryption
 /// declarations).
@@ -404,6 +418,11 @@ pub fn apply_to_core(
             .host_get(DECLARATIONS, &version.0)
             .map_err(|error| error.to_string())
     })?;
+    // As native refuses it: an encrypting app needs the registry its checks
+    // read, whatever brings it to the core.
+    if !probe && deployment.encrypts() && !core.has_account_registry() {
+        return Err(DeployError::invalid(REGISTRY_REQUIRED));
+    }
     let first = if probe {
         Vec::new()
     } else {
@@ -415,6 +434,10 @@ pub fn apply_to_core(
     };
     if !deployment.staged.response.changed {
         core.reload_catalogue().map_err(DeployError::internal)?;
+        // `first` holds only versions whose kept value `prepare_encrypted`
+        // just read as absent, in this same call, and a host that runs one
+        // call at a time (a Durable Object) cannot have another deploy
+        // write one in between: nothing here can meet a different value.
         for (table, key, value) in &first {
             store
                 .host_put_if_absent(*table, key, value)
@@ -436,6 +459,17 @@ pub trait CoreHost {
     /// Create the account registry's tables if they are missing, and
     /// install the registry the account tables' checks read on `core`.
     fn install_registry(&self, core: &mut crate::runtime::ServerCore) -> Result<(), String>;
+}
+
+/// Install the host's account registry on `core`, and refuse a core that
+/// serves an encrypting app without it ([`CoreHost::install_registry`] may
+/// leave a core without one, for one opened for no app).
+pub fn install_registry(
+    host: &dyn CoreHost,
+    core: &mut crate::runtime::ServerCore,
+) -> Result<(), String> {
+    host.install_registry(core)?;
+    core.require_account_registry()
 }
 
 /// Publish the deploy body in `body`: validate it against the core's
@@ -484,8 +518,7 @@ pub fn deploy(
         probed?;
         let mut opened = ServerCore::open(genesis, store, false, Some(app.to_owned()))
             .map_err(DeployError::internal)?;
-        host.install_registry(&mut opened)
-            .map_err(DeployError::internal)?;
+        install_registry(host, &mut opened).map_err(DeployError::internal)?;
         *core = Some(opened);
     }
     let store = host.store().map_err(DeployError::internal)?;

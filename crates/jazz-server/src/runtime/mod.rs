@@ -1080,7 +1080,7 @@ impl Owner {
         // through an external login would count as founded by the app, so
         // an encrypted app is not served without one.
         owner.registry_installed = installed;
-        if registry_required && !installed && owner.encrypts()? {
+        if registry_required && owner.registry_missing()? {
             return Err(
                 "this app encrypts columns, which needs the account registry \
                  of an app's store: open the store for an app (`set_app`) with its \
@@ -1176,6 +1176,14 @@ impl Owner {
             )));
         self.registry_installed = true;
         true
+    }
+
+    /// Whether the app encrypts columns and no account registry is
+    /// installed: such a runtime is not served, since an account founded
+    /// locally that later signs in through an external login would count as
+    /// founded by the app.
+    fn registry_missing(&self) -> Result<bool, String> {
+        Ok(!self.registry_installed && self.encrypts()?)
     }
 
     /// Whether the app's schema has Jazz's E2EE system tables.
