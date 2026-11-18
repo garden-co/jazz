@@ -738,6 +738,39 @@ mod smoke {
         serde_json::to_string(&request).expect("deploy request JSON")
     }
 
+    /// A local-first guest (keys from `seed`, a byte repeated) proving
+    /// itself for `audience` at `now_seconds`: `{ proof, peer, subject }`,
+    /// its self-signed proof, the peer identity its client names (with the
+    /// account founded in `audience`'s namespace) and its subject.
+    #[wasm_bindgen(js_name = testGuest)]
+    pub fn test_guest(seed: u8, audience: &str, now_seconds: u64) -> String {
+        use jazz::tools::identity;
+        let seed = [seed; 32];
+        let proof = identity::mint_jazz_self_signed_token_at(
+            &seed,
+            identity::DEVICE_ACCOUNT_ISSUER,
+            audience,
+            3600,
+            now_seconds,
+        )
+        .expect("a proof");
+        let subject = identity::derive_user_id(&seed).to_string();
+        let founding = jazz_server::portable::accounts::local_first_founding_app(audience);
+        let peer = AuthorSubject::reserved(identity::DEVICE_ACCOUNT_ISSUER, &subject)
+            .expect("a local-first author")
+            .with_account(jazz::account_registry::device_account_id(
+                *founding.uuid(),
+                &subject,
+            ));
+        serde_json::json!({
+            "proof": proof,
+            "peer": peer.canonical(),
+            "subject": subject,
+            "issuer": identity::DEVICE_ACCOUNT_ISSUER,
+        })
+        .to_string()
+    }
+
     /// A user's identity (`issuer`, `subject`), as a prelude names its peer.
     #[wasm_bindgen(js_name = testUserIdentity)]
     pub fn test_user_identity(issuer: &str, subject: &str) -> String {
@@ -944,7 +977,8 @@ mod core_host {
         self, AccountRoute, RouteAuthority, RouteBody, RouteContext,
     };
     use jazz_server::portable::admission::{
-        admit_by_core_secret, same_secret, SessionRevocation, UpgradeCredential, WebSocketPrelude,
+        admit_by_core_secret, same_secret, SessionRevocation, UpgradeCredential,
+        WebSocketCredential, WebSocketPrelude,
     };
     use jazz_server::portable::catalogue::{CatalogueIndex, DeploymentResponse};
     use jazz_server::portable::deployment::{self, DeployError, DeployRequest};
@@ -983,6 +1017,10 @@ mod core_host {
         /// For a user session the backend stated: what a revocation of its
         /// user's sessions is checked against.
         revocation: Option<SessionRevocation>,
+        /// For a guest admitted by its own proof: its identity, whose
+        /// account assignment is checked again whenever assignments change
+        /// (as native's sockets watch the registry).
+        guest: Option<jazz::ids::AuthorSubject>,
     }
 
     /// The most input a socket may have held for room (one session's
@@ -1198,7 +1236,26 @@ mod core_host {
                 access: access.as_deref(),
             });
             let now = js_sys::Date::now() as u64;
-            let admission = match admit_by_core_secret(&prelude, upgrade, &self.secret, now) {
+            // A guest the backend relays proves who it is itself: its proof
+            // is checked, and its account founded or found, in the object's
+            // account registry, as native admits it.
+            let secret = self.secret.clone();
+            let app_id = jazz::tools::AppId::from_string(&self.app_id);
+            let mut guest = |token: &str, peer, audience: Option<&str>| {
+                let app_id = app_id.clone().map_err(|error| error.to_string())?;
+                let storage = self.registry()?;
+                jazz_server::portable::guest::admit_guest(
+                    &storage,
+                    token,
+                    peer,
+                    audience,
+                    app_id,
+                    now / 1000,
+                )
+                .map_err(|refusal| refusal.to_string())
+            };
+            let admission = match admit_by_core_secret(&prelude, upgrade, &secret, now, &mut guest)
+            {
                 Ok(admission) => admission,
                 Err(message) => return fail(jazz::wire::WireErrorCode::AuthFailed, message),
             };
@@ -1213,6 +1270,8 @@ mod core_host {
             // A stated session of a user whose sessions were revoked after
             // the backend authenticated it is refused, as native refuses it.
             let revocation = admission.revocation.clone();
+            let guest = (admission.credential == WebSocketCredential::Session)
+                .then_some(admission.identity);
             if let Some(revocation) = &revocation {
                 match self.revocation_mark(&revocation.principal) {
                     Ok(mark) if accounts::session_revoked(mark, revocation.authenticated_at_ms) => {
@@ -1268,6 +1327,7 @@ mod core_host {
                     held_bytes: 0,
                     failed: None,
                     revocation,
+                    guest,
                 },
             );
             let hello = encode_ws_frame_batches(&[link.server_hello])
@@ -1988,6 +2048,46 @@ mod core_host {
                 .map_err(|error| error.to_string())
         }
 
+        /// After an assignment may have changed: end every guest socket
+        /// whose identity no longer holds its account, as native ends it.
+        fn recheck_guests(&mut self, storage: &jazz::storage::Storage) {
+            use jazz::wire::{WireError, WireErrorCode, WireRetry};
+            for state in self.sockets.values_mut() {
+                let Some(identity) = state.guest else {
+                    continue;
+                };
+                let (issuer, subject) = identity.principal_parts();
+                let principal = jazz::account_registry::Principal { issuer, subject };
+                // As native's `account_still_admitted`: the assignment must
+                // still be the account the guest was admitted as; a refusal
+                // is told as the registry words it, and a registry that
+                // cannot be read closes the socket for a later retry.
+                let ends = match (identity.account_id(), accounts::login(storage, &principal)) {
+                    (Some(account), Ok(assignment)) if assignment.account == account => None,
+                    (_, Err(accounts::RegistryError::Unavailable(_))) => Some(WireError::new(
+                        WireErrorCode::NotReady,
+                        WireRetry::Later,
+                        "account registry unavailable",
+                    )),
+                    (_, Err(accounts::RegistryError::Decision(error))) => Some(WireError::new(
+                        WireErrorCode::AuthFailed,
+                        WireRetry::Never,
+                        error.to_string(),
+                    )),
+                    _ => Some(WireError::new(
+                        WireErrorCode::AuthFailed,
+                        WireRetry::Never,
+                        "account identity revoked",
+                    )),
+                };
+                if let Some(error) = ends {
+                    state.held.clear();
+                    state.held_bytes = 0;
+                    state.failed.get_or_insert(error);
+                }
+            }
+        }
+
         /// Serve an account route (`admin/accounts/...`) on the store's
         /// account registry, as native does. A revocation of a user's
         /// sessions ends the stated sessions of that user authenticated
@@ -2012,6 +2112,9 @@ mod core_host {
                     fresh_id: &mut uuid::Uuid::new_v4,
                 },
             );
+            if effects.assignments_changed {
+                self.recheck_guests(&storage);
+            }
             if let Some((principal, mark)) = effects.sessions_revoked {
                 for state in self.sockets.values_mut() {
                     let ends = state.revocation.as_ref().is_some_and(|revocation| {
