@@ -1907,7 +1907,7 @@ mod tests {
             "a shared provider subject must not bridge issuer domains"
         );
         let local_first = Session::new(AuthorSubject::LOCAL_FIRST_ISSUER, "local-user")
-            .with_auth_mode(AuthMode::LocalFirst);
+            .with_auth_mode(AuthMode::DeviceAccount);
         let local_first_peer =
             AuthorSubject::from_canonical(r#"["urn:jazz:local-first","local-user"]"#).unwrap();
         assert!(ws_validate_session_identity(&local_first, local_first_peer).is_ok());

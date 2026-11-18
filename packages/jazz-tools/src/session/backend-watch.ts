@@ -650,7 +650,7 @@ function linkRefused(cause: unknown): boolean {
   return (
     cause.code === "link_refused" ||
     cause.code === "invalid_local_first_proof" ||
-    cause.code === "local_first_account_required" ||
+    cause.code === "device_account_required" ||
     cause.code === "linked_account_mismatch"
   );
 }

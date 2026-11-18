@@ -5221,7 +5221,7 @@ function assertPublicSessionIssuer(
   if (
     isReservedJazzIssuer(issuer) &&
     !(
-      (authMode === "local-first" || authMode === "anonymous" || authMode === "external") &&
+      (authMode === "device-account" || authMode === "anonymous" || authMode === "external") &&
       isTrustedReservedSession(
         { issuer, user_id: userId, authMode, account_id: accountId },
         trustedToken,

@@ -198,7 +198,7 @@ it("keeps backend authority opaque, scoped, and revocable", async () => {
     /backend_account_requires_backend_host/,
   );
   await expect(manager.linkWithBackend()).rejects.toThrow(
-    /local_first_account_required: .*came from your backend.*refresh\(\)/,
+    /device_account_required: .*came from your backend.*refresh\(\)/,
   );
   const invalidated = vi.fn();
   onAccountInvalidated(backend, invalidated);

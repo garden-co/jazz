@@ -1,0 +1,5 @@
+---
+"jazz-tools": minor
+---
+
+**Breaking:** `session.authMode` for a device account is now `"device-account"` (was `"local-first"`), in policies, in `Session.authMode` and in `createPolicyTestApp().as({ authMode })`. A permissions file or `schema.ts` rule that still compares `session.authMode` with `"local-first"` is refused with an error that names `"device-account"`, where it used to quietly stop matching. Without the error, `session.authMode != 'local-first'` would start letting device accounts in. Replace `'local-first'` with `'device-account'` in those comparisons and redeploy. A rule published before this release that still has the old value now fails closed: reads and writes it guards fail until you redeploy. The `AccountAuthError` codes are renamed to match: `local_first_account_required` is now `device_account_required`, `local_first_recovery_unavailable` is now `device_account_recovery_unavailable`, and `local_first_restore_unavailable` is now `device_account_restore_unavailable`. Device-account JWTs (issuer `urn:jazz:local-first`) and local storage stay as they were, so devices keep their data.

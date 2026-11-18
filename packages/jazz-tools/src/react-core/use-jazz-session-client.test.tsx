@@ -7,7 +7,7 @@ import { useJazzSession } from "./session.js";
 import { makeFakeClient } from "./test-utils.js";
 import { SessionContext } from "./session-context.js";
 
-function clientWithSession(authMode: "external" | "local-first" | "anonymous") {
+function clientWithSession(authMode: "external" | "device-account" | "anonymous") {
   const client = makeFakeClient({ authMode, userId: "u-1", claims: { role: "admin" } });
   return Object.assign(client, { session: client.db.getAuthState().session });
 }
@@ -34,7 +34,7 @@ describe("useJazzSession under <JazzClientProvider client>", () => {
 
   it("names a device account by kind and has no user for an anonymous reader", () => {
     const device = renderHook(() => useJazzSession(), {
-      wrapper: wrapperFor(clientWithSession("local-first")),
+      wrapper: wrapperFor(clientWithSession("device-account")),
     });
     expect(device.result.current.user?.kind).toBe("device");
     const anonymous = renderHook(() => useJazzSession(), {

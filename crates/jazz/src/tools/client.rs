@@ -2818,7 +2818,7 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
     }
     let auth_mode = match claims.iss.as_str() {
         AuthorSubject::LOCAL_FIRST_ISSUER => {
-            crate::model::public_api::session::AuthMode::LocalFirst
+            crate::model::public_api::session::AuthMode::DeviceAccount
         }
         AuthorSubject::ANONYMOUS_ISSUER => crate::model::public_api::session::AuthMode::Anonymous,
         _ => crate::model::public_api::session::AuthMode::External,
@@ -2939,7 +2939,7 @@ fn is_registered_jwt_claim(name: &str) -> bool {
 fn auth_mode_claim_value(auth_mode: crate::model::public_api::session::AuthMode) -> &'static str {
     match auth_mode {
         crate::model::public_api::session::AuthMode::External => "external",
-        crate::model::public_api::session::AuthMode::LocalFirst => "local-first",
+        crate::model::public_api::session::AuthMode::DeviceAccount => "device-account",
         crate::model::public_api::session::AuthMode::Anonymous => "anonymous",
     }
 }

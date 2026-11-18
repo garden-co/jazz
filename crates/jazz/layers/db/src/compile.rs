@@ -30,6 +30,18 @@ pub(crate) const DEFAULT_INHERITS_DEPTH: usize = 10;
 /// Fixpoint gathers carry a depth column only as a runaway guard.
 const FIXPOINT_GUARD: usize = 1_000;
 
+/// Refuse a policy comparing `session.authMode` with the removed
+/// `"local-first"`: no session has it any more, and a policy published
+/// before the rename must fail closed rather than quietly stop matching.
+fn refuse_removed_auth_mode(path: &[String], values: &[crate::tools::Value]) -> Result<(), Error> {
+    match values.iter().find_map(|value| {
+        jazz_model::model::public_api::policy::removed_auth_mode_literal(path, value)
+    }) {
+        Some(message) => Err(Error::new(crate::options::ErrorCode::Schema, message)),
+        None => Ok(()),
+    }
+}
+
 /// The identity a read or write is authorized as.
 #[derive(Clone, Debug, Default)]
 pub struct Session {
@@ -93,7 +105,7 @@ impl Session {
             // `session.authMode`).
             ["authMode"] => Value::String(
                 match self.issuer.as_deref()? {
-                    AuthorSubject::LOCAL_FIRST_ISSUER => "local-first",
+                    AuthorSubject::LOCAL_FIRST_ISSUER => "device-account",
                     AuthorSubject::ANONYMOUS_ISSUER => "anonymous",
                     _ => "external",
                 }
@@ -2387,6 +2399,7 @@ impl<'a> Ctx<'a> {
                 self.cmp(op.clone(), left, right)?
             }
             PolicyExpr::SessionCmp { path, op, value } => {
+                refuse_removed_auth_mode(path, std::slice::from_ref(value))?;
                 let right = public_value(value)?;
                 let left = self.claim_term(session, path, literal_type(&right).as_ref())?;
                 let right = self.value_term(&right)?;
@@ -2453,6 +2466,7 @@ impl<'a> Ctx<'a> {
                 self.in_list(left, options)?
             }
             PolicyExpr::SessionInList { path, values } => {
+                refuse_removed_auth_mode(path, values)?;
                 let values = values
                     .iter()
                     .map(public_value)
@@ -2482,6 +2496,7 @@ impl<'a> Ctx<'a> {
             // Both sides are known at compile time: an array claim holds the
             // value, or a text claim contains it.
             PolicyExpr::SessionContains { path, value } => {
+                refuse_removed_auth_mode(path, std::slice::from_ref(value))?;
                 let needle = public_value(value)?;
                 // A claim element compares as the literal's type, as
                 // everywhere else ([`claim_as`]); the session's own values

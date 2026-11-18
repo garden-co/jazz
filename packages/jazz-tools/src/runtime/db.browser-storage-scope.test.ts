@@ -84,7 +84,7 @@ describe("resolveDefaultPersistentDbName", () => {
         config,
         internalSessionFromVerifiedReservedJwtPayload(
           { iss: LOCAL_FIRST_JWT_ISSUER, sub: subject },
-          "local-first",
+          "device-account",
         ),
       );
       return config;

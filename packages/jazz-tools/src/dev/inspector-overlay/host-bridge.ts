@@ -33,7 +33,7 @@ function overlayBrowserWorkerSession(
   const payload = parseJwtPayload(config.jwtToken ?? "");
   const authMode =
     payload?.iss === LOCAL_FIRST_JWT_ISSUER
-      ? "local-first"
+      ? "device-account"
       : payload?.iss === ANONYMOUS_JWT_ISSUER
         ? "anonymous"
         : null;

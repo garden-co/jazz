@@ -983,7 +983,7 @@ pub async fn extract_session(
             .map_err(local_first_auth_error)?;
             let auth_mode = match issuer {
                 identity::ANONYMOUS_ISSUER => jazz::tools::AuthMode::Anonymous,
-                _ => jazz::tools::AuthMode::LocalFirst,
+                _ => jazz::tools::AuthMode::DeviceAccount,
             };
             return Ok(Some(Session {
                 account_id: None,
@@ -1821,7 +1821,7 @@ mod tests {
             .unwrap()
             .expect("session");
 
-        assert_eq!(session.auth_mode, jazz::tools::AuthMode::LocalFirst);
+        assert_eq!(session.auth_mode, jazz::tools::AuthMode::DeviceAccount);
         if let serde_json::Value::Object(map) = &session.claims {
             assert!(
                 !map.contains_key("auth_mode"),

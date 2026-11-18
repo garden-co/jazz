@@ -84,7 +84,7 @@ function requireJwtPayload(token: string): JwtPayload {
 }
 
 function localFirstSessionFromVerifiedProof(payload: JwtPayload, verifiedUserId: string): Session {
-  const session = internalSessionFromVerifiedReservedJwtPayload(payload, "local-first");
+  const session = internalSessionFromVerifiedReservedJwtPayload(payload, "device-account");
   if (!session) {
     throw new RequestAuthenticationError("Invalid JWT payload");
   }

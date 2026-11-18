@@ -70,7 +70,7 @@ export interface RuntimeSourcesConfig {
 /**
  * Mirrors the Rust `AuthMode` enum in `crates/jazz-tools/src/public_schema.rs`.
  */
-export type AuthMode = "external" | "local-first" | "anonymous";
+export type AuthMode = "external" | "device-account" | "anonymous";
 
 /**
  * Session context for policy evaluation.
