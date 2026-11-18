@@ -1,0 +1,59 @@
+//! Bindings of an app that declares encryption (`tests/apps/encrypted`):
+//! code reads and writes plaintext types, never ciphertext or equality
+//! tokens, and a backend running from its bindings reaches the bundle the
+//! files give, Jazz's system policies included.
+
+use std::path::PathBuf;
+
+use jazz::tools::deployment::artifact;
+use jazz::tools::public_schema::ColumnType;
+use jazz_codegen::App;
+
+fn app_json() -> Vec<u8> {
+    std::fs::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/apps/encrypted/jazz.app.json"),
+    )
+    .unwrap()
+}
+
+const PERMISSIONS: &str = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+    "tables": {
+        "projects": {
+            "read": "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.id, accountId = session.user)",
+            "insert": "$createdBy.account = session.user",
+            "update": "ownerId = session.user"
+        },
+        "tasks": { "read": "allowedTo.read(project)", "insert": "allowedTo.update(project)" }
+    } }"#;
+
+/// Generated code sees an encrypted column's plaintext type and no
+/// equality column or system table.
+#[test]
+fn bindings_expose_plaintext_and_hide_ciphertext() {
+    let app = App::load(&app_json()).unwrap();
+    let names: Vec<&str> = app.tables.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, ["projects", "tasks"]);
+    let tasks = app.table("tasks").unwrap();
+    assert!(tasks.column("__e2ee_eq_title").is_none());
+    let title = tasks.column("title").unwrap();
+    assert_eq!(title.ty.ty, ColumnType::Text);
+    assert!(!title.ty.nullable);
+    assert!(tasks.column("notes").unwrap().ty.nullable);
+    assert_eq!(
+        app.table("tasks").unwrap().column("done").unwrap().ty.ty,
+        ColumnType::Boolean
+    );
+}
+
+/// A backend loading its permissions against the bindings' compiled app
+/// computes the bundle the app's files give: the embedded declarations
+/// let it derive the system tables' policies.
+#[test]
+fn a_backend_from_bindings_derives_the_same_bundle() {
+    let bound = jazz_codegen::compile_app(&app_json()).unwrap();
+    let from_bindings = artifact::load_backend(bound.as_bytes(), PERMISSIONS.as_bytes())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let from_files = artifact::load(&app_json(), PERMISSIONS.as_bytes()).unwrap();
+    assert_eq!(from_bindings.bundle(), from_files.bundle());
+    assert_eq!(from_bindings.encryption(), from_files.encryption());
+}

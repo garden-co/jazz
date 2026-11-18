@@ -6,9 +6,11 @@
 //! maps them to its own idiom and refuses names it can't express.
 
 use jazz::tools::deployment::artifact::{
-    self, AppDefinition, ArtifactError, CodegenRelation, json::Json,
+    self, AppDefinition, ArtifactError, CodegenRelation, DeclaredEncryption, json::Json,
+    system_tables::is_system_table,
 };
 use jazz::tools::deployment::published::{PublishMigrationRequest, PublishedSchema};
+use jazz::tools::public_schema::EncryptionEntry;
 use jazz::tools::public_schema::{
     ColumnMergeStrategy, ColumnType, Schema, SchemaHash, TableSchema, Value,
 };
@@ -116,6 +118,9 @@ pub struct Compiled {
     /// Oldest first, the current one last.
     pub schemas: Vec<(SchemaHash, Schema)>,
     pub migrations: Vec<PublishMigrationRequest>,
+    /// The app's encryption declarations, every version's: a backend
+    /// derives the system tables' policies from them.
+    pub encryption: Option<DeclaredEncryption>,
 }
 
 impl Compiled {
@@ -130,11 +135,15 @@ impl Compiled {
                 schema: schema.clone(),
             })
             .collect::<Vec<_>>();
-        Json::Object(vec![
+        let mut fields = vec![
             ("current".into(), Json::string(self.current.to_string())),
             ("schemas".into(), serde(&schemas)),
             ("migrations".into(), serde(&self.migrations)),
-        ])
+        ];
+        if let Some(encryption) = &self.encryption {
+            fields.push(("encryption".into(), serde(encryption)));
+        }
+        Json::Object(fields)
     }
 
     /// The current schema.
@@ -180,12 +189,18 @@ impl App {
     fn from_definition(source: String, definition: &AppDefinition) -> App {
         let codegen = definition.codegen();
         let current = definition.current_schema();
+        let encryption = definition
+            .encryption()
+            .entries(&definition.current_hash().to_string());
+        // Jazz's system tables are no app table: generated code doesn't
+        // name them.
         let tables = current
             .iter()
+            .filter(|(name, _)| !is_system_table(name.as_str()))
             .map(|(name, schema)| {
                 let name = name.as_str();
                 let info = codegen.tables.get(name);
-                table(name, schema, info)
+                table(name, schema, info, encryption.and_then(|e| e.get(name)))
             })
             .collect();
         App {
@@ -205,6 +220,7 @@ impl App {
                 current: definition.current_hash(),
                 schemas: definition.schemas().to_vec(),
                 migrations: definition.migrations().to_vec(),
+                encryption: codegen.encryption.clone(),
             },
             warnings: definition.warnings().to_vec(),
             stranded: definition.stranded().to_vec(),
@@ -220,18 +236,41 @@ impl App {
     }
 }
 
-fn table(name: &str, schema: &TableSchema, info: Option<&artifact::CodegenTable>) -> Table {
+fn table(
+    name: &str,
+    schema: &TableSchema,
+    info: Option<&artifact::CodegenTable>,
+    encryption: Option<&EncryptionEntry>,
+) -> Table {
+    // An encrypted table's code reads and writes each encrypted column's
+    // plaintext type, never its ciphertext, and never its equality tokens.
     let columns: Vec<Column> = schema
         .columns
         .columns
         .iter()
+        .filter(|c| {
+            encryption.is_none()
+                || !c
+                    .name_str()
+                    .starts_with(artifact::encryption::EQUALITY_PREFIX)
+        })
         .map(|c| Column {
             name: c.name_str().to_string(),
-            ty: FieldType {
-                ty: c.column_type.clone(),
-                nullable: c.nullable,
+            ty: match encryption.and_then(|e| e.columns.get(c.name_str())) {
+                Some(encrypted) => FieldType {
+                    ty: encrypted.plain.column_type.clone(),
+                    nullable: encrypted.plain.nullable,
+                },
+                None => FieldType {
+                    ty: c.column_type.clone(),
+                    nullable: c.nullable,
+                },
             },
-            default: c.default.clone(),
+            default: match encryption.and_then(|e| e.columns.get(c.name_str())) {
+                // A stored ciphertext default isn't a plaintext value.
+                Some(_) => None,
+                None => c.default.clone(),
+            },
             merge: c.merge_strategy,
             references: c.references.map(|t| t.as_str().to_string()),
             transform: info.and_then(|i| i.transforms.get(c.name_str()).cloned()),
