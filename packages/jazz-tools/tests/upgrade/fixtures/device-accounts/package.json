@@ -1,0 +1,9 @@
+{
+  "name": "upgrade-fixture-device-accounts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "auth": "jazz-tools apps auth set --allow-local-first-auth",
+    "build": "jazz-tools generate"
+  }
+}

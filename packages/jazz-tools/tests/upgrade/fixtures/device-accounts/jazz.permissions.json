@@ -1,0 +1,17 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "b5efb25c9f14027d9b4c6b23418eee587c7617a6b666790e9e81f2935336395e"
+  },
+  "tables": {
+    "notes": {
+      "read": { "anyOf": ["owner = session.user", "session.authMode = 'local-first'"] },
+      "insert": { "allOf": ["owner = session.user", "session.authMode != 'local-first'"] },
+      "update": {
+        "allOf": ["owner = session.user", "session.authMode in ['external', 'local-first']"]
+      },
+      "delete": "owner = session.user"
+    }
+  }
+}

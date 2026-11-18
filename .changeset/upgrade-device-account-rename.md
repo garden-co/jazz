@@ -1,0 +1,5 @@
+---
+"jazz-tools": patch
+---
+
+`npx jazz-tools upgrade` now applies alpha.69's device-account renames to an app already on alpha.66's layout. It used to refuse such an app. It rewrites `"local-first"` to `"device-account"` wherever it's compared with `session.authMode`: in `schema.ts` (`eq`, `ne` and `isIn` on `session.authMode`), in app code (`authMode === "local-first"`, `case "local-first":`, `as({ authMode: "local-first" })`), and in `jazz.permissions.json`. It also renames the three `AccountAuthError` codes, and the deprecated `getLocalFirstIdentityProof`, `LocalFirstGuest` and `--allow-local-first-auth` (in `package.json` scripts; it reports the flag in shell scripts and CI files without editing them). It leaves every other `"local-first"` alone, such as storage tiers, `jazz-tools/local-first` and the issuer. Then it runs `generate` and checks that the app deploys exactly as its old files would with only the rename applied. Otherwise it puts every file back. Apps upgrading from alpha.65 get the same renames.

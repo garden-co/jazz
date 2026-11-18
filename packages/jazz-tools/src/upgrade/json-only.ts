@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { dirname, join, relative } from "node:path";
 import type { AppJson, PermissionsJson } from "../printer/app-json.js";
 import { expandDefs } from "../printer/defs.js";
+import { rewritePermissions } from "./device-accounts.js";
 import { formatTs, layout, loadPrettier } from "../printer/format.js";
 import { printSchemaTs, type Unsupported } from "../printer/index.js";
 import { printMigrations } from "../printer/migrations.js";
@@ -56,7 +57,14 @@ export async function upgradeJsonOnly(
     ? (JSON.parse(readFileSync(permissionsFile, "utf8")) as PermissionsJson)
     : ({ format: 1, tables: {} } as PermissionsJson);
   const notes: string[] = [];
-  const permissions = written.defs ? expandDefs(written) : written;
+  // alpha.69: `session.authMode` is "device-account" where it was "local-first".
+  const renamed = rewritePermissions(written.defs ? expandDefs(written) : written);
+  const permissions = renamed.permissions;
+  if (renamed.count > 0) {
+    notes.push(
+      `${renamed.count} polic${renamed.count === 1 ? "y compares" : "ies compare"} \`session.authMode\` with "local-first", which is "device-account" from alpha.69: printed with the new value, so the bundle id is that of the renamed permissions.`,
+    );
+  }
   if (written.defs) {
     notes.push(
       `jazz.permissions.json's \`defs\` (${Object.keys(written.defs).join(", ")}) were expanded where they are called; repeated checks became helpers again.`,

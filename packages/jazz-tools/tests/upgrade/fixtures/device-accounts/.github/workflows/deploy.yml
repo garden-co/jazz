@@ -1,0 +1,4 @@
+jobs:
+  deploy:
+    steps:
+      - run: npx jazz-tools apps auth set --allow-local-first-auth

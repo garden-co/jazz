@@ -431,7 +431,10 @@ function printHelp(): void {
   );
   console.log("  migrations graph      Visualize the full migration graph");
   console.log(
-    "  upgrade               Convert an alpha.65 app to alpha.66's schema.ts (or write it from a JSON-only app's files)",
+    "  upgrade               Convert an alpha.65 app to alpha.66's schema.ts (or write it from a JSON-only app's files);",
+  );
+  console.log(
+    "                        on alpha.66's layout, apply later releases' renames (alpha.69: device accounts)",
   );
   console.log(
     "  schema compile        Print the compiled schema jazz.generated.ts embeds, as JSON",

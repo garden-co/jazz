@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { legacyEnvironment } from "./fresh.js";
+import { rewritePermissionsText } from "./device-accounts.js";
+import { expandDefs } from "../printer/defs.js";
 /**
  * `jazz-tools upgrade` end to end, on alpha.65 apps (from the examples at
  * v2.0.0-alpha.65-rc.1, trimmed), whose JSON files the published
@@ -391,6 +393,79 @@ describe("jazz-tools upgrade: conversions", () => {
     );
   });
 
+  it("renames alpha.69's device-account names in an app on alpha.66's layout, keeping the renamed deployment", async () => {
+    const dir = fixture("device-accounts");
+    // What the app deploys once "local-first" is "device-account": the target.
+    const renamed = await artifactIdentity(
+      readFileSync(join(dir, "jazz.app.json"), "utf8"),
+      rewritePermissionsText(readFileSync(join(dir, "jazz.permissions.json"), "utf8")).text,
+    );
+    const report = await upgrade(dir);
+    expect(await identityOf(dir)).toEqual(renamed);
+    expect(readFileSync(join(dir, "jazz.permissions.json"), "utf8")).not.toContain("local-first");
+    const schema = readFileSync(join(dir, "schema.ts"), "utf8");
+    expect(schema).toContain('eq(session.authMode, "device-account")');
+    expect(schema).toContain('ne(session.authMode, "device-account")');
+    expect(schema).toContain('isIn(session.authMode, ["external", "device-account"])');
+    const auth = readFileSync(join(dir, "src", "auth.ts"), "utf8");
+    expect(auth).toContain('session.authMode === "device-account"');
+    expect(auth).toContain('case "device-account":');
+    expect(auth).toContain('error.code === "device_account_required"');
+    expect(auth).toContain("db.getDeviceAccountProof(");
+    expect(auth).toContain('import { type DeviceAccountsAnswer } from "jazz-tools/backend";');
+    expect(auth).toContain('{ tier: "local-first" }');
+    expect(readFileSync(join(dir, "tests", "policy.test.ts"), "utf8")).toContain(
+      'authMode: "device-account"',
+    );
+    expect(JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).scripts.auth).toBe(
+      "jazz-tools apps auth set --allow-device-accounts",
+    );
+    // The CI file is reported, not edited.
+    expect(report.manual).toEqual([
+      ".github/workflows/deploy.yml:4: `--allow-local-first-auth` is deprecated: use `--allow-device-accounts`",
+    ]);
+    expect(readFileSync(join(dir, ".github", "workflows", "deploy.yml"), "utf8")).toContain(
+      "--allow-local-first-auth",
+    );
+    expect(report.rewrites.join("\n")).toContain(
+      'schema.ts:10: authMode "local-first" → "device-account"',
+    );
+    expect(report.notes.join("\n")).toContain("the bundle id changes with it");
+  });
+
+  it("puts an app on alpha.66's layout back when a comparison it didn't recognise keeps the old value", async () => {
+    const dir = fixture("device-accounts");
+    const schema = join(dir, "schema.ts");
+    writeFileSync(
+      schema,
+      readFileSync(schema, "utf8").replace(
+        'const deviceAccount = eq(session.authMode, "local-first");',
+        'const legacy = "local-first";\nconst deviceAccount = eq(session.authMode, legacy as never);',
+      ),
+    );
+    const before = projectFiles(dir);
+    await expect(upgrade(dir)).rejects.toThrow(/so upgrade put every file back/);
+    expect(projectFiles(dir)).toEqual(before);
+  });
+
+  it("prints a JSON-only app's authMode comparisons with alpha.69's value", async () => {
+    const dir = fixture("json-only");
+    const file = join(dir, "jazz.permissions.json");
+    const permissions = JSON.parse(readFileSync(file, "utf8"));
+    permissions.tables.notes.insert = "session.authMode = 'local-first'";
+    writeFileSync(file, `${JSON.stringify(permissions, null, 2)}\n`);
+    const renamed = await artifactIdentity(
+      readFileSync(join(dir, "jazz.app.json"), "utf8"),
+      rewritePermissionsText(JSON.stringify(expandDefs(permissions))).text,
+    );
+    const report = await upgrade(dir);
+    expect(await identityOf(dir)).toEqual(renamed);
+    expect(readFileSync(join(dir, "schema.ts"), "utf8")).toContain(
+      'eq(session.authMode, "device-account")',
+    );
+    expect(report.notes.join("\n")).toContain('compares `session.authMode` with "local-first"');
+  });
+
   it("writes nothing on a dry run", async () => {
     const dir = fixture("chat");
     const before = projectFiles(dir);
@@ -535,7 +610,7 @@ describe("jazz-tools upgrade: refusals", () => {
     );
   });
 
-  it("refuses an app that is already converted", async () => {
+  it("leaves an app on alpha.66's layout with nothing to rename as it is", async () => {
     const dir = fixture("chat");
     const schema = join(dir, "schema.ts");
     writeFileSync(
@@ -545,6 +620,9 @@ describe("jazz-tools upgrade: refusals", () => {
         "export const schema = s.defineSchema({",
       ),
     );
-    await refused(dir, /already calls `defineSchema`: this app is on alpha\.66's layout/);
+    const before = projectFiles(dir);
+    const report = await upgrade(dir);
+    expect(projectFiles(dir)).toEqual(before);
+    expect(report.notes.join("\n")).toContain("nothing to change");
   });
 });

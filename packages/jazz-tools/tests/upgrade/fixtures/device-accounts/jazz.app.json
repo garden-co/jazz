@@ -1,0 +1,8 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "ff44ccc636e9afcf9a413e9edbad8aecddea7d9e31c949da68e6cdcb1b9fbee3"
+  },
+  "tables": { "notes": { "columns": { "owner": "uuid", "text": "string" } } }
+}

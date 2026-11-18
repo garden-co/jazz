@@ -58,6 +58,8 @@ import {
 } from "./project.js";
 import { JsonOnlyApp } from "./project.js";
 import { upgradeJsonOnly } from "./json-only.js";
+import { upgradeInLayout } from "./in-layout.js";
+import { rewriteFile, rewritePermissions, rewritePermissionsText } from "./device-accounts.js";
 import { appOutputs, snapshot } from "./snapshot.js";
 import { environmentReads, refuseDroppedConditions } from "./permissions-check.js";
 import { refusePayloadEnums } from "./payload-enums.js";
@@ -151,10 +153,25 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     );
   }
 
+  // On alpha.66's layout already: the later releases' renames, in place.
   if (/\.defineSchema\(/.test(readFileSync(project.schemaFile, "utf8"))) {
-    throw new UpgradeRefusal(
-      `${rel(project.schemaFile)} already calls \`defineSchema\`: this app is on alpha.66's layout, run \`npx jazz-tools generate\``,
-    );
+    const report = await upgradeInLayout(project, {
+      dryRun: options.dryRun,
+      generate: options.generate ?? runGenerateMarked,
+      identity: artifactIdentity,
+      differences: identityDifferences,
+    });
+    return {
+      dir: project.root,
+      written: report.written,
+      deleted: [],
+      rewrites: report.rewrites,
+      manual: report.manual,
+      notes: report.notes,
+      typeErrors: [],
+      preexistingTypeErrors: [],
+      typechecked: false,
+    };
   }
 
   // 1. The JSON files must be fresh: the permissions are printed from them.
@@ -172,7 +189,8 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
             project,
             legacy,
             JSON.stringify(expandDefs(committed)),
-            artifactIdentity,
+            // alpha.69's loader refuses authMode "local-first": both sides renamed.
+            (app, permissions) => artifactIdentity(app, rewritePermissionsText(permissions).text),
           )
         : checkLegacyFiles(project, legacy)),
     );
@@ -195,15 +213,24 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
   const written = JSON.parse(permissionsText) as PermissionsJson;
   // `defs` (alpha.63–65, refused from alpha.66): expanded where they are called,
   // as the old loader read them. The printer's helpers usually bring them back.
-  const permissions = written.defs ? expandDefs(written) : written;
+  const expanded = written.defs ? expandDefs(written) : written;
   if (written.defs) {
     notes.push(
       `jazz.permissions.json's \`defs\` (${Object.keys(written.defs).join(", ")}) were expanded where they are called; repeated checks became helpers again.`,
     );
   }
+  // alpha.69: `session.authMode` is "device-account" where it was "local-first" (and
+  // alpha.69's loader refuses the old value), so the permissions are printed renamed.
+  const renamed = rewritePermissions(expanded);
+  const permissions = renamed.permissions;
+  if (renamed.count > 0) {
+    notes.push(
+      `${renamed.count} polic${renamed.count === 1 ? "y compares" : "ies compare"} \`session.authMode\` with "local-first", which is "device-account" from alpha.69: printed with the new value, so the bundle id is that of the renamed permissions.`,
+    );
+  }
   const before = await artifactIdentity(
     appText,
-    written.defs ? JSON.stringify(permissions) : permissionsText,
+    written.defs || renamed.count > 0 ? JSON.stringify(permissions) : permissionsText,
   );
 
   // 2. schema.ts.
@@ -407,6 +434,21 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     manifest ? new Map([[manifest.file, manifest.text]]) : undefined,
   );
   for (const file of rewrites.files) writes.push([file.file, file.text]);
+  // alpha.69's device-account renames in every source upgrade keeps (written or not).
+  const deviceAccountRewrites: string[] = [];
+  {
+    const pending = new Map(writes);
+    for (const file of new Set([...project.sources, ...pending.keys()])) {
+      if (deleted.has(file) || !/\.(m|c)?[jt]sx?$|\.(svelte|vue|html)$/.test(file)) continue;
+      const text = pending.get(file) ?? readFileSync(file, "utf8");
+      const out = rewriteFile(ts, file, text);
+      if (out.text === text) continue;
+      const at = writes.findIndex(([p]) => p === file);
+      if (at >= 0) writes[at]![1] = out.text;
+      else writes.push([file, out.text]);
+      deviceAccountRewrites.push(...out.changes.map((c) => `${rel(file)}:${c.line}: ${c.what}`));
+    }
+  }
   if (config.file) writes.push([config.file, config.text]);
   if (manifest && !aliasEdits.has(manifest.file)) writes.push([manifest.file, manifest.text]);
   for (const [file, edit] of aliasEdits) writes.push([file, edit.text]);
@@ -416,6 +458,7 @@ export async function upgradeProject(options: UpgradeOptions = {}): Promise<Upgr
     written: writes.map(([path]) => rel(path)),
     deleted: [...deleted].map(rel).sort(),
     rewrites: [
+      ...deviceAccountRewrites,
       ...codemod.changes,
       ...rewrites.files.flatMap((f) => f.changes),
       ...config.changes,
@@ -686,6 +729,12 @@ function refuseBareTrue(project: Project, envReads: string[]): void {
 }
 
 /** This jazz-tools' `generate`, in the app's directory: the JSON files from the TS, then the bindings. */
+/** `generate` for an app on alpha.66's layout, whose files carry their `$generated` markers. */
+async function runGenerateMarked(schemaDir: string): Promise<void> {
+  const { generateApp } = await import("../dev/project.js");
+  await generateApp({ cwd: schemaDir });
+}
+
 async function runGenerate(schemaDir: string): Promise<void> {
   const { generateApp } = await import("../dev/project.js");
   // alpha.65's JSON files carry no `$generated` marker: replacing them is the point.
