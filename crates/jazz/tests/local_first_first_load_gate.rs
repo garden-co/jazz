@@ -1922,3 +1922,81 @@ fn cold_mergeable_localfirst_honours_the_binding_coverage_budget() {
         foreground.tab.abandon_transaction_handle(id).unwrap();
     }
 }
+
+/// Alice's cold tab reads at Remote inside a mergeable transaction while
+/// Bob's worker cannot reach its server. The read waits rather than answering
+/// from Bob's cache (or her empty store), and once the server is back it
+/// answers with the server's rows, including `k`, which Bob never cached.
+///
+/// server(a..j, k) ══ worker(cache a..j, server offline) ══ tab(cold)
+/// tab: begin mergeable ─ Remote read ─ (pending, server offline) ─ server back ─► a..k
+#[test]
+fn cold_mergeable_remote_read_waits_for_the_server() {
+    let server = seeded_server();
+    let worker = warm_worker(0x8d, &server);
+    seed(&server, 10, "k");
+    worker.set_remote_link_hint(RemoteLinkHint::Failed);
+    let foreground = foreground_over(0x8e, 0x8d, worker);
+    foreground.tab.set_remote_link_hint(RemoteLinkHint::Failed);
+    for _ in 0..3 {
+        foreground.turn(None);
+    }
+    let id = jazz::tools::OpenTransactionId::new();
+    block_on(foreground.tab.begin_mergeable(id)).unwrap();
+    let prepared = foreground.tab.prepare_query(&items()).unwrap();
+    let transaction = foreground.tab.tx_ref(id);
+    let mut reading =
+        Box::pin(transaction.all_prepared_at(&prepared, false, None, jazz::db::ReadTier::Remote));
+    for _ in 0..20 {
+        assert!(
+            reading
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending(),
+            "a Remote read must not answer while the server is offline"
+        );
+        foreground.turn(None);
+    }
+    foreground.worker.set_remote_link_hint(RemoteLinkHint::Live);
+    foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    let rows = drive_cold_mergeable(&foreground, Some(&server), reading).unwrap();
+    let mut ids: Vec<_> = rows.iter().map(|r| r.row_uuid()).collect();
+    ids.sort();
+    let mut expected = all_rows();
+    expected.push(row(10));
+    expected.sort();
+    assert_eq!(ids, expected, "the server's rows, k included");
+    foreground.tab.abandon_transaction_handle(id).unwrap();
+}
+
+/// Alice's durable client holds none of the server's rows. A Remote read in
+/// her mergeable transaction asks the server, as it does outside one, rather
+/// than answering from her empty store.
+#[test]
+fn a_durable_mergeable_remote_read_fetches_from_the_server() {
+    let server = seeded_server();
+    let alice = fresh_client(0x8f);
+    connect(&alice, &server);
+    let id = jazz::tools::OpenTransactionId::new();
+    block_on(alice.begin_mergeable(id)).unwrap();
+    let prepared = alice.prepare_query(&items()).unwrap();
+    let transaction = alice.tx_ref(id);
+    let mut reading =
+        pin!(transaction.all_prepared_at(&prepared, false, None, jazz::db::ReadTier::Remote,));
+    let rows = 'answer: {
+        for _ in 0..MAX_TURNS {
+            if let Poll::Ready(rows) = reading
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+            {
+                break 'answer rows.unwrap();
+            }
+            turn(&alice, Some(&server));
+        }
+        panic!("the Remote read did not finish");
+    };
+    let mut ids: Vec<_> = rows.iter().map(|r| r.row_uuid()).collect();
+    ids.sort();
+    assert_eq!(ids, all_rows());
+    alice.abandon_transaction_handle(id).unwrap();
+}

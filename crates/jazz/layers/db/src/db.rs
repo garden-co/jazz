@@ -11731,8 +11731,9 @@ impl TxRef<'_> {
 
     /// Binding entry point: as [`Self::all_prepared_in`], keeping the
     /// caller's whole read options (its first-load policy) and coverage
-    /// check for the relay fetch of a cold non-durable foreground. This does
-    /// not select a different identity or upgrade a mergeable read's read set.
+    /// check for a mergeable read's fetch, as outside a transaction. This
+    /// does not select a different identity or upgrade a mergeable read's
+    /// read set.
     pub(crate) async fn all_prepared_with_options(
         &self,
         prepared: &PreparedQuery,
@@ -11740,45 +11741,13 @@ impl TxRef<'_> {
         opts: &ReadOpts,
         coverage: Option<&dyn Fn() -> bool>,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let include_deleted = opts.read_view.include_deleted;
         let source = &opts.read_view.source;
-        let view = match source {
-            ReadViewSourceSpec::Current => None,
-            ReadViewSourceSpec::Snapshot { .. } => {
-                return Err(Error::new(
-                    ErrorCode::Query,
-                    "Reading a snapshot inside a transaction is not supported yet",
-                ));
-            }
-            // A live base needs nothing from the store; only a frozen one
-            // resolves its snapshot, under the store gate (which applies
-            // the staged writes of open transactions, so it is not taken
-            // for every branch read).
-            ReadViewSourceSpec::BranchView {
-                head,
-                base: None | Some(BranchViewBase::Current(_)),
-            } => Some(View {
-                head: head.clone(),
-                base: match source {
-                    ReadViewSourceSpec::BranchView {
-                        base: Some(BranchViewBase::Current(base)),
-                        ..
-                    } => Some(base.clone()),
-                    _ => None,
-                },
-                base_cut: None,
-            }),
-            ReadViewSourceSpec::BranchView { .. } => {
-                let frozen = ReadOpts {
-                    read_view: ReadViewSpec {
-                        source: source.clone(),
-                        include_deleted,
-                    },
-                    ..ReadOpts::for_read_tier(ReadTier::LocalOnly)
-                };
-                ReadSpec::of(&frozen, &self.db.inner())?.view
-            }
-        };
+        if let ReadViewSourceSpec::Snapshot { .. } = source {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "Reading a snapshot inside a transaction is not supported yet",
+            ));
+        }
         // Capture staging before queueing: later writes must not leak into
         // the prefix this read admitted, even when its predecessor is cancelled.
         let (prefix, state) = {
@@ -11798,11 +11767,7 @@ impl TxRef<'_> {
             .borrow_mut()
             .queue
             .push_back(guard.ticket.clone());
-        let through = ReadThrough {
-            view,
-            source: source.clone(),
-        };
-        let reading = self.read_admitted(prepared, identity, opts, coverage, prefix, through);
+        let reading = self.read_admitted(prepared, identity, opts, coverage, prefix);
         let mut reading = std::pin::pin!(reading);
         std::future::poll_fn(|cx| {
             {
@@ -11832,6 +11797,44 @@ impl TxRef<'_> {
         .await
     }
 
+    /// The branch view `source` reads through (`None`: the root view). A
+    /// live base needs nothing from the store; only a frozen one resolves
+    /// its snapshot, under the store gate (which applies the staged writes
+    /// of open transactions, so it is not taken for every branch read).
+    fn read_view(
+        &self,
+        source: &ReadViewSourceSpec,
+        include_deleted: bool,
+    ) -> Result<Option<View>, Error> {
+        Ok(match source {
+            ReadViewSourceSpec::Current | ReadViewSourceSpec::Snapshot { .. } => None,
+            ReadViewSourceSpec::BranchView {
+                head,
+                base: None | Some(BranchViewBase::Current(_)),
+            } => Some(View {
+                head: head.clone(),
+                base: match source {
+                    ReadViewSourceSpec::BranchView {
+                        base: Some(BranchViewBase::Current(base)),
+                        ..
+                    } => Some(base.clone()),
+                    _ => None,
+                },
+                base_cut: None,
+            }),
+            ReadViewSourceSpec::BranchView { .. } => {
+                let frozen = ReadOpts {
+                    read_view: ReadViewSpec {
+                        source: source.clone(),
+                        include_deleted,
+                    },
+                    ..ReadOpts::for_read_tier(ReadTier::LocalOnly)
+                };
+                ReadSpec::of(&frozen, &self.db.inner())?.view
+            }
+        })
+    }
+
     async fn read_admitted(
         &self,
         prepared: &PreparedQuery,
@@ -11839,10 +11842,10 @@ impl TxRef<'_> {
         opts: &ReadOpts,
         coverage: Option<&dyn Fn() -> bool>,
         prefix: BatchPrefix,
-        through: ReadThrough,
     ) -> Result<Vec<CurrentRow>, Error> {
         let tier = opts.tier;
         let include_deleted = opts.read_view.include_deleted;
+        let source = &opts.read_view.source;
         // Except for LocalOnly, a client hydrates a serializable read from
         // the authority at the snapshot first. LocalFirst may answer from
         // the replica when the link cannot answer.
@@ -11891,6 +11894,12 @@ impl TxRef<'_> {
                 ),
             ));
         }
+        // A serializable read resolves its view before fetching, so a
+        // frozen base it cannot resolve fails before asking the authority.
+        let mut view = match snapshot {
+            Some(_) => Some(self.read_view(source, include_deleted)?),
+            None => None,
+        };
         if let Some((snapshot, pinned)) = snapshot
             && self.db.is_client()
             && tier != ReadTier::LocalOnly
@@ -11917,7 +11926,7 @@ impl TxRef<'_> {
                     None,
                     None,
                     tier == ReadTier::Remote,
-                    &through.source,
+                    source,
                 )
                 .await?;
             if let Some(Batch {
@@ -11937,25 +11946,27 @@ impl TxRef<'_> {
                 *pinned = true;
             }
         }
+        let non_durable = self.db.inner().non_durable;
         if snapshot.is_none()
-            && tier == ReadTier::LocalFirst
-            && matches!(through.source, ReadViewSourceSpec::Current)
             && self.db.is_client()
-            && self.db.inner().non_durable
+            && let Some(reach) = sync::remote_reach(opts, non_durable, false)
+            && let Some(deadline) = sync::remote_deadline(opts, non_durable, true)
         {
-            // A cold non-durable foreground's local store is its durable
-            // relay (its worker), including while that relay's server is
-            // offline, as for a read outside a transaction. Keep LocalFirst
-            // reach and the caller's first-load wait: the serializable
-            // BEST_EFFORT fetch above would ask for Remote authority instead.
-            // Records nothing: the mergeable read keeps its admitted prefix,
-            // current view and no-read-set semantics below. The fetched
-            // position is not pinned, unlike a read outside a transaction
-            // (`Position::At`): a mergeable read has no snapshot, so it reads
-            // at the overlay's current cut, at least as new as that answer.
+            // A mergeable read fetches as a read outside a transaction does.
+            // A cold non-durable foreground asks its durable relay (its
+            // worker) at its own tier and first-load wait, including while
+            // that relay's server is offline; a durable client asks the
+            // server on Remote, or on LocalFirst with `WaitForRemote`. A
+            // Remote read waits for the server while offline (`strict`).
+            //
+            // Records nothing: the read keeps its admitted prefix and its
+            // no-read-set semantics below. Unlike a read outside a
+            // transaction, it neither pins the fetched position
+            // (`Position::At`) nor filters a Remote read to settled rows: it
+            // has no snapshot, so it reads the overlay's current cut (at
+            // least as new as that answer), with other writers' unsettled
+            // rows visible, as a serializable read's overlay shows them.
             // As outside a transaction, the query must have a synced shape.
-            let reach = sync::remote_reach(opts, true, false).expect("non-durable reach");
-            let deadline = sync::remote_deadline(opts, true, true).expect("non-durable wait");
             self.db.remote_shape(&prepared.query)?;
             self.db
                 .fetch(
@@ -11965,11 +11976,21 @@ impl TxRef<'_> {
                     reach,
                     deadline,
                     coverage,
-                    false,
-                    &through.source,
+                    tier == ReadTier::Remote,
+                    source,
                 )
                 .await?;
         }
+        // A frozen base resolves its snapshot only now: a cold foreground
+        // learns the state it was captured at from the fetch above.
+        let view = match view.take() {
+            Some(view) => view,
+            None => self.read_view(source, include_deleted)?,
+        };
+        let through = ReadThrough {
+            view,
+            source: source.clone(),
+        };
         // Relations nest inside the overlay, so they see staged rows too.
         // Offloaded leaves are fetched as for any read.
         let (rows, prepared) = self
