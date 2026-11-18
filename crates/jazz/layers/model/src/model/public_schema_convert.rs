@@ -82,6 +82,10 @@ pub enum UnsupportedPolicy {
     /// update `WITH CHECK`, or under a `NOT` outside its `Exists`:
     /// everywhere else it is false, so a `NOT` of it holds for every row.
     MisplacedInsertedByThisTransaction,
+    /// An `InheritsFrom` whose `table_column` or `id_column` is not a
+    /// scalar column (an array, say): a row naming several rows would
+    /// inherit from any one of them.
+    NonScalarAddressColumn,
 }
 
 impl SchemaConversionError {
@@ -214,6 +218,11 @@ pub fn check_deployable_json_schemas(schema: &Schema) -> Result<(), SchemaConver
 /// `Inherits`, `InheritsReferencing` or `InheritsFrom`) is held to the same
 /// placement.
 ///
+/// An `InheritsFrom` whose `table_column` or `id_column` is an array or
+/// row column is refused ([`UnsupportedPolicy::NonScalarAddressColumn`]):
+/// an address names one row, and a row listing several would inherit from
+/// any one of them.
+///
 /// A relation policy's unsupported shapes (output steps, query parameters,
 /// malformed union labels) are the schema compile's to refuse, which
 /// `jazz-tools validate`, the dev server and a deployment all run.
@@ -247,6 +256,7 @@ pub fn check_deployable_policies(schema: &Schema) -> Result<(), SchemaConversion
                     negated: false,
                 };
                 refuse_misplaced_inserted(schema, table, expr, &path, placement)?;
+                refuse_non_scalar_addresses(schema, table, expr, &path)?;
             }
         }
     }
@@ -406,6 +416,83 @@ fn reaches_inherits_from(
             ..
         } => inherited(&TableName::new(source_table.clone()), *operation, seen),
         _ => false,
+    }
+}
+
+/// Refuse an `InheritsFrom` in `expr` (a policy of `table`) whose address
+/// columns are not scalar (see [`check_deployable_policies`]).
+fn refuse_non_scalar_addresses(
+    schema: &Schema,
+    table: &TableSchema,
+    expr: &PolicyExpr,
+    path: &str,
+) -> Result<(), SchemaConversionError> {
+    match expr {
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => {
+            let kind = if matches!(expr, PolicyExpr::And(_)) {
+                "And"
+            } else {
+                "Or"
+            };
+            for (index, part) in parts.iter().enumerate() {
+                refuse_non_scalar_addresses(
+                    schema,
+                    table,
+                    part,
+                    &format!("{path}.{kind}[{index}]"),
+                )?;
+            }
+            Ok(())
+        }
+        PolicyExpr::Not(inner) => {
+            refuse_non_scalar_addresses(schema, table, inner, &format!("{path}.Not"))
+        }
+        PolicyExpr::Exists {
+            table: exists,
+            condition,
+        } => match schema.get(&TableName::new(exists.clone())) {
+            Some(exists) => refuse_non_scalar_addresses(
+                schema,
+                exists,
+                condition,
+                &format!("{path}.Exists.condition"),
+            ),
+            // An unknown table is the schema compile's to refuse.
+            None => Ok(()),
+        },
+        PolicyExpr::InheritsFrom {
+            table_column,
+            id_column,
+            ..
+        } => {
+            for (field, column) in [("table_column", table_column), ("id_column", id_column)] {
+                // An unknown column is the schema compile's to refuse.
+                let Some(descriptor) = table
+                    .columns
+                    .columns
+                    .iter()
+                    .find(|descriptor| descriptor.name.as_str() == column)
+                else {
+                    continue;
+                };
+                if matches!(
+                    descriptor.column_type,
+                    ColumnType::Array { .. } | ColumnType::Row { .. }
+                ) {
+                    return Err(SchemaConversionError::unsupported(
+                        format!("{path}.InheritsFrom.{field}"),
+                        format!(
+                            "an `InheritsFrom` {field} must be a scalar column, but `{column}` \
+                             is not: an address names one row, and a column listing several \
+                             would inherit from any one of them"
+                        ),
+                        UnsupportedPolicy::NonScalarAddressColumn,
+                    ));
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 

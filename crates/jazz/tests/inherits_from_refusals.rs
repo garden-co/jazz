@@ -379,3 +379,64 @@ fn inserted_by_this_transaction_outside_a_write_check_exists_is_refused() {
         .build();
     assert_refused(&inherited, refused, "$.tasks.policies.select.using");
 }
+
+/// An address names one row: an `InheritsFrom` whose `id_column` or
+/// `table_column` is an array would inherit from any one row it lists, so
+/// it is refused, under `Or` and inside an `exists` too.
+///
+/// ```text
+/// members.insert = IF(scopeId, identifiers: [uuid])     ✗
+/// members.insert = IF(scopeIds: [uuid], identifier)     ✗
+/// ```
+#[test]
+fn an_inherits_from_with_a_non_scalar_address_column_is_refused() {
+    let refused = UnsupportedPolicy::NonScalarAddressColumn;
+    let uuids = || ColumnType::Array {
+        element: Box::new(ColumnType::Uuid),
+    };
+    let address = |table_column: &str, id_column: &str| PolicyExpr::InheritsFrom {
+        operation: Operation::Select,
+        table_column: table_column.to_owned(),
+        id_column: id_column.to_owned(),
+        tables: vec!["projects".to_owned()],
+    };
+    let members = |check: PolicyExpr| {
+        SchemaBuilder::new()
+            .table(projects())
+            .table(
+                address_table(
+                    MEMBERS,
+                    None,
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::True)
+                        .with_insert(check),
+                )
+                .column("identifiers", uuids())
+                .column("scopeIds", uuids()),
+            )
+            .build()
+    };
+    let insert_path = "$.__e2ee_members.policies.insert.with_check";
+
+    let scalar = members(address("scopeId", "identifier"));
+    check_deployable_policies(&scalar).unwrap();
+    deploy(&scalar).unwrap();
+
+    assert_refused(
+        &members(address("scopeId", "identifiers")),
+        refused,
+        &format!("{insert_path}.InheritsFrom.id_column"),
+    );
+    assert_refused(
+        &members(PolicyExpr::Or(vec![
+            PolicyExpr::False,
+            address("scopeIds", "identifier"),
+        ])),
+        refused,
+        &format!("{insert_path}.Or[1].InheritsFrom.table_column"),
+    );
+    let error = check_deployable_policies(&members(address("scopeId", "identifiers")))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("must be a scalar column"), "{error}");
+}
