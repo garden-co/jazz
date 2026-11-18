@@ -1126,3 +1126,49 @@ fn decrypting_every_column_keeps_the_system_tables() {
     );
     assert_eq!(loaded.encryption().versions.len(), 2);
 }
+
+/// A version that keeps the system tables without declaring encryption
+/// takes the declarations of the nearest version before it that has them;
+/// two equally near versions that declare differently leave no nearest one,
+/// and the loader refuses, as the deploy's check does.
+///
+/// ```text
+/// v1 (declares) ──┐
+///                 ├──► current (declares nothing)   ✗ they disagree
+/// v2 (declares) ──┘
+/// ```
+#[test]
+fn equally_near_versions_that_declare_differently_are_refused() {
+    let file = |v2_sweep: &str| {
+        format!(
+            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": {{ "notes": {{ "columns": {{ "done": "boolean" }} }} }},
+            "history": {{
+                "v1": {{ "tables": {{ "notes": {{
+                    "columns": {{ "title": "bytes", "done": "boolean" }},
+                    "encryption": {{ "space": "id", "scope": "notes", "columns": {{ "title": "string" }} }} }} }} }},
+                "v2": {{ "tables": {{ "notes": {{
+                    "columns": {{ "title": "bytes", "done": "boolean", "extra": "boolean?" }},
+                    "encryption": {{ "space": "id", "scope": "notes", "columns": {{ "title": "string" }}{v2_sweep} }} }} }} }} }},
+            "migrations": [
+                {{ "from": "v1", "migrate": {{ "notes": {{ "title": {{ "drop": "bytes", "backwardsDefault": "" }} }} }} }},
+                {{ "from": "v2", "migrate": {{ "notes": {{
+                    "title": {{ "drop": "bytes", "backwardsDefault": "" }},
+                    "extra": {{ "drop": "boolean?", "backwardsDefault": null }} }} }} }}] }}"#
+        )
+    };
+    let permissions = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
+    // The same declarations: the nearest ones are unambiguous.
+    load(file("").as_bytes(), permissions.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    // Different ones: no nearest.
+    let disagreeing = file(r#", "sweep": "members""#);
+    let error = refusal(load(disagreeing.as_bytes(), permissions.as_bytes()));
+    assert!(error.contains("declare differently"), "{error}");
+    let error = refusal(load_client_encrypted(
+        disagreeing.as_bytes(),
+        AppId::from_name("notes-app"),
+        "production",
+    ));
+    assert!(error.contains("declare differently"), "{error}");
+}

@@ -419,7 +419,7 @@ fn with_system_policies(
     permissions: &Permissions,
 ) -> Result<(Permissions, Vec<String>), ArtifactError> {
     let Some(entries) =
-        governing_entries(&history.encryption, &history.migrations, history.current)
+        governing_entries(&history.encryption, &history.migrations, history.current)?
     else {
         return Ok((permissions.clone(), Vec::new()));
     };
@@ -950,13 +950,15 @@ pub fn load_client_encrypted(
     let history = check_history(&app_file)?;
     let (schemas, lenses) = lower_client_migrations(history.bundle())
         .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
-    let declarations = governing_entries(&history.encryption, &history.migrations, history.current)
-        .map(|tables| crate::tools::public_schema::E2eeDeclarations {
-            app_id,
-            environment: environment.to_owned(),
-            settings: history.encryption.settings.clone(),
-            tables: tables.clone(),
-        });
+    let declarations =
+        governing_entries(&history.encryption, &history.migrations, history.current)?.map(
+            |tables| crate::tools::public_schema::E2eeDeclarations {
+                app_id,
+                environment: environment.to_owned(),
+                settings: history.encryption.settings.clone(),
+                tables: tables.clone(),
+            },
+        );
     Ok((
         history.current_schema().clone(),
         crate::db::Migrations { schemas, lenses },
@@ -1414,31 +1416,54 @@ fn has_system_tables(schema: &Schema) -> bool {
 
 /// The declarations the system tables of `version` follow: its own if it
 /// declares encryption, else those of the nearest version before it (by the
-/// migrations) that does, since a version that keeps the system tables
-/// without declaring encryption keeps its spaces too. `None` when none does.
+/// migrations, breadth first) that does, since a version that keeps the
+/// system tables without declaring encryption keeps its spaces too. `None`
+/// when none does; equally near versions that declare differently leave no
+/// nearest one and are refused, as the deploy's check does.
 fn governing_entries<'a>(
     encryption: &'a DeclaredEncryption,
     migrations: &[PublishMigrationRequest],
     version: SchemaHash,
-) -> Option<&'a encryption::Entries> {
-    let mut queue = vec![version];
-    let mut seen = Vec::new();
-    while let Some(hash) = queue.pop() {
-        if seen.contains(&hash) {
-            continue;
+) -> Result<Option<&'a encryption::Entries>, ArtifactError> {
+    let mut level = vec![version];
+    let mut seen = vec![version];
+    while !level.is_empty() {
+        let declared: Vec<(SchemaHash, &encryption::Entries)> = level
+            .iter()
+            .filter_map(|hash| {
+                encryption
+                    .entries(&hash.to_string())
+                    .map(|entries| (*hash, entries))
+            })
+            .collect();
+        if let Some((first_hash, first)) = declared.first() {
+            if let Some((other, _)) = declared.iter().find(|(_, entries)| entries != first) {
+                return Err(ArtifactError::new(format!(
+                    "the schema keeps Jazz's system tables without declaring encryption, and \
+                     the versions it follows nearest declare differently ({first_hash} and \
+                     {other}): declare encryption in it"
+                )));
+            }
+            return Ok(Some(first));
         }
-        seen.push(hash);
-        if let Some(entries) = encryption.entries(&hash.to_string()) {
-            return Some(entries);
-        }
-        queue.extend(
-            migrations
-                .iter()
-                .filter(|migration| migration.to_hash == hash.to_string())
-                .filter_map(|migration| parse_schema_hash(&migration.from_hash).ok()),
-        );
+        level = level
+            .iter()
+            .flat_map(|hash| {
+                migrations
+                    .iter()
+                    .filter(move |migration| migration.to_hash == hash.to_string())
+                    .filter_map(|migration| parse_schema_hash(&migration.from_hash).ok())
+            })
+            .filter(|hash| {
+                let fresh = !seen.contains(hash);
+                if fresh {
+                    seen.push(*hash);
+                }
+                fresh
+            })
+            .collect();
     }
-    None
+    Ok(None)
 }
 
 /// The table lenses that add Jazz's system tables along a migration into a
