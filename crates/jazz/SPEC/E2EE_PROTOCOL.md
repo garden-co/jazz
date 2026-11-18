@@ -529,10 +529,17 @@ Account and device tables (fixed policies):
   request and the approved device's request belong to that account; a
   recovery approval's `recoveryRootId` names a recovery root of that account.
   Both successor tables: `accountId = session account`; the signer request
-  and the target (removed device's request or retired recovery root) belong
-  to that account; the target columns match `action` (§1.2); the
-  private and public rows share their ID and are inserted in one
-  transaction. Removal requests: `accountId = session account`, and the
+  and the removed device's request belong to that account; the target
+  columns match `action` (§1.2). The server does not check that a retired
+  recovery root belongs to the account: the target is an ID in a list column,
+  which no policy reads. Clients check it on replay (§2.4 step 3: the target
+  must be a valid, earlier, unretired recovery root of the account's own
+  ledger), so a successor retiring another account's root is not accepted. A
+  public successor requires the private one with its ID, inserted in the same
+  transaction. The reverse is not enforced: two rows cannot each require the
+  other of one transaction, and a private approval or successor without its
+  public half is inert (replay reads only public rows, and private
+  verification drops a private row no public one pairs with). Removal requests: `accountId = session account`, and the
   request of `deviceId` belongs to that account.
 - R9. Recovery roots: `accountId = session account`, signer request of the
   same account. Recovery deliveries: the root's `accountId` is the session
