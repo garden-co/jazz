@@ -641,14 +641,31 @@ struct Cached {
 impl Chunks {
     /// Chunks of a store in memory (`path` is `None`) or the file at
     /// `path`, on its VFS.
+    #[cfg(test)]
     pub(crate) fn install(
         path: Option<(&std::path::Path, Option<&'static str>)>,
         store: Option<Arc<dyn ChunkStore>>,
         host_io: bool,
     ) -> Result<Arc<Self>, Error> {
-        let reader = match path {
-            None => None,
-            Some((path, vfs)) => {
+        Self::install_reading(path, None, store, host_io)
+    }
+
+    /// [`Self::install`] for a store read through `shared` when it has one:
+    /// a managed store's own backend ([`Storage::shared_reader`]), which is
+    /// durable, so the cache is bounded as a file's is and reads what it
+    /// lacks back through it (after a Durable Object restarts, say).
+    /// Without one, a store with no path is in memory and the cache is its
+    /// only readable copy of its nodes.
+    pub(crate) fn install_reading(
+        path: Option<(&std::path::Path, Option<&'static str>)>,
+        shared: Option<Storage>,
+        store: Option<Arc<dyn ChunkStore>>,
+        host_io: bool,
+    ) -> Result<Arc<Self>, Error> {
+        let reader = match (path, shared) {
+            (_, Some(shared)) => Some(shared),
+            (None, None) => None,
+            (Some((path, vfs)), None) => {
                 let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
                     | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
                 let reader = match vfs {
@@ -664,7 +681,7 @@ impl Chunks {
                 nodes: HashMap::new(),
                 epochs: HashMap::new(),
                 bytes: 0,
-                budget: path.map(|_| CACHE_BYTES),
+                budget: reader.as_ref().map(|_| CACHE_BYTES),
                 clock: 0,
                 reader,
                 demand: BTreeSet::new(),
