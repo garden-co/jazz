@@ -6,6 +6,6 @@ import { dirname, join } from "node:path";
 export const hostBuilt = existsSync(
   join(
     dirname(createRequire(import.meta.url).resolve("jazz-wasm/package.json")),
-    "durable-object/pkg",
+    "durable-object/pkg/jazz_wasm_do_bg.wasm",
   ),
 );

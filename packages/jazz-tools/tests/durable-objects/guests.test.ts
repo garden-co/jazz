@@ -2,12 +2,11 @@
 // (createJazz on durableObjects()) serves its clients over HTTP, and its
 // core is the real jazz-wasm host in local workerd. The same checks as
 // guest-decision.integration.test.ts runs on the other stores.
-import { mkdtemp, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   acceptDeviceAccounts,
   createJazz,
@@ -42,12 +41,9 @@ async function listening(server: Server): Promise<number> {
 
 describe.skipIf(!hostBuilt && !process.env.CI)("clients of a Durable Object core", () => {
   let script: string;
-  let persist: string;
   beforeAll(async () => {
     script = await bundleWorker(join(__dirname, "real-core-worker.ts"));
-    persist = await mkdtemp(join(tmpdir(), "jazz-do-guests-"));
   });
-  afterAll(() => rm(persist, { recursive: true, force: true }));
 
   /** The app's Jazz on a fresh Durable Object core, served on its own origin. */
   async function appOn(authenticate: (request: Request) => unknown) {
@@ -116,7 +112,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("clients of a Durable Object core
 
   it("refuses a device account (guest) the app doesn't accept", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const { client } = await appOn(() => null);
+    const { jazz, client } = await appOn(() => null);
     const guest = await client("device");
     void guest.db
       .insert(app.todos, { title: "made as a guest", owner: guest.session!.user! })
@@ -129,6 +125,8 @@ describe.skipIf(!hostBuilt && !process.env.CI)("clients of a Durable Object core
         ).toBe(true),
       { timeout: 20_000 },
     );
+    // Its write never reached the core.
+    expect(await jazz.db.all(app.todos)).toEqual([]);
   });
 
   it("serves a signed-in user, the session stated by the backend", async () => {
@@ -146,8 +144,23 @@ describe.skipIf(!hostBuilt && !process.env.CI)("clients of a Durable Object core
       new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
     );
     expect((await asAlice.all(app.todos)).map((todo) => todo.title)).toEqual(["alice's"]);
+    // The app's permissions hold for her session: she sees only her rows,
+    // and can't write one as someone else.
+    await jazz.db
+      .insert(app.todos, { title: "someone else's", owner: randomUUID() })
+      .wait({ tier: "global" });
+    expect((await jazz.db.all(app.todos)).length).toBe(2);
     expect((await alice.db.all(app.todos, { tier: "remote" })).map((todo) => todo.title)).toEqual([
       "alice's",
+    ]);
+    await expect(
+      alice.db.insert(app.todos, { title: "as someone else", owner: randomUUID() }).wait({
+        tier: "global",
+      }),
+    ).rejects.toThrow();
+    expect((await jazz.db.all(app.todos)).map((todo) => todo.title).sort()).toEqual([
+      "alice's",
+      "someone else's",
     ]);
   });
 });
