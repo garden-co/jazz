@@ -98,5 +98,7 @@ mod split_messages;
 mod subscription_initial_hydration;
 #[path = "../subscription_lifecycle.rs"]
 mod subscription_lifecycle;
+#[path = "../table_identity.rs"]
+mod table_identity;
 #[path = "../transactions.rs"]
 mod transactions;

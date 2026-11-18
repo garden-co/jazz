@@ -1501,6 +1501,13 @@ impl WasmDb {
             .map_err(host_error)
     }
 
+    /// The catalogue identity of a table, as UUID text: what a member row's
+    /// `scopeId` holds for its space table.
+    #[wasm_bindgen(js_name = tableIdentity)]
+    pub fn table_identity(&self, table: String) -> Result<String, JsValue> {
+        self.binding()?.table_identity(&table).map_err(host_error)
+    }
+
     /// Exact local state for the write-merge bridge: the row as stored,
     /// deleted or not. Write authorization remains at the mutation boundary;
     /// this is not a query.

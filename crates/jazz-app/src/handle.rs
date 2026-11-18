@@ -312,6 +312,15 @@ impl Jazz {
         self.for_user
     }
 
+    /// The catalogue identity of table `table`, which a member row's
+    /// `scopeId` holds for its space table (see
+    /// [`JazzClient::table_identity`]).
+    pub async fn table_identity(&self, table: &str) -> Result<ObjectId> {
+        let table = table.to_owned();
+        self.with_client(move |client| async move { Ok(client.table_identity(&table)?) })
+            .await
+    }
+
     /// Runs `job` with the untyped client on its thread: for what the typed
     /// API does not cover.
     pub async fn with_client<F, Fut, R>(&self, job: F) -> Result<R>

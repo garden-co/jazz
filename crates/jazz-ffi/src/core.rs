@@ -409,6 +409,12 @@ impl Core {
         Ok(self.open_jazz()?.bundle().map(str::to_owned))
     }
 
+    /// The catalogue identity of a table, as UUID text: what a member row's
+    /// `scopeId` holds for its space table.
+    pub fn table_identity(&self, table: &str) -> Result<String> {
+        Ok(block_on(self.open_jazz()?.table_identity(table))?.to_string())
+    }
+
     /// The account of the user a backend acts as (`session.user`).
     pub fn account(&self) -> Result<Option<String>> {
         Ok(self

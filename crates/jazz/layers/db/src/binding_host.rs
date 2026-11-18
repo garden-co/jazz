@@ -1483,6 +1483,19 @@ impl Binding {
 
     // ---- reads ----
 
+    /// The catalogue identity of table `table` (see
+    /// [`crate::db::Db::table_identity`]) as lowercase hyphenated UUID
+    /// text, which generated code writes into a member row's `scopeId`.
+    /// Fails with code `NotObserved` until the authority's catalogue with
+    /// this schema version is mirrored, and with an argument error for a
+    /// table the schema doesn't have.
+    pub fn table_identity(&self, table: &str) -> HostResult<String> {
+        match self.db.table_identity(table)? {
+            Some(identity) => Ok(identity.0.to_string()),
+            None => Err(HostError::Argument(format!("no table {table}"))),
+        }
+    }
+
     /// The row as stored, deleted or not: the write-merge bridge's exact
     /// local state. Not a query; write authorization stays at the mutation.
     pub fn local_current_row(&self, table: &str, row: &[u8]) -> HostResult<Vec<u8>> {
