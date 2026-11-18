@@ -6,12 +6,12 @@
     "@expo/metro-runtime": "~58.0.17",
     "expo": "~58.0.25",
     "expo-status-bar": "~58.0.5",
-    "jazz-tools": "2.0.0-alpha.65",
+    "jazz-tools": "2.0.0-alpha.67",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "react-native": "0.88.1",
     "react-native-web": "^0.21.4",
-    "jazz-wasm": "2.0.0-alpha.65"
+    "jazz-wasm": "2.0.0-alpha.67"
   },
   "devDependencies": {
     "@types/react": "~19.3.0",

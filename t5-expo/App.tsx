@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 import { createJazzClient } from "jazz-tools";
-import { app } from "./jazz/schema";
+import { app } from "./jazz/jazz.generated";
 export default function App() {
   const [st, setSt] = useState("starting");
   useEffect(() => { (async () => {

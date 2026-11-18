@@ -1,2 +1,19 @@
-{"name":"t6-import-style","private":true,"type":"module","imports":{"#app":"./src/db/index.ts","#permissions":"./src/db/access.ts"},
-"dependencies":{"jazz-tools":"2.0.0-alpha.65","jazz-wasm":"2.0.0-alpha.65","jazz-napi":"2.0.0-alpha.65","hono":"^4","@hono/node-server":"^1","tsx":"^4","ws":"^8","typescript":"^5"}}
+{
+  "name": "t6-import-style",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#app": "./src/db/index.ts",
+    "#permissions": "./jazz.permissions.json"
+  },
+  "dependencies": {
+    "jazz-tools": "2.0.0-alpha.67",
+    "jazz-wasm": "2.0.0-alpha.67",
+    "jazz-napi": "2.0.0-alpha.67",
+    "hono": "^4",
+    "@hono/node-server": "^1",
+    "tsx": "^4",
+    "ws": "^8",
+    "typescript": "^5"
+  }
+}

@@ -1,2 +1,2 @@
 // re-export barrel: app code imports from "./src/db"
-export { app, notesOnly } from "../../schema.js";
+export { app, app as notesOnly } from "../../jazz.generated.js";

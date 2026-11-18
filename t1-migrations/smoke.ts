@@ -1,4 +1,4 @@
-import { app } from "./schema.js";
+import { app } from "./jazz.generated.js";
 import { account, clientAs, check, done } from "./client.js";
 const [aId, bId] = [await account("alice"), await account("bob")]; await account("carol");
 const alice = await clientAs("alice"), bob = await clientAs("bob"), carol = await clientAs("carol");

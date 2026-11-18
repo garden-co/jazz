@@ -1,6 +1,9 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "ef1bcf09e340de0700d7c0e9e2ffd7aa984f08725ccdb4a2f49422844af00e66"
+  },
   "tables": {
     "projectMembers": {
       "read": {

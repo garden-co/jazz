@@ -1,1 +1,1 @@
-export { default } from "../jazz/permissions.js";
+export { default } from "../jazz/jazz.permissions.json" with { type: "json" };

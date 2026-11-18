@@ -1,4 +1,4 @@
-import { app } from "./schema.js";
+import { app } from "./jazz.generated.js";
 import { clientAs, check, done, PORT } from "./client.js";
 const { orgId } = await (await fetch(`http://localhost:${PORT}/seed`, { method: "POST" })).json();
 const ed = await clientAs("ed"), vic = await clientAs("vic"), out = await clientAs("out"), staffer = await clientAs("staffer", { staff: true }), ann = await clientAs("ann"), friend = await clientAs("friend");

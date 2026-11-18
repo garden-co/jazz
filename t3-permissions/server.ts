@@ -3,7 +3,7 @@ import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { createJazz, sqlite, acceptDeviceAccounts } from "jazz-tools/backend";
 import { app } from "#app";
-import permissions from "#permissions";
+import permissions from "#permissions" with { type: "json" };
 const port = Number(process.env.PORT ?? 8600);
 const jazz = createJazz({
   app, permissions, store: sqlite({ path: process.env.DATA ?? "./data/jazz" }),

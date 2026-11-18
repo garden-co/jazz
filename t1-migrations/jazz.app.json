@@ -1,6 +1,9 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "423278e7e5222957466a7cda481dc133e6414701a8ec37935c0cdc64d108200c"
+  },
   "tables": {
     "projectMembers": {
       "columns": { "projectId": "uuid", "user_id": "uuid" },
@@ -87,7 +90,7 @@
       "to": "8744a9e92b14",
       "migrate": { "tasks": { "notes": { "add": "string", "default": null } } }
     },
-    { "from": "8744a9e92b14", "to": "23b3cde5819a", "migrate": { "tasks": {} } },
+    { "from": "8744a9e92b14", "to": "23b3cde5819a" },
     { "from": "23b3cde5819a", "migrate": { "tasks": { "details": { "renameFrom": "notes" } } } }
   ]
 }

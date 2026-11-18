@@ -1,6 +1,9 @@
 {
-  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
-  "format": 1,
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "c5495dff5d53d5cc9b5a33cbd756107386f0641f263f667724a63e3c2762b549"
+  },
   "tables": {
     "boards": {
       "columns": { "title": "string", "color": "string?", "owner_id": "uuid" },
@@ -30,6 +33,5 @@
       "from": "82d3aaff21db",
       "migrate": { "boards": { "color": { "add": "string", "default": null } } }
     }
-  ],
-  "slices": { "app": ["notes", "boards"], "notesOnly": ["notes"] }
+  ]
 }

@@ -1,1 +1,1 @@
-export { app } from "../jazz/schema.js";
+export { app } from "../jazz/jazz.generated.js";
