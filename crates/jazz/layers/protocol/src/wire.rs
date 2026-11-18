@@ -66,6 +66,12 @@ pub const FEATURE_SERIALIZABLE_BRANCH_READS: WireFeatures = 1 << 12;
 /// sends a read or commit using them only over a link that negotiated this,
 /// and refuses it locally otherwise.
 pub const FEATURE_TEXT_AFFIX_PREDICATES: WireFeatures = 1 << 13;
+/// The peer decodes a refused commit's storage failure
+/// (`WireError::Storage` in the sync layer, Postcard tag 3). A peer without
+/// it cannot decode that fate and drops the link, so a server sends one
+/// only over a link that negotiated this, and the same failure as the
+/// generic `Other` otherwise.
+pub const FEATURE_STORAGE_VERDICTS: WireFeatures = 1 << 14;
 
 /// Bitset of optional protocol features advertised by one peer.
 pub type WireFeatures = u64;
@@ -848,6 +854,7 @@ pub fn current_wire_features() -> WireFeatures {
         | FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
         | FEATURE_SERIALIZABLE_BRANCH_READS
         | FEATURE_TEXT_AFFIX_PREDICATES
+        | FEATURE_STORAGE_VERDICTS
         | runtime_transport_compression_features()
 }
 

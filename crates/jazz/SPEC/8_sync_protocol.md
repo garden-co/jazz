@@ -183,7 +183,10 @@ SQLite endpoint sends them. Clients, relays and servers upgrade together.
 The sync frames are pinned by `crates/jazz/fixtures/sqlite_sync_wire_v1.json`,
 which every shipped artifact (native, NAPI, WASM) validates
 (`jazz::sync_wire_corpus`). The corpus may be re-pinned until alpha.60 ships;
-after that, a layout change needs a compatibility write-up.
+after that, a layout change needs a compatibility write-up. Since then the
+corpus has only gained entries, each for a variant appended behind a feature
+an older peer does not advertise: a `Fate` refused for storage (§8.3), and
+its generic counterpart.
 
 A server pings every link every 20 s and drops one that sent nothing for
 60 s. The WebSocket API shows neither pings nor partial messages, so a
@@ -370,8 +373,21 @@ read-your-writes end to end.
   `Fate` and one `Settled` downstream.
 - `Refused { through, error }`: the commit was refused and landed nowhere.
   `error` is `Conflict`, `Rejected { reason, message }` (a `Reason` by
-  stable name; an unknown name arrives as a rejection without a reason) or
-  `Other`. The rows the commit wrote shipped back ahead of the fate as they
+  stable name; an unknown name arrives as a rejection without a reason),
+  `Other` or `Storage`. `Storage` (tag 3, appended after alpha.60 shipped)
+  is a storage failure where the commit was decided, with its message as
+  it was (no `Storage:` prefix): the writer reports it with the code
+  `storage`, also when a relay passes it on or the fate is replayed. It is
+  as final as any refusal: resending the commit, storage restored, gets the
+  recorded fate, not a new decision. `Other` is reported as `protocol`, and
+  its message is never parsed. An older build cannot decode `Storage`, and
+  a frame it cannot decode drops its link, so a server or relay sends
+  `Storage` only over a link that negotiated `FEATURE_STORAGE_VERDICTS`
+  (`1 << 14`), and over any other the same failure as `Other` with the
+  message an older build sent, `Storage: ` and the message. A storage
+  failure that leaves no fate recorded is not a refusal: the session closes
+  with a retryable error, and the commit is resent. The rows the commit
+  wrote shipped back ahead of the fate as they
   are, and the session is complete through position `through` with them: a
   retry's snapshot reads at it, so a serializable retry sees what the commit
   conflicted with.

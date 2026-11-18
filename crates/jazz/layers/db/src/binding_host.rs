@@ -2314,7 +2314,10 @@ impl Link {
     /// The optional wire features the host negotiated with the peer in
     /// its `Hello`. An upstream link uses them to decide what it may send:
     /// a serializable commit that read through a branch view goes only to
-    /// a peer with [`crate::wire::FEATURE_SERIALIZABLE_BRANCH_READS`].
+    /// a peer with [`crate::wire::FEATURE_SERIALIZABLE_BRANCH_READS`]. A
+    /// subscriber link uses them to decide what it may send back: a storage
+    /// failure travels typed only to a peer with
+    /// [`crate::wire::FEATURE_STORAGE_VERDICTS`].
     pub fn set_features(&self, features: crate::wire::WireFeatures) {
         self.queues.features.set(features);
         self.binding.hooks.schedule_tick();

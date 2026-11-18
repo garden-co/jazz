@@ -1307,6 +1307,7 @@ mod core_host {
                     admission.claims,
                     admission.bundle,
                     admission.trust,
+                    hello.features,
                 )
             };
             let session = match opened {

@@ -1968,6 +1968,8 @@ impl WasmDb {
             .binding()?
             .accept_subscriber(identity, claims)
             .map_err(host_error)?;
+        // A worker's tabs run its build.
+        link.set_features(jazz::wire::current_wire_features());
         Ok(js_sys::Promise::resolve(&JsValue::from(
             WasmTransport::new(link),
         )))

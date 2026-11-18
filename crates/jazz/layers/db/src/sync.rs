@@ -1364,6 +1364,12 @@ pub enum WireError {
         message: String,
     },
     Other(String),
+    /// A storage failure where the commit was decided (`ErrorCode::Storage`),
+    /// as final as any refusal. Its message is the error's own, without the
+    /// `Storage:` display prefix `Other` carries.
+    /// Appended so the earlier variants keep their tags; only a link that
+    /// negotiated [`crate::wire::FEATURE_STORAGE_VERDICTS`] carries it.
+    Storage(String),
 }
 
 /// A large-value node named by its object hash.
@@ -4252,6 +4258,7 @@ fn wire_error(error: &Error) -> WireError {
             reason: error.reason.map(|reason| reason.as_str().to_owned()),
             message: error.message.clone(),
         },
+        ErrorCode::Storage => WireError::Storage(error.message.clone()),
         _ => WireError::Other(error.to_string()),
     }
 }
@@ -4265,6 +4272,7 @@ fn from_wire_error(error: WireError) -> Error {
             message,
         },
         WireError::Other(m) => Error::new(ErrorCode::Protocol, m),
+        WireError::Storage(m) => Error::new(ErrorCode::Storage, m),
     }
 }
 
@@ -14174,7 +14182,22 @@ impl Db {
                 slot: index,
                 generation: session.generation,
             };
-            for message in out {
+            // A storage failure travels typed only to a peer that can
+            // decode it; an older one gets it as it always did, as the
+            // generic `Other` worded by the error's display.
+            let storage_verdicts =
+                session.transport.features() & crate::wire::FEATURE_STORAGE_VERDICTS != 0;
+            for mut message in out {
+                if !storage_verdicts
+                    && let SyncMessage::Fate {
+                        outcome: Outcome::Refused { error, .. },
+                        ..
+                    } = &mut message
+                    && let WireError::Storage(text) = error
+                {
+                    let text = std::mem::take(text);
+                    *error = WireError::Other(Error::new(ErrorCode::Storage, text).to_string());
+                }
                 // A failed or backed-up client is dropped, never waited
                 // on: one slow client must not stall the others, and its
                 // replica is coherent only with every message. It

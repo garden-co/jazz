@@ -375,8 +375,11 @@ impl Transport for Recording {
 /// over a live base, over a frozen base, and of a head alone, and a hidden
 /// `AccessLost` (a branch view's row whose head version the reader may not
 /// read), and serializable `Commit`s with a snapshot the authority served
-/// and one a worker with no server numbered.
-const SHAPES: [&str; 15] = [
+/// and one a worker with no server numbered. A refused commit's storage
+/// failure (`WireError` tag 3, sent only over a link that negotiated
+/// `FEATURE_STORAGE_VERDICTS`) and its generic failure (tag 2) are pinned
+/// apart, appended after the shapes alpha.60 shipped with.
+const SHAPES: [&str; 17] = [
     "Read/once",
     "Rows/tx_ids",
     "Catalogue/versions",
@@ -392,6 +395,8 @@ const SHAPES: [&str; 15] = [
     "Read/once-historical",
     "Read/live-resumed-pinned",
     "Welcome/pinned",
+    "Fate/storage",
+    "Fate/other",
 ];
 
 fn shape(message: &SyncMessage) -> Option<&'static str> {
@@ -466,6 +471,22 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
             kind: WireKind::Serializable { .. },
             ..
         } => Some(SHAPES[9]),
+        SyncMessage::Fate {
+            outcome:
+                Outcome::Refused {
+                    error: SyncWireError::Storage(_),
+                    ..
+                },
+            ..
+        } => Some(SHAPES[15]),
+        SyncMessage::Fate {
+            outcome:
+                Outcome::Refused {
+                    error: SyncWireError::Other(_),
+                    ..
+                },
+            ..
+        } => Some(SHAPES[16]),
         _ => None,
     }
 }
@@ -1099,7 +1120,10 @@ fn hidden_in_a_view(recorded: &Recorded) {
 
 /// Writes `fixtures/sqlite_sync_wire_v1.json` when
 /// `JAZZ_WRITE_SQLITE_SYNC_WIRE_CORPUS=1`. Until alpha.60 ships, re-run it
-/// for a sync message layout change; after, add a new corpus instead.
+/// for a sync message layout change; after, add a new corpus instead. Its
+/// scenario's frames carry clock times, so a shape appended since (the two
+/// `Fate` error shapes) is copied from its output into the pinned file by
+/// hand, leaving every earlier entry's bytes as they were.
 #[test]
 #[ignore = "#1787: manual wire corpus producer; run for a sync wire layout change"]
 fn produce_sqlite_sync_wire_corpus_v1() {
@@ -1109,6 +1133,22 @@ fn produce_sqlite_sync_wire_corpus_v1() {
         "set JAZZ_WRITE_SQLITE_SYNC_WIRE_CORPUS=1 to overwrite the pinned corpus"
     );
     let mut recorded = record();
+    // Both error tags, through the production encoder, without depending
+    // on a platform's SQL diagnostics; the storage error tests cover the
+    // failed uploads themselves.
+    for error in [
+        SyncWireError::Storage("database or disk is full".to_owned()),
+        SyncWireError::Other("Storage: database or disk is full".to_owned()),
+    ] {
+        let message = SyncMessage::Fate {
+            id: jazz::tx::TxId::new(jazz::time::TxTime(1), NodeUuid::from_bytes([0x55; 16])),
+            outcome: Outcome::Refused { through: 1, error },
+            global: true,
+        };
+        let name = shape(&message).expect("an error fate shape");
+        let [frame] = encode_frames(message).unwrap().try_into().unwrap();
+        recorded.insert(name.to_owned(), ("client".to_owned(), frame));
+    }
     let missing: Vec<&str> = VARIANTS
         .iter()
         .copied()

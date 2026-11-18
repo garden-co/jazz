@@ -248,12 +248,20 @@ export const FEATURE_SERIALIZABLE_BRANCH_READS = 1 << 12;
  * server cannot decode (and would drop the link over).
  */
 export const FEATURE_TEXT_AFFIX_PREDICATES = 1 << 13;
+/**
+ * `FEATURE_STORAGE_VERDICTS` in `crates/jazz/layers/protocol/src/wire.rs`:
+ * the core decodes a commit refused for a storage failure with its own error
+ * code. Without it, the server sends that failure as a generic one, which an
+ * older core can decode.
+ */
+export const FEATURE_STORAGE_VERDICTS = 1 << 14;
 export const CLIENT_WIRE_FEATURES =
   FEATURE_PAYLOAD_ZSTD |
   FEATURE_AUTHORIZATION_SCOPE_VIEWS |
   FEATURE_AUXILIARY_CHUNKS |
   FEATURE_SERIALIZABLE_BRANCH_READS |
-  FEATURE_TEXT_AFFIX_PREDICATES;
+  FEATURE_TEXT_AFFIX_PREDICATES |
+  FEATURE_STORAGE_VERDICTS;
 
 // The server route accepts WebSocket messages up to one MiB. Reserve enough
 // postcard framing bytes that a burst of otherwise-valid wire frames remains
