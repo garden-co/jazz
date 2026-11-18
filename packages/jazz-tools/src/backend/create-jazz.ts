@@ -659,6 +659,14 @@ export interface CreateJazzOptions {
    */
   allowDroppingHistory?: boolean;
   /**
+   * Confirms the decrypt conversions this deployment makes, as
+   * `table.column` (`["notes.body"]`): a migration that decrypts a column
+   * puts its plaintext on the server and every replica, so starting a
+   * backend whose schema does that fails, naming the column, until it is
+   * listed here. Remove it again once the deployment is out.
+   */
+  confirmDecrypt?: string[];
+  /**
    * Who may use the Inspector and agent debug access at `<basePath>/inspect`:
    * return `{ by, write? }` for a request that may, null for one that may
    * not.
@@ -1199,6 +1207,7 @@ async function applyBundle(
     /** What the Rust loader built from the app's bindings and jazz.permissions.json. */
     loaded: LoadedBackendApp;
     allowDroppingHistory?: boolean;
+    confirmDecrypt?: string[];
     /** A test harness's backend: print no warnings. */
     quiet?: boolean;
   },
@@ -1212,6 +1221,7 @@ async function applyBundle(
       serverUrl: origin,
       adminSecret: options.adminSecret,
       allowDroppingHistory: options.allowDroppingHistory,
+      confirmDecrypt: options.confirmDecrypt,
     },
     options.loaded,
   ).catch((error: unknown) => {

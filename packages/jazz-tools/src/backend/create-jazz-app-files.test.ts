@@ -102,3 +102,65 @@ describe("createJazz takes jazz.permissions.json in every form a project may hol
     );
   });
 });
+
+describe("createJazz confirms the decrypt conversions its app declares", () => {
+  // Projects are spaces; a task's title is encrypted in its project's space,
+  // and its notes are being decrypted into `notesText`.
+  const encrypted: TestAppFile = {
+    format: 1,
+    tables: {
+      projects: { columns: { name: "string", ownerId: "uuid" } },
+      tasks: {
+        columns: {
+          projectId: "uuid",
+          title: "bytes",
+          notes: "bytes",
+          notesText: "string?",
+        },
+        relations: { project: { rel: "projects", column: "projectId" } },
+        encryption: {
+          space: "projectId",
+          scope: "projects",
+          columns: { title: "string", notes: { type: "string", to: "notesText" } },
+        },
+      },
+    },
+  };
+  const members =
+    "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.id, accountId = session.user)";
+  const permissions = {
+    $schema: "https://jazz.tools/schemas/jazz.permissions.v1.json",
+    tables: {
+      projects: {
+        read: members,
+        insert: "$createdBy.account = session.user",
+        update: "ownerId = session.user",
+      },
+      tasks: { read: "allowedTo.read(project)", insert: "allowedTo.update(project)" },
+    },
+  } as never;
+
+  async function startConfirming(confirmDecrypt?: string[]) {
+    await inProject();
+    const jazz = createJazz({
+      app: testApp(encrypted),
+      permissions,
+      store: memory(),
+      confirmDecrypt,
+    });
+    cleanups.push(() => jazz.close());
+    return jazz.ready();
+  }
+
+  it("starts when confirmDecrypt names the decrypted column", async () => {
+    await expect(startConfirming(["tasks.notes"])).resolves.toBeTruthy();
+  });
+
+  it("refuses, naming the column, without confirmDecrypt", async () => {
+    await expect(startConfirming()).rejects.toThrow(/decrypting tasks\.notes/);
+  });
+
+  it("refuses when confirmDecrypt names only another column", async () => {
+    await expect(startConfirming(["tasks.title"])).rejects.toThrow(/decrypting tasks\.notes/);
+  });
+});
