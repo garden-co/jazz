@@ -1373,6 +1373,9 @@ fn plaintext_and_equality_values_never_print() {
         format!("{:?}", EqualityValueBuf::Text(text.to_owned())),
         format!("{:?}", EqualityValueBuf::Bytes(secret.to_vec())),
         format!("{:?}", EqualityValueBuf::Enum(text.to_owned())),
+        format!("{:?}", EqualityValue::Text(text)),
+        format!("{:?}", EqualityValue::Bytes(secret)),
+        format!("{:?}", EqualityValue::Enum(text)),
     ] {
         assert_redacted(&debug, secret);
     }

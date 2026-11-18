@@ -416,8 +416,9 @@ impl EqualityColumn {
 
 /// A logical value as an equality index encodes it (`E2EE_EQUALITY_FORMAT.md`,
 /// "Value encoding"). The column's type is bound by the context, so values
-/// of different types are never compared.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// of different types are never compared. Its `Debug` output names the
+/// variant only, never the value.
+#[derive(Clone, Copy, PartialEq)]
 pub enum EqualityValue<'a> {
     Null,
     Bool(bool),
@@ -431,6 +432,22 @@ pub enum EqualityValue<'a> {
     Uuid([u8; 16]),
     /// An enum value, by its variant name; compared by exact UTF-8 bytes.
     Enum(&'a str),
+}
+
+impl core::fmt::Debug for EqualityValue<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Null => "Null",
+            Self::Bool(_) => "Bool(..)",
+            Self::Int(_) => "Int(..)",
+            Self::Timestamp(_) => "Timestamp(..)",
+            Self::Float(_) => "Float(..)",
+            Self::Text(_) => "Text(..)",
+            Self::Bytes(_) => "Bytes(..)",
+            Self::Uuid(_) => "Uuid(..)",
+            Self::Enum(_) => "Enum(..)",
+        })
+    }
 }
 
 /// The canonical bit pattern the token encoding gives every NaN; `-0.0` is
