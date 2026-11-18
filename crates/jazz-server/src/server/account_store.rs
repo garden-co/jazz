@@ -105,91 +105,10 @@ fn unix_now_ms() -> u64 {
         })
 }
 
-/// The registry as core's checks beside the account tables' policies read
-/// it (E2EE protocol R5, R6): on a connection of its own, which sees what
-/// the registry committed, so a check never waits for the store's thread.
-pub(crate) struct RegistryFounders {
-    reader: jazz::host::HostReader,
-    app: Uuid,
-}
-
-impl RegistryFounders {
-    pub(crate) fn new(reader: jazz::host::HostReader, app: Uuid) -> Self {
-        Self { reader, app }
-    }
-}
-
-impl jazz::db::AccountRegistryView for RegistryFounders {
-    /// An account was founded by a local-first identity when one of its
-    /// local-first identities derives its id: linking a local-first
-    /// identity into another account keeps that account's id.
-    fn founded_local_first(&self, account: AccountId) -> Result<Option<bool>, String> {
-        let issuers = self.reader.sql(|conn| {
-            let mut statement = conn
-                .prepare_cached(
-                    "SELECT issuer, subject FROM _jazz_host_account_identities WHERE account = ?1",
-                )
-                .map_err(registry::storage_error)?;
-            let rows = statement
-                .query_map([account.0.as_bytes()], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })
-                .map_err(registry::storage_error)?;
-            rows.collect::<Result<Vec<_>, _>>()
-                .map_err(registry::storage_error)
-        });
-        let identities = match issuers {
-            Ok(identities) => identities,
-            // A store whose registry never opened knows no account.
-            Err(error) if error.to_string().contains("no such table") => return Ok(None),
-            Err(error) => return Err(error.to_string()),
-        };
-        if identities.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(identities.iter().any(|(issuer, subject)| {
-            issuer == jazz::identity::DEVICE_ACCOUNT_ISSUER
-                && jazz::account_registry::device_account_id(self.app, subject) == account
-        })))
-    }
-
-    /// An account whose identities are all local-first and none of which
-    /// derives its id in this app's namespace was founded for another
-    /// audience (`found-local-first` and a guest's first admission may name
-    /// one). An encrypting app does not serve such accounts: this rule is
-    /// the documented one (E2EE protocol R5, R6), and the founding routes
-    /// refuse to create them. An account with an external identity is not
-    /// told apart from one the app founded, so it reads as the app's.
-    fn founded_for_another_audience(&self, account: AccountId) -> Result<bool, String> {
-        let Some(founded) = self.founded_local_first(account)? else {
-            return Ok(false);
-        };
-        if founded {
-            return Ok(false);
-        }
-        let identities = self.reader.sql(|conn| {
-            let mut statement = conn
-                .prepare_cached(
-                    "SELECT COUNT(*) FROM _jazz_host_account_identities \
-                     WHERE account = ?1 AND issuer <> ?2",
-                )
-                .map_err(registry::storage_error)?;
-            statement
-                .query_row(
-                    rusqlite::params![account.0.as_bytes(), jazz::identity::DEVICE_ACCOUNT_ISSUER],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map_err(registry::storage_error)
-        });
-        identities
-            .map(|external| external == 0)
-            .map_err(|error| error.to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::portable::accounts::RegistryFounders;
     use crate::portable::accounts::{REVOCATION_MARK_RETENTION_MS, storage_error};
     use jazz::account_registry::AccountError;
 

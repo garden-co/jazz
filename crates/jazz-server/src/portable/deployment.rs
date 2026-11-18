@@ -14,7 +14,7 @@ use jazz::tools::deployment::{self, DeploymentError, PreparedDeployment};
 use jazz::tools::public_schema::{Schema, SchemaHash, TableName, TablePolicies};
 use serde::{Deserialize, Serialize};
 
-use super::catalogue::{CatalogueIndex, StagedDeployment};
+use super::catalogue::{CatalogueIndex, DeploymentResponse, StagedDeployment};
 use crate::runtime::CatalogueApplyError;
 
 /// The deploy route's request body.
@@ -361,4 +361,134 @@ impl Deployment {
         deployment::prepare_catalogue_change(&self.prepared, runtime_rows, self.staged.put.clone())
             .map_err(DeployError::invalid)
     }
+}
+
+/// The host table a store keeps each deployed schema version's encryption
+/// declarations in, keyed by the version's schema hash, in the form
+/// [`encryption::STORED_DECLARATIONS_V1`]: a later deployment of the
+/// version may not change them in a way that breaks its sealed cells
+/// (migrations §3.1), even though the schema is unchanged.
+pub const DECLARATIONS: jazz::host::HostTable = jazz::host::HostTable::new("e2ee_declarations");
+
+/// Parse a deploy body (a [`DeployRequest`] and its encryption
+/// declarations).
+pub fn read_body(body: &[u8]) -> Result<DeployBody, DeployError> {
+    serde_json::from_slice(body).map_err(DeployError::invalid)
+}
+
+/// Stage the deploy `body` on `core`'s catalogue and apply it, for a host
+/// that holds the core and its store in one place. `store` is another
+/// handle on the core's own store: the declarations each version was first
+/// deployed with are read from it ([`DECLARATIONS`]). The ones this
+/// deployment names for the first time are written in the same transaction
+/// as the catalogue rows (`ServerCore::apply_catalogue_keeping`), so a
+/// version is deployed with its declarations or not at all; a deployment
+/// with nothing to commit writes them on their own. With `probe`, the core
+/// is a scratch one that stands in for the store (a deployment the
+/// catalogue refuses never creates it): nothing is kept, and a bundle new
+/// to it ends no session. Otherwise a bundle new to the store ends the
+/// sessions pinned to others. Nothing to commit reloads the core's
+/// catalogue.
+pub fn apply_to_core(
+    core: &mut crate::runtime::ServerCore,
+    store: &jazz::host::StoreFile,
+    body: &[u8],
+    now: u64,
+    probe: bool,
+) -> Result<DeploymentResponse, DeployError> {
+    use jazz::host::HostTables;
+    let rows = core.db().catalogue().map_err(DeployError::internal)?;
+    let index = CatalogueIndex::from_rows(&rows, None);
+    let deployment = prepare_encrypted(&index, read_body(body)?, now, |version| {
+        store
+            .host_get(DECLARATIONS, &version.0)
+            .map_err(|error| error.to_string())
+    })?;
+    let first = if probe {
+        Vec::new()
+    } else {
+        deployment
+            .first_declared
+            .iter()
+            .map(|(version, stored)| (DECLARATIONS, version.0.to_vec(), stored.clone()))
+            .collect()
+    };
+    if !deployment.staged.response.changed {
+        core.reload_catalogue().map_err(DeployError::internal)?;
+        for (table, key, value) in &first {
+            store
+                .host_put_if_absent(*table, key, value)
+                .map_err(DeployError::internal)?;
+        }
+        return Ok(deployment.staged.response);
+    }
+    let change = deployment.catalogue_change(&rows)?;
+    let new_bundle = deployment.staged.new_bundle().filter(|_| !probe);
+    core.apply_catalogue_keeping(deployment.staged.expected(), change, &first, new_bundle)?;
+    Ok(deployment.staged.response)
+}
+
+/// What a host that holds its core and store in one place gives
+/// [`deploy`]: handles on its store, and the account registry's install.
+pub trait CoreHost {
+    /// A new handle on the host's store (a Durable Object's SQL).
+    fn store(&self) -> Result<jazz::host::StoreFile, String>;
+    /// Create the account registry's tables if they are missing, and
+    /// install the registry the account tables' checks read on `core`.
+    fn install_registry(&self, core: &mut crate::runtime::ServerCore) -> Result<(), String>;
+}
+
+/// Publish the deploy body in `body`: validate it against the core's
+/// catalogue and apply its rows, admissions and first-time declarations in
+/// one transaction ([`apply_to_core`]). Without a core yet, the deployment
+/// is probed on a scratch store first, so one the catalogue refuses never
+/// opens the app's store on its schema, and the core is opened on its first
+/// schema with the account registry installed; it is then staged again on
+/// that core's catalogue (which admitted the schema it opened on).
+pub fn deploy(
+    core: &mut Option<crate::runtime::ServerCore>,
+    host: &dyn CoreHost,
+    app: &str,
+    body: &[u8],
+    now: u64,
+) -> Result<DeploymentResponse, DeployError> {
+    use crate::runtime::ServerCore;
+    use jazz::host::{HostTables, StoreFile};
+    if core.is_none() {
+        let store = host.store().map_err(DeployError::internal)?;
+        let rows = store.catalogue().map_err(DeployError::internal)?;
+        let index = CatalogueIndex::from_rows(&rows, None);
+        let deployment = prepare_encrypted(&index, read_body(body)?, now, |version| {
+            store
+                .host_get(DECLARATIONS, &version.0)
+                .map_err(|error| error.to_string())
+        })?;
+        if !deployment.staged.response.changed {
+            // Nothing to commit; the declarations of a version deployed
+            // with them for the first time are kept as when it commits.
+            for (version, stored) in &deployment.first_declared {
+                store
+                    .host_put_if_absent(DECLARATIONS, &version.0, stored)
+                    .map_err(DeployError::internal)?;
+            }
+            return Ok(deployment.staged.response);
+        }
+        let genesis = deployment.genesis()?;
+        let scratch = StoreFile::memory().map_err(DeployError::internal)?;
+        let mut probe = ServerCore::open(genesis.clone(), scratch, false, None)
+            .map_err(DeployError::internal)?;
+        // The scratch store keeps nothing and ends no session; the
+        // declarations the deployment is judged by are the real store's.
+        let probed = apply_to_core(&mut probe, &store, body, now, true).map(drop);
+        probe.close();
+        probed?;
+        let mut opened = ServerCore::open(genesis, store, false, Some(app.to_owned()))
+            .map_err(DeployError::internal)?;
+        host.install_registry(&mut opened)
+            .map_err(DeployError::internal)?;
+        *core = Some(opened);
+    }
+    let store = host.store().map_err(DeployError::internal)?;
+    let core = core.as_mut().expect("opened above");
+    apply_to_core(core, &store, body, now, false)
 }

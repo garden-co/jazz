@@ -18,14 +18,7 @@ use jazz::tools::public_schema::{SchemaHash, TableName};
 #[cfg(test)]
 use std::collections::HashMap;
 
-/// The host table the server keeps each deployed schema version's
-/// encryption declarations in, keyed by the version's schema hash, in the
-/// form [`jazz::tools::deployment::artifact::encryption::STORED_DECLARATIONS_V1`]:
-/// a later deployment of the version may not change them in a way that
-/// breaks its sealed cells (migrations §3.1), even though the schema is
-/// unchanged.
-pub(crate) const DECLARATIONS: jazz::host::HostTable =
-    jazz::host::HostTable::new("e2ee_declarations");
+pub(crate) use crate::portable::deployment::DECLARATIONS;
 
 pub(crate) async fn deploy(
     state: Arc<ServerState>,

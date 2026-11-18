@@ -82,6 +82,30 @@ impl ServerCore {
         })
     }
 
+    /// Install the account registry the checks beside the E2EE account
+    /// tables' policies read, over `reader` (see
+    /// [`crate::portable::accounts::RegistryFounders`]), for a host whose
+    /// registry lives in its own store. Needs the core opened with an app
+    /// name; false, and nothing installed, without one.
+    pub fn install_account_registry(
+        &mut self,
+        reader: impl crate::portable::accounts::RegistryRead + 'static,
+    ) -> bool {
+        self.owner.install_registry(reader)
+    }
+
+    /// Whether the app's schema has Jazz's E2EE system tables; an error
+    /// when the schema cannot be read.
+    pub fn encrypts(&self) -> Result<bool, String> {
+        self.owner.encrypts()
+    }
+
+    /// Whether the account registry the checks beside the E2EE account
+    /// tables' policies read is installed.
+    pub fn has_account_registry(&self) -> bool {
+        self.owner.registry_installed
+    }
+
     /// The core's store.
     pub fn db(&self) -> &Db {
         &self.owner.db
@@ -306,6 +330,19 @@ impl ServerCore {
         change: CatalogueChange,
         supersedes: Option<jazz::catalogue::BundleId>,
     ) -> Result<(), CatalogueApplyError> {
+        self.apply_catalogue_keeping(expected, change, &[], supersedes)
+    }
+
+    /// [`Self::apply_catalogue`], writing `kept` (host table entries: a
+    /// key already there keeps its value) in the same transaction as the
+    /// change.
+    pub fn apply_catalogue_keeping(
+        &mut self,
+        expected: &crate::portable::catalogue::CatalogueIndex,
+        change: CatalogueChange,
+        kept: &[(jazz::host::HostTable, Vec<u8>, Vec<u8>)],
+        supersedes: Option<jazz::catalogue::BundleId>,
+    ) -> Result<(), CatalogueApplyError> {
         let rows = self
             .db()
             .catalogue()
@@ -316,7 +353,7 @@ impl ServerCore {
                     .to_owned(),
             ));
         }
-        let (ended, result) = self.owner.apply_catalogue(change, supersedes);
+        let (ended, result) = self.owner.apply_catalogue_keeping(change, supersedes, kept);
         // Sessions that ended are gone even when a later step failed: the
         // host takes their error frames and closes their sockets, and a
         // tick moves what the change made visible.
