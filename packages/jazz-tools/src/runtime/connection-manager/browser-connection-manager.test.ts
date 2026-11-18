@@ -605,6 +605,7 @@ describe("Browser configuration admission retries", () => {
       await waiting;
       expect(isStoreHeldByAnotherTabError(failure)).toBe(true);
       expect((failure as Error).message).toContain("another build of this app");
+      expect((failure as Error).message).toContain("reload the tab that runs the older build");
       expect(status()).toEqual({ state: "offline", reason: "held-by-another-tab", retrying: true });
       // The other tab reloads into this build: the next attempt joins.
       unpin();

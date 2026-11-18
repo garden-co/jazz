@@ -47,6 +47,17 @@ describe("compareRuntimeAdmission", () => {
     expect(compareRuntimeAdmission(fingerprint(), "not json", tasks)).toBe("incompatible");
   });
 
+  it("refuses another configuration that also has another schema, rather than wait for it", () => {
+    // Waiting would never end: no reload of the other tab makes this one fit.
+    expect(
+      compareRuntimeAdmission(
+        fingerprint(),
+        fingerprint({ schemaHash: "older-deploy", workerUrl: "other.js" }),
+        tasks,
+      ),
+    ).toBe("incompatible");
+  });
+
   // #5139: a Db that hasn't read or written opens the store with no schema,
   // only to delete it (a clearOnSignOut sign-out right after a sign-up).
   it("admits a tab with no schema to a store open under the app's schema", () => {

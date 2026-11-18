@@ -380,7 +380,7 @@ export class BrowserConnectionManager extends ConnectionManager {
   private heldByAnotherTabError(connection: BrowserWorkerConnection, cause: unknown): Error {
     return connection.waitsForAnotherTab?.() === "build"
       ? new StoreHeldByAnotherTabError(
-          "Another tab runs another build of this app (another schema) and holds this account's local store: reload or close that other tab. This tab joins once it lets go; reloading this tab first loses its unsynced writes",
+          "Another tab runs another build of this app (another schema) and holds this account's local store: reload the tab that runs the older build, which may be this one (reloading picks up the newest build), or close it. This tab joins once the other lets go; reloading this tab loses its unsynced writes",
           { cause },
         )
       : new StoreHeldByAnotherTabError(undefined, { cause });

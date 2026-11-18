@@ -1106,6 +1106,32 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(rows.some((row) => row.title === "Old schema row")).toBe(true);
   });
 
+  it("still refuses another configuration besides the schema visibly, rather than wait", async () => {
+    // Waiting is only for another build's schema: no reload of the other tab
+    // makes a different configuration fit this store.
+    const appId = uniqueDbName("incompatible-config-app");
+    const dbName = uniqueDbName("incompatible-config");
+    const pinning = track(await createDb({ appId, driver: { type: "persistent", dbName } }));
+    pinning.insert(todos, { title: "Pinning row", done: false });
+    await waitForCondition(
+      async () => (await pinning.all(allTodos, { tier: "local-first" })).length === 1,
+      8_000,
+      "The first tab should open the store",
+    );
+    const other = track(
+      await createDb({ appId, logLevel: "debug", driver: { type: "persistent", dbName } }),
+    );
+    await expect(
+      withTimeout(
+        other.all(allTodos, { tier: "local-first" }),
+        8_000,
+        "A tab of another configuration should reject instead of waiting",
+      ),
+      // Its log level is part of the worker's telemetry configuration, which
+      // the worker checks first: either refusal fails visibly.
+    ).rejects.toThrow(/incompatible persistent browser (telemetry )?configuration/);
+  });
+
   it("keeps explicit-name account caches separate, shared per scope, and destroys only the selected scope", async () => {
     const appId = uniqueDbName("explicit-browser-owner-app");
     const dbName = uniqueDbName("shared-device-cache");
