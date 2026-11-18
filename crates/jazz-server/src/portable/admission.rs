@@ -22,6 +22,19 @@ pub enum CommitUnitTrust {
     TrustedAuthority,
 }
 
+impl CommitUnitTrust {
+    /// The identity a link admitted as `identity` is served as: its own for
+    /// a user session, under its policies; SYSTEM for a trusted backend or
+    /// authority link, served with full access. Every host maps trust
+    /// through this one place.
+    pub fn served_as(self, identity: AuthorSubject) -> AuthorSubject {
+        match self {
+            Self::Session => identity,
+            Self::TrustedBackend | Self::TrustedAuthority => AuthorSubject::SYSTEM,
+        }
+    }
+}
+
 /// Capability selected by the server after authenticating a WebSocket and
 /// negotiating its features.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

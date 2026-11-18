@@ -2462,6 +2462,8 @@ dependencies = [
  "flate2",
  "futures",
  "futures-util",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
  "hex",
  "hmac",
  "http",
@@ -2486,6 +2488,7 @@ dependencies = [
  "tracing",
  "tungstenite",
  "uuid",
+ "web-time",
 ]
 
 [[package]]
