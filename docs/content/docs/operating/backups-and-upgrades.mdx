@@ -105,9 +105,24 @@ start letting device accounts in:
 - in `schema.ts`, `eq`, `ne` and `isIn` with `session.authMode` and `"local-first"` are type
   errors.
 
-A backend still running permissions published before alpha.69 opens, but every rule that compares
-`session.authMode` with `"local-first"` fails closed: the reads and writes it guards fail until you
-redeploy.
+**Permissions published before alpha.69 stop working on an alpha.69 core.** What counts is the
+version of the core your permissions run on (your self-hosted server, or the Jazz Cloud core), not
+your backend's. On an alpha.69 core, a policy that still compares `session.authMode` with
+`"local-first"` no longer compiles. Every query whose policy contains that comparison then fails,
+for **every** user, signed-in ones included, until you deploy the renamed permissions.
+
+**Upgrade the core and redeploy your backend together.** On Jazz Cloud the core is upgraded
+separately from your deployment, so the two can be out of step for a while:
+
+- an alpha.69 core with your old permissions: the tables those policies guard fail for everyone,
+  as above;
+- your new permissions on a core still on alpha.68: `eq(session.authMode, "device-account")` never
+  matches, which locks device accounts (guests) out, and `ne(session.authMode, "device-account")`
+  always matches, which lets them in.
+
+To stay correct across that window, check the issuer instead of `authMode`. It's the same on both
+versions: `eq(session.identity.issuer, "urn:jazz:local-first")` holds exactly for a device account
+(`ne(…)` for everyone else). Switch to `session.authMode` once both sides are on alpha.69.
 
 **Where to change it.** Only where the value is compared with an `authMode`:
 
@@ -122,15 +137,23 @@ redeploy.
 
 `jazz.permissions.json` follows from `schema.ts` when you run `generate`: don't edit it by hand.
 
-To find them, search for `local-first` next to `authMode`, e.g.
-`grep -rnE "authMode.{0,40}local-first|local-first.{0,40}authMode" --include='*.ts' --include='*.tsx' .`.
-A value kept in a variable (`const mode = "local-first"; … eq(session.authMode, mode)`) won't match
-that search, and `generate` refuses it: fix it the same way.
+To find them, search for `local-first` next to `authMode`, and for `case "local-first":`:
+
+```bash
+grep -rnE "authMode.{0,40}local-first|local-first.{0,40}authMode|case ['\"]local-first" \
+  --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' --include='*.mjs' \
+  --include='*.svelte' --include='*.vue' . --exclude-dir=node_modules
+```
+
+A search can't find them all: a call your formatter wrapped over several lines, or a value kept in a
+variable (`const mode = "local-first"; … eq(session.authMode, mode)`). So after making the changes,
+**run your typecheck and `npx jazz-tools generate`**: the typecheck flags `"local-first"` compared
+with an `authMode`, and `generate` refuses whatever is left, naming it.
 
 **Leave every other `"local-first"` as it is.** These are about where data is stored, not how a
 session signed in:
 
-- the read tier `tier: "local-first"` and `"local-first-unless-empty"`;
+- the read tier `tier: "local-first"`;
 - `jazz-tools/local-first` and `upgradeToLocalFirst`;
 - the device-account JWT issuer `urn:jazz:local-first` and the `X-Jazz-Local-First-Audience`
   header;
