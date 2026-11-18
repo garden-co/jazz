@@ -82,14 +82,12 @@ columns and a client-run rewrite between them.
   the stored schema is unchanged, as it is for a plaintext type change.
 - The entries still add nothing to the schema hash (H1); the deploy request
   carries every version's declarations so the server can check them.
-- **Known limits: hosts that keep no declarations.** A server keeps the
+- **Known limit: a host that keeps no declarations.** A server keeps the
   declarations a version was first deployed with in a host table of its
-  store; a version's later declarations are judged against them. Two hosts
-  keep none:
-  - A host whose deploy path takes no declarations (the Durable Object host)
-    refuses every schema that has Jazz's system tables, with "has Jazz's
-    system tables but declares no encryption", so an encrypted app cannot
-    deploy there.
+  store (`e2ee_declarations`); a version's later declarations are judged
+  against them. The native server and the Durable Object host take the whole
+  deploy body, keep them in that table in the same form, and read them back
+  for every later deploy. One host keeps none:
   - A server running without a store (a runtime only) accepts the
     declarations in each deploy body but remembers none. It cannot refuse a
     later deploy that changes a version's declarations, and it treats every
