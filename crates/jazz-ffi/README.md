@@ -84,7 +84,7 @@ storage, writes still unsent fail it with `Unsynced { pending }` (kind
 
 **End users** (contract v2): `"serverUrl"` is the app's Jazz endpoint (its
 backend's `createJazz` handler, never the core) and `"auth"` says who signs
-in: `{"deviceKey": "jazz-auth-v1:…"}` (a local-first device account; make one
+in: `{"deviceKey": "jazz-auth-v1:…"}` (a device account; make one
 with `generate_device_key()` / `jazz_generate_device_key`, and keep it as a
 password in the platform's keychain) or `{"bearer": true}`, the app's own
 sign-in, whose tokens a host callback gives (UniFFI
