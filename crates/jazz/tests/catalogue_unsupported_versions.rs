@@ -422,8 +422,6 @@ impl Transport for NewerType {
 /// ```
 #[test]
 fn rows_written_under_a_skipped_version_reach_an_older_replica() {
-    let server = open(0);
-    server.set_authority();
     let add_where = MigrationLens::new(
         schema().version_id(),
         with_where().version_id(),
@@ -437,7 +435,20 @@ fn rows_written_under_a_skipped_version_reach_an_older_replica() {
         }],
     )
     .unwrap();
-    block_on(server.activate_schema_with_lenses(with_where(), &[add_where])).unwrap();
+    // The server is deployed at v2: it opens under it, shipping v1 and the
+    // lens into v2, and installs it before any write.
+    let server = block_on(Db::open(
+        DbConfig::new(
+            with_where(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )
+        .with_migrations(vec![schema()], vec![add_where]),
+    ))
+    .unwrap();
+    server.set_authority();
     let bob = open(1);
     let (up, down) = jazz::db::duplex();
     let link = block_on(bob.connect_upstream(Box::new(NewerType { inner: up })));
