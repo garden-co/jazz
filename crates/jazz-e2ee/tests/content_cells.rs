@@ -1505,7 +1505,7 @@ fn competing_roots_take_no_write_before_a_chain_read() {
         for creation_refused in [false, true] {
             assert!(matches!(
                 held.write_key(&address, creation_refused),
-                WriteChoice::SpacePending
+                WriteChoice::NeedsChainRead
             ));
         }
         // A read of the chain names the real root: the write goes under it.

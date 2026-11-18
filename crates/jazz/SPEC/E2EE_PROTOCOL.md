@@ -2392,8 +2392,9 @@ and version. Once the device has read the space's chain, only keys of that
 chain's root write. Before such a read in this session (the chain read is
 kept only in memory, so also after a restart), a device that holds keys of
 more than one root of the address not marked `refused` cannot tell which
-root is the space's, and the write fails `space-pending` until a read; keys
-of one root alone write without one.
+root is the space's: the runtime reads the space's chain and retries the
+write at once, and offline reports it `space-pending`. Keys of one root
+alone write without a read.
 
 ### 5.3 Offline and provisional writes
 
@@ -2728,7 +2729,7 @@ Refusal codes:
 | `no-other-device`               | A removal request with no other active device to complete it (§2.8).                                                                                                      |
 | `unsupported-recipient`         | A recipient device, recovery root or account has no key of the selected mechanism (§0, §2.12).                                                                            |
 | `account-reset-not-allowed`     | An account reset by a local-first session, or where the application has not enabled `allowAccountReset` (§2.11).                                                          |
-| `space-pending`                 | An encrypted write to a space with no valid root after this device's creation was refused in this run (§3.2), or with competing roots before a chain read (§5.2).         |
+| `space-pending`                 | A write to a space with no valid root after this device's creation was refused in this run (§3.2), or offline with competing roots before a chain read (§5.2).            |
 | `space-create-refused`          | The authority refused the root itself, staged with a write or by `createSpace` (§3.2); only that transaction fails, and the device stops automatic creation of the space. |
 | `rotation-needs-key`            | A rotation by a device that holds no authenticated key of the current version (§3.5), or a recovery rotation by one that holds no version at all.                         |
 | `local-first-identity-mismatch` | A local-first root written with an identity whose key does not derive the account ID (§2.3).                                                                              |
@@ -2898,8 +2899,8 @@ Limits:
   invalid until a read shows it; can switch the device to another valid
   root of the address, or another branch of a fork; and, where the device
   holds keys of two roots of one address, so choose which of them it
-  writes under. Before its first read in a session, such a device does not
-  write to the space at all (§5.2), so it never writes under a root no
+  writes under. Before its first read in a session, such a device reads
+  the chain before it writes (§5.2), so it never writes under a root no
   read of the session showed. It cannot forge a chain: every root and
   successor is signed and checked (§3.3).
 - **Any updater can add roots.** The server does not limit roots per space

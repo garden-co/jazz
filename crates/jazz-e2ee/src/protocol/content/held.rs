@@ -347,13 +347,18 @@ pub enum WriteChoice<'k> {
     /// No usable key: the runtime acquires one, or prepares the space's
     /// root, and the write is staged again (H2 `NeedsKey`).
     NeedsKey,
-    /// The write fails `space-pending` without staging a root: the space
-    /// has no known valid root and this device's creation of it was
-    /// refused while the client runs; or keys of more than one root of the
-    /// address are held and not `refused`, and this session has read no
-    /// chain of it, so it cannot tell which root is the space's. Either
-    /// way a later read of the chain decides.
+    /// The space has no known valid root and this device's creation of it
+    /// was refused while the client runs: the write fails `space-pending`
+    /// without staging a root.
     SpacePending,
+    /// Keys of more than one root of the address are held and not
+    /// `refused`, and this session has read no chain of it, so the device
+    /// cannot tell which root is the space's (the chain read is kept in
+    /// memory only). The runtime reads the space's chain
+    /// ([`HeldKeys::observe_chain`]) and stages the write again at once;
+    /// when it cannot read it (offline), the write is reported
+    /// `space-pending` without staging a root.
+    NeedsChainRead,
 }
 
 /// The space's chain as the device last read it, for one address: which
@@ -501,8 +506,9 @@ impl HeldKeys {
     /// the address's chain, that is the chain's root: a creation that lost
     /// to it never takes a write. Before a read, keys of more than one root
     /// that are not `refused` take no write (the chain read is kept in
-    /// memory only, so this holds after a restart until a read): the write
-    /// fails `space-pending`. Keys of one root alone write without a read.
+    /// memory only, so this holds after a restart until a read): the chain
+    /// must be read first ([`WriteChoice::NeedsChainRead`]). Keys of one
+    /// root alone write without a read.
     /// Otherwise, with no key, the write fails
     /// `space-pending` when `creation_refused` (this device's creation of
     /// the space was refused while the client runs, §3.2) and no valid
@@ -519,7 +525,7 @@ impl HeldKeys {
             None => {
                 let first = roots.next();
                 if roots.next().is_some() {
-                    return WriteChoice::SpacePending;
+                    return WriteChoice::NeedsChainRead;
                 }
                 first
             }
