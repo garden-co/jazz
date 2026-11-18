@@ -9,8 +9,7 @@ use std::task::{Poll, Waker};
 
 use crate::ids::{AuthorSubject, GlobalPhysicalColumnId, GlobalPhysicalTableId, RowUuid};
 use crate::protocol::{
-    BranchSelector, BranchViewBase, CurrentWriteSchema, LensOp, MigrationLens, ReadViewSourceSpec,
-    ReadViewSpec, SchemaVersion,
+    BranchSelector, BranchViewBase, LensOp, MigrationLens, ReadViewSourceSpec, ReadViewSpec,
 };
 use crate::query::Query;
 use crate::records::{Value, ValueType};
@@ -379,6 +378,11 @@ pub enum SubscriptionEvent {
         removed: Vec<RemovedRow>,
         settled: bool,
         tier: DurabilityTier,
+        /// A reset that stands for deltas the reader fell too far behind
+        /// to be told one by one (see
+        /// [`Db::set_subscription_backlog_limit`]): the current result,
+        /// which supersedes them. Always `false` on other deltas.
+        coalesced: bool,
     },
     /// The subscription ended with an error: `code` says what kind,
     /// `message` is the error's own message, `reason` the error as text
@@ -600,7 +604,23 @@ impl SubscriptionStream {
             }
             return Some(event);
         }
-        self.queue.borrow_mut().pop_front()
+        let mut queue = self.queue.borrow_mut();
+        if !queue.reset_due() {
+            return queue.pop_front(None);
+        }
+        // A group is borrowed mutably only inside the store's own calls
+        // (dispatching a commit), which never run a reader's code, so it
+        // is free here. Were it not, the reset stays due for the next read.
+        let group = self.group.upgrade();
+        let group = group.as_ref().and_then(|group| group.try_borrow().ok());
+        debug_assert!(group.is_some(), "a reader reads outside dispatch");
+        queue.pop_front(group.as_ref().map(|group| group.rows.as_slice()))
+    }
+
+    /// Changed rows its undelivered deltas hold: at most its backlog limit
+    /// ([`Db::set_subscription_backlog_limit`]), past which they coalesce.
+    pub fn backlog_rows(&self) -> usize {
+        self.queue.borrow().backlog_rows()
     }
 
     pub async fn close(self) -> Result<(), Error> {
@@ -646,13 +666,6 @@ pub struct RuntimeStats {
     pub active_subscriptions: usize,
     pub active_prepared_shapes: usize,
     pub active_shape_params: usize,
-}
-
-/// A schema lineage step authored for publication.
-#[derive(Clone, Debug)]
-pub struct SchemaPublication {
-    version: SchemaVersion,
-    lens: MigrationLens,
 }
 
 struct Inner {
@@ -844,13 +857,18 @@ struct Inner {
     /// Rows a unit's trusted writes (no write check) left behind, by stored
     /// table: they need no evidence, so its grounding starts from them.
     trusted_rows: RefCell<BTreeMap<String, BTreeSet<[u8; 16]>>>,
+    /// The inherited rows the unit being applied (or the staging overlay)
+    /// copied into a branch head: (stored table, row, head key) to the base
+    /// key it acted on. The unit's later writes to the head row act on that
+    /// base row (SPEC 7). Cleared at every unit and overlay boundary
+    /// ([`Inner::start_unit_heads`]), never left to another unit.
+    inherited_heads: RefCell<InheritedHeads>,
     /// The open transaction's seq and the tables it wrote.
     tx: Option<(u64, BTreeSet<String>)>,
     /// The identity the open callback transaction writes as. A write as
     /// any other identity while it is open would join its commit, and
     /// upload under its author and claims, so it is refused.
     tx_identity: Option<WriteIdentity>,
-    publications: Vec<SchemaPublication>,
     /// Set once connected upstream: this store is a replica.
     client: Option<sync::Client>,
     /// A replica whose store does not outlive it (a foreground over a
@@ -925,6 +943,14 @@ struct Inner {
     /// followed key found, read once for every session following it
     /// (see `sync::FollowMemo`).
     follow_memo: Rc<RefCell<Option<sync::FollowMemo>>>,
+    /// Per stored table, how many composite support column sets the
+    /// server's sessions hold (see `sync::CompositeTables`): a written row
+    /// of a table no session follows that way skips the sessions' sets.
+    pub(crate) composite_tables: sync::CompositeTables,
+    /// Ticks' gatherings of composite support column sets (see
+    /// `Db::composite_scans_for_test`).
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) composite_scans: std::cell::Cell<usize>,
     /// Whether `_jazz_pruned_txs` exists, as last read (see
     /// `sync::has_pruned_txs`).
     pruned_txs: std::cell::Cell<Option<sync::Known>>,
@@ -2244,9 +2270,9 @@ impl Db {
                 changed: RefCell::new(Vec::new()),
                 deferred: RefCell::new(None),
                 trusted_rows: RefCell::new(BTreeMap::new()),
+                inherited_heads: RefCell::new(HashMap::new()),
                 tx: None,
                 tx_identity: None,
-                publications: Vec::new(),
                 client: None,
                 non_durable: false,
                 reopenable: path.is_some(),
@@ -2271,6 +2297,9 @@ impl Db {
                 unsupported_versions: BTreeMap::new(),
                 withheld: std::cell::Cell::new(withheld > 0),
                 follow_memo: Rc::default(),
+                composite_tables: sync::CompositeTables::default(),
+                #[cfg(any(test, feature = "testing"))]
+                composite_scans: std::cell::Cell::new(0),
                 pruned_txs: std::cell::Cell::new(None),
             })),
         };
@@ -3327,6 +3356,17 @@ impl Db {
             .set_threshold(threshold);
     }
 
+    /// How many changed rows a subscription's undelivered deltas may hold
+    /// before they are coalesced into one reset of its current result
+    /// (marked `coalesced`), for reads that set no
+    /// [`ReadOpts::backlog_rows`]. Defaults to
+    /// [`fanout::DEFAULT_SUBSCRIPTION_BACKLOG_LIMIT`]. It cannot be turned
+    /// off: a reader that stops reading holds at most this many changed
+    /// rows plus its result, however fast others write.
+    pub fn set_subscription_backlog_limit(&self, limit: std::num::NonZeroUsize) {
+        self.inner.borrow_mut().fan.backlog_limit = Some(limit);
+    }
+
     /// Diagnostics: SQLite's query plan for the INSERT check a commit
     /// would run on `row` of `table` as `author`, with `grounded` rows of
     /// that table overlaid as a later grounding round sees them.
@@ -3566,22 +3606,24 @@ impl Db {
         };
         let include_deleted = read.include_deleted;
         let mut inner = self.inner();
-        let (queue, group) = match inner.subscribe_member(prepared, identity, read, settled) {
-            Ok(member) => member,
-            Err(error) => {
-                drop(inner);
-                if let (Some(_), Some(reach)) = (&remote, reach) {
-                    self.detach_remote(
-                        &prepared.query,
-                        &prepared.binding,
-                        include_deleted,
-                        &view,
-                        reach,
-                    );
+        let backlog = fanout::Backlog::Reader(opts.backlog_rows);
+        let (queue, group) =
+            match inner.subscribe_member(prepared, identity, read, settled, backlog) {
+                Ok(member) => member,
+                Err(error) => {
+                    drop(inner);
+                    if let (Some(_), Some(reach)) = (&remote, reach) {
+                        self.detach_remote(
+                            &prepared.query,
+                            &prepared.binding,
+                            include_deleted,
+                            &view,
+                            reach,
+                        );
+                    }
+                    return Err(error);
                 }
-                return Err(error);
-            }
-        };
+            };
         Ok(SubscriptionStream {
             queue,
             dropped: inner.fan.dropped.clone(),
@@ -4019,45 +4061,13 @@ impl Db {
 
     // ---- schema evolution -------------------------------------------------
 
-    pub fn author_schema_lineage_publication(
-        &self,
-        version: SchemaVersion,
-        lens: MigrationLens,
-    ) -> Result<SchemaPublication, Error> {
-        Ok(SchemaPublication { version, lens })
-    }
-
-    pub async fn publish_schema_with_lens(
-        &self,
-        publication: SchemaPublication,
-    ) -> Result<(), Error> {
-        self.inner().publications.push(publication);
-        Ok(())
-    }
-
-    /// Make a published version current with the lens it was published
-    /// with (see [`Db::activate_schema_with_lenses`]).
-    pub async fn activate_catalogue_schema_for_test(
-        &self,
-        current: CurrentWriteSchema,
-    ) -> Result<(), Error> {
-        let publication = self
-            .inner()
-            .publications
-            .iter()
-            .find(|publication| publication.version.id == current.schema)
-            .cloned()
-            .ok_or_else(|| Error::new(ErrorCode::Schema, "schema version was not published"))?;
-        self.activate(publication.version.schema, &[publication.lens], None)
-    }
-
     /// Make `schema` the current schema. The stored tables grow to hold it:
     /// new tables, new columns (`ADD COLUMN ... DEFAULT`, no rows rewritten)
     /// and new indexes. Columns other schemas added stay, so older clients
     /// keep their data. Changing a column's type is not supported yet, and a
     /// new required column needs a default.
     pub async fn activate_schema(&self, schema: JazzSchema) -> Result<(), Error> {
-        self.activate(schema, &[], None)
+        self.activate(schema, &[])
     }
 
     /// [`Db::activate_schema`], with the migration lenses into `schema`
@@ -4070,20 +4080,7 @@ impl Db {
         schema: JazzSchema,
         lenses: &[MigrationLens],
     ) -> Result<(), Error> {
-        self.activate(schema, lenses, None)
-    }
-
-    /// [`Db::activate_schema_with_lenses`] as permissions revision
-    /// `revision` of the store's catalogue (see [`crate::catalogue`]): its
-    /// row records the schema and policies, and when they took effect. A
-    /// store without a server numbers its activations itself.
-    pub async fn activate_schema_at_revision(
-        &self,
-        revision: u64,
-        schema: JazzSchema,
-        lenses: &[MigrationLens],
-    ) -> Result<(), Error> {
-        self.activate(schema, lenses, Some(revision))
+        self.activate(schema, lenses)
     }
 
     /// Admit `schema` without making it current: the stored tables grow to
@@ -4098,18 +4095,12 @@ impl Db {
         self.admit(schema, lenses, None)
     }
 
-    fn activate(
-        &self,
-        schema: JazzSchema,
-        lenses: &[MigrationLens],
-        revision: Option<u64>,
-    ) -> Result<(), Error> {
-        self.admit(schema, lenses, Some(revision))
+    fn activate(&self, schema: JazzSchema, lenses: &[MigrationLens]) -> Result<(), Error> {
+        self.admit(schema, lenses, Some(None))
     }
 
     /// Apply `change` to the store's catalogue in one transaction: publish
-    /// its rows, admit its versions in order, then make its schema current
-    /// at its revision. A change that fails anywhere leaves the file and
+    /// its rows, then admit its versions in order. A change that fails anywhere leaves the file and
     /// this database as they were.
     pub async fn apply_catalogue(
         &self,
@@ -4130,9 +4121,6 @@ impl Db {
             crate::catalogue::put(&self.inner().conn, &change.put)?;
             for (schema, lenses) in change.admit {
                 self.admit(schema, &lenses, None)?;
-            }
-            if let Some((revision, schema, lenses)) = change.activate {
-                self.admit(schema, &lenses, Some(Some(revision)))?;
             }
             Ok(())
         })();
@@ -4857,6 +4845,7 @@ fn delta(
         removed,
         settled: true,
         tier: DurabilityTier::Local,
+        coalesced: false,
     }
 }
 
@@ -7098,6 +7087,12 @@ impl Inner {
         }
     }
 
+    /// Start applying a unit, or replaying a staging overlay: no head row
+    /// another unit copied is this one's ([`Inner::inherited_heads`]).
+    pub(crate) fn start_unit_heads(&self) {
+        self.inherited_heads.borrow_mut().clear();
+    }
+
     /// Drop a unit's pending checks (it rolled back).
     pub(crate) fn abandon_checks(&self) {
         *self.deferred.borrow_mut() = None;
@@ -7401,6 +7396,56 @@ impl Inner {
             self.existing_at(&table.stored, row, key, Some(&cut))?,
             Some((_, false))
         ))
+    }
+
+    /// A USING or read-for-write check of the row a write acts on
+    /// (SPEC 7, INV-RLS-9). While a unit is decided
+    /// ([`Inner::defer_checks`]: at the authority on upload, in a relay's
+    /// admission, and in a node's own commit) such a check reads committed
+    /// state, as the grounding's first round does: the row as it stood
+    /// before the unit and the policy's other rows likewise, never the
+    /// unit's own earlier writes. So the unit's decision does not depend on
+    /// the order of its writes, and no write vouches for another's USING.
+    /// A branch-head row the unit copied from its base acts on that base
+    /// row, as the unit's first write to it did. A row the unit created or
+    /// revived has no committed state to act on: the end-state check of
+    /// its first write ([`Inner::write_check`]) decides it. For such a row,
+    /// and outside a unit, this returns `None`: the caller checks the
+    /// current version.
+    fn holds_on_acted_row(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        seq: u64,
+        policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
+    ) -> Result<Option<bool>, Error> {
+        if self.deferred.borrow().is_none() {
+            return Ok(None);
+        }
+        let acted = if self.was_live_before(table, row, key, seq)? {
+            key.to_vec()
+        } else {
+            let base = self
+                .inherited_heads
+                .borrow()
+                .get(&(table.stored.clone(), *row.0.as_bytes(), key.to_vec()))
+                .cloned();
+            match base {
+                Some(from) if self.was_live_before(table, row, &from, seq)? => from,
+                _ => return Ok(None),
+            }
+        };
+        let key = &acted[..];
+        let cut = Cut {
+            unsettled: false,
+            seq: self.own_pos(seq.saturating_sub(1)),
+            own: self.own_rank(seq),
+            extra: Vec::new(),
+            overlay: Some(CutOverlay::Grounded(Arc::default())),
+        };
+        self.holds_as_of(&self.schema, table, row, key, cut, policy)
+            .map(Some)
     }
 
     /// Whether `row`'s current version on branch `key` is a tombstone.
@@ -8516,6 +8561,10 @@ impl Inner {
         at: Option<&Cut>,
         seq: u64,
     ) -> Result<(), Error> {
+        self.inherited_heads
+            .borrow_mut()
+            .entry((table.stored.clone(), *row.0.as_bytes(), to.to_vec()))
+            .or_insert_with(|| from.to_vec());
         let columns = self.columns_list(table);
         let id = row.0.as_bytes().to_vec();
         // A frozen base is copied as it was at the cut.
@@ -8818,6 +8867,7 @@ impl Inner {
         };
         self.changed.borrow_mut().truncate(overlay.mark);
         end_savepoint(&self.conn, "overlay", false).expect("rolling back a transaction overlay");
+        self.start_unit_heads();
     }
 
     fn checked(&self, who: Who) -> Option<AuthorSubject> {
@@ -8875,21 +8925,25 @@ impl Inner {
         key: &[u8],
         who: &Who,
         verb: &str,
+        seq: u64,
     ) -> Result<(), Error> {
-        if let Some(author) = self.checked(*who)
-            && !self.check(table, row, key, author, Operation::Select)?
-        {
+        let Some(author) = self.checked(*who) else {
+            return Ok(());
+        };
+        let readable = self.holds_on_acted_row(table, row, key, seq, |ctx| {
+            ctx.operation_policy(table, Operation::Select, "a", &self.session(author))
+        })?;
+        if !readable.map_or_else(
+            || self.check(table, row, key, author, Operation::Select),
+            Ok,
+        )? {
             return Err(unreadable_target(verb, &table.name));
         }
-        if let Some(author) = self.checked(*who)
-            && !self.check_clause(
-                table,
-                row,
-                key,
-                author,
-                table.policies.update.using.as_ref(),
-            )?
-        {
+        let using = table.policies.update.using.as_ref();
+        let usable = self.holds_on_acted_row(table, row, key, seq, |ctx| {
+            ctx.policy_clause(using, table, "a", &self.session(author))
+        })?;
+        if !usable.map_or_else(|| self.check_clause(table, row, key, author, using), Ok)? {
             return Err(denied(format_args!(
                 "{verb} policy (USING) denied the target row"
             )));
@@ -9006,7 +9060,7 @@ impl Inner {
                         cells.insert(column.name.clone(), value);
                     }
                 } else {
-                    self.authorize_patch(table, row, &key, &who, verb)?;
+                    self.authorize_patch(table, row, &key, &who, verb, seq)?;
                 }
                 if cells.is_empty() && !staged_tombstone {
                     return Ok(WriteHandle {
@@ -9037,7 +9091,7 @@ impl Inner {
                 head_cells,
                 at,
             } => {
-                self.authorize_patch(table, row, &from, &who, verb)?;
+                self.authorize_patch(table, row, &from, &who, verb, seq)?;
                 let cells = self.merged_cells(table, row, Some(&from), Some((&to, seq)), cells)?;
                 self.copy_on_write(table, row, &from, &to, &head_cells, at.as_ref(), seq)?;
                 self.set_cells(table, row, &to, &cells, Cells::Authored, seq, None, true)?;
@@ -9113,10 +9167,16 @@ impl Inner {
         // A delete by row id reads no user data (SPEC 7): its DELETE policy
         // alone decides, so a write-only principal may delete.
         let check = |inner: &Self, key: &[u8]| -> Result<(), Error> {
-            if let Some(author) = inner.checked(who)
-                && !inner.check(table, row, key, author, Operation::Delete)?
-            {
-                return Err(delete_denied());
+            if let Some(author) = inner.checked(who) {
+                let allowed = inner.holds_on_acted_row(table, row, key, seq, |ctx| {
+                    ctx.operation_policy(table, Operation::Delete, "a", &inner.session(author))
+                })?;
+                if !allowed.map_or_else(
+                    || inner.check(table, row, key, author, Operation::Delete),
+                    Ok,
+                )? {
+                    return Err(delete_denied());
+                }
             }
             Ok(())
         };
@@ -9259,6 +9319,9 @@ impl Inner {
         })
     }
 }
+
+/// See [`Inner::inherited_heads`].
+type InheritedHeads = HashMap<(String, [u8; 16], Vec<u8>), Vec<u8>>;
 
 /// A write's own policy check, deferred to the end of its unit.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -11017,6 +11080,7 @@ impl Db {
             // commits here exactly when the authority accepts it: a row the
             // unit deleted is no evidence, and rows can't ground each other
             // in a cycle.
+            inner.start_unit_heads();
             inner.defer_checks();
             let applied = inner
                 .apply_with_edits(ops, &batch.edits, 0, seq)
@@ -11113,6 +11177,7 @@ impl Db {
         inner.pending_nodes.extend(edits.pending_nodes);
         if let Some(ops) = ops {
             inner.settle_overlay();
+            inner.start_unit_heads();
             begin_savepoint(&inner.conn, "overlay")?;
             #[cfg(any(test, feature = "testing"))]
             {
@@ -11137,6 +11202,8 @@ impl Db {
             return Err(error);
         }
         let mark = inner.changed.borrow().len();
+        // A step that is undone leaves no head rows behind.
+        let heads = inner.inherited_heads.borrow().clone();
         let joins = extra.is_some();
         let applied = match extra {
             Some(op) => inner.counter_deltas(op).and_then(|()| {
@@ -11164,6 +11231,7 @@ impl Db {
         let keep = joins && result.is_ok();
         if !keep {
             inner.changed.borrow_mut().truncate(mark);
+            *inner.inherited_heads.borrow_mut() = heads;
         }
         if let Err(error) = end_savepoint(&inner.conn, "overlay_step", keep) {
             inner.settle_overlay();

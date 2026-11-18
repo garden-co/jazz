@@ -1600,12 +1600,6 @@ impl ServerRuntimeHandle {
             .run(move |owner| {
                 let mut ended = 0;
                 let result = (|| {
-                    if change.activate.is_some() {
-                        return Err(CatalogueApplyError::Rejected(
-                            "a server never makes a schema current: sessions pin bundles"
-                                .to_owned(),
-                        ));
-                    }
                     block_on(owner.db.apply_catalogue(change)).map_err(|error| {
                         if error.code == jazz::db::ErrorCode::Storage {
                             CatalogueApplyError::Failed(error.to_string())

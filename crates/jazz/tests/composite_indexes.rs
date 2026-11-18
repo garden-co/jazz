@@ -9,7 +9,7 @@ use std::task::{Context, Poll, Waker};
 
 use jazz::db::{Db, DbConfig, DbIdentity, FileOptions, InsertOptions, ReadOpts, UpdateOptions};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::protocol::{CurrentWriteSchema, MigrationLens, SchemaVersion, TableLens};
+use jazz::protocol::{MigrationLens, SchemaVersion, TableLens};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
@@ -340,15 +340,7 @@ fn publish_composite_descendant(db: &Db, plain: &JazzSchema, composite: &JazzSch
         }],
     )
     .unwrap();
-    let publication = db
-        .author_schema_lineage_publication(target.clone(), lens)
-        .unwrap();
-    block_on(db.publish_schema_with_lens(publication)).unwrap();
-    block_on(db.activate_catalogue_schema_for_test(CurrentWriteSchema {
-        revision: 1,
-        schema: target.id,
-    }))
-    .unwrap();
+    block_on(db.activate_schema_with_lenses(target.schema.clone(), &[lens])).unwrap();
 }
 
 /// Adding a composite index to an existing app is a schema change: the
