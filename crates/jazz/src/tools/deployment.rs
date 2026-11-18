@@ -598,18 +598,42 @@ fn check_encryption(
     let entries = match encryption.entries(&target.to_string()) {
         Some(entries) => Some(entries),
         None => {
-            let mut queue = vec![target.0];
-            let mut seen = BTreeSet::new();
+            // Breadth first, nearest versions first. Versions at the same
+            // distance that declare differently leave no nearest: refused.
+            let mut level = vec![target.0];
+            let mut seen = BTreeSet::from([target.0]);
             let mut found = None;
-            while let Some(hash) = queue.pop() {
-                if !seen.insert(hash) {
-                    continue;
-                }
-                if let Some(entries) = encryption.entries(&SchemaHash(hash).to_string()) {
-                    found = Some(entries);
+            while found.is_none() && !level.is_empty() {
+                let declared: Vec<(Hash, _)> = level
+                    .iter()
+                    .filter_map(|hash| {
+                        encryption
+                            .entries(&SchemaHash(*hash).to_string())
+                            .map(|entries| (*hash, entries))
+                    })
+                    .collect();
+                if let Some((_, first)) = declared.first() {
+                    if let Some((other, _)) = declared.iter().find(|(_, entries)| entries != first)
+                    {
+                        return Err(invalid(
+                            target,
+                            format!(
+                                "the schema keeps Jazz's system tables without declaring \
+                                 encryption, and the versions it follows nearest declare \
+                                 differently ({} and {}): declare encryption in it",
+                                SchemaHash(declared[0].0),
+                                SchemaHash(*other)
+                            ),
+                        ));
+                    }
+                    found = Some(*first);
                     break;
                 }
-                queue.extend(follows.get(&hash).into_iter().flatten().copied());
+                level = level
+                    .iter()
+                    .flat_map(|hash| follows.get(hash).into_iter().flatten().copied())
+                    .filter(|hash| seen.insert(*hash))
+                    .collect();
             }
             found
         }

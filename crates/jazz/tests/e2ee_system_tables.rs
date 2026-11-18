@@ -2503,6 +2503,27 @@ fn deploy_history(
     versions: Vec<(Schema, bool)>,
     ops: Vec<Vec<jazz::tools::LensOp>>,
 ) -> Result<jazz::tools::deployment::PreparedDeployment, DeploymentError> {
+    let lenses = ops
+        .into_iter()
+        .enumerate()
+        .map(|(n, ops)| (n, n + 1, ops))
+        .collect();
+    deploy_graph(
+        versions
+            .into_iter()
+            .map(|(schema, declares)| (schema, declares.then(entries)))
+            .collect(),
+        lenses,
+    )
+}
+
+/// A version graph as a deployment: each version with its declarations (if
+/// any), and lenses as (source, target, operations) by index. The last
+/// version is the target.
+fn deploy_graph(
+    versions: Vec<(Schema, Option<BTreeMap<String, EncryptionEntry>>)>,
+    lenses: Vec<(usize, usize, Vec<jazz::tools::LensOp>)>,
+) -> Result<jazz::tools::deployment::PreparedDeployment, DeploymentError> {
     use jazz::tools::{Lens, LensTransform};
     let hashes: Vec<SchemaHash> = versions
         .iter()
@@ -2512,18 +2533,16 @@ fn deploy_history(
         versions: versions
             .iter()
             .zip(&hashes)
-            .filter(|((_, declares), _)| *declares)
-            .map(|(_, hash)| (hash.to_string(), entries()))
+            .filter_map(|((_, declared), hash)| Some((hash.to_string(), declared.clone()?)))
             .collect(),
         ..Default::default()
     };
-    let migrations = ops
+    let migrations = lenses
         .into_iter()
-        .enumerate()
-        .map(|(n, ops)| {
+        .map(|(from, to, ops)| {
             Lens::new(
-                hashes[n],
-                hashes[n + 1],
+                hashes[from],
+                hashes[to],
                 LensTransform {
                     ops,
                     draft_ops: Vec::new(),
@@ -2680,4 +2699,63 @@ fn a_later_version_without_declarations_keeps_the_system_rows() {
     );
     assert!(world.server.holds_row_for_test(MEMBERS, member));
     assert_eq!(world.reads(alice(), MEMBERS), vec![member]);
+}
+
+/// A version that keeps the system tables without declaring encryption takes
+/// the declarations of the version it follows nearest. With two parents that
+/// declare alike, they are the ones; declaring differently leaves no nearest,
+/// and the deploy is refused.
+///
+/// ```text
+///        ┌─► v1a (declares A) ─┐
+/// v0 ────┤                      ├─► v2 (keeps the tables, declares nothing)
+///        └─► v1b (declares B) ─┘     A = B ✓      A ≠ B ✗
+/// ```
+#[test]
+fn a_version_with_two_parents_takes_their_declarations_only_if_they_agree() {
+    use jazz::tools::LensOp;
+    let table = |name: &str| {
+        TableSchemaBuilder::new(name)
+            .column("body", ColumnType::Text)
+            .build()
+    };
+    let marker = |name: &str| LensOp::AddTable {
+        table: name.to_owned(),
+        schema: table(name),
+    };
+    let plain = structural_of(app());
+    let fragment = structural_of(with_e2ee_fragment(&app()));
+    let mut with_b = fragment.clone();
+    with_b.insert(TableName::from("b_marker"), table("b_marker"));
+    let mut with_both = with_b.clone();
+    with_both.insert(TableName::from("a_marker"), table("a_marker"));
+
+    let history = |b_declares: BTreeMap<String, EncryptionEntry>| {
+        deploy_graph(
+            vec![
+                (plain.clone(), None),
+                (fragment.clone(), Some(entries())),
+                (with_b.clone(), Some(b_declares)),
+                (with_both.clone(), None),
+            ],
+            vec![
+                (0, 1, fragment_ops(&fragment, true)),
+                (
+                    0,
+                    2,
+                    [fragment_ops(&fragment, true), vec![marker("b_marker")]].concat(),
+                ),
+                (1, 3, vec![marker("b_marker"), marker("a_marker")]),
+                (2, 3, vec![marker("a_marker")]),
+            ],
+        )
+    };
+    history(entries()).expect("two parents that declare alike");
+    let mut other = entries();
+    for entry in other.values_mut() {
+        entry.sweep = SweepBy::Members;
+    }
+    assert_ne!(other, entries());
+    let error = history(other).expect_err("two parents that declare differently");
+    assert!(error.to_string().contains("declare differently"), "{error}");
 }
