@@ -11717,6 +11717,31 @@ impl TxRef<'_> {
         tier: ReadTier,
         source: &ReadViewSourceSpec,
     ) -> Result<Vec<CurrentRow>, Error> {
+        let opts = ReadOpts {
+            tier,
+            read_view: ReadViewSpec {
+                source: source.clone(),
+                include_deleted,
+            },
+            ..ReadOpts::default()
+        };
+        self.all_prepared_with_options(prepared, identity, &opts, None)
+            .await
+    }
+
+    /// Binding entry point: as [`Self::all_prepared_in`], keeping the
+    /// caller's whole read options (its first-load policy) and coverage
+    /// check for the relay fetch of a cold non-durable foreground. This does
+    /// not select a different identity or upgrade a mergeable read's read set.
+    pub(crate) async fn all_prepared_with_options(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        opts: &ReadOpts,
+        coverage: Option<&dyn Fn() -> bool>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let include_deleted = opts.read_view.include_deleted;
+        let source = &opts.read_view.source;
         let view = match source {
             ReadViewSourceSpec::Current => None,
             ReadViewSourceSpec::Snapshot { .. } => {
@@ -11744,14 +11769,14 @@ impl TxRef<'_> {
                 base_cut: None,
             }),
             ReadViewSourceSpec::BranchView { .. } => {
-                let opts = ReadOpts {
+                let frozen = ReadOpts {
                     read_view: ReadViewSpec {
                         source: source.clone(),
                         include_deleted,
                     },
                     ..ReadOpts::for_read_tier(ReadTier::LocalOnly)
                 };
-                ReadSpec::of(&opts, &self.db.inner())?.view
+                ReadSpec::of(&frozen, &self.db.inner())?.view
             }
         };
         // Capture staging before queueing: later writes must not leak into
@@ -11777,8 +11802,7 @@ impl TxRef<'_> {
             view,
             source: source.clone(),
         };
-        let reading =
-            self.read_admitted(prepared, include_deleted, identity, tier, prefix, through);
+        let reading = self.read_admitted(prepared, identity, opts, coverage, prefix, through);
         let mut reading = std::pin::pin!(reading);
         std::future::poll_fn(|cx| {
             {
@@ -11811,12 +11835,14 @@ impl TxRef<'_> {
     async fn read_admitted(
         &self,
         prepared: &PreparedQuery,
-        include_deleted: bool,
         identity: Option<AuthorSubject>,
-        tier: ReadTier,
+        opts: &ReadOpts,
+        coverage: Option<&dyn Fn() -> bool>,
         prefix: BatchPrefix,
         through: ReadThrough,
     ) -> Result<Vec<CurrentRow>, Error> {
+        let tier = opts.tier;
+        let include_deleted = opts.read_view.include_deleted;
         // Except for LocalOnly, a client hydrates a serializable read from
         // the authority at the snapshot first. LocalFirst may answer from
         // the replica when the link cannot answer.
@@ -11910,6 +11936,35 @@ impl TxRef<'_> {
                 }
                 *pinned = true;
             }
+        }
+        if snapshot.is_none()
+            && tier == ReadTier::LocalFirst
+            && matches!(through.source, ReadViewSourceSpec::Current)
+            && self.db.is_client()
+            && self.db.inner().non_durable
+        {
+            // A cold non-durable foreground's local store is its durable
+            // relay (its worker), including while that relay's server is
+            // offline, as for a read outside a transaction. Keep LocalFirst
+            // reach and the caller's first-load wait: the serializable
+            // BEST_EFFORT fetch above would ask for Remote authority instead.
+            // Records nothing: the mergeable read keeps its admitted prefix,
+            // current view and no-read-set semantics below.
+            let reach = sync::remote_reach(opts, true, false).expect("non-durable reach");
+            let deadline = sync::remote_deadline(opts, true, true).expect("non-durable wait");
+            self.db.remote_shape(&prepared.query)?;
+            self.db
+                .fetch(
+                    prepared,
+                    None,
+                    include_deleted,
+                    reach,
+                    deadline,
+                    coverage,
+                    false,
+                    &through.source,
+                )
+                .await?;
         }
         // Relations nest inside the overlay, so they see staged rows too.
         // Offloaded leaves are fetched as for any read.
