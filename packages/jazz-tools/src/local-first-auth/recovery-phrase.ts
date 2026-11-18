@@ -35,7 +35,7 @@ export const RecoveryPhrase = {
     } catch {
       throw new RecoveryPhraseError(
         "invalid-secret",
-        "Secret is not a canonical local-first secret",
+        "Secret is not a canonical device account key",
       );
     }
   },

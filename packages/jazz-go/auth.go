@@ -15,7 +15,7 @@ import (
 )
 
 // Auth is how an end user signs in: Token (a JWT from your auth provider)
-// or DeviceAccount / DeviceKey (a local-first account kept on this device).
+// or DeviceAccount / DeviceKey (a device account, kept on this device).
 type Auth interface {
 	authJSON() (map[string]any, error)
 }
@@ -58,11 +58,11 @@ type deviceAuth struct {
 	store SecretStore
 }
 
-// DeviceKey signs in as the local-first account whose key is key
+// DeviceKey signs in as the device account whose key is key
 // ("jazz-auth-v1:…", from GenerateDeviceKey).
 func DeviceKey(key string) Auth { return deviceAuth{key: key} }
 
-// DeviceAccount signs in as this device's local-first account, whose key
+// DeviceAccount signs in as this device's device account, whose key
 // store keeps: it is created (signing up) the first time.
 func DeviceAccount(store SecretStore) Auth { return deviceAuth{store: store} }
 

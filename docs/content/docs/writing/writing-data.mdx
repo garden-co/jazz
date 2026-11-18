@@ -409,7 +409,7 @@ lasts. Both choices apply the initial mutation locally and upload it when connec
 
 A `global` wait fails early only when the client stops trying to reach Core: a
 protocol error, a closed client, or a credential the server refuses that nothing
-renews. Only an account context's refresh cycle and a local-first token the Db
+renews. Only an account context's refresh cycle and a device account's token the Db
 mints itself count as renewing a credential, so their waits outlast an expired
 token. With a static token or a backend secret, a refused credential ends the
 wait. To bound how long you wait, pass `timeoutMs`. The wait then rejects with
@@ -499,9 +499,9 @@ is reset automatically. To sync with the new server, reset the local store: in t
 `await db.deleteClientStorage()`; in Node, delete the client's data directory and open
 it again. Writes that never reached the old server are lost with the store.
 
-In the browser, tabs that sync through a shared worker may not yet see this: a tab's `global` waits
-can keep waiting after the worker's link was refused. Treat `authority-changed` in a multi-tab app as
-best effort for now.
+In the browser, every tab that syncs through the shared worker sees this too, including a tab opened
+or reloaded after the refusal: its `global` waits fail the same way and its sync status shows
+`offline` with the reason `authority-changed`, while local reads and writes keep working.
 
 In the browser, `offline` can also have the reason `held-by-another-tab`, with `retrying: true`.
 When a guest signs up in one tab, another tab may still hold the account's local store as the

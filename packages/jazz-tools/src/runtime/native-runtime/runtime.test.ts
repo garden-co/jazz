@@ -216,6 +216,34 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(close).toHaveBeenCalledTimes(1);
   });
 
+  it("still tears down on close() after clearing client storage, and refuses work after", async () => {
+    const close = vi.fn(() => true);
+    const deleteNativeStore = vi.fn(() => ({ pendingUploads: 2 }));
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: () => fakeDb({ close, deleteNativeStore }) },
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    await expect(runtime.clearClientStorage()).resolves.toEqual({ pendingUploads: 2 });
+    expect(runtime.isClosed()).toBe(true);
+    // Deleting the store stops admission but leaves the teardown to close().
+    expect(close).not.toHaveBeenCalled();
+    await expect(runtime.clearClientStorage()).rejects.toThrow(
+      "Cannot clear client storage: native runtime is storageCleared",
+    );
+
+    await runtime.close();
+    expect(close).toHaveBeenCalledOnce();
+    expect((runtime as unknown as { phase: string }).phase).toBe("closed");
+    await runtime.close();
+    expect(close).toHaveBeenCalledOnce();
+    expect(deleteNativeStore).toHaveBeenCalledOnce();
+    expect(() => runtime.insert("todos", {})).toThrow(/closed/);
+  });
+
   it("resolves connect only after the owned native transport has pumped", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
@@ -2894,6 +2922,24 @@ describe("NativeRuntimeAdapter server transport", () => {
         expect(callbacks[0]).not.toHaveBeenCalled();
         expect(callbacks[1]).toHaveBeenCalledWith(expect.objectContaining({ reset: true }));
         expect(callbacks[2]).not.toHaveBeenCalled();
+      } finally {
+        await runtime.close();
+      }
+    });
+
+    it("marks a reset the core coalesced from a backlog with reason backlog", async () => {
+      const { runtime, native, pump } = pooledRuntime();
+      try {
+        const callback = vi.fn();
+        runtime.executeSubscription(runtime.createSubscription(app.todos._build()), callback);
+        native[0]!.queue.push(subscriptionReset([row(1)]));
+        native[0]!.queue.push({ ...subscriptionReset([row(2)]), coalesced: true });
+        pump();
+        expect(callback).toHaveBeenCalledTimes(2);
+        expect(callback.mock.calls[0]![0]).not.toHaveProperty("reason");
+        expect(callback.mock.calls[1]![0]).toEqual(
+          expect.objectContaining({ reset: true, reason: "backlog" }),
+        );
       } finally {
         await runtime.close();
       }
@@ -8337,7 +8383,7 @@ it.each([null, undefined])(
     } finally {
       releaseOwner();
       runtime.unsubscribe(handle);
-      inner.closed = true;
+      inner.phase = "closed";
     }
   },
 );

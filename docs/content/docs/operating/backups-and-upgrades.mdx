@@ -27,7 +27,7 @@ first started with the wrong one, or your app's id changed, stop the backend and
 npx jazz-tools store set-app-id ./data <app id>
 ```
 
-Local-first guests' accounts are derived from the app id, so after a change they no longer match
+Guests' device accounts are derived from the app id, so after a change they no longer match
 the ones their devices hold: change it only for a store whose users haven't relied on the old one.
 
 If your chunks are in another directory (`files({ dir })`) or a bucket (`s3()`), they're part of the
@@ -86,6 +86,14 @@ deployment isn't a fallback: the core always runs the newest `jazz-tools` its Dr
 once the new deployment has woken it, promoting the old deployment again doesn't roll back its data.
 To try an upgrade first, deploy it to a preview branch: with the per-branch setup, that preview gets
 a core of its own, separate from production's (a dry run with its own data, not a copy).
+
+## Upgrading from alpha.66
+
+- **`vercel()` takes a required `region`**, the Vercel region its cores run and keep their data
+  in. Earlier versions created every core in `iad1`: add `region: "iad1"` and the same cores open
+  with their data. A `region` that doesn't match an existing core now throws instead of being
+  ignored, since moving a core isn't supported yet. See
+  [Region](/docs/setup/deployment/vercel#region).
 
 {/* Older jazz-tools link the section by its previous anchor. */}
 
@@ -398,7 +406,7 @@ in: after your own sign-in or sign-out, `refresh()` follows it.
   `useJazzSession()` (Svelte: `getJazzSession()`), also in the provider's `signedOut`, `loading` and
   `error` views. `session.db` is the signed-in user's Db; it throws while there is none.
 - **Device accounts** are how you do guests, and a local-first friendly way to sign in: an account
-  whose key lives on the device. See [Device Accounts](/docs/setup/auth/local-first).
+  whose key lives on the device. See [Device Accounts](/docs/setup/auth/device-accounts).
 - **Errors.** A failed operation that leaves the client usable keeps the session `ready`, with
   `error` set. `status: "error"` now means there is no usable client.
 - **`window.__jazz` is Jazz's page handle**, set by every browser client: `status()`,
@@ -614,7 +622,7 @@ Then:
 
 5. **Start your new backend** on alpha.65 with `sqlite({ path: "./data-new" })`, then deploy the
    new client, also on alpha.65.
-   If your alpha.59 app had local-first guests, pass your old app ID as `scope` to the client, so
+   If your alpha.59 app had guests on device accounts, pass your old app ID as `scope` to the client, so
    each guest's device finds its account again:
 
    ```ts
@@ -624,7 +632,7 @@ Then:
    (`<JazzProvider config={{ scope: "…" }}>` in React.) With `scope` set, each guest's browser finds its
    alpha.59 account by itself, on the same origin; there's nothing else to do. Without it, those
    guests can't open their accounts. The import prints the exact `scope` line when it brings
-   local-first guests over. If the alpha.59 app was reached through more than one Jazz server URL
+   guests' device accounts over. If the alpha.59 app was reached through more than one Jazz server URL
    on that origin, guests aren't picked up automatically.
    Keep `./data` and the dump until you're happy with the result.
 
@@ -633,7 +641,7 @@ Then:
 
 `--app-id` is your app's ID exactly as before, case included: the import uses it to link each
 returning user's old sign-in to their account, as `jazz:backend` with their old `sub` (as [`fromJWT()`](/docs/setup/auth/custom) returns it), and to keep
-local-first guests on their accounts once the client is scoped to the alpha.59 app ID (step 5). The store keeps it in `jazz.sqlite`, so your code never needs
+guests on their device accounts once the client is scoped to the alpha.59 app ID (step 5). The store keeps it in `jazz.sqlite`, so your code never needs
 it: `sqlite({ path })` runs as the old app. Pass
 `--no-backend-identity-links` to skip that. The dump holds all your app's data, so store it like the
 data directory and delete it when you're done.

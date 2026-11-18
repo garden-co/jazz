@@ -119,13 +119,15 @@ fn assert_transaction_policy_denied(err: crate::JazzError) {
 }
 
 fn assert_client_policy_denied(err: crate::JazzError, table: &str, operation: Operation) {
-    let crate::JazzError::Write(message) = err else {
-        panic!("expected policy denial write error, got {err:?}");
+    // Coded as TS codes a synchronous denial, with the core's detail.
+    let crate::JazzError::WriteRejected { code, reason, .. } = &err else {
+        panic!("expected a coded policy denial, got {err:?}");
     };
+    assert_eq!(code, "permission_denied");
     let expected = format!("policy denied {operation} on table {table}");
     assert!(
-        message.ends_with(&expected),
-        "expected denial ending in {expected:?}, got {message:?}",
+        reason.ends_with(&expected),
+        "expected denial ending in {expected:?}, got {reason:?}",
     );
 }
 

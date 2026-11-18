@@ -59,7 +59,7 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-25`: A resumed subscription MUST leave the replica with the same rows as a fresh subscription to the same query.
 - `INV-SYNC-27`: Per-session delivery state MUST live only in the serving process and be released on disconnect.
 - `INV-SYNC-28`: Results MUST travel as rows and be assembled into result trees by the receiver.
-- `INV-SYNC-30`: A replica MUST treat a subscription as settled only when its connected upstream has confirmed that subscription with its own `Settled`; a node with no upstream settles locally.
+- `INV-SYNC-30`: A replica MUST treat a subscription as settled only once an upstream has confirmed that subscription with its own `Settled`, and reports the last such confirmation, at its tier, until another replaces it (through an outage too); what waits for the server (a first load, a `Remote` opening, a relay settling its own sessions' reads) waits for the current connection's `Settled`. A node with no upstream settles locally.
 - `INV-SYNC-44`: The read protocol MUST be rows plus settlement.
 - `INV-SYNC-45`: Rows MUST be shipped raw, by the authority's stored table and column names, whatever schema version the subscriber declared; a replica mirrors its upstream's catalogue and applies the lenses locally.
 - `INV-SYNC-46`: A replica missing the chunks of a large value MUST request them and install the row only once its chunks are present; a writer pushes a value's new chunks before the commit that uses them.
@@ -209,6 +209,17 @@ as its first WebSocket message (text, or binary with the same bytes). The
 server then requires one binary message that decodes to exactly one
 `WireFrame::Hello`. The prelude and that Hello each have the two-second
 handshake read deadline. Only the first message is a prelude.
+
+A client may send more binary messages right behind its `Hello`, without
+waiting for the server's. The server reads none of them until it has
+admitted the connection and sent its own `Hello`. Then it reads them in the
+order sent, as on any open connection. A connection refused before the
+server's `Hello` (a `WireFrame::Error`, then close) never reads them, so
+nothing sent ahead takes effect, and the client sends it again on its next
+connection. The prelude and the `Hello` stay messages of their own, and the
+`Hello`'s message holds the `Hello` alone. The `createJazz` relay and the
+HTTP stream transport keep this order: they pass a session's messages on one
+at a time, behind the prelude's admission.
 
 The prelude object has these server-owned fields:
 
@@ -415,6 +426,14 @@ not hold them either way).
 `Read { id, query, binding, include_deleted, tier, wait, view, span }` asks
 for one query's result:
 
+- `query` may hold text prefix/suffix predicates (`StartsWith`/`EndsWith`,
+  in `Predicate` tags 13/14 and `RelationPredicate` tags 11/12; bytewise on
+  UTF-8, NULL never matches). An older server cannot decode them and drops
+  the link, so a client sends such a read, or a serializable commit whose
+  reads hold one, only over a link that negotiated
+  `FEATURE_TEXT_AFFIX_PREDICATES` (`1 << 13`). On any other link it refuses
+  the read (`Refused`, "not supported yet by this server") or the commit (a
+  rejected fate) itself, without sending it.
 - `view` is the read view the result is of: the current state, a branch view
   (head over an optional live or frozen base), or a snapshot. It is part of
   the read's identity (`INV-BVIEW-12`): the server keeps a live read in its
@@ -496,7 +515,12 @@ opening, never before it; later ones carry only changes, after the tick's
 `Rows` and `AccessLost` and before its `Settled`. The replica keeps each live
 read's set in memory and across reconnects, replacing it with the read's
 first `Holds` on the new connection; neither side stores it. A row a
-replacing `Holds` drops stays cached until a later `members` leaves it out.
+replacing `Holds` drops that no live read holds, and that no `members` listing
+evicted, is no longer kept current for the reader: the replica asks for it
+again with `ResendWhole`, and the server ships it whole if the reader may still
+read it, else its `AccessLost`. So support the reader lost while the replica
+was away (a deleted membership row, say) leaves with the read that rested on
+it (`INV-SYNC-14`).
 `global` says the answer is the global authority's (directly, or through
 relays that settle by their upstream), not a relay's own store.
 
@@ -541,9 +565,14 @@ for each row, its newest version at or before the lowest position a live read
 or `known` reads at; a table that keeps less (latest-only) cannot be read
 through a cut.
 
-A replica treats a read as settled only once its connected upstream confirmed
-it with `Settled`; while the upstream is unanswered, offline or failing the
-read stays unsettled, and a node with no upstream settles locally
+A replica treats a read as settled only once an upstream confirmed it with
+`Settled`, and a subscription keeps reporting the last confirmation, at its
+tier, while the link is down: a client tells a current result as one that is
+settled while its link is up. Each connection starts every read over (its
+answer, refusal and first `Holds` are that connection's alone, a transport
+swapped in without a detach included), so what waits for the server (a first
+load, a `Remote` opening, a relay's settles to its own sessions) waits for the
+current connection's `Settled`. A node with no upstream settles locally
 (`INV-SYNC-30`). A `Remote` read never reports rows the answer no longer lists
 (`INV-SYNC-48`); `LocalFirst` and `LocalOnly` reads keep them.
 
@@ -825,6 +854,26 @@ catalogue.
   identity; a version only the replica admitted has none until the authority
   admits it too.
 
+Each `CatalogueVersion` decodes on its own. A version whose public schema
+names a variant this build does not know (a column type or other enum case
+from a newer Jazz) does not fail the message: the replica skips it, with its
+`CatalogueCell`s, and reports it with `Reason::SchemaVersionUnsupported`
+(`Db::unsupported_schema_versions`); the versions it can read are taken as
+below, and the link stays up. Rows written under a skipped version still
+arrive, with the columns of the versions the replica knows. A version that is
+corrupt (malformed JSON, truncated bytes, a wrong type for a known key, or a
+known shape that does not compile) still fails the message, as before. A key
+this build does not know is dropped when reading, so a version read without
+it may be another version than the one sent. A replica therefore takes a
+version only if the id it computes for it is the id sent (`INV-LENS-1`);
+otherwise the version carries keys this build ignores and is skipped the
+same way. A skipped version is never admitted. The wire is unchanged.
+
+A relay serves only the versions it can read: it skips the others as any
+replica does and does not pass them on. A relay must therefore be at least
+as new as the app's schema; a client on a version its relay cannot read
+gets that version from no one.
+
 The replica admits each version under the authority's stored names, renaming
 tables and columns it had named otherwise while it did not know them (for
 example, a table created offline under a newer local schema). It then runs the
@@ -1058,7 +1107,12 @@ those bytes are refused with it at once until the fetch backoff ends.
   declare it. Every later request is resolved against that admitted version,
   governed by the current schema's policies, as a sync session's declared
   version is (§8.9). A version the store has not admitted is refused with
-  `SchemaNotDeployed`; nothing else is served before a version.
+  `SchemaNotDeployed`; nothing else is served before a version. The server
+  runs a session's requests in order, so a client may send its schema and
+  first requests together, right behind its `Hello` (§8.1.2), and each
+  resolves against the schema declared before it. The TypeScript thin client
+  sends its schema and live queries this way, and other requests once the
+  schema is bound.
 - Request options are the JSON the native bindings take for the same call:
   read options (`tier`, `include_deleted`, `read_view` with branch head and
   frozen base, ...) on `Query` and `Subscribe`, and write options (`rowId`,

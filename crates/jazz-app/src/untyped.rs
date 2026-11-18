@@ -831,6 +831,14 @@ fn predicate(predicate: &Predicate, scope: &str) -> std::result::Result<Relation
             left: column(left)?,
             right: value(right)?,
         },
+        Predicate::StartsWith(left, right) => RelationPredicate::StartsWith {
+            left: column(left)?,
+            right: value(right)?,
+        },
+        Predicate::EndsWith(left, right) => RelationPredicate::EndsWith {
+            left: column(left)?,
+            right: value(right)?,
+        },
         Predicate::IsNull(operand) => RelationPredicate::IsNull {
             column: column(operand)?,
         },

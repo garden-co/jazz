@@ -73,3 +73,27 @@ pub enum TextFormat {
     /// Plain units, plus tags and entities.
     Html,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{NotCharBoundary, utf8_to_utf16, utf16_to_utf8};
+
+    #[test]
+    fn utf8_and_utf16_offsets_convert_on_char_boundaries() {
+        // "é" is 2 bytes / 1 unit, "😀" 4 bytes / 2 units.
+        let text = "aé😀b";
+        for (byte, unit) in [(0, 0), (1, 1), (3, 2), (7, 4), (8, 5)] {
+            assert_eq!(utf8_to_utf16(text, byte), Ok(unit));
+            assert_eq!(utf16_to_utf8(text, unit), byte);
+        }
+        for byte in [2, 4, 5, 6, 9] {
+            assert_eq!(
+                utf8_to_utf16(text, byte),
+                Err(NotCharBoundary { offset: byte })
+            );
+        }
+        // Inside the surrogate pair rounds down; past the end clamps.
+        assert_eq!(utf16_to_utf8(text, 3), 3);
+        assert_eq!(utf16_to_utf8(text, 99), text.len());
+    }
+}

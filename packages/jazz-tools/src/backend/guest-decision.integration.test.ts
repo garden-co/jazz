@@ -137,6 +137,7 @@ async function deployedVercel(): Promise<JazzStore> {
   let coreUrl = "http://127.0.0.1:9";
   const handle = (): SandboxHandle => ({
     status: "running",
+    region: "iad1",
     domain: () => coreUrl,
     currentSession: () => ({
       startedAt: new Date(),
@@ -182,7 +183,7 @@ async function deployedVercel(): Promise<JazzStore> {
     Drive: {
       async getOrCreate() {
         state.drive = true;
-        return {};
+        return { region: "iad1" };
       },
     },
   };
@@ -190,6 +191,7 @@ async function deployedVercel(): Promise<JazzStore> {
     sdk,
     backendCredential: () => oidcToken(issuer),
     namespace: ({ environment }) => environment,
+    region: "iad1",
   });
 }
 
@@ -266,7 +268,7 @@ describe.each(stores)("on a %s store", (_kind, store) => {
     await vi.waitFor(
       () =>
         expect(
-          warn.mock.calls.some((call) => /refused a local-first guest/.test(call.join(" "))),
+          warn.mock.calls.some((call) => /refused a device account/.test(call.join(" "))),
         ).toBe(true),
       { timeout: 20_000 },
     );
