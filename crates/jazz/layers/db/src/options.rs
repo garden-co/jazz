@@ -84,9 +84,9 @@ impl DbConfig {
     /// database cannot compare them (the schema carries none), and hooks
     /// built from other declarations would leave declared columns unsealed.
     /// Opening an encrypted app ([`crate::binding_host::refuse_encrypted_app`])
-    /// checks only that hooks are installed (a version that declares no
-    /// encryption but keeps the system tables is opened with hooks that
-    /// declare nothing).
+    /// checks only that the hooks say they were built from an encrypted app's
+    /// declarations ([`crate::e2ee::E2eeHooks::from_encrypted_app`]), which may
+    /// be empty for a version that declares no encrypted column.
     #[cfg(feature = "e2ee-client")]
     pub fn with_e2ee(mut self, hooks: std::rc::Rc<dyn crate::e2ee::E2eeHooks>) -> Self {
         self.e2ee = Some(hooks);

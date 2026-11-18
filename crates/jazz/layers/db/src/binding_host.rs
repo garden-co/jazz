@@ -686,7 +686,8 @@ pub const ENCRYPTED_APP_REFUSAL: &str = "this client can't open an app that decl
 /// Refuse to open `config`'s schema if it holds Jazz's system tables, which
 /// only an encrypted app's schema does (a version that declares no
 /// encryption keeps the tables once an earlier one added them), unless the
-/// configuration installs encryption hooks ([`DbConfig::with_e2ee`]). A
+/// configuration installs encryption hooks built from an encrypted app's
+/// declarations ([`DbConfig::with_e2ee`], [`crate::e2ee::E2eeHooks::from_encrypted_app`]). A
 /// build without the `e2ee-client` feature has no hooks to install and
 /// always refuses.
 pub fn refuse_encrypted_app(config: &DbConfig) -> Result<(), Error> {
@@ -699,7 +700,11 @@ pub fn refuse_encrypted_app(config: &DbConfig) -> Result<(), Error> {
         return Ok(());
     }
     #[cfg(feature = "e2ee-client")]
-    if config.e2ee.is_some() {
+    if config
+        .e2ee
+        .as_ref()
+        .is_some_and(|hooks| hooks.from_encrypted_app())
+    {
         return Ok(());
     }
     Err(Error::new(ErrorCode::Schema, ENCRYPTED_APP_REFUSAL))

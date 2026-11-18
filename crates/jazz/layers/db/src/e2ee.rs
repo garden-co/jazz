@@ -56,6 +56,17 @@ pub trait E2eeHooks {
     /// database runs.
     fn declarations(&self) -> &E2eeDeclarations;
 
+    /// Whether these hooks were built from the declarations of an encrypted
+    /// app (the ones `load_client_encrypted` returns when the schema holds
+    /// Jazz's system tables), which are empty for a version that keeps the
+    /// tables but declares no encrypted column. Opening an encrypted app
+    /// needs it. The default: the declarations name an encrypted table.
+    /// A runtime whose declarations may be empty returns `true` for those
+    /// of an encrypted app.
+    fn from_encrypted_app(&self) -> bool {
+        !self.declarations().tables.is_empty()
+    }
+
     /// Seal one write before it is stored or uploaded: replace each
     /// encrypted column's plaintext with its cell record, add equality
     /// tokens, and stage any internal rows the write needs (a space root)

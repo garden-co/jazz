@@ -218,6 +218,9 @@ struct Fake {
     /// Return a query that still filters the encrypted column: 1 keeps the
     /// filter in a rewritten query, 2 plans nothing at all.
     leak: Cell<u8>,
+    /// Built from an encrypted app's declarations even when they name no
+    /// table (a version that keeps the system tables and declares nothing).
+    encrypted_app: Cell<bool>,
 }
 
 impl Fake {
@@ -275,6 +278,10 @@ fn uuid_of(value: Option<&Value>) -> Option<uuid::Uuid> {
 impl E2eeHooks for Fake {
     fn declarations(&self) -> &E2eeDeclarations {
         self.declarations.as_ref().unwrap()
+    }
+
+    fn from_encrypted_app(&self) -> bool {
+        self.encrypted_app.get() || !self.declarations().tables.is_empty()
     }
 
     fn seal_write(&self, write: &mut WriteCells<'_>) -> Result<(), SealError> {
@@ -2304,10 +2311,12 @@ fn a_hook_cannot_return_a_query_that_still_filters_an_encrypted_column() {
 
 /// Contract: an app that declares encryption (its schema holds Jazz's
 /// system tables) opens through the bindings' open only when encryption
-/// hooks are installed on that same open; without hooks it is refused, and
-/// a database it opens seals its writes. A version that declares nothing
-/// but keeps the tables is the same app: refused without hooks, opened with
-/// hooks that declare nothing, which still cannot name a token column.
+/// hooks built from its declarations are installed on that same open;
+/// without hooks, or with plain hooks that declare nothing, it is refused,
+/// and a database it opens seals its writes. A version that declares
+/// nothing but keeps the tables is the same app: refused without hooks,
+/// opened with hooks built from its (empty) declarations, which still
+/// cannot name a token column.
 #[test]
 fn an_encrypted_app_opens_only_with_encryption_hooks() {
     use jazz::tools::AppId;
@@ -2349,6 +2358,10 @@ fn an_encrypted_app_opens_only_with_encryption_hooks() {
         }),
         ..Fake::default()
     });
+    // Hooks that declare nothing and were not built from an encrypted app
+    // are refused; built from one, they open the tables-only version.
+    refused(config().with_e2ee(empty.clone()));
+    empty.encrypted_app.set(true);
     let quiet = block_on(jazz::binding_host::open_memory(config().with_e2ee(empty))).unwrap();
     let token = Query::from("notes").filter(eq(col("__e2ee_eq_body"), lit(text("x"))));
     assert!(quiet.prepare_query(&token).is_err());
