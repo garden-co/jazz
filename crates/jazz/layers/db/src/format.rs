@@ -21,9 +21,8 @@
 //! of each released format; a change to the layout that an older file would
 //! not read bumps [`STORAGE_FORMAT`] and adds its corpus.
 
+use crate::storage::Storage;
 use std::path::Path;
-
-use rusqlite::Connection;
 
 use crate::options::{Error, ErrorCode};
 use crate::values::storage;
@@ -47,7 +46,7 @@ pub(crate) fn unsupported(detail: impl std::fmt::Display) -> Error {
 /// Admit the file `conn` opened: stamp a new one, accept one in
 /// [`STORAGE_FORMAT`], refuse anything else. Reads only, unless the file is
 /// new.
-pub(crate) fn admit(conn: &Connection) -> Result<(), Error> {
+pub(crate) fn admit(conn: &Storage) -> Result<(), Error> {
     // A damaged header fails here (`file is not a database`), as a storage
     // error, before any write.
     let tables: Vec<String> = conn
