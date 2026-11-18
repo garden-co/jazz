@@ -104,7 +104,7 @@ copied chunk directory without its `owner` file, or a new `s3()` prefix).
 
 A data directory keeps the app id it was first started with and refuses to start with another
 `--app-id`. To change it (a wrong first start, or a renamed app), stop the server and run
-`npx jazz-tools store set-app-id <path> <app id>`. Local-first guests' accounts are derived from the
+`npx jazz-tools store set-app-id <path> <app id>`. Guests' device accounts are derived from the
 app id, so they no longer match after a change.
 
 History keeps every version of a row, so deleting rows doesn't free their large values, and there
