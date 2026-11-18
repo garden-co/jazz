@@ -5214,15 +5214,6 @@ pub enum LensOp {
     },
 }
 
-/// Core-ordered current write-schema pointer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct CurrentWriteSchema {
-    /// Monotone catalogue revision assigned by the core/admin lane.
-    pub revision: u64,
-    /// Current schema for canonical writes.
-    pub schema: SchemaVersionId,
-}
-
 /// Acknowledgement for catalogue lane messages.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct CatalogueAck {

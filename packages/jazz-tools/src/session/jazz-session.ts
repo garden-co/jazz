@@ -596,6 +596,37 @@ export function coreInitial(initial: unknown): "local-first" | "signed-out" | un
 }
 
 /**
+ * What a provider's `error` view receives, in every framework, while the
+ * session has no usable client (`status: "error"`).
+ */
+export interface JazzSessionErrorViewProps {
+  /** Why there is no usable client. */
+  readonly error: Error;
+  /**
+   * What `retry()` does: repeat the operation that failed (`action`), or
+   * reopen the signed-in account (`session`).
+   */
+  readonly recovery: "action" | "session";
+  /**
+   * Try again. Never rejects: if it fails again, the error view shows the new
+   * failure, so `onClick={retry}` is safe.
+   */
+  retry(): Promise<void>;
+}
+
+/** @internal The error view's props for a session snapshot in `status: "error"`. */
+export function jazzSessionErrorViewProps(
+  session: Pick<JazzSession<unknown>, "retry">,
+  snapshot: Pick<JazzSessionSnapshot<unknown>, "error" | "recovery">,
+): JazzSessionErrorViewProps {
+  return {
+    error: snapshot.error ?? new Error("Jazz could not start"),
+    recovery: snapshot.recovery ?? "session",
+    retry: () => session.retry().catch(() => {}),
+  };
+}
+
+/**
  * @internal A session's operations, bound and without its state, for the
  * framework hooks (never a spread: `db` is a getter that throws while there
  * is no client).
