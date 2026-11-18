@@ -775,7 +775,13 @@ added by an updater.
   the earlier). The loaders append the fragment to every version after the
   first one that carries it, so both sides compute the same schema and hash;
   a later version without declarations gets the system tables' policies
-  derived from the declarations of the version it follows. Turning
+  derived from the declarations of the nearest version before it that has
+  them (the nearest wins, however far apart earlier declaring versions sit,
+  and without a warning; two nearest versions that declare differently are
+  refused). The stored catalogue decides what came earlier: a new version
+  without the system tables is refused when any stored version has them,
+  whatever lens it hangs on and whether or not the deploy allows dropping
+  history. Turning
   encryption off is a schema conversion of the columns (a decrypt,
   [migrations](E2EE_MIGRATIONS.md) §3), never a removal of the system tables.
 - **Encrypted columns are last-writer-wins.** The server cannot merge

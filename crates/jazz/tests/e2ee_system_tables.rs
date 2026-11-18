@@ -2738,3 +2738,76 @@ fn a_version_with_two_parents_takes_their_declarations_only_if_they_agree() {
     let error = history(other).expect_err("two parents that declare differently");
     assert!(error.to_string().contains("declare differently"), "{error}");
 }
+
+/// The history check holds against the stored catalogue, not only the
+/// submitted history: a new version without the system tables is refused
+/// when a stored version has them, whatever lens it hangs on (here a sibling
+/// of the stored encrypted version, off the plain first version) and whether
+/// or not the deploy allows dropping history.
+///
+/// ```text
+/// stored:  v0 plain ──► v1 fragment
+/// deploy:  v0 plain ──► v2 plain + notes, target v2      ✗
+/// ```
+#[test]
+fn a_new_version_without_the_system_tables_is_refused_against_the_stored_catalogue() {
+    use jazz::tools::{Lens, LensOp, LensTransform};
+    let plain = structural_of(app());
+    let fragment = structural_of(with_e2ee_fragment(&app()));
+    let mut sibling = plain.clone();
+    sibling.insert(
+        TableName::from("notes"),
+        TableSchemaBuilder::new("notes")
+            .column("body", ColumnType::Text)
+            .build(),
+    );
+    let (v0, v1, v2) = (
+        SchemaHash::compute(&plain),
+        SchemaHash::compute(&fragment),
+        SchemaHash::compute(&sibling),
+    );
+    let lens = |from, to, ops| {
+        Lens::new(
+            from,
+            to,
+            LensTransform {
+                ops,
+                draft_ops: Vec::new(),
+            },
+        )
+    };
+    let stored = DeploymentCatalogue {
+        schemas: vec![plain.clone(), fragment.clone()],
+        migrations: vec![lens(v0, v1, fragment_ops(&fragment, true))],
+        admitted_schema_hashes: vec![v0, v1],
+    };
+    let declared = DeclaredEncryption {
+        versions: BTreeMap::from([(v1.to_string(), entries())]),
+        ..Default::default()
+    };
+    for allow_dropping_history in [false, true] {
+        let error = prepare_encrypted_deployment(
+            &stored,
+            DeploymentRequest {
+                target_schema_hash: v2,
+                schemas: vec![(v2, sibling.clone())],
+                migrations: vec![lens(
+                    v0,
+                    v2,
+                    vec![LensOp::AddTable {
+                        table: "notes".to_owned(),
+                        schema: sibling[&TableName::from("notes")].clone(),
+                    }],
+                )],
+                permissions: HashMap::new(),
+                allow_dropping_history,
+            },
+            &declared,
+        )
+        .expect_err("a new version without the system tables beside a stored one that has them");
+        assert!(
+            error.to_string().contains("every later version does"),
+            "{error}"
+        );
+    }
+}
