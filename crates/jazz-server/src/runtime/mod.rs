@@ -1146,11 +1146,6 @@ impl Owner {
     ) -> (usize, Result<(), CatalogueApplyError>) {
         let mut ended = 0;
         let result = (|| {
-            if change.activate.is_some() {
-                return Err(CatalogueApplyError::Rejected(
-                    "a server never makes a schema current: sessions pin bundles".to_owned(),
-                ));
-            }
             block_on(self.db.apply_catalogue(change)).map_err(|error| {
                 if error.code == jazz::db::ErrorCode::Storage {
                     CatalogueApplyError::Failed(error.to_string())
@@ -3142,32 +3137,6 @@ mod tests {
             blob.state.calls.gets.load(Ordering::Relaxed) > 0,
             "read from the store"
         );
-        store.close().unwrap();
-    }
-
-    /// A server's sessions are governed by the bundle they pin: a catalogue
-    /// change that would make a schema current is refused, and the store
-    /// keeps no permissions revision.
-    #[test]
-    fn a_server_refuses_to_make_a_schema_current() {
-        let store = AppStore::memory().unwrap();
-        let runtime = store
-            .start_runtime(schema(), NodeRole::Core, false)
-            .unwrap();
-        let refused = block_on(runtime.apply_catalogue(
-            CatalogueChange {
-                activate: Some((1, schema(), Vec::new())),
-                ..CatalogueChange::default()
-            },
-            None,
-        ))
-        .unwrap_err();
-        assert!(
-            matches!(&refused, CatalogueApplyError::Rejected(message) if message.contains("never makes a schema current")),
-            "{refused:?}"
-        );
-        let rows = block_on(runtime.catalogue()).unwrap();
-        assert!(rows.head().is_none(), "no permissions revision was written");
         store.close().unwrap();
     }
 

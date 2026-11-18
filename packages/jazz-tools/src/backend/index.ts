@@ -42,6 +42,7 @@ export {
   type JazzStore,
   type BackendCredential,
   type JazzUser,
+  type DeviceAccountsAnswer,
   type LocalFirstGuest,
   type DeviceAccountsOption,
   acceptDeviceAccounts,

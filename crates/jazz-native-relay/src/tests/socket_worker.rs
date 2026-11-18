@@ -175,7 +175,7 @@ fn scripted_foreground_on(
 ) -> (NativeRelayHost, AdmissionCapability, u64) {
     let pending = host
         .begin_private_session(PrivateSessionSetupJson {
-            server_url: "https://edge.example".to_owned(),
+            server_url: "https://upstream.example".to_owned(),
             app_id: app_id.to_owned(),
             jwt: bearer(1),
             storage_root: root.display().to_string(),
@@ -227,11 +227,11 @@ fn connected(host: &NativeRelayHost, scope: &RelayScope) -> bool {
 /// connection restores it.
 ///
 /// ```text
-/// alice ─open─► relay ══socket══► edge   (connected)
+/// alice ─open─► relay ══socket══► upstream  (connected)
 ///                 │        ✗ terminal transport loss, worker retries
-/// alice ─tick─► relay                    (Ok, connected=false)
-///                 │ ══socket══► edge     (reconnected)
-/// alice ─tick─► relay                    (Ok, connected=true)
+/// alice ─tick─► relay                       (Ok, connected=false)
+///                 │ ══socket══► upstream    (reconnected)
+/// alice ─tick─► relay                       (Ok, connected=true)
 /// ```
 #[test]
 fn retrying_upstream_failure_keeps_foreground_ticking() {
@@ -271,10 +271,10 @@ fn retrying_upstream_failure_keeps_foreground_ticking() {
 /// as on the web and Node transports.
 ///
 /// ```text
-/// alice ─open─► relay ══socket══✗ edge refuses   (worker retries)
-/// alice ─tick─► relay                            (Ok, upstream failure, link Failed)
-///                 ══socket══► edge               (connected)
-/// alice ─tick─► relay                            (Ok, no failure)
+/// alice ─open─► relay ══socket══✗ upstream refuses  (worker retries)
+/// alice ─tick─► relay                               (Ok, upstream failure, link Failed)
+///                 ══socket══► upstream              (connected)
+/// alice ─tick─► relay                               (Ok, no failure)
 /// ```
 #[test]
 fn a_refused_connection_is_surfaced_and_retried() {
@@ -322,9 +322,9 @@ fn a_refused_connection_is_surfaced_and_retried() {
 /// a network failure and reads stopped waiting).
 ///
 /// ```text
-/// alice ─open─► relay ══socket══► edge   NotReady (still starting)
-///                 │                      (link Attempting, no failure)
-///                 │ ══socket══► edge     (connected)
+/// alice ─open─► relay ══socket══► upstream  NotReady (still starting)
+///                 │                         (link Attempting, no failure)
+///                 │ ══socket══► upstream    (connected)
 /// ```
 #[test]
 fn a_server_still_starting_keeps_reads_waiting_and_is_retried() {
@@ -362,12 +362,12 @@ fn a_server_still_starting_keeps_reads_waiting_and_is_retried() {
 /// meanwhile, as on the web and Node transports.
 ///
 /// ```text
-/// alice ─open─► relay ══socket(bearer 1)══► edge   (connected)
+/// alice ─open─► relay ══socket(bearer 1)══► upstream  (connected)
 ///                 │     ✗ link lost (backgrounded)
-///                 │ ══socket(bearer 1)══✗ edge     AuthFailed: worker stops
-/// alice ─tick─► relay                              (Ok, auth_rejected, link Failed)
-/// alice ─renew(bearer 2)─► relay ══socket(bearer 2)══► edge
-/// alice ─tick─► relay                              (Ok)
+///                 │ ══socket(bearer 1)══✗ upstream    AuthFailed: worker stops
+/// alice ─tick─► relay                                 (Ok, auth_rejected, link Failed)
+/// alice ─renew(bearer 2)─► relay ══socket(bearer 2)══► upstream
+/// alice ─tick─► relay                                 (Ok)
 /// ```
 #[test]
 fn an_expired_bearer_stops_the_worker_and_a_renewed_one_recovers() {
@@ -468,10 +468,10 @@ fn tick_auth_rejection(host: &mut NativeRelayHost, foreground: u64) -> Option<Na
 /// a new sequence and the host renews again instead of waiting forever.
 ///
 /// ```text
-/// alice ─open─► relay ══socket(bearer 1)══► edge   (connected)
+/// alice ─open─► relay ══socket(bearer 1)══► upstream             (connected)
 ///                 │     ✗ link lost
-///                 │ ══socket(bearer 1)══✗ edge     refusal #n
-/// alice ─renew(bearer 2)─► relay ══socket(bearer 2)══✗ edge   refusal #m > n
+///                 │ ══socket(bearer 1)══✗ upstream               refusal #n
+/// alice ─renew(bearer 2)─► relay ══socket(bearer 2)══✗ upstream  refusal #m > n
 /// ```
 #[test]
 fn a_renewed_bearer_refused_for_the_same_reason_is_a_new_refusal() {
@@ -570,9 +570,9 @@ fn wait_within(
 /// word instead of waiting out the transport's silence deadline.
 ///
 /// ```text
-/// alice ─open─► relay ══socket══► edge     (connected, on Wi-Fi)
+/// alice ─open─► relay ══socket══► upstream  (connected, on Wi-Fi)
 /// os: path unsatisfied
-///                 relay ══✗                (dropped at once, connected=false)
+///                 relay ══✗                 (dropped at once, connected=false)
 /// ```
 #[test]
 fn a_lost_network_path_drops_the_live_link_at_once() {
@@ -602,9 +602,9 @@ fn a_lost_network_path_drops_the_live_link_at_once() {
 /// device no longer routes through, so the worker reconnects at once.
 ///
 /// ```text
-/// alice ─open─► relay ══socket══► edge     (on Wi-Fi)
-/// os: Wi-Fi + cellular                     (kept)
-/// os: cellular only                        (dropped, reconnected on cellular)
+/// alice ─open─► relay ══socket══► upstream  (on Wi-Fi)
+/// os: Wi-Fi + cellular                      (kept)
+/// os: cellular only                         (dropped, reconnected on cellular)
 /// ```
 #[test]
 fn a_path_leaving_the_links_interface_reconnects_at_once() {
@@ -657,9 +657,9 @@ fn a_path_leaving_the_links_interface_reconnects_at_once() {
 /// one moment a retry is most likely to land, so the worker retries at once.
 ///
 /// ```text
-/// alice ─open─► relay ══socket══► edge     (connected)
-/// os: path unsatisfied; link lost          (backoff >= 10 s)
-/// os: path satisfied                       (retry at once, connected)
+/// alice ─open─► relay ══socket══► upstream  (connected)
+/// os: path unsatisfied; link lost           (backoff >= 10 s)
+/// os: path satisfied                        (retry at once, connected)
 /// ```
 #[test]
 fn a_returning_network_path_retries_without_waiting_out_the_backoff() {
@@ -701,9 +701,9 @@ fn a_returning_network_path_retries_without_waiting_out_the_backoff() {
 ///
 /// ```text
 /// os: path unsatisfied (lagging)
-/// alice ─open─► relay ══socket══► edge     (connected anyway)
-/// os: Wi-Fi                                (kept)
-/// os: cellular only                        (dropped, reconnected)
+/// alice ─open─► relay ══socket══► upstream  (connected anyway)
+/// os: Wi-Fi                                 (kept)
+/// os: cellular only                         (dropped, reconnected)
 /// ```
 #[test]
 fn a_link_admitted_while_the_monitor_lagged_is_watched_on_the_path_it_reports_next() {
@@ -752,8 +752,8 @@ fn a_link_admitted_while_the_monitor_lagged_is_watched_on_the_path_it_reports_ne
 /// kept, not dropped for a reconnect it does not need.
 ///
 /// ```text
-/// alice ─open─► relay ══socket══► edge     (on cellular)
-/// os: Wi-Fi only                           (kept)
+/// alice ─open─► relay ══socket══► upstream  (on cellular)
+/// os: Wi-Fi only                            (kept)
 /// ```
 #[test]
 fn a_link_on_cellular_is_kept_when_wifi_takes_over_the_path() {
@@ -997,7 +997,7 @@ fn an_attached_schema_stores_columns_where_its_shipped_migrations_put_them() {
         };
         let pending = host
             .begin_private_session(PrivateSessionSetupJson {
-                server_url: "https://edge.example".to_owned(),
+                server_url: "https://upstream.example".to_owned(),
                 app_id: app_id.to_owned(),
                 jwt: bearer(1),
                 storage_root: root.display().to_string(),
@@ -1031,7 +1031,7 @@ fn an_attached_schema_with_malformed_migrations_is_refused() {
     };
     let pending = host
         .begin_private_session(PrivateSessionSetupJson {
-            server_url: "https://edge.example".to_owned(),
+            server_url: "https://upstream.example".to_owned(),
             app_id: "malformed-migrations".to_owned(),
             jwt: bearer(1),
             storage_root: root.path().display().to_string(),
@@ -1058,7 +1058,7 @@ fn an_attached_schema_with_malformed_migrations_is_refused() {
 /// covers the owner's half against a real refusing server.
 ///
 /// ```text
-/// alice ─open─► relay ══socket══► edge      (connected)
+/// alice ─open─► relay ══socket══► upstream  (connected)
 ///                 │ relay refuses its upstream
 ///                 ══socket══✗               (worker stops, no retry)
 /// alice ─tick─► relay                       (Ok, failure: refused, not retrying)

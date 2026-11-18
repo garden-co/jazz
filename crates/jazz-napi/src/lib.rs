@@ -1,7 +1,7 @@
 //! jazz-napi — Native Node.js bindings for the Jazz database (`jazz-db`).
 //!
 //! Provides Node.js bindings for the Jazz database, server helpers, and
-//! local-first identity utilities.
+//! device-account identity utilities.
 //!
 //! # Architecture
 //!
@@ -12,7 +12,7 @@
 //!   Unsupported features fail with an explicit "not supported yet" error.
 //! - `JazzServer` exposes the Rust server process used by integration tests
 //!   and Node deployments.
-//! - Local-first JWT helpers stay here as package-level native utilities.
+//! - device-account JWT helpers stay here as package-level native utilities.
 //!
 //! # Thread affinity
 //!
@@ -1362,6 +1362,9 @@ pub struct SubscriptionDeltaEvent {
     #[napi(js_name = "type", ts_type = "'delta'")]
     pub event_type: String,
     pub reset: bool,
+    /// A reset standing for deltas the reader fell too far behind to be
+    /// told one by one (its backlog passed its limit).
+    pub coalesced: bool,
     pub delta: Uint8Array,
     /// Always empty: SQLite subscriptions deliver whole-row deltas.
     #[napi(js_name = "terminalOperations", ts_type = "Array<never>")]
@@ -1422,11 +1425,13 @@ fn subscription_event(event: CoreEvent) -> napi::Result<SubscriptionEvent> {
             EventChunk::Delta {
                 delta,
                 reset,
+                coalesced,
                 settled,
                 tier,
             } => Either3::A(SubscriptionDeltaEvent {
                 event_type: "delta".to_owned(),
                 reset,
+                coalesced,
                 delta: delta.into(),
                 terminal_operations: Vec::new(),
                 settled,
@@ -1986,9 +1991,10 @@ impl NapiDb {
         self.request_permission_advice(binding_host::advice::delete(table, &row_id), author, claims)
     }
 
-    /// Admit a verified local-first account for this backend runtime only.
-    #[napi]
-    pub fn admit_local_first_session(
+    /// Admit a verified device account for this backend runtime only.
+    // The JS name is ABI with jazz-tools; it stays until the TS side renames it.
+    #[napi(js_name = "admitLocalFirstSession")]
+    pub fn admit_device_account_session(
         &self,
         token: String,
         app_id: String,
@@ -1996,7 +2002,7 @@ impl NapiDb {
     ) -> js::Result<()> {
         Ok(self
             .binding()?
-            .admit_local_first_session(&token, &app_id, &claimed_author)
+            .admit_device_account_session(&token, &app_id, &claimed_author)
             .map_err(host_error)?)
     }
 
@@ -2651,6 +2657,17 @@ impl NapiDb {
         Ok(())
     }
 
+    /// Coalesce a subscription's undelivered deltas past `rows` changed
+    /// rows (default 10000, at least 1) into one reset of its current
+    /// result.
+    #[napi(js_name = "setSubscriptionBacklogRows")]
+    pub fn set_subscription_backlog_rows(&self, rows: f64) -> js::Result<()> {
+        self.binding()?
+            .set_subscription_backlog_rows(rows)
+            .map_err(host_error)?;
+        Ok(())
+    }
+
     /// Connect to the server over byte frames the host carries: each frame
     /// is one postcard `SyncMessage`.
     #[napi(js_name = "connectUpstream")]
@@ -3225,7 +3242,7 @@ pub fn mint_local_first_token(
     let seed = decode_seed_napi(&seed_b64)?;
     identity::mint_jazz_self_signed_token(
         &seed,
-        identity::LOCAL_FIRST_ISSUER,
+        identity::DEVICE_ACCOUNT_ISSUER,
         &audience,
         ttl_seconds as u64,
     )

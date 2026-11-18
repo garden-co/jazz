@@ -738,6 +738,48 @@ mod smoke {
         serde_json::to_string(&request).expect("deploy request JSON")
     }
 
+    /// A local-first guest (keys from `seed`, a byte repeated) proving
+    /// itself for `audience` at `now_seconds`: `{ proof, peer, subject }`,
+    /// its self-signed proof, the peer identity its client names (with the
+    /// account founded in `audience`'s namespace) and its subject.
+    #[wasm_bindgen(js_name = testGuest)]
+    pub fn test_guest(seed: u8, audience: &str, now_seconds: u64) -> String {
+        use jazz::tools::identity;
+        let seed = [seed; 32];
+        let proof = identity::mint_jazz_self_signed_token_at(
+            &seed,
+            identity::DEVICE_ACCOUNT_ISSUER,
+            audience,
+            3600,
+            now_seconds,
+        )
+        .expect("a proof");
+        let subject = identity::derive_user_id(&seed).to_string();
+        let founding = jazz_server::portable::accounts::local_first_founding_app(audience);
+        let peer = AuthorSubject::reserved(identity::DEVICE_ACCOUNT_ISSUER, &subject)
+            .expect("a local-first author")
+            .with_account(jazz::account_registry::device_account_id(
+                *founding.uuid(),
+                &subject,
+            ));
+        serde_json::json!({
+            "proof": proof,
+            "peer": peer.canonical(),
+            "subject": subject,
+            "issuer": identity::DEVICE_ACCOUNT_ISSUER,
+        })
+        .to_string()
+    }
+
+    /// A user's identity (`issuer`, `subject`), as a prelude names its peer.
+    #[wasm_bindgen(js_name = testUserIdentity)]
+    pub fn test_user_identity(issuer: &str, subject: &str) -> String {
+        AuthorSubject::authenticated(issuer, subject)
+            .expect("a user identity")
+            .canonical()
+            .to_owned()
+    }
+
     /// The system identity, as a prelude names its peer.
     #[wasm_bindgen(js_name = testSystemIdentity)]
     pub fn test_system_identity() -> String {
@@ -931,8 +973,12 @@ mod smoke {
 /// send what `output` returns.
 mod core_host {
     use super::{durable_object_storage, ObjectStorage};
+    use jazz_server::portable::accounts::{
+        self, AccountRoute, RouteAuthority, RouteBody, RouteContext,
+    };
     use jazz_server::portable::admission::{
-        admit_by_core_secret, same_secret, UpgradeCredential, WebSocketPrelude,
+        admit_by_core_secret, same_secret, SessionRevocation, UpgradeCredential,
+        WebSocketCredential, WebSocketPrelude,
     };
     use jazz_server::portable::catalogue::{CatalogueIndex, DeploymentResponse};
     use jazz_server::portable::deployment::{self, DeployError, DeployRequest};
@@ -948,6 +994,13 @@ mod core_host {
         JsValue::from_str(&error.to_string())
     }
 
+    #[cfg(feature = "durable-object-tests")]
+    thread_local! {
+        /// Tests only: a thread-local `test/panic` leaves borrowed, as a
+        /// trap leaves the core's (an instance that trapped is not reused).
+        static TRAPPED_BORROW: std::cell::RefCell<()> = const { std::cell::RefCell::new(()) };
+    }
+
     /// What a connection's socket is.
     struct Socket {
         session: ServerSession,
@@ -961,6 +1014,13 @@ mod core_host {
         held_bytes: usize,
         /// Why the socket ends: its error frame goes out with its output.
         failed: Option<jazz::wire::WireError>,
+        /// For a user session the backend stated: what a revocation of its
+        /// user's sessions is checked against.
+        revocation: Option<SessionRevocation>,
+        /// For a guest admitted by its own proof: its identity, whose
+        /// account assignment is checked again whenever assignments change
+        /// (as native's sockets watch the registry).
+        guest: Option<jazz::ids::AuthorSubject>,
     }
 
     /// The most input a socket may have held for room (one session's
@@ -1032,6 +1092,8 @@ mod core_host {
         /// Tests only: the engine takes no input and does not tick, so
         /// input piles up as held.
         paused: bool,
+        /// The account registry's tables exist (made on first use).
+        accounts_open: bool,
     }
 
     /// What `accept` answers: the frames to send, and the socket's number
@@ -1098,6 +1160,12 @@ mod core_host {
             if secret.len() < 32 {
                 return Err(js("the core secret must be at least 32 characters"));
             }
+            #[cfg(feature = "durable-object-tests")]
+            TRAPPED_BORROW.with(|cell| {
+                cell.try_borrow_mut().map(drop).map_err(|_| {
+                    js("this wasm instance trapped holding a borrow: reinstantiate it")
+                })
+            })?;
             // Admit the store (stamping a new one as Jazz's) before keeping
             // anything of the host's in it.
             jazz::host::StoreFile::from_storage(durable_object_storage(storage.clone()))
@@ -1113,6 +1181,7 @@ mod core_host {
                 held_limit: HELD_LIMIT,
                 global_held_limit: GLOBAL_HELD_LIMIT,
                 paused: false,
+                accounts_open: false,
             };
             this.open_core(schema.as_deref())?;
             Ok(this)
@@ -1162,11 +1231,31 @@ mod core_host {
                     );
                 }
             };
-            let upgrade = match (&credential, &access) {
-                (Some(credential), Some(access)) => Some(UpgradeCredential { credential, access }),
-                _ => None,
+            let upgrade = credential.as_deref().map(|credential| UpgradeCredential {
+                credential,
+                access: access.as_deref(),
+            });
+            let now = js_sys::Date::now() as u64;
+            // A guest the backend relays proves who it is itself: its proof
+            // is checked, and its account founded or found, in the object's
+            // account registry, as native admits it.
+            let secret = self.secret.clone();
+            let app_id = jazz::tools::AppId::from_string(&self.app_id);
+            let mut guest = |token: &str, peer, audience: Option<&str>| {
+                let app_id = app_id.clone().map_err(|error| error.to_string())?;
+                let storage = self.registry()?;
+                jazz_server::portable::guest::admit_guest(
+                    &storage,
+                    token,
+                    peer,
+                    audience,
+                    app_id,
+                    now / 1000,
+                )
+                .map_err(|refusal| refusal.to_string())
             };
-            let admission = match admit_by_core_secret(&prelude, upgrade, &self.secret) {
+            let admission = match admit_by_core_secret(&prelude, upgrade, &secret, now, &mut guest)
+            {
                 Ok(admission) => admission,
                 Err(message) => return fail(jazz::wire::WireErrorCode::AuthFailed, message),
             };
@@ -1178,6 +1267,26 @@ mod core_host {
                 Ok(link) => link,
                 Err(error) => return refused(error_frame(&error)),
             };
+            // A stated session of a user whose sessions were revoked after
+            // the backend authenticated it is refused, as native refuses it.
+            let revocation = admission.revocation.clone();
+            let guest = (admission.credential == WebSocketCredential::Session)
+                .then_some(admission.identity);
+            if let Some(revocation) = &revocation {
+                match self.revocation_mark(&revocation.principal) {
+                    Ok(mark) if accounts::session_revoked(mark, revocation.authenticated_at_ms) => {
+                        return refused(error_frame(&revoked()));
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        return refused(error_frame(&jazz::wire::WireError::new(
+                            jazz::wire::WireErrorCode::NotReady,
+                            jazz::wire::WireRetry::Later,
+                            error,
+                        )));
+                    }
+                }
+            }
             let Some(core) = self.core.as_mut() else {
                 return refused(error_frame(&jazz::wire::WireError::new(
                     jazz::wire::WireErrorCode::NotReady,
@@ -1217,6 +1326,8 @@ mod core_host {
                     held: VecDeque::new(),
                     held_bytes: 0,
                     failed: None,
+                    revocation,
+                    guest,
                 },
             );
             let hello = encode_ws_frame_batches(&[link.server_hello])
@@ -1394,17 +1505,60 @@ mod core_host {
             if let Err(refused) = credentials.admin(&self.secret) {
                 return Some(refused);
             }
+            let storage = durable_object_storage(self.storage.clone());
             match route {
-                "test/panic" => panic!("a test asked the core to panic"),
+                // Panic mid-write, inside a storage transaction (the
+                // object's `transactionSync`, its callback live and the
+                // storage bridge borrowed): the write must not stay, and
+                // the object must start afresh on a new instance.
+                "test/panic" => {
+                    let _ = storage.scope::<()>("jazz_test_panic", |storage| {
+                        // As a panic inside the core leaves a thread-local
+                        // borrowed (the trap never unwinds it): only a new
+                        // instance has it free again (see `open`).
+                        TRAPPED_BORROW.with(|cell| std::mem::forget(cell.borrow_mut()));
+                        storage
+                            .execute_batch(
+                                "CREATE TABLE IF NOT EXISTS _jazz_test_panic (x INTEGER); \
+                                 INSERT INTO _jazz_test_panic (x) VALUES (1);",
+                            )
+                            .map_err(|error| {
+                                jazz::db::Error::new(
+                                    jazz::db::ErrorCode::Storage,
+                                    error.to_string(),
+                                )
+                            })?;
+                        panic!("a test asked the core to panic inside a storage transaction")
+                    });
+                    unreachable!("the scope panics")
+                }
+                // How many rows a panicked write left (none).
+                "test/panic-rows" => {
+                    use jazz::storage::OptionalExtension;
+                    let rows = storage
+                        .prepare_cached("SELECT count(*) FROM _jazz_test_panic")
+                        .and_then(|mut statement| {
+                            statement
+                                .query_row([], |row| row.get::<_, i64>(0))
+                                .optional()
+                        })
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0);
+                    Some(answer(200, serde_json::json!({ "rows": rows })))
+                }
+                // Set the held limits and pause or resume the engine; the
+                // answer is the limits that were in force.
                 "test/limits" => {
                     let limits: Limits = serde_json::from_slice(body).expect("limits JSON");
+                    let before = serde_json::json!({
+                        "socket": self.held_limit,
+                        "global": self.global_held_limit,
+                    });
                     self.held_limit = limits.socket;
                     self.global_held_limit = limits.global;
                     self.paused = limits.paused;
-                    Some(HttpAnswer {
-                        status: 204,
-                        body: String::new(),
-                    })
+                    Some(answer(200, before))
                 }
                 _ => None,
             }
@@ -1495,6 +1649,8 @@ mod core_host {
     struct HttpAnswer {
         status: u16,
         body: String,
+        /// The body's content type (empty for no body).
+        content_type: &'static str,
     }
 
     impl HttpAnswer {
@@ -1502,6 +1658,7 @@ mod core_host {
             object(&[
                 ("status", JsValue::from(self.status)),
                 ("body", JsValue::from_str(&self.body)),
+                ("contentType", JsValue::from_str(self.content_type)),
             ])
         }
     }
@@ -1510,6 +1667,24 @@ mod core_host {
         HttpAnswer {
             status,
             body: serde_json::to_string(&body).unwrap_or_default(),
+            content_type: "application/json",
+        }
+    }
+
+    /// What a revoked session is told, as native tells it.
+    fn revoked() -> jazz::wire::WireError {
+        jazz::wire::WireError::new(
+            jazz::wire::WireErrorCode::AuthFailed,
+            jazz::wire::WireRetry::AfterAuth,
+            "session revoked: jazz.revokeUser ended this user's sessions",
+        )
+    }
+
+    fn no_content() -> HttpAnswer {
+        HttpAnswer {
+            status: 204,
+            body: String::new(),
+            content_type: "",
         }
     }
 
@@ -1739,14 +1914,29 @@ mod core_host {
             use jazz::tools::transport_error::ErrorResponse;
             let not_found = || refusal(404, ErrorResponse::not_found("route not found"));
             let route = route_of(path).ok_or_else(not_found)?;
+            let account = route
+                .strip_prefix("admin/accounts/")
+                .and_then(AccountRoute::from_path);
             match (method, route) {
                 ("GET", "app") => credentials.holder(&self.secret)?,
                 ("POST", "backend/admit") => credentials.backend(&self.secret)?,
+                // As native: the admin secret, or for the routes a backend
+                // vouches for (resolve, login-or-register,
+                // found-local-first), the backend's when no admin secret is
+                // sent; link, revoke and revoke-sessions are the admin's.
+                ("POST", _) if account.is_some() => match account.expect("matched").authority() {
+                    RouteAuthority::VouchingBackend if credentials.admin_secret.is_none() => {
+                        credentials.backend(&self.secret)?
+                    }
+                    _ => credentials.admin(&self.secret)?,
+                },
                 ("GET", "admin/migrations/graph" | "admin/bundles") | ("POST", "admin/bundles") => {
                     credentials.admin(&self.secret)?
                 }
                 #[cfg(feature = "durable-object-tests")]
-                ("POST", "test/panic" | "test/limits") => credentials.admin(&self.secret)?,
+                ("POST", "test/panic" | "test/panic-rows" | "test/limits") => {
+                    credentials.admin(&self.secret)?
+                }
                 _ => return Err(not_found()),
             }
             Ok(route)
@@ -1764,26 +1954,19 @@ mod core_host {
             if let Some(answer) = self.test_route(method, route, credentials, body) {
                 return answer;
             }
-            let checked: Result<(), HttpAnswer> = match (method, route) {
-                ("GET", "app") => Ok(()),
-                ("POST", "backend/admit") => credentials.backend(&self.secret),
-                ("GET", "admin/migrations/graph" | "admin/bundles") | ("POST", "admin/bundles") => {
-                    credentials.admin(&self.secret)
-                }
-                _ => {
-                    return refusal(404, ErrorResponse::not_found("route not found"));
-                }
-            };
-            if let Err(refused) = checked {
-                return refused;
+            #[cfg(not(feature = "durable-object-tests"))]
+            let _ = credentials;
+            // `check` found the route and its secrets hold.
+            if let Some(account) = route
+                .strip_prefix("admin/accounts/")
+                .and_then(AccountRoute::from_path)
+            {
+                return self.account(account, body);
             }
             match (method, route) {
                 ("GET", "app") => answer(200, serde_json::json!({ "appId": self.app_id })),
                 // The backend's credential holds: it may open sessions.
-                ("POST", "backend/admit") => HttpAnswer {
-                    status: 204,
-                    body: String::new(),
-                },
+                ("POST", "backend/admit") => no_content(),
                 ("GET", "admin/migrations/graph") => match self.catalogue_index() {
                     Ok(index) => answer(200, index.migration_graph()),
                     Err(error) => refusal(500, ErrorResponse::internal(error)),
@@ -1793,13 +1976,10 @@ mod core_host {
                     Err(error) => refusal(500, ErrorResponse::internal(error)),
                 },
                 _ => {
-                    let request = match serde_json::from_slice::<DeployRequest>(body) {
-                        Ok(request) => request,
-                        Err(error) => {
-                            return refusal(400, ErrorResponse::bad_request(error.to_string()));
-                        }
-                    };
-                    match self.deploy(request) {
+                    if let Err(error) = serde_json::from_slice::<DeployRequest>(body) {
+                        return refusal(400, ErrorResponse::bad_request(error.to_string()));
+                    }
+                    match self.deploy(body) {
                         Ok(response) => answer(200, response),
                         Err(error) => answer(error.status.as_u16(), error.body),
                     }
@@ -1847,48 +2027,148 @@ mod core_host {
             }
         }
 
+        /// The account registry over the object's SQL, its tables made on
+        /// first use.
+        fn registry(&mut self) -> Result<jazz::storage::Storage, String> {
+            let storage = durable_object_storage(self.storage.clone());
+            if !self.accounts_open {
+                accounts::open(&storage).map_err(|error| error.to_string())?;
+                self.accounts_open = true;
+            }
+            Ok(storage)
+        }
+
+        /// The revocation mark of `principal`'s sessions, if any.
+        fn revocation_mark(
+            &mut self,
+            principal: &jazz::account_registry::Principal,
+        ) -> Result<Option<u64>, String> {
+            let storage = self.registry()?;
+            accounts::sessions_revoked_before(&storage, principal)
+                .map_err(|error| error.to_string())
+        }
+
+        /// After an assignment may have changed: end every guest socket
+        /// whose identity no longer holds its account, as native ends it.
+        fn recheck_guests(&mut self, storage: &jazz::storage::Storage) {
+            use jazz::wire::{WireError, WireErrorCode, WireRetry};
+            for state in self.sockets.values_mut() {
+                let Some(identity) = state.guest else {
+                    continue;
+                };
+                let (issuer, subject) = identity.principal_parts();
+                let principal = jazz::account_registry::Principal { issuer, subject };
+                // As native's `account_still_admitted`: the assignment must
+                // still be the account the guest was admitted as; a refusal
+                // is told as the registry words it, and a registry that
+                // cannot be read closes the socket for a later retry.
+                let ends = match (identity.account_id(), accounts::login(storage, &principal)) {
+                    (Some(account), Ok(assignment)) if assignment.account == account => None,
+                    (_, Err(accounts::RegistryError::Unavailable(_))) => Some(WireError::new(
+                        WireErrorCode::NotReady,
+                        WireRetry::Later,
+                        "account registry unavailable",
+                    )),
+                    (_, Err(accounts::RegistryError::Decision(error))) => Some(WireError::new(
+                        WireErrorCode::AuthFailed,
+                        WireRetry::Never,
+                        error.to_string(),
+                    )),
+                    _ => Some(WireError::new(
+                        WireErrorCode::AuthFailed,
+                        WireRetry::Never,
+                        "account identity revoked",
+                    )),
+                };
+                if let Some(error) = ends {
+                    state.held.clear();
+                    state.held_bytes = 0;
+                    state.failed.get_or_insert(error);
+                }
+            }
+        }
+
+        /// Serve an account route (`admin/accounts/...`) on the store's
+        /// account registry, as native does. A revocation of a user's
+        /// sessions ends the stated sessions of that user authenticated
+        /// before its mark (their sockets get native's error and close);
+        /// later ones are refused at admission.
+        fn account(&mut self, route: AccountRoute, body: &[u8]) -> HttpAnswer {
+            use jazz::tools::transport_error::ErrorResponse;
+            let storage = match self.registry() {
+                Ok(storage) => storage,
+                Err(error) => return refusal(503, ErrorResponse::internal(error)),
+            };
+            let Ok(app_id) = uuid::Uuid::parse_str(&self.app_id) else {
+                return refusal(500, ErrorResponse::internal("the app id is not a UUID"));
+            };
+            let (reply, effects) = accounts::serve(
+                &storage,
+                route,
+                body,
+                RouteContext {
+                    app_id,
+                    now_ms: js_sys::Date::now() as u64,
+                    fresh_id: &mut uuid::Uuid::new_v4,
+                },
+            );
+            if effects.assignments_changed {
+                self.recheck_guests(&storage);
+            }
+            if let Some((principal, mark)) = effects.sessions_revoked {
+                for state in self.sockets.values_mut() {
+                    let ends = state.revocation.as_ref().is_some_and(|revocation| {
+                        revocation.principal == principal
+                            && accounts::session_revoked(Some(mark), revocation.authenticated_at_ms)
+                    });
+                    if ends {
+                        state.held.clear();
+                        state.held_bytes = 0;
+                        state.failed.get_or_insert_with(revoked);
+                    }
+                }
+            }
+            let (body, content_type) = match reply.body {
+                RouteBody::Empty => (String::new(), ""),
+                RouteBody::Json(body) => (body, "application/json"),
+                RouteBody::Text(body) => (body, "text/plain; charset=utf-8"),
+            };
+            HttpAnswer {
+                status: reply.status,
+                body,
+                content_type,
+            }
+        }
+
         fn catalogue_index(&self) -> Result<CatalogueIndex, String> {
             Ok(CatalogueIndex::from_rows(&self.catalogue_rows()?, None))
         }
 
-        /// Publish `request`, as native's `POST admin/bundles`: validate it
-        /// against the store's catalogue, open the core on its first schema
-        /// if none runs yet, and apply its rows and admissions in one
-        /// transaction. A bundle new to the store ends the sessions pinned
-        /// to others (they reconnect and pin again). The object serves one
-        /// request at a time, so the catalogue cannot move between
-        /// validating and applying.
-        fn deploy(&mut self, request: DeployRequest) -> Result<DeploymentResponse, DeployError> {
-            let index = self.catalogue_index().map_err(DeployError::internal)?;
+        /// Publish the deploy request in `body` (valid JSON, checked by the
+        /// caller), as native's `POST admin/bundles`: validate it against
+        /// the core's catalogue and apply its rows and admissions in one
+        /// transaction, refused if the catalogue moved since it was staged
+        /// (`apply_catalogue`). Without a core yet, the deployment is
+        /// probed on a scratch store first, so one the catalogue refuses
+        /// never opens the app's store on its schema, and the core is
+        /// opened on its first schema; it is then staged again on that
+        /// core's catalogue (which admitted the schema it opened on). A
+        /// bundle new to the store ends the sessions pinned to others.
+        fn deploy(&mut self, body: &[u8]) -> Result<DeploymentResponse, DeployError> {
+            let request =
+                || serde_json::from_slice::<DeployRequest>(body).map_err(DeployError::invalid);
             let now = js_sys::Date::now() as u64;
-            let deployment = deployment::prepare(&index, request, now)?;
-            if !deployment.staged.response.changed {
-                // Nothing to commit; the core's view of the catalogue may
-                // be behind the store's, as on native: reload it.
-                if let Some(core) = &mut self.core {
-                    core.reload_catalogue().map_err(DeployError::internal)?;
-                }
-                return Ok(deployment.staged.response);
-            }
-            let new_bundle = deployment.staged.new_bundle();
             if self.core.is_none() {
+                let index = self.catalogue_index().map_err(DeployError::internal)?;
+                let deployment = deployment::prepare(&index, request()?, now)?;
+                if !deployment.staged.response.changed {
+                    return Ok(deployment.staged.response);
+                }
                 let genesis = deployment.genesis()?;
-                // Apply on a scratch store first, as native does, so a
-                // deployment the catalogue refuses never opens the app's
-                // store on its schema.
                 let scratch = jazz::host::StoreFile::memory().map_err(DeployError::internal)?;
                 let mut probe = ServerCore::open(genesis.clone(), scratch, false, None)
                     .map_err(DeployError::internal)?;
-                let probed = probe
-                    .db()
-                    .catalogue()
-                    .map_err(DeployError::internal)
-                    .and_then(|rows| deployment.catalogue_change(&rows))
-                    .and_then(|change| {
-                        probe
-                            .apply_catalogue(change, None)
-                            .map_err(DeployError::from)
-                    });
+                let probed = apply(&mut probe, request()?, now, false).map(drop);
                 probe.close();
                 probed?;
                 let file = jazz::host::StoreFile::from_storage(durable_object_storage(
@@ -1901,11 +2181,30 @@ mod core_host {
                 );
             }
             let core = self.core.as_mut().expect("opened above");
-            let rows = core.db().catalogue().map_err(DeployError::internal)?;
-            let change = deployment.catalogue_change(&rows)?;
-            core.apply_catalogue(change, new_bundle)?;
-            Ok(deployment.staged.response)
+            apply(core, request()?, now, true)
         }
+    }
+
+    /// Stage `request` on `core`'s catalogue and apply it; with
+    /// `supersede`, a bundle new to the store ends the sessions pinned to
+    /// others. Nothing to commit reloads the core's catalogue, as native.
+    fn apply(
+        core: &mut ServerCore,
+        request: DeployRequest,
+        now: u64,
+        supersede: bool,
+    ) -> Result<DeploymentResponse, DeployError> {
+        let rows = core.db().catalogue().map_err(DeployError::internal)?;
+        let index = CatalogueIndex::from_rows(&rows, None);
+        let deployment = deployment::prepare(&index, request, now)?;
+        if !deployment.staged.response.changed {
+            core.reload_catalogue().map_err(DeployError::internal)?;
+            return Ok(deployment.staged.response);
+        }
+        let change = deployment.catalogue_change(&rows)?;
+        let new_bundle = deployment.staged.new_bundle().filter(|_| supersede);
+        core.apply_catalogue(deployment.staged.expected(), change, new_bundle)?;
+        Ok(deployment.staged.response)
     }
 
     /// What `output` answers.
