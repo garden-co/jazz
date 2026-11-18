@@ -10,7 +10,9 @@ Minimal Wrangler example that proves Jazz can boot inside Cloudflare Workers by 
 - The example uses the public `jazz-tools` package.
 - Each `/smoke` request owns a disposable device account and in-memory database, then closes its session. Requests never share a user context. This demonstrates runtime initialization, not durable storage or authentication.
 
-For an authenticated application, run Jazz in your Worker's backend with `createJazz` and read the request's user with `jazz.forReqUser(request)`. Use an appropriate durable account `store` when retaining device accounts. The smoke example supplies an ephemeral request-local store and sets `serverUrl: null`, so it performs no sync or registry request.
+The smoke example supplies an ephemeral request-local store and sets `serverUrl: null`, so it performs no sync or registry request.
+
+`createJazz` (`jazz-tools/backend`) does not run in a Worker: it loads Jazz's native Node addon (`jazz-napi`), which workerd cannot load. For an authenticated application, run your backend's `createJazz` on Node (your own server or Vercel); its data can live in a Cloudflare Durable Object with the `durableObjects()` store (see the Cloudflare Durable Objects deployment docs).
 
 ## Run locally
 
