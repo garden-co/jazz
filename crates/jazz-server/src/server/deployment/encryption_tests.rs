@@ -246,3 +246,66 @@ fn the_portable_deploy_refuses_system_tables_without_declarations() {
         refusal.body
     );
 }
+
+/// An encrypting app serves local-first accounts founded for its own app id
+/// only: the registry keeps no record of the founding namespace, so an
+/// account founded for another audience could not be told from the app's
+/// own. Before the app encrypts, any audience founds.
+///
+/// ```text
+/// found-local-first {audience: other} ──► plain app ✓
+/// deploy encrypted schema
+/// found-local-first {audience: other} ──► ✗
+/// found-local-first {}                ──► ✓   found-local-first {audience: app id} ──► ✓
+/// ```
+#[tokio::test]
+async fn an_encrypting_app_founds_local_first_accounts_for_its_own_audience_only() {
+    let router = router().await;
+    let found = |audience: Option<String>, subject: &str| {
+        let router = router.clone();
+        let mut body = json!({
+            "identity": {
+                "issuer": jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
+                "subject": subject,
+            },
+        });
+        if let Some(audience) = audience {
+            body["audience"] = audience.into();
+        }
+        async move {
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/apps/{}/admin/accounts/found-local-first",
+                            app_id()
+                        ))
+                        .header("X-Jazz-Admin-Secret", "test-admin")
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            response.status()
+        }
+    };
+    let subject = |n: u8| uuid::Uuid::from_bytes([n; 16]).to_string();
+    let other = Some("https://other.example/jazz".to_owned());
+    assert_eq!(found(other.clone(), &subject(1)).await, StatusCode::OK);
+
+    let (status, deployed) = publish(&router, encrypted_body()).await;
+    assert_eq!(status, StatusCode::OK, "{deployed}");
+    assert_eq!(
+        found(other, &subject(2)).await,
+        StatusCode::BAD_REQUEST,
+        "another audience"
+    );
+    assert_eq!(found(None, &subject(3)).await, StatusCode::OK);
+    assert_eq!(
+        found(Some(app_id().to_string()), &subject(4)).await,
+        StatusCode::OK,
+        "the app's own id as the audience"
+    );
+}

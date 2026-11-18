@@ -1621,6 +1621,11 @@ impl ServerRuntimeHandle {
         self.run(|owner| owner.reload_catalogue()).await
     }
 
+    /// Whether the app the runtime serves has Jazz's E2EE system tables.
+    pub async fn encrypts(&self) -> Result<bool, String> {
+        self.run(|owner| owner.encrypts()).await
+    }
+
     /// Whether the runtime has the account registry its checks read, which
     /// an app that encrypts columns needs.
     pub async fn has_account_registry(&self) -> Result<bool, String> {

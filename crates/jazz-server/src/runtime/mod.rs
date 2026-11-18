@@ -1086,14 +1086,7 @@ impl Owner {
         // through an external login would count as founded by the app, so
         // an encrypted app is not served without one.
         owner.registry_installed = installed;
-        if registry_required
-            && !installed
-            && owner
-                .db
-                .table_identity(jazz::tools::deployment::artifact::system_tables::MEMBERS)
-                .map_err(|error| format!("read the schema: {error}"))?
-                .is_some()
-        {
+        if registry_required && !installed && owner.encrypts()? {
             return Err(
                 "this app encrypts columns, which needs the account registry \
                  of an app's store: open the store for an app (`set_app`) with its \
@@ -1167,6 +1160,14 @@ impl Owner {
             #[cfg(all(test, feature = "native"))]
             fail_next_reload: false,
         })
+    }
+
+    /// Whether the app's schema has Jazz's E2EE system tables.
+    fn encrypts(&self) -> Result<bool, String> {
+        self.db
+            .table_identity(jazz::tools::deployment::artifact::system_tables::MEMBERS)
+            .map(|identity| identity.is_some())
+            .map_err(|error| format!("read the schema: {error}"))
     }
 
     fn reload_catalogue(&mut self) -> Result<(), String> {

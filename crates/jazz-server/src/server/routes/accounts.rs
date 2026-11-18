@@ -102,6 +102,30 @@ pub(super) async fn login_or_register_for_admin(
     Ok(response(request.identity, assignment))
 }
 
+/// The rule that an encrypting app serves only local-first accounts founded
+/// in its own namespace (E2EE protocol R5, R6): the registry keeps no record
+/// of which namespace founded an account, so an account founded for another
+/// audience could not be told from the app's own, and no account record is
+/// accepted for it. Founding one is refused at the first point the server
+/// sees it, here, and the registry view refuses its records
+/// (`founded_for_another_audience`) for any that exist already.
+async fn refuse_foreign_founding(state: &ServerState, app: uuid::Uuid) -> Result<(), &'static str> {
+    if app == *state.app_id.uuid() {
+        return Ok(());
+    }
+    let encrypts = match state.runtime() {
+        Some(runtime) => runtime.encrypts().await.unwrap_or(true),
+        None => false,
+    };
+    if encrypts {
+        Err(
+            "an app that encrypts columns serves local-first accounts founded for its own app id only",
+        )
+    } else {
+        Ok(())
+    }
+}
+
 /// The app's backend vouches for a local-first guest
 /// ([`FoundLocalFirstRequest`]).
 pub(super) async fn found_local_first_for_admin(
@@ -114,6 +138,14 @@ pub(super) async fn found_local_first_for_admin(
     let registry = owner(&state)?;
     let app =
         accounts::founding_app(request.audience.as_deref(), *state.app_id.uuid()).map_err(fail)?;
+    refuse_foreign_founding(&state, app)
+        .await
+        .map_err(|reason| {
+            fail(crate::portable::accounts::RouteFailure {
+                status: 400,
+                body: reason,
+            })
+        })?;
     let result = registry
         .execute(AccountCommand::FoundDeviceAccount {
             principal: request.identity.clone(),
@@ -308,6 +340,11 @@ pub(super) async fn admit_local_founder(
     let Some(command) = crate::portable::guest::founding_command(principal, &audience) else {
         return Ok(());
     };
+    refuse_foreign_founding(
+        state,
+        *crate::portable::accounts::local_first_founding_app(&audience).uuid(),
+    )
+    .await?;
     if let Some(registry) = &state.accounts {
         registry
             .execute(command)

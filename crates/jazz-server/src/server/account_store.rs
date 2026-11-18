@@ -152,6 +152,39 @@ impl jazz::db::AccountRegistryView for RegistryFounders {
                 && jazz::account_registry::device_account_id(self.app, subject) == account
         })))
     }
+
+    /// An account whose identities are all local-first and none of which
+    /// derives its id in this app's namespace was founded for another
+    /// audience (`found-local-first` and a guest's first admission may name
+    /// one). An encrypting app does not serve such accounts: this rule is
+    /// the documented one (E2EE protocol R5, R6), and the founding routes
+    /// refuse to create them. An account with an external identity is not
+    /// told apart from one the app founded, so it reads as the app's.
+    fn founded_for_another_audience(&self, account: AccountId) -> Result<bool, String> {
+        let Some(founded) = self.founded_local_first(account)? else {
+            return Ok(false);
+        };
+        if founded {
+            return Ok(false);
+        }
+        let identities = self.reader.sql(|conn| {
+            let mut statement = conn
+                .prepare_cached(
+                    "SELECT COUNT(*) FROM _jazz_host_account_identities \
+                     WHERE account = ?1 AND issuer <> ?2",
+                )
+                .map_err(registry::storage_error)?;
+            statement
+                .query_row(
+                    rusqlite::params![account.0.as_bytes(), jazz::identity::DEVICE_ACCOUNT_ISSUER],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(registry::storage_error)
+        });
+        identities
+            .map(|external| external == 0)
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -261,6 +294,63 @@ mod tests {
         assert_eq!(
             view.founded_local_first(AccountId(Uuid::from_bytes([3; 16]))),
             Ok(None)
+        );
+    }
+
+    /// An account whose identities are all local-first and none of which
+    /// derives its id in the app's namespace was founded for another
+    /// audience; the app's own founders, external accounts and unknown
+    /// accounts are not.
+    #[test]
+    fn an_account_founded_for_another_audience_is_told_apart() {
+        use jazz::db::AccountRegistryView;
+        let dir = tempfile::tempdir().unwrap();
+        let app = Uuid::from_bytes([7; 16]);
+        let store =
+            crate::runtime::AppStore::open(&crate::runtime::StorageConfig::data_dir(dir.path()))
+                .unwrap();
+        let mut registry = StoredAccountRegistry::open(store.sql().unwrap()).unwrap();
+        let device = |subject: &str| Principal {
+            issuer: jazz::identity::DEVICE_ACCOUNT_ISSUER.into(),
+            subject: subject.into(),
+        };
+        let found = |registry: &mut StoredAccountRegistry, subject: &str, app: Uuid| {
+            let AccountCommandResult::Assignment(assignment) = registry
+                .execute(&AccountCommand::FoundDeviceAccount {
+                    principal: device(subject),
+                    app,
+                })
+                .unwrap()
+            else {
+                panic!("an assignment");
+            };
+            assignment.account
+        };
+        let own = found(&mut registry, &Uuid::from_bytes([1; 16]).to_string(), app);
+        let other = found(
+            &mut registry,
+            &Uuid::from_bytes([2; 16]).to_string(),
+            Uuid::from_bytes([8; 16]),
+        );
+        let external = registry
+            .login_or_register(&principal("alice"))
+            .unwrap()
+            .assignment
+            .account;
+        let view = RegistryFounders::new(
+            jazz::host::HostReader::open(
+                &dir.path().join(crate::server::identity::STORE_FILE),
+                None,
+            )
+            .unwrap(),
+            app,
+        );
+        assert_eq!(view.founded_for_another_audience(own), Ok(false));
+        assert_eq!(view.founded_for_another_audience(other), Ok(true));
+        assert_eq!(view.founded_for_another_audience(external), Ok(false));
+        assert_eq!(
+            view.founded_for_another_audience(AccountId(Uuid::from_bytes([3; 16]))),
+            Ok(false)
         );
     }
 
