@@ -34,6 +34,8 @@ use wasm_bindgen_futures::future_to_promise;
 mod browser;
 #[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
 pub mod browser_bench;
+#[cfg(all(target_arch = "wasm32", feature = "durable-object"))]
+mod durable_object;
 #[cfg(target_arch = "wasm32")]
 mod idb_vfs;
 mod identity;
@@ -288,7 +290,7 @@ fn decode_seed(seed_b64: &str) -> Result<[u8; 32], JsValue> {
         .map_err(|_| JsValue::from_str("seed must be exactly 32 bytes"))
 }
 
-/// Mint a local-first identity JWT from a base64url-encoded 32-byte seed.
+/// Mint a device-account identity JWT from a base64url-encoded 32-byte seed.
 #[wasm_bindgen(js_name = mintLocalFirstToken)]
 pub fn mint_local_first_token(
     seed_b64: String,
@@ -299,7 +301,7 @@ pub fn mint_local_first_token(
     let seed = decode_seed(&seed_b64)?;
     identity::mint_jazz_self_signed_token_at(
         &seed,
-        identity::LOCAL_FIRST_ISSUER,
+        identity::DEVICE_ACCOUNT_ISSUER,
         &audience,
         ttl_seconds as u64,
         now_seconds,
@@ -307,7 +309,7 @@ pub fn mint_local_first_token(
     .map_err(|e| JsValue::from_str(&e))
 }
 
-/// Derive a stable local-first user id from a base64url-encoded 32-byte seed.
+/// Derive a stable device-account user id from a base64url-encoded 32-byte seed.
 #[wasm_bindgen(js_name = deriveUserId)]
 pub fn derive_user_id(seed_b64: String) -> Result<String, JsValue> {
     let seed = decode_seed(&seed_b64)?;
@@ -1254,6 +1256,35 @@ impl WasmDb {
         }
     }
 
+    /// Open the backend store a Durable Object owns, on its SQL
+    /// (`ctx.storage`): chunks and host tables live in that store, so it
+    /// survives the object's restarts. A core there accepts finished
+    /// transactions only (see `jazz::storage`).
+    #[cfg(all(target_arch = "wasm32", feature = "durable-object"))]
+    #[wasm_bindgen(js_name = openDurableObject)]
+    pub fn open_durable_object(
+        storage: durable_object::ObjectStorage,
+        schema: Vec<u8>,
+        config: Vec<u8>,
+    ) -> Result<WasmDb, JsValue> {
+        initialize_wasm_tracing();
+        let (schema, mut config) =
+            binding_host::decode_open(&schema, &config).map_err(host_error)?;
+        let (identity, trusted) =
+            binding_host::open_identity(&mut config, OpenAs::Backend).map_err(host_error)?;
+        let db_config = jazz::tools::deployment::published::with_client_migrations(
+            binding_host::db_config(schema, &config, identity),
+            config.migrations.as_deref(),
+        )
+        .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
+        let db = block_on(jazz::db::Db::open_storage(
+            db_config,
+            durable_object::durable_object_storage(storage),
+        ))
+        .map_err(to_js_error)?;
+        Ok(Self::runtime_owner(Binding::new(db, identity, trusted)))
+    }
+
     fn open_memory_as(schema: &[u8], config: &[u8], how: OpenAs<'_>) -> Result<WasmDb, JsValue> {
         initialize_wasm_tracing();
         let (schema, mut config) = binding_host::decode_open(schema, config).map_err(host_error)?;
@@ -1823,6 +1854,16 @@ impl WasmDb {
             .map_err(host_error)
     }
 
+    /// Coalesce a subscription's undelivered deltas past `rows` changed
+    /// rows (default 10000, at least 1) into one reset of its current
+    /// result.
+    #[wasm_bindgen(js_name = setSubscriptionBacklogRows)]
+    pub fn set_subscription_backlog_rows(&self, rows: f64) -> Result<(), JsValue> {
+        self.binding()?
+            .set_subscription_backlog_rows(rows)
+            .map_err(host_error)
+    }
+
     /// The newest transaction time this database handed out under its
     /// node (a `TxTime` is the commit seq). A leased node's next holder
     /// seeds it through `seedForegroundTxTimeHighWater`.
@@ -2137,6 +2178,7 @@ fn event_chunk_to_js(chunk: EventChunk) -> Result<JsValue, JsValue> {
         EventChunk::Delta {
             delta,
             reset,
+            coalesced,
             settled,
             tier,
         } => {
@@ -2148,6 +2190,7 @@ fn event_chunk_to_js(chunk: EventChunk) -> Result<JsValue, JsValue> {
             )?;
             set_prop(&object, "terminalOperations", js_sys::Array::new().into())?;
             set_prop(&object, "reset", JsValue::from_bool(reset))?;
+            set_prop(&object, "coalesced", JsValue::from_bool(coalesced))?;
             set_prop(&object, "settled", JsValue::from_bool(settled))?;
             set_prop(&object, "tier", JsValue::from_str(&tier))?;
         }

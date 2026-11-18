@@ -207,7 +207,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     const proof = verifiedLocalFirstRequestProof(session);
     if (!proof) return;
     if (proof.appId !== this.config.appId || !(this.runtime instanceof NativeRuntimeAdapter)) {
-      throw new Error("Local-first request proof does not match the backend runtime");
+      throw new Error("Device account request proof does not match the backend runtime");
     }
     this.runtime.admitLocalFirstSession(session, proof.token, proof.audience ?? this.config.appId);
   }
@@ -263,6 +263,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
           appId: this.config.appId,
           thresholdMs: this.config.slowQueryThresholdMs,
         },
+        subscriptionBacklogRows: this.config.subscriptionBacklogRows,
         migrations,
       },
     );
