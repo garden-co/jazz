@@ -67,6 +67,7 @@ impl AppFiles {
         match &self.permissions {
             Some(permissions) => {
                 let loaded = artifact::load(&self.app, permissions).map_err(refused)?;
+                refuse_encrypted(!loaded.encryption().is_empty())?;
                 Ok(LoadedFiles {
                     schema: loaded.current_schema().clone(),
                     migrations: loaded.client_migrations(),
@@ -84,6 +85,17 @@ impl AppFiles {
             }
         }
     }
+}
+
+/// A client has no encryption hooks yet, so it refuses an app whose files
+/// declare encryption (`declared`).
+fn refuse_encrypted(declared: bool) -> Result<()> {
+    if declared {
+        return Err(Error::App(
+            jazz::binding_host::ENCRYPTED_APP_REFUSAL.to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) struct LoadedFiles {

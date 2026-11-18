@@ -808,3 +808,33 @@ fn equality_and_stored_defaults_follow_their_formats() {
     let error = refusal(load_app(stored_default("c2VjcmV0").as_bytes()));
     assert!(error.contains("stored default"), "{error}");
 }
+
+/// A client has no encryption hooks yet, so none of the ways a client
+/// opens an app lets an encrypted one in: the files' client loader and the
+/// bindings' database open both refuse it, while a backend can still read
+/// the files to deploy them.
+#[test]
+fn a_client_refuses_an_encrypted_app_until_it_has_hooks() {
+    use jazz::db::{DbConfig, DbIdentity, block_on};
+    use jazz::ids::{AuthorSubject, NodeUuid};
+    let app = app(tasks_entry());
+    let error = refusal(load_client_current(app.as_bytes()));
+    assert!(error.contains("declares end-to-end encryption"), "{error}");
+
+    let loaded = load(app.as_bytes(), permissions(MEMBERS_RULE).as_bytes())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let schema = jazz::schema::JazzSchema::new(loaded.current_schema()).unwrap();
+    let config = DbConfig::new(
+        schema,
+        DbIdentity {
+            node: NodeUuid::from_bytes([1; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    );
+    let opened = block_on(jazz::binding_host::open_memory(config));
+    let error = opened.err().expect("refused");
+    assert!(
+        error.to_string().contains("declares end-to-end encryption"),
+        "{error}"
+    );
+}

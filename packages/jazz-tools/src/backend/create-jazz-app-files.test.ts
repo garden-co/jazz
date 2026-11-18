@@ -152,8 +152,12 @@ describe("createJazz confirms the decrypt conversions its app declares", () => {
     return jazz.ready();
   }
 
-  it("starts when confirmDecrypt names the decrypted column", async () => {
-    await expect(startConfirming(["tasks.notes"])).resolves.toBeTruthy();
+  it("publishes when confirmDecrypt names the decrypted column, which no client can open yet", async () => {
+    // The deploy passes its confirmation; the backend's own client has no
+    // encryption hooks yet, so it refuses to open the encrypted app.
+    await expect(startConfirming(["tasks.notes"])).rejects.toThrow(
+      /declares end-to-end encryption/,
+    );
   });
 
   it("refuses, naming the column, without confirmDecrypt", async () => {

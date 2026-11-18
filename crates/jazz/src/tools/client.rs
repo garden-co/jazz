@@ -926,6 +926,8 @@ impl JazzClient {
         let default_session = default_session_from_context(&context);
         let core_schema = crate::schema::JazzSchema::new(&context.schema)
             .map_err(|error| JazzError::Schema(error.to_string()))?;
+        crate::binding_host::refuse_encrypted_app(&core_schema)
+            .map_err(|error| JazzError::Schema(error.to_string()))?;
         let identity = core_identity(&context, client_id(&context)?, default_session.as_ref())?;
         let mut config = DbConfig::new(core_schema, identity);
         config.migrations = context.migrations.clone();
