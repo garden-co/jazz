@@ -603,6 +603,99 @@ async fn a_policy_may_read_a_column_that_the_target_keeps_in_plaintext() {
     assert_eq!(status, StatusCode::OK, "{deployed}");
 }
 
+/// On a memory store, a second connection to the shared in-memory database
+/// is locked out while the store's connection holds a write, so the
+/// deployment reads the kept declarations on the store's own thread. A
+/// deploy that arrives while the store is inside a write waits for it and
+/// succeeds, instead of failing with a locked database.
+///
+/// ```text
+/// store thread: write in progress ─────────────┐
+/// deploy v2: reads kept declarations ─ waits ──┴─► ✓ deployed
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_memory_store_deploy_reads_kept_declarations_while_a_write_is_open() {
+    use jazz::host::HostTables;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let server = ServerBuilder::new(app_id())
+        .with_auth_config(AuthConfig {
+            admin_secret: Some("test-admin".into()),
+            ..Default::default()
+        })
+        .with_storage(StorageBackend::InMemory)
+        .build()
+        .await
+        .unwrap();
+    let state = server.state.clone();
+    let router = create_router(state.clone());
+    // An encrypted app deploys to a fresh memory store.
+    let v1 = loaded("ownerId = session.user");
+    let (status, body) = publish(&router, v1.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v2 = artifact::load(
+        APP_V2.as_bytes(),
+        permissions(MEMBERS_RULE, "ownerId = session.user").as_bytes(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let runtime = state.runtime().expect("a runtime after the first deploy");
+    let v2_hash = v2.current_hash();
+
+    // The store's connection is inside a write (a host write's savepoint).
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let held = {
+        let runtime = runtime.clone();
+        tokio::spawn(async move {
+            runtime
+                .with_db_for_test(move |db| {
+                    db.host_sql(&mut |conn| {
+                        conn.execute_batch(
+                            "CREATE TABLE IF NOT EXISTS _jazz_host_e2ee_declarations \
+                             (k BLOB PRIMARY KEY, v BLOB NOT NULL) WITHOUT ROWID; \
+                             INSERT OR REPLACE INTO _jazz_host_e2ee_declarations \
+                             VALUES (x'01', x'02')",
+                        )
+                        .map_err(|error| {
+                            jazz::db::Error::new(jazz::db::ErrorCode::Storage, error.to_string())
+                        })?;
+                        entered_tx.send(()).unwrap();
+                        let _ = release_rx.recv();
+                        Ok(())
+                    })
+                    .map_err(|error| error.to_string())
+                })
+                .await
+        })
+    };
+    tokio::task::spawn_blocking(move || entered_rx.recv().unwrap())
+        .await
+        .unwrap();
+    let deploying = {
+        let router = router.clone();
+        let body = v2.deployment_body(false);
+        tokio::spawn(async move { publish(&router, body).await })
+    };
+    // The write stays open longer than a second connection would wait for it
+    // (SQLite's busy timeout is 10 seconds): the deploy's read of the kept
+    // declarations, made on the store's own thread, waits for it and
+    // succeeds, where one made on another connection fails as locked.
+    let kept = state
+        .store
+        .as_ref()
+        .unwrap()
+        .kv(super::DECLARATIONS)
+        .unwrap();
+    let reading = tokio::task::spawn_blocking(move || kept.get(&v2_hash.0));
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    release_tx.send(()).unwrap();
+    held.await.unwrap().unwrap();
+    let during = reading.await.unwrap();
+    assert!(during.is_ok(), "{during:?}");
+    let (status, deployed) = deploying.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{deployed}");
+}
+
 /// Decrypting a column puts its plaintext on the server, so the deploy
 /// asks for an explicit confirmation naming it (migrations §4.2).
 #[tokio::test]

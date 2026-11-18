@@ -22,7 +22,9 @@ pub(crate) type KvResult<T> = Result<T, String>;
 
 pub(crate) struct HostKv {
     table: HostTable,
-    /// Reads go here, seeing what the store committed.
+    /// Test reads go here, on a connection of its own; a read the server
+    /// makes goes through the store's thread (see [`HostKv::get`]).
+    #[cfg_attr(not(test), allow(dead_code))]
     reader: Arc<HostReader>,
     store: crate::runtime::HostSender,
 }
@@ -55,10 +57,14 @@ impl HostKv {
             .map_err(|_| "server store closed before answering".to_owned())?
     }
 
+    /// The value at `key`, read on the store's own thread and connection. A
+    /// second connection to a shared in-memory database is locked out
+    /// while the store's connection holds a write, so a read from one can
+    /// fail while the store is busy writing (and waits out its busy timeout
+    /// before it does).
     pub(crate) fn get(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
-        self.reader
-            .get(self.table, key)
-            .map_err(|error| error.to_string())
+        let key = key.to_vec();
+        self.call(move |tables, table| tables.host_get(table, &key))
     }
 
     /// Write `value` at `key` unless a value is there already: the value
