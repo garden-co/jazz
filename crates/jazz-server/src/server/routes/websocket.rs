@@ -637,9 +637,16 @@ async fn ws_admission(
                 "Invalid backend secret",
                 WireErrorReason::Invalid,
             ),
+            // A credential the client sent (a token, a stated session) that
+            // this core does not take is `invalid`, as createJazz reports it;
+            // only a client that sent none is `missing`.
             None => super::accounts::AdmissionError::refused(
                 "this core admits only its app's backend: connect through the app's createJazz handler",
-                WireErrorReason::Missing,
+                if has_jwt || has_session_header {
+                    WireErrorReason::Invalid
+                } else {
+                    WireErrorReason::Missing
+                },
             ),
         });
     }
@@ -4278,8 +4285,9 @@ mod tests {
             panic!("an error frame")
         };
         assert_eq!(error.code, WireErrorCode::AuthFailed);
-        // No backend credential: `missing`.
-        assert_eq!(error.reason, Some(WireErrorReason::Missing), "{error:?}");
+        // A token this core does not take (it admits only its backend):
+        // `invalid`, as the message-read classification has always said.
+        assert_eq!(error.reason, Some(WireErrorReason::Invalid), "{error:?}");
 
         let plain = refusal(current_wire_features()).await;
         let WireFrame::Error(error) = decode_frame(&plain).expect("plain error frame") else {
