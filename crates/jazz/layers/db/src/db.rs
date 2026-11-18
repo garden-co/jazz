@@ -56,6 +56,9 @@ pub use sync::{
 };
 pub use sync::{ORIGIN_ENTRY_RETENTION_MS, origin_node};
 #[cfg(feature = "e2ee-client")]
+#[path = "e2ee_ledger.rs"]
+pub(crate) mod e2ee_ledger;
+#[cfg(feature = "e2ee-client")]
 #[path = "e2ee_query.rs"]
 mod e2ee_query;
 #[cfg(feature = "e2ee-client")]

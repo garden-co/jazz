@@ -37,6 +37,7 @@ use crate::query::Query;
 use crate::records::{Value, ValueType};
 use crate::values::CurrentRow;
 
+pub use crate::db::e2ee_ledger::{LedgerRead, Provisional, ProvisionalRead, TransactionFate};
 pub use jazz_model::model::public_api::types::{
     E2eeDeclarations, EncryptedColumn, EncryptionEntry, EncryptionSettings, PlainType, Rehome,
     SweepBy,
