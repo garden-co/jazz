@@ -253,6 +253,48 @@ fn check_system_table_lenses(migrations: &[Lens]) -> Result<(), DeploymentError>
     Ok(())
 }
 
+/// Once any version of an app carries Jazz's system tables, every later
+/// version carries them too: a version without them that follows one with
+/// them would strand the system rows written under the earlier version (a
+/// version that brings them back stores them as new tables), so a migration
+/// from a version that has them to one that lacks them is refused. Returns
+/// the versions that follow one with them, which keep them even when they
+/// declare no encryption, each with the versions it follows directly.
+fn check_system_tables_carried<'a>(
+    schemas: &BTreeMap<Hash, Schema>,
+    migrations: impl Iterator<Item = &'a Lens>,
+) -> Result<BTreeMap<Hash, Vec<Hash>>, DeploymentError> {
+    let has = |hash: &SchemaHash| {
+        schemas.get(&hash.0).map(|schema| {
+            schema
+                .keys()
+                .any(|name| artifact::system_tables::is_system_table(name.as_str()))
+        })
+    };
+    let mut follows: BTreeMap<Hash, Vec<Hash>> = BTreeMap::new();
+    for lens in migrations {
+        if has(&lens.source_hash) != Some(true) {
+            continue;
+        }
+        if has(&lens.target_hash) == Some(false) {
+            return Err(DeploymentError::InvalidMigration {
+                from: lens.source_hash,
+                to: lens.target_hash,
+                reason:
+                    "the source version has Jazz's system tables and the target lacks them: once a \
+                         version carries them, every later version does, so that the system rows \
+                         written under earlier versions stay readable"
+                        .to_owned(),
+            });
+        }
+        follows
+            .entry(lens.target_hash.0)
+            .or_default()
+            .push(lens.source_hash.0);
+    }
+    Ok(follows)
+}
+
 /// The deploy's rules for Jazz's system tables, which a server checks
 /// before [`prepare_deployment`]: each submitted schema has all of them,
 /// exactly as Jazz defines them, or none, and no app table references
@@ -332,8 +374,14 @@ fn prepare(
             schema: request.target_schema_hash,
         });
     }
+    let follows = check_system_tables_carried(
+        &schemas,
+        stored.migrations.iter().chain(&request.migrations),
+    )?;
     let warnings = match encryption {
-        Some(encryption) => check_encryption(&schemas, &submitted, &mut request, encryption)?,
+        Some(encryption) => {
+            check_encryption(&schemas, &submitted, &mut request, encryption, &follows)?
+        }
         None => Vec::new(),
     };
     if !request.allow_dropping_history {
@@ -454,6 +502,7 @@ fn check_encryption(
     submitted: &[SchemaHash],
     request: &mut DeploymentRequest,
     encryption: &artifact::DeclaredEncryption,
+    follows: &BTreeMap<Hash, Vec<Hash>>,
 ) -> Result<Vec<String>, DeploymentError> {
     use artifact::{encryption as declared, system_tables};
     let target = request.target_schema_hash;
@@ -493,7 +542,11 @@ fn check_encryption(
         let entries = encryption.entries(&hash.to_string());
         let fragment =
             system_tables::check_e2ee_fragment(schema).map_err(|reason| invalid(*hash, reason))?;
-        if fragment != entries.is_some() {
+        // A version that follows one with the system tables keeps them
+        // whether or not it declares encryption (an app that stops
+        // encrypting keeps them, harmlessly).
+        let required = entries.is_some() || follows.contains_key(&hash.0);
+        if fragment != required {
             return Err(invalid(
                 *hash,
                 if fragment {
@@ -532,7 +585,29 @@ fn check_encryption(
             }
         }
     }
-    let Some(entries) = encryption.entries(&target.to_string()) else {
+    // A target that keeps the system tables without declaring encryption
+    // still gets their derived policies, from the declarations of the
+    // nearest version before it that has them: its spaces are still there.
+    let entries = match encryption.entries(&target.to_string()) {
+        Some(entries) => Some(entries),
+        None => {
+            let mut queue = vec![target.0];
+            let mut seen = BTreeSet::new();
+            let mut found = None;
+            while let Some(hash) = queue.pop() {
+                if !seen.insert(hash) {
+                    continue;
+                }
+                if let Some(entries) = encryption.entries(&SchemaHash(hash).to_string()) {
+                    found = Some(entries);
+                    break;
+                }
+                queue.extend(follows.get(&hash).into_iter().flatten().copied());
+            }
+            found
+        }
+    };
+    let Some(entries) = entries else {
         return Ok(Vec::new());
     };
     let derived =

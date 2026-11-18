@@ -2474,3 +2474,189 @@ fn core_admits_no_lens_that_renames_a_system_table() {
         }
     }
 }
+
+/// A version history as a deployment: `versions` oldest first, each with
+/// whether it declares encryption, and the operations of the lens from each
+/// version to the next. The last version is the target.
+fn deploy_history(
+    versions: Vec<(Schema, bool)>,
+    ops: Vec<Vec<jazz::tools::LensOp>>,
+) -> Result<jazz::tools::deployment::PreparedDeployment, DeploymentError> {
+    use jazz::tools::{Lens, LensTransform};
+    let hashes: Vec<SchemaHash> = versions
+        .iter()
+        .map(|(schema, _)| SchemaHash::compute(schema))
+        .collect();
+    let declared = DeclaredEncryption {
+        versions: versions
+            .iter()
+            .zip(&hashes)
+            .filter(|((_, declares), _)| *declares)
+            .map(|(_, hash)| (hash.to_string(), entries()))
+            .collect(),
+        ..Default::default()
+    };
+    let migrations = ops
+        .into_iter()
+        .enumerate()
+        .map(|(n, ops)| {
+            Lens::new(
+                hashes[n],
+                hashes[n + 1],
+                LensTransform {
+                    ops,
+                    draft_ops: Vec::new(),
+                },
+            )
+        })
+        .collect();
+    prepare_encrypted_deployment(
+        &DeploymentCatalogue::default(),
+        DeploymentRequest {
+            target_schema_hash: *hashes.last().unwrap(),
+            schemas: hashes
+                .iter()
+                .copied()
+                .zip(versions.into_iter().map(|(schema, _)| schema))
+                .collect(),
+            migrations,
+            permissions: app_permissions(),
+            allow_dropping_history: false,
+        },
+        &declared,
+    )
+    .map(|(prepared, _)| prepared)
+}
+
+/// The structural form of a schema, as a deployment carries it.
+fn structural_of(mut schema: Schema) -> Schema {
+    for table in schema.values_mut() {
+        table.policies = TablePolicies::default();
+    }
+    schema
+}
+
+/// The lens operations that add, or remove, every system table of `schema`.
+fn fragment_ops(schema: &Schema, add: bool) -> Vec<jazz::tools::LensOp> {
+    schema
+        .iter()
+        .filter(|(name, _)| system_tables::is_system_table(name.as_str()))
+        .map(|(name, table)| {
+            if add {
+                jazz::tools::LensOp::AddTable {
+                    table: name.to_string(),
+                    schema: table.clone(),
+                }
+            } else {
+                jazz::tools::LensOp::RemoveTable {
+                    table: name.to_string(),
+                    schema: table.clone(),
+                }
+            }
+        })
+        .collect()
+}
+
+/// Once any version of an app carries the system tables, every later version
+/// does: a history in which a version without them follows one with them is
+/// refused (bringing them back would store them as new tables and strand the
+/// system rows of the first), while a later version that keeps them and
+/// declares no encryption, as an app that stops encrypting does, is accepted.
+///
+/// ```text
+/// v1 fragment ─► v2 no fragment ─► v3 fragment    ✗ (v2 drops them)
+/// v1 fragment ─► v2 fragment, declares nothing    ✓
+/// ```
+#[test]
+fn a_later_version_carries_the_system_tables_its_predecessor_has() {
+    let fragment = structural_of(with_e2ee_fragment(&app()));
+    let mut with_notes = fragment.clone();
+    with_notes.insert(
+        TableName::from("notes"),
+        TableSchemaBuilder::new("notes")
+            .column("body", ColumnType::Text)
+            .build(),
+    );
+    let without = structural_of(app());
+    let add_notes = vec![jazz::tools::LensOp::AddTable {
+        table: "notes".to_owned(),
+        schema: with_notes[&TableName::from("notes")].clone(),
+    }];
+
+    let error = deploy_history(
+        vec![
+            (fragment.clone(), true),
+            (without.clone(), false),
+            (fragment.clone(), true),
+        ],
+        vec![
+            fragment_ops(&fragment, false),
+            fragment_ops(&fragment, true),
+        ],
+    )
+    .expect_err("the system tables dropped, then brought back");
+    assert!(
+        matches!(error, DeploymentError::InvalidMigration { .. })
+            && error.to_string().contains("every later version does"),
+        "{error}"
+    );
+    deploy_history(
+        vec![(fragment.clone(), true), (without, false)],
+        vec![fragment_ops(&fragment, false)],
+    )
+    .expect_err("a later version without them");
+
+    let prepared = deploy_history(
+        vec![(fragment.clone(), true), (with_notes, false)],
+        vec![add_notes],
+    )
+    .expect("a later version that keeps them and declares no encryption");
+    // Its system tables get their derived policies, from the declarations
+    // of the version it follows: its spaces are still there.
+    let members = &prepared.active_schema().public_schema()[&TableName::from(MEMBERS)];
+    assert!(
+        members.policies.select.using.is_some(),
+        "{:?}",
+        members.policies
+    );
+}
+
+/// An app whose later version declares no encryption keeps the system tables
+/// under their own stored names, so the system rows written under the first
+/// version stay readable.
+#[test]
+fn a_later_version_without_declarations_keeps_the_system_rows() {
+    use jazz::protocol::MigrationLens;
+    let world = World::new();
+    let p = new_row();
+    let member = new_row();
+    world
+        .commit(
+            alice(),
+            &[
+                ("projects", p, project(alice())),
+                (MEMBERS, member, world.member(p, alice())),
+            ],
+        )
+        .unwrap();
+    let before = world.server.stored_column_for_test(MEMBERS, "scopeId");
+    let first = schema();
+    let mut next = public_schema_with(&Default::default());
+    next.insert(
+        TableName::from("notes"),
+        TableSchemaBuilder::new("notes")
+            .column("body", ColumnType::Text)
+            .policies(common::allow_all_policies())
+            .build(),
+    );
+    let second = common::compile_schema(&next);
+    let lens = MigrationLens::new(first.version_id(), second.version_id(), vec![]).unwrap();
+    block_on(world.server.admit_schema_with_lenses(second, &[lens])).unwrap();
+    assert_eq!(
+        world.server.stored_column_for_test(MEMBERS, "scopeId"),
+        before,
+        "the system table keeps its stored name"
+    );
+    assert!(world.server.holds_row_for_test(MEMBERS, member));
+    assert_eq!(world.reads(alice(), MEMBERS), vec![member]);
+}
