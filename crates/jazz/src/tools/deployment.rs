@@ -258,11 +258,13 @@ pub fn prepare_deployment(
 
 /// [`prepare_deployment`] of an app with encryption declarations (every
 /// schema version's entries and the settings, E2EE protocol §1.5): each
-/// version that declares encryption has exactly Jazz's system tables, and
-/// each version that has them declares encryption. No app policy reaches a
-/// system table but by testing the members table. The target's
-/// permissions gain the policies Jazz derives for its system tables, and
-/// the deploy's warnings come back beside the prepared deployment.
+/// version that declares encryption has exactly Jazz's system tables and
+/// entries that fit it, and the target's space tables take their read
+/// rule from the members table. The target's permissions gain the
+/// policies Jazz derives for its system tables. Also gives the deploy's
+/// warnings about what it can see. The server deploys through it, with
+/// [`check_system_tables`] first, whether or not the app declares
+/// encryption.
 pub fn prepare_encrypted_deployment(
     stored: &DeploymentCatalogue,
     request: DeploymentRequest,
@@ -467,6 +469,11 @@ fn check_encryption(
                 },
             ));
         }
+        for (table, entry) in entries.into_iter().flatten() {
+            declared::check_entry(table, entry, schema).map_err(|(at, message)| {
+                invalid(*hash, format!("tables.{table}.encryption{at}: {message}"))
+            })?;
+        }
     }
     let permissions: crate::catalogue::Permissions = request
         .permissions
@@ -499,11 +506,13 @@ fn check_encryption(
     let Some(entries) = encryption.entries(&target.to_string()) else {
         return Ok(Vec::new());
     };
+    declared::check_space_read_rules(&permissions, entries).map_err(refused)?;
+    declared::check_encrypted_reads(&permissions, entries).map_err(refused)?;
     let derived =
         system_tables::derive_e2ee_policies(&schemas[&target.0], entries, &encryption.settings)
             .map_err(|reason| invalid(target, reason))?;
     request.permissions.extend(derived);
-    Ok(Vec::new())
+    Ok(declared::warnings(&permissions, entries))
 }
 
 /// Each migration's own checks, apart from where it sits in the history:
