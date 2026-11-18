@@ -3222,6 +3222,25 @@ impl Db {
         (table.stored.clone(), table.stored_name(column).to_owned())
     }
 
+    /// Whether any admitted version has a table named `logical`: the
+    /// admitted versions, not the owner's schema, which a running server
+    /// keeps at its first while deployments admit later versions.
+    pub fn admits_table(&self, logical: &str) -> bool {
+        self.inner().names.stored_table_of(logical).is_some()
+    }
+
+    /// Whether the store holds a live row `row` of the table the admitted
+    /// versions name `logical`, wherever the owner's schema stands.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn holds_row_for_test(&self, logical: &str, row: RowUuid) -> bool {
+        let inner = self.inner();
+        let Some(stored) = inner.names.stored_table_of(logical) else {
+            return false;
+        };
+        matches!(inner.existing(stored, row, &[]), Ok(Some((_, false))))
+    }
+
     /// Diagnostics: stored large-value nodes, and roots referenced by cells.
     #[doc(hidden)]
     pub fn large_value_nodes_for_test(&self) -> Result<(u64, u64), Error> {
@@ -7447,14 +7466,17 @@ impl Inner {
         })
     }
 
-    /// The name the owner's schema gives `table`. A write uploaded from a
+    /// The name the admitted versions give `table`. A write uploaded from a
     /// client is staged under the stored view, whose tables are named by
     /// their stored names: a table a later migration introduced is
-    /// `name~hash`, which Jazz's fixed names do not match.
+    /// `name~hash`, which Jazz's fixed names do not match. The owner's
+    /// schema is not the source: a running server keeps its first schema
+    /// as owner while deployments admit later versions, so the admitted
+    /// versions' stored-name map is read.
     fn logical_table_name<'a>(&'a self, table: &'a Table) -> &'a str {
-        self.owner
-            .by_stored(&table.stored)
-            .map_or(table.name.as_str(), |owned| owned.name.as_str())
+        self.names
+            .logical_table(&table.stored)
+            .unwrap_or(table.name.as_str())
     }
 
     /// Cell `column` of the account table row that `check` writes. A write
@@ -7476,10 +7498,16 @@ impl Inner {
         else {
             return Ok(None);
         };
-        match self.stored_cell(table, check.row, &check.key, column)? {
-            Some(cell) => column_from_sql(column, cell.as_ref(), &self.chunks),
-            None => Ok(None),
-        }
+        let value = match self.stored_cell(table, check.row, &check.key, column)? {
+            Some(cell) => column_from_sql(column, cell.as_ref(), &self.chunks)?,
+            None => None,
+        };
+        // A column a later version introduced is stored nullable (older
+        // rows lack it): the cell of a row that has it is its value.
+        Ok(match value {
+            Some(Value::Nullable(Some(inner))) => Some(*inner),
+            other => other,
+        })
     }
 
     /// The unit is accepted only if every write's policy also holds on the

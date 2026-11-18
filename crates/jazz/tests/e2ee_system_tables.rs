@@ -169,8 +169,12 @@ fn entries() -> BTreeMap<String, EncryptionEntry> {
 /// The app's first version, before it turned encryption on: the same
 /// tables without the system tables, and policies that need none.
 fn first_version() -> JazzSchema {
-    common::compile_schema(
-        &SchemaBuilder::new()
+    common::compile_schema(&first_version_public())
+}
+
+fn first_version_public() -> Schema {
+    {
+        SchemaBuilder::new()
             .table(
                 TableSchemaBuilder::new("boards")
                     .column("ownerId", ColumnType::Uuid)
@@ -187,8 +191,8 @@ fn first_version() -> JazzSchema {
                     .column("title", ColumnType::Bytea)
                     .policies(common::allow_all_policies()),
             )
-            .build(),
-    )
+            .build()
+    }
 }
 
 /// The server's or a client's config for the app whose encryption came
@@ -214,11 +218,15 @@ fn schema() -> JazzSchema {
 
 /// [`schema`] under the app-wide encryption `settings`.
 fn schema_with(settings: &jazz::tools::public_schema::EncryptionSettings) -> JazzSchema {
+    common::compile_schema(&public_schema_with(settings))
+}
+
+fn public_schema_with(settings: &jazz::tools::public_schema::EncryptionSettings) -> Schema {
     let mut schema = with_e2ee_fragment(&app());
     for (table, policies) in derive_e2ee_policies(&schema, &entries(), settings).unwrap() {
         schema.get_mut(&table).unwrap().policies = policies;
     }
-    common::compile_schema(&schema)
+    schema
 }
 
 type Cells = BTreeMap<String, Value>;
@@ -256,6 +264,9 @@ struct World {
     /// Whether the encryption fragment came with a later migration, so the
     /// system tables are stored under `name~hash`.
     late_fragment: bool,
+    /// The bundle the replicas' sessions are pinned to, when the fragment
+    /// was deployed to a running server, whose owner schema then lacks it.
+    bundle: Option<jazz::catalogue::BundleId>,
     /// Whether writes are made on the writer's own replica and uploaded,
     /// not staged at the authority.
     uploading: std::cell::Cell<bool>,
@@ -296,6 +307,102 @@ impl World {
         world
     }
 
+    /// The same app, but the server opened on the version without the
+    /// fragment and had the one with it deployed while running, through the
+    /// server's own pipeline: the catalogue change admits the version and
+    /// publishes its permissions as a bundle the replicas' sessions are
+    /// pinned to, and the server's first schema stays its owner. Every
+    /// write is then an upload from a replica.
+    fn late_fragment_deployed() -> Self {
+        use jazz::catalogue::CataloguePut;
+        use jazz::tools::deployment::{DeploymentRequest, prepare_catalogue_change};
+        use jazz::tools::public_schema::{SchemaHash, TablePolicies};
+        let structural = |schema: &Schema| {
+            let mut schema = schema.clone();
+            for table in schema.values_mut() {
+                table.policies = TablePolicies::default();
+            }
+            schema
+        };
+        let (first, second) = (first_version_public(), public_schema_with(&late_settings()));
+        let (first_hash, second_hash) = (
+            SchemaHash::compute(&structural(&first)),
+            SchemaHash::compute(&structural(&second)),
+        );
+        let server = block_on(Db::open_history_complete(DbConfig::new(
+            common::compile_schema(&structural(&first)),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0xee; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        let rows = server.catalogue().unwrap();
+        let permissions: HashMap<_, _> = second
+            .iter()
+            .map(|(name, table)| (*name, table.policies.clone()))
+            .collect();
+        let declared = DeclaredEncryption {
+            settings: late_settings(),
+            versions: BTreeMap::from([(second_hash.to_string(), entries())]),
+        };
+        let (prepared, _) = prepare_encrypted_deployment(
+            &DeploymentCatalogue {
+                schemas: rows.schemas.iter().map(|s| s.schema.clone()).collect(),
+                migrations: Vec::new(),
+                ..Default::default()
+            },
+            DeploymentRequest {
+                target_schema_hash: second_hash,
+                schemas: vec![
+                    (first_hash, structural(&first)),
+                    (second_hash, structural(&second)),
+                ],
+                migrations: vec![jazz::tools::Lens::new(
+                    first_hash,
+                    second_hash,
+                    jazz::tools::LensTransform {
+                        ops: structural(&second)
+                            .iter()
+                            .filter(|(name, _)| system_tables::is_system_table(name.as_str()))
+                            .map(|(name, table)| jazz::tools::LensOp::AddTable {
+                                table: name.to_string(),
+                                schema: table.clone(),
+                            })
+                            .collect(),
+                        draft_ops: Vec::new(),
+                    },
+                )],
+                // The app's own permissions: Jazz derives the system
+                // tables' and the bundle carries both.
+                permissions: permissions
+                    .iter()
+                    .filter(|(name, _)| !system_tables::is_system_table(name.as_str()))
+                    .map(|(name, policies)| (*name, policies.clone()))
+                    .collect(),
+                allow_dropping_history: false,
+            },
+            &declared,
+        )
+        .unwrap();
+        let permissions: jazz::catalogue::Permissions = permissions.into_iter().collect();
+        let change = prepare_catalogue_change(
+            &prepared,
+            &rows,
+            CataloguePut {
+                schemas: prepared.schemas().iter().map(|s| (s.clone(), 1)).collect(),
+                bundles: vec![(second_hash, permissions.clone(), 1)],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        block_on(server.apply_catalogue(change)).unwrap();
+        let mut world = Self::around(server, true);
+        world.bundle = Some(jazz::catalogue::bundle_id(&second_hash, &permissions).unwrap());
+        world.uploading.set(true);
+        world
+    }
+
     /// Tick the authority and every replica until nothing more moves.
     fn pump(&self) {
         for _ in 0..20 {
@@ -308,6 +415,9 @@ impl World {
 
     /// Whether the authority holds a live row `row` of `table`.
     fn holds(&self, table: &str, row: RowUuid) -> bool {
+        if self.bundle.is_some() {
+            return self.server.holds_row_for_test(table, row);
+        }
         let prepared = self.server.prepare_query(&Query::from(table)).unwrap();
         block_on(self.server.all(&prepared, ReadOpts::default()))
             .unwrap()
@@ -324,6 +434,7 @@ impl World {
             streams: Default::default(),
             next_node: std::cell::Cell::new(1),
             late_fragment,
+            bundle: None,
             uploading: Default::default(),
         }
     }
@@ -442,7 +553,16 @@ impl World {
         );
         let (client_side, server_side) = duplex();
         block_on(db.connect_upstream(client_side));
-        self.server.accept_subscriber(server_side, who).unwrap();
+        match self.bundle {
+            Some(bundle) => {
+                self.server
+                    .accept_pinned_subscriber(server_side, who, None, Some(bundle))
+                    .unwrap();
+            }
+            None => {
+                self.server.accept_subscriber(server_side, who).unwrap();
+            }
+        }
         for table in [MEMBERS, SPACES, "projects"] {
             let prepared = db.prepare_query(&Query::from(table)).unwrap();
             let stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
@@ -1989,18 +2109,15 @@ impl World {
     }
 }
 
-/// Core recognises Jazz's system tables by the name the owner's schema gives
-/// them, whatever name a client's upload carries: an app that turns
+/// Core recognises Jazz's system tables by the name the admitted versions
+/// give them, whatever name a client's upload carries: an app that turns
 /// encryption on in a later version stores them as `name~hash`, and an
 /// uploaded identity or root still gets the account checks, and a member
-/// still leaves over sync.
-#[test]
-fn uploaded_account_records_to_a_later_fragment_get_the_same_checks() {
-    use system_tables::ACCOUNT_ROOTS;
-    let world = World::late_fragment();
+/// still leaves over sync. Whether the server opened on the version with
+/// the fragment or had it deployed while running, which leaves the first
+/// schema its owner.
+fn uploaded_records_are_checked(world: World) {
     world.uploading.set(true);
-    let (stored, _) = world.server.stored_column_for_test(ACCOUNT_ROOTS, "kind");
-    assert!(stored.contains('~'), "{stored}");
     let device = world.device(alice());
     world
         .identity(alice(), device, 0, "local-first")
@@ -2016,10 +2133,7 @@ fn uploaded_account_records_to_a_later_fragment_get_the_same_checks() {
         .expect("a reset of an app-founded account");
 }
 
-/// A member leaves over sync from an app whose fragment came late.
-#[test]
-fn a_member_leaves_over_sync_from_a_later_fragment() {
-    let world = World::late_fragment();
+fn a_member_leaves_over_sync(world: World) {
     world.uploading.set(true);
     let p = new_row();
     world
@@ -2036,6 +2150,26 @@ fn a_member_leaves_over_sync_from_a_later_fragment() {
         .commit(alice(), &[(MEMBERS, bobs, world.member(p, bob()))])
         .unwrap();
     world.delete(bob(), MEMBERS, bobs).expect("a member leaves");
+}
+
+#[test]
+fn uploaded_account_records_to_a_later_fragment_get_the_same_checks() {
+    uploaded_records_are_checked(World::late_fragment());
+}
+
+#[test]
+fn uploaded_account_records_after_a_deployed_fragment_get_the_same_checks() {
+    uploaded_records_are_checked(World::late_fragment_deployed());
+}
+
+#[test]
+fn a_member_leaves_over_sync_from_a_later_fragment() {
+    a_member_leaves_over_sync(World::late_fragment());
+}
+
+#[test]
+fn a_member_leaves_over_sync_after_a_deployed_fragment() {
+    a_member_leaves_over_sync(World::late_fragment_deployed());
 }
 
 /// The account registry as a test sets it for an encrypting app: which
