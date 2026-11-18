@@ -2883,12 +2883,17 @@ Limits:
   first release is designed for, and members' apps are told
   (`space-over-member-limit`).
 - **A space's chain is the one the server last showed.** Spaces have no
-  floor (§6.3a): a device follows the latest read of a space's roots and
-  successors. A server that leaves rows out of a read can make the device
-  fall back to an older chain, report a version it holds as invalid until a
-  later read shows it again, and, where the device holds keys of two roots
-  of one address, choose which of them it writes under. It cannot forge a
-  chain: every root and successor is signed and checked (§3.3).
+  floor (§6.3a), but a read never rolls the chain a device knows back: one
+  that shows a prefix of it, or the same chain again, changes nothing. Only
+  a read that names another root, shows versions that are not a prefix of
+  the known ones (later versions, or a fork where both have a version), or
+  is newly unresolved replaces it. A server that leaves rows out of reads
+  can still withhold a later version, so that the device reports it as
+  invalid until a read shows it; can switch the device to another valid
+  root of the address, or another branch of a fork; and, where the device
+  holds keys of two roots of one address, so choose which of them it
+  writes under. It cannot forge a chain: every root and successor is signed
+  and checked (§3.3).
 - **Any updater can add roots.** The server does not limit roots per space
   (R15). Roots after the first valid one are ignored by every client (§3.2);
   they cost storage only, and a creator whose root lost repairs its own rows.
