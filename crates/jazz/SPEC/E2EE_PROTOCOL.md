@@ -766,6 +766,21 @@ added by an updater.
 "string"`) or, during a schema conversion, an object with `type` and the
   conversion fields of [migrations](E2EE_MIGRATIONS.md) §3.2 (`from`, `to`,
   `convert`, `sealedType`); the string is shorthand for `{ "type": … }`.
+- **The system tables stay once added.** Once any version of an app carries
+  the system tables (§1.2, §1.3), every later version carries them too, even
+  one that declares no encryption (an app that stops encrypting keeps them,
+  harmlessly: they hold the space keys and member rows its earlier versions
+  wrote). A version without them that follows one with them is refused at
+  deploy, in particular by a migration that removes a system table: bringing
+  them back in a later version would store them as new tables, stranding the
+  system rows of the earlier version (honest users would lose their keys,
+  and a member removed under the later version could still be read as one by
+  the earlier). The loaders append the fragment to every version after the
+  first one that carries it, so both sides compute the same schema and hash;
+  a later version without declarations gets the system tables' policies
+  derived from the declarations of the version it follows. Turning
+  encryption off is a schema conversion of the columns (a decrypt,
+  [migrations](E2EE_MIGRATIONS.md) §3), never a removal of the system tables.
 - **Encrypted columns are last-writer-wins.** The server cannot merge
   ciphertext, so the deploy and code generation refuse a merge strategy
   (`counter`, `g-set`, `text`, `markdown`, `html`) on an encrypted column.
@@ -2937,7 +2952,8 @@ Limits:
   holds keys of two roots of one address, so choose which of them it
   writes under. Before its first read in a session, such a device reads
   the chain before it writes (§5.2), so it never writes under a root no
-  read of the session showed. It cannot forge a chain: every root and
+  read of the session showed. A device holding one root writes under it as
+  its last read showed. It cannot forge a chain: every root and
   successor is signed and checked (§3.3).
 - **Any updater can add roots.** The server does not limit roots per space
   (R15). Roots after the first valid one are ignored by every client (§3.2);

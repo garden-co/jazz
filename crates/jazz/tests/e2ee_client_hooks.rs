@@ -2304,9 +2304,10 @@ fn a_hook_cannot_return_a_query_that_still_filters_an_encrypted_column() {
 
 /// Contract: an app that declares encryption (its schema holds Jazz's
 /// system tables) opens through the bindings' open only when encryption
-/// hooks that declare it are installed on that same open; without hooks,
-/// or with hooks that declare nothing, it is refused, and a database it
-/// opens seals its writes.
+/// hooks are installed on that same open; without hooks it is refused, and
+/// a database it opens seals its writes. A version that declares nothing
+/// but keeps the tables is the same app: refused without hooks, opened with
+/// hooks that declare nothing, which still cannot name a token column.
 #[test]
 fn an_encrypted_app_opens_only_with_encryption_hooks() {
     use jazz::tools::AppId;
@@ -2348,7 +2349,10 @@ fn an_encrypted_app_opens_only_with_encryption_hooks() {
         }),
         ..Fake::default()
     });
-    refused(config().with_e2ee(empty));
+    let quiet = block_on(jazz::binding_host::open_memory(config().with_e2ee(empty))).unwrap();
+    let token = Query::from("notes").filter(eq(col("__e2ee_eq_body"), lit(text("x"))));
+    assert!(quiet.prepare_query(&token).is_err());
+    quiet.prepare_query(&Query::from("notes")).unwrap();
     let path = tempfile::tempdir().unwrap();
     let error = block_on(jazz::binding_host::open_file(
         config(),

@@ -67,7 +67,12 @@ impl AppFiles {
         match &self.permissions {
             Some(permissions) => {
                 let loaded = artifact::load(&self.app, permissions).map_err(refused)?;
-                refuse_encrypted(!loaded.encryption().is_empty())?;
+                refuse_encrypted(
+                    loaded
+                        .current_schema()
+                        .keys()
+                        .any(|name| artifact::system_tables::is_system_table(name.as_str())),
+                )?;
                 Ok(LoadedFiles {
                     schema: loaded.current_schema().clone(),
                     migrations: loaded.client_migrations(),
