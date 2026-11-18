@@ -107,6 +107,8 @@ mod link_identities;
 mod local_first_first_load_gate;
 #[path = "../local_first_server_wait.rs"]
 mod local_first_server_wait;
+#[path = "../managed_storage.rs"]
+mod managed_storage;
 #[path = "../maybe_conflicting.rs"]
 mod maybe_conflicting;
 #[path = "../mirrored_lens_defaults.rs"]
