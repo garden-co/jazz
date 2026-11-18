@@ -525,6 +525,22 @@ pub fn check_transition(
         }
         for (name, declared) in &new.columns {
             let path = format!("{table}.{name}");
+            // The table existed in the earlier version, so it may hold rows
+            // that have no token for a column newly tagged (a column the
+            // migration adds, a plaintext column it encrypts, or one that was
+            // encrypted without equality, in a table encrypted before or
+            // for the first time): it starts in `backfill` (migrations
+            // §4.3, §4.5). A schema-level rule; no row is looked up.
+            let tagged_before = map
+                .old_name(name)
+                .is_some_and(|n| old.is_some_and(|o| o.equality.contains(&n)));
+            if new.equality.contains(name) && !tagged_before && !new.backfill.contains(name) {
+                return Err(format!(
+                    "{path}: the table existed in the earlier version, whose rows have no \
+                     equality token for it; list `{name}` in `backfill` until every row has one \
+                     (migrations §4.3, §4.5)"
+                ));
+            }
             if let Some(source) = &declared.from {
                 // A conversion writes new cells under a new type: the
                 // target of one is a column the earlier version did not
@@ -610,15 +626,6 @@ pub fn check_transition(
                         ));
                     }
                     let tagged_before = old.is_some_and(|o| o.equality.contains(&old_name));
-                    // The cells that exist have no token: adding equality
-                    // starts in `backfill` (migrations §4.3).
-                    if new.equality.contains(name) && !tagged_before && !new.backfill.contains(name)
-                    {
-                        return Err(format!(
-                            "{path}: the earlier version's cells have no equality token; list \
-                             `{name}` in `backfill` until every row has one (migrations §4.3)"
-                        ));
-                    }
                     // Removing equality drops the token column in the same
                     // migration; one left behind would be queried by older
                     // clients while nobody writes it.

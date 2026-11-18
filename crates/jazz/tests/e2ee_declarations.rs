@@ -945,3 +945,59 @@ fn connect_refuses_an_encrypted_schema_by_itself() {
     )))
     .unwrap_or_else(|e| panic!("{e}"));
 }
+
+/// A column newly tagged for equality in a table that existed in the earlier
+/// version starts in `backfill`, whether that table was encrypted before or
+/// is encrypted for the first time: its rows have no token for it. The
+/// rule reads the schema, not the rows.
+///
+/// ```text
+/// v1: notes encrypted (title)      v2: + body, equality [body]            ✗
+///                                  v2: + body, equality, backfill [body]  ✓
+/// v1: notes plaintext              v2: encrypts body, equality [body]     ✗ / ✓ with backfill
+/// ```
+#[test]
+fn a_new_equality_column_in_an_existing_table_starts_in_backfill() {
+    let app = |history_columns: &str,
+               history_entry: &str,
+               current_columns: &str,
+               current_title: &str,
+               backfill: &str| {
+        format!(
+            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": {{ "notes": {{
+                "columns": {current_columns},
+                "encryption": {{ "space": "id", "scope": "notes",
+                    "columns": {{ {current_title}"body": {{ "type": "string", "default": "" }} }},
+                    "equality": ["body"]{backfill} }} }} }},
+            "history": {{ "v1": {{ "tables": {{ "notes": {{
+                "columns": {history_columns}{history_entry} }} }} }} }},
+            "migrations": [{{ "from": "v1", "migrate": {{ "notes": {{
+                "body": {{ "add": "bytes", "default": "" }},
+                "__e2ee_eq_body": {{ "add": "bytes", "default": "" }} }} }} }}] }}"#
+        )
+    };
+    // The table was encrypted before (title); body and its tokens are new.
+    let encrypted_columns = r#"{ "title": "bytes", "body": "bytes", "__e2ee_eq_body": "bytes" }"#;
+    let encrypted_entry = r#", "encryption": { "space": "id", "scope": "notes",
+        "columns": { "title": "string" } }"#;
+    let before = |backfill| {
+        app(
+            r#"{ "title": "bytes" }"#,
+            encrypted_entry,
+            encrypted_columns,
+            r#""title": "string", "#,
+            backfill,
+        )
+    };
+    let error = refusal(load_app(before("").as_bytes()));
+    assert!(error.contains("`backfill`"), "{error}");
+    load_app(before(r#", "backfill": ["body"]"#).as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+
+    // The table is encrypted for the first time: it held plaintext before.
+    let plain_columns = r#"{ "title": "string", "body": "bytes", "__e2ee_eq_body": "bytes" }"#;
+    let first = |backfill| app(r#"{ "title": "string" }"#, "", plain_columns, "", backfill);
+    let error = refusal(load_app(first("").as_bytes()));
+    assert!(error.contains("`backfill`"), "{error}");
+    load_app(first(r#", "backfill": ["body"]"#).as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+}

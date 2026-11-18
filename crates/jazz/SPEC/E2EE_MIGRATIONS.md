@@ -508,7 +508,11 @@ and the deploy, and the stored column's own default must be the empty value
 exception: a new
 equality-tagged column on a table that already has rows starts in `backfill`,
 because those rows have no token for the default value; sweepers write the
-default's cell and token.
+default's cell and token. The deploy applies this by the schema alone, never by
+looking at rows: a column newly tagged in a table that existed in the
+previous version (a column the migration adds, a plaintext column it
+encrypts, or an encrypted column gaining equality, in a table encrypted
+before or for the first time) must be listed in `backfill`.
 
 ## 5. Rollout for app developers
 
