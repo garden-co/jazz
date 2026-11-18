@@ -422,9 +422,9 @@ describe("jazz-tools upgrade: conversions", () => {
     );
     // The CI file is reported, not edited.
     expect(report.manual).toEqual([
-      ".github/workflows/deploy.yml:4: `--allow-local-first-auth` is deprecated: use `--allow-device-accounts`",
+      "ci/deploy.yml:4: `--allow-local-first-auth` is deprecated: use `--allow-device-accounts`",
     ]);
-    expect(readFileSync(join(dir, ".github", "workflows", "deploy.yml"), "utf8")).toContain(
+    expect(readFileSync(join(dir, "ci", "deploy.yml"), "utf8")).toContain(
       "--allow-local-first-auth",
     );
     expect(report.rewrites.join("\n")).toContain(
