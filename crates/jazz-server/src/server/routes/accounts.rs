@@ -124,7 +124,7 @@ pub(super) async fn login_or_register_for_admin(
     Ok(response(request.identity, assignment))
 }
 
-/// The app's backend vouches for a local-first guest: it checked the
+/// The app's backend vouches for a device account: it checked the
 /// guest's proof of its key itself (`createJazz` links a guest only on a
 /// fresh, single-use challenge the guest signed). The core founds the
 /// guest's account deterministically, as `found-local-first` would for the
@@ -145,16 +145,16 @@ pub(super) async fn found_local_first_for_admin(
     Json(request): Json<AdminFoundLocalFirst>,
 ) -> Result<Json<AccountResponse>, Failure> {
     validate_vouching_backend(&headers, &state)?;
-    if request.identity.issuer != jazz::tools::identity::LOCAL_FIRST_ISSUER {
+    if request.identity.issuer != jazz::tools::identity::DEVICE_ACCOUNT_ISSUER {
         return Err((StatusCode::BAD_REQUEST, "local_first_identity_required"));
     }
     let result = owner(&state)?
-        .execute(AccountCommand::FoundLocalFirst {
+        .execute(AccountCommand::FoundDeviceAccount {
             principal: request.identity.clone(),
             app: match request.audience.as_deref().map(str::trim) {
                 Some("") => return Err((StatusCode::BAD_REQUEST, "invalid_local_first_audience")),
                 Some(audience) => {
-                    *crate::middleware::auth::local_first_founding_app(audience).uuid()
+                    *crate::middleware::auth::device_account_founding_app(audience).uuid()
                 }
                 None => *state.app_id.uuid(),
             },
@@ -195,7 +195,7 @@ pub(super) async fn link_for_admin(
         .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_external_identity"))?;
     let registry = owner(&state)?;
     // `from` names an account that already exists (a user the backend signed
-    // in, or a local-first guest founded from its own key proof): linking
+    // in, or a device account founded from its own key proof): linking
     // never creates it.
     registry
         .login(request.from.clone())
@@ -239,7 +239,7 @@ pub(super) struct AdminRevoke {
 
 /// The app's backend vouches for `approver`, an identity of the account, and
 /// revokes `target`, another of its identities, as the approver's own
-/// credential would (`createJazz` revokes a local-first guest's key once it
+/// credential would (`createJazz` revokes a device account's key once it
 /// links to a signed-in user, when the app asks for that). The assignment
 /// stays: the target can no longer sign in, and is never reassigned.
 pub(super) async fn revoke_for_admin(
@@ -395,13 +395,16 @@ pub(super) async fn resolve_assignment(
 }
 
 /// Offline local founding becomes durable on the first authenticated connection.
-/// The namespace a local-first founder's account id derives from: the
+/// The namespace a device-account founder's account id derives from: the
 /// audience its proof was verified against (see
-/// [`crate::middleware::auth::LOCAL_FIRST_AUDIENCE_HEADER`]).
+/// [`crate::middleware::auth::DEVICE_ACCOUNT_AUDIENCE_HEADER`]).
 fn founding_app(state: &ServerState, headers: &HeaderMap) -> Result<Uuid, UnauthenticatedResponse> {
-    let audience =
-        crate::middleware::auth::local_first_audience(headers, state.app_id, &state.auth_config)?;
-    Ok(*crate::middleware::auth::local_first_founding_app(&audience).uuid())
+    let audience = crate::middleware::auth::device_account_audience(
+        headers,
+        state.app_id,
+        &state.auth_config,
+    )?;
+    Ok(*crate::middleware::auth::device_account_founding_app(&audience).uuid())
 }
 
 pub(super) async fn admit_local_founder(
@@ -412,7 +415,7 @@ pub(super) async fn admit_local_founder(
     let app = founding_app(state, headers)?;
     if let Some(registry) = &state.accounts {
         registry
-            .execute(AccountCommand::FoundLocalFirst {
+            .execute(AccountCommand::FoundDeviceAccount {
                 principal: principal.clone(),
                 app,
             })
@@ -664,7 +667,7 @@ mod tests {
         let user =
             |subject: &str| serde_json::json!({ "issuer": "jazz:app:test", "subject": subject });
         let guest = serde_json::json!({
-            "issuer": jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            "issuer": jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
             "subject": "6f9619ff-8b86-5011-b42d-00c04fc964ff",
         });
         let post = |path: &str, body: serde_json::Value, secret: Option<&str>| {
@@ -676,7 +679,7 @@ mod tests {
         };
         let secret = Some(core.admin_secret());
 
-        // Founding needs the admin secret, and only founds local-first guests.
+        // Founding needs the admin secret, and only founds device accounts.
         let denied = post(
             "found-local-first",
             serde_json::json!({ "identity": guest }),
@@ -796,7 +799,7 @@ mod tests {
         let user =
             |subject: &str| serde_json::json!({ "issuer": "jazz:app:test", "subject": subject });
         let guest = serde_json::json!({
-            "issuer": jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            "issuer": jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
             "subject": "6f9619ff-8b86-5011-b42d-00c04fc964ff",
         });
         let nonce = Uuid::new_v4();
