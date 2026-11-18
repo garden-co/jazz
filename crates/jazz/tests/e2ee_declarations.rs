@@ -1076,11 +1076,14 @@ fn a_version_without_declarations_keeps_the_system_tables_after_an_encrypted_one
         jazz::tools::public_schema::SchemaHash::compute(&client_schema),
         loaded.current_hash()
     );
-    assert!(
-        declarations
-            .expect("the governing declarations")
-            .tables
-            .contains_key("notes")
+    // Its own declarations: none, since it dropped the encrypted column (v1's
+    // are not its own), though it is still an encrypted app.
+    let declarations = declarations.expect("an encrypted app, with its system tables");
+    assert!(declarations.tables.is_empty(), "{:?}", declarations.tables);
+    // The system tables' derived policies still follow v1's declarations.
+    assert_eq!(
+        loaded.bundle().to_hex(),
+        "189b1a8188070af2438f5360ac471e548d7c570917d44df50cfc4d71ed6726e4"
     );
     let error = refusal(load_client_current(file.as_bytes()));
     assert!(error.contains("declares end-to-end encryption"), "{error}");
@@ -1125,6 +1128,67 @@ fn decrypting_every_column_keeps_the_system_tables() {
         "every version, the one that decrypts and the later one that declares nothing, keeps them"
     );
     assert_eq!(loaded.encryption().versions.len(), 2);
+    // The last version declares nothing of its own: the client gets no
+    // encrypted column (v2's decrypting conversion is not its), and is still
+    // an encrypted app; the derived policies are unchanged.
+    let (_, _, declarations) =
+        load_client_encrypted(file.as_bytes(), AppId::from_name("notes-app"), "production")
+            .unwrap();
+    let declarations = declarations.expect("an encrypted app, with its system tables");
+    assert!(declarations.tables.is_empty(), "{:?}", declarations.tables);
+    assert_eq!(
+        loaded.bundle().to_hex(),
+        "1d85134d552cffd30937977cdd69d2ad711a952c7b7dbfd17219888090ac067e"
+    );
+}
+
+/// The backend loader, which reads the app the generated bindings embed,
+/// accepts a version that follows one that has Jazz's system tables and
+/// keeps them without declaring encryption, as the file loaders compute it.
+#[test]
+fn the_backend_loader_accepts_a_version_that_keeps_the_system_tables() {
+    use jazz::tools::deployment::artifact::load_backend;
+    let file = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": { "notes": { "columns": { "done": "boolean" } } },
+        "history": { "v1": { "tables": { "notes": {
+            "columns": { "title": "bytes", "done": "boolean" },
+            "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } } } } },
+        "migrations": [{ "from": "v1", "migrate": { "notes": {
+            "title": { "drop": "bytes", "backwardsDefault": "" } } } }] }"#;
+    let permissions = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
+    let loaded = load(file.as_bytes(), permissions.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    let body = loaded.deployment_body(false);
+    let bound = |encryption: serde_json::Value| {
+        serde_json::json!({
+            "schema": {
+                "current": loaded.current_hash().to_string(),
+                "schemas": body["schemas"],
+                "migrations": body["migrations"],
+                "encryption": encryption,
+            },
+            "relations": {},
+        })
+        .to_string()
+    };
+    let backend = load_backend(
+        bound(body["encryption"].clone()).as_bytes(),
+        permissions.as_bytes(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(backend.current_hash(), loaded.current_hash());
+    assert_eq!(
+        backend.bundle(),
+        loaded.bundle(),
+        "the same bundle as the file loader"
+    );
+    // A version that has the tables but follows none that does is still
+    // refused: without v1's declarations nothing explains them.
+    let error = refusal(load_backend(
+        bound(serde_json::json!({ "settings": {}, "versions": {} })).as_bytes(),
+        permissions.as_bytes(),
+    ));
+    assert!(error.contains("system tables"), "{error}");
 }
 
 /// A version that keeps the system tables without declaring encryption
@@ -1165,10 +1229,13 @@ fn equally_near_versions_that_declare_differently_are_refused() {
     let disagreeing = file(r#", "sweep": "members""#);
     let error = refusal(load(disagreeing.as_bytes(), permissions.as_bytes()));
     assert!(error.contains("declare differently"), "{error}");
-    let error = refusal(load_client_encrypted(
+    // The client's declarations are the version's own, so the client loader
+    // has no inherited choice to refuse.
+    let (_, _, declarations) = load_client_encrypted(
         disagreeing.as_bytes(),
         AppId::from_name("notes-app"),
         "production",
-    ));
-    assert!(error.contains("declare differently"), "{error}");
+    )
+    .unwrap();
+    assert!(declarations.expect("an encrypted app").tables.is_empty());
 }

@@ -932,8 +932,10 @@ pub fn load_client_current(json: &[u8]) -> Result<(Schema, crate::db::Migrations
 /// [`load_client_current`], with the current version's encryption
 /// declarations, for a client of app `app_id` in environment `environment`
 /// (both part of every cell's domain): what a client opening an encrypted
-/// app builds its encryption hooks from. `None` when the current version
-/// declares no encryption.
+/// app builds its encryption hooks from. The declarations are the current
+/// version's own, with no table when it keeps Jazz's system tables without
+/// declaring encryption (it is still an encrypted app); `None` when it has
+/// no system tables.
 pub fn load_client_encrypted(
     json: &[u8],
     app_id: crate::tools::AppId,
@@ -950,15 +952,19 @@ pub fn load_client_encrypted(
     let history = check_history(&app_file)?;
     let (schemas, lenses) = lower_client_migrations(history.bundle())
         .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
-    let declarations =
-        governing_entries(&history.encryption, &history.migrations, history.current)?.map(
-            |tables| crate::tools::public_schema::E2eeDeclarations {
-                app_id,
-                environment: environment.to_owned(),
-                settings: history.encryption.settings.clone(),
-                tables: tables.clone(),
-            },
-        );
+    // The version's own declarations: a version that keeps the system tables
+    // without declaring encryption declares no encrypted column (those of an
+    // earlier version are not its own: it may have dropped or decrypted
+    // them), but it is still an encrypted app, with its system tables.
+    let own = history.encryption.entries(&history.current.to_string());
+    let declarations = (own.is_some() || has_system_tables(history.current_schema())).then(|| {
+        crate::tools::public_schema::E2eeDeclarations {
+            app_id,
+            environment: environment.to_owned(),
+            settings: history.encryption.settings.clone(),
+            tables: own.cloned().unwrap_or_default(),
+        }
+    });
     Ok((
         history.current_schema().clone(),
         crate::db::Migrations { schemas, lenses },
