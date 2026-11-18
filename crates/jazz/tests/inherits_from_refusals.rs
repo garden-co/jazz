@@ -256,3 +256,126 @@ fn a_read_policy_reaching_inherits_from_through_an_inherited_policy_is_refused()
         "$.tasks.policies.select.using",
     );
 }
+
+/// The creator clause's `exists`: the `projects` row this member row names,
+/// freshly inserted by the checking transaction.
+fn created_here(inserted: PolicyExpr) -> PolicyExpr {
+    common::exists(
+        "projects",
+        vec![common::outer_eq("id", "identifier"), inserted],
+    )
+}
+
+/// `InsertedByThisTransaction` means something only inside an `exists` of
+/// an insert or update WITH CHECK; anywhere else it is false, so under a
+/// `NOT` it holds for every row. Every other placement is refused: at the
+/// top, under a `NOT` outside the `exists` (at any depth), in a read,
+/// update USING or delete policy, and in a read policy that inherits it.
+/// Only Jazz's generator writes the node, so the policies are built here.
+///
+/// ```text
+/// insert ✓  exists projects(… ∧ inserted)          update new ✓ (same)
+/// insert ✓  exists projects(… ∧ ¬inserted)
+/// insert ✗  inserted        insert ✗ ¬inserted     insert ✗ ¬exists projects(… ∧ inserted)
+/// insert ✗  mine ∧ ¬(mine ∨ exists projects(… ∧ inserted))
+/// read ✗ / update old ✗ / delete ✗  exists projects(… ∧ inserted)
+/// tasks.read ─INHERITS insert─► members.insert = exists projects(… ∧ inserted)   ✗
+/// ```
+#[test]
+fn inserted_by_this_transaction_outside_a_write_check_exists_is_refused() {
+    let mine = || PolicyExpr::eq_session("accountId", vec!["user".to_owned()]);
+    let inserted = || PolicyExpr::InsertedByThisTransaction;
+    let not = |expr: PolicyExpr| PolicyExpr::Not(Box::new(expr));
+    let members = |policies: TablePolicies| {
+        SchemaBuilder::new()
+            .table(projects())
+            .table(
+                address_table(MEMBERS, None, policies.with_select(PolicyExpr::True))
+                    .column("accountId", ColumnType::Uuid),
+            )
+            .build()
+    };
+    let insert = |check: PolicyExpr| members(TablePolicies::new().with_insert(check));
+
+    for accepted in [
+        insert(PolicyExpr::And(vec![mine(), created_here(inserted())])),
+        insert(created_here(not(inserted()))),
+        members(TablePolicies::new().with_update(Some(mine()), created_here(inserted()))),
+    ] {
+        check_deployable_policies(&accepted).unwrap();
+        deploy(&accepted).unwrap();
+    }
+
+    let refused = UnsupportedPolicy::MisplacedInsertedByThisTransaction;
+    let insert_path = "$.__e2ee_members.policies.insert.with_check";
+    assert_refused(
+        &insert(inserted()),
+        refused,
+        &format!("{insert_path}.InsertedByThisTransaction"),
+    );
+    assert_refused(
+        &insert(not(inserted())),
+        refused,
+        &format!("{insert_path}.Not.InsertedByThisTransaction"),
+    );
+    assert_refused(
+        &insert(not(created_here(inserted()))),
+        refused,
+        &format!("{insert_path}.Not.Exists.condition.And[1].InsertedByThisTransaction"),
+    );
+    assert_refused(
+        &insert(PolicyExpr::And(vec![
+            mine(),
+            not(PolicyExpr::Or(vec![mine(), created_here(inserted())])),
+        ])),
+        refused,
+        &format!("{insert_path}.And[1].Not.Or[1].Exists"),
+    );
+    for (policies, slot) in [
+        (
+            TablePolicies::new().with_select(created_here(inserted())),
+            "select.using",
+        ),
+        (
+            TablePolicies::new().with_update(Some(created_here(inserted())), mine()),
+            "update.using",
+        ),
+        (
+            TablePolicies::new().with_delete(created_here(inserted())),
+            "delete.using",
+        ),
+    ] {
+        let schema = SchemaBuilder::new()
+            .table(projects())
+            .table(address_table(MEMBERS, None, policies).column("accountId", ColumnType::Uuid))
+            .build();
+        assert_refused(
+            &schema,
+            refused,
+            &format!("$.__e2ee_members.policies.{slot}.Exists"),
+        );
+    }
+
+    let inherited = SchemaBuilder::new()
+        .table(projects())
+        .table(
+            address_table(
+                MEMBERS,
+                None,
+                TablePolicies::new()
+                    .with_select(PolicyExpr::True)
+                    .with_insert(created_here(inserted())),
+            )
+            .column("accountId", ColumnType::Uuid),
+        )
+        .table(
+            TableSchemaBuilder::new("tasks")
+                .fk_column("memberRow", MEMBERS)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::inherits(Operation::Insert, "memberRow")),
+                ),
+        )
+        .build();
+    assert_refused(&inherited, refused, "$.tasks.policies.select.using");
+}

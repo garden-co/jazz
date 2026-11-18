@@ -78,6 +78,10 @@ pub enum UnsupportedPolicy {
     /// An `InheritsFrom` in a read (`select`) policy, or in a policy one
     /// inherits: no read rule needs it and no sync support ships for it.
     InheritsFromInReadPolicy,
+    /// An `InsertedByThisTransaction` outside an `Exists` of an insert or
+    /// update `WITH CHECK`, or under a `NOT` outside its `Exists`:
+    /// everywhere else it is false, so a `NOT` of it holds for every row.
+    MisplacedInsertedByThisTransaction,
 }
 
 impl SchemaConversionError {
@@ -202,6 +206,14 @@ pub fn check_deployable_json_schemas(schema: &Schema) -> Result<(), SchemaConver
 /// ([`UnsupportedPolicy::InheritsFromInReadPolicy`]): Jazz derives the node
 /// for write policies only, and no sync support ships for it.
 ///
+/// An `InsertedByThisTransaction` is refused
+/// ([`UnsupportedPolicy::MisplacedInsertedByThisTransaction`]) unless it is
+/// inside an `Exists` of an insert or update `WITH CHECK`, with no `NOT`
+/// above it outside an `Exists`: everywhere else it is false, so under a
+/// `NOT` it would hold for every row. A policy that inherits one (through
+/// `Inherits`, `InheritsReferencing` or `InheritsFrom`) is held to the same
+/// placement.
+///
 /// A relation policy's unsupported shapes (output steps, query parameters,
 /// malformed union labels) are the schema compile's to refuse, which
 /// `jazz-tools validate`, the dev server and a deployment all run.
@@ -229,6 +241,12 @@ pub fn check_deployable_policies(schema: &Schema) -> Result<(), SchemaConversion
                 let path = format!("$.{}.policies.{slot}", name.as_str());
                 refuse_nested_outer_rows(expr, &path, false)?;
                 refuse_nested_inherits_from(schema, expr, &path)?;
+                let placement = Placement {
+                    with_check: matches!(slot, "insert.with_check" | "update.with_check"),
+                    in_exists: false,
+                    negated: false,
+                };
+                refuse_misplaced_inserted(schema, table, expr, &path, placement)?;
             }
         }
     }
@@ -387,6 +405,176 @@ fn reaches_inherits_from(
             source_table,
             ..
         } => inherited(&TableName::new(source_table.clone()), *operation, seen),
+        _ => false,
+    }
+}
+
+/// Where a policy part sits, for [`refuse_misplaced_inserted`].
+#[derive(Clone, Copy)]
+struct Placement {
+    /// In an insert or update `WITH CHECK`.
+    with_check: bool,
+    /// Inside an `Exists` condition.
+    in_exists: bool,
+    /// Under a `NOT` that is outside every `Exists`.
+    negated: bool,
+}
+
+impl Placement {
+    /// Whether an `InsertedByThisTransaction` here means what it says.
+    fn admits_inserted(self) -> bool {
+        self.with_check && self.in_exists && !self.negated
+    }
+
+    /// Whether a policy inherited here may hold an
+    /// `InsertedByThisTransaction`: its own `Exists` puts it inside one.
+    fn admits_inherited_inserted(self) -> bool {
+        self.with_check && !self.negated
+    }
+}
+
+const MISPLACED_INSERTED: &str = "`InsertedByThisTransaction` is supported only inside an \
+     `exists` of an insert or update WITH CHECK, and not under a `NOT` outside that `exists`: \
+     anywhere else it is always false, so under a `NOT` it would hold for every row";
+
+/// Refuse an `InsertedByThisTransaction` in `expr` (a policy of `table`)
+/// that `placement` does not admit (see [`check_deployable_policies`]).
+fn refuse_misplaced_inserted(
+    schema: &Schema,
+    table: &TableSchema,
+    expr: &PolicyExpr,
+    path: &str,
+    placement: Placement,
+) -> Result<(), SchemaConversionError> {
+    let refused = |path: String| {
+        Err(SchemaConversionError::unsupported(
+            path,
+            MISPLACED_INSERTED,
+            UnsupportedPolicy::MisplacedInsertedByThisTransaction,
+        ))
+    };
+    match expr {
+        PolicyExpr::InsertedByThisTransaction if !placement.admits_inserted() => {
+            refused(format!("{path}.InsertedByThisTransaction"))
+        }
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => {
+            let kind = if matches!(expr, PolicyExpr::And(_)) {
+                "And"
+            } else {
+                "Or"
+            };
+            for (index, part) in parts.iter().enumerate() {
+                refuse_misplaced_inserted(
+                    schema,
+                    table,
+                    part,
+                    &format!("{path}.{kind}[{index}]"),
+                    placement,
+                )?;
+            }
+            Ok(())
+        }
+        PolicyExpr::Not(inner) => refuse_misplaced_inserted(
+            schema,
+            table,
+            inner,
+            &format!("{path}.Not"),
+            Placement {
+                negated: placement.negated || !placement.in_exists,
+                ..placement
+            },
+        ),
+        PolicyExpr::Exists {
+            table: exists,
+            condition,
+        } => match schema.get(&TableName::new(exists.clone())) {
+            Some(exists) => refuse_misplaced_inserted(
+                schema,
+                exists,
+                condition,
+                &format!("{path}.Exists.condition"),
+                Placement {
+                    in_exists: true,
+                    ..placement
+                },
+            ),
+            // An unknown table is the schema compile's to refuse.
+            None => Ok(()),
+        },
+        PolicyExpr::Inherits { .. }
+        | PolicyExpr::InheritsReferencing { .. }
+        | PolicyExpr::InheritsFrom { .. }
+            if !placement.admits_inherited_inserted()
+                && reaches_inserted(schema, table, expr, &mut Vec::new()) =>
+        {
+            refused(path.to_owned())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Whether evaluating `expr`, a policy of `table`, reaches an
+/// `InsertedByThisTransaction`: in it, in an `Exists` condition, or in a
+/// policy it inherits (`seen` holds the inherited policies already walked).
+fn reaches_inserted(
+    schema: &Schema,
+    table: &TableSchema,
+    expr: &PolicyExpr,
+    seen: &mut Vec<(TableName, Operation)>,
+) -> bool {
+    let inherited = |name: &TableName, operation: Operation, seen: &mut Vec<_>| {
+        if seen.contains(&(*name, operation)) {
+            return false;
+        }
+        seen.push((*name, operation));
+        schema.get(name).is_some_and(|parent| {
+            // Both update clauses, as `InheritsFrom` reads them.
+            let clauses = match operation {
+                Operation::Update => vec![
+                    parent.policies.update.using.as_ref(),
+                    parent.policies.update.with_check.as_ref(),
+                ],
+                operation => vec![source_operation_policy(parent, operation)],
+            };
+            clauses
+                .into_iter()
+                .flatten()
+                .any(|policy| reaches_inserted(schema, parent, policy, seen))
+        })
+    };
+    match expr {
+        PolicyExpr::InsertedByThisTransaction => true,
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts
+            .iter()
+            .any(|part| reaches_inserted(schema, table, part, seen)),
+        PolicyExpr::Not(inner) => reaches_inserted(schema, table, inner, seen),
+        PolicyExpr::Exists {
+            table: exists,
+            condition,
+        } => schema
+            .get(&TableName::new(exists.clone()))
+            .is_some_and(|exists| reaches_inserted(schema, exists, condition, seen)),
+        PolicyExpr::Inherits {
+            operation,
+            via_column,
+            ..
+        } => table
+            .columns
+            .columns
+            .iter()
+            .find(|column| column.name.as_str() == via_column)
+            .and_then(|column| column.references.as_ref())
+            .is_some_and(|parent| inherited(parent, *operation, seen)),
+        PolicyExpr::InheritsReferencing {
+            operation,
+            source_table,
+            ..
+        } => inherited(&TableName::new(source_table.clone()), *operation, seen),
+        PolicyExpr::InheritsFrom {
+            operation, tables, ..
+        } => tables
+            .iter()
+            .any(|candidate| inherited(&TableName::new(candidate.clone()), *operation, seen)),
         _ => false,
     }
 }
