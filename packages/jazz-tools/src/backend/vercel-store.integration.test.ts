@@ -110,6 +110,11 @@ function fakeVercel(core: { appId: string; url: string }) {
     failing: false,
     /** The next `slowStarts` starts haven't run yet when the function looks. */
     slowStarts: 0,
+    /**
+     * The next `failLookups` lookups of the Sandbox (not resumes) fail as
+     * Vercel's API does when it is briefly unavailable.
+     */
+    failLookups: 0,
     /** Called when a start brings the core up. */
     onStart: undefined as (() => void) | undefined,
   };
@@ -177,6 +182,13 @@ function fakeVercel(core: { appId: string; url: string }) {
   const sdk: SandboxSdk = {
     Sandbox: {
       async get(params) {
+        if (!params.resume && state.failLookups > 0) {
+          state.failLookups--;
+          calls.push("lookup failed");
+          throw Object.assign(new Error("Status code 503 is not ok"), {
+            response: { status: 503 },
+          });
+        }
         if (!state.exists) throw new Error("404 sandbox not found");
         if (params.resume) {
           calls.push(`resume ${String(params.name)}`);
@@ -197,6 +209,10 @@ function fakeVercel(core: { appId: string; url: string }) {
       },
     },
     Drive: {
+      async get() {
+        if (!state.drive) throw new Error("404 drive not found");
+        return { region: state.driveRegion };
+      },
       async getOrCreate(params) {
         calls.push(`drive ${String(params.name)} in ${String(params.region)}`);
         // An existing Drive keeps its region, as Vercel's do.
@@ -719,6 +735,38 @@ describe("vercel() store", () => {
     }
   }, 60_000);
 
+  it("never reads a failed lookup of an existing core as a missing one", async () => {
+    const appId = randomUUID();
+    const core = await startTrustedCore(appId);
+    const open = (sdk: SandboxSdk, region: string) =>
+      openVercelCore({
+        options: { sdk, backendCredential: core.credential, namespace: "test", region },
+        openRemote: ({ url }) =>
+          ({ serverUrl: url, handle: async () => ({}), close: async () => {} }) as never,
+        version: "1.2.3",
+        env: { VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" },
+      });
+
+    // An iad1 core, opened with the wrong region while Vercel's API answers
+    // 503 to the running check and the wake's lookup: the lookup is retried
+    // and the core refused, never provisioned again in fra1.
+    const wrong = fakeVercel({ ...core, appId });
+    Object.assign(wrong.state, { exists: true, drive: true, region: "iad1", failLookups: 2 });
+    await expect(open(wrong.sdk, "fra1")).rejects.toThrow(
+      /core jazz-prj-test-test is in iad1, but `region` is "fra1"/,
+    );
+    expect(wrong.calls.filter((call) => call === "lookup failed")).toHaveLength(2);
+    expect(wrong.calls.filter((call) => /^(create|drive|start) /.test(call))).toEqual([]);
+
+    // With the right region, the same failures delay the wake, nothing more.
+    const right = fakeVercel({ ...core, appId });
+    Object.assign(right.state, { exists: true, drive: true, region: "iad1", failLookups: 2 });
+    const opened = await open(right.sdk, "iad1");
+    cleanups.push(() => opened.close());
+    expect(right.calls).toContain("resume jazz-prj-test-test");
+    expect(right.calls.filter((call) => /^(create|drive) /.test(call))).toEqual([]);
+  }, 60_000);
+
   it("refuses a Drive left in another region instead of creating a Sandbox that can't mount it", async () => {
     const appId = randomUUID();
     const core = await startTrustedCore(appId);
@@ -741,7 +789,8 @@ describe("vercel() store", () => {
     ).rejects.toThrow(
       /Drive jazz-prj-test-test-data is in iad1, but `region` is "fra1"\. Moving a core to another region isn't supported yet/,
     );
-    expect(fake.calls.filter((call) => call.startsWith("create "))).toEqual([]);
+    // Refused before asking for a Drive in fra1, which could create one there.
+    expect(fake.calls.filter((call) => /^(create|drive) /.test(call))).toEqual([]);
   }, 60_000);
 
   it("retries a start that failed for a transient reason, and keeps the Sandbox", async () => {
