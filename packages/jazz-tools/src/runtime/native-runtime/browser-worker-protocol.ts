@@ -765,5 +765,12 @@ export type BrowserFollowerPortEvent =
    * closes the tabs that haven't let go after `NEWER_BUILD_HANDOFF_MS`.
    */
   | { type: "newer-build-waiting" }
+  /**
+   * This tab didn't let go of the store within `NEWER_BUILD_HANDOFF_MS`: the
+   * worker closes it now, and the newer build takes the store. The tab treats
+   * its connection as gone (and reconnects: as an older build, it reloads,
+   * or waits).
+   */
+  | { type: "closed-for-newer-build" }
   | { type: "relay-trace"; entries: BrowserRelayTrace[] }
   | { type: "error"; error: BrowserRelayError };

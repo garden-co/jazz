@@ -513,6 +513,16 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       this.callbacks.onNewerBuild?.();
       return;
     }
+    if (message.type === "closed-for-newer-build") {
+      // As after a worker failure: the manager opens a new connection, which
+      // the worker refuses as an older build's.
+      this.fail(
+        new BrowserWorkerUnresponsiveError(
+          "The shared worker closed this tab's connection for a newer build of the app",
+        ),
+      );
+      return;
+    }
     if (message.type === "storage-invalidated") {
       this.callbacks.onStorageInvalidated?.();
       this.dispose(new Error("IndexedDB storage was externally invalidated"));

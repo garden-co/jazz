@@ -23,7 +23,7 @@ import {
   withTimeout,
 } from "./support.js";
 import { Db, resolveDefaultPersistentDbName, type QueryBuilder } from "../../src/runtime/db.js";
-import { setNewerBuildHandler } from "../../src/runtime/newer-build-reload.js";
+import { browserBuildId, setNewerBuildHandler } from "../../src/runtime/newer-build-reload.js";
 import { shipMigrations, shippedMigrations } from "../../src/runtime/client-migrations.js";
 import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
@@ -1076,6 +1076,9 @@ describe("SharedWorker bridge with IndexedDB", () => {
     setNewerBuildHandler(reloads);
     try {
       const { oldTab, open } = await oldBuildTab("newer-build-takes-store");
+      // A transaction the old tab has open when the newer build arrives.
+      const tx = oldTab.beginTransaction();
+      tx.insert(catalogueAppV1.todos, { title: "Committed too late", completed: false });
       // V2 ships V1 in its schema history: it is the newer build.
       const newTab = await open();
       const rows = await withTimeout(
@@ -1093,7 +1096,43 @@ describe("SharedWorker bridge with IndexedDB", () => {
       expect(() =>
         oldTab.insert(catalogueAppV1.todos, { title: "Too late", completed: false }),
       ).toThrow("older build of this app");
+      // Nor commits a transaction it opened before: it would report success,
+      // then the reload would lose it.
+      expect(() => tx.commit()).toThrow("older build of this app");
     } finally {
+      setNewerBuildHandler(() => {});
+    }
+  });
+
+  it("closes an old build's tab that doesn't let go after 5 s, and hands the store over then", async () => {
+    // This old tab already reloaded away from its build this session (as a
+    // stale CDN makes it), so it doesn't yield: it stands in for a frozen or
+    // unresponsive tab, which the worker closes after the deadline.
+    const reloads = vi.fn();
+    setNewerBuildHandler(reloads);
+    const marker = "jazz:newer-build-reloaded-from";
+    sessionStorage.setItem(marker, browserBuildId(catalogueAppV1.wasmSchema));
+    try {
+      const { oldTab, open } = await oldBuildTab("newer-build-forces-old-tab");
+      const newTab = await open();
+      const started = Date.now();
+      const rows = await withTimeout(
+        newTab.all(catalogueAppV2.todos, { tier: "local-first" }),
+        20_000,
+        "The newer build's tab should get the store once the old tab is closed",
+      );
+      expect(Date.now() - started).toBeGreaterThanOrEqual(4_000);
+      expect(rows.some((row) => row.title === "Old schema row")).toBe(true);
+      expect(reloads).not.toHaveBeenCalled();
+      // Told it was closed, the old tab reconnects, is refused as an older
+      // build, and (having reloaded away from it already) waits.
+      await waitForCondition(
+        async () => oldTab.getSyncStatus().link.state === "connecting",
+        10_000,
+        "The closed old tab should wait for the store, not stop",
+      );
+    } finally {
+      sessionStorage.removeItem(marker);
       setNewerBuildHandler(() => {});
     }
   });

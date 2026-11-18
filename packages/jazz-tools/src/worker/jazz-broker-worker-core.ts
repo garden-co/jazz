@@ -2347,6 +2347,9 @@ async function finalizeContextStorageReset(context: RuntimeContext): Promise<voi
  * haven't (a frozen or unresponsive tab: what it hadn't sent is lost), and
  * release the context. Every newer tab asking meanwhile shares one handoff.
  */
+/** How long a forced handoff waits for the closed tabs' received frames to be applied. */
+const FORCED_CLOSE_SETTLE_MS = 1_000;
+
 async function handOffToNewerBuild(context: RuntimeContext): Promise<void> {
   context.newerBuildHandoff ??= (async () => {
     broadcast(context, { type: "newer-build-waiting" });
@@ -2360,7 +2363,23 @@ async function handOffToNewerBuild(context: RuntimeContext): Promise<void> {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     if (!stillOpen()) return;
+    // Apply what the tabs still here already sent (bounded: their own
+    // durability is theirs), as a closing tab's flush would have, then tell
+    // them (those that can hear it) before closing them, a task later: a port
+    // closed in the same task can drop the message. Frames still on their
+    // way are lost, as a crashed tab's are.
+    await Promise.race([
+      Promise.all([...context.peers.values()].map((peer) => peer.pump?.settleInbound())),
+      new Promise((resolve) => setTimeout(resolve, FORCED_CLOSE_SETTLE_MS)),
+    ]).catch(() => undefined);
+    if (!stillOpen()) return;
+    broadcast(context, { type: "closed-for-newer-build" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (!stillOpen()) return;
     closeContextPeers(context);
+    // Returns early while another tab is mid-admission to this context: it
+    // stays, and the newer tab's admission is refused as held by another
+    // build, so it waits and tries again.
     await releaseIdleContext(context);
   })().finally(() => {
     context.newerBuildHandoff = null;

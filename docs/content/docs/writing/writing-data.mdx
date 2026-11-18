@@ -522,20 +522,23 @@ then, so a reload before it joins loses them.
 
 After a deploy that changes the schema, the newer build takes the local store, and tabs of the
 previous build reload. Each build knows its schema history (the versions and migrations in
-`jazz.generated.ts`), so Jazz can tell which build came later:
+`jazz.generated.ts`), so Jazz can tell which build came later: the one whose history contains the
+other's.
 
-- When a tab of the newer build opens, each tab of the older build stops taking writes (new ones
-  throw until it reloads). It makes the writes it already took durable in the local store and lets
-  go of the store. Then it reloads, which loads the newer build. A tab that doesn't let go within 5
-  seconds (frozen in the background, say) is closed: whatever it hadn't made durable is lost. The
-  newer tab then opens the store with its schema and reads the older rows through its migrations.
-  Writes the older build made but hadn't uploaded yet stay in the store and upload as they are, so
-  keep the previous schema version published until they have.
+- When a tab of the newer build opens, each tab of the older build stops taking writes (new writes,
+  queries and transaction commits throw until it reloads). It makes the writes it already took
+  durable in the local store and lets go of the store. Then it reloads, which loads the newer build.
+  A tab that doesn't let go within 5 seconds (frozen in the background, say) is closed, as a crashed
+  tab would be: the writes it had already handed to the shared worker are kept, and whatever it
+  hadn't sent yet is lost. The newer tab then opens the store with its schema and reads the older
+  rows through its migrations. Writes the older build made but hadn't uploaded yet stay in the store
+  and upload as they are, so keep the previous schema version published until they have.
 - A tab of the older build that opens while the newer one has the store (a stale tab, a page restored
-  from history) reloads too. If it still loads the older build (a CDN that hasn't caught up yet), it
-  doesn't reload again for 10 seconds, so it can't loop: it waits as described above.
+  from history) reloads too. If it loads the very same build again (a CDN that hasn't caught up, or
+  a rollback to the previous build, which Jazz orders as older), it doesn't reload again in that tab's
+  session: it waits as described above, and joins once the newer build's tabs have gone.
 - Builds Jazz can't order, because neither history contains the other (unrelated builds on one
-  origin, a rollback) or one ships none, don't take the store from each other: the newer tab waits.
+  origin) or one ships none, don't take the store from each other: the newer tab waits.
 
 To decide when the old tab reloads (after a "a new version is available" notice, or once a form is
 saved), pass `onNewerBuild` to `createJazzClient`. It gets the reload to call:
@@ -549,7 +552,8 @@ const session = await createJazzClient({
 });
 ```
 
-Until it calls `reload()`, the tab keeps reading what it shows, and its writes throw.
+Until it calls `reload()`, the tab keeps showing what it already shows; new writes, queries and
+commits throw.
 
 A brief drop shows as `connecting`, not `offline`, so a status badge doesn't flicker. `synced` is
 `true` when nothing waits for upload and the link is `connected` (or `local-only`).

@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  browserBuildId,
   newerBuildReloadAllowed,
   reloadForNewerBuild,
   setNewerBuildHandler,
 } from "./newer-build-reload.js";
+import type { WasmSchema } from "../drivers/types.js";
 
 function sessionStorageStub() {
   const values = new Map<string, string>();
@@ -13,21 +15,38 @@ function sessionStorageStub() {
   };
 }
 
+const v1 = {
+  todos: { columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }] },
+} as unknown as WasmSchema;
+const v2 = {
+  todos: {
+    columns: [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: true },
+    ],
+  },
+} as unknown as WasmSchema;
+
 afterEach(() => setNewerBuildHandler(undefined));
 
 describe("reloading for a newer build", () => {
-  it("reloads at once without a handler, and not again within the loop window", () => {
+  it("names a build by its exact schema", () => {
+    expect(browserBuildId(v1)).toBe(browserBuildId(structuredClone(v1)));
+    expect(browserBuildId(v1)).not.toBe(browserBuildId(v2));
+  });
+
+  it("reloads at once without a handler, and never again from the same build in this session", () => {
     const storage = sessionStorageStub();
     const reload = vi.fn();
-    let now = 1_000_000;
-    expect(newerBuildReloadAllowed({ storage, now: () => now })).toBe(true);
-    reloadForNewerBuild({ storage, reload, now: () => now });
+    const build = browserBuildId(v1);
+    expect(newerBuildReloadAllowed(build, { storage })).toBe(true);
+    reloadForNewerBuild(build, { storage, reload });
     expect(reload).toHaveBeenCalledOnce();
-    // Reloaded, and still an older build (a CDN serving it): don't loop.
-    now += 5_000;
-    expect(newerBuildReloadAllowed({ storage, now: () => now })).toBe(false);
-    now += 10_000;
-    expect(newerBuildReloadAllowed({ storage, now: () => now })).toBe(true);
+    // It loaded the same build again (a stale CDN, a rollback): however long
+    // it keeps being refused as older, it doesn't reload again.
+    expect(newerBuildReloadAllowed(build, { storage })).toBe(false);
+    // Once on another build, a later newer deploy reloads it as usual.
+    expect(newerBuildReloadAllowed(browserBuildId(v2), { storage })).toBe(true);
   });
 
   it("hands the reload to the app's onNewerBuild, which calls it when it suits it", () => {
@@ -35,7 +54,7 @@ describe("reloading for a newer build", () => {
     const reload = vi.fn();
     let later!: () => void;
     setNewerBuildHandler((go) => (later = go));
-    reloadForNewerBuild({ storage, reload });
+    reloadForNewerBuild("build", { storage, reload });
     expect(reload).not.toHaveBeenCalled();
     later();
     expect(reload).toHaveBeenCalledOnce();
@@ -47,7 +66,7 @@ describe("reloading for a newer build", () => {
     setNewerBuildHandler(() => {
       throw new Error("app bug");
     });
-    reloadForNewerBuild({ storage: sessionStorageStub(), reload });
+    reloadForNewerBuild("build", { storage: sessionStorageStub(), reload });
     expect(reload).toHaveBeenCalledOnce();
     warn.mockRestore();
   });

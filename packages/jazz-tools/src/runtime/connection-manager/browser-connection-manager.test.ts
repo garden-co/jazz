@@ -14,7 +14,7 @@ import type { DbForConnection } from "./types.js";
 import type { RemoteLinkState } from "../remote-link-state.js";
 import type { LinkStatus } from "../sync-status.js";
 import { pageCacheForTest } from "../page-cache.js";
-import { setNewerBuildHandler } from "../newer-build-reload.js";
+import { browserBuildId, setNewerBuildHandler } from "../newer-build-reload.js";
 
 function deferred() {
   let resolve!: () => void;
@@ -2045,6 +2045,37 @@ describe("BrowserConnectionManager and a newer build of the app", () => {
       fixture.allowFinish();
       fixture.host.phase = "closing";
       await fixture.manager.shutdown().catch(() => undefined);
+    }
+  });
+
+  it("never reloads again from a build it already reloaded away from, however often it is refused as older: it waits", async () => {
+    // A stale CDN, or a rollback to the previous build: reloading lands on the
+    // same build, which the store's newer build keeps refusing.
+    vi.useFakeTimers();
+    const reloads = vi.fn();
+    setNewerBuildHandler(reloads);
+    vi.stubGlobal("sessionStorage", {
+      getItem: () => browserBuildId({}),
+      setItem: () => {},
+    });
+    const { manager, host, connections } = admissionManager(true, "older-build");
+    try {
+      let failure: unknown;
+      const waiting = manager.ensureReady("runtime").catch((error: unknown) => {
+        failure = error;
+      });
+      await vi.advanceTimersByTimeAsync(120_000);
+      await waiting;
+      expect(connections.length).toBeGreaterThan(5);
+      expect(reloads).not.toHaveBeenCalled();
+      // It waits as for a build it can't order, and reports it past the patience.
+      expect(isStoreHeldByAnotherTabError(failure)).toBe(true);
+      expect(() => manager.getClient({})).not.toThrow("older build of this app");
+    } finally {
+      vi.unstubAllGlobals();
+      host.phase = "closing";
+      await manager.shutdown().catch(() => undefined);
+      vi.useRealTimers();
     }
   });
 

@@ -22,7 +22,11 @@ import { assertBrowserStorageOwnerUnchanged } from "../browser-worker-config.js"
 import { waitForInspectorOpening } from "../native-runtime/inspector-control-lifecycle.js";
 import { toError } from "../util.js";
 import { holdAcrossPageCache } from "../page-cache.js";
-import { newerBuildReloadAllowed, reloadForNewerBuild } from "../newer-build-reload.js";
+import {
+  browserBuildId,
+  newerBuildReloadAllowed,
+  reloadForNewerBuild,
+} from "../newer-build-reload.js";
 
 interface BrowserConnectionScope {
   readonly connection: BrowserWorkerConnection;
@@ -314,7 +318,8 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.rejectReconnectWaiters(error);
     this.notifyWorkerRemoteLink();
     // A newer build has the store: this tab reloads to run it too (unless it
-    // just did, and still loaded the older build: then it waits, as below).
+    // already reloaded away from this build in its session and loaded it
+    // again: then it waits, as below, on every later refusal too).
     if (connection.isOlderThanStore?.()) this.yieldToNewerBuild(connection);
     const refused = this.admissionRefused(connection);
     // A refusal for another reason (an older deploy's schema) means the other
@@ -390,21 +395,27 @@ export class BrowserConnectionManager extends ConnectionManager {
    * fail with `olderBuildError` until it reloads), makes those it took
    * durable, closes its connection so the worker can hand the store over,
    * then reloads, through the app's `onNewerBuild` if it has one. A tab
-   * that reloaded for this moments ago and still runs an older build (a CDN
-   * serving it) doesn't: it waits, as for another build's tab.
+   * that already reloaded away from this very build in its session, and
+   * loaded it again (a CDN still serving it, or a rollback to it), doesn't:
+   * it waits, as for a build it can't order, for the rest of the session.
    */
   private yieldToNewerBuild(connection: BrowserWorkerConnection): void {
     if (this.olderBuildError || this.shutdownStarted || this.dbStopping) return;
-    if (this.connection !== connection || !newerBuildReloadAllowed()) return;
+    const input = this.browserConnectionInput;
+    if (this.connection !== connection || !input) return;
+    const buildId = browserBuildId(input.schema);
+    if (!newerBuildReloadAllowed(buildId)) return;
     this.olderBuildError = new Error(
       "This tab runs an older build of this app than another tab, which has its local store now: reload this tab",
     );
+    // A transaction opened before commits through its client, not the Db.
+    this.getCurrentClient()?.refuseWrites?.(this.olderBuildError);
     this.wakeReplacementWaiters();
     void (async () => {
       // Writes already taken reach the store before the worker hands it over.
       await connection.flushLocal().catch(() => undefined);
       await connection.shutdown().catch(() => undefined);
-    })().then(() => reloadForNewerBuild());
+    })().then(() => reloadForNewerBuild(buildId));
   }
 
   /** The error that waits fail with past the patience, saying which other tab to reload. */

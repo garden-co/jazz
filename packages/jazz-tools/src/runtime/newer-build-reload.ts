@@ -1,3 +1,6 @@
+import type { WasmSchema } from "../drivers/types.js";
+import { getRuntimeSchemaCacheKey } from "../drivers/schema-wire.js";
+
 /**
  * What a tab does when a newer build of the app wants its local-first store
  * (see `BrowserConnectionManager.yieldToNewerBuild`): reload, so it runs the
@@ -10,9 +13,13 @@
 /** The `createJazzClient` option: call `reload()` to load the newer build. */
 export type NewerBuildHandler = (reload: () => void) => void;
 
-const RELOAD_MARKER = "jazz:newer-build-reload";
-/** A page that reloads for a newer build and still finds itself older within this window (a CDN serving the old build) doesn't reload again. */
-const RELOAD_LOOP_WINDOW_MS = 10_000;
+/**
+ * The build this tab last reloaded away from, for a newer one. A tab that
+ * finds itself on that same build again (a CDN still serving it, or a
+ * rollback to it) doesn't reload again in this tab's session: it waits, as
+ * for a build it can't order. Keyed by build, not time, so it can't loop.
+ */
+const RELOAD_MARKER = "jazz:newer-build-reloaded-from";
 
 let handler: NewerBuildHandler | undefined;
 
@@ -22,35 +29,40 @@ export function setNewerBuildHandler(next: NewerBuildHandler | undefined): void 
 }
 
 type ReloadContext = {
-  now?: () => number;
   storage?: Pick<Storage, "getItem" | "setItem">;
   reload?: () => void;
 };
 
+/** A short, stable name for the build that ships `schema`: its exact schema. */
+export function browserBuildId(schema: WasmSchema): string {
+  // FNV-1a: sessionStorage keeps a few characters, not the whole schema.
+  let hash = 0x811c9dc5;
+  for (const char of getRuntimeSchemaCacheKey(schema)) {
+    hash ^= char.codePointAt(0)!;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16);
+}
+
 /**
- * Whether this page may reload for a newer build now: not when it already
- * did moments ago (it loaded an older build again, so reloading again would
- * loop). Without sessionStorage it may.
+ * Whether this tab, on build `buildId`, may reload for a newer build: not
+ * when it already reloaded away from this very build in this tab's session
+ * and loaded it again (reloading again would loop). Without sessionStorage
+ * it may (and can't loop more than the browser lets it).
  */
-export function newerBuildReloadAllowed(context: ReloadContext = {}): boolean {
-  const now = (context.now ?? Date.now)();
+export function newerBuildReloadAllowed(buildId: string, context: ReloadContext = {}): boolean {
   try {
-    const storage = context.storage ?? globalThis.sessionStorage;
-    const previous = Number(storage.getItem(RELOAD_MARKER) ?? 0);
-    return !(Number.isFinite(previous) && now - previous < RELOAD_LOOP_WINDOW_MS);
+    return (context.storage ?? globalThis.sessionStorage).getItem(RELOAD_MARKER) !== buildId;
   } catch {
     return true;
   }
 }
 
-/** Reload for a newer build: through the page's handler, or at once. */
-export function reloadForNewerBuild(context: ReloadContext = {}): void {
+/** Reload away from build `buildId` for a newer one: through the page's handler, or at once. */
+export function reloadForNewerBuild(buildId: string, context: ReloadContext = {}): void {
   const reload = () => {
     try {
-      (context.storage ?? globalThis.sessionStorage).setItem(
-        RELOAD_MARKER,
-        String((context.now ?? Date.now)()),
-      );
+      (context.storage ?? globalThis.sessionStorage).setItem(RELOAD_MARKER, buildId);
     } catch {
       // Reloading still loads the newer build.
     }
