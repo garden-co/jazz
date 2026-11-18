@@ -3321,6 +3321,32 @@ mod tests {
     /// ```
     #[test]
     fn an_account_root_must_name_how_the_registry_says_its_account_was_founded() {
+        let dir = tempfile::tempdir().unwrap();
+        account_root_follows_the_registry(
+            AppStore::open(&StorageConfig::data_dir(dir.path())).unwrap(),
+            true,
+        );
+    }
+
+    /// A store whose registry tables were never created reads as an error,
+    /// not as an account nobody founded: the check refuses the upload
+    /// instead of falling back to the session's issuer.
+    #[test]
+    fn a_store_without_the_registry_tables_refuses_account_records() {
+        account_root_follows_the_registry(AppStore::memory().unwrap(), false);
+    }
+
+    /// The same on a memory store, a shared in-memory database without a
+    /// write-ahead log: the registry is read on a second connection while
+    /// the store's own connection holds the upload's write transaction.
+    #[test]
+    fn an_account_root_is_checked_against_the_registry_on_a_memory_store() {
+        account_root_follows_the_registry(AppStore::memory().unwrap(), true);
+    }
+
+    /// With `registry`, the account's registry is opened and names the app
+    /// as its founder; without, the store has no registry tables at all.
+    fn account_root_follows_the_registry(store: AppStore, registry: bool) {
         use crate::server::account_store::StoredAccountRegistry;
         use jazz::db::{InsertOptions, WriteIdentity};
         use jazz::ids::RowUuid;
@@ -3331,18 +3357,20 @@ mod tests {
         use jazz::tools::public_schema::{EncryptedColumn, EncryptionEntry, PlainType, SweepBy};
 
         let app = "founders-view-test";
-        let dir = tempfile::tempdir().unwrap();
-        let store = AppStore::open(&StorageConfig::data_dir(dir.path())).unwrap();
         store.set_app(app);
-        let mut registry = StoredAccountRegistry::open(store.sql().unwrap()).unwrap();
-        let alice = registry
-            .login_or_register(&jazz::account_registry::Principal {
-                issuer: "https://issuer.example".into(),
-                subject: "alice".into(),
-            })
-            .unwrap()
-            .assignment
-            .account;
+        let alice = if registry {
+            StoredAccountRegistry::open(store.sql().unwrap())
+                .unwrap()
+                .login_or_register(&jazz::account_registry::Principal {
+                    issuer: "https://issuer.example".into(),
+                    subject: "alice".into(),
+                })
+                .unwrap()
+                .assignment
+                .account
+        } else {
+            jazz::account_registry::AccountId(uuid::Uuid::from_bytes([0xa1; 16]))
+        };
 
         // Tasks encrypt their title in their project's space.
         let encrypted = BTreeMap::from([(
@@ -3462,10 +3490,25 @@ mod tests {
         block_on(runtime.with_db_for_test(move |db| {
             commit(db, vec![(system_tables::DEVICE_REQUESTS, device, request)])
                 .map_err(|error| format!("the device request: {error}"))?;
+            if !registry {
+                // Not "no registry, so the session's issuer decides": the
+                // unreadable registry refuses either root.
+                for kind in ["local-first", "app"] {
+                    let error = commit(db, identity_and_root(kind))
+                        .expect_err("a store without the registry tables");
+                    assert!(error.contains("account registry"), "{kind}: {error}");
+                }
+                return Ok(());
+            }
             // Without the registry the session's issuer would decide, and
             // a local-first session's root would have to say "local-first".
-            commit(db, identity_and_root("local-first"))
+            // The refusal is the policy check's, not some other error.
+            let error = commit(db, identity_and_root("local-first"))
                 .expect_err("the registry says the app founded the account");
+            assert!(
+                error.contains("INSERT policy denied") && error.contains("account_roots"),
+                "{error}"
+            );
             commit(db, identity_and_root("app"))
                 .map_err(|error| format!("the root the registry names: {error}"))
         }))

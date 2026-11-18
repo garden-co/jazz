@@ -106,44 +106,73 @@ fn unix_now_ms() -> u64 {
 }
 
 /// The registry as core's checks beside the account tables' policies read
-/// it (E2EE protocol R5, R6): on a connection of its own, which sees what
-/// the registry committed, so a check never waits for the store's thread.
+/// it (E2EE protocol R5, R6). Core reads it on the store's own connection,
+/// inside the write's transaction: a second connection to a shared
+/// in-memory database, which has no write-ahead log, is locked out while
+/// the store's connection holds a write. The reader kept beside it serves
+/// callers that hold no connection.
 pub(crate) struct RegistryFounders {
     reader: jazz::host::HostReader,
     app: Uuid,
+}
+
+/// The identities of `account` in the registry's tables on `conn`, or none
+/// for a store whose registry never opened.
+fn identities_of(
+    conn: &jazz::storage::Storage,
+    account: AccountId,
+) -> Result<Vec<(String, String)>, jazz::db::Error> {
+    let mut statement = conn
+        .prepare_cached(
+            "SELECT issuer, subject FROM _jazz_host_account_identities WHERE account = ?1",
+        )
+        .map_err(registry::storage_error)?;
+    let rows = statement
+        .query_map([account.0.as_bytes()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(registry::storage_error)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(registry::storage_error)
+}
+
+/// How many identities of `account` are not local-first.
+fn external_identities_of(
+    conn: &jazz::storage::Storage,
+    account: AccountId,
+) -> Result<i64, jazz::db::Error> {
+    let mut statement = conn
+        .prepare_cached(
+            "SELECT COUNT(*) FROM _jazz_host_account_identities \
+             WHERE account = ?1 AND issuer <> ?2",
+        )
+        .map_err(registry::storage_error)?;
+    statement
+        .query_row(
+            rusqlite::params![account.0.as_bytes(), jazz::identity::DEVICE_ACCOUNT_ISSUER],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(registry::storage_error)
 }
 
 impl RegistryFounders {
     pub(crate) fn new(reader: jazz::host::HostReader, app: Uuid) -> Self {
         Self { reader, app }
     }
-}
 
-impl jazz::db::AccountRegistryView for RegistryFounders {
     /// An account was founded by a local-first identity when one of its
     /// local-first identities derives its id: linking a local-first
     /// identity into another account keeps that account's id.
-    fn founded_local_first(&self, account: AccountId) -> Result<Option<bool>, String> {
-        let issuers = self.reader.sql(|conn| {
-            let mut statement = conn
-                .prepare_cached(
-                    "SELECT issuer, subject FROM _jazz_host_account_identities WHERE account = ?1",
-                )
-                .map_err(registry::storage_error)?;
-            let rows = statement
-                .query_map([account.0.as_bytes()], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })
-                .map_err(registry::storage_error)?;
-            rows.collect::<Result<Vec<_>, _>>()
-                .map_err(registry::storage_error)
-        });
-        let identities = match issuers {
-            Ok(identities) => identities,
-            // A store whose registry never opened knows no account.
-            Err(error) if error.to_string().contains("no such table") => return Ok(None),
-            Err(error) => return Err(error.to_string()),
-        };
+    fn founded(
+        &self,
+        account: AccountId,
+        identities: Result<Vec<(String, String)>, jazz::db::Error>,
+    ) -> Result<Option<bool>, String> {
+        // A registry that cannot be read, a missing table included, is an
+        // error that refuses the write: never "an account nobody founded",
+        // which would let the session's issuer decide.
+        let identities =
+            identities.map_err(|error| format!("the account registry cannot be read: {error}"))?;
         if identities.is_empty() {
             return Ok(None);
         }
@@ -151,6 +180,23 @@ impl jazz::db::AccountRegistryView for RegistryFounders {
             issuer == jazz::identity::DEVICE_ACCOUNT_ISSUER
                 && jazz::account_registry::device_account_id(self.app, subject) == account
         })))
+    }
+}
+
+impl jazz::db::AccountRegistryView for RegistryFounders {
+    fn founded_local_first(&self, account: AccountId) -> Result<Option<bool>, String> {
+        self.founded(
+            account,
+            self.reader.sql(|conn| identities_of(conn, account)),
+        )
+    }
+
+    fn founded_local_first_on(
+        &self,
+        store: &jazz::storage::Storage,
+        account: AccountId,
+    ) -> Result<Option<bool>, String> {
+        self.founded(account, identities_of(store, account))
     }
 
     /// An account whose identities are all local-first and none of which
@@ -167,21 +213,24 @@ impl jazz::db::AccountRegistryView for RegistryFounders {
         if founded {
             return Ok(false);
         }
-        let identities = self.reader.sql(|conn| {
-            let mut statement = conn
-                .prepare_cached(
-                    "SELECT COUNT(*) FROM _jazz_host_account_identities \
-                     WHERE account = ?1 AND issuer <> ?2",
-                )
-                .map_err(registry::storage_error)?;
-            statement
-                .query_row(
-                    rusqlite::params![account.0.as_bytes(), jazz::identity::DEVICE_ACCOUNT_ISSUER],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map_err(registry::storage_error)
-        });
-        identities
+        self.reader
+            .sql(|conn| external_identities_of(conn, account))
+            .map(|external| external == 0)
+            .map_err(|error| error.to_string())
+    }
+
+    fn founded_for_another_audience_on(
+        &self,
+        store: &jazz::storage::Storage,
+        account: AccountId,
+    ) -> Result<bool, String> {
+        let Some(founded) = self.founded_local_first_on(store, account)? else {
+            return Ok(false);
+        };
+        if founded {
+            return Ok(false);
+        }
+        external_identities_of(store, account)
             .map(|external| external == 0)
             .map_err(|error| error.to_string())
     }
