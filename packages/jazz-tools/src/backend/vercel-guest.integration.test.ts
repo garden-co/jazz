@@ -256,6 +256,10 @@ function fakeSandbox(appId: string, issuer: string, guestsOff = false) {
       },
     },
     Drive: {
+      async get() {
+        if (!state.drive) throw new Error("404 drive not found");
+        return { region: "iad1" };
+      },
       async getOrCreate() {
         state.drive = true;
         return { region: "iad1" };
