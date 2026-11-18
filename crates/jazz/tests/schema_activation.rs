@@ -1,6 +1,8 @@
-//! Activating a schema on a live or reopened SQLite store: the stored tables
+//! Installing a newer schema when a SQLite store opens: the stored tables
 //! grow (new tables, columns, indexes) and nothing already stored changes.
-//! Changes SQLite cannot make in place fail with "not supported yet".
+//! Changes SQLite cannot make in place fail with "not supported yet", and
+//! the store keeps opening under its old schema. A running store never
+//! switches schema: a deployment installs its schema at startup.
 
 use crate::common;
 
@@ -102,10 +104,13 @@ fn indexes(path: &PathBuf) -> Vec<String> {
 }
 
 #[test]
-fn activating_a_newer_schema_grows_the_live_store() {
-    let db = block_on(Db::open(config(v1()))).unwrap();
-    insert_v1(&db, 1);
-    block_on(db.activate_schema(v2())).unwrap();
+fn opening_under_a_newer_schema_grows_the_store() {
+    let path = scratch("grow");
+    {
+        let db = block_on(Db::open_at(config(v1()), &path, FileOptions::default())).unwrap();
+        insert_v1(&db, 1);
+    }
+    let db = block_on(Db::open_at(config(v2()), &path, FileOptions::default())).unwrap();
     assert_eq!(
         cell(&db, "items", "label"),
         vec![Some(Value::String("i1".into()))]
@@ -129,8 +134,11 @@ fn activating_a_newer_schema_grows_the_live_store() {
         cell(&db, "tags", "name"),
         vec![Some(Value::String("t".into()))]
     );
-    // Activating the same schema again changes nothing.
-    block_on(db.activate_schema(v2())).unwrap();
+    drop(db);
+    // Opening under the same schema again changes nothing.
+    let db = block_on(Db::open_at(config(v2()), &path, FileOptions::default())).unwrap();
+    assert_eq!(cell(&db, "items", "label").len(), 1);
+    assert_eq!(cell(&db, "tags", "name").len(), 1);
 }
 
 #[test]
@@ -172,7 +180,12 @@ fn reopening_with_a_newer_schema_extends_the_file_once() {
 
 #[test]
 fn changes_sqlite_cannot_make_in_place_are_not_supported_yet() {
-    let db = block_on(Db::open(config(v1()))).unwrap();
+    let path = scratch("unsupported");
+    {
+        let db = block_on(Db::open_at(config(v1()), &path, FileOptions::default())).unwrap();
+        insert_v1(&db, 1);
+    }
+    let open = |schema| block_on(Db::open_at(config(schema), &path, FileOptions::default()));
     let retyped = compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -182,7 +195,7 @@ fn changes_sqlite_cannot_make_in_place_are_not_supported_yet() {
             )
             .build(),
     );
-    let error = block_on(db.activate_schema(retyped)).unwrap_err();
+    let error = open(retyped).err().unwrap();
     assert!(error.to_string().contains("not supported"), "{error}");
 
     let required = compile_schema(
@@ -190,6 +203,11 @@ fn changes_sqlite_cannot_make_in_place_are_not_supported_yet() {
             .table(items(|t| t.column("must", ColumnType::Text)))
             .build(),
     );
-    let error = block_on(db.activate_schema(required)).unwrap_err();
+    // Nothing was installed: the store still opens under v1 with its row.
+    let db = open(v1()).unwrap();
+    assert_eq!(cell(&db, "items", "label").len(), 1);
+    // A deploy admits a new version before any store opens under it, and
+    // admission refuses a required column old rows cannot fill.
+    let error = block_on(db.admit_schema_with_lenses(required, &[])).unwrap_err();
     assert!(error.to_string().contains("not supported"), "{error}");
 }

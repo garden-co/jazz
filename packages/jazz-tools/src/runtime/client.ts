@@ -346,6 +346,8 @@ export interface Runtime {
   endCredentialWait?(): void;
   /** Register a callback invoked when the Rust transport rejects the JWT. */
   onAuthFailure(callback: (reason: string) => void): void;
+  /** Register a callback invoked when the server admits this client's link again. */
+  onAuthRestored?(callback: () => void): void;
 }
 
 /**
@@ -593,6 +595,8 @@ export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> 
   openTransactionId?: OpenTransactionId;
   /** Columns whose updates a subscription also delivers as splices. */
   splices?: readonly string[];
+  /** A subscription's backlog limit, in changed rows (see `QueryOptions.backlogRows`). */
+  backlogRows?: number;
 };
 
 export interface ResolvedQueryExecutionOptions {
@@ -602,6 +606,7 @@ export interface ResolvedQueryExecutionOptions {
   visibility: QueryVisibility;
   branch?: BranchView;
   splices?: readonly string[];
+  backlogRows?: number;
 }
 
 type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
@@ -721,6 +726,8 @@ export interface SubscriptionCallbacks {
 
 export interface ConnectRuntimeOptions {
   onAuthFailure?: (reason: AuthFailureReason) => void;
+  /** The server admitted this client's link (again), so an earlier refusal no longer holds. */
+  onAuthRestored?: () => void;
 }
 
 type QueryExecutionDefaultsContext = {
@@ -753,6 +760,7 @@ export function resolveEffectiveQueryExecutionOptions(
     visibility: options?.visibility ?? "public",
     branch: options?.branch,
     ...(options?.splices?.length ? { splices: options.splices } : {}),
+    ...(options?.backlogRows !== undefined ? { backlogRows: options.backlogRows } : {}),
   };
 }
 
@@ -785,6 +793,7 @@ function encodeQueryExecutionOptions(
     first_load_remote_wait_ms?: number;
     transaction_id?: string;
     splices?: readonly string[];
+    backlog_rows?: number;
     read_view?: {
       source: {
         BranchView: {
@@ -815,12 +824,14 @@ function encodeQueryExecutionOptions(
   }
 
   if (options.splices?.length) payload.splices = options.splices;
+  if (options.backlogRows !== undefined) payload.backlog_rows = options.backlogRows;
 
   if (
     !payload.transaction_id &&
     !payload.first_load_remote_wait_ms &&
     !payload.read_view &&
-    !payload.splices
+    !payload.splices &&
+    payload.backlog_rows === undefined
   ) {
     return undefined;
   }
@@ -1261,6 +1272,8 @@ export class JazzClient {
       this.handleCredentialRefusal(reason);
       onAuthFailure?.(reason);
     });
+    const onAuthRestored = runtimeOptions?.onAuthRestored;
+    if (onAuthRestored) this.runtime.onAuthRestored?.(onAuthRestored);
 
     this.runtime.onMutationError((event) => {
       console.error("Unhandled Jazz mutation error", event);

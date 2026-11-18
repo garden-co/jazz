@@ -673,26 +673,26 @@ fn an_offline_write_relayed_for_a_tab_is_reported_to_the_tab() {
     );
     let open = block_on(server.publish_bundle(&users(PolicyExpr::True))).unwrap();
     let alice = AuthorSubject::for_test_bytes([0x55; 16]);
-    let edge = client(5, alice);
-    edge.track_upstream_rejections();
-    let (edge_up, server_side) = duplex();
-    let _edge_upstream = block_on(edge.connect_upstream(edge_up));
+    let relay = client(5, alice);
+    relay.track_upstream_rejections();
+    let (relay_up, server_side) = duplex();
+    let _relay_upstream = block_on(relay.connect_upstream(relay_up));
     let session = server
         .accept_pinned_subscriber(server_side, alice, None, Some(open))
         .unwrap();
     let tab = client(1, alice);
     tab.track_upstream_rejections();
-    let (tab_side, edge_side) = duplex();
+    let (tab_side, relay_side) = duplex();
     let _tab_upstream = block_on(tab.connect_upstream(tab_side));
-    edge.accept_subscriber(edge_side, alice).unwrap();
+    relay.accept_subscriber(relay_side, alice).unwrap();
     let prepared = tab.prepare_query(&Query::from("users")).unwrap();
     let _stream = block_on(tab.subscribe(&prepared, ReadOpts::default())).unwrap();
     let pump_all = |server: &Db| {
         for _ in 0..6 {
             block_on(tab.tick()).unwrap();
-            block_on(edge.tick()).unwrap();
+            block_on(relay.tick()).unwrap();
             block_on(server.tick()).unwrap();
-            block_on(edge.tick()).unwrap();
+            block_on(relay.tick()).unwrap();
         }
         block_on(tab.tick()).unwrap();
     };
@@ -723,18 +723,18 @@ fn an_offline_write_relayed_for_a_tab_is_reported_to_the_tab() {
     .unwrap();
     pump_all(&server);
     let (client_side, server_side) = duplex();
-    let _upstream = block_on(edge.connect_upstream(client_side));
+    let _upstream = block_on(relay.connect_upstream(client_side));
     server
         .accept_pinned_subscriber(server_side, alice, None, Some(strict))
         .unwrap();
     pump_all(&server);
 
     let at_tab = tab.take_upstream_rejections();
-    let at_edge = edge.take_upstream_rejections();
+    let at_relay = relay.take_upstream_rejections();
     assert_eq!(
         at_tab.iter().map(|r| r.seq).collect::<Vec<_>>(),
         [written.mergeable_tx_id(), built_on.mergeable_tx_id()],
-        "the refusals reach the tab (edge saw {at_edge:?})"
+        "the refusals reach the tab (relay saw {at_relay:?})"
     );
     assert!(
         at_tab[0].error.is_authorization_denied(),
