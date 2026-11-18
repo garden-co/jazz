@@ -297,7 +297,7 @@ mod tests {
         let subject = subject(seed);
         AuthorSubject::reserved(identity::DEVICE_ACCOUNT_ISSUER, &subject)
             .unwrap()
-            .with_account(jazz::account_registry::local_first_account_id(
+            .with_account(jazz::account_registry::device_account_id(
                 *accounts::local_first_founding_app(audience).uuid(),
                 &subject,
             ))
