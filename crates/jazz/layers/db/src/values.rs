@@ -28,8 +28,8 @@ pub(crate) fn query_error(what: impl std::fmt::Display) -> Error {
 pub(crate) trait CachedRow {
     fn cached_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
     where
-        P: rusqlite::Params,
-        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>;
+        P: crate::storage::Params,
+        F: FnOnce(&crate::storage::Row<'_>) -> rusqlite::Result<T>;
 }
 
 pub(crate) fn storage(error: rusqlite::Error) -> Error {
@@ -45,13 +45,19 @@ pub(crate) fn storage(error: rusqlite::Error) -> Error {
 pub(crate) fn begin_savepoint(conn: &Storage, name: &str) -> Result<(), Error> {
     conn.execute_batch(&format!("SAVEPOINT {name}"))
         .map_err(storage)?;
+    open_tag_undo(conn);
+    Ok(())
+}
+
+/// Open a tag-undo log for a scope opening on `conn` ([`close_tag_undo`]
+/// closes it).
+pub(crate) fn open_tag_undo(conn: &Storage) {
     TAG_UNDO.with(|undo| {
         undo.borrow_mut()
             .entry(undo_key(conn))
             .or_default()
             .push(Vec::new())
     });
-    Ok(())
 }
 
 thread_local! {
@@ -120,7 +126,7 @@ pub(crate) fn tags_changing(conn: &Storage, tags: &ColumnTags) {
 /// the enclosing savepoint's (the outermost's are committed); rolled back,
 /// its columns' tags are put back. `all` closes every open log (SQLite
 /// rolled the whole transaction back).
-fn close_tag_undo(conn: &Storage, kept: bool, all: bool) {
+pub(crate) fn close_tag_undo(conn: &Storage, kept: bool, all: bool) {
     TAG_UNDO.with(|undo| {
         let mut undo = undo.borrow_mut();
         let key = undo_key(conn);
@@ -241,6 +247,19 @@ impl Sql {
             Sql::Real(v) => ValueRef::Real(*v),
             Sql::Text(v) => ValueRef::Text(v),
             Sql::Blob(v) => ValueRef::Blob(v),
+        }
+    }
+}
+
+impl Sql {
+    /// The value as SQLite holds it, borrowed.
+    pub fn as_value_ref(&self) -> ValueRef<'_> {
+        match self {
+            Self::Null => ValueRef::Null,
+            Self::Integer(n) => ValueRef::Integer(*n),
+            Self::Real(n) => ValueRef::Real(*n),
+            Self::Text(bytes) => ValueRef::Text(bytes),
+            Self::Blob(bytes) => ValueRef::Blob(bytes),
         }
     }
 }

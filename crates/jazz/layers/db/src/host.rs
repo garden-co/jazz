@@ -104,12 +104,15 @@ pub trait HostTables {
 /// runs `ANALYZE`, uses no `LIKE` on bound patterns and no partial indexes,
 /// so the guarantee costs no plan it would otherwise pick.
 pub(crate) fn stable_plans(conn: &Storage) -> Result<(), Error> {
-    conn.native_conn()
-        .set_db_config(
-            rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_QPSG,
-            true,
-        )
-        .map_err(storage)?;
+    // Managed SQL plans as its host does.
+    let Some(conn) = conn.native_conn() else {
+        return Ok(());
+    };
+    conn.set_db_config(
+        rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_QPSG,
+        true,
+    )
+    .map_err(storage)?;
     Ok(())
 }
 

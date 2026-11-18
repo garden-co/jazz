@@ -3913,7 +3913,13 @@ struct FollowAt(u64, u64);
 
 impl FollowAt {
     fn of(conn: &Storage) -> Self {
-        Self(conn.total_changes(), crate::values::rollbacks(conn))
+        // A store that can't say how many rows changed gets a position no
+        // other matches, so nothing is reused across it.
+        static UNKNOWN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+        let changes = conn
+            .total_changes()
+            .unwrap_or_else(|_| UNKNOWN.fetch_sub(1, std::sync::atomic::Ordering::Relaxed));
+        Self(changes, crate::values::rollbacks(conn))
     }
 }
 
@@ -4032,8 +4038,8 @@ pub fn set_follow_read_hook_for_test(hook: Option<FollowReadHook>) {
 #[cfg(any(test, feature = "testing"))]
 fn follow_read_hook(conn: &Storage, table: &str, column: &str) {
     FOLLOW_READ_HOOK.with(|cell| {
-        if let Some(hook) = cell.borrow_mut().as_mut() {
-            hook(conn.native_conn(), table, column);
+        if let (Some(hook), Some(conn)) = (cell.borrow_mut().as_mut(), conn.native_conn()) {
+            hook(conn, table, column);
         }
     });
 }
@@ -5476,9 +5482,8 @@ impl Inner {
         let rows = statement
             .query_map(params, |r| {
                 if names.is_empty() {
-                    let statement = r.as_ref();
-                    names = (0..statement.column_count())
-                        .map(|i| statement.column_name(i).map(str::to_owned))
+                    names = (0..r.column_count())
+                        .map(|i| r.column_name(i).map(str::to_owned))
                         .collect::<Result<_, _>>()?;
                 }
                 let mut image = Image {
@@ -6020,11 +6025,8 @@ impl Inner {
         let Some(arity) = keys.first().map(Vec::len) else {
             return Ok(Vec::new());
         };
-        let variables = self
-            .conn
-            .limit(rusqlite::limits::Limit::SQLITE_LIMIT_VARIABLE_NUMBER)
-            .map_err(storage)?;
-        let largest = (usize::try_from(variables).unwrap_or(0) / arity).clamp(1, SIZES[3]);
+        let variables = self.conn.max_parameters().map_err(storage)?;
+        let largest = (variables / arity).clamp(1, SIZES[3]);
         let sizes: Vec<usize> = SIZES
             .into_iter()
             .filter(|size| *size < largest)
