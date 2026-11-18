@@ -185,7 +185,9 @@ fn an_encrypted_app_deploys_and_keeps_its_declarations() {
         let mut host = Host::new(backing);
 
         let app = loaded(APP);
-        let response = host.deploy(&app.deployment_body(false)).unwrap();
+        let response = host
+            .deploy(&app.deployment_body(false))
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
         assert_eq!(response["bundle"], app.bundle().to_hex());
         assert!(response.get("warnings").is_none(), "{response}");
 
@@ -209,7 +211,7 @@ fn an_encrypted_app_deploys_and_keeps_its_declarations() {
 /// kept.
 #[test]
 fn a_later_deploy_cannot_change_a_versions_declarations() {
-    for (name, backing) in hosts() {
+    for (_, backing) in hosts() {
         let mut host = Host::new(backing);
 
         let app = loaded(APP);
@@ -240,7 +242,7 @@ fn a_later_deploy_cannot_change_a_versions_declarations() {
 /// its body is read as a plain deploy request.
 #[test]
 fn an_app_without_encryption_deploys_as_before() {
-    for (name, backing) in hosts() {
+    for (_, backing) in hosts() {
         let mut host = Host::new(backing);
 
         let app = plain();
@@ -279,7 +281,7 @@ fn an_account_root_of_the_wrong_kind_is_refused() {
     // A Durable Object core accepts only finished transactions, which this
     // test cannot author on it (see the founders view test below, which
     // reads on the object's connection).
-    for (name, backing) in hosts().into_iter().take(1) {
+    for (_, backing) in hosts().into_iter().take(1) {
         let mut host = Host::new(backing);
         // A core whose own schema carries the app's policies, as a session
         // pinned to the deployed bundle is governed by them.
