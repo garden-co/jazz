@@ -425,8 +425,12 @@ fn with_system_policies(
     };
     encryption::check_space_read_rules(permissions, entries)
         .map_err(|error| ArtifactError::in_file(PERMISSIONS_FILE, error))?;
-    encryption::check_encrypted_reads(permissions, entries)
-        .map_err(|error| ArtifactError::in_file(PERMISSIONS_FILE, error))?;
+    // A policy may read a column that is plaintext in this version: only the
+    // columns this version itself declares encrypted are checked.
+    if let Some(own) = history.encryption.entries(&history.current.to_string()) {
+        encryption::check_encrypted_reads(permissions, own)
+            .map_err(|error| ArtifactError::in_file(PERMISSIONS_FILE, error))?;
+    }
     let derived = system_tables::derive_e2ee_policies(
         history.current_schema(),
         entries,
