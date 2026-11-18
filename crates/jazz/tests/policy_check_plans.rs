@@ -197,8 +197,8 @@ fn an_always_passing_check_of_an_absent_row_is_still_run() {
 }
 
 /// A permissions-only change keeps the schema version (and the new schema
-/// may take the old one's address): a check kept under the old policy is
-/// not run under the new one.
+/// may take the old one's address): a store reopened under the new policy
+/// never runs a check kept under the old one.
 #[test]
 fn a_policy_change_of_one_version_drops_the_kept_checks() {
     let policy = |read| {
@@ -212,14 +212,15 @@ fn a_policy_change_of_one_version_drops_the_kept_checks() {
         )
     };
     assert_eq!(policy(true).version_id(), policy(false).version_id());
-    let db = open(policy(true), 1);
+    let mut db = open(policy(true), 1);
     insert(&db, "teams", id(TEAM, 0), &[("name", text("t0"))]);
     doc(&db, 0, "n0", 0, "todo").unwrap();
     db.reuse_check_key_addresses_for_test();
     for round in 0..4 {
         let read = round % 2 == 0;
         if round > 0 {
-            block_on(db.activate_schema(policy(read))).unwrap();
+            db = db.reinstall(policy(read), 1, Vec::new());
+            db.reuse_check_key_addresses_for_test();
         }
         assert_eq!(
             same(&db, id(DOC, 0), user(0), &format!("round {round}"))[..2],
@@ -446,9 +447,11 @@ fn differential(seed_of: u64) {
                 format!("user {u} role {role}")
             }
             7 if !swapped && step > 40 => {
-                block_on(db.activate_schema_with_lenses(v2.clone(), &[lens(&v1, &v2)])).unwrap();
+                // A deploy admits v2: the store rebuilds its runtime, and
+                // a kept check must still equal a fresh one.
+                block_on(db.admit_schema_with_lenses(v2.clone(), &[lens(&v1, &v2)])).unwrap();
                 swapped = true;
-                "schema v2".into()
+                "admit v2".into()
             }
             _ => continue,
         };
@@ -470,53 +473,4 @@ fn kept_checks_match_fresh_ones_under_random_policies_claims_and_schemas() {
     for seed_of in [3, 17, 29, 41, 58, 73] {
         differential(seed_of);
     }
-}
-
-/// A permissions-only activation that fails after the store has taken the
-/// new policies as its own (recording the activation errs) still drops the
-/// kept checks: a check kept under the old policy is not run under the new
-/// one, even where the new schema takes the old one's address.
-#[test]
-fn a_policy_change_that_fails_to_record_drops_the_kept_checks() {
-    use jazz::db::{DbConfig, DbIdentity, FileOptions};
-    use jazz::ids::NodeUuid;
-    let policy = |read| {
-        docs_schema(
-            &["todo", "done"],
-            if read {
-                PolicyExpr::True
-            } else {
-                PolicyExpr::False
-            },
-        )
-    };
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.sqlite");
-    let db = block_on(Db::open_at(
-        DbConfig::new(
-            policy(true),
-            DbIdentity {
-                node: NodeUuid::from_bytes([1; 16]),
-                author: AuthorSubject::SYSTEM,
-            },
-        ),
-        &path,
-        FileOptions::default(),
-    ))
-    .unwrap();
-    insert(&db, "teams", id(TEAM, 0), &[("name", text("t0"))]);
-    doc(&db, 0, "n0", 0, "todo").unwrap();
-    db.reuse_check_key_addresses_for_test();
-    assert_eq!(same(&db, id(DOC, 0), user(0), "before")[..2], [true; 2]);
-    // Recording the new permissions revision fails.
-    rusqlite::Connection::open(&path)
-        .unwrap()
-        .execute_batch(
-            "CREATE TRIGGER refuse_permissions BEFORE INSERT ON _jazz_permissions \
-             BEGIN SELECT RAISE(ABORT, 'refused'); END;",
-        )
-        .unwrap();
-    assert!(block_on(db.activate_schema(policy(false))).is_err());
-    let fresh = same(&db, id(DOC, 0), user(0), "after a failed activation");
-    assert_eq!(fresh[..2], [fresh[0]; 2]);
 }

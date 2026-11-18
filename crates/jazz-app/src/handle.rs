@@ -927,7 +927,7 @@ async fn connect_user(
             let client = JazzClient::connect_with_native_transport(context, connector).await?;
             let user = User {
                 account,
-                issuer: jazz::tools::identity::LOCAL_FIRST_ISSUER.to_owned(),
+                issuer: jazz::tools::identity::DEVICE_ACCOUNT_ISSUER.to_owned(),
                 subject: key.user_id(),
                 claims: serde_json::json!({}),
                 kind: UserKind::Device,

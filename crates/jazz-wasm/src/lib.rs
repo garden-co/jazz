@@ -290,7 +290,7 @@ fn decode_seed(seed_b64: &str) -> Result<[u8; 32], JsValue> {
         .map_err(|_| JsValue::from_str("seed must be exactly 32 bytes"))
 }
 
-/// Mint a local-first identity JWT from a base64url-encoded 32-byte seed.
+/// Mint a device-account identity JWT from a base64url-encoded 32-byte seed.
 #[wasm_bindgen(js_name = mintLocalFirstToken)]
 pub fn mint_local_first_token(
     seed_b64: String,
@@ -301,7 +301,7 @@ pub fn mint_local_first_token(
     let seed = decode_seed(&seed_b64)?;
     identity::mint_jazz_self_signed_token_at(
         &seed,
-        identity::LOCAL_FIRST_ISSUER,
+        identity::DEVICE_ACCOUNT_ISSUER,
         &audience,
         ttl_seconds as u64,
         now_seconds,
@@ -309,7 +309,7 @@ pub fn mint_local_first_token(
     .map_err(|e| JsValue::from_str(&e))
 }
 
-/// Derive a stable local-first user id from a base64url-encoded 32-byte seed.
+/// Derive a stable device-account user id from a base64url-encoded 32-byte seed.
 #[wasm_bindgen(js_name = deriveUserId)]
 pub fn derive_user_id(seed_b64: String) -> Result<String, JsValue> {
     let seed = decode_seed(&seed_b64)?;
