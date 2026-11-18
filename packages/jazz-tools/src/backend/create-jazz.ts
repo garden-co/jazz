@@ -40,6 +40,7 @@ import {
   encodeStreamRecord,
 } from "../runtime/native-runtime/http-stream-socket.js";
 import { resolveSchemaSource } from "../schema-source.js";
+import { shippedMigrations } from "../runtime/client-migrations.js";
 import { checkRunningBindings } from "../dev/app-files.js";
 import { loadBackendApp, provideCodegenNapi, type LoadedBackendApp } from "../dev/codegen-napi.js";
 import { BUNDLE_HEADER } from "./admission.js";
@@ -2366,6 +2367,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       prelude: link.prelude,
       trusted: link.trusted,
       webSocket,
+      migrations: shippedMigrations(resolveSchemaSource(options.app)),
     });
     thinClients += 1;
     let closed = false;
