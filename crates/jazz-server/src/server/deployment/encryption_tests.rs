@@ -530,6 +530,47 @@ async fn a_deploy_whose_declarations_conflict_at_apply_leaves_nothing_live() {
     assert_eq!(kept.get(&v2_hash.0).unwrap(), Some(other));
 }
 
+/// An app whose current version declares no encryption but follows one that
+/// does keeps Jazz's system tables: the loader appends them, the server's
+/// check requires them, and the client and the server compute the same
+/// schema hash and bundle.
+#[tokio::test]
+async fn a_later_version_without_declarations_deploys_with_the_system_tables() {
+    let router = router().await;
+    let file = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": { "notes": { "columns": { "done": "boolean" } } },
+        "history": { "v1": { "tables": { "notes": {
+            "columns": { "title": "bytes", "done": "boolean" },
+            "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } } } } },
+        "migrations": [{ "from": "v1", "migrate": { "notes": {
+            "title": { "drop": "bytes", "backwardsDefault": "" } } } }] }"#;
+    let permissions = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
+    let app =
+        artifact::load(file.as_bytes(), permissions.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    let (status, body) = publish(&router, app.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["bundle"], app.bundle().to_hex());
+    let (client_schema, _, _) = artifact::load_client_encrypted(
+        file.as_bytes(),
+        jazz::tools::AppId::from_name("notes-app"),
+        "production",
+    )
+    .unwrap();
+    assert_eq!(
+        jazz::tools::public_schema::SchemaHash::compute(&client_schema),
+        app.current_hash(),
+        "the client and the server compute the same hash"
+    );
+    assert!(
+        body["published"]["schemas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hash| *hash == json!(app.current_hash().to_string()))
+    );
+}
+
 /// Decrypting a column puts its plaintext on the server, so the deploy
 /// asks for an explicit confirmation naming it (migrations §4.2).
 #[tokio::test]

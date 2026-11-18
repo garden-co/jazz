@@ -1028,3 +1028,101 @@ fn reserved_column_names_cannot_be_encrypted_columns() {
         assert!(error.contains("`__e2ee_`"), "{declared}: {error}");
     }
 }
+
+/// Once a version carries Jazz's system tables, every later version does,
+/// even one that declares no encryption: every loader appends the fragment,
+/// so the client's and the server's schemas and hashes agree, the system
+/// tables take the declarations of the nearest earlier version that has
+/// them, and a client of the app is still an encrypted app.
+///
+/// ```text
+/// v1: notes.title encrypted      (fragment)
+/// v2: notes without encryption   (fragment kept, title dropped)
+/// ```
+#[test]
+fn a_version_without_declarations_keeps_the_system_tables_after_an_encrypted_one() {
+    let file = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": { "notes": { "columns": { "done": "boolean" } } },
+        "history": { "v1": { "tables": { "notes": {
+            "columns": { "title": "bytes", "done": "boolean" },
+            "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } } } } },
+        "migrations": [{ "from": "v1", "migrate": { "notes": {
+            "title": { "drop": "bytes", "backwardsDefault": "" } } } }] }"#;
+    let permissions = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
+    let loaded = load(file.as_bytes(), permissions.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    // Both versions hold the fragment, though only v1 declares encryption.
+    assert!(
+        loaded
+            .current_schema()
+            .contains_key(&TableName::from(MEMBERS))
+    );
+    assert_eq!(loaded.schemas().len(), 2);
+    assert!(
+        loaded
+            .schemas()
+            .iter()
+            .all(|(_, schema)| schema.contains_key(&TableName::from(MEMBERS)))
+    );
+    assert_eq!(loaded.encryption().versions.len(), 1, "only v1 declares");
+
+    // A client computes the same schema and hash, with the declarations it
+    // would build its hooks from, and still refuses to open for now.
+    let (client_schema, _, declarations) =
+        load_client_encrypted(file.as_bytes(), AppId::from_name("notes-app"), "production")
+            .unwrap();
+    assert_eq!(client_schema, *loaded.current_schema());
+    assert_eq!(
+        jazz::tools::public_schema::SchemaHash::compute(&client_schema),
+        loaded.current_hash()
+    );
+    assert!(
+        declarations
+            .expect("the governing declarations")
+            .tables
+            .contains_key("notes")
+    );
+    let error = refusal(load_client_current(file.as_bytes()));
+    assert!(error.contains("declares end-to-end encryption"), "{error}");
+
+    // The files rewrite to the same app.
+    let written =
+        rewrite(file.as_bytes(), permissions.as_bytes(), None).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        load(written.app.as_bytes(), written.permissions.as_bytes())
+            .unwrap()
+            .bundle(),
+        loaded.bundle()
+    );
+}
+
+/// Decrypting every column of an encrypted table keeps the system tables,
+/// in the version that decrypts and in every later one.
+#[test]
+fn decrypting_every_column_keeps_the_system_tables() {
+    let file = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": { "notes": { "columns": { "done": "boolean", "bodyText": "string?" } } },
+        "history": {
+            "v1": { "tables": { "notes": {
+                "columns": { "body": "bytes", "done": "boolean" },
+                "encryption": { "space": "id", "scope": "notes", "columns": { "body": "string" } } } } },
+            "v2": { "tables": { "notes": {
+                "columns": { "body": "bytes", "bodyText": "string?", "done": "boolean" },
+                "encryption": { "space": "id", "scope": "notes",
+                    "columns": { "body": { "type": "string", "to": "bodyText" } } } } } } },
+        "migrations": [
+            { "from": "v1", "to": "v2", "migrate": { "notes": { "bodyText": { "add": "string?", "default": null } } } },
+            { "from": "v2", "migrate": { "notes": { "body": { "drop": "bytes", "backwardsDefault": "" } } } }] }"#;
+    let permissions = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
+    let loaded = load(file.as_bytes(), permissions.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(loaded.schemas().len(), 3);
+    assert!(
+        loaded
+            .schemas()
+            .iter()
+            .all(|(_, schema)| schema.contains_key(&TableName::from(MEMBERS))),
+        "every version, the one that decrypts and the later one that declares nothing, keeps them"
+    );
+    assert_eq!(loaded.encryption().versions.len(), 2);
+}
