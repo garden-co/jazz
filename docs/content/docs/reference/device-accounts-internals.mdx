@@ -1,9 +1,9 @@
 ---
-title: Local-first auth internals
+title: Device account internals
 description: "Look under the hood at how a local signing identity founds an offline account and links other identities."
 ---
 
-[Device accounts](/docs/setup/auth/local-first), Jazz's local-first friendly auth method and how it does guests, separate a signing identity from the account that owns application data. A device account can be created offline; adding an external identity requires the core registry. Internally the identity's issuer is still `urn:jazz:local-first`.
+[Device accounts](/docs/setup/auth/device-accounts), Jazz's local-first friendly auth method and how it does guests, separate a signing identity from the account that owns application data. A device account can be created offline; adding an external identity requires the core registry. Internally the identity's issuer is still `urn:jazz:local-first`.
 
 ## Identity and account derivation
 
@@ -15,7 +15,7 @@ The session prepares native crypto and the retained account selection when it st
 
 ## Self-signed authentication
 
-Local-first JWTs use Ed25519, `iss: "urn:jazz:local-first"`, the derived identity subject, an application audience, and the embedded `jazz_pub_key`. The server verifies the signature, checks the audience and token lifetime, and confirms that the public key derives the claimed subject.
+Device-account JWTs use Ed25519, `iss: "urn:jazz:local-first"`, the derived identity subject, an application audience, and the embedded `jazz_pub_key`. The server verifies the signature, checks the audience and token lifetime, and confirms that the public key derives the claimed subject.
 
 This proves control of the identity without an external JWKS provider. The deterministic founder rule lets core admit that identity's account without a competing registration choice. It does not let the caller choose an arbitrary account ID.
 
@@ -25,7 +25,7 @@ The core registry records the exact identity-to-account assignment. A signed-in 
 
 The provider keeps its normal user ID. It does not rewrite it, accept a Jazz-specific signup proof, or mint custom linking claims.
 
-The client calls `linkDeviceAccount()`. The session gracefully closes its current context with `shutdown({ waitForSync: true })`; if synchronization fails, it keeps that context. Once closed, the client asks the backend's `backend-link/challenge` route for a challenge. The backend runs `authenticate` and issues one that names that user, expires after two minutes, and carries a nonce; it is MACed with a key derived from the core's admin secret and the app ID, so any instance of this app's backend can check it and no other app's can. The client signs the challenge with its local-first key (`signChallenge` from local-first auth, a purpose-specific signature, not a JWT) and posts the challenge and proof to `backend-link`. The backend runs `authenticate` again, checks that the challenge is its own, fresh and for this user, and verifies the proof. It then founds the guest's account and links the user's identity (`jazz:backend`, user ID) to it with its admin secret, passing the challenge's nonce as the link's intent ID. The core records that intent and refuses a used nonce before anything else, so the same proof never links twice. A link is idempotent for the same guest and user: a fresh proof from a guest already linked to that user answers with the account (and, with `guestKeyAfterLink: "revoke"`, retires the key if an earlier attempt didn't). The client opens a new context using the returned handle.
+The client calls `linkDeviceAccount()`. The session gracefully closes its current context with `shutdown({ waitForSync: true })`; if synchronization fails, it keeps that context. Once closed, the client asks the backend's `backend-link/challenge` route for a challenge. The backend runs `authenticate` and issues one that names that user, expires after two minutes, and carries a nonce; it is MACed with a key derived from the core's admin secret and the app ID, so any instance of this app's backend can check it and no other app's can. The client signs the challenge with its device key (`signChallenge`, a purpose-specific signature, not a JWT) and posts the challenge and proof to `backend-link`. The backend runs `authenticate` again, checks that the challenge is its own, fresh and for this user, and verifies the proof. It then founds the guest's account and links the user's identity (`jazz:backend`, user ID) to it with its admin secret, passing the challenge's nonce as the link's intent ID. The core records that intent and refuses a used nonce before anything else, so the same proof never links twice. A link is idempotent for the same guest and user: a fresh proof from a guest already linked to that user answers with the account (and, with `guestKeyAfterLink: "revoke"`, retires the key if an earlier attempt didn't). The client opens a new context using the returned handle.
 
 The guest's sync token is never a link proof. A leaked, unexpired token can't link the guest's account to another user, and a captured proof is good only for the user its challenge names, once.
 
@@ -33,4 +33,4 @@ The core accepts the link only if the user's identity is unassigned. An identity
 
 Existing rows retain their original structured authorship. Their account IDs stay unchanged, while new writes record the linked provider identity. Policies comparing `$createdBy` with `session.user` (the account) keep ownership stable; comparing `$createdBy.identity` with `session.identity` also distinguishes the acting identity.
 
-If linking fails after the old context was closed, the session reopens the account still selected, stays `ready` with `error` set, and `retry()` repeats the link. See [Device Accounts](/docs/setup/auth/local-first) for the application flow.
+If linking fails after the old context was closed, the session reopens the account still selected, stays `ready` with `error` set, and `retry()` repeats the link. See [Device Accounts](/docs/setup/auth/device-accounts) for the application flow.
