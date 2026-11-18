@@ -1002,25 +1002,32 @@ impl Inner {
             self.fan.stats.shared_joins += 1;
             return Ok((queue, Rc::downgrade(&handle)));
         }
-        // A replica missing chunks the result needs opens it once they
-        // arrive. Its cut is decided over its relations' tables too.
+        let (gid, handle) = self.register_read_watches(prepared, identity, read, &compiled, key)?;
+        let mut group = handle.borrow_mut();
+        if let Err(error) = self.open_registered_read(&mut group, &compiled) {
+            drop(group);
+            self.fan.drop_group(gid);
+            return Err(error);
+        }
+        let opened = group.opened;
+        let queue = new_queue(opened.then(|| open(&group.rows)));
+        group.members.push(member(&queue, opened));
+        Ok((queue, Rc::downgrade(&handle)))
+    }
+
+    /// Register a new group's watches without executing its query or sending an opening.
+    /// The caller has already checked for a shared group with this key.
+    fn register_read_watches(
+        &mut self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: ReadSpec,
+        compiled: &Compiled,
+        key: GroupKey,
+    ) -> Result<(u64, Rc<RefCell<Group>>), Error> {
         let tables = self.with_relation_tables(prepared, &compiled.tables)?;
-        let visible = self.visible_read(&read, &tables);
-        let applied = cut_of(&visible);
-        let run = match &visible {
-            Cow::Borrowed(_) => self.execute(&compiled, &prepared.query.table),
-            Cow::Owned(visible) => self
-                .compile(prepared, identity, visible)
-                .and_then(|compiled| self.execute(&compiled, &prepared.query.table)),
-        };
-        let (rows, awaiting) =
-            match run.and_then(|rows| self.nest_relations(prepared, identity, &visible, rows)) {
-                Ok(rows) => (rows, false),
-                Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
-                Err(error) => return Err(error),
-            };
         let (watches, correlations, evidence) =
-            self.watch_plan(prepared, identity, &read, &compiled)?;
+            self.watch_plan(prepared, identity, &read, compiled)?;
         let root = prepared
             .schema
             .as_ref()
@@ -1031,7 +1038,7 @@ impl Inner {
             .to_owned();
         // With relations, the watches must also allow it: decided at each
         // refresh (`Group::rechecks`), as `refresh_where` rebuilds them.
-        let recheck = recheckable(&prepared.query, &root, &read, &compiled);
+        let recheck = recheckable(&prepared.query, &root, &read, compiled);
         let branches = view_branches(
             prepared.schema.as_ref().unwrap_or(&self.owner),
             &read,
@@ -1043,9 +1050,8 @@ impl Inner {
             &read,
             watches.iter().map(Watch::table),
         );
-        let projected = order_projected(&prepared.query, &compiled);
-        let includes = self.output_only_includes(prepared, identity, &read, &compiled)?;
-        let queue = new_queue((!awaiting).then(|| open(&rows)));
+        let projected = order_projected(&prepared.query, compiled);
+        let includes = self.output_only_includes(prepared, identity, &read, compiled)?;
         let gid = self.fan.next;
         self.fan.next += 1;
         self.fan.index(gid, &watches);
@@ -1056,20 +1062,20 @@ impl Inner {
             root,
             identity,
             read,
-            rows,
-            members: vec![member(&queue, !awaiting)],
+            rows: Vec::new(),
+            members: Vec::new(),
             watches,
             evidence,
             recheck,
             projected,
             keys: Vec::new(),
             includes,
-            awaiting,
-            opened: !awaiting,
+            awaiting: false,
+            opened: false,
             branches,
             masks,
             tables,
-            applied,
+            applied: None,
             correlations,
             held: Vec::new(),
             by_root: HashMap::new(),
@@ -1085,11 +1091,36 @@ impl Inner {
             plans: crate::db::RelationPlans::default(),
             root_plans: RootPlans::default(),
         }));
-        Self::hold(&mut handle.borrow_mut(), false);
-        self.read_keys(&mut handle.borrow_mut());
-        let weak = Rc::downgrade(&handle);
-        self.fan.groups.insert(gid, handle);
-        Ok((queue, weak))
+        self.fan.groups.insert(gid, handle.clone());
+        Ok((gid, handle))
+    }
+
+    fn open_registered_read(&self, group: &mut Group, compiled: &Compiled) -> Result<(), Error> {
+        let prepared = &group.prepared;
+        let identity = group.identity;
+        // A replica missing chunks the result needs opens it once they
+        // arrive. Its cut is decided over its relations' tables too.
+        let visible = self.visible_read(&group.read, &group.tables);
+        let applied = cut_of(&visible);
+        let run = match &visible {
+            Cow::Borrowed(_) => self.execute(compiled, &prepared.query.table),
+            Cow::Owned(visible) => self
+                .compile(prepared, identity, visible)
+                .and_then(|compiled| self.execute(&compiled, &prepared.query.table)),
+        };
+        let (rows, awaiting) =
+            match run.and_then(|rows| self.nest_relations(prepared, identity, &visible, rows)) {
+                Ok(rows) => (rows, false),
+                Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
+                Err(error) => return Err(error),
+            };
+        group.rows = rows;
+        group.applied = applied;
+        group.awaiting = awaiting;
+        group.opened = !awaiting;
+        Self::hold(group, false);
+        self.read_keys(group);
+        Ok(())
     }
 
     /// The optional includes that only shape output: their target is read
