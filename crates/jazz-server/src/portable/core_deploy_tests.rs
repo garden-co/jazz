@@ -544,3 +544,110 @@ fn an_encrypting_app_is_not_served_without_the_account_registry() {
         "nothing was kept"
     );
 }
+
+/// The deployed body's v1 schema (as JSON), its hash, and a body for a second
+/// version `schema` that follows it through `forward` lens tables, declaring
+/// what the first declared.
+fn follow_up(
+    v1: &Json,
+    schema: Json,
+    forward: Json,
+) -> (Json, jazz::tools::public_schema::SchemaHash) {
+    let source: jazz::tools::public_schema::Schema =
+        serde_json::from_value(schema.clone()).unwrap();
+    let hash = jazz::tools::public_schema::SchemaHash::compute(&source);
+    let from = v1["targetSchemaHash"].as_str().unwrap().to_owned();
+    let mut body = v1.clone();
+    body["targetSchemaHash"] = json!(hash.to_string());
+    body["schemas"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "hash": hash.to_string(), "schema": schema }));
+    body["migrations"] =
+        json!([{ "fromHash": from, "toHash": hash.to_string(), "forward": forward }]);
+    let declared = body["encryption"]["versions"][&from].clone();
+    body["encryption"]["versions"][hash.to_string()] = declared;
+    (body, hash)
+}
+
+/// The deploy's rules for Jazz's system tables hold on a Durable Object
+/// core, which shares them through `prepare`: a version that follows one
+/// with the system tables may not drop them, and no lens may reshape one.
+/// Neither deploy is applied or kept.
+#[test]
+fn the_system_table_rules_hold_on_the_durable_object_host() {
+    let first = loaded(APP).deployment_body(false);
+    let v1 = first["schemas"][0]["schema"].clone();
+    let is_system =
+        |name: &str| jazz::tools::deployment::artifact::system_tables::is_system_table(name);
+    for (name, backing) in hosts() {
+        let mut host = Host::new(backing);
+        host.deploy(&first)
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        let before = host.core.as_ref().unwrap().db().catalogue().unwrap();
+
+        // A later version without the system tables.
+        let mut without = v1.clone();
+        let system: Vec<String> = without["tables"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|table| is_system(table))
+            .cloned()
+            .collect();
+        assert!(!system.is_empty(), "{name}: the first version has them");
+        for table in &system {
+            without["tables"].as_object_mut().unwrap().remove(table);
+        }
+        let removed: Vec<Json> = system
+            .iter()
+            .map(|table| json!({ "table": table, "removed": true, "operations": [] }))
+            .collect();
+        let (dropped, _) = follow_up(&first, without, Json::Array(removed));
+        let (status, refusal) = host.deploy(&dropped).unwrap_err();
+        assert_eq!(status, 422, "{name}: {refusal}");
+        assert!(
+            refusal["error"]
+                .as_str()
+                .unwrap()
+                .contains("the target lacks them"),
+            "{name}: {refusal}"
+        );
+
+        // A lens that reshapes a system table, beside a plain change to the
+        // app's own table that gives the version its own hash.
+        let mut reshaped = v1.clone();
+        let tasks = reshaped["tables"]["tasks"]["columns"]
+            .as_array_mut()
+            .unwrap();
+        tasks.push(json!({ "name": "note", "nullable": false, "column_type": { "type": "Text" } }));
+        let members = jazz::tools::deployment::artifact::system_tables::MEMBERS;
+        let text = || json!({ "type": "Text", "value": "" });
+        let (reshaping, _) = follow_up(
+            &first,
+            reshaped,
+            json!([
+                { "table": "tasks", "operations": [
+                    { "type": "introduce", "column": "note", "column_type": { "type": "Text" }, "value": text() }
+                ] },
+                { "table": members, "operations": [
+                    { "type": "introduce", "column": "extra", "column_type": { "type": "Text" }, "value": text() }
+                ] }
+            ]),
+        );
+        let (status, refusal) = host.deploy(&reshaping).unwrap_err();
+        assert_eq!(status, 422, "{name}: {refusal}");
+        assert!(
+            refusal["error"]
+                .as_str()
+                .unwrap()
+                .contains("may not change"),
+            "{name}: {refusal}"
+        );
+        assert_eq!(
+            host.core.as_ref().unwrap().db().catalogue().unwrap(),
+            before,
+            "{name}: nothing was applied"
+        );
+    }
+}
