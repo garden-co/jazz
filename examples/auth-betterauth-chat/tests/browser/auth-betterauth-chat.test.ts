@@ -46,7 +46,7 @@ afterEach(async () => {
   while (clients.length > 0) await clients.pop()!.shutdown();
 });
 
-/** A client signed in with `role`, or a local-first guest without one. */
+/** A client signed in with `role`, or a guest on a device account without one. */
 async function makeClient(role?: Role): Promise<JazzClient> {
   let serverUrl = server.serverUrl;
   let account;

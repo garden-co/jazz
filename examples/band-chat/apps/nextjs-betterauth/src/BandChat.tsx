@@ -28,7 +28,7 @@ export function BandChat(props: BandChatProps) {
   return author ? <Workspace author={author} {...props} /> : <Loading label="Loading identity…" />;
 }
 
-/** Browser receipt entrypoint. The production dashboard never uses local-first auth here. */
+/** Browser receipt entrypoint. The production dashboard never uses device accounts here. */
 export function BandChatPreview({
   config,
   initialParams,
