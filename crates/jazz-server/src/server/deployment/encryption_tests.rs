@@ -287,6 +287,46 @@ async fn kept_declarations_are_never_replaced() {
     assert_eq!(kept.get(&version.0).unwrap(), Some(b"first".to_vec()));
 }
 
+/// A deployment that changes the catalogue keeps its first-declared
+/// versions' declarations with it, in the same transaction: once the
+/// deploy answers, the store holds them, and a repost of the same
+/// declarations changes nothing.
+#[tokio::test]
+async fn a_deployment_keeps_its_declarations_with_the_catalogue_change() {
+    let server = ServerBuilder::new(app_id())
+        .with_auth_config(AuthConfig {
+            admin_secret: Some("test-admin".into()),
+            ..Default::default()
+        })
+        .with_storage(StorageBackend::InMemory)
+        .build()
+        .await
+        .unwrap();
+    let router = create_router(server.state.clone());
+    let app = loaded("ownerId = session.user");
+    let kept = server
+        .state
+        .store
+        .as_ref()
+        .unwrap()
+        .kv(super::DECLARATIONS)
+        .unwrap();
+    assert_eq!(kept.get(&app.current_hash().0).unwrap(), None);
+    let (status, body) = publish(&router, app.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let stored = kept.get(&app.current_hash().0).unwrap().expect("kept");
+    let entries = jazz::tools::deployment::artifact::encryption::decode_stored(&stored).unwrap();
+    assert_eq!(
+        entries,
+        *app.encryption()
+            .entries(&app.current_hash().to_string())
+            .unwrap()
+    );
+    let (status, body) = publish(&router, app.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(kept.get(&app.current_hash().0).unwrap(), Some(stored));
+}
+
 /// Decrypting a column puts its plaintext on the server, so the deploy
 /// asks for an explicit confirmation naming it (migrations §4.2).
 #[tokio::test]

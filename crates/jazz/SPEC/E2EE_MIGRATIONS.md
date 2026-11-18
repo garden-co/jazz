@@ -96,16 +96,12 @@ columns and a client-run rewrite between them.
     deploy of a decrypting migration as the first, so it asks for the
     confirmation of §4.2 (`confirmDecrypt` in the deploy body) on every
     deploy, not only the first.
-- **Known limit: kept declarations commit after the catalogue.** The host
-  table that keeps them is written in a transaction of its own, just after the
-  deployment's catalogue change. A deployment that names declarations
-  different from the kept ones for a version is refused. A crash between the
-  two commits leaves a deployed version without kept declarations, and the
-  next deployment of it keeps what it names then.
-- **Known limit: `confirmDecrypt` is a guard, not a security control.** It
-  stops a deploy from decrypting a column by accident. A decrypt only runs on
-  clients whose own app files declare it: a client never takes declarations
-  from the server, so a server cannot start one by itself.
+- **Kept declarations commit with the catalogue.** A deployment that changes
+  the catalogue keeps its first-declared versions' declarations in the same
+  transaction, and a deployment that names declarations different from the
+  kept ones for a version is refused before anything is live, however many
+  instances share the store. The transaction belongs to one call and ends
+  with it (a Durable Object core holds none open between calls).
 
 ### 3.2 The conversion pair
 
