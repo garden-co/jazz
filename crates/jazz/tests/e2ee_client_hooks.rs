@@ -1739,6 +1739,102 @@ fn reads_that_would_return_unopened_encrypted_rows_are_refused() {
         .unwrap();
 }
 
+/// Contract: core refuses, from the declarations alone, every read shape
+/// on an encrypted column except a top-level equality on an equality
+/// column, which the hook plans: aggregates, ORDER BY, ranges, IN, other
+/// comparisons, and an equality nested in Any, Not or All. The error names
+/// the table and column; the hook is never asked.
+#[test]
+fn reads_that_would_compare_or_return_sealed_cells_are_refused() {
+    use jazz::query::{Aggregate, AggregateQuery, OrderBy, OrderDirection};
+    let hooks = Fake::new();
+    let alice = client(&hooks);
+    let space = uuid::Uuid::new_v4();
+    let in_space = || eq(col("projectId"), lit(Value::Uuid(space)));
+    let plain = || Operand::Literal(text("x"));
+    let body = || Operand::Column("body".to_owned());
+    let nested = |predicate: Predicate| Query::from("notes").filter(in_space()).filter(predicate);
+    let mut max = Query::from("notes").filter(in_space());
+    max.aggregate = Some(Box::new(AggregateQuery::new([Aggregate::max("body")])));
+    let mut grouped = Query::from("notes");
+    grouped.aggregate = Some(Box::new(AggregateQuery {
+        aggregates: vec![Aggregate::count()],
+        group_by: Some("body".to_owned()),
+    }));
+    let mut ordered = Query::from("notes").filter(in_space());
+    ordered.order_by.push(OrderBy {
+        column: "body".to_owned(),
+        direction: OrderDirection::Asc,
+    });
+    let mut ordered_attachment = Query::from("vaults");
+    ordered_attachment.order_by.push(OrderBy {
+        column: "secret".to_owned(),
+        direction: OrderDirection::Asc,
+    });
+    let refused = [
+        (max, "notes.body"),
+        (grouped, "notes.body"),
+        (ordered, "notes.body"),
+        (ordered_attachment, "vaults.secret"),
+        (nested(Predicate::Gt(body(), plain())), "notes.body"),
+        (nested(Predicate::Lte(body(), plain())), "notes.body"),
+        (nested(Predicate::In(body(), vec![plain()])), "notes.body"),
+        (nested(Predicate::Ne(body(), plain())), "notes.body"),
+        (nested(Predicate::Contains(body(), plain())), "notes.body"),
+        (nested(Predicate::IsNull(body())), "notes.body"),
+        (nested(Predicate::Eq(plain(), body())), "notes.body"),
+        (
+            nested(Predicate::Any(vec![Predicate::Eq(body(), plain())])),
+            "notes.body",
+        ),
+        (
+            nested(Predicate::Not(Box::new(Predicate::Eq(body(), plain())))),
+            "notes.body",
+        ),
+        (
+            nested(Predicate::All(vec![Predicate::Eq(body(), plain())])),
+            "notes.body",
+        ),
+        // An encrypted column with no equality index has no plannable shape.
+        (
+            nested(Predicate::Eq(
+                Operand::Column("attachment".to_owned()),
+                plain(),
+            )),
+            "notes.attachment",
+        ),
+    ];
+    for (query, column) in refused {
+        let plans = hooks.plans.get();
+        let error = alice.prepare_query(&query).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Query, "{query:?}");
+        assert!(
+            error
+                .message
+                .starts_with(&format!("Reading encrypted column `{column}`"))
+                && error.message.ends_with("is not supported yet"),
+            "{query:?}: {}",
+            error.message
+        );
+        assert_eq!(hooks.plans.get(), plans, "the hook was not asked");
+    }
+    // Counting rows names no column; an equality the hook plans is allowed;
+    // the same shapes on a plain column of the table stay allowed.
+    let mut count = Query::from("notes").filter(in_space());
+    count.aggregate = Some(Box::new(AggregateQuery::new([Aggregate::count()])));
+    alice.prepare_query(&count).unwrap();
+    hooks.held.borrow_mut().insert(space);
+    alice
+        .prepare_query(&nested(eq(col("body"), lit(text("x")))))
+        .unwrap();
+    let mut by_title = Query::from("notes").filter(in_space());
+    by_title.order_by.push(OrderBy {
+        column: "title".to_owned(),
+        direction: OrderDirection::Asc,
+    });
+    alice.prepare_query(&by_title).unwrap();
+}
+
 /// The bodies a live result holds after its opening.
 fn opened_bodies(stream: &mut jazz::db::SubscriptionStream) -> Vec<Value> {
     let mut held = Vec::new();

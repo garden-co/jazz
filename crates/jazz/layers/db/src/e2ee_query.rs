@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use crate::e2ee::{E2eeRefusal, EncryptionEntry, EpochSetId, QueryPlan, Residual, SpaceAddress};
 use crate::options::Error;
-use crate::query::{ArraySubquery, Query};
+use crate::query::{ArraySubquery, Operand, Predicate, Query};
 use crate::schema::history::history_source_table;
 use crate::values::unsupported;
 
@@ -84,7 +84,18 @@ impl Inner {
             return Ok((query.clone(), None));
         };
         self.refuse_unopened(&hooks.declarations().tables, query)?;
-        match hooks.plan_query(query)? {
+        refuse_unplannable(&hooks.declarations().tables, query)?;
+        let plan = hooks.plan_query(query)?;
+        // Whatever the hook returns, a filter on an encrypted column must
+        // not go upstream as written.
+        match &plan {
+            QueryPlan::Plain => refuse_unplannable_filters(&hooks.declarations().tables, query)?,
+            QueryPlan::Rewritten { physical, .. } => {
+                refuse_unplannable_filters(&hooks.declarations().tables, physical)?
+            }
+            QueryPlan::NeedsKey { .. } => {}
+        }
+        match plan {
             QueryPlan::Plain => Ok((query.clone(), None)),
             QueryPlan::Rewritten {
                 physical,
@@ -157,6 +168,123 @@ impl Inner {
         }
         refuse_nested_encrypted(encrypted, &query.array_subqueries)
     }
+}
+
+/// Refuse every read shape on an encrypted column of `query`'s table except
+/// what the hooks can plan: a top-level equality of an equality-indexed
+/// column with a value (core hooks note, "Refused here"). Aggregates,
+/// ORDER BY, ranges, IN, substring and null tests, a partial read, and an
+/// equality nested in Any, Not or All would compare or return sealed
+/// cells, or send the plaintext literal upstream, so they fail naming the
+/// table and column.
+fn refuse_unplannable(
+    encrypted: &BTreeMap<String, EncryptionEntry>,
+    query: &Query,
+) -> Result<(), Error> {
+    let Some(entry) = encrypted.get(&query.table) else {
+        return Ok(());
+    };
+    let table = query.table.as_str();
+    let refuse = |column: &str, shape: &str| {
+        entry.columns.contains_key(column).then(|| {
+            unsupported(format!(
+                "Reading encrypted column `{table}.{column}` {shape}"
+            ))
+        })
+    };
+    for filter in &query.filters {
+        // A top-level equality of an equality column with a value is the
+        // one shape the hook plans.
+        if let Predicate::Eq(Operand::Column(column), value) = filter
+            && entry.equality.contains(column)
+            && matches!(
+                value,
+                Operand::Literal(_) | Operand::Param(_) | Operand::Claim(_)
+            )
+        {
+            continue;
+        }
+        if let Some(error) = refused_in_predicate(entry, table, filter) {
+            return Err(error);
+        }
+    }
+    for branch in &query.policy_branches {
+        for filter in &branch.filters {
+            if let Some(error) = refused_in_predicate(entry, table, filter) {
+                return Err(error);
+            }
+        }
+    }
+    for order in &query.order_by {
+        if let Some(error) = refuse(&order.column, "in ORDER BY") {
+            return Err(error);
+        }
+    }
+    if let Some(aggregate) = &query.aggregate {
+        let columns = aggregate
+            .aggregates
+            .iter()
+            .filter_map(|a| a.column.as_deref())
+            .chain(aggregate.group_by.as_deref());
+        for column in columns {
+            if let Some(error) = refuse(column, "in an aggregate") {
+                return Err(error);
+            }
+        }
+    }
+    for partial in &query.partial {
+        if let Some(error) = refuse(&partial.column, "in part") {
+            return Err(error);
+        }
+    }
+    for join in &query.joins {
+        if let Some(column) = &join.source_column
+            && let Some(error) = refuse(column, "in a join")
+        {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+/// The error for the first encrypted column `predicate` names, if any.
+fn refused_in_predicate(
+    entry: &EncryptionEntry,
+    table: &str,
+    predicate: &Predicate,
+) -> Option<Error> {
+    let mut named = None;
+    predicate.any_operand(&mut |operand| {
+        if let Operand::Column(column) = operand
+            && entry.columns.contains_key(column.as_str())
+        {
+            named = Some(column.clone());
+        }
+        named.is_some()
+    });
+    named.map(|column| {
+        unsupported(format!(
+            "Reading encrypted column `{table}.{column}` in a filter other than a top-level equality"
+        ))
+    })
+}
+
+/// Refuse a planned query that still names an encrypted column in a
+/// filter: the hook must have rewritten or removed it, and a plaintext
+/// literal never goes upstream.
+fn refuse_unplannable_filters(
+    encrypted: &BTreeMap<String, EncryptionEntry>,
+    query: &Query,
+) -> Result<(), Error> {
+    let Some(entry) = encrypted.get(&query.table) else {
+        return Ok(());
+    };
+    for filter in &query.filters {
+        if let Some(error) = refused_in_predicate(entry, &query.table, filter) {
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 /// Refuse a relation read that nests rows of an encrypted table: nested
