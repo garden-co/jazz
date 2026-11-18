@@ -92,6 +92,20 @@ a JSON column compares that text, so differently written JSON (`{"a":1}` and
 `{"a": 1}`) are different values and have different tokens. `{"a":1}` encodes
 as `017b2261223a317d`.
 
+Clients write JSON text differently, so one value can have several stored
+forms. The FFI (Go, Swift, Kotlin and the Rust client) re-serialises a JSON
+value compactly with its object keys sorted, at every level, so
+`{"b":1,"a":2}` is stored as `{"a":2,"b":1}`. TypeScript writes
+`JSON.stringify` of the value, which keeps the keys in insertion order
+(`{"b":1,"a":2}` stays so), and passes a string through as the text it is.
+The same value written from Go and from TypeScript can therefore be stored
+as different text, and then has different tokens: an equality search from one
+misses rows the other wrote. It never returns a wrong row (a match is
+decrypted and compared with Jazz's own rule), and plain Jazz equality on a
+JSON column behaves the same way, since it compares the stored text. An app
+that searches JSON from several languages should write it in one canonical
+form (sorted keys, no extra whitespace) itself.
+
 An array is encoded as `01`, its element count as four big-endian bytes, and
 then, for each element in order, the length of the element's own encoding `V`
 as four big-endian bytes followed by that `V` (a null element is the one byte
