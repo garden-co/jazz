@@ -2904,7 +2904,8 @@ Limits:
   holds keys of two roots of one address, so choose which of them it
   writes under. Before its first read in a session, such a device reads
   the chain before it writes (§5.2), so it never writes under a root no
-  read of the session showed. It cannot forge a chain: every root and
+  read of the session showed. A device holding one root writes under it as
+  its last read showed. It cannot forge a chain: every root and
   successor is signed and checked (§3.3).
 - **Any updater can add roots.** The server does not limit roots per space
   (R15). Roots after the first valid one are ignored by every client (§3.2);
