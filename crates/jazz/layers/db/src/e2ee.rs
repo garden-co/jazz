@@ -63,7 +63,7 @@ pub trait E2eeHooks {
     /// needs it. The default: the declarations name an encrypted table.
     /// A runtime whose declarations may be empty returns `true` for those
     /// of an encrypted app.
-    fn from_encrypted_app(&self) -> bool {
+    fn built_from_encrypted_app(&self) -> bool {
         !self.declarations().tables.is_empty()
     }
 

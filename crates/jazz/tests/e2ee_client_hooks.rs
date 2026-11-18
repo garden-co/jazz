@@ -280,7 +280,7 @@ impl E2eeHooks for Fake {
         self.declarations.as_ref().unwrap()
     }
 
-    fn from_encrypted_app(&self) -> bool {
+    fn built_from_encrypted_app(&self) -> bool {
         self.encrypted_app.get() || !self.declarations().tables.is_empty()
     }
 
