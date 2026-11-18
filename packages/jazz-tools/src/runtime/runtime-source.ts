@@ -69,6 +69,12 @@ export interface BrowserWorkerConnection {
    * again on its own; `false` for any other refusal.
    */
   waitsForAnotherTab?(): "sign-in" | "build" | false;
+  /**
+   * The worker refused this connection because a newer build of the app has
+   * the store open (see `BROWSER_STORE_OPEN_WITH_NEWER_BUILD`): this tab
+   * reloads to pick it up. It also `waitsForAnotherTab()`, as a fallback.
+   */
+  isOlderThanStore?(): boolean;
   ready(): Promise<void>;
   getWorkerRealmId?(): string | undefined;
   waitForServerConnection(): Promise<void>;
@@ -122,6 +128,12 @@ export interface BrowserWorkerConnectionContext<RuntimeConfig extends DbConfig =
   onFailure: (error: unknown) => void;
   onStorageReset?: (resetId: number) => void;
   onStorageInvalidated?: () => void;
+  /**
+   * A tab of a newer build of the app (its schema history extends this
+   * one's) wants the store: this tab closes its connection and reloads (see
+   * `BrowserConnectionManager.yieldToNewerBuild`).
+   */
+  onNewerBuild?: () => void;
 }
 
 export interface BrowserFollowerConnectionContext<RuntimeConfig extends DbConfig = DbConfig> {
@@ -137,6 +149,12 @@ export interface BrowserFollowerConnectionContext<RuntimeConfig extends DbConfig
   onFailure: (error: unknown) => void;
   onStorageReset?: (resetId: number) => void;
   onStorageInvalidated?: () => void;
+  /**
+   * A tab of a newer build of the app (its schema history extends this
+   * one's) wants the store: this tab closes its connection and reloads (see
+   * `BrowserConnectionManager.yieldToNewerBuild`).
+   */
+  onNewerBuild?: () => void;
 }
 
 /**

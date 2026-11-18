@@ -14,6 +14,7 @@ import type { DbForConnection } from "./types.js";
 import type { RemoteLinkState } from "../remote-link-state.js";
 import type { LinkStatus } from "../sync-status.js";
 import { pageCacheForTest } from "../page-cache.js";
+import { setNewerBuildHandler } from "../newer-build-reload.js";
 
 function deferred() {
   let resolve!: () => void;
@@ -462,12 +463,13 @@ describe("BrowserConnectionManager acknowledged storage reset", () => {
 
 function admissionManager(
   retryable = true,
-  heldByAnotherTab: boolean | "sign-in" | "build" = false,
+  heldByAnotherTab: boolean | "sign-in" | "build" | "older-build" = false,
   config: Record<string, unknown> = {},
 ) {
   let pinned = true;
+  const olderBuild = heldByAnotherTab === "older-build";
   let heldBy: false | "sign-in" | "build" =
-    heldByAnotherTab === true ? "sign-in" : heldByAnotherTab;
+    heldByAnotherTab === true ? "sign-in" : olderBuild ? "build" : heldByAnotherTab;
   let error = new Error(
     heldBy === "sign-in"
       ? BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN
@@ -496,6 +498,8 @@ function admissionManager(
           },
           canRetryInitialConfigurationAdmission: () => rejected && retryable,
           waitsForAnotherTab: () => (rejected && held) || false,
+          isOlderThanStore: () => rejected && olderBuild,
+          flushLocal: vi.fn(async () => undefined),
           deleteStorage: vi.fn(async () => {
             if (rejected) throw refusal;
           }),
@@ -2007,6 +2011,53 @@ describe("BrowserConnectionManager in the back/forward cache", () => {
       expect(fixture.createConnection).toHaveBeenCalledOnce();
     } finally {
       await fixture.finish();
+    }
+  });
+});
+
+describe("BrowserConnectionManager and a newer build of the app", () => {
+  afterEach(() => setNewerBuildHandler(undefined));
+
+  it("stops taking writes, makes those it took durable and closes, then reloads, when a newer build wants the store", async () => {
+    const fixture = await leasedManagerFixture();
+    const order: string[] = [];
+    const reloads = vi.fn(() => order.push("reload"));
+    setNewerBuildHandler(reloads);
+    vi.mocked(fixture.connection.flushLocal).mockImplementation(async () => {
+      order.push("flush");
+    });
+    vi.mocked(fixture.connection.shutdown).mockImplementation(async () => {
+      order.push("close");
+    });
+    try {
+      fixture.contexts[0]!.onNewerBuild!();
+      expect(() => fixture.manager.getClient({})).toThrow("older build of this app");
+      await expect(fixture.manager.ensureReady("runtime")).rejects.toThrow(
+        "older build of this app",
+      );
+      await vi.waitFor(() => expect(reloads).toHaveBeenCalledOnce());
+      expect(order).toEqual(["flush", "close", "reload"]);
+      // Told twice, it yields once.
+      fixture.contexts[0]!.onNewerBuild!();
+      await Promise.resolve();
+      expect(reloads).toHaveBeenCalledOnce();
+    } finally {
+      fixture.allowFinish();
+      fixture.host.phase = "closing";
+      await fixture.manager.shutdown().catch(() => undefined);
+    }
+  });
+
+  it("yields and reloads when the worker refuses it as an older build than the store's", async () => {
+    const reloads = vi.fn();
+    setNewerBuildHandler(reloads);
+    const { manager, host } = admissionManager(true, "older-build");
+    try {
+      await expect(manager.ensureReady("runtime")).rejects.toThrow("older build of this app");
+      await vi.waitFor(() => expect(reloads).toHaveBeenCalledOnce());
+    } finally {
+      host.phase = "closing";
+      await manager.shutdown().catch(() => undefined);
     }
   });
 });
