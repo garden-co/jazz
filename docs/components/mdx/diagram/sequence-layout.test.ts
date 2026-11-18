@@ -15,9 +15,7 @@ describe("wrapText", () => {
   });
 
   it("never splits a single unbreakable token", () => {
-    expect(wrapText("db.getLocalFirstIdentityProof()", 10)).toEqual([
-      "db.getLocalFirstIdentityProof()",
-    ]);
+    expect(wrapText("db.getDeviceAccountProof()", 10)).toEqual(["db.getDeviceAccountProof()"]);
   });
 
   it("returns a single empty line for empty text", () => {

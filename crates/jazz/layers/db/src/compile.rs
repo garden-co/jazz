@@ -93,7 +93,7 @@ impl Session {
             // `session.authMode`).
             ["authMode"] => Value::String(
                 match self.issuer.as_deref()? {
-                    AuthorSubject::LOCAL_FIRST_ISSUER => "local-first",
+                    AuthorSubject::DEVICE_ACCOUNT_ISSUER => "local-first",
                     AuthorSubject::ANONYMOUS_ISSUER => "anonymous",
                     _ => "external",
                 }

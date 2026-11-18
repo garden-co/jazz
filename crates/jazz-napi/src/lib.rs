@@ -1,7 +1,7 @@
 //! jazz-napi — Native Node.js bindings for the Jazz database (`jazz-db`).
 //!
 //! Provides Node.js bindings for the Jazz database, server helpers, and
-//! local-first identity utilities.
+//! device-account identity utilities.
 //!
 //! # Architecture
 //!
@@ -12,7 +12,7 @@
 //!   Unsupported features fail with an explicit "not supported yet" error.
 //! - `JazzServer` exposes the Rust server process used by integration tests
 //!   and Node deployments.
-//! - Local-first JWT helpers stay here as package-level native utilities.
+//! - device-account JWT helpers stay here as package-level native utilities.
 //!
 //! # Thread affinity
 //!
@@ -1991,9 +1991,10 @@ impl NapiDb {
         self.request_permission_advice(binding_host::advice::delete(table, &row_id), author, claims)
     }
 
-    /// Admit a verified local-first account for this backend runtime only.
-    #[napi]
-    pub fn admit_local_first_session(
+    /// Admit a verified device account for this backend runtime only.
+    // The JS name is ABI with jazz-tools; it stays until the TS side renames it.
+    #[napi(js_name = "admitLocalFirstSession")]
+    pub fn admit_device_account_session(
         &self,
         token: String,
         app_id: String,
@@ -2001,7 +2002,7 @@ impl NapiDb {
     ) -> js::Result<()> {
         Ok(self
             .binding()?
-            .admit_local_first_session(&token, &app_id, &claimed_author)
+            .admit_device_account_session(&token, &app_id, &claimed_author)
             .map_err(host_error)?)
     }
 
@@ -3241,7 +3242,7 @@ pub fn mint_local_first_token(
     let seed = decode_seed_napi(&seed_b64)?;
     identity::mint_jazz_self_signed_token(
         &seed,
-        identity::LOCAL_FIRST_ISSUER,
+        identity::DEVICE_ACCOUNT_ISSUER,
         &audience,
         ttl_seconds as u64,
     )
