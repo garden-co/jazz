@@ -327,6 +327,95 @@ async fn a_deployment_keeps_its_declarations_with_the_catalogue_change() {
     assert_eq!(kept.get(&app.current_hash().0).unwrap(), Some(stored));
 }
 
+/// Two instances sharing a store deploy the same new version with
+/// different declarations: the second prepared its deployment before the
+/// first kept its own, so its check saw nothing kept. It is refused when
+/// the catalogue change applies, and none of its catalogue rows land.
+///
+/// ```text
+/// B prepares v2 (nothing kept yet)
+///   A keeps v2's declarations
+/// B applies v2 + its declarations ──✗ conflict: refused, v2 not in the catalogue
+/// ```
+#[tokio::test]
+async fn a_racing_deploy_with_conflicting_declarations_is_refused_without_its_catalogue() {
+    let server = ServerBuilder::new(app_id())
+        .with_auth_config(AuthConfig {
+            admin_secret: Some("test-admin".into()),
+            ..Default::default()
+        })
+        .with_storage(StorageBackend::InMemory)
+        .build()
+        .await
+        .unwrap();
+    let state = server.state.clone();
+    let router = create_router(state.clone());
+    let v1 = loaded("ownerId = session.user");
+    let (status, body) = publish(&router, v1.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v2 = artifact::load(
+        APP_V2.as_bytes(),
+        permissions(MEMBERS_RULE, "ownerId = session.user").as_bytes(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let body: crate::portable::deployment::DeployBody =
+        serde_json::from_value(v2.deployment_body(false)).unwrap();
+
+    // B prepares against a catalogue where nothing of v2 is kept yet.
+    let index = state.catalogue_store.index().unwrap();
+    let deployment =
+        crate::portable::deployment::prepare_encrypted(&index, body, 1_000, |_| Ok(None))
+            .unwrap_or_else(|_| panic!("prepared"));
+    let v2_hash = v2.current_hash();
+    assert!(
+        deployment
+            .first_declared
+            .iter()
+            .any(|(version, _)| *version == v2_hash)
+    );
+    // A keeps different declarations for v2 meanwhile.
+    let kept = state
+        .store
+        .as_ref()
+        .unwrap()
+        .kv(super::DECLARATIONS)
+        .unwrap();
+    kept.put_if_absent(&v2_hash.0, b"declarations another instance kept")
+        .unwrap();
+
+    let runtime = state.runtime().expect("a runtime after the first deploy");
+    let change = super::change(&runtime, &deployment).await.unwrap();
+    let kept_values = deployment
+        .first_declared
+        .iter()
+        .map(|(version, stored)| (super::DECLARATIONS, version.0.to_vec(), stored.clone()))
+        .collect();
+    let refused = runtime
+        .apply_catalogue_keeping(change, deployment.staged.new_bundle(), kept_values)
+        .await
+        .expect_err("a conflicting kept declaration");
+    assert!(
+        matches!(refused, crate::runtime::CatalogueApplyError::Rejected(_)),
+        "{refused}"
+    );
+    state.catalogue_store.refresh().unwrap();
+    let schemas = state
+        .catalogue_store
+        .index()
+        .unwrap()
+        .deployment_catalogue()
+        .schemas
+        .len();
+    assert_eq!(
+        schemas, 1,
+        "only v1 is in the catalogue: v2 was not applied"
+    );
+    assert_eq!(
+        kept.get(&v2_hash.0).unwrap(),
+        Some(b"declarations another instance kept".to_vec())
+    );
+}
+
 /// Decrypting a column puts its plaintext on the server, so the deploy
 /// asks for an explicit confirmation naming it (migrations §4.2).
 #[tokio::test]
