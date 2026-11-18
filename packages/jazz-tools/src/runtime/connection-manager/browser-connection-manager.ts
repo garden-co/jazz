@@ -358,18 +358,32 @@ export class BrowserConnectionManager extends ConnectionManager {
 
   /**
    * The worker refused this tab because another tab holds this account's
-   * store under another sign-in: a guest who just signed up here, while
-   * another tab is still the guest. That tab follows the sign-up, or closes
-   * (the worker watches each tab's page lock), so this tab tries again on
-   * its own, meanwhile connecting rather than stopped: its writes wait for
-   * the worker in this tab, and its queries and waits go on once it joins.
-   * Past `HELD_BY_ANOTHER_TAB_PATIENCE_MS` it reports `held-by-another-tab`
-   * and fails those waits with a `StoreHeldByAnotherTabError`, still trying
-   * in the background. Any other refused configuration (an older deploy's
-   * schema) still fails visibly.
+   * store:
+   * - under another sign-in: a guest who just signed up here, while another
+   *   tab is still the guest. That tab follows the sign-up, or closes.
+   * - with another build's schema: another tab still runs the build this
+   *   one replaced (or the one that replaced it). That tab reloads, or
+   *   closes.
+   * The worker watches each tab's page lock, so this tab tries again on its
+   * own, meanwhile connecting rather than stopped: its writes wait for the
+   * worker in this tab, and its queries and waits go on once it joins. Past
+   * `HELD_BY_ANOTHER_TAB_PATIENCE_MS` it reports `held-by-another-tab` and
+   * fails those waits with a `StoreHeldByAnotherTabError`, still trying in
+   * the background. Any other refused configuration (another worker asset,
+   * protocol or storage format) still fails visibly.
    */
   private admissionRefused(connection: BrowserWorkerConnection | null): boolean {
-    return !!connection?.waitsForAnotherSignIn?.();
+    return !!connection?.waitsForAnotherTab?.();
+  }
+
+  /** The error that waits fail with past the patience, saying which other tab to reload. */
+  private heldByAnotherTabError(connection: BrowserWorkerConnection, cause: unknown): Error {
+    return connection.waitsForAnotherTab?.() === "build"
+      ? new StoreHeldByAnotherTabError(
+          "Another tab runs another build of this app (another schema) and holds this account's local store: reload the tab that runs the older build, which may be this one (reloading picks up the newest build), or close it. This tab joins once the other lets go; reloading this tab loses its unsynced writes",
+          { cause },
+        )
+      : new StoreHeldByAnotherTabError(undefined, { cause });
   }
 
   /** Resolves once `failed` is no longer this tab's connection, it shuts down, or `signal` aborts. */
@@ -471,7 +485,7 @@ export class BrowserConnectionManager extends ConnectionManager {
         // A refused tab tries again by itself (see `admissionRefused`): wait
         // for the attempt that joins, as for a reconnect.
         if (connection && this.admissionRefused(connection) && !signal?.aborted) {
-          if (this.heldTooLong) throw new StoreHeldByAnotherTabError(undefined, { cause: error });
+          if (this.heldTooLong) throw this.heldByAnotherTabError(connection, error);
           await this.replacementOf(connection, signal);
           if (this.dbStopping || this.shutdownStarted || signal?.aborted) return;
           connection = this.connection ?? (await this.configurationAdmissionRetry);
