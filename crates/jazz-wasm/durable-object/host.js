@@ -8,6 +8,8 @@
 //   GET  /apps/{x}/ws                  WebSocket: prelude, Hello, then wire frames
 //   POST /apps/{x}/backend/admit       204 for the app's backend
 //   GET  /apps/{x}/admin/migrations/graph, GET|POST /apps/{x}/admin/bundles
+//   POST /apps/{x}/admin/accounts/{resolve,login-or-register,link,
+//        found-local-first,revoke,revoke-sessions}
 //
 // Nobody configures an app id: the object makes one on its first open and
 // keeps it in its SQL (as a native core keeps `<data-dir>/app-id`), and
@@ -190,11 +192,11 @@ export function jazzCoreClass(wasm) {
           // A deployment may end sessions pinned to older bundles: tell them.
           this.flush();
         }
-        return answer.status === 204
-          ? new Response(null, { status: 204 })
+        return answer.contentType === ""
+          ? new Response(null, { status: answer.status })
           : new Response(answer.body, {
               status: answer.status,
-              headers: { "content-type": "application/json" },
+              headers: { "content-type": answer.contentType },
             });
       }
       if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
