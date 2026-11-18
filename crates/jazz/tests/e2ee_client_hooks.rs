@@ -1858,6 +1858,81 @@ fn reads_that_would_compare_or_return_sealed_cells_are_refused() {
     alice.prepare_query(&by_title).unwrap();
 }
 
+/// Hooks that leave `built_from_encrypted_app` at its default: they count
+/// as built from an encrypted app when their declarations name a table.
+struct Bare(E2eeDeclarations);
+
+impl E2eeHooks for Bare {
+    fn declarations(&self) -> &E2eeDeclarations {
+        &self.0
+    }
+
+    fn seal_write(&self, _: &mut WriteCells<'_>) -> Result<(), SealError> {
+        Ok(())
+    }
+
+    fn open_rows(
+        &self,
+        _: &ReadSite<'_>,
+        _: &mut Vec<CurrentRow>,
+    ) -> Result<OpenOutcome, jazz::db::Error> {
+        Ok(OpenOutcome::default())
+    }
+
+    fn plan_query(&self, _: &Query) -> Result<QueryPlan, jazz::db::Error> {
+        Ok(QueryPlan::Plain)
+    }
+
+    fn seal_stream(&self, _: &StreamTarget<'_>) -> Result<Box<dyn StreamSealer>, SealError> {
+        Err(SealError::Refused(jazz::db::Error::new(
+            ErrorCode::Query,
+            "no streams",
+        )))
+    }
+}
+
+/// Contract: hooks that do not say whether they were built from an encrypted
+/// app are taken to be when their declarations name an encrypted table, and
+/// not otherwise: so with no declared table they are refused on a schema
+/// holding Jazz's system tables, and with one they open it.
+#[test]
+fn hooks_default_to_built_from_an_encrypted_app_when_they_declare_a_table() {
+    use jazz::tools::AppId;
+    use jazz::tools::deployment::artifact::load_client_encrypted;
+    let app = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": {
+            "projects": { "columns": { "name": "string" } },
+            "notes": {
+                "columns": { "projectId": "uuid", "body": "bytes", "__e2ee_eq_body": "bytes" },
+                "relations": { "project": { "rel": "projects", "column": "projectId" } },
+                "encryption": { "space": "projectId", "scope": "projects",
+                    "columns": { "body": "string" }, "equality": ["body"] }
+            }
+        } }"#;
+    let (schema, _, declarations) =
+        load_client_encrypted(app.as_bytes(), AppId::from_name("bare"), "test").unwrap();
+    let declarations = declarations.expect("the app declares encryption");
+    let config = || DbConfig::new(jazz::schema::JazzSchema::new(&schema).unwrap(), identity(1));
+    let nothing = E2eeDeclarations {
+        tables: BTreeMap::new(),
+        ..declarations.clone()
+    };
+    let error = block_on(jazz::binding_host::open_memory(
+        config().with_e2ee(Rc::new(Bare(nothing))),
+    ))
+    .err()
+    .expect("refused");
+    assert!(
+        error.message.contains("declares end-to-end encryption"),
+        "{}",
+        error.message
+    );
+    block_on(jazz::binding_host::open_memory(
+        config().with_e2ee(Rc::new(Bare(declarations))),
+    ))
+    .unwrap();
+}
+
 /// A union query of `arms` over `notes`, each `(label, predicate)` reading
 /// the whole table under its predicate, ordered by `order` when given.
 fn union_of(arms: Vec<(&str, jazz::query::RelationPredicate)>, order: Option<&str>) -> Query {
