@@ -44,6 +44,7 @@
 //!   non-serializable commit.
 
 use crate::schema::history::{history_source_table, is_history_table};
+use crate::storage::Scoped;
 use crate::values::CachedRow;
 use crate::values::query_error;
 use crate::values::{STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT};
@@ -10344,24 +10345,23 @@ impl Db {
         };
         let mut inner = self.inner();
         let seq = inner.seq + 1;
-        if begin_savepoint(&inner.conn, "advise").is_err() {
-            return PermissionAdvice::Unknown;
-        }
-        let mark = inner.changed.borrow().len();
-        // Dry-run under the session's policies: a pinned session's bundle.
-        let governed = inner.governed_view(&inner.schema.clone(), index);
-        let active = std::mem::replace(&mut inner.schema, governed);
-        let applied = inner.apply_as(&op, who, seq).map(drop);
-        inner.schema = active;
-        inner.changed.borrow_mut().truncate(mark);
-        let undone = end_savepoint(&inner.conn, "advise", false);
-        match (applied, undone) {
-            (_, Err(_)) => PermissionAdvice::Unknown,
-            (Ok(()), Ok(())) => PermissionAdvice::Allowed,
-            (Err(error), Ok(())) if error.code == ErrorCode::WriteRejected => {
-                PermissionAdvice::Denied
-            }
-            (Err(_), Ok(())) => PermissionAdvice::Unknown,
+        let conn = inner.conn.clone();
+        // A dry run: what it wrote is undone either way.
+        let advised = conn.scope_then("advise", |_| {
+            let mark = inner.changed.borrow().len();
+            // Dry-run under the session's policies: a pinned session's bundle.
+            let governed = inner.governed_view(&inner.schema.clone(), index);
+            let active = std::mem::replace(&mut inner.schema, governed);
+            let applied = inner.apply_as(&op, who, seq).map(drop);
+            inner.schema = active;
+            inner.changed.borrow_mut().truncate(mark);
+            Scoped::Undo(applied)
+        });
+        match advised {
+            Err(_) => PermissionAdvice::Unknown,
+            Ok(Ok(())) => PermissionAdvice::Allowed,
+            Ok(Err(error)) if error.code == ErrorCode::WriteRejected => PermissionAdvice::Denied,
+            Ok(Err(_)) => PermissionAdvice::Unknown,
         }
     }
 
@@ -10372,10 +10372,8 @@ impl Db {
             return Ok(());
         }
         // Everything one tick applies commits together.
-        begin_savepoint(&self.inner.borrow().conn, "sync_tick")?;
-        let applied = self.client_apply();
-        end_savepoint(&self.inner.borrow().conn, "sync_tick", applied.is_ok())?;
-        applied?;
+        let conn = self.inner.borrow().conn.clone();
+        conn.scope("sync_tick", |_| self.client_apply())?;
         self.notify();
         let arrived = {
             let mut inner = self.inner.borrow_mut();
@@ -11425,72 +11423,81 @@ impl Db {
         let view = inner.stored_view();
         let active = std::mem::replace(&mut inner.schema, view);
         inner.replayed_commits += pending.len() as u64;
+        let conn = inner.conn.clone();
         let replayed = pending.into_iter().try_for_each(|(order, tx, ops, rows)| {
-            begin_savepoint(&inner.conn, "replay")?;
-            inner.merging = true;
-            // The branches this commit wrote that an upstream's later
-            // version holds: there, that version shows.
-            let under: Vec<&RowKey> = rows
-                .iter()
-                .filter(|key| outranked.get(key).is_some_and(|&later| later >= order))
-                .collect();
-            // An op is left out where every branch it wrote is held so; one
-            // that also wrote a branch that is not applies, and the held
-            // branches are put back after the commit replays.
-            let shown = |op: &StagedOp| {
-                op.row().is_none_or(|row| {
-                    let table = op.table();
-                    let mut wrote = rows
-                        .iter()
-                        .filter(|(t, r, _)| t == table && *r == row)
-                        .peekable();
-                    wrote.peek().is_none() || wrote.any(|key| !under.contains(&key))
-                })
-            };
-            let replayed = ops
-                .iter()
-                .filter(|op| shown(op))
-                .try_for_each(|op| match inner.apply(op, tx) {
-                    // A part of a cross-shard commit that landed before its fate
-                    // (another shard answered first) already holds its row. The
-                    // writer's version overlays that baseline as it overlays any
-                    // other, until the fate: the whole commit still shows as its
-                    // writer's. Another writer's version of the same row id lands
-                    // here the same way and is overlaid alike: the conflicting
-                    // insert is refused upstream, and the fate drops the whole
-                    // commit, which uncovers theirs.
-                    Err(error) if error.reason == Some(Reason::RowAlreadyExists) => {
-                        let StagedOp::Insert(table, _, opts) = op else {
-                            return Err(error);
-                        };
-                        let landed = baseline.iter().find_map(|((t, row, key), image)| {
-                            let image = image.as_ref()?;
-                            (t == table && Some(*row) == opts.row_id).then_some((row, key, image))
-                        });
-                        let Some((row, key, image)) = landed else {
-                            return Err(error);
-                        };
-                        let at = image.at;
-                        inner.drop_row(table, *row, key, at)?;
-                        inner.apply(op, tx).map(drop)
-                    }
-                    other => other.map(drop),
-                })
-                .and_then(|()| {
-                    for key @ (table, row, branch) in &under {
-                        let Some(Some(image)) = baseline.get(*key) else {
-                            continue;
-                        };
-                        if inner.current_image(table, *row, branch)?.map(|i| i.at) != Some(image.at)
-                        {
-                            inner.drop_row(table, *row, branch, image.at)?;
-                            inner.put_image(image, false)?;
+            // A commit that fails to replay is undone and skipped; only a
+            // savepoint that cannot open or close stops the replay.
+            conn.scope_then("replay", |_| {
+                inner.merging = true;
+                // The branches this commit wrote that an upstream's later
+                // version holds: there, that version shows.
+                let under: Vec<&RowKey> = rows
+                    .iter()
+                    .filter(|key| outranked.get(key).is_some_and(|&later| later >= order))
+                    .collect();
+                // An op is left out where every branch it wrote is held so; one
+                // that also wrote a branch that is not applies, and the held
+                // branches are put back after the commit replays.
+                let shown = |op: &StagedOp| {
+                    op.row().is_none_or(|row| {
+                        let table = op.table();
+                        let mut wrote = rows
+                            .iter()
+                            .filter(|(t, r, _)| t == table && *r == row)
+                            .peekable();
+                        wrote.peek().is_none() || wrote.any(|key| !under.contains(&key))
+                    })
+                };
+                let replayed = ops
+                    .iter()
+                    .filter(|op| shown(op))
+                    .try_for_each(|op| match inner.apply(op, tx) {
+                        // A part of a cross-shard commit that landed before its fate
+                        // (another shard answered first) already holds its row. The
+                        // writer's version overlays that baseline as it overlays any
+                        // other, until the fate: the whole commit still shows as its
+                        // writer's. Another writer's version of the same row id lands
+                        // here the same way and is overlaid alike: the conflicting
+                        // insert is refused upstream, and the fate drops the whole
+                        // commit, which uncovers theirs.
+                        Err(error) if error.reason == Some(Reason::RowAlreadyExists) => {
+                            let StagedOp::Insert(table, _, opts) = op else {
+                                return Err(error);
+                            };
+                            let landed = baseline.iter().find_map(|((t, row, key), image)| {
+                                let image = image.as_ref()?;
+                                (t == table && Some(*row) == opts.row_id)
+                                    .then_some((row, key, image))
+                            });
+                            let Some((row, key, image)) = landed else {
+                                return Err(error);
+                            };
+                            let at = image.at;
+                            inner.drop_row(table, *row, key, at)?;
+                            inner.apply(op, tx).map(drop)
                         }
-                    }
-                    Ok(())
-                });
-            inner.merging = false;
-            end_savepoint(&inner.conn, "replay", replayed.is_ok())
+                        other => other.map(drop),
+                    })
+                    .and_then(|()| {
+                        for key @ (table, row, branch) in &under {
+                            let Some(Some(image)) = baseline.get(*key) else {
+                                continue;
+                            };
+                            if inner.current_image(table, *row, branch)?.map(|i| i.at)
+                                != Some(image.at)
+                            {
+                                inner.drop_row(table, *row, branch, image.at)?;
+                                inner.put_image(image, false)?;
+                            }
+                        }
+                        Ok(())
+                    });
+                inner.merging = false;
+                match replayed {
+                    Ok(()) => Scoped::Keep(()),
+                    Err(_) => Scoped::Undo(()),
+                }
+            })
         });
         inner.schema = active;
         replayed?;
@@ -15308,7 +15315,7 @@ impl Db {
                 // ahead of the commits that name it.
                 let relay = inner.client.is_some();
                 let author = receipt_author(&inner.sessions[index].identity);
-                in_savepoint(&inner.conn, "jazz_lv_push", || {
+                inner.conn.clone().scope("jazz_lv_push", |_| {
                     for node in nodes {
                         // A node that fails authentication is dropped; a
                         // commit that needs it is then rejected for missing
@@ -15873,8 +15880,7 @@ impl Db {
             }
             previous
         };
-        let merged: HashSet<RowKey>;
-        let (seq, mark, prior) = {
+        let (seq, prior, part, conn) = {
             let mut inner = self.inner();
             // A cross-shard part lands where all its parts do: at the
             // position its gateway fixed, under commits this shard accepted
@@ -15915,7 +15921,16 @@ impl Db {
                 inner.observe_hlc(clock);
                 inner.own_order.insert(seq, (clock, id.0, id.1));
             }
-            begin_savepoint(&inner.conn, "upload").map_err(|e| (e, Vec::new()))?;
+            let conn = inner.conn.clone();
+            drop(inner);
+            (seq, prior, part, conn)
+        };
+        // The unit lands in one scope: its writes, its fate and settlement,
+        // its hold's release, the relay's upload record and the bases it
+        // was built on. Any failure undoes all of it.
+        let mut merged = HashSet::new();
+        let landed_unit = conn.scope_then("upload", |_| {
+            let mut inner = self.inner();
             let mark = inner.changed.borrow().len();
             // The unit's write checks run at its end, grounded (SPEC 7).
             inner.start_unit_heads();
@@ -15943,13 +15958,13 @@ impl Db {
                 .filter(|(_, columns)| columns.values().any(Option::is_some))
                 .map(|(row, _)| row.clone())
                 .collect();
+            // A refused write tells the sender which of its rows it
+            // mentioned, read once the unit is undone.
             if let Err(error) = applied {
                 inner.as_sent.borrow_mut().clear();
                 inner.abandon_checks();
                 inner.changed.borrow_mut().truncate(mark);
-                end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
-                let rows = mentioned(&inner);
-                return Err((error, rows));
+                return Scoped::Undo(Err((error, true)));
             }
             let recorded = inner
                 .record_fate(id.0, id.1, &Ok(()))
@@ -15957,82 +15972,80 @@ impl Db {
                 .and_then(|()| match relay {
                     true => Ok(()),
                     false => inner.prune_transactions(id, &ops),
-                });
+                })
+                // Its hold goes with it: the record of both commits together.
+                .and_then(|()| inner.forget_hold(part));
             if let Err(error) = recorded {
                 inner.changed.borrow_mut().truncate(mark);
-                end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
-                return Err((error, Vec::new()));
-            }
-            // Its hold goes with it: the record of both commits together.
-            if let Err(error) = inner.forget_hold(part) {
-                inner.changed.borrow_mut().truncate(mark);
-                end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
-                return Err((error, Vec::new()));
+                return Scoped::Undo(Err((error, false)));
             }
             inner.seq = inner.seq.max(seq);
-            (seq, mark, prior)
-        };
-        // The relay's own upload record and the rows the sender hears about
-        // are read before the commit is released, so a storage error
-        // rejects it whole instead of leaving it applied but not relayed.
-        // The authority keeps what each version was built on (INV-HIST-21);
-        // a relay passes the bases on instead.
-        let finished = if relay {
-            self.record_stored_upload(
-                ops.clone(),
-                seq,
-                upload,
-                Some(Relayed {
-                    origin: id,
-                    clock,
-                    bases,
-                }),
-                None,
-            )
-        } else {
-            Ok(())
-        }
-        .and_then(|()| self.inner.borrow().written_rows(&ops, seq))
-        .and_then(|rows| {
-            if !relay {
-                let inner = self.inner.borrow();
-                inner.record_bases(&ops, &by_row, &built, seq, &rows)?;
-                inner.record_as_sent(seq, id.0, &built, &rows)?;
+            drop(inner);
+            // The relay's own upload record and the rows the sender hears
+            // about are read before the commit is released, so a storage
+            // error rejects it whole instead of leaving it applied but not
+            // relayed. The authority keeps what each version was built on
+            // (INV-HIST-21); a relay passes the bases on instead.
+            let finished = if relay {
+                self.record_stored_upload(
+                    ops.clone(),
+                    seq,
+                    upload,
+                    Some(Relayed {
+                        origin: id,
+                        clock,
+                        bases,
+                    }),
+                    None,
+                )
+            } else {
+                Ok(())
             }
-            Ok(rows)
+            .and_then(|()| self.inner.borrow().written_rows(&ops, seq))
+            .and_then(|rows| {
+                if !relay {
+                    let inner = self.inner.borrow();
+                    inner.record_bases(&ops, &by_row, &built, seq, &rows)?;
+                    inner.record_as_sent(seq, id.0, &built, &rows)?;
+                }
+                Ok(rows)
+            });
+            match finished {
+                Ok(rows) => Scoped::Keep(Ok(rows)),
+                Err(error) => {
+                    let mut inner = self.inner();
+                    inner.as_sent.borrow_mut().clear();
+                    inner.changed.borrow_mut().truncate(mark);
+                    inner.seq = prior;
+                    Scoped::Undo(Err((error, false)))
+                }
+            }
         });
+        let rows = match landed_unit.map_err(|e| (e, Vec::new()))? {
+            Ok(rows) => rows,
+            Err((error, true)) => return Err((error, mentioned(&self.inner()))),
+            Err((error, false)) => return Err((error, Vec::new())),
+        };
         let mut inner = self.inner();
-        match finished {
-            Ok(rows) => {
-                end_savepoint(&inner.conn, "upload", true).map_err(|e| (e, Vec::new()))?;
-                inner.shard.landed(crate::db::shard::CommitRef {
-                    node: id.0,
-                    tx: id.1,
-                });
-                let on = if relay {
-                    landed
-                } else {
-                    built
-                        .iter()
-                        .map(|(row_key, built)| {
-                            let (Built::Seq(seq) | Built::On(seq)) = *built;
-                            (row_key.clone(), Pos::at(seq))
-                        })
-                        .collect()
-                };
-                let echoable = echoable(&ops, &by_row, &rows, &on, &previous, &merged);
-                drop(inner);
-                self.notify();
-                Ok((rows, echoable))
-            }
-            Err(error) => {
-                inner.as_sent.borrow_mut().clear();
-                inner.changed.borrow_mut().truncate(mark);
-                end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
-                inner.seq = prior;
-                Err((error, Vec::new()))
-            }
-        }
+        inner.shard.landed(crate::db::shard::CommitRef {
+            node: id.0,
+            tx: id.1,
+        });
+        let on = if relay {
+            landed
+        } else {
+            built
+                .iter()
+                .map(|(row_key, built)| {
+                    let (Built::Seq(seq) | Built::On(seq)) = *built;
+                    (row_key.clone(), Pos::at(seq))
+                })
+                .collect()
+        };
+        let echoable = echoable(&ops, &by_row, &rows, &on, &previous, &merged);
+        drop(inner);
+        self.notify();
+        Ok((rows, echoable))
     }
 
     /// One tick for both roles.
