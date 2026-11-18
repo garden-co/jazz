@@ -20,9 +20,9 @@ pub struct AuthAdmissionConfig {
     pub jwt_verifier: Option<JwtVerifierConfig>,
     /// Issuer that external JWTs must contain.
     pub expected_issuer: Option<String>,
-    /// Whether local-first JWT auth is allowed by configuration.
-    pub allow_local_first_auth: bool,
-    /// App id/audience that external and local-first JWTs must target.
+    /// Whether device-account JWT auth is allowed by configuration.
+    pub allow_device_accounts: bool,
+    /// App id/audience that external and device-account JWTs must target.
     pub expected_audience: Option<String>,
     /// Fallback subject used when no explicit auth is required.
     pub anonymous_subject: String,
@@ -34,7 +34,7 @@ impl Default for AuthAdmissionConfig {
             static_bearer_token: None,
             jwt_verifier: None,
             expected_issuer: None,
-            allow_local_first_auth: false,
+            allow_device_accounts: false,
             expected_audience: None,
             anonymous_subject: "anonymous".to_owned(),
         }
@@ -178,8 +178,8 @@ pub enum AdmissionSource {
     FirstFrameHandshake,
     /// No credential was required; anonymous subject was used.
     Anonymous,
-    /// Signed local-first JWT admitted by explicit local-first policy.
-    LocalFirstJwt,
+    /// Signed device-account JWT admitted by explicit device-account policy.
+    DeviceAccountJwt,
 }
 
 /// Auth/session admission errors.
@@ -308,23 +308,26 @@ pub fn admit_bearer_jwt(
     })
 }
 
-/// Issuer required for local-first admission tokens.
-pub const LOCAL_FIRST_JWT_ISSUER: &str = AuthorSubject::LOCAL_FIRST_ISSUER;
+/// Issuer required for device-account admission tokens.
+pub const DEVICE_ACCOUNT_JWT_ISSUER: &str = AuthorSubject::DEVICE_ACCOUNT_ISSUER;
+/// Deprecated alias of [`DEVICE_ACCOUNT_JWT_ISSUER`].
+#[deprecated(note = "renamed to DEVICE_ACCOUNT_JWT_ISSUER")]
+pub const LOCAL_FIRST_JWT_ISSUER: &str = DEVICE_ACCOUNT_JWT_ISSUER;
 /// Reserved issuer for subjects admitted by the process-local static bearer gate.
 pub const STATIC_BEARER_ISSUER: &str = AuthorSubject::STATIC_BEARER_ISSUER;
 /// Reserved issuer for sessions admitted without an external credential.
 pub const ANONYMOUS_ISSUER: &str = AuthorSubject::ANONYMOUS_ISSUER;
 
-/// Admit a signed local-first JWT.
+/// Admit a signed device-account JWT.
 ///
 /// This intentionally uses the configured JWT verifier and does not accept
 /// unsigned tokens. When the server has a configured app id/audience, both the
 /// JWT `aud` and local-first `appId` claims must match it.
-pub fn admit_local_first_jwt(
+pub fn admit_device_account_jwt(
     config: &AuthAdmissionConfig,
     bearer: Option<&str>,
 ) -> Result<AdmittedSession, AuthAdmissionError> {
-    if !config.allow_local_first_auth {
+    if !config.allow_device_accounts {
         return Err(AuthAdmissionError::InvalidBearer);
     }
     let verifier = config
@@ -337,7 +340,7 @@ pub fn admit_local_first_jwt(
     validation.required_spec_claims.insert("exp".to_owned());
     validation.required_spec_claims.insert("iss".to_owned());
     validation.required_spec_claims.insert("sub".to_owned());
-    validation.set_issuer(&[LOCAL_FIRST_JWT_ISSUER]);
+    validation.set_issuer(&[DEVICE_ACCOUNT_JWT_ISSUER]);
     if let Some(expected_audience) = config.expected_audience.as_deref() {
         validation.required_spec_claims.insert("aud".to_owned());
         validation.set_audience(&[expected_audience]);
@@ -365,22 +368,31 @@ pub fn admit_local_first_jwt(
         }
     }
     let subject = decoded.claims.sub;
-    let author = AuthorSubject::reserved(LOCAL_FIRST_JWT_ISSUER, &subject)?;
+    let author = AuthorSubject::reserved(DEVICE_ACCOUNT_JWT_ISSUER, &subject)?;
     let provider_claims = jwt_json_claims_to_policy_claims(decoded.claims.extra)?;
     let claims = admitted_session_claims(
-        LOCAL_FIRST_JWT_ISSUER,
+        DEVICE_ACCOUNT_JWT_ISSUER,
         &subject,
         author,
         provider_claims.clone(),
     );
     Ok(AdmittedSession {
-        issuer: LOCAL_FIRST_JWT_ISSUER.to_owned(),
+        issuer: DEVICE_ACCOUNT_JWT_ISSUER.to_owned(),
         author,
         subject,
         claims,
         provider_claims,
-        source: AdmissionSource::LocalFirstJwt,
+        source: AdmissionSource::DeviceAccountJwt,
     })
+}
+
+/// Deprecated alias of [`admit_device_account_jwt`].
+#[deprecated(note = "renamed to admit_device_account_jwt")]
+pub fn admit_local_first_jwt(
+    config: &AuthAdmissionConfig,
+    bearer: Option<&str>,
+) -> Result<AdmittedSession, AuthAdmissionError> {
+    admit_device_account_jwt(config, bearer)
 }
 
 pub use crate::portable::session::admitted_session_claims;
@@ -485,7 +497,7 @@ mod tests {
         );
         for issuer in [
             AuthorSubject::SYSTEM_ISSUER,
-            LOCAL_FIRST_JWT_ISSUER,
+            DEVICE_ACCOUNT_JWT_ISSUER,
             STATIC_BEARER_ISSUER,
             ANONYMOUS_ISSUER,
         ] {
@@ -524,7 +536,7 @@ mod tests {
     fn signed_external_jwt_rejects_reserved_issuers_during_resolution() {
         for issuer in [
             AuthorSubject::SYSTEM_ISSUER,
-            LOCAL_FIRST_JWT_ISSUER,
+            DEVICE_ACCOUNT_JWT_ISSUER,
             STATIC_BEARER_ISSUER,
             ANONYMOUS_ISSUER,
         ] {
