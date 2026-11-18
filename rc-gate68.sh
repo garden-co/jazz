@@ -18,8 +18,8 @@ for a in t1-migrations:8601 t3-permissions:8603 t6-import-style:8606; do d=${a%%
   ./_common/run-smoke.sh $d $p | grep -E "^(PASS|FAIL|SMOKE|SERVER)"; done
 for fx in fixture-data fixture-data-67; do echo "===== t1 $fx opens on rc"
   ( cd t1-migrations && FX=$fx ./fixture-check.sh | grep -E "^(PASS|FAIL|SMOKE|SERVER)"
-    db=/tmp/t1fx/jazz/jazz.sqlite; sqlite3 $db "select key, length(value) from _jazz_host_identity" 2>&1 | tr '\n' ' '; echo
-    sid=$(cat $fx/jazz/store-id); got=$(sqlite3 $db "select value from _jazz_host_identity where key='store_id'" 2>/dev/null | tr -d '\n')
+    db=/tmp/t1fx/jazz/jazz.sqlite; sqlite3 $db "select cast(k as text), length(v) from _jazz_host_identity" 2>&1 | tr '\n' ' '; echo
+    sid=$(cat $fx/jazz/store-id); got=$(sqlite3 $db "select cast(v as text) from _jazz_host_identity where cast(k as text)='store_id'" 2>/dev/null | tr -d '\n')
     [ -n "$got" ] && echo "$got" | grep -q "$sid" && echo "PASS store_id moved into jazz.sqlite ($sid)" || echo "FAIL store_id in jazz.sqlite: '$got' vs file '$sid'"
     [ "$(cat /tmp/t1fx/jazz/store-id)" = "$sid" ] && echo "PASS store-id mirror file unchanged" || echo "FAIL store-id mirror changed" ) ; done
 echo "===== t5-expo"
