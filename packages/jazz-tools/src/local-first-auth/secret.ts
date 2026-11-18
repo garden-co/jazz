@@ -22,7 +22,7 @@ export class SecretFormatError extends Error {
 /** Format exactly 32 bytes of entropy as a secret. */
 export function formatSecret(bytes: Uint8Array): string {
   if (bytes.byteLength !== SECRET_BYTES) {
-    throw new SecretFormatError(`A local-first secret must contain exactly ${SECRET_BYTES} bytes`);
+    throw new SecretFormatError(`A device account key must contain exactly ${SECRET_BYTES} bytes`);
   }
   return `${SECRET_PREFIX}${base64urlEncode(bytes)}`;
 }
@@ -30,20 +30,20 @@ export function formatSecret(bytes: Uint8Array): string {
 /** Strictly parse the canonical form and return its 32 bytes. */
 export function parseSecret(secret: string): Uint8Array {
   if (typeof secret !== "string" || !secret.startsWith(SECRET_PREFIX)) {
-    throw new SecretFormatError(`A local-first secret must start with ${SECRET_PREFIX}`);
+    throw new SecretFormatError(`A device account key must start with ${SECRET_PREFIX}`);
   }
   const payload = secret.slice(SECRET_PREFIX.length);
   if (!SECRET_PAYLOAD.test(payload)) {
-    throw new SecretFormatError("A local-first secret must use 43 unpadded base64url characters");
+    throw new SecretFormatError("A device account key must use 43 unpadded base64url characters");
   }
   let bytes: Uint8Array;
   try {
     bytes = base64urlDecode(payload, true);
   } catch {
-    throw new SecretFormatError("A local-first secret is not valid base64url");
+    throw new SecretFormatError("A device account key is not valid base64url");
   }
   if (bytes.byteLength !== SECRET_BYTES || formatSecret(bytes) !== secret) {
-    throw new SecretFormatError("A local-first secret is not canonical");
+    throw new SecretFormatError("A device account key is not canonical");
   }
   return bytes;
 }

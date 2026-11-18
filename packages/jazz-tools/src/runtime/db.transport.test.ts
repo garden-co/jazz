@@ -365,7 +365,7 @@ describe("runtime/Db native runtime path upstream wiring", () => {
 
     const inserted = db.insert(app.todos, { title: "Buy milk" });
     db.updateAuthToken("fresh-jwt");
-    const proof = db.getLocalFirstIdentityProof({
+    const proof = db.getDeviceAccountProof({
       audience: "proof-audience",
       ttlSeconds: 7,
     });

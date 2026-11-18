@@ -268,7 +268,7 @@ describe.each(stores)("on a %s store", (_kind, store) => {
     await vi.waitFor(
       () =>
         expect(
-          warn.mock.calls.some((call) => /refused a local-first guest/.test(call.join(" "))),
+          warn.mock.calls.some((call) => /refused a device account/.test(call.join(" "))),
         ).toBe(true),
       { timeout: 20_000 },
     );
