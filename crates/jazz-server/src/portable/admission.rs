@@ -187,28 +187,6 @@ pub struct UpgradeCredential<'a> {
 pub type GuestVerifier<'a> =
     dyn FnMut(&str, AuthorSubject, Option<&str>) -> Result<jazz::tools::Session, String> + 'a;
 
-/// Admit a socket to a core that admits only its app's backend, by the
-/// core's one `secret` (a Durable Object core): as a native core does with
-/// a backend credential and no trusted workload.
-///
-/// - The upgrade's credential, or the prelude's `admin_secret` /
-///   `backend_secret`, must be `secret`; an admin one is an authority link.
-/// - A backend's own link is served as the backend; a user session the
-///   backend states (`backend_session`) is served under that user's
-///   policies, and must be the peer its prelude named.
-/// - A local-first guest's own proof (`jwt_token`) comes on session access
-///   and is admitted by `guest` (below); on backend access it is refused.
-/// - A credential that holds decides the access, and the prelude's secret
-///   slots are ignored (as native's workload gate): without a stated
-///   access it vouches only that it relays a client, which must prove who
-///   it is itself.
-/// - A stated session carries its [`SessionRevocation`]: when the backend's
-///   `authenticate` started for it (`authenticatedAt`), else `now_ms`, the
-///   time the core admits it (Unix ms).
-/// - A guest the backend relays (session access, the guest's own proof in
-///   `jwt_token`) is admitted by `guest`: given the proof, the peer it must
-///   be and the audience the backend stated (`local_first_audience`), the
-///   session to serve it as (see `portable::guest::admit_guest`).
 /// Why [`admit_by_core_secret`] refused a connection: its message, and the
 /// [`WireErrorReason`] a client that reads one is told, when it is known.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -263,6 +241,28 @@ impl PartialEq<&str> for CoreSecretRefusal {
     }
 }
 
+/// Admit a socket to a core that admits only its app's backend, by the
+/// core's one `secret` (a Durable Object core): as a native core does with
+/// a backend credential and no trusted workload.
+///
+/// - The upgrade's credential, or the prelude's `admin_secret` /
+///   `backend_secret`, must be `secret`; an admin one is an authority link.
+/// - A backend's own link is served as the backend; a user session the
+///   backend states (`backend_session`) is served under that user's
+///   policies, and must be the peer its prelude named.
+/// - A local-first guest's own proof (`jwt_token`) comes on session access
+///   and is admitted by `guest` (below); on backend access it is refused.
+/// - A credential that holds decides the access, and the prelude's secret
+///   slots are ignored (as native's workload gate): without a stated
+///   access it vouches only that it relays a client, which must prove who
+///   it is itself.
+/// - A stated session carries its [`SessionRevocation`]: when the backend's
+///   `authenticate` started for it (`authenticatedAt`), else `now_ms`, the
+///   time the core admits it (Unix ms).
+/// - A guest the backend relays (session access, the guest's own proof in
+///   `jwt_token`) is admitted by `guest`: given the proof, the peer it must
+///   be and the audience the backend stated (`local_first_audience`), the
+///   session to serve it as (see `portable::guest::admit_guest`).
 pub fn admit_by_core_secret(
     prelude: &WebSocketPrelude,
     upgrade: Option<UpgradeCredential<'_>>,
