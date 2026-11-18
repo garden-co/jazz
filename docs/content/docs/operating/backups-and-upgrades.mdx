@@ -111,8 +111,9 @@ your backend's. On an alpha.69 core, a policy that still compares `session.authM
 `"local-first"` no longer compiles. Every query whose policy contains that comparison then fails,
 for **every** user, signed-in ones included, until you deploy the renamed permissions.
 
-**Upgrade the core and redeploy your backend together.** On Jazz Cloud the core is upgraded
-separately from your deployment, so the two can be out of step for a while:
+**Upgrade the core and redeploy your backend together.** On Jazz Cloud you upgrade your app's core
+separately from your deployment (`npx jazz-tools apps upgrade`), so the two can be out of step for a
+while:
 
 - an alpha.69 core with your old permissions: the tables those policies guard fail for everyone,
   as above;
