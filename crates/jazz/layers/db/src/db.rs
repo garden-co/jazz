@@ -2019,10 +2019,25 @@ impl Db {
         };
         let target = std::mem::replace(&mut config.schema, first.clone());
         let db = Self::open_named(config, conn, path)?;
-        db.admit_along_migrations(&target)?;
+        // Installing the schema: admitted along the lenses, checked against
+        // the one the store opened under, and its declaration order made
+        // tag order, all or nothing.
+        begin_savepoint(&db.inner().conn, "jazz_install")?;
+        let installed = db.admit_along_migrations(&target).and_then(|_| {
+            let inner = db.inner();
+            let owner = Rc::new(inner.named(&target));
+            for table in owner.tables.values() {
+                if let Some(current) = inner.owner.by_stored(&table.stored) {
+                    check_branch_removal(current, table)?;
+                }
+            }
+            inner.align_tags(&owner)?;
+            Ok(owner)
+        });
+        end_savepoint(&db.inner().conn, "jazz_install", installed.is_ok())?;
+        let owner = installed?;
         {
             let mut inner = db.inner();
-            let owner = Rc::new(inner.named(&target));
             inner.owner_version = target.version_id();
             inner.schema = owner.clone();
             inner.owner = owner;
@@ -2056,7 +2071,7 @@ impl Db {
         }
         for (schema, lenses) in steps {
             if self.inner().names.get(&schema.version_id()).is_none() {
-                self.admit(schema, &lenses, None)?;
+                self.admit(schema, &lenses)?;
             }
         }
         Ok(along)
@@ -2081,8 +2096,8 @@ impl Db {
         let mut names = crate::names::Names::load(&conn)?;
         // The newest version (one new to this file, or the one it admitted
         // last) is current from now on; an older one (a server reopening
-        // under its genesis schema, before it activates its current one)
-        // leaves the tags as they are.
+        // under its genesis schema, or an older client) leaves the tags as
+        // they are.
         let version = config.schema.version_id();
         let newest = names.get(&version).is_none() || names.latest_version() == Some(version);
         // Every version an earlier process admitted is admitted again, with
@@ -2091,6 +2106,22 @@ impl Db {
         let schema = names.resolve(&config.schema, &[], names.latest())?;
         names.check_branches(&schema)?;
         names.check_types(&schema)?;
+        // A version new to this file without lenses is named against the
+        // latest admitted one. It may lack a branch column (an older client
+        // reads it at its default), but may not give one another type: that
+        // would be a new stored column, and the rows are keyed by the old.
+        if names.get(&version).is_none()
+            && let Some((_, latest)) = names
+                .latest_version()
+                .and_then(|latest| admitted.iter().find(|(id, _)| *id == latest))
+        {
+            let before = names.resolve(latest, &[], names.latest())?;
+            for table in schema.tables.values() {
+                if let Some(current) = before.by_stored(&table.stored) {
+                    check_branch_retype(current, table)?;
+                }
+            }
+        }
         // Variants are tagged before any DDL: an enum default is its tag.
         names.mint(&conn, &schema)?;
         let chunks =
@@ -4068,42 +4099,25 @@ impl Db {
 
     // ---- schema evolution -------------------------------------------------
 
-    /// Make `schema` the current schema. The stored tables grow to hold it:
-    /// new tables, new columns (`ADD COLUMN ... DEFAULT`, no rows rewritten)
-    /// and new indexes. Columns other schemas added stay, so older clients
-    /// keep their data. Changing a column's type is not supported yet, and a
-    /// new required column needs a default.
-    pub async fn activate_schema(&self, schema: JazzSchema) -> Result<(), Error> {
-        self.activate(schema, &[])
-    }
-
-    /// [`Db::activate_schema`], with the migration lenses into `schema`
-    /// (lenses into other versions are ignored). A lens's added columns
-    /// take its defaults, and a renamed table or column keeps the stored
-    /// table or column of its source, so every version reads and writes the
-    /// same rows (see [`crate::names`]).
-    pub async fn activate_schema_with_lenses(
-        &self,
-        schema: JazzSchema,
-        lenses: &[MigrationLens],
-    ) -> Result<(), Error> {
-        self.activate(schema, lenses)
-    }
-
-    /// Admit `schema` without making it current: the stored tables grow to
-    /// hold it as [`Db::activate_schema_with_lenses`] would, and sessions
-    /// that declare it read and write by its names under the current
-    /// schema's policies.
+    /// Admit `schema`, with the migration lenses into it (lenses into other
+    /// versions are ignored), as a deploy does. The stored tables grow to
+    /// hold it: new tables, new columns (`ADD COLUMN ... DEFAULT`, no rows
+    /// rewritten) and new indexes; a lens's added columns take its
+    /// defaults, and a renamed table or column keeps the stored table or
+    /// column of its source, so every version reads and writes the same
+    /// rows (see [`crate::names`]). Changing a column's type in place is
+    /// not supported yet, and a new required column needs a default.
+    ///
+    /// Admitting never makes `schema` current: sessions that declare it
+    /// read and write by its names, and a store installs it as its own
+    /// schema only when it opens under it (a running store never switches
+    /// schema).
     pub async fn admit_schema_with_lenses(
         &self,
         schema: JazzSchema,
         lenses: &[MigrationLens],
     ) -> Result<(), Error> {
-        self.admit(schema, lenses, None)
-    }
-
-    fn activate(&self, schema: JazzSchema, lenses: &[MigrationLens]) -> Result<(), Error> {
-        self.admit(schema, lenses, Some(None))
+        self.admit(schema, lenses)
     }
 
     /// Apply `change` to the store's catalogue in one transaction: publish
@@ -4127,7 +4141,7 @@ impl Db {
         let result = conn.scope("jazz_catalogue", |conn| {
             crate::catalogue::put(conn, &change.put)?;
             for (schema, lenses) in change.admit {
-                self.admit(schema, &lenses, None)?;
+                self.admit(schema, &lenses)?;
             }
             Ok(())
         });
@@ -4178,15 +4192,8 @@ impl Db {
         crate::catalogue::read(&self.inner().conn)
     }
 
-    /// Admit `schema`; with `current`, also make it current, at that
-    /// permissions revision if one is given.
-    fn admit(
-        &self,
-        schema: JazzSchema,
-        lenses: &[MigrationLens],
-        current: Option<Option<u64>>,
-    ) -> Result<(), Error> {
-        let make_current = current.is_some();
+    /// Admit `schema` with the lenses into it.
+    fn admit(&self, schema: JazzSchema, lenses: &[MigrationLens]) -> Result<(), Error> {
         {
             let mut inner = self.inner();
             let version = schema.version_id();
@@ -4210,13 +4217,6 @@ impl Db {
             // keys rows the same way.
             inner.names.check_branches(&target)?;
             inner.names.check_types(&target)?;
-            if make_current {
-                for table in target.tables.values() {
-                    if let Some(current) = inner.owner.by_stored(&table.stored) {
-                        check_branch_removal(current, table)?;
-                    }
-                }
-            }
             for table in target.tables.values_mut() {
                 let stored = inner.physical.tables.get(&table.stored);
                 for column in &mut table.columns {
@@ -4259,30 +4259,7 @@ impl Db {
                     }
                 }
             }
-            inner.write_admission(&target, cells, make_current)?;
-            if make_current {
-                inner.owner_version = target.jazz.version_id();
-                inner.owner = Rc::new(target);
-                // Kept checks were compiled under the old policies; drop
-                // them now, before a fallible step below can return
-                // without reaching `reset_everything`.
-                inner.clear_check_plans();
-                // Read policies that changed may read differently from
-                // here: a subscription resuming from before opens fresh.
-                let mut digest = jazz_types::sha256::Hasher::new();
-                for table in &inner.owner.jazz.runtime().tables {
-                    digest.update(format!("{}{:?}", table.name, table.read_policy).as_bytes());
-                }
-                let digest =
-                    u64::from_le_bytes(digest.finalize().as_bytes()[..8].try_into().unwrap());
-                crate::catalogue::record_activation(
-                    &inner.conn,
-                    current.flatten(),
-                    &inner.owner.jazz,
-                    digest,
-                    inner.seq,
-                )?;
-            }
+            inner.write_admission(&target, cells, false)?;
             if !inner
                 .admitted
                 .iter()
@@ -4811,6 +4788,23 @@ impl Inner {
 /// one (SPEC 4, INV-BVIEW-19): an older version admitted beside it names
 /// that column by its default. The other branch-column changes are refused
 /// for every admitted version ([`crate::names::Names::check_branches`]).
+/// A branch column `next` keeps by name but stores elsewhere (its type
+/// changed) is refused: `current`'s rows are keyed by the old one.
+fn check_branch_retype(current: &Table, next: &Table) -> Result<(), Error> {
+    for column in &current.branch_by {
+        let stored = current.stored_name(column);
+        if let Some(kept) = next.columns.iter().find(|c| c.name == *column)
+            && kept.stored != stored
+        {
+            return Err(unsupported(format!(
+                "changing the type of branch column {}.{column}",
+                next.name
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn check_branch_removal(current: &Table, next: &Table) -> Result<(), Error> {
     for column in &current.branch_by {
         let stored = current.stored_name(column);

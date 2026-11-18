@@ -204,12 +204,13 @@ fn client_rename_lens() -> Lens {
 }
 
 /// Exercises write authorization for a v2 update whose parent version was
-/// stored under the v1 table name.
+/// stored under the v1 table name. The authority admits v2 as a deploy does
+/// and keeps running under v1, so v1's (owner-only) update policy governs.
 ///
 /// ```text
 /// writer(v1) --users insert--> authority(v1)
-/// authority  --rename lens----> authority(v2)
-/// writer(v2) --people update--> authority(v2) --policy over projected v1 parent--> accepted
+/// authority  --admits v2 with the rename lens (stays current at v1)
+/// writer(v2) --people update--> authority --policy over projected v1 parent--> accepted
 /// ```
 #[test]
 fn renamed_table_update_policy_uses_projected_parent_version() {
@@ -234,8 +235,8 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
     global_fate(&authority, &writer_v1, insert.mergeable_tx_id())
         .expect("authority accepts the v1 insert");
 
-    block_on(authority.activate_schema_with_lenses(v2.schema.clone(), &[lens]))
-        .expect("activate v2 rename lineage");
+    block_on(authority.admit_schema_with_lenses(v2.schema.clone(), &[lens]))
+        .expect("admit v2 rename lineage");
 
     let mallory = author(0xa2);
     let (non_owner_writer_v2, _mallory_link, _mallory_rows) =
