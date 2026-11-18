@@ -2033,9 +2033,8 @@ impl Inner {
             let mut names: Vec<String> = Vec::new();
             let rows = statement.query_map(params, |r| {
                 if names.is_empty() {
-                    let statement = r.as_ref();
-                    names = (0..statement.column_count())
-                        .map(|i| statement.column_name(i).map(str::to_owned))
+                    names = (0..r.column_count())
+                        .map(|i| r.column_name(i).map(str::to_owned))
                         .collect::<Result<_, _>>()?;
                 }
                 let mut seq = 0i64;
