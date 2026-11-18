@@ -1215,6 +1215,151 @@ fn deployment_accepts_only_jazzs_own_system_tables() {
     );
 }
 
+/// Core finds a system table by the name the admitted versions give it and
+/// reads its columns by name, so a migration that renames one, or changes
+/// its columns, is refused at deploy: it would give an older version's
+/// uploads another name or layout than the newest version's.
+///
+/// ```text
+/// v1: __e2ee_members  ──RenameTable──►  v2: members_old    ✗
+/// v1: old_members     ──RenameTable──►  v2: __e2ee_members ✗
+/// scopeId ⇄ identifier swapped through a temporary name    ✗
+/// a column added to __e2ee_members                         ✗
+/// ```
+#[test]
+fn a_migration_may_not_change_a_system_table() {
+    use jazz::tools::{Lens, LensOp, LensTransform};
+    let structural = |mut schema: Schema| {
+        for table in schema.values_mut() {
+            table.policies = TablePolicies::default();
+        }
+        schema
+    };
+    let fragment = structural(with_e2ee_fragment(&app()));
+    let plain = |table: &str| {
+        let mut schema = structural(app());
+        schema.insert(
+            TableName::from(table),
+            TableSchemaBuilder::new(table)
+                .column("body", ColumnType::Text)
+                .build(),
+        );
+        schema
+    };
+    let try_ops = |from_schema: Schema, to_schema: Schema, ops: Vec<LensOp>| {
+        let (from, to) = (
+            SchemaHash::compute(&from_schema),
+            SchemaHash::compute(&to_schema),
+        );
+        let declares = |schema: &Schema| schema.contains_key(&TableName::from(MEMBERS));
+        let versions = [(from, &from_schema), (to, &to_schema)]
+            .into_iter()
+            .filter(|(_, schema)| declares(schema))
+            .map(|(hash, _)| (hash.to_string(), entries()))
+            .collect();
+        prepare_encrypted_deployment(
+            &DeploymentCatalogue::default(),
+            DeploymentRequest {
+                target_schema_hash: to,
+                schemas: vec![(from, from_schema), (to, to_schema)],
+                migrations: vec![Lens::new(
+                    from,
+                    to,
+                    LensTransform {
+                        ops,
+                        draft_ops: Vec::new(),
+                    },
+                )],
+                permissions: app_permissions(),
+                allow_dropping_history: false,
+            },
+            &DeclaredEncryption {
+                versions,
+                ..Default::default()
+            },
+        )
+    };
+    let rename_table = |old: &str, new: &str| LensOp::RenameTable {
+        old_name: old.to_owned(),
+        new_name: new.to_owned(),
+    };
+    let rename_column = |table: &str, old: &str, new: &str| LensOp::RenameColumn {
+        table: table.to_owned(),
+        old_name: old.to_owned(),
+        new_name: new.to_owned(),
+    };
+    // Both versions hold the fragment exactly, so only the lens differs.
+    let mut next = fragment.clone();
+    next.insert(
+        TableName::from("notes"),
+        TableSchemaBuilder::new("notes")
+            .column("body", ColumnType::Text)
+            .build(),
+    );
+    // The lens introduces `notes`, so that apart from its column operations
+    // it is a valid migration between the two versions.
+    let add_notes = LensOp::AddTable {
+        table: "notes".to_owned(),
+        schema: next[&TableName::from("notes")].clone(),
+    };
+    let cases = [
+        (
+            fragment.clone(),
+            plain("members_old"),
+            vec![rename_table(MEMBERS, "members_old")],
+        ),
+        (
+            plain("old_members"),
+            fragment.clone(),
+            vec![rename_table("old_members", MEMBERS)],
+        ),
+        (
+            // `scopeId` and `identifier` swapped through a temporary name.
+            fragment.clone(),
+            next.clone(),
+            vec![
+                add_notes.clone(),
+                rename_column(MEMBERS, "scopeId", "swap"),
+                rename_column(MEMBERS, "identifier", "scopeId"),
+                rename_column(MEMBERS, "swap", "identifier"),
+            ],
+        ),
+        (
+            fragment.clone(),
+            next.clone(),
+            vec![
+                add_notes,
+                LensOp::AddColumn {
+                    table: MEMBERS.to_owned(),
+                    column: "extra".to_owned(),
+                    column_type: ColumnType::Text,
+                    default: jazz::tools::Value::Text("x".to_owned()),
+                },
+            ],
+        ),
+    ];
+    for (from, to, ops) in cases {
+        let error = try_ops(from, to, ops).expect_err("a lens that changes a system table");
+        assert!(
+            matches!(error, DeploymentError::InvalidMigration { .. })
+                && error.to_string().contains("may not change"),
+            "{error}"
+        );
+    }
+    // A lens on an app table is not this rule's business.
+    let outcome = try_ops(
+        fragment.clone(),
+        next,
+        vec![rename_column("boards", "ownerId", "owner")],
+    );
+    assert!(
+        !outcome
+            .err()
+            .is_some_and(|error| error.to_string().contains("may not change")),
+        "the rule names system tables only"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Each derived rule, one by one (protocol R3–R15)
 // ---------------------------------------------------------------------------
@@ -2243,4 +2388,296 @@ fn an_account_founded_for_another_audience_cannot_bootstrap() {
     world
         .identity(carol(), device, 0, "app")
         .expect("an app-founded account");
+}
+
+/// A lens that renames a system table, or changes its columns, is not
+/// admitted by core either, whatever ships it: ordinary tables' lenses still
+/// are, and a system table carried unchanged needs no entry.
+#[test]
+fn core_admits_no_lens_that_renames_a_system_table() {
+    use jazz::protocol::{LensOp, MigrationLens, TableLens};
+    let one_table = |name: &str| {
+        common::compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new(name)
+                        .column("body", ColumnType::Text)
+                        .policies(common::allow_all_policies()),
+                )
+                .build(),
+        )
+    };
+    let (before, ordinary, system) = (
+        one_table("old_members"),
+        one_table("renamed_members"),
+        one_table(MEMBERS),
+    );
+    let rename = |to: &JazzSchema, target: &str| {
+        MigrationLens::new(
+            before.version_id(),
+            to.version_id(),
+            vec![TableLens {
+                source_table: "old_members".into(),
+                target_table: target.into(),
+                ops: Vec::<LensOp>::new(),
+            }],
+        )
+        .unwrap()
+    };
+    let (to_ordinary, to_system) = (
+        rename(&ordinary, "renamed_members"),
+        rename(&system, MEMBERS),
+    );
+    let server = block_on(Db::open_history_complete(DbConfig::new(
+        before.clone(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xee; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    block_on(server.admit_schema_with_lenses(ordinary, &[to_ordinary]))
+        .expect("an ordinary rename is admitted");
+    let error = block_on(server.admit_schema_with_lenses(system, &[to_system]))
+        .expect_err("a rename to a system table's name");
+    assert!(
+        error.message.contains("carried between versions unchanged"),
+        "{error:?}"
+    );
+
+    // A column op on a system table, and the same op on an ordinary table.
+    let with_column = |table: &str, column: &str| {
+        common::compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new(table)
+                        .column(column, ColumnType::Text)
+                        .policies(common::allow_all_policies()),
+                )
+                .build(),
+        )
+    };
+    for (table, admitted) in [("plain_table", true), (MEMBERS, false)] {
+        let (first, second) = (with_column(table, "body"), with_column(table, "text"));
+        let lens = MigrationLens::new(
+            first.version_id(),
+            second.version_id(),
+            vec![TableLens {
+                source_table: table.into(),
+                target_table: table.into(),
+                ops: vec![LensOp::RenameColumn {
+                    from: "body".into(),
+                    to: "text".into(),
+                }],
+            }],
+        )
+        .unwrap();
+        let server = block_on(Db::open_history_complete(DbConfig::new(
+            first,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0xee; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        let result = block_on(server.admit_schema_with_lenses(second, &[lens]));
+        match (admitted, result) {
+            (true, result) => {
+                result.expect("a column rename on an ordinary table is admitted");
+            }
+            (false, result) => {
+                let error = result.expect_err("a column rename on a system table");
+                assert!(
+                    error.message.contains("carried between versions unchanged"),
+                    "{error:?}"
+                );
+            }
+        }
+    }
+}
+
+/// A version history as a deployment: `versions` oldest first, each with
+/// whether it declares encryption, and the operations of the lens from each
+/// version to the next. The last version is the target.
+fn deploy_history(
+    versions: Vec<(Schema, bool)>,
+    ops: Vec<Vec<jazz::tools::LensOp>>,
+) -> Result<jazz::tools::deployment::PreparedDeployment, DeploymentError> {
+    use jazz::tools::{Lens, LensTransform};
+    let hashes: Vec<SchemaHash> = versions
+        .iter()
+        .map(|(schema, _)| SchemaHash::compute(schema))
+        .collect();
+    let declared = DeclaredEncryption {
+        versions: versions
+            .iter()
+            .zip(&hashes)
+            .filter(|((_, declares), _)| *declares)
+            .map(|(_, hash)| (hash.to_string(), entries()))
+            .collect(),
+        ..Default::default()
+    };
+    let migrations = ops
+        .into_iter()
+        .enumerate()
+        .map(|(n, ops)| {
+            Lens::new(
+                hashes[n],
+                hashes[n + 1],
+                LensTransform {
+                    ops,
+                    draft_ops: Vec::new(),
+                },
+            )
+        })
+        .collect();
+    prepare_encrypted_deployment(
+        &DeploymentCatalogue::default(),
+        DeploymentRequest {
+            target_schema_hash: *hashes.last().unwrap(),
+            schemas: hashes
+                .iter()
+                .copied()
+                .zip(versions.into_iter().map(|(schema, _)| schema))
+                .collect(),
+            migrations,
+            permissions: app_permissions(),
+            allow_dropping_history: false,
+        },
+        &declared,
+    )
+    .map(|(prepared, _)| prepared)
+}
+
+/// The structural form of a schema, as a deployment carries it.
+fn structural_of(mut schema: Schema) -> Schema {
+    for table in schema.values_mut() {
+        table.policies = TablePolicies::default();
+    }
+    schema
+}
+
+/// The lens operations that add, or remove, every system table of `schema`.
+fn fragment_ops(schema: &Schema, add: bool) -> Vec<jazz::tools::LensOp> {
+    schema
+        .iter()
+        .filter(|(name, _)| system_tables::is_system_table(name.as_str()))
+        .map(|(name, table)| {
+            if add {
+                jazz::tools::LensOp::AddTable {
+                    table: name.to_string(),
+                    schema: table.clone(),
+                }
+            } else {
+                jazz::tools::LensOp::RemoveTable {
+                    table: name.to_string(),
+                    schema: table.clone(),
+                }
+            }
+        })
+        .collect()
+}
+
+/// Once any version of an app carries the system tables, every later version
+/// does: a history in which a version without them follows one with them is
+/// refused (bringing them back would store them as new tables and strand the
+/// system rows of the first), while a later version that keeps them and
+/// declares no encryption, as an app that stops encrypting does, is accepted.
+///
+/// ```text
+/// v1 fragment ─► v2 no fragment ─► v3 fragment    ✗ (v2 drops them)
+/// v1 fragment ─► v2 fragment, declares nothing    ✓
+/// ```
+#[test]
+fn a_later_version_carries_the_system_tables_its_predecessor_has() {
+    let fragment = structural_of(with_e2ee_fragment(&app()));
+    let mut with_notes = fragment.clone();
+    with_notes.insert(
+        TableName::from("notes"),
+        TableSchemaBuilder::new("notes")
+            .column("body", ColumnType::Text)
+            .build(),
+    );
+    let without = structural_of(app());
+    let add_notes = vec![jazz::tools::LensOp::AddTable {
+        table: "notes".to_owned(),
+        schema: with_notes[&TableName::from("notes")].clone(),
+    }];
+
+    let error = deploy_history(
+        vec![
+            (fragment.clone(), true),
+            (without.clone(), false),
+            (fragment.clone(), true),
+        ],
+        vec![
+            fragment_ops(&fragment, false),
+            fragment_ops(&fragment, true),
+        ],
+    )
+    .expect_err("the system tables dropped, then brought back");
+    assert!(
+        matches!(error, DeploymentError::InvalidMigration { .. })
+            && error.to_string().contains("every later version does"),
+        "{error}"
+    );
+    deploy_history(
+        vec![(fragment.clone(), true), (without, false)],
+        vec![fragment_ops(&fragment, false)],
+    )
+    .expect_err("a later version without them");
+
+    let prepared = deploy_history(
+        vec![(fragment.clone(), true), (with_notes, false)],
+        vec![add_notes],
+    )
+    .expect("a later version that keeps them and declares no encryption");
+    // Its system tables get their derived policies, from the declarations
+    // of the version it follows: its spaces are still there.
+    let members = &prepared.active_schema().public_schema()[&TableName::from(MEMBERS)];
+    assert!(
+        members.policies.select.using.is_some(),
+        "{:?}",
+        members.policies
+    );
+}
+
+/// An app whose later version declares no encryption keeps the system tables
+/// under their own stored names, so the system rows written under the first
+/// version stay readable.
+#[test]
+fn a_later_version_without_declarations_keeps_the_system_rows() {
+    use jazz::protocol::MigrationLens;
+    let world = World::new();
+    let p = new_row();
+    let member = new_row();
+    world
+        .commit(
+            alice(),
+            &[
+                ("projects", p, project(alice())),
+                (MEMBERS, member, world.member(p, alice())),
+            ],
+        )
+        .unwrap();
+    let before = world.server.stored_column_for_test(MEMBERS, "scopeId");
+    let first = schema();
+    let mut next = public_schema_with(&Default::default());
+    next.insert(
+        TableName::from("notes"),
+        TableSchemaBuilder::new("notes")
+            .column("body", ColumnType::Text)
+            .policies(common::allow_all_policies())
+            .build(),
+    );
+    let second = common::compile_schema(&next);
+    let lens = MigrationLens::new(first.version_id(), second.version_id(), vec![]).unwrap();
+    block_on(world.server.admit_schema_with_lenses(second, &[lens])).unwrap();
+    assert_eq!(
+        world.server.stored_column_for_test(MEMBERS, "scopeId"),
+        before,
+        "the system table keeps its stored name"
+    );
+    assert!(world.server.holds_row_for_test(MEMBERS, member));
+    assert_eq!(world.reads(alice(), MEMBERS), vec![member]);
 }
