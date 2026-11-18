@@ -2078,6 +2078,10 @@ impl Db {
         conn: crate::storage::Storage,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
+        #[cfg(feature = "e2ee-client")]
+        if let Some(hooks) = &config.e2ee {
+            crate::e2ee::refuse_stored_defaults(&config.schema, hooks.declarations())?;
+        }
         // Before the first statement is prepared: the flag is read at
         // prepare time.
         crate::host::stable_plans(&conn)?;

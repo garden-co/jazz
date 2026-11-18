@@ -480,6 +480,13 @@ impl E2eeHooks for Fake {
             return Ok(QueryPlan::Plain);
         }
         let mut physical = query.clone();
+        if self.leak.get() == 3 {
+            physical.includes.push(jazz::query::Include {
+                path: "projectId".to_owned(),
+                join_mode: jazz::query::JoinMode::Holes,
+                require: false,
+            });
+        }
         if self.leak.get() == 1 {
             // The filter stays as written.
         } else if self.offline.get() {
@@ -1842,6 +1849,190 @@ fn reads_that_would_compare_or_return_sealed_cells_are_refused() {
         direction: OrderDirection::Asc,
     });
     alice.prepare_query(&by_title).unwrap();
+}
+
+/// A union query of `arms` over `notes`, each `(label, predicate)` reading
+/// the whole table under its predicate, ordered by `order` when given.
+fn union_of(arms: Vec<(&str, jazz::query::RelationPredicate)>, order: Option<&str>) -> Query {
+    use jazz::query::{
+        RelationExpr, RelationOrderBy, RelationProjectColumn, RelationProjectExpr, RelationQuery,
+        RelationRowIdRef, RelationUnionArm,
+    };
+    let mut rel = RelationExpr::Union {
+        inputs: arms
+            .into_iter()
+            .map(|(label, predicate)| RelationUnionArm {
+                label: label.to_owned(),
+                input: RelationExpr::Project {
+                    input: Box::new(RelationExpr::Filter {
+                        input: Box::new(RelationExpr::TableScan {
+                            table: "notes".to_owned(),
+                            alias: None,
+                        }),
+                        predicate,
+                    }),
+                    columns: std::iter::once(RelationProjectColumn {
+                        alias: "id".to_owned(),
+                        expr: RelationProjectExpr::RowId(RelationRowIdRef::Current),
+                    })
+                    .chain(
+                        ["projectId", "title", "body", "__e2ee_eq_body", "attachment"].map(
+                            |column| RelationProjectColumn {
+                                alias: column.to_owned(),
+                                expr: RelationProjectExpr::Column(jazz::query::RelationColumnRef {
+                                    scope: Some("notes".to_owned()),
+                                    column: column.to_owned(),
+                                }),
+                            },
+                        ),
+                    )
+                    .collect(),
+                },
+            })
+            .collect(),
+    };
+    if let Some(column) = order {
+        rel = RelationExpr::OrderBy {
+            input: Box::new(rel),
+            terms: vec![RelationOrderBy {
+                column: jazz::query::RelationColumnRef {
+                    scope: Some("notes".to_owned()),
+                    column: column.to_owned(),
+                },
+                direction: jazz::query::OrderDirection::Asc,
+            }],
+        };
+    }
+    let mut query = Query::from("notes");
+    query.relation = Some(RelationQuery { rel });
+    query
+}
+
+/// Contract: a union relation query is read like any other: every
+/// condition in each of its arms that names an encrypted column is refused
+/// (the plaintext literal would go upstream, or a comparison would run on
+/// sealed cells), as is ordering the union by one; a union on plain columns
+/// of an encrypted table still prepares.
+#[test]
+fn union_arms_on_encrypted_columns_are_refused() {
+    use jazz::query::{RelationCmpOp, RelationPredicate, RelationValueRef};
+    let hooks = Fake::new();
+    let alice = client(&hooks);
+    let scoped = |column: &str| jazz::query::RelationColumnRef {
+        scope: Some("notes".to_owned()),
+        column: column.to_owned(),
+    };
+    let cmp = |column: &str, op: RelationCmpOp, value: &str| RelationPredicate::Cmp {
+        left: scoped(column),
+        op,
+        right: RelationValueRef::Literal(serde_json::json!(value)),
+    };
+    let refused = [
+        union_of(
+            vec![("a", cmp("body", RelationCmpOp::Eq, "UNION-SECRET"))],
+            None,
+        ),
+        union_of(
+            vec![
+                ("a", cmp("title", RelationCmpOp::Eq, "t")),
+                ("b", cmp("body", RelationCmpOp::Ne, "UNION-SECRET")),
+            ],
+            None,
+        ),
+        union_of(
+            vec![(
+                "a",
+                RelationPredicate::Not(Box::new(cmp("body", RelationCmpOp::Eq, "x"))),
+            )],
+            None,
+        ),
+        union_of(
+            vec![("a", cmp("title", RelationCmpOp::Eq, "t"))],
+            Some("body"),
+        ),
+    ];
+    for query in refused {
+        let error = alice.prepare_query(&query).unwrap_err();
+        assert!(
+            error
+                .message
+                .starts_with("Reading encrypted column `notes.body`")
+                && error.message.ends_with("is not supported yet"),
+            "{query:?}: {}",
+            error.message
+        );
+    }
+    alice
+        .prepare_query(&union_of(
+            vec![
+                ("a", cmp("title", RelationCmpOp::Eq, "t")),
+                ("b", cmp("title", RelationCmpOp::Ne, "u")),
+            ],
+            Some("title"),
+        ))
+        .unwrap();
+}
+
+/// Contract: a query the hook returns may differ from the one it was given
+/// only in its conditions and the window it takes over: one that also adds
+/// an include (or anything else) is refused.
+#[test]
+fn a_hook_cannot_return_a_query_that_changes_more_than_its_conditions() {
+    let hooks = Fake::new();
+    let alice = client(&hooks);
+    let space = uuid::Uuid::new_v4();
+    hooks.hold(space);
+    let query = Query::from("notes")
+        .filter(eq(col("projectId"), lit(Value::Uuid(space))))
+        .filter(eq(col("body"), lit(text("x"))));
+    alice.prepare_query(&query).unwrap();
+    hooks.leak.set(3);
+    let error = alice.prepare_query(&query).unwrap_err();
+    assert_eq!(
+        error.message,
+        "the encryption hooks returned a query that changes more than its conditions"
+    );
+}
+
+/// Contract: hooks are not installed on a schema that gives an encrypted
+/// column a stored default, which would be stored as plaintext where its
+/// ciphertext belongs.
+#[test]
+fn a_stored_default_on_an_encrypted_column_refuses_the_hooks() {
+    let hooks = Fake::new();
+    let with_default = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("projects")
+                    .column("name", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .fk_column("projectId", "projects")
+                    .column("title", ColumnType::Text)
+                    .column_with_default(
+                        "body",
+                        ColumnType::Bytea,
+                        jazz::tools::public_schema::Value::Bytea(b"plain".to_vec()),
+                    )
+                    .nullable_column("__e2ee_eq_body", ColumnType::Bytea)
+                    .nullable_column("attachment", ColumnType::Bytea)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let error = block_on(Db::open(
+        DbConfig::new(with_default, identity(1)).with_e2ee(hooks.clone()),
+    ))
+    .err()
+    .expect("refused");
+    assert_eq!(
+        error.message,
+        "encrypted column `notes.body` has a stored default, which would be stored as plaintext \
+         where its ciphertext belongs"
+    );
+    client(&hooks);
 }
 
 /// Contract: JSON and array columns are encrypted columns like any other

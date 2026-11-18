@@ -441,3 +441,31 @@ impl CurrentRow {
         self.types = types.into();
     }
 }
+
+/// Refuse to install hooks for a schema that gives an encrypted column a
+/// stored default: a row written without the column would store that
+/// plaintext default where its ciphertext belongs. The deploy refuses such
+/// an app; this covers a configuration built by hand.
+pub(crate) fn refuse_stored_defaults(
+    schema: &crate::schema::JazzSchema,
+    declarations: &E2eeDeclarations,
+) -> Result<(), Error> {
+    for table in schema.tables() {
+        let Some(entry) = declarations.tables.get(table.name.as_str()) else {
+            continue;
+        };
+        for column in &table.columns {
+            if entry.columns.contains_key(column.name.as_str()) && column.default.is_some() {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    format!(
+                        "encrypted column `{}.{}` has a stored default, which would be \
+                         stored as plaintext where its ciphertext belongs",
+                        table.name, column.name
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}

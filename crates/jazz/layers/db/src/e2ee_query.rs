@@ -8,7 +8,7 @@ use super::{Inner, PreparedQuery};
 use std::collections::BTreeMap;
 
 use crate::e2ee::{E2eeRefusal, EncryptionEntry, EpochSetId, QueryPlan, Residual, SpaceAddress};
-use crate::options::Error;
+use crate::options::{Error, ErrorCode};
 use crate::query::{ArraySubquery, JoinVia, Operand, Predicate, Query, ReachableVia};
 use crate::schema::history::history_source_table;
 use crate::values::unsupported;
@@ -83,15 +83,17 @@ impl Inner {
         let Some(hooks) = &self.e2ee else {
             return Ok((query.clone(), None));
         };
-        self.refuse_unopened(&hooks.declarations().tables, query)?;
-        refuse_unplannable(&hooks.declarations().tables, query, true)?;
+        let tables = &hooks.declarations().tables;
+        self.refuse_reads(tables, query, true)?;
         let plan = hooks.plan_query(query)?;
         // Whatever the hook returns, a condition on an encrypted column must
-        // not go upstream as written: the query it returns may keep none.
+        // not go upstream as written, and nothing but the conditions and
+        // the window may differ from the query it was given.
         match &plan {
-            QueryPlan::Plain => refuse_unplannable(&hooks.declarations().tables, query, false)?,
+            QueryPlan::Plain => self.refuse_reads(tables, query, false)?,
             QueryPlan::Rewritten { physical, .. } => {
-                refuse_unplannable(&hooks.declarations().tables, physical, false)?
+                refuse_changed_beyond_conditions(query, physical)?;
+                self.refuse_reads(tables, physical, false)?
             }
             QueryPlan::NeedsKey { .. } => {}
         }
@@ -113,6 +115,33 @@ impl Inner {
             )),
             QueryPlan::NeedsKey { space } => Err(E2eeRefusal::NeedsKey { space }.error()),
         }
+    }
+
+    /// Refuse the reads of `query` that no hook plans: those that return
+    /// unopened cells ([`Self::refuse_unopened`]) and conditions on encrypted
+    /// columns ([`refuse_unplannable`]). A union is a relation query that
+    /// stays whole, so each of its arms is read the same way, with no
+    /// plannable equality (the hook is not given an arm to plan), and its
+    /// ordering columns are refused.
+    fn refuse_reads(
+        &self,
+        encrypted: &BTreeMap<String, EncryptionEntry>,
+        query: &Query,
+        plannable: bool,
+    ) -> Result<(), Error> {
+        self.refuse_unopened(encrypted, query)?;
+        refuse_unplannable(encrypted, query, plannable)?;
+        if let Some(union) = crate::db::union_plan(query, &self.schema)? {
+            let table = query.table.as_str();
+            for term in &union.order_by {
+                refuse_column(encrypted, table, &term.column, "a union's ORDER BY")?;
+            }
+            for (_, arm) in &union.arms {
+                self.refuse_unopened(encrypted, arm)?;
+                refuse_unplannable(encrypted, arm, false)?;
+            }
+        }
+        Ok(())
     }
 
     /// Refuse a read that would return cells of an encrypted table that
@@ -276,6 +305,27 @@ fn refused_in_predicate(
             "Reading encrypted column `{table}.{column}` in a filter other than a top-level equality"
         ))
     })
+}
+
+/// Refuse a query the hook returned that differs from the one it was
+/// given in anything but its conditions and the window the residual takes
+/// over (no added relations or includes, the same table, order and
+/// selection).
+fn refuse_changed_beyond_conditions(original: &Query, returned: &Query) -> Result<(), Error> {
+    let mut expected = returned.clone();
+    expected.filters = original.filters.clone();
+    let window_moved = returned.limit.is_none() && returned.offset == 0;
+    if window_moved || (returned.limit == original.limit && returned.offset == original.offset) {
+        expected.limit = original.limit;
+        expected.offset = original.offset;
+    }
+    if expected != *original {
+        return Err(Error::new(
+            ErrorCode::Query,
+            "the encryption hooks returned a query that changes more than its conditions",
+        ));
+    }
+    Ok(())
 }
 
 /// Refuse a condition that names an encrypted column of `table` in one of
