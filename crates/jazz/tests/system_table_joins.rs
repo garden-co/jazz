@@ -569,6 +569,118 @@ fn table_identity_correlation_follows_one_tables_spaces() {
     );
 }
 
+/// A read row whose correlated column is NULL follows no support through
+/// a table identity alone. Notes are readable by their owner or by a
+/// member of the project the note names (`scopeId = table_id('projects')`
+/// and `identifier = this.projectId`). Alice owns a note on project X and
+/// one on no project; her replica receives project X's members, and none
+/// of project Y's, although she may read those too: keyed on the table
+/// identity alone, the note on no project would follow every project's
+/// member rows.
+///
+/// ```text
+/// server: X {alice, bob}, Y {alice, carol}, note on X, note on no project
+/// alice ──subscribe notes──► server
+///       ◄── both notes, alice@X, bob@X; not alice@Y, carol@Y
+/// server: + dave@X, + erin@Y ──► alice gets dave@X only
+/// ```
+#[test]
+fn a_null_correlated_cell_follows_no_space_by_table_identity_alone() {
+    let member_of_its_project = exists(
+        MEMBERS,
+        vec![
+            cmp(
+                "scopeId",
+                PolicyValue::TableIdentity {
+                    table: "projects".to_owned(),
+                },
+            ),
+            cmp("identifier", this("projectId")),
+            cmp("accountId", me()),
+        ],
+    );
+    let schema = space_tables()
+        .table(
+            TableSchemaBuilder::new("notes")
+                .nullable_column("projectId", ColumnType::Uuid)
+                .column("owner", ColumnType::Uuid)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::Or(vec![
+                            cmp("owner", me()),
+                            member_of_its_project,
+                        ]))
+                        .with_insert(PolicyExpr::True),
+                ),
+        )
+        .build();
+    let server = open_authority(&schema);
+    let projects = Value::Uuid(server.table_identity("projects").unwrap().unwrap().0);
+    let (x, y) = (
+        RowUuid::from_bytes([0x11; 16]),
+        RowUuid::from_bytes([0x22; 16]),
+    );
+    let (on_x, on_none) = (
+        RowUuid::from_bytes([0x31; 16]),
+        RowUuid::from_bytes([0x32; 16]),
+    );
+    add_member(&server, &projects, x, account(alice()));
+    add_member(&server, &projects, x, person(0xb0));
+    add_member(&server, &projects, y, account(alice()));
+    add_member(&server, &projects, y, person(0xc0));
+    insert_row(
+        &server,
+        "notes",
+        Some(on_x),
+        &[("projectId", Value::Uuid(x.0)), ("owner", account(alice()))],
+    );
+    insert_row(
+        &server,
+        "notes",
+        Some(on_none),
+        &[("owner", account(alice()))],
+    );
+
+    let replica = open_as(&schema, 0xa1, alice());
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(replica.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    let notes = replica.prepare_query(&Query::from("notes")).unwrap();
+    let _stream = block_on(replica.subscribe(&notes, ReadOpts::default())).unwrap();
+    let pump = || {
+        for _ in 0..20 {
+            block_on(replica.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+    };
+    pump();
+    assert_eq!(
+        row_ids(&replica, "notes")
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([on_x, on_none])
+    );
+    assert_eq!(
+        members_held(&replica),
+        BTreeSet::from([
+            member_held(&projects, x, account(alice())),
+            member_held(&projects, x, person(0xb0)),
+        ])
+    );
+
+    add_member(&server, &projects, x, person(0xd0));
+    add_member(&server, &projects, y, person(0xe0));
+    pump();
+    assert_eq!(
+        members_held(&replica),
+        BTreeSet::from([
+            member_held(&projects, x, account(alice())),
+            member_held(&projects, x, person(0xb0)),
+            member_held(&projects, x, person(0xd0)),
+        ])
+    );
+}
+
 /// A correlation whose two sides store equal values as different cells
 /// still loads and follows the rows it matches. Grants are matched to
 /// documents on team and level, an enum column on both sides declared in
