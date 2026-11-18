@@ -43,7 +43,7 @@ export function localFirstFactory(options: {
     const token = options.mintToken(secret, options.appId);
     const payload = parseJwtPayload(token);
     if (payload?.iss !== "urn:jazz:local-first" || typeof payload.sub !== "string") {
-      throw new Error("Native runtime returned an invalid local-first identity");
+      throw new Error("Native runtime returned an invalid device account identity");
     }
     const retained = Promise.resolve(options.retainSecret(secret));
     // A synchronous handle may exist before asynchronous platform persistence

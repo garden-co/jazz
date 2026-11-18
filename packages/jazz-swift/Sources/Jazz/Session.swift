@@ -3,7 +3,7 @@ import JazzFFI
 
 /// How an end user's client signs in to the app's Jazz endpoint.
 public enum Auth: Sendable {
-    /// A local-first device account: keep the key (from `Jazz.generateDeviceKey()`)
+    /// A device account: keep the key (from `Jazz.generateDeviceKey()`)
     /// as a password in the platform's keychain.
     case deviceKey(String)
     /// The app's own sign-in: `tokens` gives the current bearer token, or
@@ -32,7 +32,7 @@ public struct User: Decodable, Hashable, Sendable {
     public var issuer: String?
     public var subject: String?
     public var claims: JSONValue?
-    /// A local-first device account, or a user the app's backend signed in.
+    /// A device account, or a user the app's backend signed in.
     public var kind: Kind
 
     public enum Kind: String, Decodable, Hashable, Sendable { case device, backend }

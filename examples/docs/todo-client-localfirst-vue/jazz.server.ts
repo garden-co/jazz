@@ -1,6 +1,6 @@
 // The app's backend: Jazz runs inside the Vite server (dev, preview and the
 // browser tests) on the page's own origin under /jazz. The app has no sign-in,
-// so every browser is a local-first guest. In production, run the same
+// so every browser is a guest on a device account. In production, run the same
 // createJazz in your server with `jazz.nodeHandler` and `jazz.attach`.
 import type { Server } from "node:http";
 import type { Plugin, PreviewServer, ViteDevServer } from "vite";
