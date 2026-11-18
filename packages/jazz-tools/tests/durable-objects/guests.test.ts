@@ -90,7 +90,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("clients of a Durable Object core
     return { jazz, client, origin: `http://127.0.0.1:${port}` };
   }
 
-  it("syncs a local-first guest the app accepts", async () => {
+  it("syncs a device account (guest) the app accepts", async () => {
     const { jazz, client } = await appOn((request) => acceptDeviceAccounts(request));
     const guest = await client("device");
     const row = await guest.db
@@ -114,7 +114,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("clients of a Durable Object core
     expect(await second.db.all(app.todos, { tier: "remote" })).toEqual([]);
   });
 
-  it("refuses a local-first guest the app doesn't accept", async () => {
+  it("refuses a device account (guest) the app doesn't accept", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const { client } = await appOn(() => null);
     const guest = await client("device");
@@ -125,7 +125,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("clients of a Durable Object core
     await vi.waitFor(
       () =>
         expect(
-          warn.mock.calls.some((call) => /refused a local-first guest/.test(call.join(" "))),
+          warn.mock.calls.some((call) => /refused a device account/.test(call.join(" "))),
         ).toBe(true),
       { timeout: 20_000 },
     );
