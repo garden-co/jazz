@@ -1622,6 +1622,64 @@ fn a_value_of_a_third_space_is_never_rehomed() {
     );
 }
 
+/// A stream sealed under a third space is refused by the first `update`
+/// whose record authenticates, before any of its plaintext is re-encrypted:
+/// `finish` is not the only check.
+#[test]
+fn a_resealer_refuses_a_third_spaces_stream_at_its_first_record() {
+    let mut world = world(40);
+    for identifier in [OTHER_ROW, THIRD_ROW] {
+        world.add_member_of(identifier, ALICE);
+        world.create_of(identifier, ALICE);
+    }
+    let mut held = held_of(&world, ALICE, ROW);
+    held.hold(acquire_held(&world, ALICE, OTHER_ROW)).unwrap();
+    held.hold(acquire_held(&world, ALICE, THIRD_ROW)).unwrap();
+    let domain = shared(&world);
+    let (from, other, to) = (space(ROW), space(OTHER_ROW), space(THIRD_ROW));
+    let source = row(&domain, &from, ROW_1);
+    let target = row(&domain, &to, ROW_1);
+    let registry = &world.shared.registry;
+    let suite = registry.select(&Default::default()).unwrap();
+    let plaintext = TestRandom(34).bytes(200_000);
+    let stream = seal_stream(
+        &world,
+        &write_key(&held, &other),
+        &row(&domain, &other, ROW_1),
+        &plaintext,
+        4096,
+    );
+    let StreamOpen::Reader { reader, initial } =
+        StreamValueReader::open(registry, &held, &source, &blob(), &stream[..69]).unwrap()
+    else {
+        panic!("a reader");
+    };
+    assert!(initial.is_empty());
+    let (writer, mut out) = begin_stream(
+        &suite,
+        &write_key(&held, &to),
+        &target,
+        &blob(),
+        &mut TestRandom(35),
+    )
+    .unwrap();
+    let prefix = out.len();
+    let mut resealer = StreamResealer::new(reader, writer);
+    // Fed in small chunks: an update before the stream ends fails, and no
+    // earlier one wrote anything.
+    let chunks: Vec<_> = stream[69..].chunks(1024).collect();
+    let failed = chunks.iter().enumerate().find_map(|(at, part)| {
+        resealer
+            .update(part, &mut out)
+            .err()
+            .map(|error| (at, error))
+    });
+    let (at, error) = failed.expect("an update refuses the stream");
+    assert_eq!(error, ContentError::Data(DataError::StaleSpace));
+    assert!(at < chunks.len() - 1, "refused before the stream ends");
+    assert_eq!(out.len(), prefix, "nothing of the value was re-encrypted");
+}
+
 /// An acquisition whose read is older than the chain the device knows
 /// settles a missing version against the known chain: a version the
 /// newer read has is pending, never remembered as absent.
