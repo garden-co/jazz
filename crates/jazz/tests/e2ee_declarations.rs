@@ -96,11 +96,9 @@ fn an_encrypted_app_loads_with_its_system_tables_and_declarations() {
     let declarations = declarations.expect("declared");
     assert_eq!(declarations.environment, "production");
     assert_eq!(declarations.tables, *entries);
-    assert_eq!(
-        load_client_current(app.as_bytes()).unwrap().0,
-        *schema,
-        "every loader computes the same schema"
-    );
+    // The loader a client opens with refuses an encrypted app until clients
+    // have hooks (`a_client_refuses_an_encrypted_app_until_it_has_hooks`).
+    assert!(load_client_current(app.as_bytes()).is_err());
 
     let written = rewrite(app.as_bytes(), permissions(MEMBERS_RULE).as_bytes(), None)
         .unwrap_or_else(|e| panic!("{e}"));
