@@ -4,7 +4,7 @@ use crate::{
     JazzNativeRelayBytes, JazzNativeRelayStatus, bounded_bytes_arg, ffi_call, require_arg,
     reset_out, write_bytes_out,
 };
-use jazz::tools::identity::{LOCAL_FIRST_ISSUER, mint_jazz_self_signed_token_at};
+use jazz::tools::identity::{DEVICE_ACCOUNT_ISSUER, mint_jazz_self_signed_token_at};
 
 /// Generate a 32-byte local-first signing root using the operating system RNG.
 /// The caller must retain it securely before opening a context.
@@ -25,7 +25,7 @@ pub unsafe extern "C" fn jazz_native_relay_account_secret(
     })
 }
 
-/// Mint the same local-first proof as WASM/NAPI, without loading a database.
+/// Mint the same device-account proof as WASM/NAPI, without loading a database.
 /// This proves key possession only; external registration/linking stays in the
 /// shared account helper and the authoritative core registry.
 ///
@@ -52,7 +52,7 @@ pub unsafe extern "C" fn jazz_native_relay_mint_local_first_token(
             std::str::from_utf8(audience).map_err(|_| JazzNativeRelayStatus::InvalidArgument)?;
         let token = mint_jazz_self_signed_token_at(
             seed,
-            LOCAL_FIRST_ISSUER,
+            DEVICE_ACCOUNT_ISSUER,
             audience,
             ttl_seconds,
             now_seconds,
@@ -103,7 +103,7 @@ mod tests {
             1001,
         )
         .unwrap();
-        assert_eq!(verified.issuer, LOCAL_FIRST_ISSUER);
+        assert_eq!(verified.issuer, DEVICE_ACCOUNT_ISSUER);
         assert!(
             verify_jazz_self_signed_proof_with_max_ttl_at(token_text, "other-app", 3600, 1001)
                 .is_err()
