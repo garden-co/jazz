@@ -945,3 +945,86 @@ fn connect_refuses_an_encrypted_schema_by_itself() {
     )))
     .unwrap_or_else(|e| panic!("{e}"));
 }
+
+/// A column newly tagged for equality in a table that existed in the earlier
+/// version starts in `backfill`, whether that table was encrypted before or
+/// is encrypted for the first time: its rows have no token for it. The
+/// rule reads the schema, not the rows.
+///
+/// ```text
+/// v1: notes encrypted (title)      v2: + body, equality [body]            ✗
+///                                  v2: + body, equality, backfill [body]  ✓
+/// v1: notes plaintext              v2: encrypts body, equality [body]     ✗ / ✓ with backfill
+/// ```
+#[test]
+fn a_new_equality_column_in_an_existing_table_starts_in_backfill() {
+    let app = |history_columns: &str,
+               history_entry: &str,
+               current_columns: &str,
+               current_title: &str,
+               backfill: &str| {
+        format!(
+            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": {{ "notes": {{
+                "columns": {current_columns},
+                "encryption": {{ "space": "id", "scope": "notes",
+                    "columns": {{ {current_title}"body": {{ "type": "string", "default": "" }} }},
+                    "equality": ["body"]{backfill} }} }} }},
+            "history": {{ "v1": {{ "tables": {{ "notes": {{
+                "columns": {history_columns}{history_entry} }} }} }} }},
+            "migrations": [{{ "from": "v1", "migrate": {{ "notes": {{
+                "body": {{ "add": "bytes", "default": "" }},
+                "__e2ee_eq_body": {{ "add": "bytes", "default": "" }} }} }} }}] }}"#
+        )
+    };
+    // The table was encrypted before (title); body and its tokens are new.
+    let encrypted_columns = r#"{ "title": "bytes", "body": "bytes", "__e2ee_eq_body": "bytes" }"#;
+    let encrypted_entry = r#", "encryption": { "space": "id", "scope": "notes",
+        "columns": { "title": "string" } }"#;
+    let before = |backfill| {
+        app(
+            r#"{ "title": "bytes" }"#,
+            encrypted_entry,
+            encrypted_columns,
+            r#""title": "string", "#,
+            backfill,
+        )
+    };
+    let error = refusal(load_app(before("").as_bytes()));
+    assert!(error.contains("`backfill`"), "{error}");
+    load_app(before(r#", "backfill": ["body"]"#).as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+
+    // The table is encrypted for the first time: it held plaintext before.
+    let plain_columns = r#"{ "title": "string", "body": "bytes", "__e2ee_eq_body": "bytes" }"#;
+    let first = |backfill| app(r#"{ "title": "string" }"#, "", plain_columns, "", backfill);
+    let error = refusal(load_app(first("").as_bytes()));
+    assert!(error.contains("`backfill`"), "{error}");
+    load_app(first(r#", "backfill": ["body"]"#).as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// The `__e2ee_` column names are Jazz's: the token column of an equality
+/// column (`__e2ee_eq_<column>`), or any other reserved name, can't be
+/// declared as an encrypted column, nor named as a conversion's source or
+/// target.
+#[test]
+fn reserved_column_names_cannot_be_encrypted_columns() {
+    let with_columns = |declared: &str| {
+        format!(
+            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": {{ "notes": {{
+                "columns": {{ "title": "bytes", "__e2ee_eq_title": "bytes", "plain": "string?" }},
+                "encryption": {{ "space": "id", "scope": "notes",
+                    "columns": {{ {declared} }}, "equality": ["title"] }} }} }} }}"#
+        )
+    };
+    load_app(with_columns(r#""title": "string""#).as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    for declared in [
+        r#""title": "string", "__e2ee_eq_title": "string""#,
+        r#""title": "string", "__e2ee_other": "string""#,
+        r#""title": { "type": "string", "from": "__e2ee_eq_title" }"#,
+        r#""title": { "type": "string", "to": "__e2ee_plain" }"#,
+    ] {
+        let error = refusal(load_app(with_columns(declared).as_bytes()));
+        assert!(error.contains("`__e2ee_`"), "{declared}: {error}");
+    }
+}

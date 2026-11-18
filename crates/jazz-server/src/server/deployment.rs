@@ -146,25 +146,36 @@ pub(crate) async fn deploy_body(
     // backend serves them now. Publishing a known bundle again (a cold
     // start, a rollback, a deployment running beside one that published the
     // same permissions) ends no one.
-    let applied = runtime.apply_catalogue(change, new_bundle).await;
+    // The first-declared declarations commit with the catalogue, in the one
+    // transaction the apply owns: a conflicting kept value refuses the whole
+    // deployment before anything is live, however many instances share the
+    // store.
+    let kept_values = match &kept {
+        Some(_) => deployment
+            .first_declared
+            .iter()
+            .map(|(version, stored)| (DECLARATIONS, version.0.to_vec(), stored.clone()))
+            .collect(),
+        None => Vec::new(),
+    };
+    let applied = runtime
+        .apply_catalogue_keeping(change, new_bundle, kept_values)
+        .await;
     state
         .catalogue_store
         .refresh()
         .map_err(DeployError::internal)?;
     applied?;
-    keep_declarations(kept.as_ref(), &deployment.first_declared)?;
     Ok(deployment.staged.response)
 }
 
 /// Keep the declarations of each version deployed with them for the first
-/// time, once the deployment committed. A version whose declarations are
-/// kept already keeps them, and a deployment that names different ones for
-/// it is refused rather than ignored.
-///
-/// Limit: the host table commits in a transaction of its own, just after
-/// the catalogue's, so a crash between them leaves a deployed version
-/// without kept declarations; the next deployment of it is judged as a
-/// first one and keeps what it names then.
+/// time when the deployment changes no catalogue row. A deployment that does
+/// change the catalogue keeps them in the transaction that commits it
+/// (`deploy_body`), so a conflicting kept value refuses it before anything is
+/// live. A version whose declarations are kept already keeps them, and a
+/// deployment that names different ones for it is refused rather than
+/// ignored.
 fn keep_declarations(
     kept: Option<&crate::kv::HostKv>,
     first: &[(jazz::tools::public_schema::SchemaHash, Vec<u8>)],

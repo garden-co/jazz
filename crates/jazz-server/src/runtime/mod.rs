@@ -1164,10 +1164,11 @@ impl Owner {
 
     /// Whether the app's schema has Jazz's E2EE system tables.
     fn encrypts(&self) -> Result<bool, String> {
-        self.db
-            .table_identity(jazz::tools::deployment::artifact::system_tables::MEMBERS)
-            .map(|identity| identity.is_some())
-            .map_err(|error| format!("read the schema: {error}"))
+        // The admitted versions, not the owner's schema: a running server
+        // keeps its first schema while deployments admit later ones.
+        Ok(self
+            .db
+            .admits_table(jazz::tools::deployment::artifact::system_tables::MEMBERS))
     }
 
     fn reload_catalogue(&mut self) -> Result<(), String> {
@@ -1185,9 +1186,20 @@ impl Owner {
         change: CatalogueChange,
         supersedes: Option<jazz::catalogue::BundleId>,
     ) -> (usize, Result<(), CatalogueApplyError>) {
+        self.apply_catalogue_keeping(change, supersedes, &[])
+    }
+
+    /// [`Self::apply_catalogue`], keeping `kept` host-table values in the
+    /// same transaction (see [`Db::apply_catalogue_keeping`]).
+    fn apply_catalogue_keeping(
+        &mut self,
+        change: CatalogueChange,
+        supersedes: Option<jazz::catalogue::BundleId>,
+        kept: &[(jazz::host::HostTable, Vec<u8>, Vec<u8>)],
+    ) -> (usize, Result<(), CatalogueApplyError>) {
         let mut ended = 0;
         let result = (|| {
-            block_on(self.db.apply_catalogue(change)).map_err(|error| {
+            block_on(self.db.apply_catalogue_keeping(change, kept)).map_err(|error| {
                 if error.code == jazz::db::ErrorCode::Storage {
                     CatalogueApplyError::Failed(error.to_string())
                 } else {

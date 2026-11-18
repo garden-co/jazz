@@ -534,6 +534,13 @@ Account and device tables (fixed policies):
   that was linked to an external login before the app encrypted counts as
   the app's, so that login can reset it (§2.11), like any account's own
   login.
+  The rule also covers accounts founded before the app turned encryption
+  on: a local-first account founded for another audience by then is locked
+  out of encryption for good, and can neither bootstrap nor reset. There is
+  no migration, and the registry records no namespace to move it by. This
+  is intended. The deploy that first turns encryption on does not list
+  such accounts: finding them reads every local-first identity in the
+  registry, work that grows with the app's accounts, not with the deploy.
 - R7. Challenges, proofs, approvals, device deliveries: insert by `$createdBy`
   only, referencing a request or challenge of the same account; read by
   creator.

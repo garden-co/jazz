@@ -287,6 +287,249 @@ async fn kept_declarations_are_never_replaced() {
     assert_eq!(kept.get(&version.0).unwrap(), Some(b"first".to_vec()));
 }
 
+/// A deployment that changes the catalogue keeps its first-declared
+/// versions' declarations with it, in the same transaction: once the
+/// deploy answers, the store holds them, and a repost of the same
+/// declarations changes nothing.
+#[tokio::test]
+async fn a_deployment_keeps_its_declarations_with_the_catalogue_change() {
+    let server = ServerBuilder::new(app_id())
+        .with_auth_config(AuthConfig {
+            admin_secret: Some("test-admin".into()),
+            ..Default::default()
+        })
+        .with_storage(StorageBackend::InMemory)
+        .build()
+        .await
+        .unwrap();
+    let router = create_router(server.state.clone());
+    let app = loaded("ownerId = session.user");
+    let kept = server
+        .state
+        .store
+        .as_ref()
+        .unwrap()
+        .kv(super::DECLARATIONS)
+        .unwrap();
+    assert_eq!(kept.get(&app.current_hash().0).unwrap(), None);
+    let (status, body) = publish(&router, app.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let stored = kept.get(&app.current_hash().0).unwrap().expect("kept");
+    let entries = jazz::tools::deployment::artifact::encryption::decode_stored(&stored).unwrap();
+    assert_eq!(
+        entries,
+        *app.encryption()
+            .entries(&app.current_hash().to_string())
+            .unwrap()
+    );
+    let (status, body) = publish(&router, app.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(kept.get(&app.current_hash().0).unwrap(), Some(stored));
+}
+
+/// Two instances sharing a store deploy the same new version with
+/// different declarations: the second prepared its deployment before the
+/// first kept its own, so its check saw nothing kept. It is refused when
+/// the catalogue change applies, and none of its catalogue rows land.
+///
+/// ```text
+/// B prepares v2 (nothing kept yet)
+///   A keeps v2's declarations
+/// B applies v2 + its declarations ──✗ conflict: refused, v2 not in the catalogue
+/// ```
+#[tokio::test]
+async fn a_racing_deploy_with_conflicting_declarations_is_refused_without_its_catalogue() {
+    let server = ServerBuilder::new(app_id())
+        .with_auth_config(AuthConfig {
+            admin_secret: Some("test-admin".into()),
+            ..Default::default()
+        })
+        .with_storage(StorageBackend::InMemory)
+        .build()
+        .await
+        .unwrap();
+    let state = server.state.clone();
+    let router = create_router(state.clone());
+    let v1 = loaded("ownerId = session.user");
+    let (status, body) = publish(&router, v1.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v2 = artifact::load(
+        APP_V2.as_bytes(),
+        permissions(MEMBERS_RULE, "ownerId = session.user").as_bytes(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let body: crate::portable::deployment::DeployBody =
+        serde_json::from_value(v2.deployment_body(false)).unwrap();
+
+    // B prepares against a catalogue where nothing of v2 is kept yet.
+    let index = state.catalogue_store.index().unwrap();
+    let deployment =
+        crate::portable::deployment::prepare_encrypted(&index, body, 1_000, |_| Ok(None))
+            .unwrap_or_else(|_| panic!("prepared"));
+    let v2_hash = v2.current_hash();
+    assert!(
+        deployment
+            .first_declared
+            .iter()
+            .any(|(version, _)| *version == v2_hash)
+    );
+    // A keeps different declarations for v2 meanwhile.
+    let kept = state
+        .store
+        .as_ref()
+        .unwrap()
+        .kv(super::DECLARATIONS)
+        .unwrap();
+    kept.put_if_absent(&v2_hash.0, b"declarations another instance kept")
+        .unwrap();
+
+    let runtime = state.runtime().expect("a runtime after the first deploy");
+    let change = super::change(&runtime, &deployment).await.unwrap();
+    let kept_values = deployment
+        .first_declared
+        .iter()
+        .map(|(version, stored)| (super::DECLARATIONS, version.0.to_vec(), stored.clone()))
+        .collect();
+    let refused = runtime
+        .apply_catalogue_keeping(change, deployment.staged.new_bundle(), kept_values)
+        .await
+        .expect_err("a conflicting kept declaration");
+    assert!(
+        matches!(refused, crate::runtime::CatalogueApplyError::Rejected(_)),
+        "{refused}"
+    );
+    state.catalogue_store.refresh().unwrap();
+    let schemas = state
+        .catalogue_store
+        .index()
+        .unwrap()
+        .deployment_catalogue()
+        .schemas
+        .len();
+    assert_eq!(
+        schemas, 1,
+        "only v1 is in the catalogue: v2 was not applied"
+    );
+    assert_eq!(
+        kept.get(&v2_hash.0).unwrap(),
+        Some(b"declarations another instance kept".to_vec())
+    );
+}
+
+/// A deploy over the real route whose kept declarations conflict at the
+/// moment the catalogue change applies (another instance kept different
+/// ones after this deploy checked) is refused with the catalogue untouched:
+/// the declarations are kept in the transaction that commits the change.
+/// Keeping them after the commit would leave the version live and the deploy
+/// erroring.
+///
+/// ```text
+/// deploy v2: checked (nothing kept) ─┐ the store thread is busy
+///                                    │  another instance keeps v2's declarations
+///                                    └─ the change applies ──✗ refused, v2 not live
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deploy_whose_declarations_conflict_at_apply_leaves_nothing_live() {
+    use jazz::host::HostTables;
+    use jazz::tools::deployment::artifact::encryption::encode_stored;
+    use jazz::tools::public_schema::ColumnType;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let server = ServerBuilder::new(app_id())
+        .with_auth_config(AuthConfig {
+            admin_secret: Some("test-admin".into()),
+            ..Default::default()
+        })
+        .with_storage(StorageBackend::InMemory)
+        .build()
+        .await
+        .unwrap();
+    let state = server.state.clone();
+    let router = create_router(state.clone());
+    let v1 = loaded("ownerId = session.user");
+    let (status, body) = publish(&router, v1.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v2 = artifact::load(
+        APP_V2.as_bytes(),
+        permissions(MEMBERS_RULE, "ownerId = session.user").as_bytes(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let kept = state
+        .store
+        .as_ref()
+        .unwrap()
+        .kv(super::DECLARATIONS)
+        .unwrap();
+    let runtime = state.runtime().expect("a runtime after the first deploy");
+
+    // Declarations another instance keeps for v2: well formed, and different
+    // from the deploy's (the title's type), so a deploy that sees them is
+    // refused at its check and one that applies over them at its apply.
+    let v2_hash = v2.current_hash();
+    let mut other_entries = v2
+        .encryption()
+        .entries(&v2_hash.to_string())
+        .unwrap()
+        .clone();
+    other_entries
+        .get_mut("tasks")
+        .unwrap()
+        .columns
+        .get_mut("title")
+        .unwrap()
+        .plain
+        .column_type = ColumnType::Integer;
+    let other = encode_stored(&other_entries).unwrap();
+
+    // Hold the store thread so the deploy passes its checks and then waits
+    // for it. The held job writes the other instance's declarations itself
+    // (store-thread work, so no race with its release), once told to.
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (go_tx, go_rx) = mpsc::channel::<()>();
+    let held = {
+        let runtime = runtime.clone();
+        let other = other.clone();
+        tokio::spawn(async move {
+            runtime
+                .with_db_for_test(move |db| {
+                    entered_tx.send(()).unwrap();
+                    let _ = go_rx.recv();
+                    db.host_put_if_absent(super::DECLARATIONS, &v2_hash.0, &other)
+                        .map_err(|error| error.to_string())?;
+                    Ok(())
+                })
+                .await
+        })
+    };
+    tokio::task::spawn_blocking(move || entered_rx.recv().unwrap())
+        .await
+        .unwrap();
+    let deploying = {
+        let router = router.clone();
+        let body = v2.deployment_body(false);
+        tokio::spawn(async move { publish(&router, body).await })
+    };
+    // No signal says the deploy has reached its apply, so wait for it. A slow
+    // machine can only make the other instance's declarations land before the
+    // deploy's check, which refuses it the same way (422, v2 not live): the
+    // test never fails for being slow, it only stops reaching the apply.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    go_tx.send(()).unwrap();
+    held.await.unwrap().unwrap();
+    let (status, refusal) = deploying.await.unwrap();
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    state.catalogue_store.refresh().unwrap();
+    let schemas = state
+        .catalogue_store
+        .index()
+        .unwrap()
+        .deployment_catalogue()
+        .schemas
+        .len();
+    assert_eq!(schemas, 1, "v2 is not live: only v1 is in the catalogue");
+    assert_eq!(kept.get(&v2_hash.0).unwrap(), Some(other));
+}
+
 /// Decrypting a column puts its plaintext on the server, so the deploy
 /// asks for an explicit confirmation naming it (migrations §4.2).
 #[tokio::test]
@@ -564,10 +807,131 @@ async fn a_raw_deploy_of_a_foreign_system_table_is_refused() {
     assert_eq!(status, StatusCode::OK, "{deployed}");
 }
 
+/// The app's tables without Jazz's system tables.
+fn plain_app() -> jazz::tools::public_schema::Schema {
+    SchemaBuilder::new()
+        .table(TableSchema::builder("projects").column("ownerId", ColumnType::Uuid))
+        .table(
+            TableSchema::builder("tasks")
+                .fk_column("projectId", "projects")
+                .column("title", ColumnType::Bytea),
+        )
+        .build()
+}
+
+/// The app before it has a title to encrypt: the tables the plain server
+/// runs, to which a later deployment adds the encrypted title.
+fn before_app() -> jazz::tools::public_schema::Schema {
+    SchemaBuilder::new()
+        .table(TableSchema::builder("projects").column("ownerId", ColumnType::Uuid))
+        .table(TableSchema::builder("tasks").fk_column("projectId", "projects"))
+        .build()
+}
+
+/// The app with Jazz's system tables, and the declarations that go with
+/// it: tasks encrypt their title in their project's space.
+fn encrypted_app() -> (
+    jazz::tools::public_schema::Schema,
+    jazz::tools::deployment::artifact::DeclaredEncryption,
+) {
+    use jazz::tools::deployment::artifact::DeclaredEncryption;
+    use jazz::tools::deployment::artifact::system_tables::with_e2ee_fragment;
+    use jazz::tools::public_schema::{EncryptedColumn, EncryptionEntry, PlainType, SweepBy};
+    use std::collections::BTreeMap;
+    let schema = with_e2ee_fragment(&plain_app());
+    let hash = SchemaHash::compute(&schema).to_string();
+    let entries = BTreeMap::from([(
+        "tasks".to_owned(),
+        EncryptionEntry {
+            space: "projectId".to_owned(),
+            scope: "projects".to_owned(),
+            columns: BTreeMap::from([(
+                "title".to_owned(),
+                EncryptedColumn {
+                    plain: PlainType {
+                        column_type: ColumnType::Text,
+                        nullable: false,
+                        // A required encrypted column a migration adds
+                        // declares the default older rows read.
+                        default: Some(jazz::tools::public_schema::Value::Text(String::new())),
+                    },
+                    sealed_type: None,
+                    from: None,
+                    to: None,
+                    convert: None,
+                    reverse: None,
+                },
+            )]),
+            equality: Vec::new(),
+            backfill: Vec::new(),
+            rehome: None,
+            sweep: SweepBy::Updaters,
+        },
+    )]);
+    let declared = DeclaredEncryption {
+        settings: Default::default(),
+        versions: BTreeMap::from([(hash, entries)]),
+    };
+    (schema, declared)
+}
+
 /// An encrypted schema as a deploy body: tasks encrypt their title in their
 /// project's space, whose read rule comes from the members table.
 fn encrypted_body() -> Value {
     loaded("ownerId = session.user").deployment_body(false)
+}
+
+/// The plain app as a deploy body.
+fn plain_body() -> Value {
+    let schema = before_app();
+    let hash = SchemaHash::compute(&schema).to_string();
+    json!({
+        "targetSchemaHash": hash,
+        "schemas": [{ "hash": hash, "schema": schema }],
+        "migrations": [],
+        "permissions": {},
+    })
+}
+
+/// The encrypted app as a deploy body over the plain one, which the
+/// server already runs: the migration adds Jazz's system tables.
+fn encryption_turned_on_body() -> Value {
+    use jazz::tools::deployment::artifact::system_tables::is_system_table;
+    let (schema, declared) = encrypted_app();
+    let hash = SchemaHash::compute(&schema).to_string();
+    let first = SchemaHash::compute(&before_app()).to_string();
+    let mut added: Vec<Value> = schema
+        .keys()
+        .filter(|name| is_system_table(name.as_str()))
+        .map(|name| {
+            json!({
+                "table": name.as_str(),
+                "added": true,
+                "renamedFrom": null,
+                "operations": [],
+            })
+        })
+        .collect();
+    // The encrypted title is a new column of the existing tasks table.
+    added.push(json!({
+        "table": "tasks",
+        "added": false,
+        "renamedFrom": null,
+        "operations": [{
+            "type": "introduce",
+            "column": "title",
+            "column_type": ColumnType::Bytea,
+            "value": jazz::tools::public_schema::Value::Bytea(Vec::new()),
+        }],
+    }));
+    json!({
+        "targetSchemaHash": hash,
+        "schemas": [{ "hash": hash, "schema": schema }],
+        "migrations": [{ "fromHash": first, "toHash": hash, "forward": added }],
+        // The space table reads through the members table.
+        "permissions": encrypted_body()["permissions"].clone(),
+        "encryption": declared,
+    })
 }
 
 /// A server with its account registry deploys an encrypted schema to a
@@ -780,4 +1144,57 @@ async fn an_encrypting_app_admits_a_local_first_founder_of_its_own_audience_only
     admit_local_founder(&server.state, &guest(4), &stating(&app_id().to_string()))
         .await
         .expect("the app's own id, stated");
+}
+
+/// A running server keeps its first schema while deployments admit later
+/// ones, so what it knows of encryption follows the catalogue: an app that
+/// turns encryption on in a later version, deployed to a server running its
+/// plain first version, refuses another audience's founders at once, not
+/// after a restart.
+#[tokio::test]
+async fn encryption_turned_on_by_a_later_deployment_refuses_foreign_founders_at_once() {
+    let router = router().await;
+    let found = |audience: Option<String>, subject: u8| {
+        let router = router.clone();
+        let mut body = json!({
+            "identity": {
+                "issuer": jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
+                "subject": uuid::Uuid::from_bytes([subject; 16]).to_string(),
+            },
+        });
+        if let Some(audience) = audience {
+            body["audience"] = audience.into();
+        }
+        async move {
+            router
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/apps/{}/admin/accounts/found-local-first",
+                            app_id()
+                        ))
+                        .header("X-Jazz-Admin-Secret", "test-admin")
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    let other = Some("https://other.example/jazz".to_owned());
+    let (status, deployed) = publish(&router, plain_body()).await;
+    assert_eq!(status, StatusCode::OK, "{deployed}");
+    assert_eq!(found(other.clone(), 1).await, StatusCode::OK);
+
+    let (status, deployed) = publish(&router, encryption_turned_on_body()).await;
+    assert_eq!(status, StatusCode::OK, "{deployed}");
+    assert_eq!(
+        found(other, 2).await,
+        StatusCode::BAD_REQUEST,
+        "the running server follows the catalogue"
+    );
+    assert_eq!(found(None, 3).await, StatusCode::OK);
 }

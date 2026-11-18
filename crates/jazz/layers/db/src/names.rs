@@ -577,6 +577,27 @@ impl Names {
             .map(|(version, _)| *version)
     }
 
+    /// The name the most recently admitted version that stores the table
+    /// `stored` gives it.
+    pub(crate) fn logical_table(&self, stored: &str) -> Option<&str> {
+        self.in_order().into_iter().rev().find_map(|(_, names)| {
+            names
+                .tables
+                .iter()
+                .find(|(_, (table, _))| table == stored)
+                .map(|(logical, _)| logical.as_str())
+        })
+    }
+
+    /// The stored table the most recently admitted version that names
+    /// `logical` stores it as.
+    pub(crate) fn stored_table_of(&self, logical: &str) -> Option<&str> {
+        self.in_order()
+            .into_iter()
+            .rev()
+            .find_map(|(_, names)| names.tables.get(logical).map(|(stored, _)| stored.as_str()))
+    }
+
     /// How many versions are named.
     pub(crate) fn len(&self) -> usize {
         self.versions.len()

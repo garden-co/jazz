@@ -3223,6 +3223,7 @@ pub fn ensure_native_relay_abi_compatible(
 mod tests {
     use super::*;
 
+    mod encrypted_app;
     mod host;
     mod snapshot_capture_codec;
     mod socket_worker;
