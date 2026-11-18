@@ -303,7 +303,7 @@ fn migrations_are_checked_against_both_versions_declarations() {
     // the migration, so clients holding the earlier version open.
     let first = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
         "tables": { "notes": { "columns": { "title": "string", "secret": { "type": "bytes", "default": "" } },
-            "encryption": { "space": "id", "scope": "notes", "columns": { "secret": "string" } } } },
+            "encryption": { "space": "id", "scope": "notes", "columns": { "secret": { "type": "string", "default": "" } } } } },
         "history": { "v1": { "tables": { "notes": { "columns": { "title": "string" } } } } },
         "migrations": [{ "from": "v1", "migrate": { "notes": { "secret": { "add": "bytes", "default": "" } } } }] }"#;
     let app = load_app(first.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
@@ -625,13 +625,16 @@ fn an_encrypted_columns_default_may_not_change_without_a_conversion() {
         )
     };
     for accepted in [
-        "\"string\"",
         r#"{ "type": "string", "default": "untitled" }"#,
         "\"string?\"",
     ] {
         load_app(with_body(accepted, None).as_bytes())
             .unwrap_or_else(|e| panic!("{accepted}: {e}"));
     }
+    // A required column the migration adds needs its default declared: the
+    // rows stored before it read as never written.
+    let error = refusal(load_app(with_body("\"string\"", None).as_bytes()));
+    assert!(error.contains("declare its default"), "{error}");
     let error = refusal(load_app(
         with_body(
             r#"{ "type": "string", "default": "new" }"#,
@@ -672,4 +675,136 @@ fn an_encrypted_enum_default_must_be_a_variant() {
     load_app(with_default("done").as_bytes()).unwrap_or_else(|e| panic!("{e}"));
     let error = refusal(load_app(with_default("lost").as_bytes()));
     assert!(error.contains("one of the enum's variants"), "{error}");
+}
+
+/// An encrypted column keeps the type its cells were sealed under: a
+/// conversion (`from`) may not write over a column the earlier version
+/// already held as encrypted, which would leave every existing cell
+/// unreadable, while converting into a new column is the way to change a
+/// type.
+///
+/// ```text
+/// v1: title encrypted string, legacy plaintext
+/// v2: title encrypted int, from legacy          ✗ (title already encrypted)
+/// v2: title2 encrypted int, from title          ✓ (a new column)
+/// ```
+#[test]
+fn a_conversion_may_not_write_over_an_encrypted_column() {
+    let version = |columns: &str, entry: &str, migrate: &str| {
+        format!(
+            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": {{ "notes": {{ "columns": {columns},
+                "encryption": {{ "space": "id", "scope": "notes", "columns": {entry} }} }} }},
+            "history": {{ "v1": {{ "tables": {{ "notes": {{
+                "columns": {{ "title": "bytes", "legacy": "string" }},
+                "encryption": {{ "space": "id", "scope": "notes", "columns": {{ "title": "string" }} }} }} }} }} }},
+            "migrations": [{{ "from": "v1", "migrate": {{ "notes": {migrate} }} }}] }}"#
+        )
+    };
+    let over = version(
+        r#"{ "title": "bytes", "legacy": "string", "done": "boolean" }"#,
+        r#"{ "title": { "type": "int", "from": "legacy", "convert": "parse" } }"#,
+        r#"{ "done": { "add": "boolean", "default": false } }"#,
+    );
+    let error = refusal(load_app(over.as_bytes()));
+    assert!(error.contains("was already encrypted"), "{error}");
+
+    let into_new = version(
+        r#"{ "title": "bytes", "title2": { "type": "bytes", "default": "" } }"#,
+        r#"{ "title2": { "type": "int", "from": "title", "convert": "parse" } }"#,
+        r#"{ "title2": { "add": "bytes", "default": "" }, "legacy": { "drop": "string", "backwardsDefault": "" } }"#,
+    );
+    load_app(into_new.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Equality is part of what old and new clients agree on: adding it to
+/// cells that exist starts in `backfill`, since they have no token, and
+/// removing it drops the token column in the same migration, since older
+/// clients would keep querying tokens nobody writes (migrations §4.3).
+///
+/// ```text
+/// v1: title encrypted, no tag     v2: + tag, equality [title]            ✗
+///                                 v2: + tag, equality, backfill [title]  ✓
+/// v1: title + tag, equality       v2: equality [], tag kept              ✗
+///                                 v2: equality [], tag dropped           ✓
+/// ```
+#[test]
+fn equality_changes_across_versions_follow_the_migrations_spec() {
+    let app = |tables: &str, history: &str, migrate: &str| {
+        format!(
+            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": {{ "notes": {tables} }},
+            "history": {{ "v1": {{ "tables": {{ "notes": {history} }} }} }},
+            "migrations": [{{ "from": "v1", "migrate": {{ "notes": {migrate} }} }}] }}"#
+        )
+    };
+    let entry = |extra: &str| {
+        format!(
+            r#"{{ "columns": {{ "title": "bytes", "__e2ee_eq_title": "bytes", "done": "boolean" }},
+            "encryption": {{ "space": "id", "scope": "notes", "columns": {{ "title": "string" }}{extra} }} }}"#
+        )
+    };
+    let untagged = r#"{ "columns": { "title": "bytes" },
+        "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } }"#;
+    let add_tag = r#"{ "__e2ee_eq_title": { "add": "bytes", "default": "" },
+        "done": { "add": "boolean", "default": false } }"#;
+    let error = refusal(load_app(
+        app(&entry(r#", "equality": ["title"]"#), untagged, add_tag).as_bytes(),
+    ));
+    assert!(error.contains("`backfill`"), "{error}");
+    load_app(
+        app(
+            &entry(r#", "equality": ["title"], "backfill": ["title"]"#),
+            untagged,
+            add_tag,
+        )
+        .as_bytes(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+
+    let tagged = r#"{ "columns": { "title": "bytes", "__e2ee_eq_title": "bytes" },
+        "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" },
+            "equality": ["title"] } }"#;
+    let add_done = r#"{ "done": { "add": "boolean", "default": false } }"#;
+    let error = refusal(load_app(app(&entry(""), tagged, add_done).as_bytes()));
+    assert!(error.contains("token column"), "{error}");
+    let drop_tag = r#"{ "__e2ee_eq_title": { "drop": "bytes", "backwardsDefault": "" },
+        "done": { "add": "boolean", "default": false } }"#;
+    let dropped = r#"{ "columns": { "title": "bytes", "done": "boolean" },
+        "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } }"#;
+    load_app(app(dropped, tagged, drop_tag).as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// An equality token has an encoding only for the types the equality
+/// format defines, and an encrypted column's stored default is the empty
+/// ciphertext: a declaration the format can't encode, or a stored default
+/// that is not empty, is refused.
+#[test]
+fn equality_and_stored_defaults_follow_their_formats() {
+    let json_equality = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": { "notes": { "columns": { "data": "bytes", "__e2ee_eq_data": "bytes" },
+            "encryption": { "space": "id", "scope": "notes", "columns": { "data": { "json": {} } },
+                "equality": ["data"] } } } }"#;
+    let error = refusal(load_app(json_equality.as_bytes()));
+    assert!(
+        error.contains("equality is not supported for json"),
+        "{error}"
+    );
+    load_app(
+        json_equality
+            .replace(r#""data": { "json": {} }"#, r#""data": "string""#)
+            .as_bytes(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+
+    let stored_default = |default: &str| {
+        format!(
+            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": {{ "notes": {{ "columns": {{ "data": {{ "type": "bytes", "default": "{default}" }} }},
+                "encryption": {{ "space": "id", "scope": "notes", "columns": {{ "data": "string" }} }} }} }} }}"#
+        )
+    };
+    load_app(stored_default("").as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    let error = refusal(load_app(stored_default("c2VjcmV0").as_bytes()));
+    assert!(error.contains("stored default"), "{error}");
 }

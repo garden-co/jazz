@@ -142,7 +142,13 @@ pub(crate) async fn deploy_body(
 
 /// Keep the declarations of each version deployed with them for the first
 /// time, once the deployment committed. A version whose declarations are
-/// kept already keeps them.
+/// kept already keeps them, and a deployment that names different ones for
+/// it is refused rather than ignored.
+///
+/// Limit: the host table commits in a transaction of its own, just after
+/// the catalogue's, so a crash between them leaves a deployed version
+/// without kept declarations; the next deployment of it is judged as a
+/// first one and keeps what it names then.
 fn keep_declarations(
     kept: Option<&crate::kv::HostKv>,
     first: &[(jazz::tools::public_schema::SchemaHash, Vec<u8>)],
@@ -151,8 +157,16 @@ fn keep_declarations(
         return Ok(());
     };
     for (version, stored) in first {
-        kept.put_if_absent(&version.0, stored)
-            .map_err(DeployError::internal)?;
+        if let Some(existing) = kept
+            .put_if_absent(&version.0, stored)
+            .map_err(DeployError::internal)?
+            && existing != *stored
+        {
+            return Err(DeployError::invalid(format!(
+                "schema version {version} was deployed with other encryption declarations, \
+                 which its cells are sealed under; the deployment names different ones"
+            )));
+        }
     }
     Ok(())
 }

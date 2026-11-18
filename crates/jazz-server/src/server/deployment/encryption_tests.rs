@@ -217,6 +217,76 @@ async fn a_deployed_versions_declarations_change_only_compatibly() {
     assert_eq!(status, StatusCode::OK, "{body}");
 }
 
+/// The server's kept declarations judge a redeployed version like a
+/// migration: with the schema unchanged, a conversion may not write over a
+/// column that is already encrypted (its cells are sealed under the old
+/// type), and equality can't be dropped while its token column stays.
+#[tokio::test]
+async fn a_redeclaration_may_not_convert_over_a_column_or_drop_its_equality() {
+    let router = router().await;
+    let app = loaded("ownerId = session.user");
+    let (status, body) = publish(&router, app.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let hash = app.current_hash().to_string();
+
+    let mut converted = app.deployment_body(false);
+    converted["encryption"]["versions"][&hash]["tasks"]["columns"]["title"] = json!({
+        "type": { "columnType": { "type": "Integer" }, "nullable": false },
+        "from": "projectId",
+        "convert": "parse",
+    });
+    let (status, refusal) = publish(&router, converted).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("was already encrypted"),
+        "{refusal}"
+    );
+
+    let mut untagged = app.deployment_body(false);
+    untagged["encryption"]["versions"][&hash]["tasks"]
+        .as_object_mut()
+        .unwrap()
+        .remove("equality");
+    let (status, refusal) = publish(&router, untagged).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    assert!(
+        refusal["error"].as_str().unwrap().contains("token column"),
+        "{refusal}"
+    );
+}
+
+/// Declarations kept for a version are never replaced: keeping the same
+/// ones again changes nothing, and keeping different ones is refused
+/// instead of ignored.
+#[tokio::test]
+async fn kept_declarations_are_never_replaced() {
+    let server = ServerBuilder::new(app_id())
+        .with_storage(StorageBackend::InMemory)
+        .build()
+        .await
+        .unwrap();
+    let kept = server
+        .state
+        .store
+        .as_ref()
+        .unwrap()
+        .kv(super::DECLARATIONS)
+        .unwrap();
+    let version = jazz::tools::public_schema::SchemaHash::compute(
+        &jazz::tools::public_schema::SchemaBuilder::new().build(),
+    );
+    super::keep_declarations(Some(&kept), &[(version, b"first".to_vec())]).unwrap();
+    super::keep_declarations(Some(&kept), &[(version, b"first".to_vec())])
+        .expect("the same declarations again");
+    let refusal = super::keep_declarations(Some(&kept), &[(version, b"other".to_vec())])
+        .expect_err("other declarations for a kept version");
+    assert_eq!(refusal.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(kept.get(&version.0).unwrap(), Some(b"first".to_vec()));
+}
+
 /// Decrypting a column puts its plaintext on the server, so the deploy
 /// asks for an explicit confirmation naming it (migrations §4.2).
 #[tokio::test]
