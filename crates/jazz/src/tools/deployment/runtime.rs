@@ -223,11 +223,7 @@ pub fn prepare_catalogue_change(
             admit.push((target.clone(), Vec::new()));
         }
     }
-    Ok(CatalogueChange {
-        put,
-        admit,
-        activate: None,
-    })
+    Ok(CatalogueChange { put, admit })
 }
 
 #[cfg(test)]

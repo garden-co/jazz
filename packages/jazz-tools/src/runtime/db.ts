@@ -57,6 +57,7 @@ import {
   validateWriteWaitTimeout,
   WriteWaitTimeoutError,
 } from "./client.js";
+import { assertBacklogRows } from "./backlog-rows.js";
 import { sameSyncStatus, type SyncStatus } from "./sync-status.js";
 import type { TextAnchors } from "./text-anchors.js";
 import {
@@ -195,6 +196,14 @@ export type DbConfig = {
    * log off).
    */
   slowQueryThresholdMs?: number;
+  /**
+   * How many changed rows a subscription's undelivered deltas may hold before
+   * they are coalesced into one update of its current result, marked
+   * `reason: "backlog"` (default 10000). It bounds the memory a subscriber
+   * that falls behind a fast writer holds, and cannot be turned off. A query
+   * can set its own with `backlogRows`.
+   */
+  subscriptionBacklogRows?: number;
 } & (
   | {
       /** Local-first auth via a local seed. */
@@ -277,6 +286,13 @@ export type QueryOptions = ReadTierOptions & {
    * (see {@link DbSubscriptionUpdate}). One-shot reads ignore it.
    */
   splices?: readonly string[];
+  /**
+   * How many changed rows a subscription's undelivered deltas may hold before
+   * they are replaced by one update of the current result (marked
+   * `reason: "backlog"`). Overrides {@link DbConfig.subscriptionBacklogRows}
+   * (default 10000). A whole number, at least 1. One-shot reads ignore it.
+   */
+  backlogRows?: number;
 };
 
 type InternalDbQueryOptions = Omit<QueryOptions, "tier"> & {
@@ -311,6 +327,13 @@ export interface DbSubscriptionUpdate {
    * say): read its new value from the rows instead.
    */
   splices: ReadonlyMap<string, ValueSplices>;
+  /**
+   * `"backlog"` when this update replaced the result wholesale because the
+   * subscriber fell too far behind to be told every change (more than
+   * `backlogRows` changed rows waited undelivered): the rows are current,
+   * the intermediate states were skipped, and `splices` is empty.
+   */
+  reason?: "backlog";
 }
 
 /** Package-internal callbacks for incremental subscription consumers. */
@@ -347,6 +370,11 @@ function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptio
       throw new Error("splices must be an array of column names.");
     }
     if (splices.length > 0) lowered.splices = [...splices];
+  }
+  const backlogRows = (candidate as { backlogRows?: unknown }).backlogRows;
+  if (backlogRows !== undefined) {
+    assertBacklogRows(backlogRows, "backlogRows");
+    lowered.backlogRows = backlogRows;
   }
   if (isInspectorLocalQueryOptions(options)) lowered.tier = "local-only";
   return lowered;
@@ -3831,7 +3859,10 @@ export class Db {
             splices.set(change.id, change.splices);
           }
         }
-        onUpdate(update.all, { splices });
+        onUpdate(update.all, {
+          splices,
+          ...(update.reset && update.reason ? { reason: update.reason } : {}),
+        });
       },
       ...(onError === undefined ? {} : { onError }),
     };
