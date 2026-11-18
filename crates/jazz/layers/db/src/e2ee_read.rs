@@ -52,6 +52,9 @@ impl Inner {
             splices: &read.splices,
             lens_defaults: &lens_defaults,
         };
+        // The outcome's reports (protocol §4.3) stay with the hooks that
+        // built them: their runtime delivers them. Core reads the outcome
+        // only to fail a strict read.
         let outcome = hooks.open_rows(&site, rows)?;
         if strict && outcome.leaves_rows_out() {
             if let Some((space, _)) = outcome.missing_epochs.first() {
