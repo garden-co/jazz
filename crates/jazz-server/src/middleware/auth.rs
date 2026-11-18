@@ -860,7 +860,7 @@ pub fn device_account_audience(
 /// The registry namespace a device-account founder's account id derives from:
 /// the audience its proof was verified against, read as an app id.
 pub fn device_account_founding_app(audience: &str) -> AppId {
-    crate::portable::accounts::local_first_founding_app(audience)
+    crate::portable::accounts::device_account_founding_app(audience)
 }
 
 /// Deprecated alias of [`device_account_audience`].
