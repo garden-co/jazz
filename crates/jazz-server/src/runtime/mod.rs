@@ -1164,10 +1164,11 @@ impl Owner {
 
     /// Whether the app's schema has Jazz's E2EE system tables.
     fn encrypts(&self) -> Result<bool, String> {
-        self.db
-            .table_identity(jazz::tools::deployment::artifact::system_tables::MEMBERS)
-            .map(|identity| identity.is_some())
-            .map_err(|error| format!("read the schema: {error}"))
+        // The admitted versions, not the owner's schema: a running server
+        // keeps its first schema while deployments admit later ones.
+        Ok(self
+            .db
+            .admits_table(jazz::tools::deployment::artifact::system_tables::MEMBERS))
     }
 
     fn reload_catalogue(&mut self) -> Result<(), String> {
