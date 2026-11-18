@@ -1,1 +1,0 @@
-Cloudflare answers WebSocket protocol pings without waking the object. In both socket modes, the DO omits Jazz’s application-level `FEATURE_HEARTBEAT` from its handshake. The browser therefore allows a healthy connection to stay silent. [Cloudflare ping/pong handling](https://developers.cloudflare.com/durable-objects/best-practices/websockets/#automatic-pingpong-handling)

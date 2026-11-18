@@ -21,7 +21,7 @@ const APP = "my-app";
 const SECRET = "s".repeat(40);
 const SCHEMA = fixture.testNotesSchema();
 
-function start(persist) {
+function start(persist, durableObjects = { JAZZ: { className: "JazzCore", useSQLite: true } }) {
   return new Miniflare({
     modules: true,
     scriptPath: join(here, "host-worker.mjs"),
@@ -31,11 +31,22 @@ function start(persist) {
       { type: "CompiledWasm", include: ["**/*.wasm"] },
     ],
     compatibilityDate: "2026-04-01",
-    durableObjects: { JAZZ: { className: "JazzCore", useSQLite: true } },
+    durableObjects,
     durableObjectsPersist: persist,
     bindings: { JAZZ_CORE_SECRET: SECRET, JAZZ_SCHEMA: SCHEMA },
   });
 }
+
+test("the Worker answers /health without a Durable Object binding", async () => {
+  const mf = start(undefined, {});
+  try {
+    const response = await mf.dispatchFetch("http://core/health");
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), "ok");
+  } finally {
+    await mf.dispose();
+  }
+});
 
 /** A socket to the core, its answers queued as they arrive. */
 async function connect(mf, headers = {}) {
@@ -92,6 +103,7 @@ test("a Durable Object core without a published schema answers health and admits
   });
   try {
     assert.equal(await (await mf.dispatchFetch("http://core/health")).text(), "ok");
+    assert.equal((await mf.dispatchFetch("http://core/ready")).status, 200);
     const admit = (headers) =>
       mf.dispatchFetch(`http://core/apps/${APP}/backend/admit`, { method: "POST", headers });
     assert.equal((await admit({ "X-Jazz-Backend-Secret": SECRET })).status, 204);

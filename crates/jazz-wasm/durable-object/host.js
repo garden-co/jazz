@@ -3,7 +3,7 @@
 // sends everything to one object, which holds the app's store in its own
 // SQL and serves the native server's routes for it:
 //
-//   GET  /health                       200 once the store is open
+//   GET  /ready                        200 once the store is open
 //   GET  /app                          {"appId"}: for the backend's credential
 //   GET  /apps/{x}/ws                  WebSocket: prelude, Hello, then wire frames
 //   POST /apps/{x}/backend/admit       204 for the app's backend
@@ -167,7 +167,7 @@ export function jazzCoreClass(wasm) {
 
     async fetch(request) {
       const path = new URL(request.url).pathname;
-      if (path === "/health") {
+      if (path === "/ready") {
         this.open();
         return new Response("ok");
       }
@@ -326,7 +326,8 @@ export function jazzCoreClass(wasm) {
   };
 }
 
-/** The Worker's fetch: everything goes to the app's one object. */
-export function routeJazzRequest(request, env) {
+/** Answer liveness at the Worker and forward core requests to the object. */
+export async function routeJazzRequest(request, env) {
+  if (new URL(request.url).pathname === "/health") return new Response("ok");
   return env.JAZZ.get(env.JAZZ.idFromName("jazz")).fetch(request);
 }
