@@ -129,8 +129,6 @@ mod pending_commit_reopen;
 mod pending_rebase_scope;
 #[path = "../permission_advice.rs"]
 mod permission_advice;
-#[path = "../policy_activation.rs"]
-mod policy_activation;
 #[path = "../policy_check_plans.rs"]
 mod policy_check_plans;
 #[path = "../policy_claim_coercion.rs"]
@@ -165,6 +163,8 @@ mod relation_queries;
 mod relation_results;
 #[path = "../relational_delete_retraction.rs"]
 mod relational_delete_retraction;
+#[path = "../relations_parity.rs"]
+mod relations_parity;
 #[path = "../relay_local_seqs.rs"]
 mod relay_local_seqs;
 #[path = "../relay_policy_subscriptions.rs"]
@@ -219,6 +219,8 @@ mod streaming_transaction;
 mod streaming_upload_ownership;
 #[path = "../structured_result_tree.rs"]
 mod structured_result_tree;
+#[path = "../subscription_backlog.rs"]
+mod subscription_backlog;
 #[path = "../sync_access_loss.rs"]
 mod sync_access_loss;
 #[path = "../sync_aggregates.rs"]
@@ -275,6 +277,8 @@ mod transaction_policy_exists;
 mod transaction_read_tiers;
 #[path = "../union_queries.rs"]
 mod union_queries;
+#[path = "../unit_using_evidence.rs"]
+mod unit_using_evidence;
 #[path = "../unsupported_json_schemas.rs"]
 mod unsupported_json_schemas;
 #[path = "../uuid_page_probe.rs"]

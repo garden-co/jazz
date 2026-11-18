@@ -6918,6 +6918,132 @@ mod tests {
         assert_eq!(answered, [0, 2, 3, 4], "with {room} bytes of room");
     }
 
+    /// A thin client that stops reading while others keep writing holds no
+    /// more than its subscription's backlog limit on the server (#5607):
+    /// once its undelivered events pass the limit, they coalesce into one
+    /// reset of the current result. When it reads again it gets that
+    /// reset, holding every row, instead of one event per write.
+    ///
+    /// ```text
+    /// alice (thin, egress full) ◄─✗─ server ◄──insert×40── alice's writes
+    ///                                   │
+    ///                         backlog > 5 rows ──► one reset of all 40
+    /// ```
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_thin_subscription_coalesces_instead_of_growing() {
+        use crate::runtime::{SESSION_QUEUE_BUDGET, ServerRuntimeHandle, StorageConfig};
+        use jazz::thin::{ThinBody, ThinOp, ThinRequest};
+        let source = private_docs_public_schema();
+        let runtime = ServerRuntimeHandle::start_with_storage(
+            JazzSchema::new(&source).unwrap(),
+            StorageConfig::InMemory,
+        )
+        .unwrap();
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let session = runtime
+            .open_thin_session(
+                alice,
+                BTreeMap::new(),
+                None,
+                CommitUnitTrust::TrustedBackend,
+            )
+            .await
+            .unwrap();
+        let mut stream = runtime.open_wire_stream(session).unwrap();
+        let mut send = |id: u64, op: ThinOp| {
+            let runtime = runtime.clone();
+            async move {
+                let room = runtime
+                    .admit_thin_request(session, 16, false)
+                    .await
+                    .unwrap();
+                runtime
+                    .receive_thin_request(session, ThinRequest { id, op }, room)
+                    .unwrap();
+                runtime.request_wire_tick(session).unwrap();
+                runtime.settle_for_test().await;
+            }
+        };
+        send(
+            0,
+            ThinOp::Schema {
+                schema: serde_json::to_vec(&source).unwrap(),
+            },
+        )
+        .await;
+        send(
+            1,
+            ThinOp::Subscribe {
+                query: docs_query(),
+                options: br#"{"tier":"local-first","backlog_rows":5}"#.to_vec(),
+            },
+        )
+        .await;
+        // Take the answers and the empty opening, then stop reading.
+        let mut opened = false;
+        while !opened {
+            for frame in stream.recv().await.expect("open").expect("frames") {
+                if let WireFrame::ThinResponse(response) = decode_frame(&frame).unwrap() {
+                    opened |= matches!(response.body, ThinBody::Event { .. });
+                }
+            }
+        }
+        runtime.hold_egress_for_test(session, SESSION_QUEUE_BUDGET);
+        for n in 0..40u64 {
+            send(
+                10 + n,
+                ThinOp::Insert {
+                    table: "docs".to_owned(),
+                    cells: doc_cells(&format!("doc {n:02}"), alice),
+                    options: Vec::new(),
+                    transaction: None,
+                },
+            )
+            .await;
+        }
+        runtime.release_egress_for_test(session, SESSION_QUEUE_BUDGET);
+
+        let (mut events, mut titles, mut answered) = (Vec::new(), Vec::new(), 0);
+        while answered < 40 || titles.len() < 40 {
+            let frames = tokio::time::timeout(std::time::Duration::from_secs(10), stream.recv())
+                .await
+                .expect("the held output drains")
+                .expect("open")
+                .expect("frames");
+            for frame in frames {
+                let WireFrame::ThinResponse(response) = decode_frame(&frame).unwrap() else {
+                    panic!("expected a thin response");
+                };
+                match response.body {
+                    ThinBody::Event { delta, reset, .. } => {
+                        let (added, _) =
+                            jazz::binding_codec::decode_subscription_delta_rows(&delta).unwrap();
+                        if reset {
+                            titles.clear();
+                        }
+                        titles.extend(titles_of(added));
+                        events.push(reset);
+                    }
+                    ThinBody::Written { .. } => answered += 1,
+                    other => panic!("unexpected answer to {}: {other:?}", response.id),
+                }
+            }
+        }
+        titles.sort();
+        let expected: Vec<String> = (0..40).map(|n| format!("doc {n:02}")).collect();
+        assert_eq!(titles, expected, "the reader converges to every row");
+        assert_eq!(
+            events.first(),
+            Some(&true),
+            "the backlog reads as one reset first: {events:?}"
+        );
+        assert!(
+            events.len() <= 6,
+            "{} events reached the client: the backlog was not bounded",
+            events.len()
+        );
+    }
+
     /// Opens a thin session for `alice` with its output stream.
     async fn thin_session_for_test(
         runtime: &crate::runtime::ServerRuntimeHandle,

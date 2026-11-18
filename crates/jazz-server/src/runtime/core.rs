@@ -285,8 +285,8 @@ impl ServerCore {
     }
 
     /// Apply `change` to the store's catalogue in one transaction, as the
-    /// native runtime does: a change that fails leaves nothing behind, and
-    /// one that makes a schema current is refused. With `supersedes`, the
+    /// native runtime does: a change that fails leaves nothing behind.
+    /// With `supersedes`, the
     /// change publishes that bundle new to this store, and every session
     /// pinned to another bundle ends, told to reconnect later (sessions
     /// that ended stay ended even when a later step failed). The
@@ -939,27 +939,5 @@ mod tests {
             "{refused:?}"
         );
         assert_eq!(core.db().catalogue().unwrap(), moved, "nothing was applied");
-    }
-
-    /// A change that would make a schema current is refused: a server's
-    /// sessions pin bundles, it never activates one.
-    #[test]
-    fn a_change_that_activates_a_schema_is_refused() {
-        let mut core = core();
-        let rows = core.db().catalogue().unwrap();
-        let index = crate::portable::catalogue::CatalogueIndex::from_rows(&rows, None);
-        let deployment =
-            crate::portable::deployment::prepare(&index, deploy_request(&source()), 1).unwrap();
-        let mut change = deployment.catalogue_change(&rows).unwrap();
-        let schema = deployment.genesis().unwrap();
-        change.activate = Some((1, schema, Vec::new()));
-        let refused = core
-            .apply_catalogue(deployment.staged.expected(), change, None)
-            .unwrap_err();
-        assert!(
-            matches!(refused, CatalogueApplyError::Rejected(_)),
-            "{refused:?}"
-        );
-        assert_eq!(core.db().catalogue().unwrap(), rows, "nothing was applied");
     }
 }

@@ -1,4 +1,4 @@
-import { NATIVE_ARTIFACT_MISMATCH } from "./native-artifact-compatibility.js";
+import { NATIVE_ARTIFACT_MISMATCH } from "./native-artifact-mismatch-error.js";
 
 /**
  * Why a session given a local-first client (`client`) runs thin instead:
