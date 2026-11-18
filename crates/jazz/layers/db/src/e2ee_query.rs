@@ -337,16 +337,31 @@ fn refuse_in_relations(
 ) -> Result<(), Error> {
     let root = query.table.as_str();
     refuse_joins(encrypted, root, &query.joins)?;
-    refuse_reachable(encrypted, &query.reachable)?;
+    refuse_reachable(encrypted, root, &query.reachable)?;
     for inherit in &query.inherits {
         refuse_column(encrypted, root, &inherit.parent_column, "an inheritance")?;
     }
     for branch in &query.policy_branches {
         refuse_joins(encrypted, root, &branch.joins)?;
-        refuse_reachable(encrypted, &branch.reachable)?;
+        refuse_reachable(encrypted, root, &branch.reachable)?;
         for inherit in &branch.inherits {
             refuse_column(encrypted, root, &inherit.parent_column, "an inheritance")?;
         }
+    }
+    refuse_correlations(encrypted, root, &query.array_subqueries)
+}
+
+/// The columns that correlate relation arrays with their parent rows.
+fn refuse_correlations(
+    encrypted: &BTreeMap<String, EncryptionEntry>,
+    parent: &str,
+    arrays: &[ArraySubquery],
+) -> Result<(), Error> {
+    for array in arrays {
+        let place = "a relation correlation";
+        refuse_column(encrypted, parent, &array.outer_column, place)?;
+        refuse_column(encrypted, &array.table, &array.inner_column, place)?;
+        refuse_correlations(encrypted, &array.table, &array.nested_arrays)?;
     }
     Ok(())
 }
@@ -379,10 +394,14 @@ fn refuse_joins(
 
 fn refuse_reachable(
     encrypted: &BTreeMap<String, EncryptionEntry>,
+    root: &str,
     reachable: &[ReachableVia],
 ) -> Result<(), Error> {
     for via in reachable {
         let place = "a reachability";
+        if let Operand::Column(column) = &via.from {
+            refuse_column(encrypted, root, column, place)?;
+        }
         let (access, edge) = (via.access_table.as_str(), via.edge_table.as_str());
         refuse_column(encrypted, access, &via.access_row_column, place)?;
         refuse_column(encrypted, access, &via.access_team_column, place)?;

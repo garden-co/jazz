@@ -1984,6 +1984,24 @@ fn conditions_of_joins_and_reachability_on_encrypted_columns_are_refused() {
             "notes.body",
         ),
         (branch, "notes.body"),
+        (
+            Query::from("notes").reachable_via(
+                "projects",
+                "id",
+                "id",
+                Operand::Column("body".to_owned()),
+                "projects",
+                "id",
+                "id",
+                [],
+            ),
+            "notes.body",
+        ),
+        (
+            Query::from("notes")
+                .array_subquery(ArraySubquery::new("mine", "comments", "noteId", "body")),
+            "notes.body",
+        ),
     ];
     for (query, column) in refused {
         let error = alice.prepare_query(&query).unwrap_err();
