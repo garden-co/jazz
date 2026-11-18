@@ -86,7 +86,7 @@ export declare class NapiDb {
   requestReadPermissionAdvice(table: string, rowId: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
   requestUpdatePermissionAdvice(table: string, rowId: Uint8Array, patch: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
   requestDeletePermissionAdvice(table: string, rowId: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
-  /** Admit a verified local-first account for this backend runtime only. */
+  /** Admit a verified device account for this backend runtime only. */
   admitLocalFirstSession(token: string, appId: string, claimedAuthor: string): void
   insert(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write
   insertInTransaction(openTransactionId: string, table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Uint8Array

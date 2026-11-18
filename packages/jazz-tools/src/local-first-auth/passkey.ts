@@ -11,7 +11,7 @@ export type PasskeyBackupErrorCode =
 
 const DEFAULT_MESSAGES: Record<PasskeyBackupErrorCode, string> = {
   "not-supported": "WebAuthn is not supported in this browser",
-  "invalid-secret": "Secret must be a canonical local-first secret",
+  "invalid-secret": "Secret must be a canonical device account key",
   "create-failed": "Failed to create passkey credential",
   "get-failed": "Failed to retrieve passkey credential",
   "no-credential": "No passkey credential found",

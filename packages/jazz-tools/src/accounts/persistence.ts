@@ -567,7 +567,7 @@ export async function prepareAccountManager(options: {
   const superseded = async (): Promise<never> => {
     stored.selected = null;
     await save();
-    throw new Error("Automatic local-first startup was superseded");
+    throw new Error("Automatic device account startup was superseded");
   };
   automaticInitializers.set(manager, async () => {
     let changed = false;
