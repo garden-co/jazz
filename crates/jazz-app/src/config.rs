@@ -148,6 +148,9 @@ pub struct Backend {
     /// Confirms switching tables of the published schema to latest-only
     /// history, which drops their past versions for good.
     pub allow_dropping_history: bool,
+    /// Confirms decrypting these encrypted columns (`table.column`), whose
+    /// plaintext the server and every replica then hold.
+    pub confirm_decrypt: Vec<String>,
     /// The app's `jazz.permissions.json`, when the app files opened with
     /// do not carry it (generated bindings embed only the schema):
     /// `include_bytes!("../jazz.permissions.json")`.
@@ -165,6 +168,7 @@ impl Backend {
             admin_secret: admin_secret.into(),
             user_id: user_id.into(),
             allow_dropping_history: false,
+            confirm_decrypt: Vec::new(),
             permissions: None,
         }
     }

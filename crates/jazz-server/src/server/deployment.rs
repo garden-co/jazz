@@ -19,6 +19,15 @@ use jazz::tools::public_schema::{SchemaHash, TableName};
 #[cfg(test)]
 use std::collections::HashMap;
 
+/// The host table the server keeps each deployed schema version's
+/// encryption declarations in, keyed by the version's schema hash, in the
+/// form [`jazz::tools::deployment::artifact::encryption::STORED_DECLARATIONS_V1`]:
+/// a later deployment of the version may not change them in a way that
+/// breaks its sealed cells (migrations §3.1), even though the schema is
+/// unchanged.
+pub(crate) const DECLARATIONS: jazz::host::HostTable =
+    jazz::host::HostTable::new("e2ee_declarations");
+
 pub(crate) async fn deploy(
     state: Arc<ServerState>,
     request: DeployRequest,
@@ -27,11 +36,18 @@ pub(crate) async fn deploy(
 }
 
 /// [`deploy`] with the app's encryption declarations (see
-/// [`portable::prepare_encrypted`]).
+/// [`portable::prepare_encrypted`]). The response carries the deploy's
+/// warnings.
 pub(crate) async fn deploy_body(
     state: Arc<ServerState>,
     body: DeployBody,
 ) -> Result<DeploymentResponse, DeployError> {
+    let kept = state
+        .store
+        .as_ref()
+        .map(|store| store.kv(DECLARATIONS))
+        .transpose()
+        .map_err(DeployError::internal)?;
     // This guard belongs to the detached task, so shutdown also waits when
     // the HTTP client disconnects while deployment is still committing.
     let _request = state
@@ -51,8 +67,15 @@ pub(crate) async fn deploy_body(
         .catalogue_store
         .index()
         .map_err(DeployError::internal)?;
-    let deployment =
-        portable::prepare_encrypted(&index, body, super::catalogue::unix_timestamp_millis())?;
+    let deployment = portable::prepare_encrypted(
+        &index,
+        body,
+        super::catalogue::unix_timestamp_millis(),
+        |version| match &kept {
+            Some(kept) => kept.get(&version.0),
+            None => Ok(None),
+        },
+    )?;
     let staged = &deployment.staged;
     if !staged.response.changed {
         // Nothing to commit, but the runtime's view of the catalogue may be
@@ -65,6 +88,7 @@ pub(crate) async fn deploy_body(
                 .await
                 .map_err(DeployError::internal)?;
         }
+        keep_declarations(kept.as_ref(), &deployment.first_declared)?;
         return Ok(deployment.staged.response);
     }
     let new_bundle = staged.new_bundle();
@@ -112,7 +136,25 @@ pub(crate) async fn deploy_body(
         .refresh()
         .map_err(DeployError::internal)?;
     applied?;
+    keep_declarations(kept.as_ref(), &deployment.first_declared)?;
     Ok(deployment.staged.response)
+}
+
+/// Keep the declarations of each version deployed with them for the first
+/// time, once the deployment committed. A version whose declarations are
+/// kept already keeps them.
+fn keep_declarations(
+    kept: Option<&crate::kv::HostKv>,
+    first: &[(jazz::tools::public_schema::SchemaHash, Vec<u8>)],
+) -> Result<(), DeployError> {
+    let Some(kept) = kept else {
+        return Ok(());
+    };
+    for (version, stored) in first {
+        kept.put_if_absent(&version.0, stored)
+            .map_err(DeployError::internal)?;
+    }
+    Ok(())
 }
 
 /// Publish `source` (a schema carrying its permissions as table policies)

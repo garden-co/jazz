@@ -22,8 +22,7 @@ pub(crate) type KvResult<T> = Result<T, String>;
 
 pub(crate) struct HostKv {
     table: HostTable,
-    /// Reads go here; servers only write through `HostKv` so far.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Reads go here, seeing what the store committed.
     reader: Arc<HostReader>,
     store: crate::runtime::HostSender,
 }
@@ -56,11 +55,17 @@ impl HostKv {
             .map_err(|_| "server store closed before answering".to_owned())?
     }
 
-    #[cfg(test)]
     pub(crate) fn get(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
         self.reader
             .get(self.table, key)
             .map_err(|error| error.to_string())
+    }
+
+    /// Write `value` at `key` unless a value is there already: the value
+    /// in force afterwards, `None` when it is `value`.
+    pub(crate) fn put_if_absent(&self, key: &[u8], value: &[u8]) -> KvResult<Option<Vec<u8>>> {
+        let (key, value) = (key.to_vec(), value.to_vec());
+        self.call(move |tables, table| tables.host_put_if_absent(table, &key, &value))
     }
 
     /// Write every pair in one transaction: all or none.
