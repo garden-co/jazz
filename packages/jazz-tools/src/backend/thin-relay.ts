@@ -14,7 +14,7 @@
  * The client starts on the session's first transaction request and ends
  * with the socket, rolling back what it left open.
  */
-import { NapiThinRouter } from "jazz-napi";
+import { backendNative } from "./backend-native.js";
 
 /** How long a transaction request waits for the core before it is answered without it. */
 export const THIN_REQUEST_TIMEOUT_MS = 30_000;
@@ -56,7 +56,7 @@ export interface ThinRelayOptions {
 
 /** One thin client's socket, past its Hello. */
 export class ThinRelay {
-  private readonly router = new NapiThinRouter();
+  private readonly router = new (backendNative().ThinRouter)();
   private client: ThinTransactionClient | undefined;
   /** The session's transaction requests, served one at a time, in order. */
   private serving: Promise<void> = Promise.resolve();
@@ -233,5 +233,5 @@ export class ThinRelay {
 
 /** Whether a client's Hello asks for thin results: a thin client, whose transactions its backend serves. */
 export function asksThinResults(message: Uint8Array): boolean {
-  return NapiThinRouter.asksThinResults(message);
+  return backendNative().ThinRouter.asksThinResults(message);
 }

@@ -28,6 +28,7 @@ import type {
   BrowserWebSocket,
   WebSocketConstructor,
 } from "../runtime/native-runtime/websocket.js";
+import { backendNative } from "./backend-native.js";
 import { optionalPeerImportError } from "./optional-peer.js";
 import { logStoreOpened } from "./store-log.js";
 
@@ -624,7 +625,7 @@ async function functionOidcToken(): Promise<string> {
   let failure: unknown;
   try {
     // A literal inside `try`, like `importSandboxSdk`'s.
-    const { getVercelOidcToken } = (await import(/* @vite-ignore */ "@vercel/functions/oidc")) as {
+    const { getVercelOidcToken } = (await backendNative().importPeer("@vercel/functions/oidc")) as {
       getVercelOidcToken(): Promise<string>;
     };
     fetched = await getVercelOidcToken();
@@ -966,7 +967,7 @@ export interface OpenVercelCoreOptions {
  */
 async function importSandboxSdk(): Promise<SandboxSdk> {
   try {
-    return (await import(/* @vite-ignore */ "@vercel/sandbox")) as unknown as SandboxSdk;
+    return (await backendNative().importPeer("@vercel/sandbox")) as unknown as SandboxSdk;
   } catch (error) {
     throw optionalPeerImportError("vercel()", "@vercel/sandbox", error);
   }

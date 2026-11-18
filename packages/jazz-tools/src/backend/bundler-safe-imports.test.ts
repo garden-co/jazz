@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 //   import is not enough for that), and an installed one is bundled.
 // - Nothing finds a file through `import.meta.url` at runtime: bundlers
 //   bake the build machine's path into it, which a deployed function lacks.
-const sources = ["vercel-store.ts", "create-jazz.ts", "ws-peer.ts"].map((file) => ({
+const sources = ["node-peers.ts"].map((file) => ({
   file,
   text: readFileSync(new URL(file, import.meta.url), "utf8"),
 }));
@@ -45,8 +45,8 @@ describe("backend imports under bundlers", () => {
     }
   });
 
-  it("loads ws only through ws-peer.ts", () => {
-    // ws-peer.ts is what bundler-optional-peer.turbopack.test.ts builds
+  it("loads ws only through node-peers.ts", () => {
+    // node-peers.ts is what bundler-optional-peer.turbopack.test.ts builds
     // with Turbopack, without ws.
     const src = new URL("../", import.meta.url);
     const importers = (readdirSync(src, { recursive: true }) as string[])
@@ -56,7 +56,7 @@ describe("backend imports under bundlers", () => {
           readFileSync(new URL(file, src), "utf8"),
         ),
       );
-    expect(importers).toEqual(["backend/ws-peer.ts"]);
+    expect(importers).toEqual(["backend/node-peers.ts"]);
   });
 
   it("finds no file through import.meta.url at runtime", () => {

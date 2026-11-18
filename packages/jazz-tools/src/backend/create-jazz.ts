@@ -6,8 +6,16 @@ import type { Http2SecureServer, Http2Server } from "node:http2";
 import type { Duplex } from "node:stream";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import * as jazzNapi from "jazz-napi";
-import { JazzCore, type JazzCoreSocketEvent } from "jazz-napi";
+import type { JazzCoreSocketEvent } from "jazz-napi";
+import { backendNative, inProcessCore } from "./backend-native.js";
+import {
+  BINDING_ORIGIN,
+  bindingTransport,
+  networkTransport,
+  type CoreBinding,
+  type CoreTransport,
+  type CoreWebSocket,
+} from "./core-transport.js";
 import { registerInProcessTransport } from "../runtime/in-process-transport.js";
 import { accountAppId, localFirstAccountId } from "../accounts/local-first.js";
 import { AUTHENTICATE_EXPIRES_AT_MISSING } from "../accounts/registry-client.js";
@@ -142,11 +150,15 @@ export type JazzStore =
       readonly secret?: string;
       /** What runs the core, when a store other than `remote()` made this one (`durableObjects()`). */
       readonly host?: "durable-objects";
+      /** How this backend reaches the core (default: the network). */
+      readonly transport?: CoreTransport;
     }
   | {
       readonly kind: "durableObjects";
-      /** The Worker's origin. */
+      /** The Worker's origin, or a label for a binding. */
       readonly url: string;
+      /** The core's Durable Object binding, in this Worker. */
+      readonly binding?: CoreBinding;
       /** The Worker's `JAZZ_CORE_SECRET`. */
       readonly secret: string;
     }
@@ -283,17 +295,32 @@ const DURABLE_OBJECT_APP_ID = /^[A-Za-z0-9_-]{1,128}$/;
  * @experimental Durable Object cores are new; the options and the Worker's
  * bindings may still change.
  */
-export function durableObjects(options: {
-  url: string;
-  secret: string;
-  appId?: never;
-}): Extract<JazzStore, { kind: "durableObjects" }> {
+export function durableObjects(
+  options:
+    | { url: string; secret: string; appId?: never }
+    | { binding: CoreBinding; secret: string; appId?: never },
+): Extract<JazzStore, { kind: "durableObjects" }> {
   if (typeof options === "object" && options !== null && "appId" in options) {
     throw new Error(
       "durableObjects(): appId is not an option: the store keeps its own app id, in the Worker's Durable Object",
     );
   }
-  const { url, secret } = options ?? ({} as typeof options);
+  if (typeof options === "object" && options !== null && "binding" in options) {
+    const { binding, secret } = options;
+    if (
+      typeof binding !== "object" ||
+      binding === null ||
+      (typeof (binding as { fetch?: unknown }).fetch !== "function" &&
+        typeof (binding as { idFromName?: unknown }).idFromName !== "function")
+    ) {
+      throw new Error(
+        "durableObjects(): binding must be the Worker's JazzCore Durable Object binding, e.g. env.JAZZ",
+      );
+    }
+    checkCoreSecret(secret);
+    return { kind: "durableObjects", url: BINDING_ORIGIN, binding, secret };
+  }
+  const { url, secret } = (options ?? {}) as { url: string; secret: string };
   let origin: URL | undefined;
   try {
     origin = new URL(url);
@@ -323,12 +350,16 @@ export function durableObjects(options: {
       `durableObjects(): url must be https:// (http:// only for localhost, 127.0.0.1 or [::1]); got ${JSON.stringify(url)}`,
     );
   }
+  checkCoreSecret(secret);
+  return { kind: "durableObjects", url: origin.origin, secret };
+}
+
+function checkCoreSecret(secret: unknown): void {
   if (typeof secret !== "string" || secret.length < DURABLE_OBJECT_SECRET_MIN_LENGTH) {
     throw new Error(
       `durableObjects(): secret must be the Worker's JAZZ_CORE_SECRET, a random string of at least ${DURABLE_OBJECT_SECRET_MIN_LENGTH} characters`,
     );
   }
-  return { kind: "durableObjects", url: origin.origin, secret };
 }
 
 /**
@@ -338,10 +369,11 @@ export function durableObjects(options: {
 async function durableObjectCore(
   store: Extract<JazzStore, { kind: "durableObjects" }>,
 ): Promise<Extract<JazzStore, { kind: "remote" }>> {
+  const transport = store.binding ? bindingTransport(store.binding) : networkTransport();
   let response: Response;
   let body: { appId?: unknown } | undefined;
   try {
-    response = await fetch(`${store.url}/app`, {
+    response = await transport.fetch(`${store.url}/app`, {
       headers: { [CREDENTIAL_HEADER]: store.secret },
       redirect: "manual",
       signal: AbortSignal.timeout(DURABLE_OBJECT_APP_TIMEOUT_MS),
@@ -370,6 +402,7 @@ async function durableObjectCore(
   return {
     ...remote({ url: store.url, appId: body.appId, secret: store.secret }),
     host: "durable-objects",
+    transport,
   };
 }
 
@@ -1426,7 +1459,7 @@ async function openInProcessCore(
   // A SQLite store keeps its app id in its own file: a new one on first
   // start, so the app's identities stay the same across restarts (and
   // restores of the file) without the app naming an id.
-  const core = await JazzCore.open({
+  const core = await inProcessCore(store.kind).open({
     ...(store.kind === "sqlite" ? {} : { appId: randomUUID() }),
     backendSecret,
     adminSecret,
@@ -1513,18 +1546,12 @@ function openRemoteCore(
     url: string;
     backendCredential: BackendCredential;
     secrets?: { adminSecret: string; backendSecret: string };
+    transport?: CoreTransport;
   },
   bundle: () => string | undefined,
 ): Core {
   const socketUrl = `${target.url.replace(/^http/, "ws")}/apps/${encodeURIComponent(appId)}/ws`;
-  if (!globalThis.WebSocket) {
-    throw new Error("remote() needs a global WebSocket (Node 22 or newer)");
-  }
-  // Node's WebSocket (undici) takes upgrade headers as a second argument.
-  const NativeWebSocket = globalThis.WebSocket as unknown as new (
-    url: string,
-    options?: { headers?: Record<string, string> },
-  ) => WebSocket;
+  const transport = target.transport ?? networkTransport();
   const credentialHeaders = async (access: BackendAccess): Promise<string[][]> => {
     const credential = await target.backendCredential();
     if (typeof credential !== "string" || !credential) {
@@ -1549,7 +1576,7 @@ function openRemoteCore(
     adminSecret: target.secrets?.adminSecret ?? STAND_IN_SECRET,
     backendSecret: target.secrets?.backendSecret ?? STAND_IN_SECRET,
     async handle(method, path, headers, body, access = "session") {
-      const response = await fetch(`${target.url}${path}`, {
+      const response = await transport.fetch(`${target.url}${path}`, {
         method,
         // The request carries this backend's credential: never to another URL.
         redirect: "error",
@@ -1583,7 +1610,7 @@ function openRemoteCore(
     onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
     access: BackendAccess,
   ): CoreSocket {
-    let ws: WebSocket | undefined;
+    let ws: CoreWebSocket | undefined;
     const queued: Uint8Array[] = [];
     let ended = false;
     let markOpened!: () => void;
@@ -1598,7 +1625,7 @@ function openRemoteCore(
     credentialHeaders(access)
       .then((headers) => {
         if (ended) return;
-        ws = new NativeWebSocket(url, { headers: Object.fromEntries(headers) });
+        ws = transport.openWebSocket(url, Object.fromEntries(headers));
         ws.binaryType = "arraybuffer";
         ws.addEventListener("open", () => {
           for (const data of queued.splice(0)) ws!.send(data as Uint8Array<ArrayBuffer>);
@@ -3761,8 +3788,8 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
         getDeadline?(): Date | undefined;
       };
       try {
-        vercelFunctions = (await import(
-          /* @vite-ignore */ "@vercel/functions"
+        vercelFunctions = (await backendNative().importPeer(
+          "@vercel/functions",
         )) as unknown as typeof vercelFunctions;
       } catch (error) {
         throw optionalPeerImportError("Jazz on Vercel", "@vercel/functions", error);
@@ -4116,8 +4143,9 @@ async function compiledPermissions(options: CreateJazzOptions): Promise<Compiled
   const bound = boundAppOf(options.app);
   // Jazz's loader through a static jazz-napi import, so bundlers and file
   // tracers (Next.js, Vercel) ship the addon with the backend.
-  provideCodegenNapi(jazzNapi);
-  if (!testHarnessOptions.has(options)) await checkRunningBindings(bound.source);
+  provideCodegenNapi(backendNative().codegen);
+  if (!testHarnessOptions.has(options) && backendNative().host === "node")
+    await checkRunningBindings(bound.source);
   const permissions = options.permissions as unknown;
   // `$schema` names the file's version; a legacy (pre-alpha.66) file has `format`.
   if (
