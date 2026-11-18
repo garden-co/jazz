@@ -8,9 +8,8 @@
 //! (`_jazz_names`), so a reopened store and its old-version views find the
 //! same columns again.
 
+use crate::storage::Storage;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-
-use rusqlite::Connection;
 
 use crate::ids::SchemaVersionId;
 use crate::options::{Error, ErrorCode};
@@ -285,7 +284,7 @@ fn schema_error(message: impl Into<String>) -> Error {
 }
 
 impl Names {
-    pub(crate) fn load(conn: &Connection) -> Result<Self, Error> {
+    pub(crate) fn load(conn: &Storage) -> Result<Self, Error> {
         conn.execute_batch(DDL).map_err(storage)?;
         conn.execute_batch(crate::catalogue::DDL).map_err(storage)?;
         let mut names = Self::default();
@@ -461,7 +460,7 @@ impl Names {
     /// Record lens cells (once each), in memory and in the file.
     pub(crate) fn record_lens_cells(
         &mut self,
-        conn: &Connection,
+        conn: &Storage,
         cells: Vec<LensCell>,
     ) -> Result<(), Error> {
         if cells.is_empty() {
@@ -1301,7 +1300,7 @@ impl Names {
 
 /// The tag stored column `column` of stored table `table` was added with
 /// (`ADD COLUMN ... DEFAULT`), if any.
-fn table_exists(conn: &Connection, name: &str) -> Result<bool, Error> {
+fn table_exists(conn: &Storage, name: &str) -> Result<bool, Error> {
     conn.query_row(
         "SELECT count(*) > 0 FROM sqlite_master WHERE name = ?1",
         [name],
@@ -1310,7 +1309,7 @@ fn table_exists(conn: &Connection, name: &str) -> Result<bool, Error> {
     .map_err(storage)
 }
 
-fn ddl_default(conn: &Connection, table: &str, column: &str) -> Result<Option<i64>, Error> {
+fn ddl_default(conn: &Storage, table: &str, column: &str) -> Result<Option<i64>, Error> {
     let mut statement = conn
         .prepare(&format!(
             "PRAGMA table_info({})",
@@ -1331,7 +1330,7 @@ fn ddl_default(conn: &Connection, table: &str, column: &str) -> Result<Option<i6
     Ok(None)
 }
 
-fn write_names(conn: &Connection, n: i64, names: &StoredNames) -> Result<(), Error> {
+fn write_names(conn: &Storage, n: i64, names: &StoredNames) -> Result<(), Error> {
     let mut insert = conn
         .prepare_cached(
             "INSERT INTO _jazz_names (n, tbl, col, stored_tbl, stored_col) \
@@ -1360,7 +1359,7 @@ struct NewStoredColumn {
     branch: Option<Option<Sql>>,
 }
 
-fn write_stored_columns(conn: &Connection, columns: &[NewStoredColumn]) -> Result<(), Error> {
+fn write_stored_columns(conn: &Storage, columns: &[NewStoredColumn]) -> Result<(), Error> {
     let mut insert = conn
         .prepare_cached(
             "INSERT OR IGNORE INTO _jazz_stored_columns (tbl, col, ty, branch, has_dflt, dflt) \
@@ -1487,7 +1486,7 @@ mod tests {
     #[test]
     fn a_rolled_back_savepoint_takes_its_interned_tags_with_it() {
         use crate::values::{begin_savepoint, end_savepoint};
-        let conn = crate::storage::Storage::native(Connection::open_in_memory().unwrap());
+        let conn = Storage::open_in_memory().unwrap();
         let names = Names::load(&conn).unwrap();
         let file = || -> Vec<(i64, String)> {
             if !table_exists(&conn, "_jazz_enum_tags").unwrap() {
@@ -1525,7 +1524,7 @@ mod tests {
     #[test]
     fn every_change_of_enum_tags_moves_the_tag_epoch() {
         use crate::values::{begin_savepoint, end_savepoint, tag_epoch};
-        let conn = crate::storage::Storage::native(Connection::open_in_memory().unwrap());
+        let conn = Storage::open_in_memory().unwrap();
         let names = Names::load(&conn).unwrap();
         let moved = |what: &str, change: &dyn Fn()| {
             let before = tag_epoch();
@@ -1565,7 +1564,7 @@ mod tests {
         use crate::values::tag_epoch;
         let before = tag_epoch();
         std::thread::spawn(|| {
-            let conn = crate::storage::Storage::native(Connection::open_in_memory().unwrap());
+            let conn = Storage::open_in_memory().unwrap();
             let names = Names::load(&conn).unwrap();
             let start = tag_epoch();
             names.intern(&conn, "t", "c", &["a"]).unwrap();
