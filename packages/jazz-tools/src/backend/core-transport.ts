@@ -97,6 +97,8 @@ function upgradedSocket(upgrade: Promise<Response>): CoreWebSocket {
         return;
       }
       socket = ws;
+      // workerd delivers binary messages as Blobs unless told otherwise.
+      ws.binaryType = "arraybuffer";
       ws.accept();
       ws.addEventListener("message", (event) => emit("message", { data: event.data }));
       ws.addEventListener("close", (event) => {
@@ -144,6 +146,7 @@ function upgradedSocket(upgrade: Promise<Response>): CoreWebSocket {
 
 /** workerd's server-side WebSocket, as a fetch upgrade or `WebSocketPair` hands it over. */
 export interface WorkerdWebSocket {
+  binaryType?: string;
   accept(): void;
   send(data: string | ArrayBuffer | ArrayBufferView): void;
   close(code?: number, reason?: string): void;

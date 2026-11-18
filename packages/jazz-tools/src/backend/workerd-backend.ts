@@ -97,6 +97,8 @@ export async function serveJazz(jazz: Jazz, request: Request): Promise<Response>
   const pair = new Pair();
   const client = pair[0];
   const server = pair[1];
+  // Binary messages as ArrayBuffers, not workerd's default Blobs.
+  server.binaryType = "arraybuffer";
   server.accept();
   jazz.acceptSocket(request, wsLike(server));
   return new Response(null, { status: 101, webSocket: client } as ResponseInit);
