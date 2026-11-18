@@ -46,6 +46,10 @@ wasm-bindgen-test = "0.3"
 [features]
 default = ["console_error_panic_hook", "transport-compression-ruzstd"]
 bench-probes = []
+# A Durable Object's SQL (`ctx.storage.sql`) as a store: `WasmDb.openDurableObject`.
+durable-object = []
+# Test-only checks for the workerd smoke test (`tests/durable-objects`); never in releases.
+durable-object-tests = ["durable-object"]
 # Browser store probes (IndexedDB vs in memory); never in release builds.
 browser-bench = []
 transport-compression-lz4 = ["jazz/transport-compression-lz4"]
