@@ -295,6 +295,64 @@ fn check_system_tables_carried<'a>(
     Ok(follows)
 }
 
+/// A version new to the catalogue that lacks the system tables is refused
+/// when a stored version has them, unless it is an earlier version of one
+/// that has them (a lens leads from it to one): whatever lens it hangs on,
+/// it comes after the stored one in time, so it would strand the system
+/// rows written under it. The stored catalogue decides, so this holds
+/// whatever the deploy says about dropping history.
+fn check_new_versions_keep_system_tables<'a>(
+    stored: &DeploymentCatalogue,
+    submitted: &[SchemaHash],
+    schemas: &BTreeMap<Hash, Schema>,
+    migrations: impl Iterator<Item = &'a Lens>,
+) -> Result<(), DeploymentError> {
+    let has = |schema: &Schema| {
+        schema
+            .keys()
+            .any(|name| artifact::system_tables::is_system_table(name.as_str()))
+    };
+    if !stored.schemas.iter().any(has) {
+        return Ok(());
+    }
+    let stored_hashes: BTreeSet<Hash> = stored
+        .schemas
+        .iter()
+        .map(|schema| SchemaHash::compute(schema).0)
+        .collect();
+    let edges: Vec<&Lens> = migrations.collect();
+    for hash in submitted {
+        if stored_hashes.contains(&hash.0) || schemas.get(&hash.0).is_none_or(has) {
+            continue;
+        }
+        // Whether a version that has the tables is reachable from it.
+        let mut seen = BTreeSet::from([hash.0]);
+        let mut queue = vec![hash.0];
+        let mut leads_to_them = false;
+        while let Some(at) = queue.pop() {
+            for lens in edges.iter().filter(|lens| lens.source_hash.0 == at) {
+                if schemas.get(&lens.target_hash.0).is_some_and(has) {
+                    leads_to_them = true;
+                }
+                if seen.insert(lens.target_hash.0) {
+                    queue.push(lens.target_hash.0);
+                }
+            }
+        }
+        if !leads_to_them {
+            return Err(DeploymentError::InvalidSchema {
+                schema: *hash,
+                reason:
+                    "a stored version has Jazz's system tables and this one lacks them: once a \
+                         version carries them, every later version does, so that the system rows \
+                         written under earlier versions stay readable"
+                        .to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// The deploy's rules for Jazz's system tables, which a server checks
 /// before [`prepare_deployment`]: each submitted schema has all of them,
 /// exactly as Jazz defines them, or none, and no app table references
@@ -377,6 +435,12 @@ fn prepare(
         });
     }
     let follows = check_system_tables_carried(
+        &schemas,
+        stored.migrations.iter().chain(&request.migrations),
+    )?;
+    check_new_versions_keep_system_tables(
+        stored,
+        &submitted,
         &schemas,
         stored.migrations.iter().chain(&request.migrations),
     )?;
