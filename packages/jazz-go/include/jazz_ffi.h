@@ -186,7 +186,8 @@ typedef struct JazzWatch JazzWatch;
  * current one first, on a thread of its own, until jazz_unwatch. With
  * what "mutationErrors", cb gets kind "mutationErrors" and each write the
  * server refused that no durable wait reported (TS's onMutationError):
- * {"transaction", "message", "denied", "serializable"}; refusals from
+ * {"transaction", "message", "code", "reason", "denied", "serializable"}
+ * (code and reason as TS's MutationErrorEvent); refusals from
  * before the first such watch come first. When the app closes (jazz_close,
  * signOut, deleteClientStorage), cb gets a last call with kind "error" and
  * {"kind":"closed",...}, after which no callback comes; free the watch

@@ -6,13 +6,15 @@
    with your app. It works best on serverless platforms like Vercel; Cloudflare support is coming.
    You don't need to deploy to start: locally, Jazz uses a SQLite file.
    Default: Vercel for a Next.js app, your own server otherwise.
+   On Vercel, `vercel()` also needs a `region` for its cores, fixed once they exist: the region the
+   project's functions run in (`iad1` unless the project changed it).
    See /docs/setup/deployment/vercel, /docs/setup/deployment/own-server
 2. **What auth provider or library should be used?** Jazz is unopinionated here: it hooks into
    however your backend already does auth, including roles and claims from your identity provider,
    which policies can check directly.
    Default: keep what the project uses; for a new app, Better Auth.
    See /docs/setup/auth/backend, /docs/setup/auth/better-auth, /docs/setup/auth/workos,
-   /docs/setup/auth/custom, /docs/setup/auth/local-first
+   /docs/setup/auth/custom, /docs/setup/auth/device-accounts
 3. **Which backend framework should be used?** Next.js, Hono, Express / Node, Bun or Effect. Each
    setup page has a tab per framework.
    Default: what the project already has; for a new app, Next.js with React, or Hono or Express

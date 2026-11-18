@@ -158,11 +158,7 @@ describe("jazz-tools wrapper", () => {
   it.each([
     ["server", "`jazz-tools server` was removed", "createJazz"],
     ["create", "`jazz-tools create` was removed", "npm create jazz"],
-    [
-      "migrate-alpha59",
-      "moved to `jazz-alpha59-alpha60-import`",
-      "github.com/garden-co/jazz/releases",
-    ],
+    ["migrate-alpha59", "`jazz-tools migrate-alpha59` was removed", "releases/tag/v2.0.0-alpha.65"],
   ])("explains what replaced the removed %s command", async (command, removed, replacement) => {
     const result = await runWrapper([command, "my-app"]);
 

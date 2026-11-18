@@ -347,6 +347,8 @@ pub enum Ast {
         target: AllowedTarget,
         /// The bound and where `maxDepth: n` is written.
         max_depth: Option<(usize, Span)>,
+        /// From `allowedTo` to the closing `)`.
+        span: Span,
     },
 }
 
@@ -778,6 +780,7 @@ impl Parser<'_> {
 
     fn allowed(&mut self) -> Result<Ast, ExprError> {
         const EXAMPLE: &str = "allowedTo.read(chat)";
+        let start = self.here().0;
         self.at += 2;
         let Some(Token {
             tok: Tok::Ident(op_name),
@@ -860,11 +863,12 @@ impl Parser<'_> {
                 }
             }
         }
-        self.expect(Tok::RParen, "`)`")?;
+        let end = self.expect(Tok::RParen, "`)`")?.1;
         Ok(Ast::Allowed {
             op,
             target,
             max_depth,
+            span: (start, end),
         })
     }
 
@@ -1614,6 +1618,12 @@ impl Parser<'_> {
             self.expect(Tok::RParen, "`)`")?;
             return Ok(inner);
         }
+        if self.is_word("allowedTo") && self.peek_at(1) == Some(&Tok::Dot) {
+            // Read it whole, to point at all of it.
+            if let Ast::Allowed { op, span, .. } = self.allowed()? {
+                return Err(ExprError::new(span, allowed_in_exists(op)));
+            }
+        }
         if self.is_word("true") {
             self.at += 1;
             return Ok(RelationPredicate::True);
@@ -1914,9 +1924,15 @@ fn compile_in(ast: &Ast, context: &Context<'_>, scope: &Scope) -> Result<PolicyE
         Ast::Bool(false) => Ok(PolicyExpr::False),
         Ast::Or(items) => Ok(PolicyExpr::Or(compile_all(items, context, scope)?)),
         Ast::And(items) => Ok(PolicyExpr::And(compile_all(items, context, scope)?)),
-        Ast::Not(inner) => Ok(PolicyExpr::Not(Box::new(compile_in(
-            inner, context, scope,
-        )?))),
+        Ast::Not(inner) => {
+            // Inside an `exists`, its own refusal names the problem.
+            if let Some((op, span)) = negated_allowed(inner).filter(|_| scope.depth() == 0) {
+                return Err(ExprError::new(span, not_allowed(op)));
+            }
+            Ok(PolicyExpr::Not(Box::new(compile_in(
+                inner, context, scope,
+            )?)))
+        }
         Ast::Cmp {
             left,
             op,
@@ -2016,12 +2032,58 @@ fn compile_in(ast: &Ast, context: &Context<'_>, scope: &Scope) -> Result<PolicyE
             })
         }
         Ast::ExistsRel(rel) => Ok(PolicyExpr::ExistsRel { rel: rel.clone() }),
+        Ast::Allowed { op, span, .. } if scope.depth() > 0 => {
+            Err(ExprError::new(*span, allowed_in_exists(*op)))
+        }
         Ast::Allowed {
             op,
             target,
             max_depth,
+            ..
         } => compile_allowed(*op, target, *max_depth, context, scope),
     }
+}
+
+/// The first `allowedTo` under a `not`, through `anyOf` / `allOf` / `not`
+/// (an `exists` refuses its own), with its operation and span.
+fn negated_allowed(ast: &Ast) -> Option<(Operation, Span)> {
+    match ast {
+        Ast::Allowed { op, span, .. } => Some((*op, *span)),
+        Ast::Or(items) | Ast::And(items) => items.iter().find_map(negated_allowed),
+        Ast::Not(inner) => negated_allowed(inner),
+        _ => None,
+    }
+}
+
+/// Why `not allowedTo…` is refused: the engine checks inheritance only as
+/// a grant, never negated. (Negating the other table's rule would take
+/// `not exists`, which the engine refuses too.)
+pub fn not_allowed(op: Operation) -> String {
+    let op = operation_name(op);
+    format!(
+        "`not allowedTo.{op}(…)` is not supported yet: write the rule without negating \
+         inheritance (`not` works on this row's columns and session values)"
+    )
+}
+
+fn operation_name(op: Operation) -> &'static str {
+    match op {
+        Operation::Select => "read",
+        Operation::Insert => "insert",
+        Operation::Update => "update",
+        Operation::Delete => "delete",
+    }
+}
+
+/// Why `allowedTo` inside an `exists` is refused: the engine checks
+/// inheritance only on the row a rule is for, not on rows an `exists`
+/// reaches, so it would refuse the policy when the schema compiles.
+pub fn allowed_in_exists(op: Operation) -> String {
+    let op = operation_name(op);
+    format!(
+        "`allowedTo.{op}(…)` inside `exists` is not supported yet: repeat the other table's \
+         {op} rule there instead (e.g. share it as a helper function)"
+    )
 }
 
 /// Why `allowedTo` along a reverse relation takes no `maxDepth`, as the TS
@@ -2607,7 +2669,10 @@ fn relation_predicate(
                 "a hop's conditions are comparisons; write this one as `exists (from …)`",
             ));
         }
-        Ast::ExistsRel(_) | Ast::Allowed { .. } => {
+        Ast::Allowed { op, span, .. } => {
+            return Err(ExprError::new(*span, allowed_in_exists(*op)));
+        }
+        Ast::ExistsRel(_) => {
             return Err(ExprError::new(
                 (0, 0),
                 "a hop's conditions are comparisons; write this one as `exists (from …)`",
@@ -3295,6 +3360,11 @@ impl Printer<'_, '_> {
             RelationPredicate::Contains { left, right } => {
                 format!("{} contains {}", column(left)?, value(right)?)
             }
+            // The policy language has no prefix/suffix test, so no policy
+            // holds one; there is no text to give back.
+            RelationPredicate::StartsWith { .. } | RelationPredicate::EndsWith { .. } => {
+                return None;
+            }
             RelationPredicate::Removed(removed) => match *removed {},
         })
     }
@@ -3512,6 +3582,13 @@ fn predicate_text(p: &RelationPredicate, precedence: u8) -> String {
         ),
         RelationPredicate::Contains { left, right } => {
             format!("{} contains {}", colref_text(left), value_ref_text(right))
+        }
+        // Not policy syntax (policies cannot hold these); a readable form for diagnostics.
+        RelationPredicate::StartsWith { left, right } => {
+            format!("{} startsWith {}", colref_text(left), value_ref_text(right))
+        }
+        RelationPredicate::EndsWith { left, right } => {
+            format!("{} endsWith {}", colref_text(left), value_ref_text(right))
         }
         RelationPredicate::Removed(removed) => match *removed {},
     }

@@ -23,12 +23,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 
 use crate::catalogue::{CataloguePut, CatalogueRows};
 use crate::db::{Db, FileOptions, Journal};
 use crate::options::{Error, ErrorCode};
-use crate::values::{in_savepoint, storage};
+use crate::storage::Storage;
+use crate::values::storage;
 
 /// One host table: `_jazz_host_<name>`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -87,7 +88,7 @@ pub trait HostTables {
     /// For host tables with columns of their own (`_jazz_host_<name>`,
     /// created by `f` itself), which plain key-value pairs would hide from
     /// SQL.
-    fn host_sql(&self, f: &mut dyn FnMut(&Connection) -> Result<(), Error>) -> Result<(), Error>;
+    fn host_sql(&self, f: &mut dyn FnMut(&Storage) -> Result<(), Error>) -> Result<(), Error>;
 }
 
 /// Turn on SQLite's query planner stability guarantee
@@ -102,7 +103,11 @@ pub trait HostTables {
 /// (thousands of reprepares per write on a busy client). The engine never
 /// runs `ANALYZE`, uses no `LIKE` on bound patterns and no partial indexes,
 /// so the guarantee costs no plan it would otherwise pick.
-pub(crate) fn stable_plans(conn: &Connection) -> Result<(), Error> {
+pub(crate) fn stable_plans(conn: &Storage) -> Result<(), Error> {
+    // Managed SQL plans as its host does.
+    let Some(conn) = conn.native_conn() else {
+        return Ok(());
+    };
     conn.set_db_config(
         rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_QPSG,
         true,
@@ -114,7 +119,7 @@ pub(crate) fn stable_plans(conn: &Connection) -> Result<(), Error> {
 /// A store's file opened and admitted, before a [`Db`] is opened on it:
 /// [`StoreFile::open`] then [`Db::open_file`] is [`Db::open_at`].
 pub struct StoreFile {
-    pub(crate) conn: Connection,
+    pub(crate) conn: Storage,
     pub(crate) path: Option<(PathBuf, Option<&'static str>)>,
 }
 
@@ -130,8 +135,8 @@ impl StoreFile {
         }
         let flags = rusqlite::OpenFlags::default();
         let conn = match options.vfs {
-            None => Connection::open_with_flags(path, flags),
-            Some(vfs) => Connection::open_with_flags_and_vfs(path, flags, vfs),
+            None => Storage::open_with_flags(path, flags),
+            Some(vfs) => Storage::open_with_flags_and_vfs(path, flags, vfs),
         }
         .map_err(storage)?;
         let synchronous = match (options.journal, options.synchronous_full) {
@@ -180,9 +185,20 @@ impl StoreFile {
         })
     }
 
+    /// A store on `storage` a host opened (a Durable Object's SQL:
+    /// [`Storage::from_backend`]), admitted as a file is, with no path:
+    /// its chunks live in the store itself.
+    pub fn from_storage(storage: Storage) -> Result<Self, Error> {
+        crate::format::admit(&storage)?;
+        Ok(Self {
+            conn: storage,
+            path: None,
+        })
+    }
+
     /// A store that lives only as long as what is opened on it.
     pub fn memory() -> Result<Self, Error> {
-        let conn = Connection::open_in_memory().map_err(storage)?;
+        let conn = Storage::open_in_memory().map_err(storage)?;
         crate::format::admit(&conn)?;
         Ok(Self { conn, path: None })
     }
@@ -192,7 +208,7 @@ impl StoreFile {
     /// (or read it with a [`HostReader`]) without losing it.
     pub fn shared_memory(name: &str) -> Result<Self, Error> {
         let conn =
-            Connection::open_with_flags(shared_memory_uri(name), uri_flags()).map_err(storage)?;
+            Storage::open_with_flags(shared_memory_uri(name), uri_flags()).map_err(storage)?;
         crate::format::admit(&conn)?;
         Ok(Self { conn, path: None })
     }
@@ -203,7 +219,7 @@ impl StoreFile {
 /// file serves readers beside its writer). It sees every write that
 /// returned before the read began.
 pub struct HostReader {
-    conn: Mutex<Option<Connection>>,
+    conn: Mutex<Option<Storage>>,
 }
 
 impl HostReader {
@@ -213,8 +229,8 @@ impl HostReader {
             | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
             | rusqlite::OpenFlags::SQLITE_OPEN_URI;
         let conn = match vfs {
-            None => Connection::open_with_flags(path, flags),
-            Some(vfs) => Connection::open_with_flags_and_vfs(path, flags, vfs),
+            None => Storage::open_with_flags(path, flags),
+            Some(vfs) => Storage::open_with_flags_and_vfs(path, flags, vfs),
         }
         .map_err(storage)?;
         Self::with(conn)
@@ -222,12 +238,10 @@ impl HostReader {
 
     /// Read the store [`StoreFile::shared_memory`] opened by `name`.
     pub fn shared_memory(name: &str) -> Result<Self, Error> {
-        Self::with(
-            Connection::open_with_flags(shared_memory_uri(name), uri_flags()).map_err(storage)?,
-        )
+        Self::with(Storage::open_with_flags(shared_memory_uri(name), uri_flags()).map_err(storage)?)
     }
 
-    fn with(conn: Connection) -> Result<Self, Error> {
+    fn with(conn: Storage) -> Result<Self, Error> {
         // A WAL reader waits only while another connection recovers the
         // log.
         conn.busy_timeout(Duration::from_secs(5)).map_err(storage)?;
@@ -236,7 +250,7 @@ impl HostReader {
         })
     }
 
-    fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T, Error>) -> Result<T, Error> {
+    fn read<T>(&self, f: impl FnOnce(&Storage) -> Result<T, Error>) -> Result<T, Error> {
         let conn = self
             .conn
             .lock()
@@ -265,7 +279,7 @@ impl HostReader {
     /// Run `f` on the read-only connection, for host tables that
     /// [`HostTables::host_sql`] shaped. A table no write created yet is
     /// missing here: `f` must not assume it exists.
-    pub fn sql<T>(&self, f: impl FnOnce(&Connection) -> Result<T, Error>) -> Result<T, Error> {
+    pub fn sql<T>(&self, f: impl FnOnce(&Storage) -> Result<T, Error>) -> Result<T, Error> {
         self.read(f)
     }
 
@@ -320,13 +334,12 @@ impl HostTables for StoreFile {
     }
 
     fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error> {
-        in_savepoint(&self.conn, "host_write", || {
-            crate::catalogue::put(&self.conn, put)
-        })
+        self.conn
+            .scope("host_write", |conn| crate::catalogue::put(conn, put))
     }
 
-    fn host_sql(&self, f: &mut dyn FnMut(&Connection) -> Result<(), Error>) -> Result<(), Error> {
-        in_savepoint(&self.conn, "host_write", || f(&self.conn))
+    fn host_sql(&self, f: &mut dyn FnMut(&Storage) -> Result<(), Error>) -> Result<(), Error> {
+        self.conn.scope("host_write", |conn| f(conn))
     }
 }
 
@@ -362,12 +375,12 @@ impl HostTables for Db {
 
     fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error> {
         self.with_host_connection(|conn| {
-            in_savepoint(conn, "host_write", || crate::catalogue::put(conn, put))
+            conn.scope("host_write", |conn| crate::catalogue::put(conn, put))
         })
     }
 
-    fn host_sql(&self, f: &mut dyn FnMut(&Connection) -> Result<(), Error>) -> Result<(), Error> {
-        self.with_host_connection(|conn| in_savepoint(conn, "host_write", || f(conn)))
+    fn host_sql(&self, f: &mut dyn FnMut(&Storage) -> Result<(), Error>) -> Result<(), Error> {
+        self.with_host_connection(|conn| conn.scope("host_write", |conn| f(conn)))
     }
 }
 
@@ -399,13 +412,13 @@ impl Db {
 }
 
 /// Whether `table` exists yet; reads of one that does not find nothing.
-fn exists(conn: &Connection, table: HostTable) -> Result<bool, Error> {
+fn exists(conn: &Storage, table: HostTable) -> Result<bool, Error> {
     conn.prepare_cached("SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?1")
         .and_then(|mut statement| statement.query_row([table.sql_name()], |row| row.get(0)))
         .map_err(storage)
 }
 
-fn create(conn: &Connection, table: HostTable) -> Result<(), Error> {
+fn create(conn: &Storage, table: HostTable) -> Result<(), Error> {
     conn.execute_batch(&format!(
         "CREATE TABLE IF NOT EXISTS {} (k BLOB PRIMARY KEY, v BLOB NOT NULL) WITHOUT ROWID",
         table.sql_name()
@@ -413,7 +426,7 @@ fn create(conn: &Connection, table: HostTable) -> Result<(), Error> {
     .map_err(storage)
 }
 
-fn get(conn: &Connection, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+fn get(conn: &Storage, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
     if !exists(conn, table)? {
         return Ok(None);
     }
@@ -422,7 +435,7 @@ fn get(conn: &Connection, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>
         .map_err(storage)
 }
 
-fn prefix_scan(conn: &Connection, table: HostTable, prefix: &[u8]) -> Result<Vec<HostPair>, Error> {
+fn prefix_scan(conn: &Storage, table: HostTable, prefix: &[u8]) -> Result<Vec<HostPair>, Error> {
     if !exists(conn, table)? {
         return Ok(Vec::new());
     }
@@ -446,11 +459,11 @@ fn prefix_scan(conn: &Connection, table: HostTable, prefix: &[u8]) -> Result<Vec
     Ok(out)
 }
 
-fn put_many(conn: &Connection, table: HostTable, pairs: &[HostPair]) -> Result<(), Error> {
+fn put_many(conn: &Storage, table: HostTable, pairs: &[HostPair]) -> Result<(), Error> {
     if pairs.is_empty() {
         return Ok(());
     }
-    in_savepoint(conn, "host_write", || {
+    conn.scope("host_write", |conn| {
         create(conn, table)?;
         let mut statement = conn
             .prepare_cached(&format!(
@@ -466,12 +479,12 @@ fn put_many(conn: &Connection, table: HostTable, pairs: &[HostPair]) -> Result<(
 }
 
 fn put_if_absent(
-    conn: &Connection,
+    conn: &Storage,
     table: HostTable,
     key: &[u8],
     value: &[u8],
 ) -> Result<Option<Vec<u8>>, Error> {
-    in_savepoint(conn, "host_write", || {
+    conn.scope("host_write", |conn| {
         create(conn, table)?;
         let existing: Option<Vec<u8>> = conn
             .prepare_cached(&format!("SELECT v FROM {} WHERE k = ?1", table.sql_name()))
@@ -489,7 +502,7 @@ fn put_if_absent(
     })
 }
 
-fn delete(conn: &Connection, table: HostTable, key: &[u8]) -> Result<(), Error> {
+fn delete(conn: &Storage, table: HostTable, key: &[u8]) -> Result<(), Error> {
     if !exists(conn, table)? {
         return Ok(());
     }
@@ -501,10 +514,11 @@ fn delete(conn: &Connection, table: HostTable, key: &[u8]) -> Result<(), Error> 
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::{Connection, StatementStatus};
+    use crate::storage::Storage;
+    use rusqlite::StatementStatus;
 
     /// Reprepares of a cached `LIMIT ?` read run `runs` times on `conn`.
-    fn reprepares(conn: &Connection, runs: i64) -> i32 {
+    fn reprepares(conn: &Storage, runs: i64) -> i32 {
         conn.execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1), (2), (3);")
             .unwrap();
         let sql = "SELECT x FROM t ORDER BY x LIMIT ?1 OFFSET ?2";
@@ -525,13 +539,13 @@ mod tests {
     #[test]
     fn a_cached_limit_read_is_not_planned_again_on_each_run() {
         // The cost this guards against: rebinding `LIMIT ?` expires it.
-        let plain = Connection::open_in_memory().unwrap();
+        let plain = Storage::open_in_memory().unwrap();
         assert!(
             reprepares(&plain, 5) >= 4,
             "SQLite no longer expires on LIMIT rebinds"
         );
 
-        let conn = Connection::open_in_memory().unwrap();
+        let conn = Storage::open_in_memory().unwrap();
         super::stable_plans(&conn).unwrap();
         assert_eq!(reprepares(&conn, 5), 0);
     }
