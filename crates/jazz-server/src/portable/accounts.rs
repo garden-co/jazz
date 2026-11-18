@@ -611,7 +611,7 @@ pub fn require_external_identity(identity: &Principal) -> Result<(), RouteFailur
 
 /// `found-local-first` founds only local-first guests.
 pub fn require_local_first_identity(identity: &Principal) -> Result<(), RouteFailure> {
-    if identity.issuer != jazz::tools::identity::LOCAL_FIRST_ISSUER {
+    if identity.issuer != jazz::tools::identity::DEVICE_ACCOUNT_ISSUER {
         return Err(refuse(400, "local_first_identity_required"));
     }
     Ok(())
@@ -719,7 +719,7 @@ pub fn found_local_first(
     let app = founding_app(request.audience.as_deref(), app_id)?;
     let result = execute(
         storage,
-        &AccountCommand::FoundLocalFirst {
+        &AccountCommand::FoundDeviceAccount {
             principal: request.identity.clone(),
             app,
         },
@@ -1207,7 +1207,7 @@ mod tests {
             assert!(login(&storage, &principal("alice")).is_ok(), "{store}");
 
             let guest = Principal {
-                issuer: jazz::tools::identity::LOCAL_FIRST_ISSUER.into(),
+                issuer: jazz::tools::identity::DEVICE_ACCOUNT_ISSUER.into(),
                 subject: "6f9619ff-8b86-5011-b42d-00c04fc964ff".into(),
             };
             let found = |audience: Option<&str>, fresh_id: &mut dyn FnMut() -> Uuid| {

@@ -614,18 +614,18 @@ fn verify_self_signed_until(
     )?)
 }
 
-/// The account-bound local-first author `proof` proves `claimed_author` is,
+/// The account-bound device-account author `proof` proves `claimed_author` is,
 /// and until when (Unix seconds).
-fn verify_local_first(
+fn verify_device_account(
     proof: &SelfSignedProof,
     claimed_author: &str,
 ) -> HostResult<(AuthorSubject, u64)> {
     let (author, expires_at) =
         verify_self_signed_until(&proof.token, &proof.app_id, claimed_author)?;
-    if author.principal_parts().0 != AuthorSubject::LOCAL_FIRST_ISSUER
+    if author.principal_parts().0 != AuthorSubject::DEVICE_ACCOUNT_ISSUER
         || author.account_id().is_none()
     {
-        return Err("session admission requires an account-bound local-first proof".into());
+        return Err("session admission requires an account-bound device-account proof".into());
     }
     Ok((author, expires_at))
 }
@@ -929,14 +929,14 @@ pub struct Binding {
     /// Open transactions bound to an identity: their writes are its, and
     /// their reads run as it.
     bound: Rc<RefCell<BTreeMap<OpenTransactionId, WriteIdentity>>>,
-    /// Local-first accounts a backend admitted (see
-    /// [`Binding::admit_local_first_session`]), by canonical author.
+    /// Device accounts a backend admitted (see
+    /// [`Binding::admit_device_account_session`]), by canonical author.
     admitted: Rc<RefCell<BTreeMap<String, SelfSignedProof>>>,
     /// Whether the next tick reports the retry store's refusals again.
     requeue: Rc<Cell<bool>>,
 }
 
-/// A Jazz self-signed proof of a local-first account.
+/// A Jazz self-signed proof of a device account.
 #[derive(Clone)]
 struct SelfSignedProof {
     token: String,
@@ -976,12 +976,12 @@ impl Binding {
         }
     }
 
-    /// Let this backend runtime write and read as the local-first account
+    /// Let this backend runtime write and read as the device account
     /// `claimed_author`, proven by `token`. Raw author bytes never name a
     /// Jazz-reserved identity otherwise. The admission covers this runtime
     /// and its schema views; the proof is checked again at every use, so an
     /// expired one stops admitting.
-    pub fn admit_local_first_session(
+    pub fn admit_device_account_session(
         &self,
         token: &str,
         app_id: &str,
@@ -993,7 +993,7 @@ impl Binding {
             app_id: app_id.to_owned(),
             expires_at: 0,
         };
-        (_, proof.expires_at) = verify_local_first(&proof, claimed_author)?;
+        (_, proof.expires_at) = verify_device_account(&proof, claimed_author)?;
         let now = now_seconds()?;
         let mut admitted = self.admitted.borrow_mut();
         // An expired proof admits no one any more: drop those, so the map
@@ -1010,15 +1010,33 @@ impl Binding {
         Ok(())
     }
 
-    /// How many local-first accounts this backend holds an unexpired-at-
+    /// Deprecated alias of [`Self::admit_device_account_session`].
+    #[deprecated(note = "renamed to admit_device_account_session")]
+    pub fn admit_local_first_session(
+        &self,
+        token: &str,
+        app_id: &str,
+        claimed_author: &str,
+    ) -> HostResult<()> {
+        self.admit_device_account_session(token, app_id, claimed_author)
+    }
+
+    /// How many device accounts this backend holds an unexpired-at-
     /// admission proof for: only tests read it, to see the map stay bounded.
     #[cfg(any(test, feature = "testing"))]
-    pub fn admitted_local_first_accounts(&self) -> usize {
+    pub fn admitted_device_accounts(&self) -> usize {
         self.admitted.borrow().len()
     }
 
+    /// Deprecated alias of `admitted_device_accounts`.
+    #[deprecated(note = "renamed to admitted_device_accounts")]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn admitted_local_first_accounts(&self) -> usize {
+        self.admitted_device_accounts()
+    }
+
     /// The subject `bytes` (canonical author JSON) names: an ordinary
-    /// author, or a local-first account this backend admitted.
+    /// author, or a device account this backend admitted.
     fn author_of(&self, bytes: &[u8]) -> HostResult<AuthorSubject> {
         match author(bytes) {
             Ok(author) => Ok(author),
@@ -1028,7 +1046,7 @@ impl Binding {
                 });
                 match admitted {
                     Some((canonical, proof)) => {
-                        verify_local_first(&proof, canonical).map(|(author, _)| author)
+                        verify_device_account(&proof, canonical).map(|(author, _)| author)
                     }
                     None => Err(error),
                 }

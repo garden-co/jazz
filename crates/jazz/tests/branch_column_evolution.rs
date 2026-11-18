@@ -55,15 +55,24 @@ fn v2() -> JazzSchema {
     v2_with("eu", ColumnType::Text)
 }
 
-fn open(schema: JazzSchema) -> Db {
-    block_on(Db::open(DbConfig::new(
+fn config(schema: JazzSchema) -> DbConfig {
+    DbConfig::new(
         schema,
         DbIdentity {
             node: NodeUuid::from_bytes([1; 16]),
             author: AuthorSubject::SYSTEM,
         },
-    )))
-    .unwrap()
+    )
+}
+
+/// The store at `path`, opened under `schema`: how a deployment installs
+/// a schema (a running store never switches).
+fn open_file(schema: JazzSchema, path: &std::path::Path) -> Result<Db, jazz::db::Error> {
+    block_on(Db::open_at(
+        config(schema),
+        path,
+        jazz::db::FileOptions::default(),
+    ))
 }
 
 fn space(name: &str) -> BranchSelector {
@@ -110,15 +119,16 @@ fn text(value: &str) -> Option<Value> {
 /// only `space`, reads and writes `(a, eu)`.
 ///
 /// ```text
-/// v1: write(space a) ─► activate v2 ─► read(a, eu) = [before]
+/// v1: write(space a) ─► reopen as v2 ─► read(a, eu) = [before]
 ///                                      write(a, us), write(a, eu)
 /// v1 view: write(space a) ──────────► read(a, eu) = [before, european, from v1]
 /// ```
 #[test]
 fn an_added_branch_column_reads_older_rows_and_selectors_at_its_default() {
-    let db = open(v1());
+    let path = scratch("added");
+    let db = open_file(v1(), &path).unwrap();
     write(&db, space("a"), "before");
-    block_on(db.activate_schema(v2())).unwrap();
+    let db = common::reinstall(db, &path, config(v2()), vec![]);
 
     assert_eq!(
         bodies(&db, space_region("a", "eu")),
@@ -160,16 +170,19 @@ fn an_added_branch_column_reads_older_rows_and_selectors_at_its_default() {
     );
 }
 
-/// The only branch-column evolution is adding one with a default: a
-/// version that adds one without a default, turns an existing column into
-/// one, changes a branch column's default or type, or (made current) drops
-/// one is refused as not supported yet, and the store is left as it was.
+/// The only branch-column evolution is adding one with a default: a store
+/// opened under a version that adds one without a default, turns an
+/// existing column into one, or changes a branch column's default or type
+/// is refused as not supported yet, and the store is left as it was.
 #[test]
 fn every_other_branch_column_change_is_not_supported_yet() {
-    let db = open(v1());
-    write(&db, space("a"), "before");
+    let path = scratch("other");
+    {
+        let db = open_file(v1(), &path).unwrap();
+        write(&db, space("a"), "before");
+    }
     let refused = |schema: JazzSchema, what: &str| {
-        let error = block_on(db.activate_schema(schema)).unwrap_err();
+        let error = open_file(schema, &path).err().expect(what);
         assert!(
             error.to_string().contains("not supported"),
             "{what}: {error}"
@@ -196,12 +209,12 @@ fn every_other_branch_column_change_is_not_supported_yet() {
         table(&|t| t.branch_by("body")),
         "an existing column made a branch column",
     );
-    block_on(db.activate_schema(v2())).unwrap();
+    drop(open_file(v2(), &path).unwrap());
     refused(v2_with("us", ColumnType::Text), "a changed default");
     refused(v2_with("", ColumnType::Integer), "a changed type");
-    refused(v1(), "a dropped branch column");
 
     // Planted positive: the store still reads as v2 did.
+    let db = open_file(v2(), &path).unwrap();
     assert_eq!(
         bodies(&db, space_region("a", "eu")),
         vec![(text("before"), text("eu"))]
@@ -211,11 +224,12 @@ fn every_other_branch_column_change_is_not_supported_yet() {
 /// Every admitted version reads the same stored rows, so a new version is
 /// checked against each of them, not only the current one: with v2 (region
 /// defaulting to "eu") admitted beside a current v1, a version with region
-/// defaulting to "us" is refused whether admitted or made current, and so
+/// defaulting to "us" is refused whether admitted or opened under, and so
 /// is one keeping region as an ordinary column.
 #[test]
 fn a_branch_column_s_default_agrees_with_every_admitted_version() {
-    let db = open(v1());
+    let path = scratch("agrees");
+    let db = open_file(v1(), &path).unwrap();
     write(&db, space("a"), "before");
     block_on(db.admit_schema_with_lenses(v2(), &[])).unwrap();
     let error =
@@ -224,11 +238,15 @@ fn a_branch_column_s_default_agrees_with_every_admitted_version() {
         error.to_string().contains("not supported"),
         "admitted: {error}"
     );
-    let error = block_on(db.activate_schema(v2_with("us", ColumnType::Text))).unwrap_err();
+    drop(db);
+    let error = open_file(v2_with("us", ColumnType::Text), &path)
+        .err()
+        .expect("opening as us");
     assert!(
         error.to_string().contains("not supported"),
-        "activated: {error}"
+        "opened: {error}"
     );
+    let db = open_file(v1(), &path).unwrap();
     let ordinary = compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -251,8 +269,8 @@ fn a_branch_column_s_default_agrees_with_every_admitted_version() {
         "ordinary: {error}"
     );
 
-    // Planted positive: the admitted v2 itself can still be made current.
-    block_on(db.activate_schema(v2())).unwrap();
+    // Planted positive: the store still opens under the admitted v2.
+    let db = common::reinstall(db, &path, config(v2()), vec![]);
     assert_eq!(
         bodies(&db, space_region("a", "eu")),
         vec![(text("before"), text("eu"))]
@@ -264,9 +282,10 @@ fn a_branch_column_s_default_agrees_with_every_admitted_version() {
 /// refused instead of reading the "eu" rows as `(a, us)`.
 #[test]
 fn a_schema_view_keys_rows_as_every_admitted_version_does() {
-    let db = open(v1());
+    let path = scratch("view");
+    let db = open_file(v1(), &path).unwrap();
     write(&db, space("a"), "before");
-    block_on(db.activate_schema(v2())).unwrap();
+    let db = common::reinstall(db, &path, config(v2()), vec![]);
     let error = block_on(db.register_schema_view(v2_with("us", ColumnType::Text)))
         .err()
         .expect("a view keyed by us");
@@ -376,13 +395,13 @@ fn a_lens_may_not_key_rows_by_another_branch_default() {
     {
         let db = open_at(v1());
         write(&db, space("a"), "before");
-        let error = block_on(db.activate_schema_with_lenses(v2(), &[add_region("us")]))
+        let error = block_on(db.admit_schema_with_lenses(v2(), &[add_region("us")]))
             .err()
             .expect("a lens keying rows by us");
         assert!(error.to_string().contains("not supported"), "{error}");
 
         // Planted positive: a lens with the declared default.
-        block_on(db.activate_schema_with_lenses(v2(), &[add_region("eu")])).unwrap();
+        block_on(db.admit_schema_with_lenses(v2(), &[add_region("eu")])).unwrap();
     }
     let db = open_at(v2());
     assert_eq!(
@@ -395,7 +414,7 @@ fn a_lens_may_not_key_rows_by_another_branch_default() {
 mod duplex_transport;
 
 /// Mixed versions agree on the branch: a client still on v1 writes to
-/// space `a`, and a server on v2 holds it in `(a, eu)`.
+/// space `a`, and a server that admitted v2 holds it in `(a, eu)`.
 ///
 /// ```text
 /// alice(v1) ──insert(space a)──► server(v2) ──► read(a, eu) = [from alice]
@@ -410,7 +429,7 @@ fn a_client_on_the_old_version_writes_into_the_default_branch() {
         },
     )))
     .unwrap();
-    block_on(server.activate_schema(v2())).unwrap();
+    block_on(server.admit_schema_with_lenses(v2(), &[])).unwrap();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let client = block_on(Db::open(DbConfig::new(
         v1(),
@@ -429,9 +448,102 @@ fn a_client_on_the_old_version_writes_into_the_default_branch() {
         block_on(client.tick()).unwrap();
         block_on(server.tick()).unwrap();
     }
+    let v2_view = block_on(server.register_schema_view(v2())).unwrap();
     assert_eq!(
-        bodies(&server, space_region("a", "eu")),
+        bodies(&v2_view, space_region("a", "eu")),
         vec![(text("from alice"), text("eu"))]
     );
-    assert!(bodies(&server, space_region("a", "us")).is_empty());
+    assert!(bodies(&v2_view, space_region("a", "us")).is_empty());
+}
+
+/// Installing a version along the app's lenses is checked like any other:
+/// a store at v2 refuses to open under a v3 whose lens drops the `region`
+/// branch column (its rows are keyed by it), and still opens as v2.
+#[test]
+fn a_store_refuses_a_lens_that_drops_a_branch_column() {
+    let path = scratch("lens-drop");
+    {
+        let db = open_file(v1(), &path).unwrap();
+        write(&db, space("a"), "before");
+        drop(common::reinstall(db, &path, config(v2()), vec![]));
+    }
+    let v3 = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("docs")
+                    .column("space", ColumnType::Text)
+                    .column("body", ColumnType::Text)
+                    .nullable_column("note", ColumnType::Text)
+                    .branch_by("space")
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let lens = jazz::protocol::MigrationLens::new(
+        v2().version_id(),
+        v3.version_id(),
+        vec![jazz::protocol::TableLens {
+            source_table: "docs".into(),
+            target_table: "docs".into(),
+            ops: vec![
+                jazz::protocol::LensOp::DropColumn {
+                    column: "region".into(),
+                    backwards_default: Value::String("eu".into()),
+                },
+                jazz::protocol::LensOp::AddColumn {
+                    column: "note".into(),
+                    default: Value::Nullable(None),
+                },
+            ],
+        }],
+    )
+    .unwrap();
+    let error = block_on(Db::open_at(
+        config(v3).with_migrations(vec![v2()], vec![lens]),
+        &path,
+        jazz::db::FileOptions::default(),
+    ))
+    .err()
+    .expect("a lens dropping a branch column");
+    assert!(
+        error
+            .to_string()
+            .contains("removing branch column docs.region"),
+        "{error}"
+    );
+
+    // Planted positive: nothing was installed.
+    let db = open_file(v2(), &path).unwrap();
+    assert_eq!(
+        bodies(&db, space_region("a", "eu")),
+        vec![(text("before"), text("eu"))]
+    );
+}
+
+/// Lacking a branch column is not dropping it: a store running v1 that
+/// admitted v2 (adding `region`), as a deploy does, still opens under a
+/// v1 with a new nullable column and no lens, and reads its rows at the
+/// default region.
+#[test]
+fn a_version_lacking_an_admitted_branch_column_still_opens() {
+    let path = scratch("lacking");
+    {
+        let db = open_file(v1(), &path).unwrap();
+        write(&db, space("a"), "before");
+        block_on(db.admit_schema_with_lenses(v2(), &[])).unwrap();
+    }
+    let noted = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("docs")
+                    .column("space", ColumnType::Text)
+                    .column("body", ColumnType::Text)
+                    .nullable_column("note", ColumnType::Text)
+                    .branch_by("space")
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let db = open_file(noted, &path).unwrap();
+    assert_eq!(bodies(&db, space("a")), vec![(text("before"), None)]);
 }
