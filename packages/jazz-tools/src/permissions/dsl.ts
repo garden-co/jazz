@@ -50,6 +50,7 @@ import {
   type RelationTarget,
   type Row,
   type Session,
+  type SessionAuthMode,
   type AnyClaims,
   type ValueHandle as Value,
   type Rel,
@@ -191,6 +192,19 @@ type NotOfInherits<A> =
 
 type Comparable = Value<any, any> | string | number | boolean | bigint | Date | Uint8Array | null;
 
+/**
+ * What a value compared with `left` may be: `session.authMode` only compares
+ * with its own values, so the pre-rename `"local-first"` is a type error.
+ */
+type ComparableWith<L> =
+  L extends Value<infer V, any>
+    ? string extends V
+      ? Comparable
+      : [V] extends [SessionAuthMode]
+        ? SessionAuthMode | Value<any, any> | null
+        : Comparable
+    : Comparable;
+
 function comparison(name: "ne" | "gt" | "gte" | "lt" | "lte" | "eq") {
   return (...args: unknown[]): unknown => {
     if (args.length === 1) {
@@ -205,13 +219,13 @@ function comparison(name: "ne" | "gt" | "gte" | "lt" | "lte" | "eq") {
 /** One-argument comparison helpers are a condition's value (`{ n: gt(3) }`); two-argument ones a policy (`gt(session.claims.level, 3)`). */
 export interface CompareHelper<Op extends string> {
   <const X>(operand: X): CompareOp<X>;
-  (left: Value<any, any>, right: Comparable): Policy;
+  <L extends Value<any, any>>(left: L, right: ComparableWith<L>): Policy;
   readonly __op?: Op;
 }
 /** `eq(a, b)`: equal (`=`); `eq(v)` is just `v`. */
 export interface EqHelper {
   <const X>(operand: X): X;
-  (left: Value<any, any>, right: Comparable): Policy;
+  <L extends Value<any, any>>(left: L, right: ComparableWith<L>): Policy;
 }
 
 export const eq = /*#__PURE__*/ comparison("eq") as EqHelper;
@@ -231,7 +245,10 @@ export function contains(...args: unknown[]): unknown {
 
 /** `{ teamId: isIn(session.claims.teams) }`: the column is one of a session list; `isIn(a, list)` as a policy. */
 export function isIn(list: Value<any, any>): InOp;
-export function isIn(left: Value<any, any>, list: Value<any, any> | readonly Comparable[]): Policy;
+export function isIn<L extends Value<any, any>>(
+  left: L,
+  list: Value<any, any> | readonly ComparableWith<L>[],
+): Policy;
 export function isIn(...args: unknown[]): unknown {
   if (args.length === 1) return op({ op: "in", operand: args[0] });
   return node({ k: "compare", left: args[0], op: "in", right: args[1] });

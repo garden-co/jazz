@@ -1785,7 +1785,7 @@ mod tests {
             .unwrap()
             .expect("session");
 
-        assert_eq!(session.auth_mode, jazz::tools::AuthMode::LocalFirst);
+        assert_eq!(session.auth_mode, jazz::tools::AuthMode::DeviceAccount);
         if let serde_json::Value::Object(map) = &session.claims {
             assert!(
                 !map.contains_key("auth_mode"),

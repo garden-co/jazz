@@ -115,7 +115,7 @@ test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", ()
     expect(overlayConfig.hasJwtToken).toBe(true);
     expect(overlayConfig.browserWorkerSession).toMatchObject({
       issuer: "urn:jazz:local-first",
-      authMode: "local-first",
+      authMode: "device-account",
     });
 
     // The overlay reads the handle, opens its connection joining that store, and

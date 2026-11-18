@@ -16,7 +16,7 @@ function makeClient(): JazzClient {
       user: "00000000-0000-4000-8000-000000000002",
       identity: { issuer: "urn:jazz:local-first", subject: "device-1" },
       claims: {},
-      authMode: "local-first",
+      authMode: "device-account",
     },
     shutdown: vi.fn(async () => undefined),
   } as unknown as JazzClient;

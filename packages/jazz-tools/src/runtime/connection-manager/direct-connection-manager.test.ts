@@ -15,7 +15,7 @@ describe("DirectConnectionManager explicit offline state", () => {
       issuer: "urn:jazz:local-first",
       user_id: "alice",
       claims: {},
-      authMode: "local-first",
+      authMode: "device-account",
     };
     setTrustedReservedSession(config, session);
     let runtimeConfig: object | undefined;

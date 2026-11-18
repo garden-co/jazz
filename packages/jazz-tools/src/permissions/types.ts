@@ -453,6 +453,9 @@ export interface ClaimsMarker<C> {
   readonly __claims?: C;
 }
 
+/** The values of `session.authMode`. */
+export type SessionAuthMode = "external" | "device-account" | "anonymous";
+
 /** The session's values. */
 export interface Session<Claims = AnyClaims> {
   /**
@@ -465,8 +468,12 @@ export interface Session<Claims = AnyClaims> {
     readonly subject: ValueHandle<string, any>;
     readonly issuer: ValueHandle<string, any>;
   };
-  /** How the session authenticated. */
-  readonly authMode: ValueHandle<string, any>;
+  /**
+   * How the session authenticated: `"external"`, `"device-account"` or
+   * `"anonymous"`. Device accounts were `"local-first"` before 2026-11;
+   * comparing with that is refused.
+   */
+  readonly authMode: ValueHandle<SessionAuthMode, any>;
   /** The provider's claims, `session.claims.<path>`. */
   readonly claims: Claims;
 }
