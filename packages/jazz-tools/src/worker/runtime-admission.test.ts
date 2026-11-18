@@ -30,11 +30,13 @@ describe("compareRuntimeAdmission", () => {
     );
   });
 
-  it("refuses another schema, whoever is signed in", () => {
+  it("makes a tab of another build (another schema) wait for the store, whoever is signed in", () => {
     const other = { schemaHash: "older-deploy" };
-    expect(compareRuntimeAdmission(fingerprint(), fingerprint(other), tasks)).toBe("incompatible");
+    expect(compareRuntimeAdmission(fingerprint(), fingerprint(other), tasks)).toBe(
+      "held-by-another-build",
+    );
     expect(compareRuntimeAdmission(fingerprint(), fingerprint({ ...other, ...user }), tasks)).toBe(
-      "incompatible",
+      "held-by-another-build",
     );
   });
 

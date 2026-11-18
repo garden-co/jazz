@@ -62,11 +62,13 @@ export interface BrowserWorkerConnection {
   /** Only a rejected initial configuration admission permits a later API call to retry. */
   canRetryInitialConfigurationAdmission?(): boolean;
   /**
-   * The worker refused this connection because another tab holds the store
-   * under another sign-in to the same account: the tab tries again on its
-   * own (see `BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN`).
+   * The worker refused this connection because another tab holds the store:
+   * under another sign-in to the same account (`"sign-in"`, see
+   * `BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN`), or with another build's schema
+   * (`"build"`, see `BROWSER_STORE_HELD_BY_ANOTHER_BUILD`). The tab tries
+   * again on its own; `false` for any other refusal.
    */
-  waitsForAnotherSignIn?(): boolean;
+  waitsForAnotherTab?(): "sign-in" | "build" | false;
   ready(): Promise<void>;
   getWorkerRealmId?(): string | undefined;
   waitForServerConnection(): Promise<void>;
