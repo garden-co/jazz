@@ -98,12 +98,15 @@ pub struct RepairTarget<'a> {
 /// Plans the repair of `rows` (§3.2): the losing key is the `refused` root
 /// key of `losing_root_id`, and every rewrite is sealed under the newest
 /// held version that is not `refused` of the space's chain, whose root is
-/// `space_root_id`, of the same address. `None` while no such key is held:
-/// repair waits for the real key.
+/// `space_root_id`, of the same address. `None` while no such key is held,
+/// or while the device has read no chain of the address: repair waits for
+/// the real key, and seals only under the root of the chain it read, as a
+/// write does ([`HeldKeys::write_key`]).
 ///
 /// A losing root whose key is not `refused` (its creation is unsettled) or
 /// not held, roots of different addresses, and a cell of a column not in
-/// `columns` or given twice, are invalid inputs.
+/// `columns` or given twice, are invalid inputs. A `space_root_id` that is
+/// not the root of the chain the device read is inconsistent evidence.
 pub fn plan_repair(
     target: &RepairTarget<'_>,
     losing_root_id: &str,
@@ -123,6 +126,13 @@ pub fn plan_repair(
     };
     if real.address() != losing.address() || real.root_id() == losing.root_id() {
         return Err(ProtocolError::InconsistentEvidence.into());
+    }
+    match target.held.known(losing.address()) {
+        None => return Ok(None),
+        Some(known) if known.root_id() != real.root_id() => {
+            return Err(ProtocolError::InconsistentEvidence.into());
+        }
+        Some(_) => {}
     }
     let Some((depth, key)) = real
         .keys
