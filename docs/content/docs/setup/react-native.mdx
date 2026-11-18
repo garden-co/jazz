@@ -9,7 +9,7 @@ React Native and Expo are supported as an alpha through `jazz-tools/react-native
 
 React Native and Expo use the same session API as the web, with platform-specific runtime and
 account storage adapters. `initial: "device"` starts people as guests on a
-[device account](/docs/setup/auth/local-first), which works offline:
+[device account](/docs/setup/auth/device-accounts), which works offline:
 
 ```tsx
 import { JazzProvider } from "jazz-tools/expo";
@@ -135,7 +135,7 @@ export `JazzProvider`, `useJazzSession`, `createJazzClient`, `useDb`, `useAll`,
 <Callout type="warn">
   A device account's key is that identity's signing credential. If it is lost, the account needs
   another linked identity or a recovery backup to regain access. Plan for recovery with [backup and
-  restore](/docs/setup/auth/local-first#backing-up-and-restoring-the-key).
+  restore](/docs/setup/auth/device-accounts#backing-up-and-restoring-the-key).
 </Callout>
 
 <Accordions type="single">

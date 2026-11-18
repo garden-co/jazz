@@ -3,7 +3,7 @@
   import "@garden-co/design/jazz/fonts.css";
   import "../app.css";
   import type { Snippet } from "svelte";
-  import { JazzProvider } from "jazz-tools/svelte";
+  import { JazzProvider, type JazzSessionErrorViewProps } from "jazz-tools/svelte";
 
   let { children }: { children: Snippet } = $props();
 </script>
@@ -26,7 +26,7 @@
   {@render children()}
   {#snippet loading()}<p class="status" role="status">Opening StagePlan…</p>{/snippet}
   {#snippet signedOut()}<p class="status" role="status">Opening StagePlan…</p>{/snippet}
-  {#snippet error(cause: Error, retry: () => Promise<void>)}
+  {#snippet error({ error: cause, retry }: JazzSessionErrorViewProps)}
     <div class="status" role="alert">
       <p>Could not open StagePlan: {cause.message}</p>
       <button onclick={() => void retry()}>Try again</button>

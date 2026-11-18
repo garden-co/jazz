@@ -68,6 +68,11 @@ const NATIVE_RELAY_QUEUE_MAX_MESSAGES: usize = 1024;
 /// Commands which cross from a platform call into a relay owner must not
 /// accumulate without bound.
 const NATIVE_RELAY_OWNER_COMMAND_MAX: usize = 1_024;
+/// Events one subscription's relay buffer holds before the relay stops
+/// taking more from its stream: the rest wait in the core, which coalesces
+/// a backlog past the subscription's limit into one reset, so a foreground
+/// that stops draining holds no more than this plus that limit.
+pub(crate) const FOREGROUND_SUBSCRIPTION_BUFFER_EVENTS: usize = 16;
 /// Rounds of one drive before the owner yields to queued commands. A drive
 /// that hits it continues on the next owner turn.
 const NATIVE_RELAY_DRIVE_ROUNDS: usize = 64;
@@ -817,6 +822,7 @@ impl Foreground {
     fn collect_events(&mut self) -> Result<(), String> {
         for subscription in self.subscriptions.values_mut() {
             while !subscription.closed
+                && subscription.buffer.len() < FOREGROUND_SUBSCRIPTION_BUFFER_EVENTS
                 && let Some(event) = subscription.stream.try_next_event()
             {
                 subscription.opened = true;
@@ -826,6 +832,9 @@ impl Foreground {
                         reset,
                         settled,
                         tier,
+                        // Not in the foreground ABI yet: a coalesced backlog
+                        // reaches React Native as a plain reset.
+                        coalesced: _,
                     } => ForegroundSubscriptionEvent::Delta {
                         reset,
                         settled,
@@ -1696,9 +1705,11 @@ fn foreground_command(
             let subscription = client.subscriptions.get_mut(&subscription).ok_or_else(|| {
                 HostError::Argument(format!("unknown subscription {subscription}"))
             })?;
-            Response::SubscriptionEvents {
-                events: subscription.buffer.drain(..).collect(),
-            }
+            let events = subscription.buffer.drain(..).collect();
+            // Refill from the core: what is left wakes the foreground to
+            // drain again.
+            client.collect_events().map_err(HostError::Argument)?;
+            Response::SubscriptionEvents { events }
         }
         Request::Unsubscribe { subscription } => {
             let closed = client.subscriptions.remove(&subscription).is_some();

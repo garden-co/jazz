@@ -247,6 +247,11 @@ pub struct OrderedRowDelta {
     pub removed: Vec<OrderedRemoved>,
     pub updated: Vec<OrderedUpdated>,
     pub pending: bool,
+    /// The subscriber fell too far behind to be told every change: this
+    /// delta replaces everything it held with the current result (it
+    /// removes every row held, then adds the current ones), standing for
+    /// the changes it missed.
+    pub coalesced: bool,
 }
 
 impl OrderedRowDelta {

@@ -43,6 +43,15 @@ impl Visit for Fields<'_> {
 }
 
 impl Subscriber for Capture {
+    /// Never let a callsite cache "off" from this capture: the module's
+    /// tests run in parallel with others in one binary, each under its own
+    /// thread-local capture (at different levels), and a callsite whose
+    /// interest is rebuilt while only another capture (or none) is live
+    /// would otherwise be cached as never enabled, so `tracing::enabled!`
+    /// in the sync layer would skip this capture's thread too.
+    fn register_callsite(&self, _: &'static Metadata<'static>) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::sometimes()
+    }
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
         metadata.target() == "jazz::sync" && *metadata.level() <= self.level
     }
@@ -91,6 +100,11 @@ fn logged_subscription(level: Level) -> Vec<BTreeMap<String, String>> {
         events: events.clone(),
     };
     tracing::subscriber::with_default(capture, || {
+        // Other tests in this binary install and drop their own
+        // subscribers concurrently; one rebuilt while this capture was not
+        // yet live can leave callsite interest, or the global max level,
+        // cached as off. Rebuild both now that it is.
+        tracing::callsite::rebuild_interest_cache();
         let server = block_on(Db::open_history_complete(config(
             0x61,
             AuthorSubject::SYSTEM,

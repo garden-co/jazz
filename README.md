@@ -129,7 +129,7 @@ export function OpenTodos() {
 ## Setup guides
 
 - **Deploy:** [Vercel](https://jazz.tools/docs/setup/deployment/vercel) &middot; [your own server](https://jazz.tools/docs/setup/deployment/own-server) &middot; [Jazz Cloud](https://jazz.tools/docs/setup/deployment/jazz-cloud)
-- **Auth:** [how it works](https://jazz.tools/docs/setup/auth/backend) &middot; [Better Auth](https://jazz.tools/docs/setup/auth/better-auth) &middot; [WorkOS](https://jazz.tools/docs/setup/auth/workos) &middot; [custom](https://jazz.tools/docs/setup/auth/custom) &middot; [local-first](https://jazz.tools/docs/setup/auth/local-first)
+- **Auth:** [how it works](https://jazz.tools/docs/setup/auth/backend) &middot; [Better Auth](https://jazz.tools/docs/setup/auth/better-auth) &middot; [WorkOS](https://jazz.tools/docs/setup/auth/workos) &middot; [custom](https://jazz.tools/docs/setup/auth/custom) &middot; [device accounts (guests)](https://jazz.tools/docs/setup/auth/device-accounts)
 - **Clients:** [thin web client](https://jazz.tools/docs/setup/web-client/thin-client) &middot; [local-first web client](https://jazz.tools/docs/setup/web-client/local-first-client) &middot; [React Native](https://jazz.tools/docs/setup/react-native) &middot; [backend clients](https://jazz.tools/docs/setup/backend-client)
 - **Examples:** [complete apps for each framework and auth setup](https://jazz.tools/docs/reference/examples)
 
