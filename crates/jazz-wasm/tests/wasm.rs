@@ -148,9 +148,9 @@ async fn self_signed_subscriber_admission_requires_the_exact_proof() {
     let app_id = "wasm-subscriber-proof";
     let now_seconds = (js_sys::Date::now() / 1_000.0) as u64;
     let token = mint_local_first_token(seed.to_owned(), app_id.to_owned(), 60, now_seconds)
-        .expect("mint a current local-first proof");
+        .expect("mint a current device-account proof");
     let claimed_author = serde_json::to_string(&(
-        AuthorSubject::LOCAL_FIRST_ISSUER,
+        AuthorSubject::DEVICE_ACCOUNT_ISSUER,
         derive_user_id(seed.to_owned()).expect("derive proof subject"),
     ))
     .expect("canonical proof author");
@@ -175,7 +175,7 @@ async fn self_signed_subscriber_admission_requires_the_exact_proof() {
         app_id.to_owned(),
         claimed_author.clone(),
     )
-    .expect("open with a verified local-first proof");
+    .expect("open with a verified device-account proof");
 
     // A raw worker-port identity is always untrusted; a valid canonical
     // reserved identity must not bypass its issuer guard.

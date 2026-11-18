@@ -135,10 +135,10 @@ production hostname.
 A device account calls your API routes like any signed-in user: `jazz.forReqUser(request)` gives
 the route a database scoped to that account, under your permissions, and its writes are attributed
 to it. The browser proves which account it is by sending a short-lived proof from
-`db.getLocalFirstIdentityProof()` as an `Authorization` header:
+`db.getDeviceAccountProof()` as an `Authorization` header:
 
 ```ts
-const proof = db.getLocalFirstIdentityProof(); // null unless signed in as a device account
+const proof = db.getDeviceAccountProof(); // null unless signed in as a device account
 await fetch("/api/notes", {
   method: "POST",
   headers: proof ? { Authorization: `Bearer ${proof}` } : {},

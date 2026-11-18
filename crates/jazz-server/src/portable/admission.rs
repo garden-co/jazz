@@ -72,7 +72,7 @@ pub struct WebSocketPrelude {
     pub requested_link: RequestedWebSocketLink,
     /// The audience a trusted backend verified the client's local-first
     /// proof against; honoured only with that backend's secret (see
-    /// [`crate::middleware::auth::LOCAL_FIRST_AUDIENCE_HEADER`]).
+    /// [`crate::middleware::auth::DEVICE_ACCOUNT_AUDIENCE_HEADER`]).
     #[serde(default)]
     pub local_first_audience: Option<String>,
     /// The published permissions bundle (hex id) the backend that opened
