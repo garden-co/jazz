@@ -11949,7 +11949,11 @@ impl TxRef<'_> {
             // reach and the caller's first-load wait: the serializable
             // BEST_EFFORT fetch above would ask for Remote authority instead.
             // Records nothing: the mergeable read keeps its admitted prefix,
-            // current view and no-read-set semantics below.
+            // current view and no-read-set semantics below. The fetched
+            // position is not pinned, unlike a read outside a transaction
+            // (`Position::At`): a mergeable read has no snapshot, so it reads
+            // at the overlay's current cut, at least as new as that answer.
+            // As outside a transaction, the query must have a synced shape.
             let reach = sync::remote_reach(opts, true, false).expect("non-durable reach");
             let deadline = sync::remote_deadline(opts, true, true).expect("non-durable wait");
             self.db.remote_shape(&prepared.query)?;

@@ -1877,3 +1877,48 @@ fn cold_mergeable_localfirst_preserves_the_binding_first_load_policy() {
     );
     foreground.tab.abandon_transaction_handle(id).unwrap();
 }
+
+/// Alice's binding read carries a coverage budget into her cold mergeable
+/// transaction. While Bob's worker has not answered, a spent budget fails the
+/// read rather than answering from the empty foreground store; an unspent one
+/// waits for Bob and then reads his rows.
+#[test]
+fn cold_mergeable_localfirst_honours_the_binding_coverage_budget() {
+    for spent in [true, false] {
+        let server = seeded_server();
+        let worker = warm_worker(0x8b, &server);
+        worker.set_remote_link_hint(RemoteLinkHint::Failed);
+        let foreground = foreground_over(0x8c, 0x8b, worker);
+        foreground.tab.set_remote_link_hint(RemoteLinkHint::Failed);
+        for _ in 0..3 {
+            foreground.turn(None);
+        }
+        let id = jazz::tools::OpenTransactionId::new();
+        block_on(foreground.tab.begin_mergeable(id)).unwrap();
+        let query = postcard::to_allocvec(&items()).unwrap();
+        let expired = move || spent;
+        let read = foreground.tab.all_serialized_query(
+            &query,
+            ReadOpts::for_read_tier(jazz::db::ReadTier::LocalFirst),
+            Some(id),
+            None,
+            Some(&expired),
+        );
+        let result = drive_cold_mergeable(&foreground, None, read);
+        if spent {
+            let error = result.expect_err("a spent budget fails the unanswered read");
+            assert_eq!(error.code, jazz::db::ErrorCode::NotObserved);
+            assert!(
+                error
+                    .message
+                    .contains("Timed out waiting for query coverage")
+            );
+        } else {
+            let SerializedReadResult::Rows(rows) = result.unwrap() else {
+                panic!("row query")
+            };
+            assert_eq!(rows.len(), LABELS.len());
+        }
+        foreground.tab.abandon_transaction_handle(id).unwrap();
+    }
+}
