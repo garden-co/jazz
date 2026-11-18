@@ -2391,7 +2391,13 @@ the ledger position is not needed. When acquiring, the device starts from
 the current version and, if it cannot open that version's key (its delivery
 has not arrived), steps back through predecessors; a version not yet
 delivered therefore does not block writes. Equality tokens use the same key
-and version.
+and version. Once the device has read the space's chain, only keys of that
+chain's root write. Before such a read in this session (the chain read is
+kept only in memory, so also after a restart), a device that holds keys of
+more than one root of the address not marked `refused` cannot tell which
+root is the space's: the runtime reads the space's chain and retries the
+write at once, and offline reports it `space-pending`. Keys of one root
+alone write without a read.
 
 ### 5.3 Offline and provisional writes
 
@@ -2407,8 +2413,9 @@ only from an updater (R15), and a refusal fails that transaction alone. The
 new key is stored as a held key before commit, with a persisted
 `unpublished` mark (§6.2) carrying the creation's durable transaction
 identity, and the mark is cleared once the creation is accepted as the
-space's root. An unpublished key never wins a tie against a published key at
-the same depth, including after a restart.
+space's root. An unpublished key is never chosen over a key of another root:
+a device holding both writes only after it has read the space's chain, and
+then only under the chain's root (§5.2), including after a restart.
 
 Later writes under an unpublished key are ordinary transactions of their
 own. They do not depend on the creation and are not held back or refused
@@ -2725,7 +2732,7 @@ Refusal codes:
 | `no-other-device`               | A removal request with no other active device to complete it (§2.8).                                                                                                      |
 | `unsupported-recipient`         | A recipient device, recovery root or account has no key of the selected mechanism (§0, §2.12).                                                                            |
 | `account-reset-not-allowed`     | An account reset by a local-first session, or where the application has not enabled `allowAccountReset` (§2.11).                                                          |
-| `space-pending`                 | An encrypted write to a space that has no valid root, after this device's creation of it was refused while the client runs (§3.2).                                        |
+| `space-pending`                 | A write to a space with no valid root after this device's creation was refused in this run (§3.2), or offline with competing roots before a chain read (§5.2).            |
 | `space-create-refused`          | The authority refused the root itself, staged with a write or by `createSpace` (§3.2); only that transaction fails, and the device stops automatic creation of the space. |
 | `rotation-needs-key`            | A rotation by a device that holds no authenticated key of the current version (§3.5), or a recovery rotation by one that holds no version at all.                         |
 | `local-first-identity-mismatch` | A local-first root written with an identity whose key does not derive the account ID (§2.3).                                                                              |
@@ -2886,12 +2893,19 @@ Limits:
   first release is designed for, and members' apps are told
   (`space-over-member-limit`).
 - **A space's chain is the one the server last showed.** Spaces have no
-  floor (§6.3a): a device follows the latest read of a space's roots and
-  successors. A server that leaves rows out of a read can make the device
-  fall back to an older chain, report a version it holds as invalid until a
-  later read shows it again, and, where the device holds keys of two roots
-  of one address, choose which of them it writes under. It cannot forge a
-  chain: every root and successor is signed and checked (§3.3).
+  floor (§6.3a), but a read never rolls the chain a device knows back: one
+  that shows a prefix of it, or the same chain again, changes nothing. Only
+  a read that names another root, shows versions that are not a prefix of
+  the known ones (later versions, or a fork where both have a version), or
+  is newly unresolved replaces it. A server that leaves rows out of reads
+  can still withhold a later version, so that the device reports it as
+  invalid until a read shows it; can switch the device to another valid
+  root of the address, or another branch of a fork; and, where the device
+  holds keys of two roots of one address, so choose which of them it
+  writes under. Before its first read in a session, such a device reads
+  the chain before it writes (§5.2), so it never writes under a root no
+  read of the session showed. It cannot forge a chain: every root and
+  successor is signed and checked (§3.3).
 - **Any updater can add roots.** The server does not limit roots per space
   (R15). Roots after the first valid one are ignored by every client (§3.2);
   they cost storage only, and a creator whose root lost repairs its own rows.

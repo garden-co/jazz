@@ -814,22 +814,19 @@ fn a_write_uses_the_deepest_key_and_old_cells_stay_readable() {
     assert_eq!(write_key(&before, &address).epoch_id(), first);
 }
 
+/// A creation that lost is marked `refused` and never writes, alone or
+/// beside the space's root; with only a refused key, the write needs a key,
+/// or is `space-pending` after this device's creation was refused in this
+/// run and while no valid root is known.
 #[test]
-fn an_unpublished_key_never_wins_a_tie_and_a_refused_key_never_writes() {
+fn a_refused_key_never_writes() {
     let world = world(14);
     let address = space(ROW);
     let lost = root_from(&world, ROW, root_random(4, 5, 6));
+    let space_root = chain_of(&world, ROW).root.row.id.clone();
     let mut held = HeldKeys::new();
     held.hold(creation(&world, &lost, "tx-lost")).unwrap();
     assert!(held.holds_unpublished(&address));
-    // Alone, the unpublished key writes.
-    assert_eq!(write_key(&held, &address).root_id(), lost.root.id);
-    // The space's root at the same depth wins, whichever root ID sorts
-    // first.
-    held.hold(acquire_held(&world, ALICE, ROW)).unwrap();
-    let space_root = chain_of(&world, ROW).root.row.id.clone();
-    assert_eq!(write_key(&held, &address).root_id(), space_root);
-    // Refused: never chosen, alone or not.
     held.space_mut(&lost.root.id)
         .unwrap()
         .settle(CreationFate::Accepted, Some(&space_root));
@@ -838,6 +835,10 @@ fn an_unpublished_key_never_wins_a_tie_and_a_refused_key_never_writes() {
         held.space(&lost.root.id).unwrap().mark(0),
         Some(&KeyMark::Refused)
     );
+    // Beside the space's root, without a read: the refused key does not
+    // compete, and the space's root writes.
+    held.hold(acquire_held(&world, ALICE, ROW)).unwrap();
+    assert_eq!(write_key(&held, &address).root_id(), space_root);
     let mut only_refused = HeldKeys::new();
     let mut refused = creation(&world, &lost, "tx-lost");
     refused.settle(CreationFate::NotAccepted, None);
@@ -1471,6 +1472,55 @@ fn a_write_uses_only_the_known_roots_keys() {
     assert_eq!(write_key(&accepted, &address).root_id(), space_root);
 }
 
+/// Keys of two roots of one address that are not `refused` take no write
+/// until this session has read the space's chain: the chain read is kept
+/// in memory only, so after a restart the device cannot tell which root is
+/// the space's. Keys of one root alone write without a read.
+#[test]
+fn competing_roots_take_no_write_before_a_chain_read() {
+    let world = world(41);
+    let address = space(ROW);
+    let chain = chain_of(&world, ROW);
+    let space_root = chain.root.row.id.clone();
+    let lost = root_from(&world, ROW, root_random(7, 8, 9));
+    // One root alone, either one: the write goes ahead without a read.
+    let mut own = HeldKeys::new();
+    own.hold(creation(&world, &lost, "tx-lost")).unwrap();
+    assert_eq!(write_key(&own, &address).root_id(), lost.root.id);
+    let real = held_of(&world, ALICE, ROW);
+    assert_eq!(write_key(&real, &address).root_id(), space_root);
+    // Both, as after a restart: no key, whatever the creation's fate.
+    let both = |fate: Option<CreationFate>| {
+        let mut held = HeldKeys::new();
+        let mut own = creation(&world, &lost, "tx-lost");
+        if let Some(fate) = fate {
+            own.settle(fate, Some(&lost.root.id));
+        }
+        held.hold(own).unwrap();
+        held.hold(acquire_held(&world, ALICE, ROW)).unwrap();
+        held
+    };
+    for fate in [None, Some(CreationFate::Accepted)] {
+        let mut held = both(fate);
+        for creation_refused in [false, true] {
+            assert!(matches!(
+                held.write_key(&address, creation_refused),
+                WriteChoice::NeedsChainRead
+            ));
+        }
+        // A read of the chain names the real root: the write goes under it.
+        held.observe_chain(&chain);
+        assert_eq!(write_key(&held, &address).root_id(), space_root);
+    }
+    // A refused key does not compete: the real root writes without a read.
+    let mut refused = HeldKeys::new();
+    let mut own = creation(&world, &lost, "tx-lost");
+    own.settle(CreationFate::NotAccepted, None);
+    refused.hold(own).unwrap();
+    refused.hold(acquire_held(&world, ALICE, ROW)).unwrap();
+    assert_eq!(write_key(&refused, &address).root_id(), space_root);
+}
+
 /// A stream is reported stale only once a record authenticated under one
 /// key of another space; before that, a key of another space proves
 /// nothing, and the value may turn out to be missing.
@@ -1620,6 +1670,64 @@ fn a_value_of_a_third_space_is_never_rehomed() {
         read_stream(registry, &held, &target, &resealed, 4096).unwrap(),
         plaintext
     );
+}
+
+/// A stream sealed under a third space is refused by the first `update`
+/// whose record authenticates, before any of its plaintext is re-encrypted:
+/// `finish` is not the only check.
+#[test]
+fn a_resealer_refuses_a_third_spaces_stream_at_its_first_record() {
+    let mut world = world(40);
+    for identifier in [OTHER_ROW, THIRD_ROW] {
+        world.add_member_of(identifier, ALICE);
+        world.create_of(identifier, ALICE);
+    }
+    let mut held = held_of(&world, ALICE, ROW);
+    held.hold(acquire_held(&world, ALICE, OTHER_ROW)).unwrap();
+    held.hold(acquire_held(&world, ALICE, THIRD_ROW)).unwrap();
+    let domain = shared(&world);
+    let (from, other, to) = (space(ROW), space(OTHER_ROW), space(THIRD_ROW));
+    let source = row(&domain, &from, ROW_1);
+    let target = row(&domain, &to, ROW_1);
+    let registry = &world.shared.registry;
+    let suite = registry.select(&Default::default()).unwrap();
+    let plaintext = TestRandom(34).bytes(200_000);
+    let stream = seal_stream(
+        &world,
+        &write_key(&held, &other),
+        &row(&domain, &other, ROW_1),
+        &plaintext,
+        4096,
+    );
+    let StreamOpen::Reader { reader, initial } =
+        StreamValueReader::open(registry, &held, &source, &blob(), &stream[..69]).unwrap()
+    else {
+        panic!("a reader");
+    };
+    assert!(initial.is_empty());
+    let (writer, mut out) = begin_stream(
+        &suite,
+        &write_key(&held, &to),
+        &target,
+        &blob(),
+        &mut TestRandom(35),
+    )
+    .unwrap();
+    let prefix = out.len();
+    let mut resealer = StreamResealer::new(reader, writer);
+    // Fed in small chunks: an update before the stream ends fails, and no
+    // earlier one wrote anything.
+    let chunks: Vec<_> = stream[69..].chunks(1024).collect();
+    let failed = chunks.iter().enumerate().find_map(|(at, part)| {
+        resealer
+            .update(part, &mut out)
+            .err()
+            .map(|error| (at, error))
+    });
+    let (at, error) = failed.expect("an update refuses the stream");
+    assert_eq!(error, ContentError::Data(DataError::StaleSpace));
+    assert!(at < chunks.len() - 1, "refused before the stream ends");
+    assert_eq!(out.len(), prefix, "nothing of the value was re-encrypted");
 }
 
 /// An acquisition whose read is older than the chain the device knows

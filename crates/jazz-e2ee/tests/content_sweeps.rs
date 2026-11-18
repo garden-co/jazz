@@ -78,8 +78,15 @@ impl Repairing {
         }
     }
 
-    /// Alice learns that another root won, and acquires the real key.
+    /// Alice reads the space's chain, learns that another root won, and
+    /// acquires the real key.
     fn settle(&mut self) {
+        self.alice.observe_chain(&chain_of(&self.world, ROW));
+        self.settle_unread();
+    }
+
+    /// [`Self::settle`] without taking the chain read.
+    fn settle_unread(&mut self) {
         self.alice
             .space_mut(&self.losing)
             .unwrap()
@@ -421,17 +428,15 @@ fn an_interrupted_repair_keeps_the_key_and_finishes_after_a_restart() {
         Some(&KeyMark::Refused)
     );
     let second_cells = [(notes().column_id, stored_of(&second, &notes()))];
-    let rest = repairing
-        .plan(
-            &restarted,
-            &[RepairRow {
-                row_id: ROW_2,
-                space_identifier: ROW,
-                cells: &second_cells,
-            }],
-        )
-        .unwrap()
-        .unwrap();
+    let second_rows = [RepairRow {
+        row_id: ROW_2,
+        space_identifier: ROW,
+        cells: &second_cells,
+    }];
+    // The chain the device read is not stored: repair waits for a read.
+    assert_eq!(repairing.plan(&restarted, &second_rows), Ok(None));
+    restarted.observe_chain(&chain_of(&repairing.world, ROW));
+    let rest = repairing.plan(&restarted, &second_rows).unwrap().unwrap();
     assert_eq!(rewritten(&rest, ROW_2).len(), 1);
 }
 
@@ -714,6 +719,42 @@ fn repair_needs_a_settled_losing_key_and_the_real_key() {
     };
     assert_eq!(
         same.plan(&same.alice, &rows),
+        Err(ContentError::Protocol(ProtocolError::InconsistentEvidence))
+    );
+}
+
+/// Repair seals only under the root of the chain the device read, as a
+/// write does: never under another root of the address it holds a key of,
+/// and not before it has read a chain.
+#[test]
+fn repair_seals_only_under_the_root_of_the_chain_read() {
+    let mut repairing = Repairing::new(15);
+    let cells = repairing.alice_writes(ROW_1, &[(notes(), "n")]);
+    let read = [(notes().column_id, stored_of(&cells, &notes()))];
+    let rows = [RepairRow {
+        row_id: ROW_1,
+        space_identifier: ROW,
+        cells: &read,
+    }];
+    // A third root of the address, whose key Alice holds and which is not
+    // refused, but which the chain does not name.
+    let third = own_creation(&repairing.world, ALICE, ROW, "tx-third");
+    let third_root = third.root_id().to_owned();
+    repairing.alice.hold(third).unwrap();
+    repairing.settle_unread();
+    // No chain read yet: repair waits.
+    assert_eq!(repairing.plan(&repairing.alice, &rows), Ok(None));
+    repairing
+        .alice
+        .observe_chain(&chain_of(&repairing.world, ROW));
+    let plan = repairing.plan(&repairing.alice, &rows).unwrap().unwrap();
+    assert_eq!(plan.epoch_id, repairing.world.current());
+    let wrong = Repairing {
+        space_root: third_root,
+        ..repairing
+    };
+    assert_eq!(
+        wrong.plan(&wrong.alice, &rows),
         Err(ContentError::Protocol(ProtocolError::InconsistentEvidence))
     );
 }
