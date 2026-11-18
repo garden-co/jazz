@@ -4,9 +4,7 @@ name: Release candidate
 # native assets the release v2.0.0-alpha.N will carry, so Jazz Cloud and
 # self-hosters can try a candidate before it ships:
 #   - the server binaries Jazz Cloud's images run, jazz-tools-linux-{x64,arm64},
-#     with SHA256SUMS ("Publish jazz-tools alpha" attaches the same files);
-#   - the alpha.59 exporter and importer, with their .sha256 files (from the
-#     "alpha59-alpha60 exporter" workflow, which this calls).
+#     with SHA256SUMS ("Publish jazz-tools alpha" attaches the same files).
 # It publishes nothing to npm, moves no dist-tag, and is never Latest. The
 # Actions token creates the tag on the exact commit built, when the
 # prerelease is published; an existing tag or release refuses the run.
@@ -117,20 +115,9 @@ jobs:
           test "$(gh release view "v${VERSION}" --json isDraft --jq .isDraft)" = true
           gh release upload "v${VERSION}" dist/jazz-tools-linux-x64 dist/jazz-tools-linux-arm64 dist/SHA256SUMS
 
-  exporter:
-    name: alpha59-alpha60 exporter
-    needs: draft
-    permissions:
-      contents: write
-    uses: ./.github/workflows/alpha59-alpha60-exporter.yml
-    secrets: inherit
-    with:
-      version: ${{ inputs.version }}
-      ref: ${{ needs.draft.outputs.sha }}
-
   publish:
     name: Publish the prerelease
-    needs: [draft, attach-server-binaries, exporter]
+    needs: [draft, attach-server-binaries]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -142,9 +129,7 @@ jobs:
         run: |
           set -euo pipefail
           assets=$(gh release view "v${VERSION}" --json assets --jq '.assets[].name')
-          for asset in jazz-tools-linux-x64 jazz-tools-linux-arm64 SHA256SUMS \
-            jazz-alpha59-alpha60-export-linux-x64 jazz-alpha59-alpha60-import-linux-x64 \
-            jazz-alpha59-alpha60-export.sha256 jazz-alpha59-alpha60-import.sha256; do
+          for asset in jazz-tools-linux-x64 jazz-tools-linux-arm64 SHA256SUMS; do
             grep -qx "${asset}" <<<"${assets}" || { echo "::error::missing ${asset}"; exit 1; }
           done
           gh release edit "v${VERSION}" --draft=false --prerelease --latest=false

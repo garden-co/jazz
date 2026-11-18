@@ -275,6 +275,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         setTrustedReservedSession(appContext, getTrustedReservedSession(context.config));
         return JazzRuntimeClient.connectWithRuntime(runtime, appContext, {
           onAuthFailure: context.onAuthFailure,
+          onAuthRestored: context.onAuthRestored,
         });
       } catch (error) {
         this.lifecycleForeground = null;

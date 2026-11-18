@@ -19,7 +19,6 @@ use jazz::records::Value;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
-use tracing::subscriber::Interest;
 use tracing::{Event, Level, Metadata, Subscriber};
 
 /// Keeps every `jazz::sync` event at or above `level` as its fields.
@@ -43,49 +42,18 @@ impl Visit for Fields<'_> {
     }
 }
 
-impl Capture {
+impl Subscriber for Capture {
+    /// Never let a callsite cache "off" from this capture: the module's
+    /// tests run in parallel with others in one binary, each under its own
+    /// thread-local capture (at different levels), and a callsite whose
+    /// interest is rebuilt while only another capture (or none) is live
+    /// would otherwise be cached as never enabled, so `tracing::enabled!`
+    /// in the sync layer would skip this capture's thread too.
+    fn register_callsite(&self, _: &'static Metadata<'static>) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::sometimes()
+    }
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
         metadata.target() == "jazz::sync" && *metadata.level() <= self.level
-    }
-    fn event(&self, event: &Event<'_>) {
-        let mut fields = BTreeMap::new();
-        event.record(&mut Fields(&mut fields));
-        self.events.lock().unwrap().push(fields);
-    }
-}
-
-thread_local! {
-    /// The capture of the test running on this thread, if any.
-    static CAPTURE: std::cell::RefCell<Option<Capture>> = const { std::cell::RefCell::new(None) };
-}
-
-/// The process-wide subscriber: it forwards `jazz::sync` events to the
-/// capture of the thread that emits them.
-///
-/// Why not `tracing::subscriber::with_default`: a scoped subscriber races
-/// the tests on other threads of this binary. `tracing` caches, per call
-/// site, whether any subscriber wants it; a call site another thread first
-/// hits while no capture is registered can be cached as wanted by nobody,
-/// and then this test sees no event at all. Once this subscriber is the
-/// global default, every `jazz::sync` call site is always wanted, and
-/// whether an event is kept is decided per event, on the emitting thread.
-struct Forward;
-
-impl Subscriber for Forward {
-    fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
-        if metadata.target() == "jazz::sync" {
-            Interest::sometimes()
-        } else {
-            Interest::never()
-        }
-    }
-    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        CAPTURE.with(|capture| {
-            capture
-                .borrow()
-                .as_ref()
-                .is_some_and(|capture| capture.enabled(metadata))
-        })
     }
     fn new_span(&self, _: &Attributes<'_>) -> Id {
         Id::from_u64(1)
@@ -93,26 +61,12 @@ impl Subscriber for Forward {
     fn record(&self, _: &Id, _: &Record<'_>) {}
     fn record_follows_from(&self, _: &Id, _: &Id) {}
     fn event(&self, event: &Event<'_>) {
-        CAPTURE.with(|capture| {
-            if let Some(capture) = capture.borrow().as_ref() {
-                capture.event(event);
-            }
-        });
+        let mut fields = BTreeMap::new();
+        event.record(&mut Fields(&mut fields));
+        self.events.lock().unwrap().push(fields);
     }
     fn enter(&self, _: &Id) {}
     fn exit(&self, _: &Id) {}
-}
-
-/// Make [`Forward`] the global default, once, and forget any call-site
-/// interest cached before it was: a call site whose interest was being
-/// worked out while it was installed may still say "never".
-fn forward_sync_events() {
-    static INSTALLED: std::sync::Once = std::sync::Once::new();
-    INSTALLED.call_once(|| {
-        tracing::subscriber::set_global_default(Forward)
-            .expect("no other global tracing subscriber in this test binary");
-    });
-    tracing::callsite::rebuild_interest_cache();
 }
 
 fn config(node: u8, author: AuthorSubject) -> DbConfig {
@@ -141,14 +95,16 @@ const SEEDED: &str = "seeded-label-7f3a";
 /// what was logged.
 fn logged_subscription(level: Level) -> Vec<BTreeMap<String, String>> {
     let events = Arc::new(Mutex::new(Vec::new()));
-    forward_sync_events();
-    CAPTURE.with(|capture| {
-        *capture.borrow_mut() = Some(Capture {
-            level,
-            events: events.clone(),
-        })
-    });
-    let run = std::panic::catch_unwind(|| {
+    let capture = Capture {
+        level,
+        events: events.clone(),
+    };
+    tracing::subscriber::with_default(capture, || {
+        // Other tests in this binary install and drop their own
+        // subscribers concurrently; one rebuilt while this capture was not
+        // yet live can leave callsite interest, or the global max level,
+        // cached as off. Rebuild both now that it is.
+        tracing::callsite::rebuild_interest_cache();
         let server = block_on(Db::open_history_complete(config(
             0x61,
             AuthorSubject::SYSTEM,
@@ -181,11 +137,6 @@ fn logged_subscription(level: Level) -> Vec<BTreeMap<String, String>> {
         block_on(client.tick()).unwrap();
         assert!(stream.try_next_event().is_some());
     });
-    // The thread may run another test next: stop capturing first.
-    CAPTURE.with(|capture| *capture.borrow_mut() = None);
-    if let Err(panic) = run {
-        std::panic::resume_unwind(panic);
-    }
     let events = events.lock().unwrap().clone();
     events
 }

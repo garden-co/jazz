@@ -203,7 +203,7 @@ fn run(seed: u64, rows: usize, emit: bool) {
     titles.insert(queued, "offline-v1".to_owned());
     searches.insert(queued, "offline-v1".to_owned());
 
-    // Seed rows on v1, then move the authority along the chain.
+    // Seed rows on v1, then deploy the chain: the authority admits each step.
     for n in 0..rows {
         insert(
             sim.db("core"),
@@ -218,9 +218,9 @@ fn run(seed: u64, rows: usize, emit: bool) {
     for (step, lens) in lenses(&schemas).into_iter().enumerate() {
         block_on(
             sim.db("core")
-                .activate_schema_with_lenses(schemas[step + 1].clone(), &[lens]),
+                .admit_schema_with_lenses(schemas[step + 1].clone(), &[lens]),
         )
-        .unwrap_or_else(|error| panic!("activate v{}: {error}", step + 2));
+        .unwrap_or_else(|error| panic!("admit v{}: {error}", step + 2));
     }
     let migrate_us = migrate.elapsed().as_micros() as u64;
 

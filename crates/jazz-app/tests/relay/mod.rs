@@ -353,14 +353,14 @@ async fn link(backend: &Backend, user: &str, body: &[u8]) -> Option<Value> {
     if issued_for != user {
         return None;
     }
-    let subject = jazz_app_support::jazz::tools::identity::verify_local_first_challenge(
+    let subject = jazz_app_support::jazz::tools::identity::verify_device_account_challenge(
         body["proof"].as_str()?,
         challenge,
     )
     .ok()?
     .to_string();
     let guest = json!({
-        "issuer": jazz_app_support::jazz::tools::identity::LOCAL_FIRST_ISSUER,
+        "issuer": jazz_app_support::jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
         "subject": subject,
     });
     let (refused, appears, revoke) = {

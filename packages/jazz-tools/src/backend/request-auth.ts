@@ -65,7 +65,12 @@ export function isAuthenticationUnavailableError(
 }
 
 // Only verified requests that completed account admission receive this capability.
-const localFirstProofs = new WeakMap<Session, Readonly<{ token: string; appId: string }>>();
+// `audience` is what the proof was verified for, when it isn't `appId` (an
+// endpoint URL an app-less browser names): the account's namespace too.
+const localFirstProofs = new WeakMap<
+  Session,
+  Readonly<{ token: string; appId: string; audience?: string }>
+>();
 export function verifiedLocalFirstRequestProof(session: Session) {
   return localFirstProofs.get(session);
 }
@@ -84,7 +89,7 @@ function localFirstSessionFromVerifiedProof(payload: JwtPayload, verifiedUserId:
     throw new RequestAuthenticationError("Invalid JWT payload");
   }
   if (session.user_id !== verifiedUserId) {
-    throw new RequestAuthenticationError("Invalid local-first identity proof");
+    throw new RequestAuthenticationError("Invalid device account proof");
   }
   return session;
 }
@@ -107,10 +112,44 @@ export function localFirstSessionFromToken(token: string, appId: string): Sessio
     if (payload.iss !== LOCAL_FIRST_JWT_ISSUER) throw new Error("not local-first");
     subject = verifyLocalFirstToken(token, appId);
   } catch {
-    throw new Error("Invalid local-first identity proof");
+    throw new Error("Invalid device account proof");
   }
   const session = localFirstSessionFromVerifiedProof(payload, subject);
   session.account_id = localFirstAccountId(appId, session.user_id);
   localFirstProofs.set(session, { token, appId });
+  return session;
+}
+
+/**
+ * The device-account proof a plain HTTP request carries: a local-first
+ * token as `Authorization: Bearer` (what `db.getDeviceAccountProof()`
+ * mints), or null for any other credential or none. Not verified here.
+ */
+export function deviceProofOf(request: Request): string | null {
+  const match = request.headers.get("authorization")?.match(/^Bearer\s+(\S+)$/i);
+  const token = match?.[1];
+  if (!token) return null;
+  return parseJwtPayload(token)?.iss === LOCAL_FIRST_JWT_ISSUER ? token : null;
+}
+
+/**
+ * The session of a device account whose `token` the caller verified for
+ * `audience` (its signature, issuer and expiry proved `subject`), on the
+ * account the core admitted it as. The backend's runtime admits it from the
+ * same proof, which it verifies again on each use, so the session acts only
+ * while the proof is unexpired.
+ */
+export function deviceAccountSession(
+  proof: { token: string; subject: string; account: string },
+  appId: string,
+  audience: string,
+): Session {
+  const session = localFirstSessionFromVerifiedProof(requireJwtPayload(proof.token), proof.subject);
+  session.account_id = proof.account;
+  localFirstProofs.set(session, {
+    token: proof.token,
+    appId,
+    ...(audience === appId ? {} : { audience }),
+  });
   return session;
 }

@@ -107,6 +107,19 @@ export const ciPartitions = Object.freeze({
   lint: Object.freeze([
     command("format check", "pnpm", ["format:check"]),
     command("lint", "pnpm", ["lint"]),
+    // jazz-server's engine without its native host (what a Durable Object
+    // host runs), with its tests; its wasm32 build is checked in the
+    // TypeScript partition, whose toolchain builds jazz-wasm.
+    command("jazz-server without its native host", "cargo", [
+      "clippy",
+      "-p",
+      "jazz-server",
+      "--no-default-features",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings",
+    ]),
     // Ready PRs run only this partition, so it carries the TypeScript
     // typecheck too. The binding declarations it needs are committed.
     command("jazz-tools typecheck", "pnpm", ["--filter", "jazz-tools", "check"]),
@@ -281,6 +294,17 @@ export const ciPartitions = Object.freeze({
       "--",
       "node",
       "dev/gates/example-bindings.mjs",
+    ]),
+    // A Durable Object host runs jazz-server's engine on wasm32, without
+    // its native host; this partition's toolchain builds wasm32.
+    command("jazz-server's engine for wasm32", "cargo", [
+      "check",
+      "-p",
+      "jazz-server",
+      "--no-default-features",
+      "--lib",
+      "--target",
+      "wasm32-unknown-unknown",
     ]),
   ]),
   // Whether a ready PR runs the Next.js trace test (B65-1): it touches how a

@@ -412,6 +412,45 @@
         }
       },
       "postcard_hex": "090001740003"
+    },
+    {
+      "name": "text_affix_predicates",
+      "relation": {
+        "rel": {
+          "Filter": {
+            "input": {
+              "TableScan": {
+                "table": "t"
+              }
+            },
+            "predicate": {
+              "And": [
+                {
+                  "StartsWith": {
+                    "left": {
+                      "column": "name"
+                    },
+                    "right": {
+                      "Literal": "An"
+                    }
+                  }
+                },
+                {
+                  "EndsWith": {
+                    "left": {
+                      "column": "name"
+                    },
+                    "right": {
+                      "Literal": "é"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "postcard_hex": "010001740006020b00046e616d65000502416e0c00046e616d65000502c3a9"
     }
   ]
 }

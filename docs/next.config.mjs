@@ -147,7 +147,7 @@ const config = {
       },
       {
         source: "/docs/setup/web-client/local-first-auth",
-        destination: "/docs/setup/auth/local-first",
+        destination: "/docs/setup/auth/device-accounts",
         permanent: false,
       },
       {
@@ -171,9 +171,20 @@ const config = {
         destination: "/docs/setup/auth/backend#lifecycle",
         permanent: false,
       },
+      // Local-first auth was renamed to device accounts.
+      {
+        source: "/docs/setup/auth/local-first",
+        destination: "/docs/setup/auth/device-accounts",
+        permanent: false,
+      },
+      {
+        source: "/docs/reference/local-first-auth-internals",
+        destination: "/docs/reference/device-accounts-internals",
+        permanent: false,
+      },
       {
         source: "/docs/auth/local-first-auth",
-        destination: "/docs/setup/auth/local-first",
+        destination: "/docs/setup/auth/device-accounts",
         permanent: false,
       },
       { source: "/docs/auth/permissions", destination: "/docs/schemas/policies", permanent: false },
