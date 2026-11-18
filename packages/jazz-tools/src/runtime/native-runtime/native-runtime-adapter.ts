@@ -3990,10 +3990,10 @@ export class NativeRuntimeAdapter implements Runtime {
       !session.account_id ||
       !isTrustedReservedSession(session, trustedReservedSessionToken(session))
     ) {
-      throw new Error("Local-first native admission requires a verified account session");
+      throw new Error("Device account native admission requires a verified account session");
     }
     if (!this.db.admitLocalFirstSession)
-      throw new Error("Native runtime lacks local-first session admission");
+      throw new Error("Native runtime lacks device account session admission");
     this.db.admitLocalFirstSession(
       token,
       appId,

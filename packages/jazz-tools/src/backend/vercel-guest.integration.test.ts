@@ -550,7 +550,7 @@ it("never opens a guest's session on the core when the app doesn't accept device
   await vi.waitFor(
     () =>
       expect(
-        warn.mock.calls.filter((call) => /refused a local-first guest/.test(call.join(" "))),
+        warn.mock.calls.filter((call) => /refused a device account/.test(call.join(" "))),
       ).toHaveLength(1),
     { timeout: 20_000 },
   );
