@@ -910,3 +910,38 @@ fn equality_follows_the_types_the_format_encodes() {
         assert!(message.contains(named), "{refused:?}: {message}");
     }
 }
+
+/// A Rust program that connects a `JazzClient` directly, without the files'
+/// loader, is refused by `connect` itself: the schema it hands over holds
+/// Jazz's system tables, and the client has no encryption hooks yet.
+///
+/// ```text
+/// AppContext { encrypted schema } ──JazzClient::connect──► ✗ refused
+/// AppContext { ordinary schema }  ──JazzClient::connect──► ✓
+/// ```
+#[test]
+fn connect_refuses_an_encrypted_schema_by_itself() {
+    use jazz::db::block_on;
+    use jazz::tools::{AppContext, JazzClient};
+    let app = app(tasks_entry());
+    let loaded = load(app.as_bytes(), permissions(MEMBERS_RULE).as_bytes())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let refused = block_on(JazzClient::connect(AppContext::test(
+        loaded.current_schema().clone(),
+    )));
+    let error = refused.err().expect("an encrypted schema is refused");
+    assert!(
+        error.to_string().contains("declares end-to-end encryption"),
+        "{error}"
+    );
+    let ordinary = load_app(
+        r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": { "notes": { "columns": { "title": "string" } } } }"#
+            .as_bytes(),
+    )
+    .unwrap();
+    block_on(JazzClient::connect(AppContext::test(
+        ordinary.current_schema().clone(),
+    )))
+    .unwrap_or_else(|e| panic!("{e}"));
+}
