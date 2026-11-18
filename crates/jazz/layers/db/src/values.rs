@@ -43,10 +43,27 @@ pub(crate) fn storage(error: rusqlite::Error) -> Error {
 
 /// Open `SAVEPOINT name`; [`end_savepoint`] closes it.
 pub(crate) fn begin_savepoint(conn: &Storage, name: &str) -> Result<(), Error> {
+    if conn.is_managed() {
+        return Err(not_on_managed_storage(name));
+    }
     conn.execute_batch(&format!("SAVEPOINT {name}"))
         .map_err(storage)?;
     open_tag_undo(conn);
     Ok(())
+}
+
+/// The typed refusal for what managed storage (a Durable Object's SQL)
+/// cannot do: keep savepoint `name` open past the call that opened it. A
+/// transaction handle's staged writes and a callback transaction's
+/// savepoint stay open between calls; on managed storage both are refused.
+pub(crate) fn not_on_managed_storage(name: &str) -> Error {
+    Error::new(
+        ErrorCode::Query,
+        format!(
+            "keeping a transaction open between calls (savepoint `{name}`) is not supported on \
+             managed storage (Durable Objects) yet: a core there only accepts finished transactions"
+        ),
+    )
 }
 
 /// Open a tag-undo log for a scope opening on `conn` ([`close_tag_undo`]
