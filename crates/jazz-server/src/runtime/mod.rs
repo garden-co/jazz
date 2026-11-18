@@ -1036,6 +1036,7 @@ impl Owner {
     /// [`Self::open_on`]): a network one gets its I/O runner, which wakes
     /// the store thread through `wake`.
     #[cfg(feature = "native")]
+    #[allow(clippy::too_many_arguments)]
     fn open(
         schema: JazzSchema,
         file: StoreFile,
