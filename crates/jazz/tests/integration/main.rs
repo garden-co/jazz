@@ -263,6 +263,8 @@ mod sync_untrusted_clients;
 mod sync_wire_corpus;
 #[path = "../sync_write_only.rs"]
 mod sync_write_only;
+#[path = "../system_only_policy_nodes.rs"]
+mod system_only_policy_nodes;
 #[path = "../system_table_joins.rs"]
 mod system_table_joins;
 #[path = "../system_table_row_id_joins.rs"]
