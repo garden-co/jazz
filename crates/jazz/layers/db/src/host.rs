@@ -88,10 +88,7 @@ pub trait HostTables {
     /// For host tables with columns of their own (`_jazz_host_<name>`,
     /// created by `f` itself), which plain key-value pairs would hide from
     /// SQL.
-    fn host_sql(
-        &self,
-        f: &mut dyn FnMut(&rusqlite::Connection) -> Result<(), Error>,
-    ) -> Result<(), Error>;
+    fn host_sql(&self, f: &mut dyn FnMut(&Storage) -> Result<(), Error>) -> Result<(), Error>;
 }
 
 /// Turn on SQLite's query planner stability guarantee
@@ -268,11 +265,8 @@ impl HostReader {
     /// Run `f` on the read-only connection, for host tables that
     /// [`HostTables::host_sql`] shaped. A table no write created yet is
     /// missing here: `f` must not assume it exists.
-    pub fn sql<T>(
-        &self,
-        f: impl FnOnce(&rusqlite::Connection) -> Result<T, Error>,
-    ) -> Result<T, Error> {
-        self.read(|conn| f(conn.native_conn()))
+    pub fn sql<T>(&self, f: impl FnOnce(&Storage) -> Result<T, Error>) -> Result<T, Error> {
+        self.read(f)
     }
 
     /// Close the connection; reads fail afterwards. Close readers before
@@ -330,11 +324,8 @@ impl HostTables for StoreFile {
             .scope("host_write", |conn| crate::catalogue::put(conn, put))
     }
 
-    fn host_sql(
-        &self,
-        f: &mut dyn FnMut(&rusqlite::Connection) -> Result<(), Error>,
-    ) -> Result<(), Error> {
-        self.conn.scope("host_write", |conn| f(conn.native_conn()))
+    fn host_sql(&self, f: &mut dyn FnMut(&Storage) -> Result<(), Error>) -> Result<(), Error> {
+        self.conn.scope("host_write", |conn| f(conn))
     }
 }
 
@@ -374,11 +365,8 @@ impl HostTables for Db {
         })
     }
 
-    fn host_sql(
-        &self,
-        f: &mut dyn FnMut(&rusqlite::Connection) -> Result<(), Error>,
-    ) -> Result<(), Error> {
-        self.with_host_connection(|conn| conn.scope("host_write", |conn| f(conn.native_conn())))
+    fn host_sql(&self, f: &mut dyn FnMut(&Storage) -> Result<(), Error>) -> Result<(), Error> {
+        self.with_host_connection(|conn| conn.scope("host_write", |conn| f(conn)))
     }
 }
 
