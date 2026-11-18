@@ -326,8 +326,11 @@ export interface DeviceAccountsAnswer {
   readonly [localFirstGuestBrand]: true;
 }
 
-/** @deprecated Renamed to {@link DeviceAccountsAnswer}; this alias goes in a later release. */
-export type LocalFirstGuest = DeviceAccountsAnswer;
+/**
+ * @deprecated Renamed to {@link DeviceAccountsAnswer}; this alias goes in a later release.
+ * An interface (not a type alias), so code that merges declarations into it keeps compiling.
+ */
+export interface LocalFirstGuest extends DeviceAccountsAnswer {}
 
 /**
  * The marker's brand, registered globally like `createJazz`'s store registry:
@@ -863,9 +866,9 @@ export interface Jazz {
   /**
    * Make `to` another identity of the account `from` already uses: after
    * this, `authenticate` returning `to` opens that same account and its data.
-   * Call it once your own auth has verified both, as when an anonymous or
-   * guest on a device account signs up, or a user adds a second sign-in method. `to`
-   * must not have its own account yet. Returns the account id.
+   * Call it once your own auth has verified both, as when an anonymous user
+   * or a guest (a device account) signs up, or a user adds a second sign-in
+   * method. `to` must not have its own account yet. Returns the account id.
    */
   linkIdentity(link: { from: string; to: string }): Promise<{ account: string }>;
   /** Close every session, the backend database and the core. */
@@ -2186,9 +2189,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   }
 
   /**
-   * A guest on a device account who just signed up: link the guest's identity to the
+   * A guest who just signed up: link their device account's identity to the
    * user `authenticate` now names, so the account and its data carry over.
-   * The guest proves itself by signing a challenge issued for this user
+   * The device account proves itself by signing a challenge issued for this user
    * (see {@link issueLinkChallenge}).
    */
   async function backendLink(request: Request): Promise<Response> {
