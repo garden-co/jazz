@@ -284,6 +284,48 @@ impl ServerCore {
         self.owner.reload_catalogue()
     }
 
+    /// Apply `change` to the store's catalogue in one transaction, as the
+    /// native runtime does: a change that fails leaves nothing behind.
+    /// With `supersedes`, the
+    /// change publishes that bundle new to this store, and every session
+    /// pinned to another bundle ends, told to reconnect later (sessions
+    /// that ended stay ended even when a later step failed). The
+    /// catalogue is read again after.
+    ///
+    /// `expected` is the index the change was staged against
+    /// ([`crate::portable::catalogue::StagedDeployment::expected`]): if the
+    /// store's catalogue no longer reads the same, the change is refused,
+    /// as native refuses a deployment whose catalogue moved under it.
+    /// Stage it on this core's own catalogue: `expected` must be
+    /// `CatalogueIndex::from_rows(&core.db().catalogue()?, None)`, read from
+    /// this core. An index of the store read before the core opened differs
+    /// (a core admits the schema it opens on), and is refused.
+    pub fn apply_catalogue(
+        &mut self,
+        expected: &crate::portable::catalogue::CatalogueIndex,
+        change: CatalogueChange,
+        supersedes: Option<jazz::catalogue::BundleId>,
+    ) -> Result<(), CatalogueApplyError> {
+        let rows = self
+            .db()
+            .catalogue()
+            .map_err(|error| CatalogueApplyError::Failed(error.to_string()))?;
+        if crate::portable::catalogue::CatalogueIndex::from_rows(&rows, None) != *expected {
+            return Err(CatalogueApplyError::Rejected(
+                "catalogue changed while preparing deployment; fetch the graph and retry"
+                    .to_owned(),
+            ));
+        }
+        let (ended, result) = self.owner.apply_catalogue(change, supersedes);
+        // Sessions that ended are gone even when a later step failed: the
+        // host takes their error frames and closes their sockets, and a
+        // tick moves what the change made visible.
+        if result.is_ok() || ended > 0 {
+            self.tick_wanted = true;
+        }
+        result
+    }
+
     /// End every session pinned to a bundle `ends` names, telling each
     /// `error` first. How many ended.
     pub fn end_pinned_sessions(
@@ -670,5 +712,232 @@ mod tests {
         assert_eq!(rows.len(), 1, "the replica's write reached the core");
         let status = replica.upload_status();
         assert_eq!(status.pending, 0, "the core's answer settled the write");
+    }
+
+    /// A deploy request publishing `source`'s structure with its table
+    /// policies as the permissions, as `createJazz` does on boot.
+    fn deploy_request(
+        source: &jazz::tools::public_schema::Schema,
+    ) -> crate::portable::deployment::DeployRequest {
+        let mut structural = source.clone();
+        for table in structural.values_mut() {
+            table.policies = TablePolicies::default();
+        }
+        let hash = jazz::tools::public_schema::SchemaHash::compute(&structural).to_string();
+        crate::portable::deployment::DeployRequest {
+            target_schema_hash: hash.clone(),
+            schemas: vec![crate::portable::deployment::DeploySchema {
+                hash,
+                schema: structural,
+            }],
+            migrations: Vec::new(),
+            permissions: source
+                .iter()
+                .map(|(name, table)| (*name, table.policies.clone()))
+                .collect(),
+            allow_dropping_history: false,
+        }
+    }
+
+    /// Deploy `request` onto `core` as a host without the native store
+    /// does: index the core's catalogue, prepare and stage through
+    /// `portable`, and apply the change, superseding other bundles when it
+    /// publishes a new one.
+    fn deploy(
+        core: &mut ServerCore,
+        request: crate::portable::deployment::DeployRequest,
+    ) -> crate::portable::catalogue::DeploymentResponse {
+        let rows = core.db().catalogue().unwrap();
+        let index = crate::portable::catalogue::CatalogueIndex::from_rows(&rows, None);
+        let deployment = crate::portable::deployment::prepare(&index, request, 1_000)
+            .unwrap_or_else(|error| panic!("deploy refused: {}", error.body));
+        if deployment.staged.response.changed {
+            let change = deployment.catalogue_change(&rows).unwrap_or_else(|error| {
+                panic!("no catalogue change: {}", error.body);
+            });
+            core.apply_catalogue(
+                deployment.staged.expected(),
+                change,
+                deployment.staged.new_bundle(),
+            )
+            .unwrap();
+        }
+        deployment.staged.response
+    }
+
+    fn bundle(
+        response: &crate::portable::catalogue::DeploymentResponse,
+    ) -> jazz::catalogue::BundleId {
+        jazz::catalogue::BundleId::from_hex(&response.bundle).unwrap()
+    }
+
+    fn alice() -> AuthorSubject {
+        AuthorSubject::authenticated("https://idp.example", "alice").unwrap()
+    }
+
+    /// A bundle deployed through `portable` onto a core is one a user
+    /// session can pin to: before the deployment, a session pinned to it
+    /// is refused; after, it opens.
+    ///
+    /// ```text
+    /// alice (pinned to B) ──open──► refused
+    /// deploy B ──► alice (pinned to B) ──open──► served
+    /// ```
+    #[test]
+    fn a_bundle_deployed_onto_a_core_serves_sessions_pinned_to_it() {
+        let mut core = core();
+        let request = deploy_request(&source());
+        let index = crate::portable::catalogue::CatalogueIndex::from_rows(
+            &core.db().catalogue().unwrap(),
+            None,
+        );
+        let expected = crate::portable::deployment::prepare(&index, deploy_request(&source()), 1)
+            .unwrap()
+            .staged
+            .response;
+        let pinned = bundle(&expected);
+        let refused = core.open_session(
+            alice(),
+            BTreeMap::new(),
+            Some(pinned),
+            CommitUnitTrust::Session,
+        );
+        assert!(refused.is_err(), "{refused:?}");
+
+        let response = deploy(&mut core, request);
+        assert!(response.changed);
+        assert_eq!(bundle(&response), pinned);
+        assert_eq!(
+            core.db()
+                .catalogue()
+                .unwrap()
+                .bundles
+                .iter()
+                .map(|known| known.id)
+                .collect::<Vec<_>>(),
+            [pinned]
+        );
+        let opened = core.open_session(
+            alice(),
+            BTreeMap::new(),
+            Some(pinned),
+            CommitUnitTrust::Session,
+        );
+        assert!(opened.is_ok(), "{opened:?}");
+    }
+
+    /// Deploying a second bundle ends the sessions pinned to the first,
+    /// told to reconnect later; an unpinned trusted backend stays.
+    ///
+    /// ```text
+    /// deploy A ──► alice pinned to A
+    /// deploy B ──► alice: NotReady/Later "permissions changed"; backend stays
+    /// ```
+    #[test]
+    fn deploying_a_second_bundle_ends_sessions_pinned_to_the_first() {
+        let mut core = core();
+        let first = bundle(&deploy(&mut core, deploy_request(&source())));
+        let session = core
+            .open_session(
+                alice(),
+                BTreeMap::new(),
+                Some(first),
+                CommitUnitTrust::Session,
+            )
+            .unwrap();
+        let backend = core
+            .open_session(
+                AuthorSubject::SYSTEM,
+                BTreeMap::new(),
+                None,
+                CommitUnitTrust::TrustedBackend,
+            )
+            .unwrap();
+        core.tick();
+        core.take_output(session);
+        core.take_output(backend);
+
+        let mut stricter = source();
+        for table in stricter.values_mut() {
+            table.policies = TablePolicies::new().with_select(PolicyExpr::True);
+        }
+        let second = deploy(&mut core, deploy_request(&stricter));
+        assert!(second.changed);
+        assert_ne!(bundle(&second), first);
+        assert!(core.wants_tick(), "the change wants a tick");
+
+        let ended = core.take_output(session);
+        let [.., Err(error)] = ended.as_slice() else {
+            panic!("expected the session's error, got {ended:?}");
+        };
+        assert_eq!(error.code, jazz::wire::WireErrorCode::NotReady);
+        assert_eq!(error.retry, jazz::wire::WireRetry::Later);
+        assert!(error.message.contains("permissions changed"), "{error:?}");
+        assert!(
+            core.take_output(backend).iter().all(Result::is_ok),
+            "the unpinned backend stays"
+        );
+    }
+
+    /// Deploying the same request twice changes nothing the second time:
+    /// it reports `changed: false`, publishes no artifacts, and ends no
+    /// session pinned to the bundle.
+    #[test]
+    fn deploying_the_same_request_twice_changes_nothing() {
+        let mut core = core();
+        let first = deploy(&mut core, deploy_request(&source()));
+        assert!(first.changed);
+        let session = core
+            .open_session(
+                alice(),
+                BTreeMap::new(),
+                Some(bundle(&first)),
+                CommitUnitTrust::Session,
+            )
+            .unwrap();
+        core.tick();
+        core.take_output(session);
+
+        let again = deploy(&mut core, deploy_request(&source()));
+        assert!(!again.changed);
+        assert!(again.published.schemas.is_empty());
+        assert!(again.published.migrations.is_empty());
+        assert_eq!(again.bundle, first.bundle);
+        assert!(
+            core.take_output(session).iter().all(Result::is_ok),
+            "the pinned session stays"
+        );
+    }
+
+    /// A deployment staged against a catalogue that moved before it was
+    /// applied is refused, and leaves the catalogue as it was.
+    ///
+    /// ```text
+    /// stage A on C ── deploy B (C → C') ── apply A on C' ──► Rejected
+    /// ```
+    #[test]
+    fn a_deployment_staged_on_a_catalogue_that_moved_is_refused() {
+        let mut core = core();
+        let rows = core.db().catalogue().unwrap();
+        let index = crate::portable::catalogue::CatalogueIndex::from_rows(&rows, None);
+        let stale =
+            crate::portable::deployment::prepare(&index, deploy_request(&source()), 1).unwrap();
+        let change = stale.catalogue_change(&rows).unwrap();
+
+        let mut other = source();
+        for table in other.values_mut() {
+            table.policies = TablePolicies::new().with_select(PolicyExpr::True);
+        }
+        assert!(deploy(&mut core, deploy_request(&other)).changed);
+        let moved = core.db().catalogue().unwrap();
+
+        let refused = core
+            .apply_catalogue(stale.staged.expected(), change, stale.staged.new_bundle())
+            .unwrap_err();
+        assert!(
+            matches!(&refused, CatalogueApplyError::Rejected(message) if message.contains("catalogue changed")),
+            "{refused:?}"
+        );
+        assert_eq!(core.db().catalogue().unwrap(), moved, "nothing was applied");
     }
 }
