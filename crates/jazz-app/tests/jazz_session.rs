@@ -344,7 +344,7 @@ where
 {
 }
 
-/// TS's "keeps a local-first guest when the backend says no one is signed
+/// TS's "keeps a device account when the backend says no one is signed
 /// in" (`backend-watch.test.ts`), then its guest link on sign-up.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_guest_is_kept_while_no_one_is_signed_in_and_linked_on_sign_up() {

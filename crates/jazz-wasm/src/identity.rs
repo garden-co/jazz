@@ -10,7 +10,7 @@ const KEY_NAMESPACE: Uuid = Uuid::from_bytes([
 
 const SIGN_DOMAIN: &str = "jazz-auth-sign-v1";
 
-pub const LOCAL_FIRST_ISSUER: &str = "urn:jazz:local-first";
+pub const DEVICE_ACCOUNT_ISSUER: &str = "urn:jazz:local-first";
 pub const ANONYMOUS_ISSUER: &str = "urn:jazz:anonymous";
 
 #[derive(serde::Serialize)]

@@ -17,7 +17,7 @@ import {
 
 // `forReqUser`, `withAttribution` and `accountFor` on a plain HTTP request
 // from a device account (#5500): the request carries the account's
-// local-first proof as `Authorization: Bearer` (`db.getLocalFirstIdentityProof()`),
+// device account's proof as `Authorization: Bearer` (`db.getDeviceAccountProof()`),
 // checked as a sync socket's is, and admitted by the core. `forReqUser`
 // takes it, policy-scoped as the device's sync is; `withAttribution` (backend
 // authority) and `accountFor` only with `{ deviceAccounts: true }`, since
@@ -95,12 +95,10 @@ describe("forReqUser for a device account", () => {
       .wait({ tier: "global" });
 
     // What a browser attaches to its own fetch.
-    const proof = client.db.getLocalFirstIdentityProof();
+    const proof = client.db.getDeviceAccountProof();
     expect(proof).toEqual(expect.any(String));
     // It is for this app's endpoint only.
-    expect(client.db.getLocalFirstIdentityProof({ audience: "https://other.example/jazz" })).toBe(
-      null,
-    );
+    expect(client.db.getDeviceAccountProof({ audience: "https://other.example/jazz" })).toBe(null);
     const request = () => route(origin, bearer(proof!));
 
     // Without the opt-in, withAttribution and accountFor take no device account.
