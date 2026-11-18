@@ -478,7 +478,7 @@ fn put_many(conn: &Storage, table: HostTable, pairs: &[HostPair]) -> Result<(), 
     })
 }
 
-fn put_if_absent(
+pub(crate) fn put_if_absent(
     conn: &Storage,
     table: HostTable,
     key: &[u8],

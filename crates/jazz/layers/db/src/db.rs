@@ -4202,6 +4202,20 @@ impl Db {
         &self,
         change: crate::catalogue::CatalogueChange,
     ) -> Result<(), Error> {
+        self.apply_catalogue_keeping(change, &[]).await
+    }
+
+    /// [`Self::apply_catalogue`] that also keeps `kept` (host table, key,
+    /// value) in the same transaction: each is written unless its key holds
+    /// a value already, and a key that holds a different value fails the
+    /// whole change (code `Schema`), leaving the file and this database as
+    /// they were. The transaction is the one this call owns and ends before
+    /// it returns.
+    pub async fn apply_catalogue_keeping(
+        &self,
+        change: crate::catalogue::CatalogueChange,
+        kept: &[(crate::host::HostTable, Vec<u8>, Vec<u8>)],
+    ) -> Result<(), Error> {
         let saved = {
             let inner = self.inner();
             (
@@ -4217,6 +4231,16 @@ impl Db {
             crate::catalogue::put(conn, &change.put)?;
             for (schema, lenses) in change.admit {
                 self.admit(schema, &lenses)?;
+            }
+            for (table, key, value) in kept {
+                if let Some(existing) = crate::host::put_if_absent(conn, *table, key, value)?
+                    && existing != *value
+                {
+                    return Err(Error::new(
+                        ErrorCode::Schema,
+                        "this change keeps a value that conflicts with the one kept before",
+                    ));
+                }
             }
             Ok(())
         });
