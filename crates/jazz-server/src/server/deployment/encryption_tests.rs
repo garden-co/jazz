@@ -481,21 +481,21 @@ async fn a_deploy_whose_declarations_conflict_at_apply_leaves_nothing_live() {
         .column_type = ColumnType::Integer;
     let other = encode_stored(&other_entries).unwrap();
 
-    // Hold the store thread so the deploy passes its checks and then waits
-    // for it. The held job writes the other instance's declarations itself
-    // (store-thread work, so no race with its release), once told to.
+    // Hold the store thread (job H1). The deploy's read of the kept
+    // declarations is host work, which waits for it and then runs ahead of
+    // queued runtime work, so a second job H2 queued meanwhile, which keeps
+    // the other instance's declarations, runs after that read and before the
+    // deploy's own catalogue job: the declarations conflict only when the
+    // change applies.
     let (entered_tx, entered_rx) = mpsc::channel();
-    let (go_tx, go_rx) = mpsc::channel::<()>();
-    let held = {
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let h1 = {
         let runtime = runtime.clone();
-        let other = other.clone();
         tokio::spawn(async move {
             runtime
-                .with_db_for_test(move |db| {
+                .with_db_for_test(move |_| {
                     entered_tx.send(()).unwrap();
-                    let _ = go_rx.recv();
-                    db.host_put_if_absent(super::DECLARATIONS, &v2_hash.0, &other)
-                        .map_err(|error| error.to_string())?;
+                    let _ = release_rx.recv();
                     Ok(())
                 })
                 .await
@@ -509,13 +509,28 @@ async fn a_deploy_whose_declarations_conflict_at_apply_leaves_nothing_live() {
         let body = v2.deployment_body(false);
         tokio::spawn(async move { publish(&router, body).await })
     };
-    // No signal says the deploy has reached its apply, so wait for it. A slow
-    // machine can only make the other instance's declarations land before the
-    // deploy's check, which refuses it the same way (422, v2 not live): the
-    // test never fails for being slow, it only stops reaching the apply.
+    // No signal says the deploy's read is queued, so wait for it. A slow
+    // machine can only make H2 run before that read, which then refuses the
+    // deploy at its check (the same 422, v2 not live): the test never fails
+    // for being slow, it only stops reaching the apply.
     tokio::time::sleep(Duration::from_millis(500)).await;
-    go_tx.send(()).unwrap();
-    held.await.unwrap().unwrap();
+    let h2 = {
+        let runtime = runtime.clone();
+        let other = other.clone();
+        tokio::spawn(async move {
+            runtime
+                .with_db_for_test(move |db| {
+                    db.host_put_if_absent(super::DECLARATIONS, &v2_hash.0, &other)
+                        .map_err(|error| error.to_string())?;
+                    Ok(())
+                })
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    release_tx.send(()).unwrap();
+    h1.await.unwrap().unwrap();
+    h2.await.unwrap().unwrap();
     let (status, refusal) = deploying.await.unwrap();
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
     state.catalogue_store.refresh().unwrap();
@@ -686,7 +701,7 @@ async fn a_memory_store_deploy_reads_kept_declarations_while_a_write_is_open() {
         .unwrap()
         .kv(super::DECLARATIONS)
         .unwrap();
-    let reading = tokio::task::spawn_blocking(move || kept.get(&v2_hash.0));
+    let reading = tokio::task::spawn_blocking(move || kept.get_on_store(&v2_hash.0));
     tokio::time::sleep(Duration::from_secs(11)).await;
     release_tx.send(()).unwrap();
     held.await.unwrap().unwrap();
