@@ -76,3 +76,45 @@ fn a_change_keeps_host_values_with_it_or_not_at_all() {
         "the change's schema was not published"
     );
 }
+
+/// The kept values are written inside the transaction that applies the
+/// change, not after it: when a later entry conflicts, an earlier one of the
+/// same call that was already written is rolled back with the catalogue rows.
+///
+/// ```text
+/// apply { schema, keep a=1, keep k=b (k holds a) } ──✗──► a absent, schema absent
+/// ```
+#[test]
+fn a_failed_change_leaves_no_earlier_kept_value_behind() {
+    let db = open();
+    block_on(db.apply_catalogue_keeping(
+        CatalogueChange::default(),
+        &[(KEPT, b"k".to_vec(), b"a".to_vec())],
+    ))
+    .unwrap();
+    let before = db.catalogue().unwrap().schemas.len();
+    let other = {
+        let schema = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("other").column("title", ColumnType::Text))
+            .build();
+        CatalogueChange {
+            put: CataloguePut {
+                schemas: vec![(schema, 2)],
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    };
+    let kept = [
+        (KEPT, b"first".to_vec(), b"1".to_vec()),
+        (KEPT, b"k".to_vec(), b"conflicting".to_vec()),
+    ];
+    block_on(db.apply_catalogue_keeping(other, &kept)).expect_err("the second entry conflicts");
+    assert_eq!(
+        db.host_get(KEPT, b"first").unwrap(),
+        None,
+        "the entry written before the conflict is rolled back"
+    );
+    assert_eq!(db.host_get(KEPT, b"k").unwrap(), Some(b"a".to_vec()));
+    assert_eq!(db.catalogue().unwrap().schemas.len(), before);
+}

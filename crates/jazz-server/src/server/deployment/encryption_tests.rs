@@ -416,6 +416,106 @@ async fn a_racing_deploy_with_conflicting_declarations_is_refused_without_its_ca
     );
 }
 
+/// A deploy over the real route whose kept declarations conflict at the
+/// moment the catalogue change applies (another instance kept different
+/// ones after this deploy checked) is refused with the catalogue untouched:
+/// the declarations are kept in the transaction that commits the change.
+/// Keeping them after the commit would leave the version live and the deploy
+/// erroring.
+///
+/// ```text
+/// deploy v2: checked (nothing kept) ─┐ the store thread is busy
+///                                    │  another instance keeps v2's declarations
+///                                    └─ the change applies ──✗ refused, v2 not live
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deploy_whose_declarations_conflict_at_apply_leaves_nothing_live() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let server = ServerBuilder::new(app_id())
+        .with_auth_config(AuthConfig {
+            admin_secret: Some("test-admin".into()),
+            ..Default::default()
+        })
+        .with_storage(StorageBackend::InMemory)
+        .build()
+        .await
+        .unwrap();
+    let state = server.state.clone();
+    let router = create_router(state.clone());
+    let v1 = loaded("ownerId = session.user");
+    let (status, body) = publish(&router, v1.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v2 = artifact::load(
+        APP_V2.as_bytes(),
+        permissions(MEMBERS_RULE, "ownerId = session.user").as_bytes(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let kept = state
+        .store
+        .as_ref()
+        .unwrap()
+        .kv(super::DECLARATIONS)
+        .unwrap();
+    let runtime = state.runtime().expect("a runtime after the first deploy");
+
+    // Hold the store thread, so the deploy passes its checks and then waits
+    // for it before applying.
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let held = {
+        let runtime = runtime.clone();
+        tokio::spawn(async move {
+            runtime
+                .with_db_for_test(move |_| {
+                    entered_tx.send(()).unwrap();
+                    let _ = release_rx.recv();
+                    Ok(())
+                })
+                .await
+        })
+    };
+    tokio::task::spawn_blocking(move || entered_rx.recv().unwrap())
+        .await
+        .unwrap();
+    let deploying = {
+        let router = router.clone();
+        let body = v2.deployment_body(false);
+        tokio::spawn(async move { publish(&router, body).await })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Another instance keeps different declarations for v2 meanwhile (host
+    // work runs ahead of the deploy's queued runtime work).
+    let v2_hash = v2.current_hash();
+    let other = tokio::task::spawn_blocking({
+        let kept = kept;
+        move || {
+            kept.put_if_absent(&v2_hash.0, b"declarations another instance kept")
+                .unwrap();
+            kept
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    release_tx.send(()).unwrap();
+    held.await.unwrap().unwrap();
+    let kept = other.await.unwrap();
+    let (status, refusal) = deploying.await.unwrap();
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    state.catalogue_store.refresh().unwrap();
+    let schemas = state
+        .catalogue_store
+        .index()
+        .unwrap()
+        .deployment_catalogue()
+        .schemas
+        .len();
+    assert_eq!(schemas, 1, "v2 is not live: only v1 is in the catalogue");
+    assert_eq!(
+        kept.get(&v2_hash.0).unwrap(),
+        Some(b"declarations another instance kept".to_vec())
+    );
+}
+
 /// Decrypting a column puts its plaintext on the server, so the deploy
 /// asks for an explicit confirmation naming it (migrations §4.2).
 #[tokio::test]
