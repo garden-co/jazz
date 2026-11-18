@@ -32,6 +32,10 @@ durable-object-limits = ["rusqlite/limits"]
 # Object host takes: callback scopes only, no SQL transaction control,
 # nothing open between calls.
 managed-storage-emulation = ["testing"]
+# The client's end-to-end encryption hooks (`crate::e2ee`): the hook trait,
+# `DbConfig::with_e2ee` and every call site. Off, each call site compiles to
+# nothing. A server never enables it.
+e2ee-client = []
 
 [dependencies]
 jazz-text.workspace = true

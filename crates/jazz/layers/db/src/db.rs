@@ -969,6 +969,13 @@ struct Inner {
     /// Whether `_jazz_pruned_txs` exists, as last read (see
     /// `sync::has_pruned_txs`).
     pruned_txs: std::cell::Cell<Option<sync::Known>>,
+    /// The client's encryption hooks ([`crate::e2ee`]).
+    #[cfg(feature = "e2ee-client")]
+    e2ee: Option<Rc<dyn crate::e2ee::E2eeHooks>>,
+    /// Keys this database's digests of plaintext search values, chosen at
+    /// random when it opens: a digest confirms no guessed value elsewhere.
+    #[cfg(feature = "e2ee-client")]
+    e2ee_salt: [u8; 32],
 }
 
 /// Whether a read decodes its rows' projected cells.
@@ -2386,6 +2393,15 @@ impl Db {
                 #[cfg(any(test, feature = "testing"))]
                 composite_scans: std::cell::Cell::new(0),
                 pruned_txs: std::cell::Cell::new(None),
+                #[cfg(feature = "e2ee-client")]
+                e2ee: config.e2ee,
+                #[cfg(feature = "e2ee-client")]
+                e2ee_salt: {
+                    let mut salt = [0; 32];
+                    salt[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+                    salt[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+                    salt
+                },
             })),
         };
         {
@@ -2523,8 +2539,19 @@ impl Db {
     /// before any client connected (a backup) carries it: its replicas
     /// still follow it once it is restored. A store that cannot write it
     /// now mints it when it first serves its catalogue, as before.
+    ///
+    /// # Panics
+    ///
+    /// On a database opened with encryption hooks
+    /// ([`DbConfig::with_e2ee`]): only clients seal and open encrypted
+    /// cells, and an authority must store and serve them as they are.
     pub fn set_authority(&self) {
         let mut inner = self.inner.borrow_mut();
+        #[cfg(feature = "e2ee-client")]
+        assert!(
+            inner.e2ee.is_none(),
+            "a database with encryption hooks cannot serve as the authority"
+        );
         inner.authority = true;
         if inner.publishes_catalogue() {
             // A storage failure here surfaces again, with its error, from

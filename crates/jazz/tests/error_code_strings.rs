@@ -145,6 +145,8 @@ fn a_public_api_error_keeps_its_display_text_and_exposes_the_stable_code() {
         clock: None,
         migrations: Default::default(),
         system_node: None,
+        #[cfg(feature = "e2ee-client")]
+        e2ee: None,
     }))
     .expect("alice opens a database");
 

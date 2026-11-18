@@ -45,6 +45,9 @@ pub struct DbConfig {
     /// The node SYSTEM provenance names, when it is not this replica's own:
     /// a backend that draws a fresh node per open keeps one stable subject.
     pub system_node: Option<NodeUuid>,
+    /// The client's encryption hooks (see [`DbConfig::with_e2ee`]).
+    #[cfg(feature = "e2ee-client")]
+    pub e2ee: Option<std::rc::Rc<dyn crate::e2ee::E2eeHooks>>,
 }
 
 /// Schema versions and the lenses between them (see
@@ -67,7 +70,18 @@ impl DbConfig {
             clock: None,
             migrations: Migrations::default(),
             system_node: None,
+            #[cfg(feature = "e2ee-client")]
+            e2ee: None,
         }
+    }
+
+    /// Seal writes and open reads with `hooks`, the client's end-to-end
+    /// encryption ([`crate::e2ee`]), from the moment the database opens.
+    /// A database with hooks never serves as the authority.
+    #[cfg(feature = "e2ee-client")]
+    pub fn with_e2ee(mut self, hooks: std::rc::Rc<dyn crate::e2ee::E2eeHooks>) -> Self {
+        self.e2ee = Some(hooks);
+        self
     }
 
     /// Stamp SYSTEM provenance as `node` instead of this replica's node.

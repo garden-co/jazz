@@ -27,6 +27,9 @@ pub use jazz_db::binding_host;
 pub use jazz_db::catalogue;
 pub use jazz_db::chunk_store;
 pub use jazz_db::db;
+/// The client's end-to-end encryption hooks.
+#[cfg(feature = "e2ee-client")]
+pub use jazz_db::e2ee;
 pub use jazz_db::format;
 pub use jazz_db::host;
 pub use jazz_db::link;
