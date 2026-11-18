@@ -723,6 +723,54 @@ fn unknown_keys_are_refused_at_every_level_with_the_nearest() {
     .unwrap();
 }
 
+/// `__e2ee_` names Jazz's own end-to-end encryption tables, which schema
+/// validation treats differently: an application may not define one in its
+/// current schema, nor set policies on one, even when the schema it reads
+/// the permissions against holds one (as Jazz's own will).
+#[test]
+fn the_system_table_prefix_is_reserved_for_jazz() {
+    // The writer reads what it writes back, so it refuses the table too.
+    let mut input = todo_server();
+    input.schemas[0].insert(
+        TableName::from("__e2ee_spaces"),
+        table(vec![
+            ColumnDescriptor::new("scopeId", ColumnType::Uuid),
+            ColumnDescriptor::new("identifier", ColumnType::Uuid),
+        ]),
+    );
+    input.current = SchemaHash::compute(&input.schemas[0]).to_string();
+    let error = write(input)
+        .expect_err("the table must be refused")
+        .to_string();
+    assert!(
+        error.contains(
+            "tables.__e2ee_spaces: `__e2ee_spaces`: table names starting with `__e2ee_` are \
+             reserved for Jazz's own"
+        ),
+        "{error}"
+    );
+
+    let mut current = loaded(shared_todos()).current_schema().clone();
+    current.insert(
+        TableName::from("__e2ee_spaces"),
+        table(vec![
+            ColumnDescriptor::new("scopeId", ColumnType::Uuid),
+            ColumnDescriptor::new("identifier", ColumnType::Uuid),
+        ]),
+    );
+    let relations = shared_todos().codegen.relations();
+    let file = json::parse(br#"{"tables": {"__e2ee_spaces": {"insert": "true"}}}"#).unwrap();
+    let (path, message) =
+        permissions_file::read(&file, &current, &relations, &Default::default()).unwrap_err();
+    assert_eq!(path, "tables.__e2ee_spaces");
+    assert!(message.contains("are reserved for Jazz's own"), "{message}");
+    // A table that only resembles the prefix is the application's.
+    let file = json::parse(br#"{"tables": {"_e2ee_spaces": {"insert": "true"}}}"#).unwrap();
+    let (_, message) =
+        permissions_file::read(&file, &current, &relations, &Default::default()).unwrap_err();
+    assert!(message.contains("has no table"), "{message}");
+}
+
 #[test]
 fn an_unknown_version_is_refused_before_anything_else() {
     // `$schema` carries the version.

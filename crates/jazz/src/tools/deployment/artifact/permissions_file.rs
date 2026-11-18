@@ -64,6 +64,11 @@ pub fn read(
         .ok_or_else(|| refuse("tables", "must be an object of table: policies"))?;
     for (table, ops) in tables {
         let path = format!("tables.{table}");
+        // Jazz sets its own system tables' policies, whatever the schema
+        // holds.
+        if crate::schema::is_system_table(table) {
+            return Err(refuse(&path, super::app_file::reserved_table_name(table)));
+        }
         if schema.get(&TableName::from(table.as_str())).is_none() {
             let names: Vec<String> = schema.keys().map(|t| t.as_str().to_string()).collect();
             return Err(refuse(
