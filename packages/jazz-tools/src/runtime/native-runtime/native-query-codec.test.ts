@@ -33,6 +33,42 @@ describe("native query codec", () => {
     }
   });
 
+  it("pins the text prefix/suffix predicate tags (flat 13/14, relation 11/12)", () => {
+    const fixture = nativeQueryCodecFixture();
+    const text = (value: string) => ({ type: "Text" as const, value });
+    const column = { column: "name" };
+    const cases: Array<[string, Uint8Array]> = [
+      [
+        "text_affix_flat_predicates",
+        queryWithPredicates("people", [
+          { column: "name", op: "StartsWith", value: text("Ann") },
+          { column: "name", op: "EndsWith", value: text("é") },
+        ]),
+      ],
+      [
+        "text_affix_relation_predicates",
+        queryWithPredicates("people", [], {
+          relation: {
+            Filter: {
+              input: { TableScan: { table: "people" } },
+              predicate: {
+                Or: [
+                  { StartsWith: { left: column, right: { Literal: "Ann" } } },
+                  { EndsWith: { left: column, right: { Literal: "é" } } },
+                ],
+              },
+            },
+          },
+        }),
+      ],
+    ];
+    for (const [name, bytes] of cases) {
+      const expected = fixture.cases.find((candidate) => candidate.name === name);
+      expect(expected, `${name} fixture is present`).toBeDefined();
+      expect(bytesToHex(bytes), name).toBe(expected!.query_hex);
+    }
+  });
+
   it.each([
     ["limit", -1],
     ["limit", Number.NaN],

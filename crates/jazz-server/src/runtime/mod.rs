@@ -12,7 +12,6 @@
 //! serving the server's host tables (catalogue, account registry), and the
 //! runtime's [`Db`] opens on the same connection once a schema is known.
 
-pub mod alpha59_alpha60;
 pub mod auth_admission;
 mod thin;
 
@@ -26,7 +25,6 @@ use std::sync::{Arc, Mutex, Weak, mpsc as std_mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
 use crate::kv::HostKv;
 use crate::kv::HostSql;
 use jazz::catalogue::{CatalogueChange, CatalogueRows};
@@ -130,18 +128,7 @@ pub enum NodeRole {
     Core,
 }
 
-/// How much the server trusts a link's commits, chosen at admission.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CommitUnitTrust {
-    /// An end-user session: every read and write is checked against the
-    /// table policies for its identity.
-    Session,
-    /// An authenticated backend. It is served with full access.
-    TrustedBackend,
-    /// An authenticated administrative or authority link, served with full
-    /// access.
-    TrustedAuthority,
-}
+pub use crate::portable::admission::{CommitUnitTrust, ServerLinkAdmission};
 
 /// Authority endpoints and features negotiated for one connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -154,25 +141,6 @@ pub struct ConnectionSessionContext {
     pub link_identity: AuthorSubject,
     /// The negotiated wire features.
     pub negotiated_features: WireFeatures,
-}
-
-/// Capability selected by the server after authenticating a WebSocket and
-/// negotiating its features.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ServerLinkAdmission {
-    /// A normal session or backend link.
-    #[default]
-    OrdinarySession,
-    /// Host-verified SYSTEM authority credential permitting scoped query
-    /// delegation. On SQLite it is served as a trusted SYSTEM link; the sync
-    /// protocol cannot express a delegated scope yet.
-    AuthorityQueryDelegate,
-    /// A durable relay for exactly the one session authenticated by this
-    /// connection. On SQLite it is served as that session.
-    ScopeIsolatedClientRelay {
-        /// Fresh server-issued capability epoch for this accepted connection.
-        admission_epoch: u64,
-    },
 }
 
 /// Opaque handle for one admitted session.
@@ -736,7 +704,6 @@ impl AppStore {
     }
 
     /// Key-value access to one host table.
-    #[cfg(test)]
     pub(crate) fn kv(&self, table: HostTable) -> Result<HostKv, String> {
         Ok(HostKv::new(
             table,
@@ -1246,7 +1213,7 @@ struct Edge {
     /// A thin session's room for requests being joined or queued: the most
     /// one request takes, as permits of one byte.
     thin_ingress: Arc<tokio::sync::Semaphore>,
-    egress: Arc<AtomicUsize>,
+    egress: Arc<Egress>,
 }
 
 /// Room for one thin request, in its session's and the server's ingress
@@ -1307,19 +1274,96 @@ fn release_egress(egress: &AtomicUsize, bytes: usize, runtime: &Weak<Inner>) {
     }
 }
 
+/// A session's output in server memory: the bytes held (handed to its
+/// socket side and not yet written), which it derefs to, and the raw bytes
+/// its socket has written, which tell a client that is reading slowly from
+/// one that stopped.
+#[derive(Default)]
+pub struct Egress {
+    held: AtomicUsize,
+    written: AtomicU64,
+}
+
+impl std::ops::Deref for Egress {
+    type Target = AtomicUsize;
+
+    fn deref(&self) -> &AtomicUsize {
+        &self.held
+    }
+}
+
+impl Egress {
+    /// Raw bytes the session's socket has written.
+    pub(super) fn written(&self) -> u64 {
+        self.written.load(Ordering::Acquire)
+    }
+}
+
+/// Counts the raw bytes a session's socket writes (see [`Egress`]).
+#[derive(Clone)]
+pub struct WrittenBytes(Arc<Egress>);
+
+impl WrittenBytes {
+    /// The socket wrote `bytes`.
+    pub fn add(&self, bytes: usize) {
+        self.0.written.fetch_add(bytes as u64, Ordering::AcqRel);
+    }
+}
+
 /// One session's ordered outbound frame batches.
 pub struct ServerRuntimeFrameStream {
     receiver: tokio_mpsc::UnboundedReceiver<Outbound>,
-    egress: Arc<AtomicUsize>,
+    egress: Arc<Egress>,
     runtime: Weak<Inner>,
 }
 
 impl ServerRuntimeFrameStream {
-    /// Receive the next batch of outbound frames.
+    /// Receive the next batch of outbound frames, its bytes no longer held.
     pub async fn recv(&mut self) -> Option<Result<Vec<AbiBytes>, jazz::wire::WireError>> {
         let (result, bytes) = self.receiver.recv().await?;
         release_egress(&self.egress, bytes, &self.runtime);
         Some(result)
+    }
+
+    /// Receive the next batch with its size, its bytes still held: the
+    /// caller releases them through [`Self::egress_release`] as it writes
+    /// them, so the session's egress counts them until they are written
+    /// and a slow reader is seen reading as each part goes.
+    pub async fn recv_held(
+        &mut self,
+    ) -> Option<(Result<Vec<AbiBytes>, jazz::wire::WireError>, usize)> {
+        self.receiver.recv().await
+    }
+
+    /// Counts the raw bytes the session's socket writes, so a client that
+    /// reads slowly is seen reading while a large message is still going.
+    pub fn written_bytes(&self) -> WrittenBytes {
+        WrittenBytes(Arc::clone(&self.egress))
+    }
+
+    /// Releases bytes of [`Self::recv_held`] batches as they are written.
+    pub fn egress_release(&self) -> EgressRelease {
+        EgressRelease {
+            egress: Arc::clone(&self.egress),
+            runtime: self.runtime.clone(),
+        }
+    }
+}
+
+/// Releases a session's held output as it is written (see
+/// [`ServerRuntimeFrameStream::recv_held`]).
+#[derive(Clone)]
+pub struct EgressRelease {
+    egress: Arc<Egress>,
+    runtime: Weak<Inner>,
+}
+
+impl EgressRelease {
+    /// `bytes` of the session's output were written.
+    pub fn release(&self, bytes: usize) {
+        if bytes > 0 {
+            release_egress(&self.egress, bytes, &self.runtime);
+        }
     }
 }
 
@@ -1407,7 +1451,7 @@ impl ServerRuntimeHandle {
         };
         let session = ServerSession(self.inner.next_session.fetch_add(1, Ordering::Relaxed));
         let (output, receiver) = tokio_mpsc::unbounded_channel();
-        let egress = Arc::new(AtomicUsize::new(0));
+        let egress = Arc::new(Egress::default());
         self.insert_edge(session, receiver, Arc::clone(&egress))?;
         let opened = self
             .run(move |owner| {
@@ -1421,7 +1465,7 @@ impl ServerRuntimeHandle {
         &self,
         session: ServerSession,
         receiver: tokio_mpsc::UnboundedReceiver<Outbound>,
-        egress: Arc<AtomicUsize>,
+        egress: Arc<Egress>,
     ) -> Result<(), SessionOpenError> {
         self.edges().map_err(SessionOpenError::Runtime)?.insert(
             session,
@@ -1560,7 +1604,7 @@ impl ServerRuntimeHandle {
         };
         let session = ServerSession(self.inner.next_session.fetch_add(1, Ordering::Relaxed));
         let (output, receiver) = tokio_mpsc::unbounded_channel();
-        let egress = Arc::new(AtomicUsize::new(0));
+        let egress = Arc::new(Egress::default());
         self.insert_edge(session, receiver, Arc::clone(&egress))?;
         let opened = self
             .run(move |owner| {
@@ -1642,6 +1686,31 @@ impl ServerRuntimeHandle {
     pub(crate) fn release_egress_for_test(&self, session: ServerSession, bytes: usize) {
         let egress = Arc::clone(&self.edges().expect("edges")[&session].egress);
         release_egress(&egress, bytes, &Arc::downgrade(&self.inner));
+    }
+
+    /// Apply `limits` from now on (sessions opened after this call take
+    /// its per-session bounds).
+    #[cfg(test)]
+    pub(crate) async fn set_egress_limits_for_test(&self, limits: EgressLimits) {
+        self.run(move |owner| {
+            owner.limits = limits;
+            Ok(())
+        })
+        .await
+        .expect("owner");
+    }
+
+    /// Sessions this runtime closed because their client fell behind.
+    pub async fn egress_sheds(&self) -> Result<EgressSheds, String> {
+        self.run(|owner| Ok(owner.sheds)).await
+    }
+
+    /// Whether `session` is an open thin session.
+    #[cfg(test)]
+    pub(crate) async fn is_thin_session_for_test(&self, session: ServerSession) -> bool {
+        self.run(move |owner| Ok(owner.thin.contains_key(&session)))
+            .await
+            .expect("owner")
     }
 
     /// Wait until the owner has run everything queued before this call.
@@ -1788,12 +1857,6 @@ impl ServerRuntimeHandle {
             .run(move |owner| {
                 let mut ended = 0;
                 let result = (|| {
-                    if change.activate.is_some() {
-                        return Err(CatalogueApplyError::Rejected(
-                            "a server never makes a schema current: sessions pin bundles"
-                                .to_owned(),
-                        ));
-                    }
                     block_on(owner.db.apply_catalogue(change)).map_err(|error| {
                         if error.code == jazz::db::ErrorCode::Storage {
                             CatalogueApplyError::Failed(error.to_string())
@@ -1956,6 +2019,10 @@ impl From<CatalogueApplyError> for String {
 struct Owner {
     db: Db,
     sessions: HashMap<ServerSession, OwnerSession>,
+    /// The bounds on output held for clients (see [`EgressLimits`]).
+    limits: EgressLimits,
+    /// Sessions closed for falling behind, by reason.
+    sheds: EgressSheds,
     /// Thin client connections (SPEC 8.14), which are not sync sessions.
     thin: HashMap<ServerSession, thin::ThinSession>,
     /// The tick in progress's time slice, shared with every session's queues.
@@ -1978,7 +2045,7 @@ struct OwnerSession {
     joiner: jazz::db::FrameJoiner,
     queues: Rc<SessionQueues>,
     output: tokio_mpsc::UnboundedSender<Outbound>,
-    egress: Arc<AtomicUsize>,
+    egress: Arc<Egress>,
 }
 
 struct SessionQueues {
@@ -1994,6 +2061,8 @@ struct SessionQueues {
     outbound: RefCell<VecDeque<(Vec<AbiBytes>, usize)>>,
     /// What the session's output holds in memory (see [`Backlog`]).
     backlog: Backlog,
+    /// Whether its client is reading.
+    clock: ReadClock,
     /// Inbound messages the engine may still take in the tick serving this
     /// session.
     budget: std::cell::Cell<usize>,
@@ -2150,14 +2219,15 @@ impl SessionQueues {
         }
     }
 
-    fn new(slice: Rc<TickSlice>, egress: Arc<AtomicUsize>) -> Self {
+    fn new(slice: Rc<TickSlice>, egress: Arc<Egress>, limits: &EgressLimits) -> Self {
         Self {
             inbound: RefCell::default(),
             held_ingress: RefCell::default(),
             pushed: std::cell::Cell::new(0),
             taken: std::cell::Cell::new(0),
             outbound: RefCell::default(),
-            backlog: Backlog::new(egress),
+            backlog: Backlog::new(egress, limits),
+            clock: ReadClock::default(),
             budget: std::cell::Cell::new(0),
             served: std::cell::Cell::new(false),
             done: std::cell::Cell::new(false),
@@ -2187,22 +2257,237 @@ fn encode_outbound(message: SyncMessage) -> Result<(Vec<AbiBytes>, usize), Trans
 
 /// Undrained output a session may hold beyond its biggest tick's: a reader
 /// this far behind is closed with `Backpressure` (the client reconnects
-/// later) instead of holding server memory without bound.
+/// later) instead of holding server memory without bound. The default of
+/// [`EgressLimits::session_backlog_bytes`] (`JAZZ_SESSION_BACKLOG_BYTES`).
 pub(crate) const SESSION_BACKLOG_FLOOR: usize = 64 * 1024 * 1024;
 
+/// The most undrained output one session may hold however big its ticks
+/// are: the default of [`EgressLimits::session_backlog_max_bytes`]
+/// (`JAZZ_SESSION_BACKLOG_MAX_BYTES`).
+pub(crate) const SESSION_BACKLOG_CEILING: usize = 256 * 1024 * 1024;
+
+/// The undrained output every session together may hold when nothing sets
+/// [`EgressLimits::egress_budget_bytes`] and no memory limit is known.
+pub(crate) const EGRESS_BUDGET_DEFAULT: usize = 2 * 1024 * 1024 * 1024;
+
+/// How far behind the minimum read rate a session may fall, while its
+/// output waits at the budget, before it is closed: the default of
+/// [`EgressLimits::slow_reader_timeout`] (`JAZZ_SLOW_READER_TIMEOUT_SECS`).
+/// Generous, so a slow mobile link that pauses is not cut off ([`ReadClock`]).
+pub(crate) const SLOW_READER_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Bounds on the output the server holds for its clients. Every bound
+/// closes the session it picks with a retryable `Backpressure` error: the
+/// client reconnects with backoff and resumes from its last settled seq.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EgressLimits {
+    /// Undrained output one session may hold beyond twice its biggest
+    /// tick (default 64 MiB).
+    pub session_backlog_bytes: usize,
+    /// Undrained output one session may hold at most, however big its
+    /// ticks (default 256 MiB). At least `session_backlog_bytes`.
+    pub session_backlog_max_bytes: usize,
+    /// Undrained output all sessions together may hold, best effort: past
+    /// it, the sessions behind the minimum read rate by
+    /// [`Self::stall_grace`] are closed,
+    /// biggest first, until the rest fit or none is left stalled. Sessions
+    /// still reading are never closed for it, so the total may exceed it by
+    /// what they hold (each bounded by its own backlog bound).
+    pub egress_budget_bytes: usize,
+    /// How far behind [`Self::min_read_rate`] a session may fall, while its
+    /// output waits at the budget, before it is closed.
+    pub slow_reader_timeout: Duration,
+    /// How long a session must have been behind [`Self::min_read_rate`]
+    /// before the egress budget may close it (default 10 s).
+    pub stall_grace: Duration,
+    /// Bytes a second a client must read, on average, while its output
+    /// waits, to count as reading (default 1024 bytes a second).
+    pub min_read_rate: u64,
+}
+
+impl Default for EgressLimits {
+    fn default() -> Self {
+        Self {
+            session_backlog_bytes: SESSION_BACKLOG_FLOOR,
+            session_backlog_max_bytes: SESSION_BACKLOG_CEILING,
+            egress_budget_bytes: EGRESS_BUDGET_DEFAULT,
+            slow_reader_timeout: SLOW_READER_TIMEOUT,
+            stall_grace: STALL_GRACE,
+            min_read_rate: MIN_READ_RATE,
+        }
+    }
+}
+
+static EGRESS_LIMITS: Mutex<Option<EgressLimits>> = Mutex::new(None);
+
+/// Set the egress limits runtimes started after this call apply (the
+/// process's, from its launch options).
+pub fn set_egress_limits(limits: EgressLimits) {
+    *EGRESS_LIMITS.lock().unwrap_or_else(|e| e.into_inner()) = Some(limits);
+}
+
+fn egress_limits() -> EgressLimits {
+    EGRESS_LIMITS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_default()
+}
+
+/// The stalled sessions to close so what every session holds fits
+/// `budget`, biggest first. `held` lists every session's undrained bytes
+/// and whether it is stalled ([`ReadClock`]): a session that is reading is
+/// never picked, however much it holds, as what it holds is shrinking (and
+/// bounded by its own backlog bound); a stalled one far behind goes before
+/// stalled ones that hold little.
+fn sessions_to_shed(held: Vec<(ServerSession, usize, bool)>, budget: usize) -> Vec<ServerSession> {
+    let mut total: usize = held.iter().map(|(_, bytes, _)| *bytes).sum();
+    if total <= budget {
+        return Vec::new();
+    }
+    let mut held: Vec<(ServerSession, usize)> = held
+        .into_iter()
+        .filter(|(_, _, stalled)| *stalled)
+        .map(|(session, bytes, _)| (session, bytes))
+        .collect();
+    held.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.0.cmp(&b.0.0)));
+    let mut shed = Vec::new();
+    for (session, bytes) in held {
+        if total <= budget {
+            break;
+        }
+        total -= bytes;
+        shed.push(session);
+    }
+    shed
+}
+
+/// How far a session's client is behind a minimum read rate, while its
+/// output waits at the budget.
+///
+/// A client's progress is the bytes it took (handed to the socket side
+/// minus those still held) or the raw bytes its socket wrote, whichever
+/// moved more since the last check: either is the client making room. Each
+/// check while the egress is at the budget, the clock runs, and progress
+/// winds it back at [`EgressLimits::min_read_rate`]: a client reading at
+/// least that fast stays at zero, one that stopped, or trickles a few
+/// bytes a second to dodge the bound, falls behind as fast as time passes.
+/// Under the budget nothing waits on the client, and the clock resets.
+/// Past [`EgressLimits::slow_reader_timeout`] behind, the session is
+/// closed; past [`EgressLimits::stall_grace`], the egress budget may close
+/// it.
+#[derive(Default)]
+struct ReadClock {
+    /// Bytes ever handed to the socket side.
+    handed: std::cell::Cell<u64>,
+    /// Bytes the client had taken at the last check (`handed - egress`).
+    taken: std::cell::Cell<i128>,
+    /// Raw bytes the socket had written at the last check.
+    written: std::cell::Cell<u64>,
+    /// The moment the client's reading has caught up to, at the minimum
+    /// rate, while the egress is at the budget.
+    caught_up: std::cell::Cell<Option<std::time::Instant>>,
+}
+
+impl ReadClock {
+    /// `bytes` were handed to the socket side.
+    fn handed(&self, bytes: usize) {
+        self.handed.set(self.handed.get() + bytes as u64);
+    }
+
+    /// Check at `now`: how far the client is behind `min_rate` bytes a
+    /// second while its egress is at the budget, if it is.
+    fn check(&self, egress: &Egress, now: std::time::Instant, min_rate: u64) -> Option<Duration> {
+        let (held, written) = (egress.load(Ordering::Acquire), egress.written());
+        let taken = i128::from(self.handed.get()) - held as i128;
+        let took = u64::try_from(taken - self.taken.replace(taken)).unwrap_or(0);
+        let wrote = written.saturating_sub(self.written.replace(written));
+        let progress = took.max(wrote);
+        if held < SESSION_QUEUE_BUDGET {
+            self.caught_up.set(None);
+            return None;
+        }
+        let credit = Duration::try_from_secs_f64(progress as f64 / min_rate.max(1) as f64)
+            .unwrap_or(Duration::MAX);
+        let caught_up = self
+            .caught_up
+            .get()
+            .unwrap_or(now)
+            .checked_add(credit)
+            .unwrap_or(now)
+            .min(now);
+        self.caught_up.set(Some(caught_up));
+        Some(now.duration_since(caught_up))
+    }
+}
+
+/// The default of [`EgressLimits::min_read_rate`]: 1 KiB/s. Slower than
+/// any link a person uses; a client that reads slower than this for the
+/// slow-reader timeout while its output waits is closed.
+pub(crate) const MIN_READ_RATE: u64 = 1024;
+
+/// How long a session must have been behind the minimum read rate before
+/// the egress budget may close it: the default of
+/// [`EgressLimits::stall_grace`] (`JAZZ_EGRESS_STALL_GRACE_SECS`). Output
+/// handed over in this tick has not had a chance to be read, so a session
+/// that just got a big result is not closed at once; a client reading at
+/// the minimum rate never falls behind at all. Shorter reclaims memory
+/// sooner in a spike, longer spares clients whose link pauses.
+pub(crate) const STALL_GRACE: Duration = Duration::from_secs(10);
+
+/// Sessions a runtime closed because their client fell behind, by reason.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EgressSheds {
+    /// Its client wrote nothing for longer than the slow-reader timeout.
+    pub slow_reader: u64,
+    /// The server's egress budget was spent while it was stalled.
+    pub egress_budget: u64,
+}
+
+/// Why a session was closed for falling behind.
+#[derive(Clone, Copy, Debug)]
+enum ShedReason {
+    SlowReader,
+    EgressBudget,
+}
+
+impl ShedReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SlowReader => "slow_reader",
+            Self::EgressBudget => "egress_budget",
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::SlowReader => "it read nothing for longer than the slow-reader timeout",
+            Self::EgressBudget => {
+                "the server's egress budget is spent, and it held the most output of the \
+                 sessions that read nothing"
+            }
+        }
+    }
+}
+
 /// How much of a session's output sits in server memory: queued in the
-/// engine and handed to the socket but not yet read off it.
+/// engine, and handed to the socket side but not yet written to the socket
+/// (a WebSocket connection releases it message by message as it writes,
+/// so its writer's queue counts; kernel buffers do not).
 ///
 /// One tick's output for a session is always taken whole, however large
 /// (a first result is as big as what the client asked for). Output of a
 /// later tick is refused, and the session closed, once what earlier ticks
 /// left undrained exceeds twice the session's biggest tick, and at least
-/// [`SESSION_BACKLOG_FLOOR`]: a reader that keeps up drains a burst before
-/// the next one doubles it, and one that does not is bounded by about
-/// that much.
+/// [`SESSION_BACKLOG_FLOOR`] but at most [`SESSION_BACKLOG_CEILING`]: a
+/// reader that keeps up drains a burst before the next one doubles it,
+/// and one that does not is bounded by about that much.
 struct Backlog {
-    /// Bytes the socket took and the client has not read yet.
-    egress: Arc<AtomicUsize>,
+    /// Bytes handed to the socket side and not yet written.
+    egress: Arc<Egress>,
+    /// [`EgressLimits::session_backlog_bytes`] and
+    /// [`EgressLimits::session_backlog_max_bytes`].
+    floor: usize,
+    ceiling: usize,
     /// Bytes queued in the engine, not yet handed to the socket.
     queued: std::cell::Cell<usize>,
     /// Undrained bytes (queued and egress) when this tick started.
@@ -2214,9 +2499,13 @@ struct Backlog {
 }
 
 impl Backlog {
-    fn new(egress: Arc<AtomicUsize>) -> Self {
+    fn new(egress: Arc<Egress>, limits: &EgressLimits) -> Self {
         Self {
             egress,
+            floor: limits.session_backlog_bytes,
+            ceiling: limits
+                .session_backlog_max_bytes
+                .max(limits.session_backlog_bytes),
             queued: std::cell::Cell::new(0),
             carried: std::cell::Cell::new(0),
             burst: std::cell::Cell::new(0),
@@ -2234,11 +2523,26 @@ impl Backlog {
     fn start_tick(&self) {
         self.peak.set(self.peak.get().max(self.burst.replace(0)));
         self.carried.set(self.undrained());
+        // Once the burst it allowed for has drained, a session is bounded
+        // by the floor again: one huge result must not raise its bound for
+        // the rest of its life.
+        if self.carried.get() < self.floor {
+            self.peak.set(0);
+        }
     }
 
     /// Whether this tick may queue more for the session.
     fn admits(&self) -> bool {
-        let allowed = SESSION_BACKLOG_FLOOR.max(self.peak.get().saturating_mul(2));
+        // Twice the biggest tick, so a burst being drained is not cut off,
+        // but never past the ceiling: one huge first result must not let
+        // the session hold several times it for good. A burst bigger than
+        // the ceiling still drains, with a floor's worth of room for what
+        // follows it.
+        let peak = self.peak.get();
+        let allowed = self
+            .floor
+            .max(peak.saturating_mul(2))
+            .min(self.ceiling.max(peak.saturating_add(self.floor)));
         self.carried.get() <= allowed
     }
 
@@ -2478,6 +2782,8 @@ impl Owner {
             db,
             sessions: HashMap::new(),
             thin: HashMap::new(),
+            limits: egress_limits(),
+            sheds: EgressSheds::default(),
             slice: Rc::default(),
             catalogue,
             app,
@@ -2565,7 +2871,7 @@ impl Owner {
         claims: BTreeMap<String, Value>,
         bundle: Option<jazz::catalogue::BundleId>,
         output: tokio_mpsc::UnboundedSender<Outbound>,
-        egress: Arc<AtomicUsize>,
+        egress: Arc<Egress>,
     ) -> Result<(), jazz::db::Error> {
         let claims = (identity != AuthorSubject::SYSTEM).then(|| {
             self.db.set_identity_claims(identity, claims.clone());
@@ -2574,6 +2880,7 @@ impl Owner {
         let queues = Rc::new(SessionQueues::new(
             Rc::clone(&self.slice),
             Arc::clone(&egress),
+            &self.limits,
         ));
         let subscriber = self.db.accept_pinned_subscriber(
             Box::new(SessionTransport(Rc::clone(&queues))),
@@ -2760,6 +3067,7 @@ impl Owner {
                 continue;
             }
             session.egress.fetch_add(bytes, Ordering::AcqRel);
+            session.queues.clock.handed(bytes);
             if session.output.send((Ok(frames), bytes)).is_err() {
                 gone.push(*id);
             }
@@ -2768,6 +3076,70 @@ impl Owner {
             self.close_session(id);
         }
         self.pump_thin();
+        self.shed_egress();
+    }
+
+    /// Close, with `Backpressure`, the sessions whose client read nothing
+    /// for longer than the slow-reader timeout, then, while all sessions
+    /// together hold more than the server's egress budget, the stalled
+    /// sessions holding the most.
+    fn shed_egress(&mut self) {
+        let now = std::time::Instant::now();
+        let timeout = self.limits.slow_reader_timeout;
+        let mut held: Vec<(ServerSession, usize, bool)> = Vec::new();
+        let mut too_slow = Vec::new();
+        for (id, session) in &self.sessions {
+            let stalled =
+                session
+                    .queues
+                    .clock
+                    .check(&session.egress, now, self.limits.min_read_rate);
+            if stalled.is_some_and(|stalled| stalled > timeout) {
+                too_slow.push(*id);
+            }
+            let stalled_long = stalled.is_some_and(|stalled| stalled >= self.limits.stall_grace);
+            held.push((*id, session.queues.backlog.undrained(), stalled_long));
+        }
+        for (id, thin) in &self.thin {
+            let stalled = thin.stalled_for(now, self.limits.min_read_rate);
+            if stalled.is_some_and(|stalled| stalled > timeout) {
+                too_slow.push(*id);
+            }
+            let stalled_long = stalled.is_some_and(|stalled| stalled >= self.limits.stall_grace);
+            held.push((*id, thin.undrained(), stalled_long));
+        }
+        held.retain(|(id, ..)| !too_slow.contains(id));
+        for session in too_slow {
+            self.shed(session, ShedReason::SlowReader);
+        }
+        for session in sessions_to_shed(held, self.limits.egress_budget_bytes) {
+            self.shed(session, ShedReason::EgressBudget);
+        }
+    }
+
+    /// Tell `session` it is closed for backpressure, and close it.
+    fn shed(&mut self, session: ServerSession, reason: ShedReason) {
+        match reason {
+            ShedReason::SlowReader => self.sheds.slow_reader += 1,
+            ShedReason::EgressBudget => self.sheds.egress_budget += 1,
+        }
+        let error = jazz::db::Error::new(
+            jazz::db::ErrorCode::Backpressure,
+            format!("the client fell behind: {}", reason.message()),
+        );
+        tracing::warn!(
+            %error,
+            reason = reason.as_str(),
+            app = self.app.as_deref().unwrap_or("?"),
+            "closing a session that fell behind"
+        );
+        let wire = session_closed_error(&error);
+        if let Some(owned) = self.sessions.get(&session) {
+            let _ = owned.output.send((Err(wire), 0));
+        } else if let Some(thin) = self.thin.get(&session) {
+            thin.fail(wire);
+        }
+        self.close_session(session);
     }
 }
 
@@ -3157,7 +3529,8 @@ mod tests {
             .map(|_| {
                 Rc::new(SessionQueues::new(
                     Rc::clone(&slice),
-                    Arc::new(AtomicUsize::new(0)),
+                    Arc::new(Egress::default()),
+                    &EgressLimits::default(),
                 ))
             })
             .collect();
@@ -3250,7 +3623,8 @@ mod tests {
             .map(|_| {
                 Rc::new(SessionQueues::new(
                     Rc::clone(slice),
-                    Arc::new(AtomicUsize::new(0)),
+                    Arc::new(Egress::default()),
+                    &EgressLimits::default(),
                 ))
             })
             .collect()
@@ -3476,7 +3850,7 @@ mod tests {
             let room = Arc::new(tokio::sync::Semaphore::new(usize::MAX >> 4));
             let (alice_out, mut alice_rx) = tokio_mpsc::unbounded_channel();
             let (bob_out, _bob_rx) = tokio_mpsc::unbounded_channel();
-            let egress = Arc::new(AtomicUsize::new(0));
+            let egress = Arc::new(Egress::default());
             for (session, output, egress) in [
                 (ServerSession(1), alice_out, Arc::clone(&egress)),
                 (ServerSession(2), bob_out, Arc::default()),
@@ -3656,10 +4030,11 @@ mod tests {
     /// whole however large, and a reader that drains is admitted again.
     #[test]
     fn a_session_that_stops_draining_is_refused_past_its_backlog() {
-        let egress = Arc::new(AtomicUsize::new(0));
+        let egress = Arc::new(Egress::default());
         let queues = Rc::new(SessionQueues::new(
             Rc::new(TickSlice::default()),
             Arc::clone(&egress),
+            &EgressLimits::default(),
         ));
         let mut transport = SessionTransport(Rc::clone(&queues));
         let message = || SyncMessage::Unsubscribe { id: 1 };
@@ -3698,8 +4073,8 @@ mod tests {
     /// it is still within twice that burst.
     #[test]
     fn the_backlog_bound_follows_the_biggest_tick() {
-        let egress = Arc::new(AtomicUsize::new(0));
-        let backlog = Backlog::new(Arc::clone(&egress));
+        let egress = Arc::new(Egress::default());
+        let backlog = Backlog::new(Arc::clone(&egress), &EgressLimits::default());
         backlog.start_tick();
         let burst = 3 * SESSION_BACKLOG_FLOOR;
         backlog.queued(burst);
@@ -3713,6 +4088,150 @@ mod tests {
             !backlog.admits(),
             "past twice the biggest tick it is refused"
         );
+    }
+
+    /// The bound follows the biggest tick only up to the ceiling, or the
+    /// burst plus a floor's worth when that is more: after a first result
+    /// of 200 MiB, a reader that stops draining is refused past 264 MiB,
+    /// not at twice its first result.
+    #[test]
+    fn the_backlog_bound_stops_at_the_ceiling() {
+        let egress = Arc::new(Egress::default());
+        let backlog = Backlog::new(Arc::clone(&egress), &EgressLimits::default());
+        backlog.start_tick();
+        let burst = 200 * 1024 * 1024;
+        backlog.queued(burst);
+        backlog.handed_on(burst);
+        egress.store(burst, Ordering::Release);
+        backlog.start_tick();
+        assert!(backlog.admits(), "the first result is being drained");
+        egress.store(burst + SESSION_BACKLOG_FLOOR + 1, Ordering::Release);
+        backlog.start_tick();
+        assert!(
+            !backlog.admits(),
+            "past the bound it is refused, though under twice its biggest tick"
+        );
+    }
+
+    /// A burst bigger than the ceiling still drains: the session may hold
+    /// it plus a floor's worth of what follows, but no more.
+    #[test]
+    fn a_burst_over_the_ceiling_drains_with_a_floor_of_room() {
+        let egress = Arc::new(Egress::default());
+        let backlog = Backlog::new(Arc::clone(&egress), &EgressLimits::default());
+        backlog.start_tick();
+        let burst = 300 * 1024 * 1024;
+        backlog.queued(burst);
+        backlog.handed_on(burst);
+        egress.store(burst + SESSION_BACKLOG_FLOOR, Ordering::Release);
+        backlog.start_tick();
+        assert!(backlog.admits(), "the burst and a floor's worth after it");
+        egress.store(burst + SESSION_BACKLOG_FLOOR + 1, Ordering::Release);
+        backlog.start_tick();
+        assert!(!backlog.admits());
+    }
+
+    /// Once the burst that raised it has drained, a session's bound is the
+    /// floor again: one huge result does not let it hold more for good.
+    #[test]
+    fn the_bound_drops_back_once_the_burst_has_drained() {
+        let egress = Arc::new(Egress::default());
+        let backlog = Backlog::new(Arc::clone(&egress), &EgressLimits::default());
+        backlog.start_tick();
+        let burst = 200 * 1024 * 1024;
+        backlog.queued(burst);
+        backlog.handed_on(burst);
+        egress.store(burst, Ordering::Release);
+        backlog.start_tick();
+        egress.store(SESSION_BACKLOG_FLOOR + 1, Ordering::Release);
+        backlog.start_tick();
+        assert!(backlog.admits(), "still draining the burst");
+        // Drained under the floor: the burst no longer counts.
+        egress.store(SESSION_BACKLOG_FLOOR - 1, Ordering::Release);
+        backlog.start_tick();
+        egress.store(SESSION_BACKLOG_FLOOR + 1, Ordering::Release);
+        backlog.start_tick();
+        assert!(
+            !backlog.admits(),
+            "past the floor again, with no new burst, it is refused"
+        );
+    }
+
+    /// Over the server's egress budget, the stalled sessions holding the
+    /// most are closed first, only as many as the rest need to fit. A
+    /// session that is reading is never picked, however much it holds.
+    #[test]
+    fn the_egress_budget_sheds_the_biggest_stalled_backlogs_first() {
+        let held = vec![
+            (ServerSession(1), 10, true),
+            (ServerSession(2), 500, true),
+            (ServerSession(3), 40, true),
+            (ServerSession(4), 300, true),
+            (ServerSession(5), 900, false),
+        ];
+        assert_eq!(sessions_to_shed(held.clone(), 2000), Vec::new());
+        assert_eq!(sessions_to_shed(held.clone(), 1300), vec![ServerSession(2)]);
+        assert_eq!(
+            sessions_to_shed(held.clone(), 950),
+            vec![ServerSession(2), ServerSession(4)]
+        );
+        assert_eq!(
+            sessions_to_shed(held, 100),
+            vec![
+                ServerSession(2),
+                ServerSession(4),
+                ServerSession(3),
+                ServerSession(1)
+            ],
+            "the reading session stays, even over budget"
+        );
+    }
+
+    /// While its output waits at the budget, a client is behind by the time
+    /// it read slower than the minimum rate: one reading faster stays at
+    /// zero however much it has left, one that stops or only trickles falls
+    /// behind as time passes, and raw bytes its socket wrote count as
+    /// reading as much as messages taken.
+    #[test]
+    fn the_read_clock_measures_how_far_behind_the_minimum_rate_a_client_is() {
+        let clock = ReadClock::default();
+        let egress = Egress::default();
+        let start = std::time::Instant::now();
+        let at = |secs: u64| start + Duration::from_secs(secs);
+        let full = SESSION_QUEUE_BUDGET;
+        let rate = 1024;
+        let check = |held: usize, secs| {
+            egress.store(held, Ordering::Release);
+            clock.check(&egress, at(secs), rate)
+        };
+        // A slow reader taking 2 KiB a second, refilled: never behind.
+        clock.handed(full);
+        assert_eq!(check(full, 0), Some(Duration::ZERO));
+        for secs in 1..600 {
+            clock.handed(2048);
+            assert_eq!(check(full, secs), Some(Duration::ZERO), "at {secs}s");
+        }
+        // It stops: behind by the time passed.
+        assert_eq!(check(full, 900), Some(Duration::from_secs(301)));
+        // A trickle of 10 bytes a second winds it back by 10 ms a second.
+        for secs in 901..=1000 {
+            clock.handed(10);
+            check(full, secs);
+        }
+        let behind = check(full, 1000).unwrap();
+        assert!(
+            behind > Duration::from_secs(400),
+            "a trickle stays behind: {behind:?}"
+        );
+        // Raw bytes its socket wrote, a large message still going out,
+        // count as reading: 1 MiB is 1024 s at 1 KiB/s.
+        egress.written.fetch_add(1024 * 1024, Ordering::AcqRel);
+        assert_eq!(check(full, 1001), Some(Duration::ZERO));
+        // Under the budget nothing waits on it, and the clock resets: back
+        // at the budget after a long stop, it starts from zero.
+        assert_eq!(check(full, 1300), Some(Duration::from_secs(299)));
+        assert_eq!(check(full - 1, 1301), None);
+        assert_eq!(check(full, 1302), Some(Duration::ZERO));
     }
 
     #[test]
@@ -4231,32 +4750,6 @@ mod tests {
             blob.state.calls.gets.load(Ordering::Relaxed) > 0,
             "read from the store"
         );
-        store.close().unwrap();
-    }
-
-    /// A server's sessions are governed by the bundle they pin: a catalogue
-    /// change that would make a schema current is refused, and the store
-    /// keeps no permissions revision.
-    #[test]
-    fn a_server_refuses_to_make_a_schema_current() {
-        let store = AppStore::memory().unwrap();
-        let runtime = store
-            .start_runtime(schema(), NodeRole::Core, false)
-            .unwrap();
-        let refused = block_on(runtime.apply_catalogue(
-            CatalogueChange {
-                activate: Some((1, schema(), Vec::new())),
-                ..CatalogueChange::default()
-            },
-            None,
-        ))
-        .unwrap_err();
-        assert!(
-            matches!(&refused, CatalogueApplyError::Rejected(message) if message.contains("never makes a schema current")),
-            "{refused:?}"
-        );
-        let rows = block_on(runtime.catalogue()).unwrap();
-        assert!(rows.head().is_none(), "no permissions revision was written");
         store.close().unwrap();
     }
 

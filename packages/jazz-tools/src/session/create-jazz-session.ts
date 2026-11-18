@@ -27,7 +27,17 @@ import {
   type LocalFirstLoader,
   type LocalFirstModule,
 } from "../runtime/local-first-upgrade.js";
-import { createJazzSessionOwner, replaceJazzSessionClient } from "./state.js";
+import {
+  createJazzSessionOwner,
+  notifyJazzSessionClientChanged,
+  replaceJazzSessionClient,
+} from "./state.js";
+import {
+  clearLocalFirstUnavailable,
+  describeLocalFirstFailure,
+  localFirstUnavailableWarning,
+  markLocalFirstUnavailable,
+} from "../runtime/local-first-unavailable.js";
 import {
   coreInitial,
   createStartedJazzSession,
@@ -164,6 +174,7 @@ const BROWSER_SESSION_OPTIONS = {
   telemetryCollectorUrl: true,
   devMode: true,
   slowQueryThresholdMs: true,
+  subscriptionBacklogRows: true,
   store: true,
   fetch: true,
   bearer: true,
@@ -366,8 +377,19 @@ export async function openBrowserSessionCore(
     await replaceJazzSessionClient<JazzClient>(
       session!,
       async (current, account) => {
-        const { createClient } = await loader();
-        const next = await openReplica(createClient, account);
+        let next: JazzClient;
+        try {
+          const { createClient } = await loader();
+          next = await openReplica(createClient, account);
+        } catch (error) {
+          // The session stays on this thin client: say why on its snapshot
+          // (`localFirstUnavailable`), not only in the console.
+          if (session?.getSnapshot().client === current) {
+            markLocalFirstUnavailable(current, describeLocalFirstFailure(error));
+            notifyJazzSessionClientChanged(session);
+          }
+          throw error;
+        }
         try {
           await prefetchThinQueries(current.db, next.db);
           await handOffThinWrites(current.db, next.db);
@@ -378,7 +400,10 @@ export async function openBrowserSessionCore(
         upgraded = account;
         return next;
       },
-      (current, next) => upgradesInPlace.get(current)!(next),
+      (current, next) => {
+        clearLocalFirstUnavailable(current);
+        upgradesInPlace.get(current)!(next);
+      },
     );
     // Only once the session took the new client: a superseded upgrade
     // (a logout or account switch meanwhile) is not remembered.
@@ -401,6 +426,14 @@ export async function openBrowserSessionCore(
     return upgradableClient(thin);
   };
 
+  const openThinBecause = async (account: AccountHandle, error: unknown, generic: string) => {
+    const info = describeLocalFirstFailure(error);
+    console.warn(localFirstUnavailableWarning(info, generic, "starting thin"), error);
+    const client = await openThin(account);
+    markLocalFirstUnavailable(client, info);
+    return client;
+  };
+
   const openClient = async (account: AccountHandle) => {
     if (loadLocalFirst && (localFirst === "now" || upgrades.has(account))) {
       let module: LocalFirstModule;
@@ -413,8 +446,11 @@ export async function openBrowserSessionCore(
         // A chunk that no longer loads (renamed by a deploy, or the network)
         // costs the app its offline start, not the session: it runs thin,
         // and the background upgrade tries the loader again.
-        console.warn("Jazz could not load the local-first client; starting thin.", error);
-        return openThin(account);
+        return openThinBecause(
+          account,
+          error,
+          "Jazz could not load the local-first client; starting thin.",
+        );
       }
       return openReplica(module.createClient, account);
     }
@@ -620,7 +656,14 @@ function upgradeInBackground(session: BrowserJazzSession, loader: LocalFirstLoad
       if (session.getSnapshot().client !== client) return;
       return client.db.upgradeToLocalFirst(loader).catch((error: unknown) => {
         if (session.getSnapshot().client !== client) return;
-        console.warn("Jazz could not upgrade to the local-first client; staying thin.", error);
+        console.warn(
+          localFirstUnavailableWarning(
+            describeLocalFirstFailure(error),
+            "Jazz could not upgrade to the local-first client; staying thin.",
+            "staying thin",
+          ),
+          error,
+        );
       });
     });
   };

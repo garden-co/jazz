@@ -156,7 +156,10 @@ Not yet: deleting a session account's store through its handle (refused).
 - `watch_mutation_errors(listener)` / `jazz_watch(h, "mutationErrors", …)`:
   each write the server refused that no durable wait (a `global` tier,
   `wait_for_sync`) reported, as TS's `onMutationError`:
-  `{"transaction", "message", "denied", "serializable"}`. Refusals from
+  `{"transaction", "message", "code", "reason", "denied", "serializable"}`,
+  where `code` and `reason` are TS's `MutationErrorEvent`'s (`code`:
+  `permission_denied`, `serialization_conflict`, `transaction_conflict`,
+  `client_clock_too_far_ahead` or `write_rejected`). Refusals from
   before the first watch come first.
 - Every watch (session, sync, mutation errors) ends when the app closes,
   whichever way (`shutdown`, `sign_out`, `delete_client_storage`): a last

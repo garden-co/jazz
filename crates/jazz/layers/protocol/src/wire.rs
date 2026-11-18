@@ -59,6 +59,13 @@ pub const FEATURE_HEARTBEAT: WireFeatures = 1 << 11;
 /// whose reads name their views (`WireKind::SerializableViews` in the sync
 /// layer) only over a link that negotiated this (jazz#5806).
 pub const FEATURE_SERIALIZABLE_BRANCH_READS: WireFeatures = 1 << 12;
+/// The peer decodes and serves the text prefix/suffix predicates
+/// (`Predicate::StartsWith`/`EndsWith`, Postcard tags 13/14, and
+/// `RelationPredicate::StartsWith`/`EndsWith`, tags 11/12). A peer without
+/// it cannot decode a message holding one and drops the link, so a client
+/// sends a read or commit using them only over a link that negotiated this,
+/// and refuses it locally otherwise.
+pub const FEATURE_TEXT_AFFIX_PREDICATES: WireFeatures = 1 << 13;
 
 /// Bitset of optional protocol features advertised by one peer.
 pub type WireFeatures = u64;
@@ -840,6 +847,7 @@ pub fn current_wire_features() -> WireFeatures {
     FEATURE_AUTHORIZATION_SCOPE_VIEWS
         | FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
         | FEATURE_SERIALIZABLE_BRANCH_READS
+        | FEATURE_TEXT_AFFIX_PREDICATES
         | runtime_transport_compression_features()
 }
 

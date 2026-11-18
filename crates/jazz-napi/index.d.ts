@@ -17,7 +17,17 @@ export type E2eeSodiumStream = E2EeSodiumStream
 
 export declare class JazzCore {
   /** Open the core's storage and serve it in this process. */
-  static open(options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: "files" | "s3" | "sqlite"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; telemetryCollectorUrl?: string }): Promise<JazzCore>
+  static open(options: { appId?: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: "files" | "s3" | "sqlite"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; telemetryCollectorUrl?: string }): Promise<JazzCore>
+  /**
+   * The app this core serves: the one its store keeps, or the one it was
+   * opened with in memory.
+   */
+  get appId(): string
+  /**
+   * The secret a backend signs agent tokens with, kept in
+   * `<dataDir>/inspect-token-secret` (`null` in memory).
+   */
+  get tokenSecret(): string | null
   /**
    * Route one HTTP request. `url` is the path and query, as the core's
    * router sees them (`/apps/<appId>/...` or `/health`).
@@ -204,6 +214,12 @@ export declare class NapiDb {
    */
   setSlowQueryThresholdMs(ms: number): void
   /**
+   * Coalesce a subscription's undelivered deltas past `rows` changed
+   * rows (default 10000, at least 1) into one reset of its current
+   * result.
+   */
+  setSubscriptionBacklogRows(rows: number): void
+  /**
    * Connect to the server over byte frames the host carries: each frame
    * is one postcard `SyncMessage`.
    */
@@ -226,6 +242,18 @@ export declare class NapiDb {
    * or below `high_water` is reused.
    */
   seedForegroundTxTimeHighWater(highWater: bigint): void
+  /**
+   * Serve one of a thin session's transaction requests (SPEC 8.14), as
+   * the backend's client linked to the core as that session: `request`
+   * is the request's wire frame, the answer the response's. A commit
+   * answers once the core accepted it. One request at a time.
+   */
+  serveThinTransaction(request: Uint8Array): Uint8Array | PendingNativeRead
+  /**
+   * End the thin session's open transactions and uploads: nothing of
+   * them reached the core.
+   */
+  releaseThinTransactions(): Uint8Array | PendingNativeRead
   /** Capture a snapshot reference, as its persisted string's bytes. */
   captureSnapshot(): Uint8Array | PendingNativeRead
   /**
@@ -241,6 +269,52 @@ export declare class NapiDb {
    */
   waitForSync(tier: string, writer?: Uint8Array | undefined | null): Uint8Array | PendingNativeRead
   close(): Promise<undefined>
+}
+
+/**
+ * One thin connection's frames split between the core and the session's
+ * backend, in the client's order (SPEC 8.14; `jazz::thin_transactions::
+ * ThinRouter`). Messages are WebSocket messages (frame batches).
+ */
+export declare class NapiThinRouter {
+  constructor()
+  /**
+   * Take one client message. Throws when it does not decode: the
+   * connection is broken.
+   */
+  fromClient(message: Uint8Array): void
+  /**
+   * Note one message the core sent the client: whether it answered a
+   * request sent to the core.
+   */
+  fromCore(message: Uint8Array): boolean
+  /**
+   * Note the backend's answer (a response frame, as
+   * `serveThinTransaction` gives it), and return the messages that carry
+   * it to the client.
+   */
+  answer(answer: Uint8Array): Array<Uint8Array>
+  /**
+   * Answer backend request `id` with an error the backend gave in its
+   * place (`code`, `message`): a request it stopped waiting for, or one
+   * it could not serve. Returns the messages that carry it to the client.
+   */
+  refuse(id: number, code: string, message: string): Array<Uint8Array>
+  /**
+   * Whether a client's Hello (its first message after the prelude) asks
+   * for thin results: a thin client, whose transactions its backend
+   * serves.
+   */
+  static asksThinResults(message: Uint8Array): boolean
+  /** What may go now, in order. */
+  ready(): Array<ThinStep>
+  /**
+   * The public schema JSON the client bound the connection to, once it
+   * did.
+   */
+  schema(): Uint8Array | null
+  /** Whether something routed waits on an answer that has not come. */
+  isWaiting(): boolean
 }
 
 /**
@@ -425,6 +499,16 @@ export interface DeleteOptions {
   base?: JsonValue
   updatedAtMs?: number
 }
+
+/**
+ * Make the stopped store in `dataDir` a store of its own: it forgets its
+ * store id and where its large values live, so its next start claims a
+ * chunk directory or bucket prefix of its own instead of the original's,
+ * and its agent-token secret, so the original's tokens don't open it. For
+ * a copy of a store (a staging copy of a backup) opened next to the
+ * original. It keeps the app id: the copy serves the same app.
+ */
+export declare function detachStore(dataDir: string): void
 
 /** Options of [`generate_for_dir`] and [`migrations_create_for_dir`]. */
 export interface DirOptions {
@@ -648,6 +732,13 @@ export declare function schemaSourceHash(appJson: string): string
  */
 export declare function serveCore(options: { appId: string; port: number; dataDir: string; blobs: { kind: "sqlite" } | { kind: "files"; dir?: string } | { kind: "s3"; bucket?: string; region?: string; endpoint?: string; prefix?: string; roleFromWorkload?: boolean; environment?: string } | { kind: "vercel-blob"; storeId?: string; prefix?: string; tokenFromWorkload?: boolean; environment?: string }; trustedWorkload?: { issuer: string; audience: string; subject: string }; backendSecret?: string; adminSecret?: string; shutdownTimeoutSecs?: number; maxConnections?: number; memoryLimitBytes?: number }): ServedCore
 
+/**
+ * Make the stopped store in `dataDir` serve `appId` from its next start. A
+ * store refuses any app but the one it was first opened for; this is the
+ * way to change it (a wrong first `--app-id`, or a renamed app).
+ */
+export declare function setStoreAppId(dataDir: string, appId: string): void
+
 /** Owned libsodium device encryption keys. */
 export interface SodiumDeviceKeyPair {
   publicKey: Uint8Array
@@ -680,6 +771,11 @@ export interface SubscriptionClosedEvent {
 export interface SubscriptionDeltaEvent {
   type: 'delta'
   reset: boolean
+  /**
+   * A reset standing for deltas the reader fell too far behind to be
+   * told one by one (its backlog passed its limit).
+   */
+  coalesced: boolean
   delta: Uint8Array
   /** Always empty: SQLite subscriptions deliver whole-row deltas. */
   terminalOperations: Array<never>
@@ -705,6 +801,19 @@ export interface SubscriptionServerFailureReason {
    * thrown core error's `code`.
    */
   errorCode: string
+}
+
+/**
+ * One step a [`NapiThinRouter`] releases: a message for the core, or a
+ * request frame for the backend's client (`serveThinTransaction`).
+ */
+export interface ThinStep {
+  core?: Uint8Array
+  backend?: Uint8Array
+  /** The backend request's id. */
+  id?: number
+  /** Whether the backend request is a commit. */
+  commit?: boolean
 }
 
 export interface UpdateOptions {

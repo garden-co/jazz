@@ -88,6 +88,71 @@ export function isSocketDropWireError(error: WireError): boolean {
   );
 }
 
+const KNOWN_WIRE_ERROR_CODES = new Set([
+  "unsupported_protocol_version",
+  "unsupported_feature",
+  "malformed_frame",
+  "auth_failed",
+  "backpressure",
+  "internal",
+  "not_ready",
+]);
+const KNOWN_WIRE_RETRIES = new Set(["never", "after_auth", "after_resume", "later"]);
+
+/** How an upstream link treats a connection's end (`LinkFailure` in Rust). */
+export type WireLinkFailureKind =
+  | "network"
+  | "refused"
+  | "serverNotReady"
+  | "authRejected"
+  | "fatal"
+  | "reauthenticate";
+
+/**
+ * How a link classifies the `error` a connection ended with, for hosts that
+ * cannot call the Rust link (the thin client). Rust decides this
+ * (`LinkFailure::from_wire_error`); this copy is held to the same table
+ * (`crates/jazz/layers/db/fixtures/link_wire_failure_v1.json`). Decided by
+ * `code`, never by `retry` alone: a malformed frame or a refused credential
+ * can carry `later`. A code or retry this client does not know came from a
+ * newer server: a refusal, retried, never a stop.
+ */
+export function classifyWireLinkFailure(error: WireError, admitted: boolean): WireLinkFailureKind {
+  if (isSocketDropWireError(error)) return "network";
+  if (isLocalProtocolWireError(error)) return "fatal";
+  // A code or retry from a newer server, even on `auth_failed`: native
+  // clients cannot decode it at all and retry it, so every host does.
+  if (!KNOWN_WIRE_ERROR_CODES.has(error.code) || !KNOWN_WIRE_RETRIES.has(error.retry)) {
+    return "refused";
+  }
+  if (error.code === "auth_failed") {
+    return isReauthenticateWireError(error) ? "reauthenticate" : "authRejected";
+  }
+  // `internal` with `later`: a runtime that cannot serve the session now.
+  if (isReconnectLaterWireError(error) || (error.code === "internal" && error.retry === "later")) {
+    if (admitted) return "network";
+    return error.code === "not_ready" ? "serverNotReady" : "refused";
+  }
+  return "fatal";
+}
+
+/**
+ * Whether the carrier itself ended the link for good: it could not handle
+ * what the server sent (`protocol_error`), or its socket ended in a way it
+ * does not retry (a `websocket_*` code without `later`). These are the
+ * carrier's codes, not a server's, so the link never sees them as unknown
+ * server codes: they stop the link.
+ */
+export function isLocalProtocolWireError(error: WireError): boolean {
+  if (error.code === "protocol_error") return true;
+  return (
+    (error.code === "websocket_closed" ||
+      error.code === "websocket_error" ||
+      error.code === "websocket_silent") &&
+    !isSocketDropWireError(error)
+  );
+}
+
 export function isRetryablePreHelloWireError(error: unknown): error is PreHelloWireError {
   return error instanceof PreHelloWireError && isReconnectLaterWireError(error.wireError);
 }
@@ -176,11 +241,19 @@ const WIRE_FRAME_HEARTBEAT = 7;
  * upstream rather than have it validated against the wrong rows (jazz#5806).
  */
 export const FEATURE_SERIALIZABLE_BRANCH_READS = 1 << 12;
+/**
+ * `FEATURE_TEXT_AFFIX_PREDICATES` in `crates/jazz/layers/protocol/src/wire.rs`:
+ * the server decodes the text prefix/suffix query predicates. Without it, the
+ * core refuses a read or commit using them rather than send what an older
+ * server cannot decode (and would drop the link over).
+ */
+export const FEATURE_TEXT_AFFIX_PREDICATES = 1 << 13;
 export const CLIENT_WIRE_FEATURES =
   FEATURE_PAYLOAD_ZSTD |
   FEATURE_AUTHORIZATION_SCOPE_VIEWS |
   FEATURE_AUXILIARY_CHUNKS |
-  FEATURE_SERIALIZABLE_BRANCH_READS;
+  FEATURE_SERIALIZABLE_BRANCH_READS |
+  FEATURE_TEXT_AFFIX_PREDICATES;
 
 // The server route accepts WebSocket messages up to one MiB. Reserve enough
 // postcard framing bytes that a burst of otherwise-valid wire frames remains
@@ -328,9 +401,24 @@ export class WebSocketCarrier {
   private resolveNegotiation!: (value: WebSocketNegotiation) => void;
   private rejectNegotiation!: (reason: unknown) => void;
   private negotiated = false;
+  /** Whether the prelude and Hello went out, after which frames may follow. */
+  private helloSent = false;
+  /** Frames sent ahead before the Hello went out, oldest first (`sendAhead`). */
+  private ahead: (readonly Uint8Array[])[] = [];
   private closing = false;
   private terminated = false;
   private lastInbound = performance.now();
+  /** Messages received whose handling hasn't finished yet. */
+  private handlingMessages = 0;
+  /**
+   * A socket's error and close that came while messages were still being
+   * handled, reported once the last of them is: the HTTP stream hands a
+   * backend's last message and its close over in one read, and a refusal
+   * (`auth_failed`, say after `jazz.revokeUser`) read after the close would
+   * count as a dropped connection, retried for good. With no message being
+   * handled, they are reported at once, from the event itself.
+   */
+  private afterMessages: Array<() => void> = [];
   private silenceTimer: ReturnType<typeof setTimeout> | undefined;
   private handshakeTimer: ReturnType<typeof setTimeout> | undefined;
   /** Where to renew this session in place, when it rides on the app's cookie. */
@@ -366,6 +454,8 @@ export class WebSocketCarrier {
           ),
         );
         this.socket.send(encodeWebSocketFrameBatch([encodeWireClientHello(this.localFeatures)]));
+        this.helloSent = true;
+        for (const frames of this.ahead.splice(0)) this.write(frames);
       },
       (error) => {
         this.reportTerminal({
@@ -376,37 +466,52 @@ export class WebSocketCarrier {
         this.close();
       },
     );
+    const reportAfterMessages = (run: () => void) => {
+      if (this.handlingMessages === 0) run();
+      else this.afterMessages.push(run);
+    };
     this.socket.addEventListener("message", (event) => {
       this.lastInbound = performance.now();
-      void this.handleMessage(event.data).catch((error) => {
-        this.reportTerminal(
-          {
-            code: "protocol_error",
-            retry: "never",
-            message: error instanceof Error ? error.message : String(error),
-          },
-          undefined,
-          false,
-        );
-        this.close();
-      });
+      this.handlingMessages += 1;
+      void this.handleMessage(event.data)
+        .catch((error) => {
+          this.reportTerminal(
+            {
+              code: "protocol_error",
+              retry: "never",
+              message: error instanceof Error ? error.message : String(error),
+            },
+            undefined,
+            false,
+          );
+          this.close();
+        })
+        .finally(() => {
+          this.handlingMessages -= 1;
+          if (this.handlingMessages > 0) return;
+          for (const run of this.afterMessages.splice(0)) run();
+        });
     });
-    this.socket.addEventListener("error", (event) => {
-      this.reportTerminal({
-        code: "websocket_error",
-        retry: "later",
-        // A native socket's error event says nothing; the HTTP stream and a
-        // backend client's failed upgrade hand an Error that does.
-        message: event instanceof Error ? event.message : "websocket transport error",
-      });
-    });
+    this.socket.addEventListener("error", (event) =>
+      reportAfterMessages(() =>
+        this.reportTerminal({
+          code: "websocket_error",
+          retry: "later",
+          // A native socket's error event says nothing; the HTTP stream and a
+          // backend client's failed upgrade hand an Error that does.
+          message: event instanceof Error ? event.message : "websocket transport error",
+        }),
+      ),
+    );
     this.socket.addEventListener("close", (event) => {
       const close = websocketCloseDetails(event);
-      this.reportTerminal({
-        code: "websocket_closed",
-        retry: "later",
-        message: `websocket closed (code=${close.code ?? "unknown"}, reason=${close.reason ?? "none"})`,
-      });
+      reportAfterMessages(() =>
+        this.reportTerminal({
+          code: "websocket_closed",
+          retry: "later",
+          message: `websocket closed (code=${close.code ?? "unknown"}, reason=${close.reason ?? "none"})`,
+        }),
+      );
     });
   }
 
@@ -416,6 +521,27 @@ export class WebSocketCarrier {
 
   async sendBatch(frames: readonly Uint8Array[]): Promise<void> {
     await this.ready();
+    this.write(frames);
+  }
+
+  /**
+   * Send `frames` right behind this connection's `Hello`, without waiting
+   * for the server's: the server reads nothing past a client's `Hello`
+   * until it admitted the connection and said hello itself, then reads on
+   * in order, and a connection it refuses never reads them (SPEC §8.1.2).
+   * Frames sent ahead go out in the order of the calls, also once
+   * negotiated (a `sendBatch` waiting for the server's `Hello` may go out
+   * after them). On a connection that closes before its `Hello` went out,
+   * they are dropped.
+   */
+  sendAhead(frames: readonly Uint8Array[]): void {
+    if (this.closing || this.terminated) return;
+    if (this.helloSent) this.write(frames);
+    else this.ahead.push(frames);
+  }
+
+  /** Write `frames` to the socket, in as few batches as the limits allow. */
+  private write(frames: readonly Uint8Array[]): void {
     let batch: Uint8Array[] = [];
     let batchBytes = POSTCARD_BATCH_LENGTH_RESERVE;
     for (const frame of frames) {
@@ -448,6 +574,7 @@ export class WebSocketCarrier {
   close(): void {
     if (this.closing) return;
     this.closing = true;
+    this.ahead = [];
     clearTimeout(this.silenceTimer);
     clearTimeout(this.handshakeTimer);
     clearTimeout(this.renewalTimer);
@@ -1001,7 +1128,9 @@ function wireErrorCodeName(tag: number): string {
     case 6:
       return "not_ready";
     default:
-      throw new Error(`unknown WireErrorCode discriminant ${tag}`);
+      // A code from a newer server: still the server's refusal, which the
+      // link retries rather than a frame it failed to read.
+      return `unknown:${tag}`;
   }
 }
 
@@ -1016,7 +1145,7 @@ function wireRetryName(tag: number): string {
     case 3:
       return "later";
     default:
-      throw new Error(`unknown WireRetry discriminant ${tag}`);
+      return `unknown:${tag}`;
   }
 }
 

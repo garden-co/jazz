@@ -19,6 +19,7 @@ export {
 export type {
   JazzSession,
   JazzSessionSnapshot,
+  JazzSessionErrorViewProps,
   JazzSessionOperation,
   JazzUser,
 } from "../session/jazz-session.js";
