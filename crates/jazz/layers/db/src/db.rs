@@ -1638,6 +1638,18 @@ pub trait AccountRegistryView {
         &self,
         account: jazz_types::account_registry::AccountId,
     ) -> Result<Option<bool>, String>;
+
+    /// Whether `account` was founded by a local-first identity for another
+    /// audience than the app's own, whose accounts an encrypting app does
+    /// not serve: with no record of which namespace founded it, such an
+    /// account's kind (E2EE protocol R6) and reset rights (R5) cannot be
+    /// told, so no account record is accepted for it. False by default.
+    fn founded_for_another_audience(
+        &self,
+        _account: jazz_types::account_registry::AccountId,
+    ) -> Result<bool, String> {
+        Ok(false)
+    }
 }
 
 /// A write that would change or remove a row of a system table, which no
@@ -7369,6 +7381,13 @@ impl Inner {
         let Some(account) = check.author.account_id() else {
             return Ok(false);
         };
+        if let Some(registry) = &self.account_registry
+            && registry
+                .founded_for_another_audience(account)
+                .map_err(|error| Error::new(ErrorCode::Storage, error))?
+        {
+            return Ok(false);
+        }
         let local_first_session =
             check.author.principal_parts().0 == jazz_types::identity::DEVICE_ACCOUNT_ISSUER;
         // A store without the account, or without a registry, has no

@@ -520,6 +520,17 @@ Account and device tables (fixed policies):
   is `local-first` exactly when the account was founded by a local-first
   identity (Jazz's account registry); an account founded otherwise writes
   `app` roots.
+  An encrypting app serves local-first accounts founded for its own app id
+  only. A local-first identity's account ID derives from the audience its
+  proof names (§2.3), which may be another than the app's, and the registry
+  keeps no record of which one founded an account, so such an account could
+  not be told from the app's own. The server therefore refuses to found one
+  for an app that encrypts (`found-local-first`, and a guest's first
+  admission), and accepts no identity or root (R5, R6) for an account whose
+  identities are all local-first and none of which derives its ID in the
+  app's namespace: neither a `local-first` nor an `app` root, so neither a
+  bootstrap nor a reset. An account with an external identity is not told
+  apart from one the app founded.
 - R7. Challenges, proofs, approvals, device deliveries: insert by `$createdBy`
   only, referencing a request or challenge of the same account; read by
   creator.

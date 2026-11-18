@@ -2037,3 +2037,55 @@ fn a_member_leaves_over_sync_from_a_later_fragment() {
         .unwrap();
     world.delete(bob(), MEMBERS, bobs).expect("a member leaves");
 }
+
+/// The account registry as a test sets it for an encrypting app: which
+/// accounts the app's own namespace founded, and which another audience did.
+struct Namespaces {
+    own: Vec<jazz::account_registry::AccountId>,
+    other: Vec<jazz::account_registry::AccountId>,
+}
+
+impl jazz::db::AccountRegistryView for Namespaces {
+    fn founded_local_first(
+        &self,
+        account: jazz::account_registry::AccountId,
+    ) -> Result<Option<bool>, String> {
+        Ok(Some(self.own.contains(&account)))
+    }
+
+    fn founded_for_another_audience(
+        &self,
+        account: jazz::account_registry::AccountId,
+    ) -> Result<bool, String> {
+        Ok(self.other.contains(&account))
+    }
+}
+
+/// An encrypting app serves local-first accounts founded for its own app id
+/// only (R5, R6): for an account founded for another audience, neither an
+/// honest `local-first` root nor an `app` one is accepted. The app's own
+/// local-first accounts and app-founded accounts still bootstrap.
+#[test]
+fn an_account_founded_for_another_audience_cannot_bootstrap() {
+    let world = World::new();
+    world
+        .server
+        .set_account_registry(std::rc::Rc::new(Namespaces {
+            own: vec![bob().account_id().unwrap()],
+            other: vec![alice().account_id().unwrap()],
+        }));
+    let device = world.device(alice());
+    for kind in ["local-first", "app"] {
+        world
+            .identity(alice(), device, 0, kind)
+            .expect_err("no root of either kind for an account of another audience");
+    }
+    let device = world.device(bob());
+    world
+        .identity(bob(), device, 0, "local-first")
+        .expect("an account the app's own audience founded");
+    let device = world.device(carol());
+    world
+        .identity(carol(), device, 0, "app")
+        .expect("an app-founded account");
+}
