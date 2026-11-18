@@ -47,6 +47,31 @@ impl std::ops::Deref for Store {
     }
 }
 
+impl Store {
+    /// The store reopened under `schema` on `node`, shipping `lenses`: how
+    /// a deployment installs a schema (see [`common::reinstall`]).
+    pub(crate) fn reinstall(
+        self,
+        schema: JazzSchema,
+        node: u8,
+        lenses: Vec<MigrationLens>,
+    ) -> Store {
+        let path = self._dir.path().join("store.sqlite");
+        let Store { db, _dir } = self;
+        let config = DbConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        );
+        Store {
+            db: common::reinstall(db, &path, config, lenses),
+            _dir,
+        }
+    }
+}
+
 pub(crate) fn open(schema: JazzSchema, node: u8) -> Store {
     open_as(schema, node, AuthorSubject::SYSTEM)
 }
@@ -975,19 +1000,19 @@ fn comments_lens(from: &JazzSchema, to: &JazzSchema, ops: Vec<LensOp>) -> Migrat
     .unwrap()
 }
 
-/// F6. Stored names change on a schema reset: after `post` is renamed away
-/// and a new `post` is added (a stored column of its own), the live
-/// relation `comments WHERE post = posts.id` correlates on the new stored
-/// column, so filters are rebuilt with the watches.
+/// F6. Stored names change when the store reopens under a new schema:
+/// after `post` is renamed away and a new `post` is added (a stored column
+/// of its own), the relation `comments WHERE post = posts.id` correlates
+/// on the new stored column.
 ///
 /// ```
-/// v1: comments.post ──rename to old_post, add a new post──► v3
-/// alice: posts, comments by post (re-read under each version)
+/// v1: comments.post ──rename to old_post, add a new post──► reopen as v3
+/// alice: posts, comments by post (subscribed under each version)
 /// writer ──insert comment(post = P1) under v3──► P1.comments gains it
 /// ```
 #[test]
 fn f6_filters_follow_stored_names_across_a_schema_reset() {
-    let db = open(posts_v1(), 1);
+    let mut db = open(posts_v1(), 1);
     let post = |n| id(CHATS, n);
     let comment = |n| id(MESSAGES, n);
     for n in 1..=2 {
@@ -1024,17 +1049,17 @@ fn f6_filters_follow_stored_names_across_a_schema_reset() {
             to: "old_post".into(),
         }],
     );
-    block_on(db.activate_schema_with_lenses(posts_v3(), &[rename])).unwrap();
-    // The live result is re-read under v3, where `post` names another
-    // stored column; a fresh subscription under v3 runs beside it.
-    lives.push(subscribe(
+    drop(lives);
+    db = db.reinstall(posts_v3(), 1, vec![rename]);
+    // Under v3 `post` names another stored column.
+    let mut lives = vec![subscribe(
         &db,
         "posts with comments under v3",
         Query::from("posts")
             .array_subquery(ArraySubquery::new("comments", "comments", "post", "id")),
         None,
-    ));
-    check(&db, &mut lives, "activate v3");
+    )];
+    check(&db, &mut lives, "reopen as v3");
     // The old column names a post outside the result from here on, so
     // only the new column can tie these comments to a held post.
     update(&db, "comments", comment(1), &[("old_post", uuid(post(9)))]);
@@ -1091,7 +1116,7 @@ fn kinds_schema(variants: &[&str]) -> JazzSchema {
 /// ```
 #[test]
 fn f6_enum_correlations_compare_as_stored() {
-    let db = open(kinds_schema(&["a", "b"]), 1);
+    let mut db = open(kinds_schema(&["a", "b"]), 1);
     insert(&db, "labels", id(1, 1), &[("kind", text("a"))]);
     insert(&db, "labels", id(1, 2), &[("kind", text("b"))]);
     let query = || {
@@ -1115,7 +1140,8 @@ fn f6_enum_correlations_compare_as_stored() {
         Vec::new(),
     )
     .unwrap();
-    block_on(db.activate_schema_with_lenses(wider, &[lens])).unwrap();
+    drop(lives);
+    db = db.reinstall(wider, 1, vec![lens]);
     let mut lives = vec![subscribe(
         &db,
         "labels with items, wider enum",

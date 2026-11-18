@@ -3,7 +3,7 @@ import { schema as s } from "jazz-tools";
 const role = () => s.enum("viewer", "editor");
 
 export const schema = s.defineSchema({
-  // A display name for an anonymous local-first account, so members and file
+  // A display name for an anonymous device account, so members and file
   // owners read as people rather than account ids. The row id is the account
   // id, so each account has exactly one profile. The reverse relations let
   // permissions show a name only to the other side of a membership.

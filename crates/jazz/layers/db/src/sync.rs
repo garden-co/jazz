@@ -7529,14 +7529,14 @@ impl Inner {
     /// its transactions before it sends them, and builds on its commits
     /// under its own claims.
     ///
-    /// The node moves with its account's sign-in: a local-first guest that
+    /// The node moves with its account's sign-in: a device account that
     /// signs up keeps its account and its store, and so its node, and goes on
     /// writing under the principal the app's backend names; later the same
     /// account may sign in another way (another issuer, or an identity the
     /// backend linked). The first commit as the node by another signed-in
     /// principal of the same account takes the node over, and from then on
     /// only that principal writes as it, until another one takes it over.
-    /// A local-first principal never takes a node over, so a guest's key
+    /// A device-account principal never takes a node over, so a guest's key
     /// (unexpired, or leaked) no longer writes as its node once the account
     /// has signed in.
     pub(crate) fn claim_node(
@@ -7581,7 +7581,7 @@ impl Inner {
             return Ok(false);
         };
         if account == jazz_types::account_registry::SYSTEM_ACCOUNT_ID
-            || identity.principal_parts().0 == jazz_types::identity::LOCAL_FIRST_ISSUER
+            || identity.principal_parts().0 == jazz_types::identity::DEVICE_ACCOUNT_ISSUER
         {
             return Ok(false);
         }
