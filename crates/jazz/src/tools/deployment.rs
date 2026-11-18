@@ -218,6 +218,33 @@ fn structural(mut schema: Schema) -> Schema {
     schema
 }
 
+/// No lens renames a table to or from a system table's name. Core finds a
+/// system table by the name the admitted versions give it, which stays
+/// fixed across versions: a rename would give an older version's uploads
+/// another name than the newest version's, and skip the checks beside the
+/// system tables' policies.
+fn check_system_table_lenses(migrations: &[Lens]) -> Result<(), DeploymentError> {
+    for lens in migrations {
+        for op in &lens.forward.ops {
+            if let LensOp::RenameTable { old_name, new_name } = op
+                && let Some(name) = [old_name, new_name]
+                    .into_iter()
+                    .find(|name| artifact::system_tables::is_system_table(name))
+            {
+                return Err(DeploymentError::InvalidMigration {
+                    from: lens.source_hash,
+                    to: lens.target_hash,
+                    reason: format!(
+                        "{name} is one of Jazz's system tables, which keep their names in every \
+                         version: a migration may not rename a table to or from one"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The deploy's rules for Jazz's system tables, which a server checks
 /// before [`prepare_deployment`]: each submitted schema has all of them,
 /// exactly as Jazz defines them, or none, and no app table references
@@ -279,6 +306,7 @@ fn prepare(
     mut request: DeploymentRequest,
     encryption: Option<&artifact::DeclaredEncryption>,
 ) -> Result<(PreparedDeployment, Vec<String>), DeploymentError> {
+    check_system_table_lenses(&request.migrations)?;
     let mut schemas = BTreeMap::new();
     for schema in &stored.schemas {
         schemas.insert(SchemaHash::compute(schema).0, structural(schema.clone()));

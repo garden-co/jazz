@@ -1119,6 +1119,22 @@ impl Names {
         // version this store admitted, as every store picks it (see
         // `migration_path`); else the base.
         into.sort_by_key(|lens| lens.source);
+        // A system table keeps its name in every version: core finds it by
+        // the name the admitted versions give it, so a lens that renamed one
+        // would give an older version's uploads another name.
+        for lens in &into {
+            if let Some(table) = lens.table_lenses().iter().find(|table| {
+                table.source_table != table.target_table
+                    && [&table.source_table, &table.target_table]
+                        .into_iter()
+                        .any(|name| jazz_model::schema::is_system_table(name))
+            }) {
+                return Err(schema_error(format!(
+                    "a lens renames `{}` to `{}`, but Jazz's system tables keep their names in every version",
+                    table.source_table, table.target_table
+                )));
+            }
+        }
         self.lenses_agree(schema, &into)?;
         let lens = into
             .iter()

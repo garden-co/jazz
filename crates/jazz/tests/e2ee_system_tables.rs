@@ -1194,6 +1194,96 @@ fn deployment_accepts_only_jazzs_own_system_tables() {
     );
 }
 
+/// Core finds a system table by the name the admitted versions give it, so a
+/// migration that renames a table to or from a system table's name is
+/// refused at deploy: it would give an older version's uploads another name
+/// than the newest version's.
+///
+/// ```text
+/// v1: __e2ee_members  ──RenameTable──►  v2: members_old   ✗
+/// v1: old_members     ──RenameTable──►  v2: __e2ee_members ✗
+/// ```
+#[test]
+fn a_migration_may_not_rename_a_table_to_or_from_a_system_table() {
+    use jazz::tools::{Lens, LensOp, LensTransform};
+    let structural = |mut schema: Schema| {
+        for table in schema.values_mut() {
+            table.policies = TablePolicies::default();
+        }
+        schema
+    };
+    let fragment = structural(with_e2ee_fragment(&app()));
+    let plain = |table: &str| {
+        let mut schema = structural(app());
+        schema.insert(
+            TableName::from(table),
+            TableSchemaBuilder::new(table)
+                .column("body", ColumnType::Text)
+                .build(),
+        );
+        schema
+    };
+    let try_rename = |from_schema: Schema, to_schema: Schema, old: &str, new: &str| {
+        let (from, to) = (
+            SchemaHash::compute(&from_schema),
+            SchemaHash::compute(&to_schema),
+        );
+        let declares = |schema: &Schema| schema.contains_key(&TableName::from(MEMBERS));
+        let versions = [(from, &from_schema), (to, &to_schema)]
+            .into_iter()
+            .filter(|(_, schema)| declares(schema))
+            .map(|(hash, _)| (hash.to_string(), entries()))
+            .collect();
+        prepare_encrypted_deployment(
+            &DeploymentCatalogue::default(),
+            DeploymentRequest {
+                target_schema_hash: to,
+                schemas: vec![(from, from_schema), (to, to_schema)],
+                migrations: vec![Lens::new(
+                    from,
+                    to,
+                    LensTransform {
+                        ops: vec![LensOp::RenameTable {
+                            old_name: old.to_owned(),
+                            new_name: new.to_owned(),
+                        }],
+                        draft_ops: Vec::new(),
+                    },
+                )],
+                permissions: app_permissions(),
+                allow_dropping_history: false,
+            },
+            &DeclaredEncryption {
+                versions,
+                ..Default::default()
+            },
+        )
+    };
+    for (from, to, old, new) in [
+        (
+            fragment.clone(),
+            plain("members_old"),
+            MEMBERS,
+            "members_old",
+        ),
+        (
+            plain("old_members"),
+            fragment.clone(),
+            "old_members",
+            MEMBERS,
+        ),
+    ] {
+        let error = try_rename(from, to, old, new).expect_err("a rename of a system table");
+        assert!(
+            matches!(error, DeploymentError::InvalidMigration { .. })
+                && error
+                    .to_string()
+                    .contains("may not rename a table to or from"),
+            "{error}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Each derived rule, one by one (protocol R3–R15)
 // ---------------------------------------------------------------------------
@@ -2222,4 +2312,59 @@ fn an_account_founded_for_another_audience_cannot_bootstrap() {
     world
         .identity(carol(), device, 0, "app")
         .expect("an app-founded account");
+}
+
+/// A lens renaming a table to or from a system table's name is not admitted
+/// by core either, whatever ships it: an ordinary rename still is.
+#[test]
+fn core_admits_no_lens_that_renames_a_system_table() {
+    use jazz::protocol::{LensOp, MigrationLens, TableLens};
+    let one_table = |name: &str| {
+        common::compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new(name)
+                        .column("body", ColumnType::Text)
+                        .policies(common::allow_all_policies()),
+                )
+                .build(),
+        )
+    };
+    let (before, ordinary, system) = (
+        one_table("old_members"),
+        one_table("renamed_members"),
+        one_table(MEMBERS),
+    );
+    let rename = |to: &JazzSchema, target: &str| {
+        MigrationLens::new(
+            before.version_id(),
+            to.version_id(),
+            vec![TableLens {
+                source_table: "old_members".into(),
+                target_table: target.into(),
+                ops: Vec::<LensOp>::new(),
+            }],
+        )
+        .unwrap()
+    };
+    let (to_ordinary, to_system) = (
+        rename(&ordinary, "renamed_members"),
+        rename(&system, MEMBERS),
+    );
+    let server = block_on(Db::open_history_complete(DbConfig::new(
+        before.clone(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xee; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    block_on(server.admit_schema_with_lenses(ordinary, &[to_ordinary]))
+        .expect("an ordinary rename is admitted");
+    let error = block_on(server.admit_schema_with_lenses(system, &[to_system]))
+        .expect_err("a rename to a system table's name");
+    assert!(
+        error.message.contains("keep their names in every version"),
+        "{error:?}"
+    );
 }
