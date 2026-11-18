@@ -2004,4 +2004,23 @@ mod tests {
             FfiError::Refused(_)
         ));
     }
+    /// A client has no encryption hooks yet: an app whose files declare
+    /// encryption is refused at open, before a Go, Swift or Kotlin program
+    /// can write a string into its bytes columns, where the binding would
+    /// store it as plain bytes.
+    #[test]
+    fn an_app_that_declares_encryption_is_refused_at_open() {
+        let app = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": { "notes": { "columns": { "body": "bytes" },
+                "encryption": { "space": "id", "scope": "notes", "columns": { "body": "string" } } } } }"#;
+        let opened = Core::open(&serde_json::json!({ "app": app }).to_string());
+        let Err(error) = opened else {
+            panic!("an encrypted app must not open without hooks");
+        };
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("declares end-to-end encryption"),
+            "{message}"
+        );
+    }
 }

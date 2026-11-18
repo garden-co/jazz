@@ -81,7 +81,8 @@ fn an_encrypted_app_loads_with_its_system_tables_and_declarations() {
         entries["tasks"].columns["notes"].plain,
         PlainType {
             column_type: ColumnType::Text,
-            nullable: true
+            nullable: true,
+            default: None,
         }
     );
     // The app's own permissions travel; Jazz's are derived on both sides.
@@ -95,11 +96,9 @@ fn an_encrypted_app_loads_with_its_system_tables_and_declarations() {
     let declarations = declarations.expect("declared");
     assert_eq!(declarations.environment, "production");
     assert_eq!(declarations.tables, *entries);
-    assert_eq!(
-        load_client_current(app.as_bytes()).unwrap().0,
-        *schema,
-        "every loader computes the same schema"
-    );
+    // The loader a client opens with refuses an encrypted app until clients
+    // have hooks (`a_client_refuses_an_encrypted_app_until_it_has_hooks`).
+    assert!(load_client_current(app.as_bytes()).is_err());
 
     let written = rewrite(app.as_bytes(), permissions(MEMBERS_RULE).as_bytes(), None)
         .unwrap_or_else(|e| panic!("{e}"));
@@ -302,7 +301,7 @@ fn migrations_are_checked_against_both_versions_declarations() {
     // the migration, so clients holding the earlier version open.
     let first = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
         "tables": { "notes": { "columns": { "title": "string", "secret": { "type": "bytes", "default": "" } },
-            "encryption": { "space": "id", "scope": "notes", "columns": { "secret": "string" } } } },
+            "encryption": { "space": "id", "scope": "notes", "columns": { "secret": { "type": "string", "default": "" } } } } },
         "history": { "v1": { "tables": { "notes": { "columns": { "title": "string" } } } } },
         "migrations": [{ "from": "v1", "migrate": { "notes": { "secret": { "add": "bytes", "default": "" } } } }] }"#;
     let app = load_app(first.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
@@ -523,4 +522,317 @@ fn an_app_table_with_the_reserved_prefix_is_refused_in_every_version() {
     let error = refusal(load_app(older.as_bytes()));
     assert!(error.contains("history"), "{error}");
     assert!(error.contains("are reserved for Jazz's own"), "{error}");
+}
+
+/// An encrypted column's declared default (what a cell never written reads
+/// as, protocol §4.1) travels with its declarations: from the app file
+/// through the client loader, the rewritten file, the deploy request and
+/// the server's stored form. It is not part of the type the cells are
+/// sealed under, so another version may change it without a conversion.
+///
+/// ```text
+/// jazz.app.json { "type": "string", "default": "none yet" }
+///   ├─► client declarations ─► runtime
+///   ├─► rewritten app file
+///   └─► deploy request ─► jazz-e2ee-declarations-v1 (stored) ─► back
+/// ```
+#[test]
+fn an_encrypted_columns_default_travels_with_its_declarations() {
+    use jazz::tools::deployment::artifact::encryption::{decode_stored, encode_stored};
+    use jazz::tools::public_schema::Value;
+    let entry = r#"{ "space": "projectId", "scope": "projects",
+        "columns": { "title": "string", "notes": { "type": "string", "default": "none yet" } },
+        "equality": ["title"] }"#;
+    let file = app(entry);
+    let expected = PlainType {
+        column_type: ColumnType::Text,
+        nullable: false,
+        default: Some(Value::Text("none yet".to_owned())),
+    };
+    let notes = |entries: &jazz::tools::deployment::artifact::encryption::Entries| {
+        entries["tasks"].columns["notes"].plain.clone()
+    };
+
+    let (_, _, declarations) =
+        load_client_encrypted(file.as_bytes(), AppId::from_name("tasks-app"), "production")
+            .unwrap();
+    assert_eq!(notes(&declarations.unwrap().tables), expected);
+
+    let written = rewrite(file.as_bytes(), permissions(MEMBERS_RULE).as_bytes(), None)
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert!(written.app.contains("\"none yet\""), "{}", written.app);
+    let reloaded = load_app(written.app.as_bytes()).unwrap();
+    let entries = reloaded.encryption().versions.values().next().unwrap();
+    assert_eq!(notes(entries), expected);
+
+    let loaded = load(file.as_bytes(), permissions(MEMBERS_RULE).as_bytes()).unwrap();
+    // The deploy body carries the declarations as the server reads them.
+    let body = loaded.deployment_body(false);
+    let sent: jazz::tools::deployment::artifact::encryption::DeclaredEncryption =
+        serde_json::from_value(body["encryption"].clone()).unwrap();
+    let deployed = sent.versions.values().next().unwrap();
+    assert_eq!(notes(deployed), expected);
+    let stored = encode_stored(deployed).unwrap();
+    assert!(
+        String::from_utf8(stored.clone())
+            .unwrap()
+            .contains("\"default\"")
+    );
+    assert_eq!(notes(&decode_stored(&stored).unwrap()), expected);
+
+    // A sealed type takes no default: it only names what cells are sealed
+    // under.
+    let sealed = app(r#"{ "space": "projectId", "scope": "projects",
+        "columns": { "title": "string", "notes": { "type": "string?",
+            "sealedType": { "type": "string", "default": "x" } } } }"#);
+    let error = refusal(load_app(sealed.as_bytes()));
+    assert!(error.contains("sealedType.default"), "{error}");
+}
+
+/// A migration may add an encrypted column with or without a declared
+/// default, but a later version may not change a column's default: the
+/// rows stored before the column read it, and clients of each version
+/// would read them differently. Changing it is a re-encrypt into a new
+/// column.
+#[test]
+fn an_encrypted_columns_default_may_not_change_without_a_conversion() {
+    let with_body = |body: &str, history_body: Option<&str>| {
+        let history_columns = match history_body {
+            Some(_) => r#"{ "title": "bytes", "body": "bytes" }"#,
+            None => r#"{ "title": "bytes" }"#,
+        };
+        let history_encrypted = match history_body {
+            Some(spec) => format!(r#"{{ "title": "string", "body": {spec} }}"#),
+            None => r#"{ "title": "string" }"#.to_owned(),
+        };
+        let migrate = match history_body {
+            Some(_) => r#"{ "notes": { "done": { "add": "boolean", "default": false } } }"#,
+            None => {
+                r#"{ "notes": { "body": { "add": "bytes", "default": "" }, "done": { "add": "boolean", "default": false } } }"#
+            }
+        };
+        format!(
+            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": {{
+                "notes": {{ "columns": {{ "title": "bytes", "body": "bytes", "done": "boolean" }},
+                    "encryption": {{ "space": "id", "scope": "notes", "columns": {{ "title": "string", "body": {body} }} }} }} }},
+            "history": {{ "v1": {{ "tables": {{
+                "notes": {{ "columns": {history_columns},
+                    "encryption": {{ "space": "id", "scope": "notes", "columns": {history_encrypted} }} }} }} }} }},
+            "migrations": [{{ "from": "v1", "migrate": {migrate} }}] }}"#
+        )
+    };
+    for accepted in [
+        r#"{ "type": "string", "default": "untitled" }"#,
+        "\"string?\"",
+    ] {
+        load_app(with_body(accepted, None).as_bytes())
+            .unwrap_or_else(|e| panic!("{accepted}: {e}"));
+    }
+    // A required column the migration adds needs its default declared: the
+    // rows stored before it read as never written.
+    let error = refusal(load_app(with_body("\"string\"", None).as_bytes()));
+    assert!(error.contains("declare its default"), "{error}");
+    let error = refusal(load_app(
+        with_body(
+            r#"{ "type": "string", "default": "new" }"#,
+            Some(r#"{ "type": "string", "default": "old" }"#),
+        )
+        .as_bytes(),
+    ));
+    assert!(error.contains("default changes"), "{error}");
+    let error = refusal(load_app(
+        with_body(
+            "\"string\"",
+            Some(r#"{ "type": "string", "default": "old" }"#),
+        )
+        .as_bytes(),
+    ));
+    assert!(error.contains("default changes"), "{error}");
+    load_app(
+        with_body(
+            r#"{ "type": "string", "default": "same" }"#,
+            Some(r#"{ "type": "string", "default": "same" }"#),
+        )
+        .as_bytes(),
+    )
+    .unwrap_or_else(|e| panic!("keeping a default: {e}"));
+}
+
+/// An encrypted enum column's declared default must be one of its
+/// variants: the reader refuses any other, as the runtime would.
+#[test]
+fn an_encrypted_enum_default_must_be_a_variant() {
+    let with_default = |default: &str| {
+        app(&format!(
+            r#"{{ "space": "projectId", "scope": "projects",
+            "columns": {{ "title": "string",
+                "notes": {{ "enum": ["open", "done"], "default": "{default}" }} }} }}"#
+        ))
+    };
+    load_app(with_default("done").as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    let error = refusal(load_app(with_default("lost").as_bytes()));
+    assert!(error.contains("one of the enum's variants"), "{error}");
+}
+
+/// An encrypted column keeps the type its cells were sealed under: a
+/// conversion (`from`) may not write over a column the earlier version
+/// already held as encrypted, which would leave every existing cell
+/// unreadable, while converting into a new column is the way to change a
+/// type.
+///
+/// ```text
+/// v1: title encrypted string, legacy plaintext
+/// v2: title encrypted int, from legacy          ✗ (title already encrypted)
+/// v2: title2 encrypted int, from title          ✓ (a new column)
+/// ```
+#[test]
+fn a_conversion_may_not_write_over_an_encrypted_column() {
+    let version = |columns: &str, entry: &str, migrate: &str| {
+        format!(
+            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": {{ "notes": {{ "columns": {columns},
+                "encryption": {{ "space": "id", "scope": "notes", "columns": {entry} }} }} }},
+            "history": {{ "v1": {{ "tables": {{ "notes": {{
+                "columns": {{ "title": "bytes", "legacy": "string" }},
+                "encryption": {{ "space": "id", "scope": "notes", "columns": {{ "title": "string" }} }} }} }} }} }},
+            "migrations": [{{ "from": "v1", "migrate": {{ "notes": {migrate} }} }}] }}"#
+        )
+    };
+    let over = version(
+        r#"{ "title": "bytes", "legacy": "string", "done": "boolean" }"#,
+        r#"{ "title": { "type": "int", "from": "legacy", "convert": "parse" } }"#,
+        r#"{ "done": { "add": "boolean", "default": false } }"#,
+    );
+    let error = refusal(load_app(over.as_bytes()));
+    assert!(error.contains("was already encrypted"), "{error}");
+
+    let into_new = version(
+        r#"{ "title": "bytes", "title2": { "type": "bytes", "default": "" } }"#,
+        r#"{ "title2": { "type": "int", "from": "title", "convert": "parse" } }"#,
+        r#"{ "title2": { "add": "bytes", "default": "" }, "legacy": { "drop": "string", "backwardsDefault": "" } }"#,
+    );
+    load_app(into_new.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Equality is part of what old and new clients agree on: adding it to
+/// cells that exist starts in `backfill`, since they have no token, and
+/// removing it drops the token column in the same migration, since older
+/// clients would keep querying tokens nobody writes (migrations §4.3).
+///
+/// ```text
+/// v1: title encrypted, no tag     v2: + tag, equality [title]            ✗
+///                                 v2: + tag, equality, backfill [title]  ✓
+/// v1: title + tag, equality       v2: equality [], tag kept              ✗
+///                                 v2: equality [], tag dropped           ✓
+/// ```
+#[test]
+fn equality_changes_across_versions_follow_the_migrations_spec() {
+    let app = |tables: &str, history: &str, migrate: &str| {
+        format!(
+            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": {{ "notes": {tables} }},
+            "history": {{ "v1": {{ "tables": {{ "notes": {history} }} }} }},
+            "migrations": [{{ "from": "v1", "migrate": {{ "notes": {migrate} }} }}] }}"#
+        )
+    };
+    let entry = |extra: &str| {
+        format!(
+            r#"{{ "columns": {{ "title": "bytes", "__e2ee_eq_title": "bytes", "done": "boolean" }},
+            "encryption": {{ "space": "id", "scope": "notes", "columns": {{ "title": "string" }}{extra} }} }}"#
+        )
+    };
+    let untagged = r#"{ "columns": { "title": "bytes" },
+        "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } }"#;
+    let add_tag = r#"{ "__e2ee_eq_title": { "add": "bytes", "default": "" },
+        "done": { "add": "boolean", "default": false } }"#;
+    let error = refusal(load_app(
+        app(&entry(r#", "equality": ["title"]"#), untagged, add_tag).as_bytes(),
+    ));
+    assert!(error.contains("`backfill`"), "{error}");
+    load_app(
+        app(
+            &entry(r#", "equality": ["title"], "backfill": ["title"]"#),
+            untagged,
+            add_tag,
+        )
+        .as_bytes(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+
+    let tagged = r#"{ "columns": { "title": "bytes", "__e2ee_eq_title": "bytes" },
+        "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" },
+            "equality": ["title"] } }"#;
+    let add_done = r#"{ "done": { "add": "boolean", "default": false } }"#;
+    let error = refusal(load_app(app(&entry(""), tagged, add_done).as_bytes()));
+    assert!(error.contains("token column"), "{error}");
+    let drop_tag = r#"{ "__e2ee_eq_title": { "drop": "bytes", "backwardsDefault": "" },
+        "done": { "add": "boolean", "default": false } }"#;
+    let dropped = r#"{ "columns": { "title": "bytes", "done": "boolean" },
+        "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } }"#;
+    load_app(app(dropped, tagged, drop_tag).as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// An equality token has an encoding only for the types the equality
+/// format defines, and an encrypted column's stored default is the empty
+/// ciphertext: a declaration the format can't encode, or a stored default
+/// that is not empty, is refused.
+#[test]
+fn equality_and_stored_defaults_follow_their_formats() {
+    let json_equality = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": { "notes": { "columns": { "data": "bytes", "__e2ee_eq_data": "bytes" },
+            "encryption": { "space": "id", "scope": "notes", "columns": { "data": { "json": {} } },
+                "equality": ["data"] } } } }"#;
+    let error = refusal(load_app(json_equality.as_bytes()));
+    assert!(
+        error.contains("equality is not supported for json"),
+        "{error}"
+    );
+    load_app(
+        json_equality
+            .replace(r#""data": { "json": {} }"#, r#""data": "string""#)
+            .as_bytes(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+
+    let stored_default = |default: &str| {
+        format!(
+            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": {{ "notes": {{ "columns": {{ "data": {{ "type": "bytes", "default": "{default}" }} }},
+                "encryption": {{ "space": "id", "scope": "notes", "columns": {{ "data": "string" }} }} }} }} }}"#
+        )
+    };
+    load_app(stored_default("").as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    let error = refusal(load_app(stored_default("c2VjcmV0").as_bytes()));
+    assert!(error.contains("stored default"), "{error}");
+}
+
+/// A client has no encryption hooks yet, so none of the ways a client
+/// opens an app lets an encrypted one in: the files' client loader and the
+/// bindings' database open both refuse it, while a backend can still read
+/// the files to deploy them.
+#[test]
+fn a_client_refuses_an_encrypted_app_until_it_has_hooks() {
+    use jazz::db::{DbConfig, DbIdentity, block_on};
+    use jazz::ids::{AuthorSubject, NodeUuid};
+    let app = app(tasks_entry());
+    let error = refusal(load_client_current(app.as_bytes()));
+    assert!(error.contains("declares end-to-end encryption"), "{error}");
+
+    let loaded = load(app.as_bytes(), permissions(MEMBERS_RULE).as_bytes())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let schema = jazz::schema::JazzSchema::new(loaded.current_schema()).unwrap();
+    let config = DbConfig::new(
+        schema,
+        DbIdentity {
+            node: NodeUuid::from_bytes([1; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    );
+    let opened = block_on(jazz::binding_host::open_memory(config));
+    let error = opened.err().expect("refused");
+    assert!(
+        error.to_string().contains("declares end-to-end encryption"),
+        "{error}"
+    );
 }

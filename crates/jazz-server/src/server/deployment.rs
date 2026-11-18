@@ -5,7 +5,6 @@ pub(crate) use crate::portable::catalogue::DeploymentResponse;
 pub(crate) use crate::portable::deployment::DeploySchema;
 use crate::portable::deployment::{self as portable, Deployment};
 pub(crate) use crate::portable::deployment::{DeployBody, DeployError, DeployRequest};
-use crate::runtime::StorageConfig;
 #[cfg(any(test, feature = "embedded-server"))]
 use jazz::tools::public_schema::{Schema, TablePolicies};
 use std::sync::Arc;
@@ -77,6 +76,24 @@ pub(crate) async fn deploy_body(
         },
     )?;
     let staged = &deployment.staged;
+    // An encrypted app needs the account registry its checks read, as when
+    // a runtime opens (`Owner::open`): a deployment that brings one to a
+    // runtime without it is refused before anything is applied.
+    if let Some(runtime) = state.runtime()
+        && deployment.prepared.schemas().iter().any(|schema| {
+            jazz::tools::deployment::artifact::system_tables::check_e2ee_fragment(schema)
+                .unwrap_or(false)
+        })
+        && !runtime
+            .has_account_registry()
+            .await
+            .map_err(DeployError::internal)?
+    {
+        return Err(DeployError::invalid(
+            "this app encrypts columns, which needs the account registry of an app's store; \
+             the server's runtime has none",
+        ));
+    }
     if !staged.response.changed {
         // Nothing to commit, but the runtime's view of the catalogue may be
         // behind the store's: a deployment that committed and then failed
@@ -101,9 +118,8 @@ pub(crate) async fn deploy_body(
             // starts as empty as the scratch one, so the same change
             // applies there; only a storage failure can still fail it, and
             // then leaves an empty store that the next deployment reuses.
-            let probe =
-                ServerRuntimeHandle::start_with_storage(genesis.clone(), StorageConfig::InMemory)
-                    .map_err(DeployError::internal)?;
+            let probe = ServerRuntimeHandle::start_scratch(genesis.clone())
+                .map_err(DeployError::internal)?;
             let applied = match change(&probe, &deployment).await {
                 Ok(change) => probe
                     .apply_catalogue(change, None)
@@ -142,7 +158,13 @@ pub(crate) async fn deploy_body(
 
 /// Keep the declarations of each version deployed with them for the first
 /// time, once the deployment committed. A version whose declarations are
-/// kept already keeps them.
+/// kept already keeps them, and a deployment that names different ones for
+/// it is refused rather than ignored.
+///
+/// Limit: the host table commits in a transaction of its own, just after
+/// the catalogue's, so a crash between them leaves a deployed version
+/// without kept declarations; the next deployment of it is judged as a
+/// first one and keeps what it names then.
 fn keep_declarations(
     kept: Option<&crate::kv::HostKv>,
     first: &[(jazz::tools::public_schema::SchemaHash, Vec<u8>)],
@@ -151,8 +173,16 @@ fn keep_declarations(
         return Ok(());
     };
     for (version, stored) in first {
-        kept.put_if_absent(&version.0, stored)
-            .map_err(DeployError::internal)?;
+        if let Some(existing) = kept
+            .put_if_absent(&version.0, stored)
+            .map_err(DeployError::internal)?
+            && existing != *stored
+        {
+            return Err(DeployError::invalid(format!(
+                "schema version {version} was deployed with other encryption declarations, \
+                 which its cells are sealed under; the deployment names different ones"
+            )));
+        }
     }
     Ok(())
 }

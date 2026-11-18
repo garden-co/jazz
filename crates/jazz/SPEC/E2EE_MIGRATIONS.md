@@ -96,6 +96,12 @@ columns and a client-run rewrite between them.
     deploy of a decrypting migration as the first, so it asks for the
     confirmation of §4.2 (`confirmDecrypt` in the deploy body) on every
     deploy, not only the first.
+- **Known limit: kept declarations commit after the catalogue.** The host
+  table that keeps them is written in a transaction of its own, just after the
+  deployment's catalogue change. A deployment that names declarations
+  different from the kept ones for a version is refused. A crash between the
+  two commits leaves a deployed version without kept declarations, and the
+  next deployment of it keeps what it names then.
 - **Known limit: `confirmDecrypt` is a guard, not a security control.** It
   stops a deploy from decrypting a column by accident. A decrypt only runs on
   clients whose own app files declare it: a client never takes declarations
@@ -442,7 +448,8 @@ backend), because the server and every replica then hold the plaintext. Rows in 
   is unchanged in each case. Any other change is a re-encrypt into a new
   column, with `convert` when the conversion is not the identity.
 - **Adding equality tagging.** The lens adds `__e2ee_eq_<column>` with default
-  `""`, and the column is listed in `backfill`. Sweepers decrypt each cell and
+  `""`, and the column is listed in `backfill`; the deploy refuses an equality
+  column added to cells that exist without it. Sweepers decrypt each cell and
   write its token (and nothing else) under the cell's own epoch. Until every row of
   a space has a token, equality queries on it fail `conversion-pending`
   (§3.3). Unlike the conversions, an
@@ -451,7 +458,18 @@ backend), because the server and every replica then hold the plaintext. Rows in 
   floor in §6 or re-encryption into a new tagged column (whose seal works as
   in §3.7).
 - **Removing equality tagging.** Lens drop of the tag column. Tokens remain in
-  history; they disclose equality only.
+  history; they disclose equality only. The deploy refuses taking a column out
+  of `equality` while its tag column stays, since older clients would keep
+  querying tokens nobody writes.
+- **Conversions never write over an encrypted column.** A conversion
+  (`from`) targets a column the earlier version did not hold as encrypted:
+  the cells of an encrypted column are sealed under its type, which a
+  conversion in place would leave unreadable. The same holds for a version
+  redeployed with other declarations.
+- **Equality types.** Equality is declared only on boolean, integer, bigint,
+  timestamp, double, text, bytes, uuid and enum columns, the types the
+  equality format encodes; array, row, JSON and transaction-ID columns are
+  refused.
 
 ### 4.4 Changing the space: re-homes, moves, splits and merges
 
@@ -482,7 +500,10 @@ Confirmed trivial, with one exception. A new table has no rows; its first
 inserts create spaces as usual. A new encrypted column on an encrypted table
 is a lens `add` of a `bytes` column with default `""`; existing rows read the
 declared plaintext default, or null for an optional column, until written. A
-required column with no default is refused by `generate`. The exception: a new
+required column with no declared default is refused by the loaders, `generate`
+and the deploy, and the stored column's own default must be the empty value
+(a plaintext default is declared in the entry, where it is public). The
+exception: a new
 equality-tagged column on a table that already has rows starts in `backfill`,
 because those rows have no token for the default value; sweepers write the
 default's cell and token.

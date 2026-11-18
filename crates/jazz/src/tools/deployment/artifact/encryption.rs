@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::catalogue::Permissions;
 use crate::tools::public_schema::{
     CmpOp, ColumnDescriptor, ColumnType, EncryptionEntry, EncryptionSettings, PolicyExpr,
-    PolicyValue, Schema, TableName, TablePolicies,
+    PolicyValue, Schema, TableName, TablePolicies, Value,
 };
 
 use super::super::published::{PublishLensOp, PublishMigrationRequest, PublishTableLens};
@@ -167,6 +167,21 @@ pub fn check_entry(
                 ),
             ));
         }
+        if stored
+            .default
+            .as_ref()
+            .is_some_and(|default| !is_empty_cell(default))
+        {
+            return Err((
+                at,
+                format!(
+                    "an encrypted column's stored default is the empty ciphertext (rows older \
+                     than the column read as never written); column {name} has another. \
+                     Declare the plaintext default in the entry instead (`{{ \"type\": …, \
+                     \"default\": … }}`)"
+                ),
+            ));
+        }
         if stored.merge_strategy.is_some() {
             return Err((
                 at,
@@ -259,6 +274,25 @@ pub fn check_entry(
                 format!("`{name}` is not an encrypted column of the entry"),
             ));
         }
+        if let Some(declared) = entry.columns.get(name)
+            && !has_equality_encoding(&declared.plain.column_type)
+        {
+            return Err((
+                at,
+                format!(
+                    "equality is not supported for {} columns: only boolean, integer, bigint, \
+                     timestamp, double, text, bytes, uuid and enum values have an equality token \
+                     encoding (equality format, column types)",
+                    match declared.plain.column_type {
+                        ColumnType::Json { .. } => "json",
+                        ColumnType::Array { .. } => "array",
+                        ColumnType::Row { .. } => "row",
+                        ColumnType::TransactionId => "transaction-ID",
+                        _ => "this type of",
+                    }
+                ),
+            ));
+        }
         let tag = equality_column(name);
         if !column(schema, table, &tag).is_some_and(is_cipher) {
             return Err((
@@ -278,6 +312,33 @@ pub fn check_entry(
         }
     }
     Ok(())
+}
+
+/// Whether `value` is the empty cell a row older than an encrypted column
+/// reads: the empty byte string (or text, as a file may write it).
+fn is_empty_cell(value: &Value) -> bool {
+    match value {
+        Value::Bytea(bytes) => bytes.is_empty(),
+        Value::Text(text) => text.is_empty(),
+        _ => false,
+    }
+}
+
+/// Whether the equality format defines a value encoding for columns of
+/// `column_type`: array, row, JSON and transaction-ID columns have none.
+fn has_equality_encoding(column_type: &ColumnType) -> bool {
+    matches!(
+        column_type,
+        ColumnType::Boolean
+            | ColumnType::Integer
+            | ColumnType::BigInt
+            | ColumnType::Timestamp
+            | ColumnType::Double
+            | ColumnType::Text
+            | ColumnType::Bytea
+            | ColumnType::Uuid
+            | ColumnType::Enum { .. }
+    )
 }
 
 /// `convert` is required when a conversion changes the type, and refused
@@ -463,6 +524,20 @@ pub fn check_transition(
         for (name, declared) in &new.columns {
             let path = format!("{table}.{name}");
             if let Some(source) = &declared.from {
+                // A conversion writes new cells under a new type: the
+                // target of one is a column the earlier version did not
+                // hold as an encrypted column, or its cells (sealed under
+                // the old type) would no longer read.
+                if map
+                    .old_name(name)
+                    .is_some_and(|n| old.is_some_and(|o| o.columns.contains_key(&n)))
+                {
+                    return Err(format!(
+                        "{path}: column {name} was already encrypted in the earlier version, so \
+                         its cells are sealed under its type there; a conversion (`\"from\"`) \
+                         can't write over it. Convert into a new column"
+                    ));
+                }
                 let old_source = map.old_name(source);
                 match old_source
                     .as_deref()
@@ -504,7 +579,7 @@ pub fn check_transition(
                 .and_then(|n| old.and_then(|o| o.columns.get(&n).map(|c| (n, c))));
             match previous {
                 Some((old_name, previous)) => {
-                    if declared.cell_type() != previous.cell_type() {
+                    if !declared.cell_type().same_type(previous.cell_type()) {
                         return Err(format!(
                             "{path}: the encrypted column's type changes from {:?} to {:?}, \
                              which its cells were sealed under; re-encrypt it into a new column \
@@ -514,7 +589,17 @@ pub fn check_transition(
                             declared.cell_type()
                         ));
                     }
-                    if declared.plain != *declared.cell_type()
+                    // Rows older than the column read its default: another
+                    // default would read them differently on clients of
+                    // each version.
+                    if declared.plain.default != previous.plain.default {
+                        return Err(format!(
+                            "{path}: the encrypted column's default changes, and the rows \
+                             stored before the column read it; re-encrypt it into a new column \
+                             (`\"from\"`) to change it"
+                        ));
+                    }
+                    if !declared.plain.same_type(declared.cell_type())
                         && !widens(declared.cell_type(), &declared.plain)
                     {
                         return Err(format!(
@@ -523,6 +608,28 @@ pub fn check_transition(
                         ));
                     }
                     let tagged_before = old.is_some_and(|o| o.equality.contains(&old_name));
+                    // The cells that exist have no token: adding equality
+                    // starts in `backfill` (migrations §4.3).
+                    if new.equality.contains(name) && !tagged_before && !new.backfill.contains(name)
+                    {
+                        return Err(format!(
+                            "{path}: the earlier version's cells have no equality token; list \
+                             `{name}` in `backfill` until every row has one (migrations §4.3)"
+                        ));
+                    }
+                    // Removing equality drops the token column in the same
+                    // migration; one left behind would be queried by older
+                    // clients while nobody writes it.
+                    if tagged_before
+                        && !new.equality.contains(name)
+                        && column(new_schema, table, &equality_column(name)).is_some()
+                    {
+                        return Err(format!(
+                            "{path}: it is no longer an equality column, but the token column \
+                             {} stays: drop it in the same migration (migrations §4.3)",
+                            equality_column(name)
+                        ));
+                    }
                     if tagged_before
                         && new.equality.contains(name)
                         && map.old_name(&equality_column(name)) != Some(equality_column(&old_name))
@@ -542,6 +649,19 @@ pub fn check_transition(
                             "{path}: column {name} held plaintext in the earlier version; \
                              encrypt it with a conversion (`\"from\"` naming the plaintext \
                              column)"
+                        ));
+                    }
+                    // A column added to a table that may hold rows: they
+                    // read it as never written (the empty cell), which a
+                    // required column answers with its declared default.
+                    if declared.to.is_none()
+                        && !declared.plain.nullable
+                        && declared.plain.default.is_none()
+                    {
+                        return Err(format!(
+                            "{path}: the migration adds a required encrypted column, which the \
+                             rows stored before it read as never written; declare its default \
+                             (`{{ \"type\": …, \"default\": … }}`) or make it optional"
                         ));
                     }
                 }

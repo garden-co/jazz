@@ -741,10 +741,38 @@ fn read_entry(value: &Json, path: &str) -> Result<EncryptionEntry, Refusal> {
     })
 }
 
+/// Whether every enum value in `value` is one of its column type's
+/// variants.
+fn in_variants(column_type: &ColumnType, value: &Value) -> bool {
+    match (column_type, value) {
+        (_, Value::Null) => true,
+        (ColumnType::Enum { variants }, Value::Text(variant)) => variants.contains(variant),
+        (ColumnType::Enum { .. }, _) => false,
+        (ColumnType::Array { element }, Value::Array(items)) => {
+            items.iter().all(|item| in_variants(element, item))
+        }
+        _ => true,
+    }
+}
+
 /// A plaintext type: a type string (`"string?"`) or type object, without
-/// the options only a stored column has.
-fn read_plain(spec: &Json, path: &str) -> Result<PlainType, Refusal> {
-    let column = read_column("", spec, path)?;
+/// the options only a stored column has, and, where `with_default`, its
+/// declared default (protocol §4.1): a sealed type takes none.
+fn read_plain(spec: &Json, path: &str, with_default: bool) -> Result<PlainType, Refusal> {
+    let mut column = read_column("", spec, path)?;
+    let default = if with_default {
+        column.default.take()
+    } else {
+        None
+    };
+    if let Some(default) = &default
+        && !in_variants(&column.column_type, default)
+    {
+        return Err(refuse(
+            format!("{path}.default"),
+            "an enum default must be one of the enum's variants",
+        ));
+    }
     plain_type(&column, spec, path)?;
     if spec.get("transform").is_some() {
         return Err(refuse(
@@ -755,6 +783,7 @@ fn read_plain(spec: &Json, path: &str) -> Result<PlainType, Refusal> {
     Ok(PlainType {
         column_type: column.column_type,
         nullable: column.nullable,
+        default,
     })
 }
 
@@ -766,7 +795,7 @@ fn read_encrypted_column(spec: &Json, path: &str) -> Result<EncryptedColumn, Ref
         .any(|key| spec.get(key).is_some());
     if !conversion {
         return Ok(EncryptedColumn {
-            plain: read_plain(spec, path)?,
+            plain: read_plain(spec, path, true)?,
             sealed_type: None,
             from: None,
             to: None,
@@ -787,10 +816,10 @@ fn read_encrypted_column(spec: &Json, path: &str) -> Result<EncryptedColumn, Ref
             .transpose()
     };
     Ok(EncryptedColumn {
-        plain: read_plain(ty, &format!("{path}.type"))?,
+        plain: read_plain(ty, &format!("{path}.type"), true)?,
         sealed_type: spec
             .get("sealedType")
-            .map(|t| read_plain(t, &format!("{path}.sealedType")))
+            .map(|t| read_plain(t, &format!("{path}.sealedType"), false))
             .transpose()?,
         from: name("from")?,
         to: name("to")?,
@@ -1455,6 +1484,7 @@ fn write_tables(
 fn write_plain(plain: &PlainType) -> Result<Json, String> {
     let mut column = ColumnDescriptor::new("", plain.column_type.clone());
     column.nullable = plain.nullable;
+    column.default = plain.default.clone();
     write_column(&column, None)
 }
 

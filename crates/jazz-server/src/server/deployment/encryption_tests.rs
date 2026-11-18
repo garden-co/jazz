@@ -217,6 +217,76 @@ async fn a_deployed_versions_declarations_change_only_compatibly() {
     assert_eq!(status, StatusCode::OK, "{body}");
 }
 
+/// The server's kept declarations judge a redeployed version like a
+/// migration: with the schema unchanged, a conversion may not write over a
+/// column that is already encrypted (its cells are sealed under the old
+/// type), and equality can't be dropped while its token column stays.
+#[tokio::test]
+async fn a_redeclaration_may_not_convert_over_a_column_or_drop_its_equality() {
+    let router = router().await;
+    let app = loaded("ownerId = session.user");
+    let (status, body) = publish(&router, app.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let hash = app.current_hash().to_string();
+
+    let mut converted = app.deployment_body(false);
+    converted["encryption"]["versions"][&hash]["tasks"]["columns"]["title"] = json!({
+        "type": { "columnType": { "type": "Integer" }, "nullable": false },
+        "from": "projectId",
+        "convert": "parse",
+    });
+    let (status, refusal) = publish(&router, converted).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("was already encrypted"),
+        "{refusal}"
+    );
+
+    let mut untagged = app.deployment_body(false);
+    untagged["encryption"]["versions"][&hash]["tasks"]
+        .as_object_mut()
+        .unwrap()
+        .remove("equality");
+    let (status, refusal) = publish(&router, untagged).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    assert!(
+        refusal["error"].as_str().unwrap().contains("token column"),
+        "{refusal}"
+    );
+}
+
+/// Declarations kept for a version are never replaced: keeping the same
+/// ones again changes nothing, and keeping different ones is refused
+/// instead of ignored.
+#[tokio::test]
+async fn kept_declarations_are_never_replaced() {
+    let server = ServerBuilder::new(app_id())
+        .with_storage(StorageBackend::InMemory)
+        .build()
+        .await
+        .unwrap();
+    let kept = server
+        .state
+        .store
+        .as_ref()
+        .unwrap()
+        .kv(super::DECLARATIONS)
+        .unwrap();
+    let version = jazz::tools::public_schema::SchemaHash::compute(
+        &jazz::tools::public_schema::SchemaBuilder::new().build(),
+    );
+    super::keep_declarations(Some(&kept), &[(version, b"first".to_vec())]).unwrap();
+    super::keep_declarations(Some(&kept), &[(version, b"first".to_vec())])
+        .expect("the same declarations again");
+    let refusal = super::keep_declarations(Some(&kept), &[(version, b"other".to_vec())])
+        .expect_err("other declarations for a kept version");
+    assert_eq!(refusal.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(kept.get(&version.0).unwrap(), Some(b"first".to_vec()));
+}
+
 /// Decrypting a column puts its plaintext on the server, so the deploy
 /// asks for an explicit confirmation naming it (migrations §4.2).
 #[tokio::test]
@@ -492,4 +562,222 @@ async fn a_raw_deploy_of_a_foreign_system_table_is_refused() {
     );
     let (status, deployed) = publish(&router, body("notes")).await;
     assert_eq!(status, StatusCode::OK, "{deployed}");
+}
+
+/// An encrypted schema as a deploy body: tasks encrypt their title in their
+/// project's space, whose read rule comes from the members table.
+fn encrypted_body() -> Value {
+    loaded("ownerId = session.user").deployment_body(false)
+}
+
+/// A server with its account registry deploys an encrypted schema to a
+/// fresh store.
+#[tokio::test]
+async fn an_encrypted_schema_deploys_to_a_server_with_its_registry() {
+    let router = router().await;
+    let (status, deployed) = publish(&router, encrypted_body()).await;
+    assert_eq!(status, StatusCode::OK, "{deployed}");
+}
+
+/// A deployment that brings an encrypted schema to a runtime without the
+/// account registry is refused before anything is applied, and one that
+/// brings an ordinary schema is not.
+///
+/// ```text
+/// runtime (no registry) ◄── encrypted schema ──✗ refused
+/// runtime (no registry) ◄── ordinary schema ──✓
+/// ```
+#[tokio::test]
+async fn an_encrypted_schema_is_not_deployed_to_a_runtime_without_the_registry() {
+    use crate::runtime::ServerRuntimeHandle;
+    use crate::runtime::StorageConfig;
+    let server = ServerBuilder::new(app_id())
+        .with_auth_config(AuthConfig {
+            admin_secret: Some("test-admin".into()),
+            ..Default::default()
+        })
+        .with_storage(StorageBackend::InMemory)
+        .build()
+        .await
+        .unwrap();
+    // A standalone runtime reads no host tables, so it has no registry.
+    let schema = SchemaBuilder::new()
+        .table(TableSchema::builder("notes").column("body", ColumnType::Text))
+        .build();
+    *server.state.core_server_shell.write().unwrap() = Some(
+        ServerRuntimeHandle::start_with_storage(
+            jazz::schema::JazzSchema::new(&schema).unwrap(),
+            StorageConfig::InMemory,
+        )
+        .unwrap(),
+    );
+    let router = create_router(server.state.clone());
+    let (status, refusal) = publish(&router, encrypted_body()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("account registry"),
+        "{refusal}"
+    );
+    let hash = SchemaHash::compute(&schema).to_string();
+    let (status, deployed) = publish(
+        &router,
+        json!({
+            "targetSchemaHash": hash,
+            "schemas": [{ "hash": hash, "schema": schema }],
+            "migrations": [],
+            "permissions": {},
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deployed}");
+}
+
+/// A host without the native store (a Durable Object) deploys through the
+/// portable route with no declarations, which refuses Jazz's system tables:
+/// a schema that has them must declare encryption.
+#[test]
+fn the_portable_deploy_refuses_system_tables_without_declarations() {
+    use crate::portable::catalogue::CatalogueIndex;
+    use crate::portable::deployment::{DeployRequest, DeploySchema, prepare};
+    use jazz::tools::deployment::artifact::system_tables::with_e2ee_fragment;
+    let schema = with_e2ee_fragment(
+        &SchemaBuilder::new()
+            .table(TableSchema::builder("notes").column("body", ColumnType::Text))
+            .build(),
+    );
+    let hash = SchemaHash::compute(&schema).to_string();
+    let index = CatalogueIndex::from_rows(&Default::default(), None);
+    let Err(refusal) = prepare(
+        &index,
+        DeployRequest {
+            target_schema_hash: hash.clone(),
+            schemas: vec![DeploySchema { hash, schema }],
+            migrations: Vec::new(),
+            permissions: Default::default(),
+            allow_dropping_history: false,
+        },
+        1_000,
+    ) else {
+        panic!("a schema with system tables and no declarations is refused");
+    };
+    assert!(
+        refusal.body.to_string().contains("declares no encryption"),
+        "{}",
+        refusal.body
+    );
+}
+
+/// An encrypting app serves local-first accounts founded for its own app id
+/// only: the registry keeps no record of the founding namespace, so an
+/// account founded for another audience could not be told from the app's
+/// own. Before the app encrypts, any audience founds.
+///
+/// ```text
+/// found-local-first {audience: other} ──► plain app ✓
+/// deploy encrypted schema
+/// found-local-first {audience: other} ──► ✗
+/// found-local-first {}                ──► ✓   found-local-first {audience: app id} ──► ✓
+/// ```
+#[tokio::test]
+async fn an_encrypting_app_founds_local_first_accounts_for_its_own_audience_only() {
+    let router = router().await;
+    let found = |audience: Option<String>, subject: &str| {
+        let router = router.clone();
+        let mut body = json!({
+            "identity": {
+                "issuer": jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
+                "subject": subject,
+            },
+        });
+        if let Some(audience) = audience {
+            body["audience"] = audience.into();
+        }
+        async move {
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/apps/{}/admin/accounts/found-local-first",
+                            app_id()
+                        ))
+                        .header("X-Jazz-Admin-Secret", "test-admin")
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            response.status()
+        }
+    };
+    let subject = |n: u8| uuid::Uuid::from_bytes([n; 16]).to_string();
+    let other = Some("https://other.example/jazz".to_owned());
+    assert_eq!(found(other.clone(), &subject(1)).await, StatusCode::OK);
+
+    let (status, deployed) = publish(&router, encrypted_body()).await;
+    assert_eq!(status, StatusCode::OK, "{deployed}");
+    assert_eq!(
+        found(other, &subject(2)).await,
+        StatusCode::BAD_REQUEST,
+        "another audience"
+    );
+    assert_eq!(found(None, &subject(3)).await, StatusCode::OK);
+    assert_eq!(
+        found(Some(app_id().to_string()), &subject(4)).await,
+        StatusCode::OK,
+        "the app's own id as the audience"
+    );
+}
+
+/// A local-first guest's first admission founds its account in the namespace
+/// of the audience its proof names, and an encrypting app refuses a guest
+/// whose audience is not its own.
+#[tokio::test]
+async fn an_encrypting_app_admits_a_local_first_founder_of_its_own_audience_only() {
+    use crate::server::routes::accounts::admit_local_founder;
+    use axum::http::HeaderMap;
+    let server = ServerBuilder::new(app_id())
+        .with_auth_config(AuthConfig {
+            admin_secret: Some("test-admin".into()),
+            backend_secret: Some("test-backend".into()),
+            ..Default::default()
+        })
+        .with_storage(StorageBackend::InMemory)
+        .build()
+        .await
+        .unwrap();
+    let router = create_router(server.state.clone());
+    let guest = |n: u8| jazz::account_registry::Principal {
+        issuer: jazz::tools::identity::DEVICE_ACCOUNT_ISSUER.into(),
+        subject: uuid::Uuid::from_bytes([n; 16]).to_string(),
+    };
+    let stating = |audience: &str| {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            crate::middleware::auth::DEVICE_ACCOUNT_AUDIENCE_HEADER,
+            audience.parse().unwrap(),
+        );
+        headers.insert("X-Jazz-Backend-Secret", "test-backend".parse().unwrap());
+        headers
+    };
+    let other = "https://other.example/jazz";
+    admit_local_founder(&server.state, &guest(1), &stating(other))
+        .await
+        .expect("before the app encrypts, any audience founds");
+
+    let (status, deployed) = publish(&router, encrypted_body()).await;
+    assert_eq!(status, StatusCode::OK, "{deployed}");
+    admit_local_founder(&server.state, &guest(2), &stating(other))
+        .await
+        .expect_err("another audience");
+    admit_local_founder(&server.state, &guest(3), &HeaderMap::new())
+        .await
+        .expect("no audience stated: the app's own");
+    admit_local_founder(&server.state, &guest(4), &stating(&app_id().to_string()))
+        .await
+        .expect("the app's own id, stated");
 }
