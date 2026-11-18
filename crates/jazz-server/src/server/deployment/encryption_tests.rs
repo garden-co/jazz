@@ -571,6 +571,38 @@ async fn a_later_version_without_declarations_deploys_with_the_system_tables() {
     );
 }
 
+/// A policy of a later version that declares nothing may read a column that
+/// is plaintext in it, though an earlier version had one of that name
+/// encrypted: the server's check refuses only the columns the target itself
+/// declares encrypted.
+#[tokio::test]
+async fn a_policy_may_read_a_column_that_the_target_keeps_in_plaintext() {
+    let router = router().await;
+    let file = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": { "notes": { "columns": { "title": "string?" } } },
+        "history": {
+            "v1": { "tables": { "notes": {
+                "columns": { "title": "bytes" },
+                "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } } } },
+            "v2": { "tables": { "notes": {
+                "columns": { "title": "bytes", "titleText": "string?" },
+                "encryption": { "space": "id", "scope": "notes",
+                    "columns": { "title": { "type": "string", "to": "titleText" } } } } } },
+            "v3": { "tables": { "notes": { "columns": { "titleText": "string?" } } } } },
+        "migrations": [
+            { "from": "v1", "to": "v2", "migrate": { "notes": { "titleText": { "add": "string?", "default": null } } } },
+            { "from": "v2", "to": "v3", "migrate": { "notes": { "title": { "drop": "bytes", "backwardsDefault": "" } } } },
+            { "from": "v3", "migrate": { "notes": { "title": { "renameFrom": "titleText" } } } }] }"#;
+    let permissions = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user) and title = 'public'" } } }"#;
+    let app =
+        artifact::load(file.as_bytes(), permissions.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    let mut body = app.deployment_body(false);
+    body["confirmDecrypt"] = json!(["notes.title"]);
+    let (status, deployed) = publish(&router, body).await;
+    assert_eq!(status, StatusCode::OK, "{deployed}");
+}
+
 /// Decrypting a column puts its plaintext on the server, so the deploy
 /// asks for an explicit confirmation naming it (migrations §4.2).
 #[tokio::test]

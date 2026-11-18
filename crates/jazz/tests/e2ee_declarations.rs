@@ -1239,3 +1239,50 @@ fn equally_near_versions_that_declare_differently_are_refused() {
     .unwrap();
     assert!(declarations.expect("an encrypted app").tables.is_empty());
 }
+
+/// A policy of a version that keeps the system tables without declaring
+/// encryption may read a column that is plaintext in it, though an earlier
+/// version had a column of that name encrypted: only the columns the version
+/// itself declares encrypted are refused, while the system tables' policies
+/// still follow the earlier declarations.
+///
+/// ```text
+/// v1: title encrypted
+/// v2: decrypts title into titleText       (declares)
+/// v3: drops title                         (declares nothing)
+/// v4: titleText renamed title, plaintext  (declares nothing) ◄── may read title
+/// ```
+#[test]
+fn a_policy_may_read_a_column_that_is_plaintext_in_this_version() {
+    let file = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": { "notes": { "columns": { "title": "string?" } } },
+        "history": {
+            "v1": { "tables": { "notes": {
+                "columns": { "title": "bytes" },
+                "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } } } },
+            "v2": { "tables": { "notes": {
+                "columns": { "title": "bytes", "titleText": "string?" },
+                "encryption": { "space": "id", "scope": "notes",
+                    "columns": { "title": { "type": "string", "to": "titleText" } } } } } },
+            "v3": { "tables": { "notes": { "columns": { "titleText": "string?" } } } } },
+        "migrations": [
+            { "from": "v1", "to": "v2", "migrate": { "notes": { "titleText": { "add": "string?", "default": null } } } },
+            { "from": "v2", "to": "v3", "migrate": { "notes": { "title": { "drop": "bytes", "backwardsDefault": "" } } } },
+            { "from": "v3", "migrate": { "notes": { "title": { "renameFrom": "titleText" } } } }] }"#;
+    let members = "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)";
+    let permissions = |read: &str| {
+        format!(
+            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+            "tables": {{ "notes": {{ "read": "{}" }} }} }}"#,
+            read.replace('"', "\\\"")
+        )
+    };
+    let reading_title = format!("{members} and title = 'public'");
+    load(file.as_bytes(), permissions(&reading_title).as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    // The space table's rule still has to come from the members table.
+    let error = refusal(load(
+        file.as_bytes(),
+        permissions("title = 'public'").as_bytes(),
+    ));
+    assert!(error.contains("members table"), "{error}");
+}
