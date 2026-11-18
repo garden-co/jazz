@@ -22,7 +22,7 @@ use jazz::tools::deployment::artifact::{self, LoadedApp, system_tables};
 use serde_json::{Value as Json, json};
 
 use super::accounts;
-use super::deployment::{CoreHost, DECLARATIONS, apply_to_core, deploy};
+use super::deployment::{CoreHost, DECLARATIONS, apply_to_core, deploy, keep_first_declared};
 use crate::runtime::ServerCore;
 
 const APP_NAME: &str = "core-deploy-tests";
@@ -648,6 +648,44 @@ fn the_system_table_rules_hold_on_the_durable_object_host() {
             host.core.as_ref().unwrap().db().catalogue().unwrap(),
             before,
             "{name}: nothing was applied"
+        );
+    }
+}
+
+/// A deployment that changes no catalogue row refuses declarations that
+/// differ from the ones its version keeps (written since the deployment
+/// read them), as the transaction of one that does change it refuses
+/// them; the kept ones stay. The same ones, or none kept yet, are kept.
+#[test]
+fn keeping_first_time_declarations_refuses_different_kept_ones() {
+    for (name, backing) in hosts() {
+        let store = backing.store().unwrap();
+        let version = loaded(APP).current_hash();
+        let put = |key: &[u8], value: &[u8]| {
+            store
+                .host_put_if_absent(DECLARATIONS, key, value)
+                .map_err(|error| error.to_string())
+        };
+        let first = vec![(version, b"first".to_vec())];
+
+        keep_first_declared(&first, put).unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        keep_first_declared(&first, put).unwrap_or_else(|error| panic!("{name}: {error:?}"));
+
+        let other = vec![(version, b"other".to_vec())];
+        let refusal = keep_first_declared(&other, put).unwrap_err();
+        assert_eq!(refusal.status.as_u16(), 422, "{name}: {:?}", refusal.body);
+        assert!(
+            refusal.body["error"]
+                .as_str()
+                .unwrap()
+                .contains("deployed with other encryption declarations"),
+            "{name}: {:?}",
+            refusal.body
+        );
+        assert_eq!(
+            store.host_get(DECLARATIONS, &version.0).unwrap(),
+            Some(b"first".to_vec()),
+            "{name}: the kept ones stay"
         );
     }
 }

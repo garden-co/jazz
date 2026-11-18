@@ -347,9 +347,11 @@ impl ServerCore {
         self.apply_catalogue_keeping(expected, change, &[], supersedes)
     }
 
-    /// [`Self::apply_catalogue`], writing `kept` (host table entries: a
-    /// key already there keeps its value) in the same transaction as the
-    /// change.
+    /// [`Self::apply_catalogue`], writing `kept` (host table entries) in
+    /// the same transaction as the change. A key already holding the same
+    /// value is left as it is; a key holding a different value fails the
+    /// whole change, which then leaves nothing behind
+    /// ([`jazz::db::Db::apply_catalogue_keeping`]).
     pub fn apply_catalogue_keeping(
         &mut self,
         expected: &crate::portable::catalogue::CatalogueIndex,
