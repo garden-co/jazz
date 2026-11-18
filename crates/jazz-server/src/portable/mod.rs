@@ -5,5 +5,6 @@
 //! Each host keeps its own I/O around it.
 
 pub mod admission;
+pub mod handshake;
 pub mod session;
 pub mod websocket_codec;
