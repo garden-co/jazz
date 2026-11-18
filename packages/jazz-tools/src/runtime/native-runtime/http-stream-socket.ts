@@ -238,11 +238,14 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
               [STREAM_KEY_HEADER]: this.session.key,
             },
             body: body as BodyInit,
+            signal: this.abort.signal,
           },
         );
         if (!response.ok) throw new Error(`HTTP stream send refused (${response.status})`);
       }
     } catch (error) {
+      // Closed meanwhile: the send's failure is not news.
+      if (this.readyState >= 2) return;
       this.emit("error", error);
       this.close();
     } finally {
@@ -257,6 +260,7 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
   private finish(code: number, reason: string, abort = true): void {
     if (this.readyState >= 2) return;
     this.readyState = 3;
+    this.queued.length = 0;
     if (abort) this.abort.abort();
     this.emit("close", { code, reason });
   }
