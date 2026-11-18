@@ -1194,17 +1194,19 @@ fn deployment_accepts_only_jazzs_own_system_tables() {
     );
 }
 
-/// Core finds a system table by the name the admitted versions give it, so a
-/// migration that renames a table to or from a system table's name is
-/// refused at deploy: it would give an older version's uploads another name
-/// than the newest version's.
+/// Core finds a system table by the name the admitted versions give it and
+/// reads its columns by name, so a migration that renames one, or changes
+/// its columns, is refused at deploy: it would give an older version's
+/// uploads another name or layout than the newest version's.
 ///
 /// ```text
-/// v1: __e2ee_members  ──RenameTable──►  v2: members_old   ✗
+/// v1: __e2ee_members  ──RenameTable──►  v2: members_old    ✗
 /// v1: old_members     ──RenameTable──►  v2: __e2ee_members ✗
+/// scopeId ⇄ identifier swapped through a temporary name    ✗
+/// a column added to __e2ee_members                         ✗
 /// ```
 #[test]
-fn a_migration_may_not_rename_a_table_to_or_from_a_system_table() {
+fn a_migration_may_not_change_a_system_table() {
     use jazz::tools::{Lens, LensOp, LensTransform};
     let structural = |mut schema: Schema| {
         for table in schema.values_mut() {
@@ -1223,7 +1225,7 @@ fn a_migration_may_not_rename_a_table_to_or_from_a_system_table() {
         );
         schema
     };
-    let try_rename = |from_schema: Schema, to_schema: Schema, old: &str, new: &str| {
+    let try_ops = |from_schema: Schema, to_schema: Schema, ops: Vec<LensOp>| {
         let (from, to) = (
             SchemaHash::compute(&from_schema),
             SchemaHash::compute(&to_schema),
@@ -1243,10 +1245,7 @@ fn a_migration_may_not_rename_a_table_to_or_from_a_system_table() {
                     from,
                     to,
                     LensTransform {
-                        ops: vec![LensOp::RenameTable {
-                            old_name: old.to_owned(),
-                            new_name: new.to_owned(),
-                        }],
+                        ops,
                         draft_ops: Vec::new(),
                     },
                 )],
@@ -1259,29 +1258,85 @@ fn a_migration_may_not_rename_a_table_to_or_from_a_system_table() {
             },
         )
     };
-    for (from, to, old, new) in [
+    let rename_table = |old: &str, new: &str| LensOp::RenameTable {
+        old_name: old.to_owned(),
+        new_name: new.to_owned(),
+    };
+    let rename_column = |table: &str, old: &str, new: &str| LensOp::RenameColumn {
+        table: table.to_owned(),
+        old_name: old.to_owned(),
+        new_name: new.to_owned(),
+    };
+    // Both versions hold the fragment exactly, so only the lens differs.
+    let mut next = fragment.clone();
+    next.insert(
+        TableName::from("notes"),
+        TableSchemaBuilder::new("notes")
+            .column("body", ColumnType::Text)
+            .build(),
+    );
+    // The lens introduces `notes`, so that apart from its column operations
+    // it is a valid migration between the two versions.
+    let add_notes = LensOp::AddTable {
+        table: "notes".to_owned(),
+        schema: next[&TableName::from("notes")].clone(),
+    };
+    let cases = [
         (
             fragment.clone(),
             plain("members_old"),
-            MEMBERS,
-            "members_old",
+            vec![rename_table(MEMBERS, "members_old")],
         ),
         (
             plain("old_members"),
             fragment.clone(),
-            "old_members",
-            MEMBERS,
+            vec![rename_table("old_members", MEMBERS)],
         ),
-    ] {
-        let error = try_rename(from, to, old, new).expect_err("a rename of a system table");
+        (
+            // `scopeId` and `identifier` swapped through a temporary name.
+            fragment.clone(),
+            next.clone(),
+            vec![
+                add_notes.clone(),
+                rename_column(MEMBERS, "scopeId", "swap"),
+                rename_column(MEMBERS, "identifier", "scopeId"),
+                rename_column(MEMBERS, "swap", "identifier"),
+            ],
+        ),
+        (
+            fragment.clone(),
+            next.clone(),
+            vec![
+                add_notes,
+                LensOp::AddColumn {
+                    table: MEMBERS.to_owned(),
+                    column: "extra".to_owned(),
+                    column_type: ColumnType::Text,
+                    default: jazz::tools::Value::Text("x".to_owned()),
+                },
+            ],
+        ),
+    ];
+    for (from, to, ops) in cases {
+        let error = try_ops(from, to, ops).expect_err("a lens that changes a system table");
         assert!(
             matches!(error, DeploymentError::InvalidMigration { .. })
-                && error
-                    .to_string()
-                    .contains("may not rename a table to or from"),
+                && error.to_string().contains("may not change"),
             "{error}"
         );
     }
+    // A lens on an app table is not this rule's business.
+    let outcome = try_ops(
+        fragment.clone(),
+        next,
+        vec![rename_column("boards", "ownerId", "owner")],
+    );
+    assert!(
+        !outcome
+            .err()
+            .is_some_and(|error| error.to_string().contains("may not change")),
+        "the rule names system tables only"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2314,8 +2369,9 @@ fn an_account_founded_for_another_audience_cannot_bootstrap() {
         .expect("an app-founded account");
 }
 
-/// A lens renaming a table to or from a system table's name is not admitted
-/// by core either, whatever ships it: an ordinary rename still is.
+/// A lens that renames a system table, or changes its columns, is not
+/// admitted by core either, whatever ships it: ordinary tables' lenses still
+/// are, and a system table carried unchanged needs no entry.
 #[test]
 fn core_admits_no_lens_that_renames_a_system_table() {
     use jazz::protocol::{LensOp, MigrationLens, TableLens};
@@ -2364,7 +2420,57 @@ fn core_admits_no_lens_that_renames_a_system_table() {
     let error = block_on(server.admit_schema_with_lenses(system, &[to_system]))
         .expect_err("a rename to a system table's name");
     assert!(
-        error.message.contains("keep their names in every version"),
+        error.message.contains("carried between versions unchanged"),
         "{error:?}"
     );
+
+    // A column op on a system table, and the same op on an ordinary table.
+    let with_column = |table: &str, column: &str| {
+        common::compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new(table)
+                        .column(column, ColumnType::Text)
+                        .policies(common::allow_all_policies()),
+                )
+                .build(),
+        )
+    };
+    for (table, admitted) in [("plain_table", true), (MEMBERS, false)] {
+        let (first, second) = (with_column(table, "body"), with_column(table, "text"));
+        let lens = MigrationLens::new(
+            first.version_id(),
+            second.version_id(),
+            vec![TableLens {
+                source_table: table.into(),
+                target_table: table.into(),
+                ops: vec![LensOp::RenameColumn {
+                    from: "body".into(),
+                    to: "text".into(),
+                }],
+            }],
+        )
+        .unwrap();
+        let server = block_on(Db::open_history_complete(DbConfig::new(
+            first,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0xee; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        let result = block_on(server.admit_schema_with_lenses(second, &[lens]));
+        match (admitted, result) {
+            (true, result) => {
+                result.expect("a column rename on an ordinary table is admitted");
+            }
+            (false, result) => {
+                let error = result.expect_err("a column rename on a system table");
+                assert!(
+                    error.message.contains("carried between versions unchanged"),
+                    "{error:?}"
+                );
+            }
+        }
+    }
 }

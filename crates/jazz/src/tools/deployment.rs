@@ -218,25 +218,33 @@ fn structural(mut schema: Schema) -> Schema {
     schema
 }
 
-/// No lens renames a table to or from a system table's name. Core finds a
-/// system table by the name the admitted versions give it, which stays
-/// fixed across versions: a rename would give an older version's uploads
-/// another name than the newest version's, and skip the checks beside the
-/// system tables' policies.
+/// No lens reshapes a system table: it may not be renamed, nor have a
+/// column added, removed or renamed. Core finds a system table by the name
+/// the admitted versions give it and reads its columns by name across
+/// versions, so a system table is carried between versions unchanged (a
+/// lens may still introduce or remove one whole, as the fragment's own
+/// versions do): a rename, or columns swapped through a temporary name,
+/// would make an older version's uploads read under another layout.
 fn check_system_table_lenses(migrations: &[Lens]) -> Result<(), DeploymentError> {
     for lens in migrations {
         for op in &lens.forward.ops {
-            if let LensOp::RenameTable { old_name, new_name } = op
-                && let Some(name) = [old_name, new_name]
-                    .into_iter()
-                    .find(|name| artifact::system_tables::is_system_table(name))
+            let touched: Vec<&String> = match op {
+                LensOp::RenameTable { old_name, new_name } => vec![old_name, new_name],
+                LensOp::AddColumn { table, .. }
+                | LensOp::RemoveColumn { table, .. }
+                | LensOp::RenameColumn { table, .. } => vec![table],
+                LensOp::AddTable { .. } | LensOp::RemoveTable { .. } => Vec::new(),
+            };
+            if let Some(name) = touched
+                .into_iter()
+                .find(|name| artifact::system_tables::is_system_table(name))
             {
                 return Err(DeploymentError::InvalidMigration {
                     from: lens.source_hash,
                     to: lens.target_hash,
                     reason: format!(
-                        "{name} is one of Jazz's system tables, which keep their names in every \
-                         version: a migration may not rename a table to or from one"
+                        "{name} is one of Jazz's system tables, which a migration may not change: \
+                         it keeps its name and columns in every version"
                     ),
                 });
             }
