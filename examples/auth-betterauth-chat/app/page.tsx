@@ -28,7 +28,7 @@ function ChatShell({
       </span>
       <section className="content-grid">
         <AuthCard
-          loggedIn={authMode !== "local-first"}
+          loggedIn={authMode !== "device-account"}
           role={claims.role as string | null | undefined}
           onSignIn={onSignIn}
           onSignUp={onSignUp}
