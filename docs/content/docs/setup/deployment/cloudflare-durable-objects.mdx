@@ -44,7 +44,7 @@ export default { fetch: routeJazzRequest };
 ```
 
 The object is the app: it holds your app's data, and the app's ID, which it makes on its first
-start. Keep the Worker's name, the `JazzCore` class and its migration as they are: a renamed Worker or
+start. One Worker serves one app, whatever app ID a request's path names. Keep the Worker's name, the `JazzCore` class and its migration as they are: a renamed Worker or
 a new class starts a new, empty app, and your backend publishes onto it without noticing.
 
 Give it a core secret: a random string of at least 32 characters (`openssl rand -hex 32`). Keep it
