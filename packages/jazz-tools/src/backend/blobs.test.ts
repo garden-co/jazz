@@ -51,24 +51,41 @@ describe("vercelBlob()", () => {
 
   it("is a vercel() core's default once a Blob store is connected", () => {
     const warn = vi.fn();
-    expect(resolveCoreBlobs({}, { BLOB_STORE_ID: "abc" }, warn)).toEqual({ storeId: "abc" });
-    expect(resolveCoreBlobs({ blobs: "sqlite" }, { BLOB_STORE_ID: "abc" }, warn)).toBeUndefined();
+    expect(resolveCoreBlobs({ region: "iad1" }, { BLOB_STORE_ID: "abc" }, warn)).toEqual({
+      storeId: "abc",
+    });
+    expect(
+      resolveCoreBlobs({ blobs: "sqlite", region: "iad1" }, { BLOB_STORE_ID: "abc" }, warn),
+    ).toBeUndefined();
     expect(warn).not.toHaveBeenCalled();
     // Without one, large values stay in SQLite, and the core says how to move them.
-    expect(resolveCoreBlobs({}, {}, warn)).toBeUndefined();
+    expect(resolveCoreBlobs({ region: "iad1" }, {}, warn)).toBeUndefined();
     expect(warn).toHaveBeenCalledWith(expect.stringMatching(/no Blob store is connected/));
+  });
+
+  it("checks an s3() bucket against the core's configured region", () => {
+    const warn = vi.fn();
+    const env = {
+      S3_BUCKET_NAME: "app-blobs",
+      AWS_REGION: "eu-central-1",
+      AWS_ROLE_ARN: "arn:aws:iam::1:role/vercel",
+    };
+    resolveCoreBlobs({ blobs: s3(), region: "fra1" }, env, warn);
+    expect(warn).not.toHaveBeenCalled();
+    resolveCoreBlobs({ blobs: s3(), region: "iad1" }, env, warn);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/eu-central-1.*iad1 \(us-east-1\)/));
   });
 
   it("says a vercel() core has no Blob store once per process, however many copies of jazz-tools load", async () => {
     // Said here, or already by an earlier test in this process.
-    resolveCoreBlobs({}, {}, () => {});
+    resolveCoreBlobs({ region: "iad1" }, {}, () => {});
     const warn = vi.fn();
-    resolveCoreBlobs({}, {}, warn);
+    resolveCoreBlobs({ region: "iad1" }, {}, warn);
     // Next.js bundles each route on its own: another copy of this module.
     vi.resetModules();
     const copy = await import("./vercel-store.js");
     expect(copy.resolveCoreBlobs).not.toBe(resolveCoreBlobs);
-    copy.resolveCoreBlobs({}, {}, warn);
+    copy.resolveCoreBlobs({ region: "iad1" }, {}, warn);
     expect(warn).not.toHaveBeenCalled();
   });
 });

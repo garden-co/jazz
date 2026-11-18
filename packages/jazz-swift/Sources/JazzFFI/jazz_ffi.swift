@@ -803,8 +803,10 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
     /**
      * Calls `listener` with each write the server refused that no durable
      * wait (a `global` tier, `wait_for_sync`) reported, as TS's
-     * `onMutationError`: `{"transaction", "message", "denied",
-     * "serializable"}`. Refusals from before the first watch come first.
+     * `onMutationError`: `{"transaction", "message", "code", "reason",
+     * "denied", "serializable"}`, `code` and `reason` as TS's
+     * `MutationErrorEvent`. Refusals from before the first watch come
+     * first.
      */
     func watchMutationErrors(listener: StateListener) throws  -> Watch
     
@@ -1414,8 +1416,10 @@ open func waitForSync(tier: String)throws   {try rustCallWithError(FfiConverterT
     /**
      * Calls `listener` with each write the server refused that no durable
      * wait (a `global` tier, `wait_for_sync`) reported, as TS's
-     * `onMutationError`: `{"transaction", "message", "denied",
-     * "serializable"}`. Refusals from before the first watch come first.
+     * `onMutationError`: `{"transaction", "message", "code", "reason",
+     * "denied", "serializable"}`, `code` and `reason` as TS's
+     * `MutationErrorEvent`. Refusals from before the first watch come
+     * first.
      */
 open func watchMutationErrors(listener: StateListener)throws  -> Watch  {
     return try  FfiConverterTypeWatch_lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
@@ -3619,7 +3623,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_wait_for_sync() != 43748) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_jazzhandle_watch_mutation_errors() != 3339) {
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_watch_mutation_errors() != 42692) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_watch_session() != 20465) {

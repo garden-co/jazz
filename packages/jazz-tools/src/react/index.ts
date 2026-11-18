@@ -33,8 +33,10 @@ export {
 export type {
   JazzSession,
   JazzSessionSnapshot,
+  JazzSessionErrorViewProps,
   JazzSessionOperation,
   JazzUser,
+  LocalFirstUnavailable,
 } from "../session/jazz-session.js";
 export {
   useJazzSession,

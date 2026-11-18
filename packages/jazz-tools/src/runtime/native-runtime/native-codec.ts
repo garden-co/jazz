@@ -186,7 +186,7 @@ export type QueryPredicate =
     }
   | {
       column: string;
-      op: "Contains";
+      op: "Contains" | "StartsWith" | "EndsWith";
       value: QueryLiteral;
     }
   | {
@@ -414,6 +414,14 @@ function writePredicate(writer: PostcardWriter, predicate: QueryPredicate): void
   }
   if (predicate.op === "Contains") {
     writer.u64(10); // Predicate::Contains
+    writeColumnOperand(writer, predicate.column);
+    writeLiteralOperand(writer, predicate.value);
+    return;
+  }
+  if (predicate.op === "StartsWith" || predicate.op === "EndsWith") {
+    // Appended after IsNull (12); only for a link that negotiated
+    // FEATURE_TEXT_AFFIX_PREDICATES.
+    writer.u64(predicate.op === "StartsWith" ? 13 : 14);
     writeColumnOperand(writer, predicate.column);
     writeLiteralOperand(writer, predicate.value);
     return;

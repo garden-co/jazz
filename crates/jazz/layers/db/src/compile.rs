@@ -93,7 +93,7 @@ impl Session {
             // `session.authMode`).
             ["authMode"] => Value::String(
                 match self.issuer.as_deref()? {
-                    AuthorSubject::LOCAL_FIRST_ISSUER => "local-first",
+                    AuthorSubject::DEVICE_ACCOUNT_ISSUER => "local-first",
                     AuthorSubject::ANONYMOUS_ISSUER => "anonymous",
                     _ => "external",
                 }
@@ -1535,6 +1535,112 @@ impl<'a> Ctx<'a> {
         Ok(())
     }
 
+    /// Checks `query`'s array relations as reads of them would compile them
+    /// ([`Ctx::compile_children`]): parent and child columns, filters and
+    /// order, nested relations too. An optional relation is compiled only
+    /// per parent row, so without this a bad filter or order would pass
+    /// `prepare` and fail at read time. For `prepare` only: reads don't run
+    /// it.
+    ///
+    /// Also checks what each column's type supports beyond what compiling
+    /// it does ([`check_operators`]) everywhere a query names columns: its
+    /// filters and order, its joins (hop seeds) and their nested joins, every
+    /// union arm and the union's order, history reads (against their source
+    /// table), and every relation.
+    pub fn validate_prepared(mut self, query: &Query) -> Result<(), Error> {
+        self.validate_rules(query)
+    }
+
+    fn validate_rules(&mut self, query: &Query) -> Result<(), Error> {
+        let name =
+            crate::schema::history::history_source_table(&query.table).unwrap_or(&query.table);
+        // A source compiling resolved but that isn't a table of the schema
+        // (none today besides history) has no column types to check.
+        let Ok(table) = self.table(name) else {
+            return Ok(());
+        };
+        match &query.flat_join {
+            None => check_operators(table, &query.filters, &query.order_by)?,
+            Some(flat) => {
+                let mut sources: Vec<(&str, &'a Table)> = vec![(
+                    flat.root_alias.as_deref().unwrap_or(query.table.as_str()),
+                    table,
+                )];
+                for source in &flat.sources {
+                    let name = crate::schema::history::history_source_table(&source.table)
+                        .unwrap_or(&source.table);
+                    let joined = self.table(name)?;
+                    sources.push((
+                        source.alias.as_deref().unwrap_or(source.table.as_str()),
+                        joined,
+                    ));
+                }
+                // `alias.column`, or a bare name the root or else exactly
+                // one joined table has.
+                // The alias may hold dots (`history.posts`); the column
+                // follows the last one.
+                let lookup = |name: &str| match name.rsplit_once('.') {
+                    Some((alias, column)) => sources
+                        .iter()
+                        .find(|(name, _)| *name == alias)
+                        .and_then(|(_, table)| table.column(column)),
+                    None => table.column(name).or_else(|| {
+                        let mut found = sources[1..].iter().filter_map(|(_, t)| t.column(name));
+                        let first = found.next();
+                        if found.next().is_some() { None } else { first }
+                    }),
+                };
+                check_operators_by(&lookup, &query.filters, &query.order_by)?;
+            }
+        }
+        self.check_joins(&query.joins)?;
+        for reachable in &query.reachable {
+            let access = self.table(&reachable.access_table)?;
+            check_operators(access, &reachable.access_filters, &[])?;
+            let edge = self.table(&reachable.edge_table)?;
+            check_operators(edge, &reachable.edge_filters, &[])?;
+            if let Some(seed) = &reachable.seed {
+                let seeds = self.table(&seed.table)?;
+                check_operators(seeds, &seed.filters, &[])?;
+            }
+        }
+        if let Some(plan) = crate::db::union_plan(query, self.schema)? {
+            for (_, arm) in &plan.arms {
+                self.validate_rules(arm)?;
+            }
+            check_operators(table, &[], &plan.order_by)?;
+        }
+        for array in &query.array_subqueries {
+            self.check_array(table, array)?;
+        }
+        Ok(())
+    }
+
+    fn check_joins(&mut self, joins: &[crate::query::JoinVia]) -> Result<(), Error> {
+        for join in joins {
+            let table = self.table(&join.table)?;
+            check_operators(table, &join.filters, &[])?;
+            self.check_joins(&join.nested_joins)?;
+        }
+        Ok(())
+    }
+
+    fn check_array(&mut self, parent: &'a Table, array: &ArraySubquery) -> Result<(), Error> {
+        let child = self.table(&array.table)?;
+        column_sql(child, "c", &array.inner_column)?;
+        column_sql(parent, "p", &array.outer_column)?;
+        projection(child, array.select.as_deref())?;
+        for filter in &array.filters {
+            self.predicate(filter, child, "c")?;
+        }
+        self.order_terms(child, "c", &array.order_by)?;
+        check_operators(child, &array.filters, &array.order_by)?;
+        for nested in &array.nested_arrays {
+            self.check_array(child, nested)?;
+        }
+        Ok(())
+    }
+
     /// One array relation for one parent row.
     /// The rows `array` relates to `parent`, with the index of the bound
     /// parameter that carries `parent` (`None` when it is not bound: NaN
@@ -2118,6 +2224,15 @@ impl<'a> Ctx<'a> {
                 } else {
                     self.contains(l, r)
                 }
+            }
+            Predicate::StartsWith(l, r) | Predicate::EndsWith(l, r) => {
+                if let Operand::Column(column) = l {
+                    check_affix_text(table, column)?;
+                }
+                let end = matches!(predicate, Predicate::EndsWith(..));
+                let l = self.operand(l, table, alias)?;
+                let r = self.operand(r, table, alias)?;
+                self.affix(l, r, end)
             }
             Predicate::IsNull(operand) => match self.operand(operand, table, alias)? {
                 Term::Missing => "1".to_owned(),
@@ -3151,6 +3266,23 @@ impl<'a> Ctx<'a> {
                 let right = self.rel_value_as(right, ty.as_ref(), rel, scope)?;
                 self.contains(left, right)
             }
+            RelationPredicate::StartsWith { left, right }
+            | RelationPredicate::EndsWith { left, right } => {
+                let end = matches!(predicate, RelationPredicate::EndsWith { .. });
+                match self.rel_column_type(rel, left) {
+                    Some(ValueType::String) | None => {}
+                    Some(other) => {
+                        return Err(query_error(format!(
+                            "operand type mismatch: {} on {}, which has type {other:?}",
+                            if end { "ends with" } else { "starts with" },
+                            left.column
+                        )));
+                    }
+                }
+                let left = self.resolve_term(rel, left)?;
+                let right = self.rel_value_as(right, Some(&ValueType::String), rel, scope)?;
+                self.affix(left, right, end)
+            }
             RelationPredicate::Removed(removed) => match *removed {},
         })
     }
@@ -3213,9 +3345,10 @@ fn outer_key_only(rel: &RelationExpr) -> bool {
     }
     fn predicate_refs(predicate: &RelationPredicate) -> usize {
         match predicate {
-            RelationPredicate::Cmp { right, .. } | RelationPredicate::Contains { right, .. } => {
-                refs(right)
-            }
+            RelationPredicate::Cmp { right, .. }
+            | RelationPredicate::Contains { right, .. }
+            | RelationPredicate::StartsWith { right, .. }
+            | RelationPredicate::EndsWith { right, .. } => refs(right),
             RelationPredicate::In { values, .. } => values.iter().map(refs).sum(),
             RelationPredicate::Not(payload) => predicate_refs(payload),
             RelationPredicate::Removed(removed) => match *removed {},
@@ -3455,7 +3588,105 @@ fn check_candidate(table: &Table, column: &str, option: &Operand) -> Result<(), 
     )))
 }
 
+/// What a column's type supports beyond what compiling a query checks: a
+/// JSON or bytes column takes no range comparison (`gt`, `gte`, `lt`,
+/// `lte`) and can't order a query, and a JSON column takes no `contains`.
+/// JSON is stored as text and bytes as a blob, so SQLite would compare
+/// them as such, which means nothing for either. Bytes keep `contains` (a
+/// byte subsequence, SPEC 19.5). Every other column type keeps what the
+/// engine supports. Run at `prepare` only ([`Ctx::validate_prepared`]).
+fn check_operators(
+    table: &Table,
+    filters: &[Predicate],
+    order_by: &[crate::query::OrderBy],
+) -> Result<(), Error> {
+    check_operators_by(&|column| table.column(column), filters, order_by)
+}
+
+/// [`check_operators`], with `lookup` finding the column a name in the
+/// query refers to (a flat join's names reach several tables).
+fn check_operators_by<'t>(
+    lookup: &dyn Fn(&str) -> Option<&'t crate::values::Column>,
+    filters: &[Predicate],
+    order_by: &[crate::query::OrderBy],
+) -> Result<(), Error> {
+    // `None`: the column supports everything; `Some(kind)`: it is one of
+    // the restricted kinds.
+    let restricted = |column: &str| {
+        let declared = lookup(column)?;
+        match type_kind(&declared.ty) {
+            Kind::Bytes => Some("bytes"),
+            Kind::Array => None,
+            _ if declared.json => Some("JSON"),
+            _ => None,
+        }
+    };
+    fn walk(
+        predicate: &Predicate,
+        restricted: &dyn Fn(&str) -> Option<&'static str>,
+    ) -> Result<(), Error> {
+        let (op, left, right) = match predicate {
+            Predicate::All(children) | Predicate::Any(children) => {
+                return children
+                    .iter()
+                    .try_for_each(|child| walk(child, restricted));
+            }
+            Predicate::Not(child) => return walk(child, restricted),
+            Predicate::Gt(l, r) => ("gt", l, r),
+            Predicate::Gte(l, r) => ("gte", l, r),
+            Predicate::Lt(l, r) => ("lt", l, r),
+            Predicate::Lte(l, r) => ("lte", l, r),
+            Predicate::Contains(l, r) => ("contains", l, r),
+            _ => return Ok(()),
+        };
+        for operand in [left, right] {
+            if let Operand::Column(column) = operand
+                && let Some(kind) = restricted(column)
+            {
+                if kind == "bytes" && op == "contains" {
+                    continue;
+                }
+                let supported = if kind == "bytes" {
+                    "eq, ne, in, notIn, contains, isNull or isNotNull"
+                } else {
+                    "eq, ne, in, notIn, isNull or isNotNull"
+                };
+                return Err(query_error(format!(
+                    "{kind} column \"{column}\" does not support \"{op}\"; use {supported}"
+                )));
+            }
+        }
+        Ok(())
+    }
+    for filter in filters {
+        walk(filter, &restricted)?;
+    }
+    for key in order_by {
+        if let Some(kind) = restricted(&key.column) {
+            return Err(query_error(format!(
+                "{kind} column \"{}\" cannot be used in orderBy",
+                key.column
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// `contains` searches text, bytes or an array.
+/// A prefix or suffix test reads a text column only.
+fn check_affix_text(table: &Table, column: &str) -> Result<(), Error> {
+    let Some(declared) = table.column(column) else {
+        return Ok(());
+    };
+    match type_kind(&declared.ty) {
+        Kind::Text => Ok(()),
+        _ => Err(query_error(format!(
+            "operand type mismatch: starts/ends with on {column}, which has type {:?}",
+            declared.ty
+        ))),
+    }
+}
+
 fn check_haystack(table: &Table, column: &str) -> Result<(), Error> {
     let Some(declared) = table.column(column) else {
         return Ok(());
@@ -4238,6 +4469,44 @@ impl Ctx<'_> {
         self.params[slot] = crate::values::array_needle(needle);
         let needle = placeholder;
         format!("EXISTS (SELECT 1 FROM json_each({array}) WHERE value = {needle})")
+    }
+
+    /// Text `left` starting (`end` false) or ending (`end` true) with text
+    /// `right`, bytewise on UTF-8. NULL on either side is false. Like
+    /// [`Self::contains`], a chunked cell is an INTEGER, not its value, and
+    /// matches nothing (SPEC 19.5).
+    fn affix(&mut self, left: Term, right: Term, end: bool) -> String {
+        let chunked = |term: &Term, sql: &str| {
+            matches!(term, Term::Large(_))
+                .then(|| format!("NOT {}", crate::large::chunked_sql(sql)))
+        };
+        let (Some(l), Some(r)) = (left.sql(), right.sql()) else {
+            return "0".to_owned();
+        };
+        let (lb, rb) = (format!("CAST({l} AS BLOB)"), format!("CAST({r} AS BLOB)"));
+        // `substr` and `length` count bytes on a BLOB. `substr` of an empty
+        // BLOB is NULL, so the empty needle is matched by length; NULL on
+        // either side leaves the test NULL, read as false.
+        let test = if end {
+            format!(
+                "({lb} IS NOT NULL AND (length({rb}) = 0 OR (length({lb}) >= length({rb}) \
+                 AND substr({lb}, length({lb}) - length({rb}) + 1) = {rb})))"
+            )
+        } else {
+            format!(
+                "({lb} IS NOT NULL AND (length({rb}) = 0 \
+                 OR substr({lb}, 1, length({rb})) = {rb}))"
+            )
+        };
+        let mut parts: Vec<String> = [chunked(&left, l), chunked(&right, r)]
+            .into_iter()
+            .flatten()
+            .collect();
+        parts.push(format!("COALESCE({test}, 0)"));
+        if parts.len() == 1 {
+            return parts.pop().expect("one part");
+        }
+        format!("({})", parts.join(" AND "))
     }
 
     fn contains(&mut self, left: Term, right: Term) -> String {
