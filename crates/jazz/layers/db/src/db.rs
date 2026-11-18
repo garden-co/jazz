@@ -1589,23 +1589,29 @@ fn default_fits(column: &crate::values::Column, value: &Value) -> bool {
 /// limit applies to the whole text handed to one prepare, and schema DDL
 /// outgrows Durable Object SQLite's 100 KB.
 pub(crate) fn execute_script(conn: &Storage, script: &str) -> Result<(), Error> {
-    let mut start = 0;
-    for (end, _) in script.match_indices(';') {
-        let statement = &script[start..=end];
-        let text = std::ffi::CString::new(statement)
-            .map_err(|_| Error::new(ErrorCode::Storage, "NUL in SQL"))?;
-        // SAFETY: a NUL-terminated string; `sqlite3_complete` only reads it.
-        // A `;` inside a trigger body or a literal leaves it incomplete.
-        if unsafe { rusqlite::ffi::sqlite3_complete(text.as_ptr()) } != 0 {
-            conn.execute_batch(statement).map_err(storage)?;
-            start = end + 1;
+    // One transaction for the whole script: outside one, every statement
+    // commits (and syncs the file) alone, and a schema of a few hundred
+    // tables then paid a durable commit per table, index and trigger when
+    // its store opened. It also leaves no half-created schema behind.
+    conn.scope("jazz_ddl", |conn| {
+        let mut start = 0;
+        for (end, _) in script.match_indices(';') {
+            let statement = &script[start..=end];
+            let text = std::ffi::CString::new(statement)
+                .map_err(|_| Error::new(ErrorCode::Storage, "NUL in SQL"))?;
+            // SAFETY: a NUL-terminated string; `sqlite3_complete` only reads
+            // it. A `;` inside a trigger body or a literal leaves it incomplete.
+            if unsafe { rusqlite::ffi::sqlite3_complete(text.as_ptr()) } != 0 {
+                conn.execute_batch(statement).map_err(storage)?;
+                start = end + 1;
+            }
         }
-    }
-    let rest = &script[start..];
-    if !rest.trim().is_empty() {
-        conn.execute_batch(rest).map_err(storage)?;
-    }
-    Ok(())
+        let rest = &script[start..];
+        if !rest.trim().is_empty() {
+            conn.execute_batch(rest).map_err(storage)?;
+        }
+        Ok(())
+    })
 }
 
 pub(crate) fn rejected(message: impl Into<String>) -> Error {
@@ -12473,5 +12479,92 @@ mod check_plan_tests {
         plans.put(key("c"), plan("r", 1));
         assert_eq!(plans.plans.len(), 1);
         assert!(kept(&plans, "c", "r", 1) && !kept(&plans, "a", "r", 1));
+    }
+}
+
+/// White-box on purpose: how many commits a store's DDL costs, and that a
+/// failing statement undoes the statements before it, are not visible
+/// through the public API (a store that fails to open is just an error).
+#[cfg(test)]
+mod execute_script_tests {
+    use super::execute_script;
+    use crate::storage::{Scoped, Storage};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// `tables` tables, each with an index and a trigger whose body holds
+    /// a `;` (so the script is not split inside it).
+    fn script(tables: usize) -> String {
+        (0..tables)
+            .map(|i| {
+                format!(
+                    "CREATE TABLE t{i} (a, b); CREATE INDEX t{i}_a ON t{i}(a); \
+                     CREATE TRIGGER t{i}_tr AFTER INSERT ON t{i} BEGIN SELECT 1; END;"
+                )
+            })
+            .collect()
+    }
+
+    /// Native SQLite and an emulated Durable Object store.
+    fn both() -> [(&'static str, Storage); 2] {
+        [
+            ("native", Storage::open_in_memory().unwrap()),
+            ("managed", Storage::managed_emulation_in_memory().unwrap()),
+        ]
+    }
+
+    fn objects(storage: &Storage) -> i64 {
+        storage
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name LIKE 't%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// A schema's DDL is one commit (one sync of the file), however many
+    /// statements it holds.
+    #[test]
+    fn a_script_commits_once() {
+        for (owner, storage) in both() {
+            let commits = Arc::new(AtomicUsize::new(0));
+            let counted = commits.clone();
+            storage
+                .commit_hook(Some(move || {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    false
+                }))
+                .unwrap();
+            execute_script(&storage, &script(50)).unwrap();
+            assert_eq!(commits.load(Ordering::SeqCst), 1, "{owner}");
+            assert_eq!(objects(&storage), 150, "{owner}");
+        }
+    }
+
+    /// A failing statement undoes the whole script: no half-created schema.
+    #[test]
+    fn a_failed_script_leaves_nothing() {
+        for (owner, storage) in both() {
+            let failing = format!("{} CREATE TABLE t0 (again);", script(3));
+            assert!(execute_script(&storage, &failing).is_err(), "{owner}");
+            assert_eq!(objects(&storage), 0, "{owner}");
+            assert!(storage.is_autocommit(), "{owner}");
+        }
+    }
+
+    /// Inside a caller's scope the script commits, or is undone, with it.
+    #[test]
+    fn a_script_inside_a_scope_goes_with_it() {
+        for (owner, storage) in both() {
+            storage
+                .scope_then("caller", |storage| {
+                    execute_script(storage, &script(2)).unwrap();
+                    assert!(!storage.is_autocommit(), "{owner}");
+                    Scoped::Undo(())
+                })
+                .unwrap();
+            assert_eq!(objects(&storage), 0, "{owner}");
+        }
     }
 }
