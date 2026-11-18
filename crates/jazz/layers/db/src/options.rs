@@ -432,12 +432,14 @@ pub struct Error {
     pub message: String,
     /// The encrypted space a call needs a key for, when it was refused for
     /// that (reasons [`Reason::KeyPending`] and [`Reason::SpacePending`]).
+    #[cfg(feature = "e2ee-client")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space: Option<SpaceAddress>,
 }
 
 /// An encrypted space's address: the catalogue identity of its space table
 /// and the space row's ID, both as UUID strings (E2EE protocol §1.3).
+#[cfg(feature = "e2ee-client")]
 #[derive(
     Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
 )]
@@ -466,6 +468,7 @@ impl Error {
             code,
             reason: None,
             message: message.into(),
+            #[cfg(feature = "e2ee-client")]
             space: None,
         }
     }
@@ -477,6 +480,7 @@ impl Error {
             code,
             reason: Some(reason),
             message: message.into(),
+            #[cfg(feature = "e2ee-client")]
             space: None,
         }
     }
@@ -557,17 +561,39 @@ pub enum Reason {
     /// that this device does not hold (code `NotObserved`, E2EE protocol
     /// §7). Nothing of the call was applied; [`Error::space`] names the
     /// space.
+    #[cfg(feature = "e2ee-client")]
     #[serde(rename = "key-pending")]
     KeyPending,
     /// An encrypted write to a space that has no valid root, which this
     /// device may not create (code `WriteRejected`, E2EE protocol §3.2,
     /// §7). [`Error::space`] names the space.
+    #[cfg(feature = "e2ee-client")]
     #[serde(rename = "space-pending")]
     SpacePending,
 }
 
 impl Reason {
     /// Every reason, in declaration order.
+    #[cfg(not(feature = "e2ee-client"))]
+    pub const ALL: [Reason; 13] = [
+        Reason::AuthorizationDenied,
+        Reason::ClientClockTooFarAhead,
+        Reason::SerializationConflict,
+        Reason::RowAlreadyDeleted,
+        Reason::RowAlreadyExists,
+        Reason::RowNotDeleted,
+        Reason::MissingRequired,
+        Reason::BranchMove,
+        Reason::MissingChunks,
+        Reason::PredecessorRejected,
+        Reason::SchemaVersionNotDeployed,
+        Reason::IdentityMismatch,
+        Reason::SchemaVersionUnsupported,
+    ];
+
+    /// With the `e2ee-client` feature: also the two reasons an encrypting
+    /// client reports.
+    #[cfg(feature = "e2ee-client")]
     pub const ALL: [Reason; 15] = [
         Reason::AuthorizationDenied,
         Reason::ClientClockTooFarAhead,
@@ -609,7 +635,9 @@ impl Reason {
             Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
             Reason::IdentityMismatch => "identity_mismatch",
             Reason::SchemaVersionUnsupported => "schema_version_unsupported",
+            #[cfg(feature = "e2ee-client")]
             Reason::KeyPending => "key-pending",
+            #[cfg(feature = "e2ee-client")]
             Reason::SpacePending => "space-pending",
         }
     }

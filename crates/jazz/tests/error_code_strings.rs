@@ -76,7 +76,9 @@ fn pinned_reason(reason: Reason) -> &'static str {
         Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
         Reason::IdentityMismatch => "identity_mismatch",
         Reason::SchemaVersionUnsupported => "schema_version_unsupported",
+        #[cfg(feature = "e2ee-client")]
         Reason::KeyPending => "key-pending",
+        #[cfg(feature = "e2ee-client")]
         Reason::SpacePending => "space-pending",
     }
 }
@@ -161,5 +163,29 @@ fn a_public_api_error_keeps_its_display_text_and_exposes_the_stable_code() {
         error.to_string(),
         "Query: unknown table missing",
         "the binding-visible message is unchanged by the stable code"
+    );
+}
+
+/// Contract: without the `e2ee-client` feature the encryption reasons do
+/// not exist, so a build that does not encrypt sees the same reasons, and
+/// reads the names of the two an encrypting client reports as no reason.
+#[cfg(not(feature = "e2ee-client"))]
+#[test]
+fn a_build_without_the_encrypting_client_knows_neither_of_its_reasons() {
+    assert_eq!(Reason::ALL.len(), 13);
+    assert_eq!(Reason::from_name("key-pending"), None);
+    assert_eq!(Reason::from_name("space-pending"), None);
+}
+
+/// Contract: with the feature the two reasons are known, by the protocol's
+/// kebab-case names.
+#[cfg(feature = "e2ee-client")]
+#[test]
+fn an_encrypting_client_knows_its_two_reasons() {
+    assert_eq!(Reason::ALL.len(), 15);
+    assert_eq!(Reason::from_name("key-pending"), Some(Reason::KeyPending));
+    assert_eq!(
+        Reason::from_name("space-pending"),
+        Some(Reason::SpacePending)
     );
 }

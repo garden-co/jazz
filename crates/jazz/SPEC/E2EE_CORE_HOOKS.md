@@ -29,7 +29,7 @@ pub struct OpenOutcome { pub unreadable: Vec<Unreadable>, pub missing_epochs: Ve
 
 The hooks are installed when the database opens, with `DbConfig::with_e2ee(Rc<dyn E2eeHooks>)` (exists), next to `with_id_source` and `with_clock`, so a database never runs without them. An `Option` that is `None` costs one branch per call site.
 
-A call the hooks refuse for want of a key (`NeedsKey`, `SpacePending`, here and in H3–H5) applies nothing and fails with reason `key-pending` (code `NotObserved`) or `space-pending` (code `WriteRejected`), the protocol's §7 names (exists: `Reason::KeyPending`, `Reason::SpacePending`). The error carries the space in its `space` field (`Error::space`); `E2eeRefusal::of(&error)` gives both.
+A call the hooks refuse for want of a key (`NeedsKey`, `SpacePending`, here and in H3–H5) applies nothing and fails with reason `key-pending` (code `NotObserved`) or `space-pending` (code `WriteRejected`), the protocol's §7 names (exists: `Reason::KeyPending`, `Reason::SpacePending`, and `Error::space`, all behind the `e2ee-client` feature, so a build without it sees no change). The error carries the space in its `space` field (`Error::space`); `E2eeRefusal::of(&error)` gives both.
 
 ## 2. Hooks
 
