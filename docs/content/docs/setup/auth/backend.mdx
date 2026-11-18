@@ -50,7 +50,7 @@ export const jazz = createJazz({
   organization, under `session.claims`.
 - Return `null` for a signed-out request.
 - Return `acceptDeviceAccounts(request)` (from `jazz-tools/backend`) to let a signed-out
-  [device account](/docs/setup/auth/local-first) sync: that's how guests work. Device accounts are
+  [device account](/docs/setup/auth/device-accounts) sync: that's how guests work. Device accounts are
   refused otherwise. An app with no sign-in at all passes `authenticate: acceptDeviceAccounts`.
   This gates device-account sync only; [linking](#guests-and-linking) doesn't depend on it.
 
@@ -299,7 +299,7 @@ session?.identity; // { issuer: "jazz:backend", subject: "alice" }, subject = th
 
 On the client, the Jazz session names the same user: `getSnapshot().user` (or `user` from
 `useJazzSession()`) is `{ accountId, kind, identity, claims }`, or `null` while no one is signed in.
-`kind` is `"device"` for a [device account](/docs/setup/auth/local-first) and `"backend"` for a
+`kind` is `"device"` for a [device account](/docs/setup/auth/device-accounts) and `"backend"` for a
 user your backend signed in; `identity.subject` is your own user ID.
 
 - **Ownership** compares `session.user`. Linked identities share one account, so this is
@@ -420,7 +420,7 @@ A copied account ID or claim is not authorization: Jazz checks the request or ha
 
 ## Guests and linking
 
-Guests are [device accounts](/docs/setup/auth/local-first): accounts whose key lives on the device.
+Guests are [device accounts](/docs/setup/auth/device-accounts): accounts whose key lives on the device.
 A guest who signs up keeps its account and data: after your sign-up sets its session, the client
 calls `linkDeviceAccount()`. It proves it owns the device account by signing a one-time challenge
 with its key; your backend runs `authenticate` and links the new user to that account. Call it in
@@ -537,7 +537,7 @@ Signing out stays signed out until a user signs in again, across reloads too: wi
 local data or revoke anything at your auth provider; you are still responsible for any clean-up
 your auth library requires. A device account's key stays on the device, and
 `session.reopenDeviceAccount()` signs back in as it, with its data (see
-[Signing out of a device account](/docs/setup/auth/local-first#signing-out-of-a-device-account)).
+[Signing out of a device account](/docs/setup/auth/device-accounts#signing-out-of-a-device-account)).
 With `clearOnSignOut`, the key is forgotten and the data wiped.
 
 `session.signOut()` signs out of Jazz only. While your own auth still has the user signed in (its
