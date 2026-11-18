@@ -4,6 +4,7 @@
 //! the network, the file system or the clock, so it compiles for wasm32.
 //! Each host keeps its own I/O around it.
 
+pub mod accounts;
 pub mod admission;
 pub mod catalogue;
 pub mod deployment;
