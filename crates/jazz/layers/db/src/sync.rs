@@ -4272,6 +4272,7 @@ fn from_wire_error(error: WireError) -> Error {
             code: ErrorCode::WriteRejected,
             reason: reason.as_deref().and_then(Reason::from_name),
             message,
+            space: None,
         },
         WireError::Other(m) => Error::new(ErrorCode::Protocol, m),
     }
@@ -8877,6 +8878,7 @@ fn schema_version_not_deployed() -> Error {
         message: "this write was made through a schema version the server has not deployed: \
                   deploy the schema before releasing the app that writes through it"
             .to_owned(),
+        space: None,
     }
 }
 

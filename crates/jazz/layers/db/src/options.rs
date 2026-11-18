@@ -416,6 +416,20 @@ pub struct Error {
     pub reason: Option<Reason>,
     /// Human-readable detail.
     pub message: String,
+    /// The encrypted space a call needs a key for, when it was refused for
+    /// that (reasons [`Reason::KeyPending`] and [`Reason::SpacePending`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<SpaceAddress>,
+}
+
+/// An encrypted space's address: the catalogue identity of its space table
+/// and the space row's ID, both as UUID strings (E2EE protocol §1.3).
+#[derive(
+    Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
+)]
+pub struct SpaceAddress {
+    pub scope_id: String,
+    pub identifier: String,
 }
 
 impl std::fmt::Display for Error {
@@ -438,6 +452,7 @@ impl Error {
             code,
             reason: None,
             message: message.into(),
+            space: None,
         }
     }
 
@@ -448,6 +463,7 @@ impl Error {
             code,
             reason: Some(reason),
             message: message.into(),
+            space: None,
         }
     }
 
@@ -523,11 +539,22 @@ pub enum Reason {
     /// skipped and the store keeps syncing the versions it knows (code
     /// `Schema`).
     SchemaVersionUnsupported,
+    /// A write, query or strict read needs the key of an encrypted space
+    /// that this device does not hold (code `NotObserved`, E2EE protocol
+    /// §7). Nothing of the call was applied; [`Error::space`] names the
+    /// space.
+    #[serde(rename = "key-pending")]
+    KeyPending,
+    /// An encrypted write to a space that has no valid root, which this
+    /// device may not create (code `WriteRejected`, E2EE protocol §3.2,
+    /// §7). [`Error::space`] names the space.
+    #[serde(rename = "space-pending")]
+    SpacePending,
 }
 
 impl Reason {
     /// Every reason, in declaration order.
-    pub const ALL: [Reason; 13] = [
+    pub const ALL: [Reason; 15] = [
         Reason::AuthorizationDenied,
         Reason::ClientClockTooFarAhead,
         Reason::SerializationConflict,
@@ -541,9 +568,13 @@ impl Reason {
         Reason::SchemaVersionNotDeployed,
         Reason::IdentityMismatch,
         Reason::SchemaVersionUnsupported,
+        Reason::KeyPending,
+        Reason::SpacePending,
     ];
 
-    /// The stable, snake_case name of this reason.
+    /// The stable name of this reason: snake_case, except the E2EE
+    /// reasons, which keep the protocol's kebab-case names (`key-pending`,
+    /// `space-pending`).
     ///
     /// Like [`ErrorCode::as_str`], a durable contract: bindings expose it to
     /// JavaScript as `error.reason`, and the sync wire carries it by this
@@ -564,6 +595,8 @@ impl Reason {
             Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
             Reason::IdentityMismatch => "identity_mismatch",
             Reason::SchemaVersionUnsupported => "schema_version_unsupported",
+            Reason::KeyPending => "key-pending",
+            Reason::SpacePending => "space-pending",
         }
     }
 
