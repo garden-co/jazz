@@ -7,6 +7,6 @@
     "examples",
     "app-files",
     "internals",
-    "local-first-auth-internals"
+    "device-accounts-internals"
   ]
 }
