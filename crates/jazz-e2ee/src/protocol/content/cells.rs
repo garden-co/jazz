@@ -61,6 +61,10 @@ pub enum EqualityValueBuf {
     Bytes(Vec<u8>),
     Uuid([u8; 16]),
     Enum(String),
+    /// A JSON value as stored: the text as written.
+    Json(String),
+    /// An array's elements, in order.
+    Array(Vec<EqualityValueBuf>),
 }
 
 impl core::fmt::Debug for EqualityValueBuf {
@@ -75,6 +79,8 @@ impl core::fmt::Debug for EqualityValueBuf {
             Self::Bytes(_) => "Bytes(..)",
             Self::Uuid(_) => "Uuid(..)",
             Self::Enum(_) => "Enum(..)",
+            Self::Json(_) => "Json(..)",
+            Self::Array(_) => "Array(..)",
         })
     }
 }
@@ -87,7 +93,9 @@ impl Drop for EqualityValueBuf {
             Self::Int(value) => value.zeroize(),
             Self::Timestamp(value) => value.zeroize(),
             Self::Float(value) => value.zeroize(),
-            Self::Text(value) | Self::Enum(value) => value.zeroize(),
+            Self::Text(value) | Self::Enum(value) | Self::Json(value) => value.zeroize(),
+            // Each element clears itself as it drops.
+            Self::Array(_) => {}
             Self::Bytes(value) => value.zeroize(),
             Self::Uuid(value) => value.zeroize(),
         }
@@ -106,6 +114,8 @@ impl EqualityValueBuf {
             Self::Bytes(value) => EqualityValue::Bytes(value),
             Self::Uuid(value) => EqualityValue::Uuid(*value),
             Self::Enum(value) => EqualityValue::Enum(value),
+            Self::Json(value) => EqualityValue::Json(value),
+            Self::Array(items) => EqualityValue::Array(crate::records::EqualityItems::Bufs(items)),
         }
     }
 }

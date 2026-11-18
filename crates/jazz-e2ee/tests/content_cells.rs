@@ -1377,6 +1377,18 @@ fn plaintext_and_equality_values_never_print() {
         format!("{:?}", EqualityValue::Text(text)),
         format!("{:?}", EqualityValue::Bytes(secret)),
         format!("{:?}", EqualityValue::Enum(text)),
+        format!("{:?}", EqualityValueBuf::Json(text.to_owned())),
+        format!(
+            "{:?}",
+            EqualityValueBuf::Array(vec![EqualityValueBuf::Text(text.to_owned())])
+        ),
+        format!("{:?}", EqualityValue::Json(text)),
+        format!(
+            "{:?}",
+            EqualityValue::Array(jazz_e2ee::records::EqualityItems::Values(&[
+                EqualityValue::Text(text)
+            ]))
+        ),
     ] {
         assert_redacted(&debug, secret);
     }
