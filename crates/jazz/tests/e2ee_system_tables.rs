@@ -151,6 +151,7 @@ fn entries() -> BTreeMap<String, EncryptionEntry> {
                         plain: PlainType {
                             column_type: ColumnType::Text,
                             nullable: false,
+                            default: None,
                         },
                         sealed_type: None,
                         from: None,

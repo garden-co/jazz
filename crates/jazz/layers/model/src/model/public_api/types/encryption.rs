@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use jazz_types::app_id::AppId;
 
-use super::ColumnType;
+use super::{ColumnType, Value};
 
 /// Everything a client needs to know about one app's encryption, for the
 /// schema version it runs.
@@ -107,7 +107,8 @@ impl EncryptedColumn {
 }
 
 /// A plaintext type with its nullability, as an app file states it
-/// (`"string"`, `"string?"`).
+/// (`"string"`, `"string?"`), and the column's declared plaintext default
+/// (`{ "type": "string", "default": "untitled" }`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlainType {
@@ -116,6 +117,29 @@ pub struct PlainType {
     /// Whether the value may be null.
     #[serde(default)]
     pub nullable: bool,
+    /// What a cell that was never written reads as (protocol §4.1): rows
+    /// stored before a migration added the column, say. `None`: no
+    /// default. Not part of the type the cells are sealed under, and
+    /// absent from the stored form when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<Value>,
+}
+
+impl PlainType {
+    /// A type without a declared default.
+    pub fn new(column_type: ColumnType, nullable: bool) -> Self {
+        Self {
+            column_type,
+            nullable,
+            default: None,
+        }
+    }
+
+    /// Whether `other` is the same type, its default aside: what cells are
+    /// sealed under (protocol §4.1).
+    pub fn same_type(&self, other: &PlainType) -> bool {
+        self.column_type == other.column_type && self.nullable == other.nullable
+    }
 }
 
 /// The old space of a re-home.

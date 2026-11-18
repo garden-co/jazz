@@ -240,7 +240,7 @@
         },
         "columns": {
           "type": "object",
-          "description": "The encrypted columns and the plaintext types code reads and writes.",
+          "description": "The encrypted columns and the plaintext types code reads and writes. A column may declare a `default`, e.g. { \"type\": \"string\", \"default\": \"untitled\" }: what a cell never written reads as, such as on rows older than the column. A default is stored and deployed in plain text, visible to the server, so it must not be secret.",
           "additionalProperties": {
             "anyOf": [
               {
@@ -256,6 +256,9 @@
                   },
                   "sealedType": {
                     "$ref": "#/$defs/columnType"
+                  },
+                  "default": {
+                    "description": "What a cell never written reads as. Stored and deployed in plain text: not secret."
                   },
                   "from": {
                     "type": "string"

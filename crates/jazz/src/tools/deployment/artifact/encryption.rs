@@ -504,7 +504,7 @@ pub fn check_transition(
                 .and_then(|n| old.and_then(|o| o.columns.get(&n).map(|c| (n, c))));
             match previous {
                 Some((old_name, previous)) => {
-                    if declared.cell_type() != previous.cell_type() {
+                    if !declared.cell_type().same_type(previous.cell_type()) {
                         return Err(format!(
                             "{path}: the encrypted column's type changes from {:?} to {:?}, \
                              which its cells were sealed under; re-encrypt it into a new column \
@@ -514,7 +514,17 @@ pub fn check_transition(
                             declared.cell_type()
                         ));
                     }
-                    if declared.plain != *declared.cell_type()
+                    // Rows older than the column read its default: another
+                    // default would read them differently on clients of
+                    // each version.
+                    if declared.plain.default != previous.plain.default {
+                        return Err(format!(
+                            "{path}: the encrypted column's default changes, and the rows \
+                             stored before the column read it; re-encrypt it into a new column \
+                             (`\"from\"`) to change it"
+                        ));
+                    }
+                    if !declared.plain.same_type(declared.cell_type())
                         && !widens(declared.cell_type(), &declared.plain)
                     {
                         return Err(format!(
