@@ -2035,6 +2035,70 @@ fn a_stored_default_on_an_encrypted_column_refuses_the_hooks() {
     client(&hooks);
 }
 
+/// Contract: an application's query never names a reserved token column
+/// (`__e2ee_eq_*`): in a filter, an ordering, a selection or a union arm,
+/// its literal would go upstream as written. The hook's own token filter
+/// in the query it returns is accepted: an ordinary equality on `body`
+/// still prepares.
+#[test]
+fn an_application_query_cannot_name_a_token_column() {
+    use jazz::query::{
+        OrderBy, OrderDirection, RelationCmpOp, RelationPredicate, RelationValueRef,
+    };
+    let hooks = Fake::new();
+    let alice = client(&hooks);
+    let space = uuid::Uuid::new_v4();
+    hooks.hold(space);
+    let in_space = || eq(col("projectId"), lit(Value::Uuid(space)));
+    let mut ordered = Query::from("notes").filter(in_space());
+    ordered.order_by.push(OrderBy {
+        column: "__e2ee_eq_body".to_owned(),
+        direction: OrderDirection::Asc,
+    });
+    let mut selected = Query::from("notes").filter(in_space());
+    selected.select = Some(vec!["__e2ee_eq_body".to_owned()]);
+    let arm = union_of(
+        vec![(
+            "a",
+            RelationPredicate::Cmp {
+                left: jazz::query::RelationColumnRef {
+                    scope: Some("notes".to_owned()),
+                    column: "__e2ee_eq_body".to_owned(),
+                },
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::Literal(serde_json::json!("x")),
+            },
+        )],
+        None,
+    );
+    for query in [
+        Query::from("notes").filter(eq(col("__e2ee_eq_body"), lit(text("x")))),
+        Query::from("notes").filter(Predicate::Ne(
+            Operand::Column("__e2ee_eq_body".to_owned()),
+            lit(text("x")),
+        )),
+        ordered,
+        selected,
+        arm,
+    ] {
+        let error = alice.prepare_query(&query).unwrap_err();
+        assert!(
+            error.message.contains("__e2ee_eq_body")
+                && error.message.ends_with("not supported yet")
+                || error.message.starts_with("Reading reserved column"),
+            "{query:?}: {}",
+            error.message
+        );
+    }
+    alice
+        .prepare_query(
+            &Query::from("notes")
+                .filter(in_space())
+                .filter(eq(col("body"), lit(text("x")))),
+        )
+        .unwrap();
+}
+
 /// Contract: JSON and array columns are encrypted columns like any other
 /// to the refusal walk: a top-level equality on an equality-indexed one of
 /// the query's own table is left to the hook, and every other condition on

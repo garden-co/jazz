@@ -131,6 +131,9 @@ impl Inner {
     ) -> Result<(), Error> {
         self.refuse_unopened(encrypted, query)?;
         refuse_unplannable(encrypted, query, plannable)?;
+        // What the application wrote never names a reserved column: only
+        // the hook writes token conditions, into the query it returns.
+        let reserved = plannable.then(|| self.reserved_columns());
         if let Some(union) = crate::db::union_plan(query, &self.schema)? {
             let table = query.table.as_str();
             for term in &union.order_by {
@@ -139,9 +142,59 @@ impl Inner {
             for (_, arm) in &union.arms {
                 self.refuse_unopened(encrypted, arm)?;
                 refuse_unplannable(encrypted, arm, false)?;
+                if let Some(reserved) = &reserved {
+                    refuse_reserved(reserved, arm)?;
+                }
             }
         }
+        if let Some(reserved) = &reserved {
+            refuse_reserved(reserved, query)?;
+        }
         Ok(())
+    }
+
+    /// The reserved (`__e2ee_`) columns of each table of the schema, as
+    /// entries the conditions walk reads: none is plannable.
+    fn reserved_columns(&self) -> BTreeMap<String, EncryptionEntry> {
+        let column = || crate::e2ee::EncryptedColumn {
+            plain: crate::e2ee::PlainType {
+                column_type: crate::tools::ColumnType::Bytea,
+                nullable: true,
+                default: None,
+            },
+            sealed_type: None,
+            from: None,
+            to: None,
+            convert: None,
+            reverse: None,
+        };
+        self.schema
+            .jazz
+            .tables()
+            .iter()
+            .filter_map(|table| {
+                let columns: BTreeMap<_, _> = table
+                    .columns
+                    .iter()
+                    .filter(|c| c.name.as_str().starts_with("__e2ee_"))
+                    .map(|c| (c.name.to_string(), column()))
+                    .collect();
+                (!columns.is_empty()).then(|| {
+                    (
+                        table.name.to_string(),
+                        EncryptionEntry {
+                            space: String::new(),
+                            scope: String::new(),
+                            columns,
+                            equality: Vec::new(),
+                            backfill: Vec::new(),
+                            rehome: None,
+                            sweep: Default::default(),
+                        },
+                    )
+                })
+            })
+            .collect()
     }
 
     /// Refuse a read that would return cells of an encrypted table that
@@ -305,6 +358,26 @@ fn refused_in_predicate(
             "Reading encrypted column `{table}.{column}` in a filter other than a top-level equality"
         ))
     })
+}
+
+/// Refuse a query of the application that names a reserved column in a
+/// condition, an ordering, an aggregate or its selection.
+fn refuse_reserved(
+    reserved: &BTreeMap<String, EncryptionEntry>,
+    query: &Query,
+) -> Result<(), Error> {
+    refuse_unplannable(reserved, query, false)?;
+    if let Some(entry) = reserved.get(&query.table) {
+        for column in query.select.iter().flatten() {
+            if entry.columns.contains_key(column.as_str()) {
+                return Err(unsupported(format!(
+                    "Reading reserved column `{}.{column}`",
+                    query.table
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Refuse a query the hook returned that differs from the one it was
