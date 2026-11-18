@@ -1420,6 +1420,8 @@ function openRemoteCore(
     async handle(method, path, headers, body, access = "session") {
       const response = await fetch(`${target.url}${path}`, {
         method,
+        // The request carries this backend's credential: never to another URL.
+        redirect: "error",
         headers: [...withoutStated(headers), ...(await credentialHeaders(access))].map(
           ([name, value]) => [name!, value!] as [string, string],
         ),
