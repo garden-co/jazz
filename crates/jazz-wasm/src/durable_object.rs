@@ -738,6 +738,15 @@ mod smoke {
         serde_json::to_string(&request).expect("deploy request JSON")
     }
 
+    /// A user's identity (`issuer`, `subject`), as a prelude names its peer.
+    #[wasm_bindgen(js_name = testUserIdentity)]
+    pub fn test_user_identity(issuer: &str, subject: &str) -> String {
+        AuthorSubject::authenticated(issuer, subject)
+            .expect("a user identity")
+            .canonical()
+            .to_owned()
+    }
+
     /// The system identity, as a prelude names its peer.
     #[wasm_bindgen(js_name = testSystemIdentity)]
     pub fn test_system_identity() -> String {
@@ -931,8 +940,11 @@ mod smoke {
 /// send what `output` returns.
 mod core_host {
     use super::{durable_object_storage, ObjectStorage};
+    use jazz_server::portable::accounts::{
+        self, AccountRoute, RouteAuthority, RouteBody, RouteContext,
+    };
     use jazz_server::portable::admission::{
-        admit_by_core_secret, same_secret, UpgradeCredential, WebSocketPrelude,
+        admit_by_core_secret, same_secret, SessionRevocation, UpgradeCredential, WebSocketPrelude,
     };
     use jazz_server::portable::catalogue::{CatalogueIndex, DeploymentResponse};
     use jazz_server::portable::deployment::{self, DeployError, DeployRequest};
@@ -968,6 +980,9 @@ mod core_host {
         held_bytes: usize,
         /// Why the socket ends: its error frame goes out with its output.
         failed: Option<jazz::wire::WireError>,
+        /// For a user session the backend stated: what a revocation of its
+        /// user's sessions is checked against.
+        revocation: Option<SessionRevocation>,
     }
 
     /// The most input a socket may have held for room (one session's
@@ -1039,6 +1054,8 @@ mod core_host {
         /// Tests only: the engine takes no input and does not tick, so
         /// input piles up as held.
         paused: bool,
+        /// The account registry's tables exist (made on first use).
+        accounts_open: bool,
     }
 
     /// What `accept` answers: the frames to send, and the socket's number
@@ -1126,6 +1143,7 @@ mod core_host {
                 held_limit: HELD_LIMIT,
                 global_held_limit: GLOBAL_HELD_LIMIT,
                 paused: false,
+                accounts_open: false,
             };
             this.open_core(schema.as_deref())?;
             Ok(this)
@@ -1192,6 +1210,24 @@ mod core_host {
                 Ok(link) => link,
                 Err(error) => return refused(error_frame(&error)),
             };
+            // A stated session of a user whose sessions were revoked after
+            // the backend authenticated it is refused, as native refuses it.
+            let revocation = admission.revocation.clone();
+            if let Some(revocation) = &revocation {
+                match self.revocation_mark(&revocation.principal) {
+                    Ok(mark) if accounts::session_revoked(mark, revocation.authenticated_at_ms) => {
+                        return refused(error_frame(&revoked()));
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        return refused(error_frame(&jazz::wire::WireError::new(
+                            jazz::wire::WireErrorCode::NotReady,
+                            jazz::wire::WireRetry::Later,
+                            error,
+                        )));
+                    }
+                }
+            }
             let Some(core) = self.core.as_mut() else {
                 return refused(error_frame(&jazz::wire::WireError::new(
                     jazz::wire::WireErrorCode::NotReady,
@@ -1231,6 +1267,7 @@ mod core_host {
                     held: VecDeque::new(),
                     held_bytes: 0,
                     failed: None,
+                    revocation,
                 },
             );
             let hello = encode_ws_frame_batches(&[link.server_hello])
@@ -1552,6 +1589,8 @@ mod core_host {
     struct HttpAnswer {
         status: u16,
         body: String,
+        /// The body's content type (empty for no body).
+        content_type: &'static str,
     }
 
     impl HttpAnswer {
@@ -1559,6 +1598,7 @@ mod core_host {
             object(&[
                 ("status", JsValue::from(self.status)),
                 ("body", JsValue::from_str(&self.body)),
+                ("contentType", JsValue::from_str(self.content_type)),
             ])
         }
     }
@@ -1567,6 +1607,24 @@ mod core_host {
         HttpAnswer {
             status,
             body: serde_json::to_string(&body).unwrap_or_default(),
+            content_type: "application/json",
+        }
+    }
+
+    /// What a revoked session is told, as native tells it.
+    fn revoked() -> jazz::wire::WireError {
+        jazz::wire::WireError::new(
+            jazz::wire::WireErrorCode::AuthFailed,
+            jazz::wire::WireRetry::AfterAuth,
+            "session revoked: jazz.revokeUser ended this user's sessions",
+        )
+    }
+
+    fn no_content() -> HttpAnswer {
+        HttpAnswer {
+            status: 204,
+            body: String::new(),
+            content_type: "",
         }
     }
 
@@ -1796,9 +1854,22 @@ mod core_host {
             use jazz::tools::transport_error::ErrorResponse;
             let not_found = || refusal(404, ErrorResponse::not_found("route not found"));
             let route = route_of(path).ok_or_else(not_found)?;
+            let account = route
+                .strip_prefix("admin/accounts/")
+                .and_then(AccountRoute::from_path);
             match (method, route) {
                 ("GET", "app") => credentials.holder(&self.secret)?,
                 ("POST", "backend/admit") => credentials.backend(&self.secret)?,
+                // As native: the admin secret, or for the routes a backend
+                // vouches for (resolve, login-or-register,
+                // found-local-first), the backend's when no admin secret is
+                // sent; link, revoke and revoke-sessions are the admin's.
+                ("POST", _) if account.is_some() => match account.expect("matched").authority() {
+                    RouteAuthority::VouchingBackend if credentials.admin_secret.is_none() => {
+                        credentials.backend(&self.secret)?
+                    }
+                    _ => credentials.admin(&self.secret)?,
+                },
                 ("GET", "admin/migrations/graph" | "admin/bundles") | ("POST", "admin/bundles") => {
                     credentials.admin(&self.secret)?
                 }
@@ -1823,26 +1894,19 @@ mod core_host {
             if let Some(answer) = self.test_route(method, route, credentials, body) {
                 return answer;
             }
-            let checked: Result<(), HttpAnswer> = match (method, route) {
-                ("GET", "app") => Ok(()),
-                ("POST", "backend/admit") => credentials.backend(&self.secret),
-                ("GET", "admin/migrations/graph" | "admin/bundles") | ("POST", "admin/bundles") => {
-                    credentials.admin(&self.secret)
-                }
-                _ => {
-                    return refusal(404, ErrorResponse::not_found("route not found"));
-                }
-            };
-            if let Err(refused) = checked {
-                return refused;
+            #[cfg(not(feature = "durable-object-tests"))]
+            let _ = credentials;
+            // `check` found the route and its secrets hold.
+            if let Some(account) = route
+                .strip_prefix("admin/accounts/")
+                .and_then(AccountRoute::from_path)
+            {
+                return self.account(account, body);
             }
             match (method, route) {
                 ("GET", "app") => answer(200, serde_json::json!({ "appId": self.app_id })),
                 // The backend's credential holds: it may open sessions.
-                ("POST", "backend/admit") => HttpAnswer {
-                    status: 204,
-                    body: String::new(),
-                },
+                ("POST", "backend/admit") => no_content(),
                 ("GET", "admin/migrations/graph") => match self.catalogue_index() {
                     Ok(index) => answer(200, index.migration_graph()),
                     Err(error) => refusal(500, ErrorResponse::internal(error)),
@@ -1900,6 +1964,76 @@ mod core_host {
                     .map_err(|error| error.to_string())?;
                     jazz::host::HostTables::catalogue(&file).map_err(|error| error.to_string())
                 }
+            }
+        }
+
+        /// The account registry over the object's SQL, its tables made on
+        /// first use.
+        fn registry(&mut self) -> Result<jazz::storage::Storage, String> {
+            let storage = durable_object_storage(self.storage.clone());
+            if !self.accounts_open {
+                accounts::open(&storage).map_err(|error| error.to_string())?;
+                self.accounts_open = true;
+            }
+            Ok(storage)
+        }
+
+        /// The revocation mark of `principal`'s sessions, if any.
+        fn revocation_mark(
+            &mut self,
+            principal: &jazz::account_registry::Principal,
+        ) -> Result<Option<u64>, String> {
+            let storage = self.registry()?;
+            accounts::sessions_revoked_before(&storage, principal)
+                .map_err(|error| error.to_string())
+        }
+
+        /// Serve an account route (`admin/accounts/...`) on the store's
+        /// account registry, as native does. A revocation of a user's
+        /// sessions ends the stated sessions of that user authenticated
+        /// before its mark (their sockets get native's error and close);
+        /// later ones are refused at admission.
+        fn account(&mut self, route: AccountRoute, body: &[u8]) -> HttpAnswer {
+            use jazz::tools::transport_error::ErrorResponse;
+            let storage = match self.registry() {
+                Ok(storage) => storage,
+                Err(error) => return refusal(503, ErrorResponse::internal(error)),
+            };
+            let Ok(app_id) = uuid::Uuid::parse_str(&self.app_id) else {
+                return refusal(500, ErrorResponse::internal("the app id is not a UUID"));
+            };
+            let (reply, effects) = accounts::serve(
+                &storage,
+                route,
+                body,
+                RouteContext {
+                    app_id,
+                    now_ms: js_sys::Date::now() as u64,
+                    fresh_id: &mut uuid::Uuid::new_v4,
+                },
+            );
+            if let Some((principal, mark)) = effects.sessions_revoked {
+                for state in self.sockets.values_mut() {
+                    let ends = state.revocation.as_ref().is_some_and(|revocation| {
+                        revocation.principal == principal
+                            && accounts::session_revoked(Some(mark), revocation.authenticated_at_ms)
+                    });
+                    if ends {
+                        state.held.clear();
+                        state.held_bytes = 0;
+                        state.failed.get_or_insert_with(revoked);
+                    }
+                }
+            }
+            let (body, content_type) = match reply.body {
+                RouteBody::Empty => (String::new(), ""),
+                RouteBody::Json(body) => (body, "application/json"),
+                RouteBody::Text(body) => (body, "text/plain; charset=utf-8"),
+            };
+            HttpAnswer {
+                status: reply.status,
+                body,
+                content_type,
             }
         }
 
