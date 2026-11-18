@@ -342,6 +342,7 @@ export class ThinRuntime implements Runtime {
   private readonly streamsInFlight = new Set<Promise<void>>();
   private mutationErrorCallback?: (event: MutationErrorEvent) => void;
   private authFailureCallback?: (reason: string) => void;
+  private authRestoredCallback?: () => void;
 
   constructor(schema: WasmSchema, options: ThinRuntimeOptions = {}) {
     this.schema = schema;
@@ -409,6 +410,10 @@ export class ThinRuntime implements Runtime {
     this.authFailureCallback = callback;
   }
 
+  onAuthRestored(callback: () => void): void {
+    this.authRestoredCallback = callback;
+  }
+
   onMutationError(callback: (event: MutationErrorEvent) => void): void {
     this.mutationErrorCallback = callback;
   }
@@ -458,10 +463,13 @@ export class ThinRuntime implements Runtime {
       authJson: this.authJson,
       WebSocket: this.WebSocketImpl,
       onFrame: (frame) => this.receive(carrier, frame),
-      // The server's planned re-authentication arrives as an error on an open
-      // connection, ahead of its close: handle it as the connection's end.
+      // The server's planned re-authentication, and a refusal of an admitted
+      // session (`jazz.revokeUser`), arrive as an error on an open connection,
+      // ahead of its close: handle it as the connection's end, so a refusal
+      // says why (`revoked`) rather than reading as a dropped connection.
       onError: (error) => {
-        if (isReauthenticateWireError(error)) this.lost(carrier, error);
+        if (isReauthenticateWireError(error) || wireAuthFailureReason(error))
+          this.lost(carrier, error);
       },
       onTerminal: (error) => this.lost(carrier, error),
     });
@@ -505,6 +513,8 @@ export class ThinRuntime implements Runtime {
         this.reauthenticating = false;
         this.refused = false;
         this.refusal = undefined;
+        // Admitted: whatever refused the credential before holds no more.
+        this.authRestoredCallback?.();
         this.stopped = false;
         this.clearOutage();
         this.notifySyncStatus();
