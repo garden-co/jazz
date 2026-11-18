@@ -748,7 +748,7 @@ mod smoke {
         let seed = [seed; 32];
         let proof = identity::mint_jazz_self_signed_token_at(
             &seed,
-            identity::LOCAL_FIRST_ISSUER,
+            identity::DEVICE_ACCOUNT_ISSUER,
             audience,
             3600,
             now_seconds,
@@ -756,9 +756,9 @@ mod smoke {
         .expect("a proof");
         let subject = identity::derive_user_id(&seed).to_string();
         let founding = jazz_server::portable::accounts::local_first_founding_app(audience);
-        let peer = AuthorSubject::reserved(identity::LOCAL_FIRST_ISSUER, &subject)
+        let peer = AuthorSubject::reserved(identity::DEVICE_ACCOUNT_ISSUER, &subject)
             .expect("a local-first author")
-            .with_account(jazz::account_registry::local_first_account_id(
+            .with_account(jazz::account_registry::device_account_id(
                 *founding.uuid(),
                 &subject,
             ));
@@ -766,7 +766,7 @@ mod smoke {
             "proof": proof,
             "peer": peer.canonical(),
             "subject": subject,
-            "issuer": identity::LOCAL_FIRST_ISSUER,
+            "issuer": identity::DEVICE_ACCOUNT_ISSUER,
         })
         .to_string()
     }
