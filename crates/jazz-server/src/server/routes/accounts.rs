@@ -239,7 +239,7 @@ pub(super) async fn revoke_sessions_for_admin(
 
 /// Authentication denial and temporary registry availability are different wire outcomes.
 #[derive(Debug)]
-pub(super) enum AdmissionError {
+pub(in crate::server) enum AdmissionError {
     Denied(String),
     /// The user's sessions were revoked after this one was authenticated:
     /// the backend asks its `authenticate` again.
@@ -327,7 +327,7 @@ pub(super) async fn resolve_assignment(
 /// local-first guest, in the namespace of the audience its proof was
 /// verified against (see
 /// [`crate::middleware::auth::DEVICE_ACCOUNT_AUDIENCE_HEADER`]).
-pub(super) async fn admit_local_founder(
+pub(in crate::server) async fn admit_local_founder(
     state: &ServerState,
     principal: &Principal,
     headers: &HeaderMap,

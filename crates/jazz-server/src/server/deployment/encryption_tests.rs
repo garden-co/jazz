@@ -309,3 +309,52 @@ async fn an_encrypting_app_founds_local_first_accounts_for_its_own_audience_only
         "the app's own id as the audience"
     );
 }
+
+/// A local-first guest's first admission founds its account in the namespace
+/// of the audience its proof names, and an encrypting app refuses a guest
+/// whose audience is not its own.
+#[tokio::test]
+async fn an_encrypting_app_admits_a_local_first_founder_of_its_own_audience_only() {
+    use crate::server::routes::accounts::admit_local_founder;
+    use axum::http::HeaderMap;
+    let server = ServerBuilder::new(app_id())
+        .with_auth_config(AuthConfig {
+            admin_secret: Some("test-admin".into()),
+            backend_secret: Some("test-backend".into()),
+            ..Default::default()
+        })
+        .with_storage(StorageBackend::InMemory)
+        .build()
+        .await
+        .unwrap();
+    let router = create_router(server.state.clone());
+    let guest = |n: u8| jazz::account_registry::Principal {
+        issuer: jazz::tools::identity::DEVICE_ACCOUNT_ISSUER.into(),
+        subject: uuid::Uuid::from_bytes([n; 16]).to_string(),
+    };
+    let stating = |audience: &str| {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            crate::middleware::auth::DEVICE_ACCOUNT_AUDIENCE_HEADER,
+            audience.parse().unwrap(),
+        );
+        headers.insert("X-Jazz-Backend-Secret", "test-backend".parse().unwrap());
+        headers
+    };
+    let other = "https://other.example/jazz";
+    admit_local_founder(&server.state, &guest(1), &stating(other))
+        .await
+        .expect("before the app encrypts, any audience founds");
+
+    let (status, deployed) = publish(&router, encrypted_body()).await;
+    assert_eq!(status, StatusCode::OK, "{deployed}");
+    admit_local_founder(&server.state, &guest(2), &stating(other))
+        .await
+        .expect_err("another audience");
+    admit_local_founder(&server.state, &guest(3), &HeaderMap::new())
+        .await
+        .expect("no audience stated: the app's own");
+    admit_local_founder(&server.state, &guest(4), &stating(&app_id().to_string()))
+        .await
+        .expect("the app's own id, stated");
+}
