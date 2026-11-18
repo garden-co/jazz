@@ -1065,12 +1065,34 @@ impl Owner {
         owner.chunk_io = chunk_io;
         // The checks beside the E2EE account tables' policies read the
         // account registry the store keeps beside the rows.
-        if let (Some(reader), Some(app)) = (registry, owner.app.as_deref()) {
-            let app = jazz::tools::AppId::from_string(app)
-                .unwrap_or_else(|_| jazz::tools::AppId::from_name(app));
-            owner.db.set_account_registry(Rc::new(
-                crate::server::account_store::RegistryFounders::new(reader, *app.uuid()),
-            ));
+        // The registry names the app's founding namespace, parsed as device
+        // accounts' ids derive from it (`local_first_founding_app`).
+        let installed = match (registry, owner.app.as_deref()) {
+            (Some(reader), Some(app)) => {
+                let app = crate::portable::accounts::local_first_founding_app(app);
+                owner.db.set_account_registry(Rc::new(
+                    crate::server::account_store::RegistryFounders::new(reader, *app.uuid()),
+                ));
+                true
+            }
+            _ => false,
+        };
+        // Without a registry an account founded locally that later signs in
+        // through an external login would count as founded by the app, so
+        // an encrypted app is not served without one.
+        if !installed
+            && owner
+                .db
+                .table_identity(jazz::tools::deployment::artifact::system_tables::MEMBERS)
+                .map_err(|error| format!("read the schema: {error}"))?
+                .is_some()
+        {
+            return Err(
+                "this app encrypts columns, which needs the account registry \
+                 of an app's store: open the store for an app (`set_app`) with its \
+                 host tables"
+                    .to_owned(),
+            );
         }
         Ok(owner)
     }
@@ -3426,6 +3448,33 @@ mod tests {
                 .map_err(|error| format!("the root the registry names: {error}"))
         }))
         .unwrap();
+        store.close().unwrap();
+    }
+
+    /// A store opened for no app has no account registry, so an encrypted
+    /// app is not served from it: an account founded locally that later
+    /// signs in through an external login would count as app-founded.
+    #[test]
+    fn an_encrypted_app_is_not_served_without_the_account_registry() {
+        use jazz::tools::deployment::artifact::system_tables::with_e2ee_fragment;
+        let tables = with_e2ee_fragment(
+            &SchemaBuilder::new()
+                .table(TableSchema::builder("projects").column("ownerId", ColumnType::Uuid))
+                .build(),
+        );
+        let schema = || JazzSchema::new(&tables).unwrap();
+        let store = AppStore::memory().unwrap();
+        let Err(error) = store.start_runtime(schema(), NodeRole::Core, false) else {
+            panic!("no app named, so no registry");
+        };
+        assert!(error.contains("account registry"), "{error}");
+        store.close().unwrap();
+
+        let store = AppStore::memory().unwrap();
+        store.set_app("the-encrypted-app");
+        store
+            .start_runtime(schema(), NodeRole::Core, false)
+            .expect("an app's store serves it");
         store.close().unwrap();
     }
 }
