@@ -1578,13 +1578,18 @@ function openRemoteCore(
     async handle(method, path, headers, body, access = "session") {
       const response = await transport.fetch(`${target.url}${path}`, {
         method,
-        // The request carries this backend's credential: never to another URL.
-        redirect: "error",
+        // The request carries this backend's credential: never to another
+        // URL. ("manual", not "error", which workerd doesn't implement.)
+        redirect: "manual",
         headers: [...withoutStated(headers), ...(await credentialHeaders(access))].map(
           ([name, value]) => [name!, value!] as [string, string],
         ),
         ...(method === "GET" || method === "HEAD" ? {} : { body: body as BodyInit }),
       });
+      if (response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400)) {
+        await response.body?.cancel();
+        throw new TypeError(`the Jazz core at ${target.url} answered with a redirect`);
+      }
       const replyHeaders: string[][] = [];
       response.headers.forEach((value, name) => {
         // fetch already decoded the body.

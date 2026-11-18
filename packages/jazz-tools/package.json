@@ -57,6 +57,7 @@
     },
     "./backend": {
       "types": "./dist/backend/index.d.ts",
+      "workerd": "./dist/backend/workerd.js",
       "default": "./dist/backend/index.js"
     },
     "./durable-object": {
