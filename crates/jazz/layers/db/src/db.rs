@@ -1,5 +1,6 @@
 //! The `Db` facade: Jazz's public database API over one SQLite connection.
 
+use crate::storage::Storage;
 use crate::values::CachedRow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -18,7 +19,7 @@ use crate::tools::OpenTransactionId;
 use crate::tools::Operation;
 use crate::tx::DurabilityTier;
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, OptionalExtension, params_from_iter};
+use rusqlite::{OptionalExtension, params_from_iter};
 
 pub use crate::options::{
     DbConfig, DbIdentity, DeleteOptions, Error, ErrorCode, ExactWriteTarget, InsertOptions,
@@ -1465,7 +1466,7 @@ pub fn take_vm_steps_for_test() -> u64 {
 }
 
 /// The application tables a store holds, by their stored columns.
-fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> {
+fn stored_schema(conn: &Storage, jazz: &JazzSchema) -> Result<Schema, Error> {
     let names: Vec<String> = conn
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
         .and_then(|mut statement| {
@@ -1522,7 +1523,7 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
 
 /// Each column of stored table `table` that its DDL gives a default, as
 /// the default's SQL text.
-fn ddl_defaults(conn: &Connection, table: &str) -> Result<BTreeMap<String, String>, Error> {
+fn ddl_defaults(conn: &Storage, table: &str) -> Result<BTreeMap<String, String>, Error> {
     let mut statement = conn
         .prepare(&format!("PRAGMA table_info({})", quote(table)))
         .map_err(storage)?;
@@ -1542,7 +1543,7 @@ fn ddl_defaults(conn: &Connection, table: &str) -> Result<BTreeMap<String, Strin
 
 /// The value of a DDL default's SQL text. It is this store's own DDL, as
 /// `Schema::union` and `Table::ddl` wrote it: a literal.
-fn ddl_literal(conn: &Connection, literal: &str) -> Result<Sql, Error> {
+fn ddl_literal(conn: &Storage, literal: &str) -> Result<Sql, Error> {
     conn.query_row(&format!("SELECT {literal}"), [], |row| row.get::<_, Sql>(0))
         .map_err(storage)
 }
@@ -1586,7 +1587,7 @@ fn default_fits(column: &crate::values::Column, value: &Value) -> bool {
 /// Run a script of statements one at a time. SQLite's statement length
 /// limit applies to the whole text handed to one prepare, and schema DDL
 /// outgrows Durable Object SQLite's 100 KB.
-pub(crate) fn execute_script(conn: &Connection, script: &str) -> Result<(), Error> {
+pub(crate) fn execute_script(conn: &Storage, script: &str) -> Result<(), Error> {
     let mut start = 0;
     for (end, _) in script.match_indices(';') {
         let statement = &script[start..=end];
@@ -1950,9 +1951,9 @@ impl Error {
 
 impl Db {
     pub async fn open(config: DbConfig) -> Result<Self, Error> {
-        let conn = Connection::open_in_memory().map_err(storage)?;
+        let conn = Storage::open_in_memory().map_err(storage)?;
         crate::format::admit(&conn)?;
-        Self::open_on(config, conn.into(), None)
+        Self::open_on(config, conn, None)
     }
 
     /// A durable store in one SQLite file (WAL unless `options.journal`
@@ -2082,9 +2083,9 @@ impl Db {
     ) -> Result<Self, Error> {
         // Before the first statement, so both see all of them.
         #[cfg(feature = "durable-object-limits")]
-        crate::durable_object_limits::apply(&conn);
+        crate::durable_object_limits::apply(conn.native_conn());
         #[cfg(feature = "sql-trace")]
-        crate::sql_trace::install(&conn);
+        crate::sql_trace::install(conn.native_conn());
         // A version this file admitted keeps its names; another one is
         // named against the most recently admitted.
         let mut names = crate::names::Names::load(&conn)?;
@@ -7511,7 +7512,7 @@ impl Inner {
         }
         let (account, issuer, subject) = key;
         let account = account.as_bytes().to_vec();
-        let find = |conn: &rusqlite::Connection| {
+        let find = |conn: &Storage| {
             conn.cached_row(
                 "SELECT n FROM _jazz_authors WHERE account = ?1 AND issuer = ?2 AND subject = ?3",
                 rusqlite::params![account, issuer, subject],

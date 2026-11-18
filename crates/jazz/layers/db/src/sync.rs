@@ -45,6 +45,7 @@
 
 use crate::schema::history::{history_source_table, is_history_table};
 use crate::storage::Scoped;
+use crate::storage::Storage;
 use crate::values::CachedRow;
 use crate::values::query_error;
 use crate::values::{STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT};
@@ -3911,7 +3912,7 @@ pub(crate) struct FollowMemo {
 struct FollowAt(u64, u64);
 
 impl FollowAt {
-    fn of(conn: &rusqlite::Connection) -> Self {
+    fn of(conn: &Storage) -> Self {
         Self(conn.total_changes(), crate::values::rollbacks(conn))
     }
 }
@@ -4029,10 +4030,10 @@ pub fn set_follow_read_hook_for_test(hook: Option<FollowReadHook>) {
 }
 
 #[cfg(any(test, feature = "testing"))]
-fn follow_read_hook(conn: &rusqlite::Connection, table: &str, column: &str) {
+fn follow_read_hook(conn: &Storage, table: &str, column: &str) {
     FOLLOW_READ_HOOK.with(|cell| {
         if let Some(hook) = cell.borrow_mut().as_mut() {
-            hook(conn, table, column);
+            hook(conn.native_conn(), table, column);
         }
     });
 }
@@ -16729,10 +16730,7 @@ pub fn pruned_txs_lookups_for_test() -> usize {
 /// `CREATE` (which moves the rollback count, and the table is read again).
 /// [`PRUNED_TXS_DDL`] has one user, which records it: anything else that
 /// came to create the table on an open connection would have to as well.
-fn has_pruned_txs(
-    conn: &rusqlite::Connection,
-    known: &std::cell::Cell<Option<Known>>,
-) -> Result<bool, Error> {
+fn has_pruned_txs(conn: &Storage, known: &std::cell::Cell<Option<Known>>) -> Result<bool, Error> {
     let rollbacks = crate::values::rollbacks(conn);
     if let Some(known) = known.get()
         && known.rollbacks == rollbacks
@@ -16754,7 +16752,7 @@ fn has_pruned_txs(
 }
 
 /// Record that `_jazz_pruned_txs` was just created on `conn`.
-fn pruned_txs_created(conn: &rusqlite::Connection, known: &std::cell::Cell<Option<Known>>) {
+fn pruned_txs_created(conn: &Storage, known: &std::cell::Cell<Option<Known>>) {
     known.set(Some(Known {
         holds: true,
         rollbacks: crate::values::rollbacks(conn),
@@ -16851,9 +16849,9 @@ mod tests {
     #[test]
     fn the_pruned_table_bit_follows_a_rolled_back_create() {
         use crate::values::{begin_savepoint, end_savepoint};
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = Storage::open_in_memory().unwrap();
         let known = std::cell::Cell::new(None);
-        let on_disk = |conn: &rusqlite::Connection| -> bool {
+        let on_disk = |conn: &Storage| -> bool {
             conn.query_row(
                 "SELECT count(*) > 0 FROM sqlite_master WHERE name = '_jazz_pruned_txs'",
                 [],
