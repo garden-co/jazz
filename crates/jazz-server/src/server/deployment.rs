@@ -4,7 +4,7 @@ pub(crate) use crate::portable::catalogue::DeploymentResponse;
 #[cfg(any(test, feature = "embedded-server"))]
 pub(crate) use crate::portable::deployment::DeploySchema;
 use crate::portable::deployment::{self as portable, Deployment};
-pub(crate) use crate::portable::deployment::{DeployError, DeployRequest};
+pub(crate) use crate::portable::deployment::{DeployBody, DeployError, DeployRequest};
 use crate::runtime::StorageConfig;
 #[cfg(any(test, feature = "embedded-server"))]
 use jazz::tools::public_schema::{Schema, TablePolicies};
@@ -22,6 +22,15 @@ use std::collections::HashMap;
 pub(crate) async fn deploy(
     state: Arc<ServerState>,
     request: DeployRequest,
+) -> Result<DeploymentResponse, DeployError> {
+    deploy_body(state, request.into()).await
+}
+
+/// [`deploy`] with the app's encryption declarations (see
+/// [`portable::prepare_encrypted`]).
+pub(crate) async fn deploy_body(
+    state: Arc<ServerState>,
+    body: DeployBody,
 ) -> Result<DeploymentResponse, DeployError> {
     // This guard belongs to the detached task, so shutdown also waits when
     // the HTTP client disconnects while deployment is still committing.
@@ -42,7 +51,8 @@ pub(crate) async fn deploy(
         .catalogue_store
         .index()
         .map_err(DeployError::internal)?;
-    let deployment = portable::prepare(&index, request, super::catalogue::unix_timestamp_millis())?;
+    let deployment =
+        portable::prepare_encrypted(&index, body, super::catalogue::unix_timestamp_millis())?;
     let staged = &deployment.staged;
     if !staged.response.changed {
         // Nothing to commit, but the runtime's view of the catalogue may be
@@ -150,5 +160,7 @@ async fn change(
     deployment.catalogue_change(&stored)
 }
 
+#[cfg(test)]
+mod encryption_tests;
 #[cfg(test)]
 mod tests;

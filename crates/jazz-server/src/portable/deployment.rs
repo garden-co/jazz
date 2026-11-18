@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use http::StatusCode;
 use jazz::catalogue::{CatalogueChange, CatalogueRows};
 use jazz::schema::JazzSchema;
+use jazz::tools::deployment::artifact::DeclaredEncryption;
 use jazz::tools::deployment::published::{PublishMigrationRequest, lower_migration};
 use jazz::tools::deployment::{self, DeploymentError, PreparedDeployment};
 use jazz::tools::public_schema::{Schema, SchemaHash, TableName, TablePolicies};
@@ -27,6 +28,27 @@ pub struct DeployRequest {
     /// Confirms switching existing tables to latest-only history.
     #[serde(default)]
     pub allow_dropping_history: bool,
+}
+
+/// The body the deploy route takes: a [`DeployRequest`] and, for an app
+/// that declares encryption, its declarations (every schema version's
+/// entries and the settings, E2EE protocol §1.5).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeployBody {
+    #[serde(flatten)]
+    pub request: DeployRequest,
+    #[serde(default)]
+    pub encryption: Option<DeclaredEncryption>,
+}
+
+impl From<DeployRequest> for DeployBody {
+    fn from(request: DeployRequest) -> Self {
+        Self {
+            request,
+            encryption: None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -153,12 +175,31 @@ pub struct Deployment {
 /// `now` (Unix ms). A host commits the staged rows (with
 /// [`Deployment::catalogue_change`]) only while its catalogue still reads
 /// [`StagedDeployment::expected`]; with `staged.response.changed` false
-/// there is nothing to commit.
+/// there is nothing to commit. A request with no declarations is refused
+/// if a schema holds Jazz's system tables.
 pub fn prepare(
     index: &CatalogueIndex,
     request: DeployRequest,
     now: u64,
 ) -> Result<Deployment, DeployError> {
+    prepare_encrypted(index, request.into(), now)
+}
+
+/// [`prepare`] with the app's encryption declarations: each schema has all
+/// of Jazz's system tables exactly as Jazz defines them or none, a version
+/// has them if and only if it declares encryption, the app's permissions
+/// name none of them, and Jazz derives the system tables' policies into the
+/// bundle.
+pub fn prepare_encrypted(
+    index: &CatalogueIndex,
+    body: DeployBody,
+    now: u64,
+) -> Result<Deployment, DeployError> {
+    let DeployBody {
+        request,
+        encryption: declared,
+    } = body;
+    let declared = declared.unwrap_or_default();
     let stored = index.deployment_catalogue();
     let schemas = request
         .schemas
@@ -186,7 +227,7 @@ pub fn prepare(
             lower_migration(migration, source, target).map_err(DeployError::invalid)
         })
         .collect::<Result<Vec<_>, DeployError>>()?;
-    let prepared = deployment::prepare_deployment(
+    let (prepared, _warnings) = deployment::prepare_encrypted_deployment(
         &stored,
         deployment::DeploymentRequest {
             target_schema_hash: hash(&request.target_schema_hash)?,
@@ -195,6 +236,7 @@ pub fn prepare(
             permissions: request.permissions,
             allow_dropping_history: request.allow_dropping_history,
         },
+        &declared,
     )?;
     let staged = index
         .stage_deployment(&prepared, now)
