@@ -64,7 +64,7 @@ impl ServerCore {
     pub const IDLE_TICK: std::time::Duration = std::time::Duration::from_secs(1);
 
     /// Open the core on `file` (whose store a host opened, e.g. on a
-    /// Durable Object's SQL: [`StoreFile::from_storage`]). A store with no
+    /// Durable Object's SQL, through `StoreFile::from_storage`). A store with no
     /// published schema yet serves `schema`; `any_stored_catalogue` says
     /// whether the store already holds one. `app` names it in logs.
     pub fn open(
