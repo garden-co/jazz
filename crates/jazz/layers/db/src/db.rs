@@ -1,5 +1,6 @@
 //! The `Db` facade: Jazz's public database API over one SQLite connection.
 
+use crate::storage::Storage;
 use crate::values::CachedRow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -14,11 +15,12 @@ use crate::protocol::{
 use crate::query::Query;
 use crate::records::{Value, ValueType};
 use crate::schema::{JazzSchema, MergeStrategy};
+use crate::storage::params_from_iter;
 use crate::tools::OpenTransactionId;
 use crate::tools::Operation;
 use crate::tx::DurabilityTier;
+use rusqlite::OptionalExtension;
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, OptionalExtension, params_from_iter};
 
 pub use crate::options::{
     DbConfig, DbIdentity, DeleteOptions, Error, ErrorCode, ExactWriteTarget, InsertOptions,
@@ -62,8 +64,8 @@ use crate::result_tree::{ResultNode, ResultRelation, ResultTree};
 pub use crate::values::CurrentRow;
 use crate::values::{
     AuthorKey, STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT, Schema, Sql, Table, author_key,
-    begin_savepoint, cell_from_sql, column_from_sql, end_savepoint, in_savepoint, quote, storage,
-    to_sql, unsupported,
+    begin_savepoint, cell_from_sql, column_from_sql, end_savepoint, quote, storage, to_sql,
+    unsupported,
 };
 pub use sync::{
     ACCEPTED, AccessProof, Acting, BuiltOn, CatalogueCell, CatalogueSchema, CatalogueUpdate,
@@ -669,7 +671,9 @@ pub struct RuntimeStats {
 }
 
 struct Inner {
-    conn: Connection,
+    /// Shared so a scope can run while the store is borrowed afresh
+    /// inside it ([`crate::storage::Storage::scope`]).
+    conn: Rc<crate::storage::Storage>,
     /// Query shapes (with their binding) `prepare` has already validated
     /// against this schema version: it validates each once. Cleared when
     /// it reaches [`VALIDATED_SHAPES_MAX`].
@@ -1463,7 +1467,7 @@ pub fn take_vm_steps_for_test() -> u64 {
 }
 
 /// The application tables a store holds, by their stored columns.
-fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> {
+fn stored_schema(conn: &Storage, jazz: &JazzSchema) -> Result<Schema, Error> {
     let names: Vec<String> = conn
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
         .and_then(|mut statement| {
@@ -1520,7 +1524,7 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
 
 /// Each column of stored table `table` that its DDL gives a default, as
 /// the default's SQL text.
-fn ddl_defaults(conn: &Connection, table: &str) -> Result<BTreeMap<String, String>, Error> {
+fn ddl_defaults(conn: &Storage, table: &str) -> Result<BTreeMap<String, String>, Error> {
     let mut statement = conn
         .prepare(&format!("PRAGMA table_info({})", quote(table)))
         .map_err(storage)?;
@@ -1540,7 +1544,7 @@ fn ddl_defaults(conn: &Connection, table: &str) -> Result<BTreeMap<String, Strin
 
 /// The value of a DDL default's SQL text. It is this store's own DDL, as
 /// `Schema::union` and `Table::ddl` wrote it: a literal.
-fn ddl_literal(conn: &Connection, literal: &str) -> Result<Sql, Error> {
+fn ddl_literal(conn: &Storage, literal: &str) -> Result<Sql, Error> {
     conn.query_row(&format!("SELECT {literal}"), [], |row| row.get::<_, Sql>(0))
         .map_err(storage)
 }
@@ -1584,7 +1588,7 @@ fn default_fits(column: &crate::values::Column, value: &Value) -> bool {
 /// Run a script of statements one at a time. SQLite's statement length
 /// limit applies to the whole text handed to one prepare, and schema DDL
 /// outgrows Durable Object SQLite's 100 KB.
-pub(crate) fn execute_script(conn: &Connection, script: &str) -> Result<(), Error> {
+pub(crate) fn execute_script(conn: &Storage, script: &str) -> Result<(), Error> {
     let mut start = 0;
     for (end, _) in script.match_indices(';') {
         let statement = &script[start..=end];
@@ -1948,9 +1952,18 @@ impl Error {
 
 impl Db {
     pub async fn open(config: DbConfig) -> Result<Self, Error> {
-        let conn = Connection::open_in_memory().map_err(storage)?;
-        crate::format::admit(&conn)?;
-        Self::open_on(config, conn, None)
+        #[cfg(not(feature = "managed-storage-emulation"))]
+        let conn = Storage::open_in_memory().map_err(storage)?;
+        #[cfg(feature = "managed-storage-emulation")]
+        let conn = Storage::managed_emulation_in_memory().map_err(storage)?;
+        Self::open_storage(config, conn).await
+    }
+
+    /// Open on `storage` (a host's SQL: [`Storage::from_backend`]), with
+    /// no file: chunks live in the store itself.
+    pub async fn open_storage(config: DbConfig, storage: Storage) -> Result<Self, Error> {
+        crate::format::admit(&storage)?;
+        Self::open_on(config, storage, None)
     }
 
     /// A durable store in one SQLite file (WAL unless `options.journal`
@@ -1980,7 +1993,7 @@ impl Db {
     /// overlay (see [`crate::host`]).
     pub(crate) fn with_host_connection<T>(
         &self,
-        f: impl FnOnce(&Connection) -> Result<T, Error>,
+        f: impl FnOnce(&crate::storage::Storage) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let inner = self.inner.borrow_mut();
         f(&inner.conn)
@@ -1988,7 +2001,7 @@ impl Db {
 
     fn open_on(
         mut config: DbConfig,
-        conn: Connection,
+        conn: crate::storage::Storage,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
         // Before the first statement is prepared: the flag is read at
@@ -2075,14 +2088,18 @@ impl Db {
 
     fn open_named(
         config: DbConfig,
-        conn: Connection,
+        conn: crate::storage::Storage,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
         // Before the first statement, so both see all of them.
         #[cfg(feature = "durable-object-limits")]
-        crate::durable_object_limits::apply(&conn);
+        if let Some(native) = conn.native_conn() {
+            crate::durable_object_limits::apply(native);
+        }
         #[cfg(feature = "sql-trace")]
-        crate::sql_trace::install(&conn);
+        if let Some(native) = conn.native_conn() {
+            crate::sql_trace::install(native);
+        }
         // A version this file admitted keeps its names; another one is
         // named against the most recently admitted.
         let mut names = crate::names::Names::load(&conn)?;
@@ -2116,8 +2133,12 @@ impl Db {
         }
         // Variants are tagged before any DDL: an enum default is its tag.
         names.mint(&conn, &schema)?;
-        let chunks =
-            crate::large::Chunks::install(path, config.chunk_store.clone(), config.host_chunk_io)?;
+        let chunks = crate::large::Chunks::install_reading(
+            path,
+            conn.shared_reader(),
+            config.chunk_store.clone(),
+            config.host_chunk_io,
+        )?;
         // Statements are keyed per table and verb; the default 16 entries
         // thrash as soon as a schema has a few tables.
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
@@ -2226,7 +2247,7 @@ impl Db {
             view: None,
             defer_fetches: false,
             inner: Rc::new(Store::new(Inner {
-                conn,
+                conn: Rc::new(conn),
                 validated_shapes: HashSet::new(),
                 mutation_admission_closed: false,
                 kept_variants: BTreeMap::new(),
@@ -2340,9 +2361,10 @@ impl Db {
             // order.
             if newest {
                 let owner = inner.owner.clone();
-                crate::values::in_savepoint(&inner.conn, "jazz_align", || {
-                    inner.align_tags(&owner)
-                })?;
+                inner
+                    .conn
+                    .clone()
+                    .scope("jazz_align", |_| inner.align_tags(&owner))?;
             }
             inner.seq = seq;
             inner.load_client()?;
@@ -2908,7 +2930,7 @@ impl Db {
         {
             let inner = self.inner();
             if !io.puts.is_empty() {
-                in_savepoint(&inner.conn, "jazz_lv_offloaded", || {
+                inner.conn.clone().scope("jazz_lv_offloaded", |_| {
                     for ((key, _), put) in io.puts.iter().zip(put) {
                         match put {
                             Ok(()) => crate::large::offloaded(&inner.conn, key)?,
@@ -2921,7 +2943,7 @@ impl Db {
                 })?;
             }
             if !io.deletes.is_empty() {
-                in_savepoint(&inner.conn, "jazz_lv_deleted", || {
+                inner.conn.clone().scope("jazz_lv_deleted", |_| {
                     for (key, done) in io.deletes.iter().zip(deleted) {
                         match done {
                             Ok(()) => crate::large::deleted(&inner.conn, key)?,
@@ -3898,10 +3920,8 @@ impl Db {
         if !wrap {
             return f();
         }
-        begin_savepoint(&self.inner.borrow().conn, "upload_local")?;
-        let result = f();
-        end_savepoint(&self.inner.borrow().conn, "upload_local", result.is_ok())?;
-        result
+        let conn = self.inner.borrow().conn.clone();
+        conn.scope("upload_local", |_| f())
     }
 
     /// Run one write atomically. Inside a transaction it joins the
@@ -3919,7 +3939,7 @@ impl Db {
                 Some((seq, _)) => (*seq, false),
                 None => (inner.fresh_seq(), true),
             };
-            begin_savepoint(&inner.conn, "w")?;
+            let conn = inner.conn.clone();
             let mark = inner.changed.borrow().len();
             // A standalone commit takes the writer id a thin client's write
             // gave it (`Db::write_as_origin`), on every attempt of the write
@@ -3930,9 +3950,6 @@ impl Db {
             // drops whatever an exit after this one leaves).
             let origin = if standalone { inner.next_origin } else { None };
             let prior = standalone.then(|| inner.own_order.get(&seq).copied());
-            inner.commit_origin = origin;
-            let applied = apply(&mut inner, seq);
-            inner.commit_origin = None;
             let restore = |inner: &mut Inner| match prior {
                 Some(Some(order)) => {
                     inner.own_order.insert(seq, order);
@@ -3942,31 +3959,35 @@ impl Db {
                 }
                 None => {}
             };
-            // The authority records the fate of a commit made under a
-            // client's id in the commit itself.
-            let applied = applied.and_then(|handle| {
-                let wrote = handle.seq == inner.own_pos(seq);
-                if let (true, true, Some((node, tx))) =
-                    (standalone && wrote, inner.me == sync::ACCEPTED, origin)
-                {
-                    inner.record_fate(node, tx, &Ok(()))?;
-                    inner.record_settled(node, tx, Some(Pos::at(seq)))?;
-                    // Its entry ages out if all it wrote is latest-only,
-                    // as the commit's version declares (SPEC 8 §8.14).
-                    let prunable = {
-                        let changed = inner.changed.borrow();
-                        changed.len() > mark
-                            && changed[mark..]
-                                .iter()
-                                .all(|(stored, ..)| inner.prunes(stored))
-                    };
-                    inner.note_origin_entry(node, tx, prunable)?;
-                }
-                Ok((wrote, handle))
+            let applied = conn.scope("w", |_| {
+                inner.commit_origin = origin;
+                let applied = apply(&mut inner, seq);
+                inner.commit_origin = None;
+                // The authority records the fate of a commit made under a
+                // client's id in the commit itself.
+                applied.and_then(|handle| {
+                    let wrote = handle.seq == inner.own_pos(seq);
+                    if let (true, true, Some((node, tx))) =
+                        (standalone && wrote, inner.me == sync::ACCEPTED, origin)
+                    {
+                        inner.record_fate(node, tx, &Ok(()))?;
+                        inner.record_settled(node, tx, Some(Pos::at(seq)))?;
+                        // Its entry ages out if all it wrote is latest-only,
+                        // as the commit's version declares (SPEC 8 §8.14).
+                        let prunable = {
+                            let changed = inner.changed.borrow();
+                            changed.len() > mark
+                                && changed[mark..]
+                                    .iter()
+                                    .all(|(stored, ..)| inner.prunes(stored))
+                        };
+                        inner.note_origin_entry(node, tx, prunable)?;
+                    }
+                    Ok((wrote, handle))
+                })
             });
             match applied {
                 Ok((wrote, handle)) => {
-                    end_savepoint(&inner.conn, "w", true)?;
                     if !wrote {
                         restore(&mut inner);
                     } else if origin.is_some() {
@@ -3986,7 +4007,6 @@ impl Db {
                 Err(error) => {
                     inner.changed.borrow_mut().truncate(mark);
                     restore(&mut inner);
-                    end_savepoint(&inner.conn, "w", false)?;
                     return Err(error);
                 }
             }
@@ -4130,16 +4150,14 @@ impl Db {
                 inner.owner_version,
             )
         };
-        begin_savepoint(&self.inner().conn, "jazz_catalogue")?;
-        let applied = (|| {
-            crate::catalogue::put(&self.inner().conn, &change.put)?;
+        let conn = self.inner().conn.clone();
+        let result = conn.scope("jazz_catalogue", |conn| {
+            crate::catalogue::put(conn, &change.put)?;
             for (schema, lenses) in change.admit {
                 self.admit(schema, &lenses)?;
             }
             Ok(())
-        })();
-        let ended = end_savepoint(&self.inner().conn, "jazz_catalogue", applied.is_ok());
-        let result = applied.and(ended);
+        });
         if result.is_err() {
             let mut inner = self.inner();
             let (physical, names, admitted, owner, owner_version) = saved;
@@ -4394,10 +4412,11 @@ impl Inner {
             self.admitted.clone(),
         );
         let tags = self.names.tags().snapshot();
-        begin_savepoint(&self.conn, "jazz_mirror")?;
-        let mirrored = self.mirror_versions_steps(versions, cells, defaults);
-        let ended = end_savepoint(&self.conn, "jazz_mirror", mirrored.is_ok());
-        if let Err(error) = mirrored.and(ended) {
+        let conn = self.conn.clone();
+        let mirrored = conn.scope("jazz_mirror", |_| {
+            self.mirror_versions_steps(versions, cells, defaults)
+        });
+        if let Err(error) = mirrored {
             self.physical = physical;
             self.names = names;
             self.admitted = admitted;
@@ -4644,10 +4663,10 @@ impl Inner {
     ) -> Result<(), Error> {
         let (physical, names) = (self.physical.clone(), self.names.clone());
         let tags = self.names.tags().snapshot();
-        begin_savepoint(&self.conn, "jazz_admit")?;
-        let written = self.write_admission_steps(target, cells, current);
-        let ended = end_savepoint(&self.conn, "jazz_admit", written.is_ok());
-        let written = written.and(ended);
+        let conn = self.conn.clone();
+        let written = conn.scope("jazz_admit", |_| {
+            self.write_admission_steps(target, cells, current)
+        });
         if written.is_err() {
             self.physical = physical;
             self.names = names;
@@ -5327,7 +5346,7 @@ impl Inner {
     /// fire the large-value refcount triggers, so preparing one compiles
     /// those trigger programs too; re-preparing per row dominated bulk
     /// writes.
-    fn exec<P: rusqlite::Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
+    fn exec<P: crate::storage::Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
         self.conn.prepare_cached(sql)?.execute(params)
     }
 
@@ -7511,7 +7530,7 @@ impl Inner {
         }
         let (account, issuer, subject) = key;
         let account = account.as_bytes().to_vec();
-        let find = |conn: &rusqlite::Connection| {
+        let find = |conn: &Storage| {
             conn.cached_row(
                 "SELECT n FROM _jazz_authors WHERE account = ?1 AND issuer = ?2 AND subject = ?3",
                 rusqlite::params![account, issuer, subject],
@@ -7528,7 +7547,7 @@ impl Inner {
                     rusqlite::params![account, issuer, subject],
                 )
                 .map_err(storage)?;
-                self.conn.last_insert_rowid()
+                self.conn.last_insert_rowid().map_err(storage)?
             }
         };
         self.remember_author(key, code);
@@ -7605,7 +7624,11 @@ impl Inner {
     /// A pass runs only when one could find work: a row changed since the
     /// last pass that emptied the queue, or an upload was dropped.
     fn reclaim_large_values(&mut self, budget: usize) -> Result<usize, Error> {
-        if self.reclaimed_at == Some(self.conn.total_changes())
+        if self
+            .conn
+            .total_changes()
+            .ok()
+            .is_some_and(|at| self.reclaimed_at == Some(at))
             && self.upload_cleanup.borrow().is_empty()
         {
             return Ok(0);
@@ -7613,13 +7636,13 @@ impl Inner {
         self.reclaim_passes += 1;
         self.reclaimed_at = None;
         self.release_dropped_uploads()?;
-        let deleted = in_savepoint(&self.conn, "reclaim", || {
+        let deleted = self.conn.clone().scope("reclaim", |_| {
             crate::large::reclaim(&self.conn, &self.chunks, budget)
         })?;
         // A pass inside an open transaction may yet roll back, and one
         // that ran out of budget left work queued: both run again.
         if self.conn.is_autocommit() && !crate::large::reclaim_queued(&self.conn)? {
-            self.reclaimed_at = Some(self.conn.total_changes());
+            self.reclaimed_at = self.conn.total_changes().ok();
         }
         Ok(deleted)
     }
@@ -11066,7 +11089,7 @@ impl Db {
         let (seq, prior, mark) = {
             let mut inner = self.inner();
             let seq = inner.fresh_seq();
-            begin_savepoint(&inner.conn, "commit_batch")?;
+            let conn = inner.conn.clone();
             let mark = inner.changed.borrow().len();
             // Each write passed its check as it was staged, with the rows
             // staged before it as evidence. The commit grounds the unit's
@@ -11075,17 +11098,20 @@ impl Db {
             // unit deleted is no evidence, and rows can't ground each other
             // in a cycle.
             inner.start_unit_heads();
-            inner.defer_checks();
-            let applied = inner
-                .apply_with_edits(ops, &batch.edits, 0, seq)
-                .and_then(|()| inner.finish_checks(seq).map_err(refused_at_commit));
+            let applied = conn.scope("commit_batch", |_| {
+                inner.defer_checks();
+                let applied = inner
+                    .apply_with_edits(ops, &batch.edits, 0, seq)
+                    .and_then(|()| inner.finish_checks(seq).map_err(refused_at_commit));
+                if applied.is_err() {
+                    inner.abandon_checks();
+                }
+                applied
+            });
             if let Err(error) = applied {
-                inner.abandon_checks();
                 inner.changed.borrow_mut().truncate(mark);
-                end_savepoint(&inner.conn, "commit_batch", false)?;
                 return Err(error);
             }
-            end_savepoint(&inner.conn, "commit_batch", true)?;
             let prior = inner.seq;
             if !ops.is_empty() || kind.validates_reads() {
                 inner.seq = inner.seq.max(seq);
