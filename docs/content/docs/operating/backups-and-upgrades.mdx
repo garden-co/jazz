@@ -87,6 +87,95 @@ once the new deployment has woken it, promoting the old deployment again doesn't
 To try an upgrade first, deploy it to a preview branch: with the per-branch setup, that preview gets
 a core of its own, separate from production's (a dry run with its own data, not a copy).
 
+## Upgrading from alpha.68
+
+Local-first auth is called device accounts now, and alpha.69 renames the last names that still
+said so. **Search your app for each name below and replace it.** The search patterns are precise,
+so you, or an AI coding assistant you point at this section, can make every change in one pass.
+
+### `session.authMode` is `"device-account"` (was `"local-first"`)
+
+A device account's `session.authMode` is `"device-account"`. Every comparison of
+`session.authMode` with `"local-first"` must change. alpha.69 refuses the old value rather than let
+the comparison quietly stop matching, since `session.authMode != 'local-first'` would otherwise
+start letting device accounts in:
+
+- `jazz-tools generate` and `validate` (and a deployment) refuse it, with the error
+  `session.authMode is never "local-first" any more: local-first auth was renamed to device accounts, so compare with "device-account"`;
+- in `schema.ts`, `eq`, `ne` and `isIn` with `session.authMode` and `"local-first"` are type
+  errors.
+
+A backend still running permissions published before alpha.69 opens, but every rule that compares
+`session.authMode` with `"local-first"` fails closed: the reads and writes it guards fail until you
+redeploy.
+
+**Where to change it.** Only where the value is compared with an `authMode`:
+
+| Where                   | Before                                                     | After                                                    |
+| ----------------------- | ---------------------------------------------------------- | -------------------------------------------------------- |
+| `schema.ts` permissions | `eq(session.authMode, "local-first")`                      | `eq(session.authMode, "device-account")`                 |
+|                         | `ne(session.authMode, "local-first")`                      | `ne(session.authMode, "device-account")`                 |
+|                         | `isIn(session.authMode, ["external", "local-first"])`      | `isIn(session.authMode, ["external", "device-account"])` |
+| App code                | `session.authMode === "local-first"` (or `!==`)            | `session.authMode === "device-account"`                  |
+|                         | `case "local-first":` in a `switch` on `authMode`          | `case "device-account":`                                 |
+| Policy tests            | `createPolicyTestApp(app).as({ authMode: "local-first" })` | `.as({ authMode: "device-account" })`                    |
+
+`jazz.permissions.json` follows from `schema.ts` when you run `generate`: don't edit it by hand.
+
+To find them, search for `local-first` next to `authMode`, e.g.
+`grep -rnE "authMode.{0,40}local-first|local-first.{0,40}authMode" --include='*.ts' --include='*.tsx' .`.
+A value kept in a variable (`const mode = "local-first"; … eq(session.authMode, mode)`) won't match
+that search, and `generate` refuses it: fix it the same way.
+
+**Leave every other `"local-first"` as it is.** These are about where data is stored, not how a
+session signed in:
+
+- the read tier `tier: "local-first"` and `"local-first-unless-empty"`;
+- `jazz-tools/local-first` and `upgradeToLocalFirst`;
+- the device-account JWT issuer `urn:jazz:local-first` and the `X-Jazz-Local-First-Audience`
+  header;
+- `allowLocalFirstAuth`;
+- claims you named yourself, such as `session.claims.mode = 'local-first'`.
+
+Then run `npx jazz-tools generate`, commit `jazz.app.json` and `jazz.permissions.json`, and
+redeploy your backend. The permissions bundle changes with the new value; the schema hashes don't.
+
+### `AccountAuthError` codes
+
+Three codes are renamed. Replace them wherever your app compares `error.code`:
+
+| Before                             | After                                 |
+| ---------------------------------- | ------------------------------------- |
+| `local_first_account_required`     | `device_account_required`             |
+| `local_first_recovery_unavailable` | `device_account_recovery_unavailable` |
+| `local_first_restore_unavailable`  | `device_account_restore_unavailable`  |
+
+`grep -rnE "local_first_(account_required|recovery_unavailable|restore_unavailable)" .` finds them.
+The HTTP error codes `local_first_auth_disabled`, `invalid_local_first_proof` and
+`local_first_proof_required` are unchanged: leave them.
+
+### Renamed APIs (the old names still work)
+
+These old names are deprecated aliases. They keep working, but rename them now so a later release
+that removes them doesn't break your app:
+
+| Before                                              | After                                                 |
+| --------------------------------------------------- | ----------------------------------------------------- |
+| `db.getLocalFirstIdentityProof(options)`            | `db.getDeviceAccountProof(options)` (same options)    |
+| type `LocalFirstGuest` from `jazz-tools/backend`    | type `DeviceAccountsAnswer` from `jazz-tools/backend` |
+| `jazz-tools apps auth set --allow-local-first-auth` | `jazz-tools apps auth set --allow-device-accounts`    |
+
+Look for the CLI flag in `package.json` scripts, shell scripts and CI workflows. Rename
+`LocalFirstGuest` only where it's imported from `jazz-tools/backend`: a type of your own with that
+name is unaffected.
+
+### For an AI coding assistant
+
+To have an assistant make these changes, give it this section and a prompt such as: "Upgrade this
+app to jazz-tools alpha.69 following the 'Upgrading from alpha.68' section. Change only the
+comparisons it lists, leave every other `local-first` alone, then run `npx jazz-tools generate` and
+the typecheck, and show me the diff." Review the diff before you deploy.
+
 ## Upgrading from alpha.66
 
 - **`vercel()` takes a required `region`**, the Vercel region its cores run and keep their data
