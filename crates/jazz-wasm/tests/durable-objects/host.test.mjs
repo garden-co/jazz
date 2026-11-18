@@ -414,3 +414,175 @@ test("after a panic the object starts afresh on its storage", async () => {
     await mf.dispose();
   }
 });
+test("a Durable Object core keeps its app's accounts", async () => {
+  const persist = mkdtempSync(join(tmpdir(), "jazz-do-accounts-"));
+  const open = () =>
+    new Miniflare({
+      modules: true,
+      scriptPath: join(here, "host-worker.mjs"),
+      modulesRoot: join(here, "../.."),
+      modulesRules: [
+        { type: "ESModule", include: ["**/*.js", "**/*.mjs"] },
+        { type: "CompiledWasm", include: ["**/*.wasm"] },
+      ],
+      compatibilityDate: "2026-04-01",
+      durableObjects: { JAZZ: { className: "JazzCore", useSQLite: true } },
+      durableObjectsPersist: persist,
+      bindings: { JAZZ_CORE_SECRET: SECRET },
+    });
+  const post = (mf, path, headers, body) =>
+    mf.dispatchFetch(`http://core/apps/${APP}/admin/accounts/${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify(body),
+    });
+  const asBackend = { "X-Jazz-Backend-Secret": SECRET };
+  const asAdmin = { "X-Jazz-Admin-Secret": SECRET };
+  const alice = { identity: { issuer: "https://idp.example", subject: "alice" } };
+  let mf;
+  try {
+    mf = open();
+    // A backend vouches for its users: it registers and resolves them.
+    const registered = await post(mf, "login-or-register", asBackend, alice);
+    assert.equal(registered.status, 200);
+    const account = (await registered.json()).account;
+    const resolved = await post(mf, "resolve", asBackend, alice);
+    assert.equal((await resolved.json()).account, account);
+    // Refusals are sent without a body: the secret is checked first, and
+    // Node's fetch cannot answer a 401 to a request that streamed one.
+    const refused = (path, headers) =>
+      mf.dispatchFetch(`http://core/apps/${APP}/admin/accounts/${path}`, {
+        method: "POST",
+        headers,
+      });
+    // A wrong admin secret is not excused by a right backend one.
+    const wrong = await refused("resolve", { ...asBackend, "X-Jazz-Admin-Secret": "w".repeat(40) });
+    assert.equal(wrong.status, 401);
+    // Revoking sessions is the admin's.
+    assert.equal((await refused("revoke-sessions", asBackend)).status, 401);
+    const asked = { ...alice, revokedBefore: 1000 };
+    assert.equal((await post(mf, "revoke-sessions", asAdmin, asked)).status, 200);
+    const unknown = await post(mf, "nonsense", asAdmin, alice);
+    assert.equal(unknown.status, 404);
+    const malformed = await mf.dispatchFetch(`http://core/apps/${APP}/admin/accounts/resolve`, {
+      method: "POST",
+      headers: asBackend,
+      body: "{",
+    });
+    assert.equal(malformed.status, 400);
+    await mf.dispose();
+
+    // The next instance knows alice's account.
+    mf = open();
+    const again = await post(mf, "resolve", asBackend, alice);
+    assert.equal((await again.json()).account, account);
+    assert.equal(await (await mf.dispatchFetch("http://core/health")).text(), "ok");
+  } finally {
+    await mf?.dispose();
+    rmSync(persist, { recursive: true, force: true });
+  }
+});
+
+test("each account route takes the secrets native's does", async () => {
+  const mf = start(mkdtempSync(join(tmpdir(), "jazz-do-account-auth-")));
+  const wrong = "w".repeat(40);
+  const as = {
+    none: {},
+    wrong: { "X-Jazz-Backend-Secret": wrong },
+    "wrong admin, right backend": { "X-Jazz-Admin-Secret": wrong, "X-Jazz-Backend-Secret": SECRET },
+    backend: { "X-Jazz-Backend-Secret": SECRET },
+    admin: { "X-Jazz-Admin-Secret": SECRET },
+    both: { "X-Jazz-Admin-Secret": SECRET, "X-Jazz-Backend-Secret": SECRET },
+    "credential, backend": {
+      "X-Jazz-Backend-Credential": SECRET,
+      "X-Jazz-Backend-Access": "backend",
+    },
+    "credential, admin": { "X-Jazz-Backend-Credential": SECRET, "X-Jazz-Backend-Access": "admin" },
+    "credential, no access": { "X-Jazz-Backend-Credential": SECRET },
+    "wrong credential": { "X-Jazz-Backend-Credential": wrong, "X-Jazz-Backend-Access": "admin" },
+  };
+  const admits = {
+    vouching: ["backend", "admin", "both", "credential, backend", "credential, admin"],
+    admin: ["admin", "both", "credential, admin"],
+  };
+  const routes = {
+    resolve: "vouching",
+    "login-or-register": "vouching",
+    "found-local-first": "vouching",
+    link: "admin",
+    revoke: "admin",
+    "revoke-sessions": "admin",
+  };
+  try {
+    for (const [route, authority] of Object.entries(routes)) {
+      for (const [who, headers] of Object.entries(as)) {
+        // No body: the secrets are checked first, and an admitted request
+        // then fails on its (missing) JSON.
+        const response = await mf.dispatchFetch(`http://core/apps/${APP}/admin/accounts/${route}`, {
+          method: "POST",
+          headers,
+        });
+        const expected = admits[authority].includes(who) ? 400 : 401;
+        assert.equal(response.status, expected, `${route} as ${who}`);
+      }
+    }
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("revoking a user's sessions ends their stated sessions and refuses older ones", async () => {
+  const mf = start(mkdtempSync(join(tmpdir(), "jazz-do-revoke-")));
+  const identity = { issuer: "https://idp.example", subject: "alice" };
+  let bundle;
+  const statedAt = (authenticatedAt) =>
+    JSON.stringify({
+      peer_identity: fixture.testUserIdentity(identity.issuer, identity.subject),
+      bundle,
+      auth: {
+        backend_session: {
+          issuer: identity.issuer,
+          user_id: identity.subject,
+          claims: {},
+          authenticatedAt,
+        },
+      },
+    });
+  const as = async (authenticatedAt) => {
+    const socket = await connect(mf, backend);
+    socket.send(statedAt(authenticatedAt));
+    socket.send(fixture.testThinHello());
+    return [socket, await socket.next()];
+  };
+  try {
+    // A user session is pinned to the permissions the backend published.
+    const published = await mf.dispatchFetch(`http://core/apps/${APP}/admin/bundles`, {
+      method: "POST",
+      headers: { "X-Jazz-Admin-Secret": SECRET, "content-type": "application/json" },
+      body: fixture.testDeployRequest(SCHEMA),
+    });
+    bundle = (await published.json()).bundle;
+    const [alice, hello] = await as(1000);
+    assert.deepEqual(hello, { hello: true });
+
+    const revoked = await mf.dispatchFetch(
+      `http://core/apps/${APP}/admin/accounts/revoke-sessions`,
+      {
+        method: "POST",
+        headers: { "X-Jazz-Admin-Secret": SECRET, "content-type": "application/json" },
+        body: JSON.stringify({ identity, revokedBefore: 2000 }),
+      },
+    );
+    assert.equal(revoked.status, 200);
+    assert.match((await alice.next()).error ?? "", /session revoked/);
+    await eventually(() => alice.closed(), "alice's socket closes");
+
+    const [, older] = await as(1500);
+    assert.match(older.error ?? "", /session revoked/);
+    const [later, fresh] = await as(3000);
+    assert.deepEqual(fresh, { hello: true }, "a session authenticated after the mark is admitted");
+    later.close();
+  } finally {
+    await mf.dispose();
+  }
+});
