@@ -227,11 +227,10 @@ impl CataloguePut {
 #[derive(Clone, Debug, Default)]
 pub struct CatalogueChange {
     pub put: CataloguePut,
-    /// Versions to admit, in order, each with the lenses into it.
+    /// Versions to admit, in order, each with the lenses into it. A
+    /// change never makes a schema current: a store installs its schema
+    /// when it opens.
     pub admit: Vec<(JazzSchema, Vec<crate::protocol::MigrationLens>)>,
-    /// The schema (with its policies) to make current, at a permissions
-    /// revision, with the lenses into it.
-    pub activate: Option<(u64, JazzSchema, Vec<crate::protocol::MigrationLens>)>,
 }
 
 /// `value` as canonical JSON: object keys sorted at every level, no

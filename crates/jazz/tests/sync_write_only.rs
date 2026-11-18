@@ -552,22 +552,22 @@ fn a_write_only_insert_superseded_by_another_writer_is_evicted() {
     assert_eq!(local_rows(&alice), vec![]);
 }
 
-fn relayed(relay: AuthorSubject, server_link: bool) -> (Db, Db, Db) {
+fn relayed(identity: AuthorSubject, server_link: bool) -> (Db, Db, Db) {
     let server = open_as(write_only(), 41, AuthorSubject::SYSTEM);
     server.set_authority();
-    let edge = open_as(write_only(), 42, relay);
+    let relay = open_as(write_only(), 42, identity);
     if server_link {
         let (up, down) = duplex();
-        block_on(edge.connect_upstream(up));
-        server.accept_subscriber(down, relay).unwrap();
-        edge.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+        block_on(relay.connect_upstream(up));
+        server.accept_subscriber(down, identity).unwrap();
+        relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
     } else {
-        edge.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+        relay.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
     }
     let client = open_as(write_only(), 43, author("alice"));
     let (up, down) = duplex();
     block_on(client.connect_upstream(up));
-    edge.accept_subscriber(down, author("alice")).unwrap();
+    relay.accept_subscriber(down, author("alice")).unwrap();
     client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
     let insert = insert(&client, 1, "founder");
     let tier = if server_link {
@@ -576,17 +576,17 @@ fn relayed(relay: AuthorSubject, server_link: bool) -> (Db, Db, Db) {
         DurabilityTier::Local
     };
     drive(
-        &[&client, &edge, &server],
+        &[&client, &relay, &server],
         client.wait_for_transaction(insert, tier),
     )
     .unwrap();
     for _ in 0..4 {
-        for db in [&client, &edge, &server, &edge] {
+        for db in [&client, &relay, &server, &relay] {
             block_on(db.tick()).unwrap();
         }
     }
     block_on(client.tick()).unwrap();
-    (client, edge, server)
+    (client, relay, server)
 }
 
 /// Through a relay serving another identity, the relay only passes on the
@@ -595,7 +595,7 @@ fn relayed(relay: AuthorSubject, server_link: bool) -> (Db, Db, Db) {
 /// evicted (as before write-only acknowledgements).
 #[test]
 fn a_write_only_insert_through_another_identitys_relay_is_evicted() {
-    let (client, _edge, server) = relayed(AuthorSubject::SYSTEM, true);
+    let (client, _relay, server) = relayed(AuthorSubject::SYSTEM, true);
     assert_eq!(local_rows(&server), vec![(row(1), "founder".into())]);
     assert_eq!(local_rows(&client), vec![]);
 }
@@ -607,8 +607,8 @@ fn a_write_only_insert_through_another_identitys_relay_is_evicted() {
 /// keeps the write it holds as Local, as it always did on this path.
 #[test]
 fn a_write_only_insert_a_relay_with_no_server_accepts_stays_local() {
-    let (client, edge, _server) = relayed(AuthorSubject::SYSTEM, false);
-    assert_eq!(local_rows(&edge), vec![(row(1), "founder".into())]);
+    let (client, relay, _server) = relayed(AuthorSubject::SYSTEM, false);
+    assert_eq!(local_rows(&relay), vec![(row(1), "founder".into())]);
     assert_eq!(local_rows(&client), vec![(row(1), "founder".into())]);
 }
 
@@ -617,8 +617,8 @@ fn a_write_only_insert_a_relay_with_no_server_accepts_stays_local() {
 /// serves its own identity's sessions what it holds.
 #[test]
 fn a_write_only_insert_through_the_writers_own_relay_stays() {
-    let (client, edge, _server) = relayed(author("alice"), true);
-    assert_eq!(local_rows(&edge), vec![(row(1), "founder".into())]);
+    let (client, relay, _server) = relayed(author("alice"), true);
+    assert_eq!(local_rows(&relay), vec![(row(1), "founder".into())]);
     assert_eq!(local_rows(&client), vec![(row(1), "founder".into())]);
 }
 
