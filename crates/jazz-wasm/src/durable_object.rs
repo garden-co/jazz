@@ -792,7 +792,9 @@ mod smoke {
         batch(&[jazz::wire::WireFrame::Hello(
             jazz::wire::WireHello::current(
                 jazz::wire::WirePeerRole::Client,
-                jazz::wire::current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS,
+                jazz::wire::current_wire_features()
+                    | jazz::wire::FEATURE_THIN_RESULTS
+                    | jazz::wire::FEATURE_HEARTBEAT,
             ),
         )])
     }
@@ -859,7 +861,9 @@ mod smoke {
         let mut out = Vec::new();
         for frame in frames {
             out.push(match jazz::wire::decode_frame(&frame).map_err(js)? {
-                jazz::wire::WireFrame::Hello(_) => serde_json::json!({ "hello": true }),
+                jazz::wire::WireFrame::Hello(hello) => serde_json::json!({
+                    "hello": true, "heartbeat": hello.features & jazz::wire::FEATURE_HEARTBEAT != 0
+                }),
                 jazz::wire::WireFrame::Error(error) => {
                     serde_json::json!({ "error": error.message })
                 }
@@ -1267,10 +1271,12 @@ mod core_host {
                 Ok(admission) => admission,
                 Err(refusal) => return refused(error_frame(&refusal.into_wire(), client_features)),
             };
-            let hello = match negotiate_hello(first, prelude.bootstrap_catalogue) {
-                Ok(hello) => hello,
-                Err(error) => return refused(error_frame(&error, client_features)),
-            };
+            let hello =
+                match negotiate_hello(first, prelude.bootstrap_catalogue, jazz::wire::FEATURE_NONE)
+                {
+                    Ok(hello) => hello,
+                    Err(error) => return refused(error_frame(&error, client_features)),
+                };
             let link = match link(&admission, &hello) {
                 Ok(link) => link,
                 Err(error) => return refused(error_frame(&error, client_features)),
