@@ -132,6 +132,7 @@ fn encrypted(column_type: ColumnType, nullable: bool) -> EncryptedColumn {
         plain: PlainType {
             column_type,
             nullable,
+            default: None,
         },
         sealed_type: None,
         from: None,
@@ -1833,6 +1834,84 @@ fn reads_that_would_compare_or_return_sealed_cells_are_refused() {
         direction: OrderDirection::Asc,
     });
     alice.prepare_query(&by_title).unwrap();
+}
+
+/// Contract: an app that declares encryption (its schema holds Jazz's
+/// system tables) opens through the bindings' open only when encryption
+/// hooks that declare it are installed on that same open; without hooks,
+/// or with hooks that declare nothing, it is refused, and a database it
+/// opens seals its writes.
+#[test]
+fn an_encrypted_app_opens_only_with_encryption_hooks() {
+    use jazz::tools::AppId;
+    use jazz::tools::deployment::artifact::load_client_encrypted;
+    let app = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": {
+            "projects": { "columns": { "name": "string" } },
+            "space_roots": { "columns": { "space": "uuid" } },
+            "notes": {
+                "columns": { "projectId": "uuid", "title": "string", "body": "bytes",
+                    "__e2ee_eq_body": "bytes" },
+                "relations": { "project": { "rel": "projects", "column": "projectId" } },
+                "encryption": { "space": "projectId", "scope": "projects",
+                    "columns": { "body": "string" },
+                    "equality": ["body"] }
+            }
+        } }"#;
+    let (schema, _, declarations) =
+        load_client_encrypted(app.as_bytes(), AppId::from_name("hooks"), "test").unwrap();
+    let declarations = declarations.expect("the app declares encryption");
+    let config = || DbConfig::new(jazz::schema::JazzSchema::new(&schema).unwrap(), identity(1));
+
+    let refused = |config: DbConfig| {
+        let error = block_on(jazz::binding_host::open_memory(config))
+            .err()
+            .expect("refused");
+        assert_eq!(error.code, ErrorCode::Schema);
+        assert!(
+            error.message.contains("declares end-to-end encryption"),
+            "{}",
+            error.message
+        );
+    };
+    refused(config());
+    let empty = Rc::new(Fake {
+        declarations: Some(E2eeDeclarations {
+            tables: BTreeMap::new(),
+            ..declarations.clone()
+        }),
+        ..Fake::default()
+    });
+    refused(config().with_e2ee(empty));
+    let path = tempfile::tempdir().unwrap();
+    let error = block_on(jazz::binding_host::open_file(
+        config(),
+        &path.path().join("refused.sqlite"),
+        FileOptions::default(),
+    ))
+    .err()
+    .expect("refused");
+    assert_eq!(error.code, ErrorCode::Schema);
+
+    let hooks = Rc::new(Fake {
+        declarations: Some(declarations),
+        ..Fake::default()
+    });
+    let space = uuid::Uuid::new_v4();
+    hooks.hold(space);
+    let db = block_on(jazz::binding_host::open_memory(
+        config().with_e2ee(hooks.clone()),
+    ))
+    .unwrap();
+    block_on(db.insert("notes", note(space, SECRET), Default::default())).unwrap();
+    assert_eq!(hooks.seals.get(), 1, "the write was sealed");
+    assert_eq!(bodies(&all(&db, "notes")), [text(SECRET)]);
+    block_on(jazz::binding_host::open_file(
+        config().with_e2ee(hooks),
+        &path.path().join("opened.sqlite"),
+        FileOptions::default(),
+    ))
+    .unwrap();
 }
 
 /// The bodies a live result holds after its opening.

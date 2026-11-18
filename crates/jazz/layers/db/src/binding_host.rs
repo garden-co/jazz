@@ -675,32 +675,45 @@ pub fn db_config(schema: JazzSchema, config: &OpenConfig, identity: DbIdentity) 
 }
 
 /// Why a client may not open an app whose schema holds Jazz's system tables
-/// (it declares end-to-end encryption): it has no encryption hooks yet, so
-/// it would write plaintext into the ciphertext columns, and the types
-/// generated code gives those columns would hide that.
+/// (it declares end-to-end encryption) without encryption hooks: it would
+/// write plaintext into the ciphertext columns, and the types generated
+/// code gives those columns would hide that.
 pub const ENCRYPTED_APP_REFUSAL: &str = "this client can't open an app that declares end-to-end \
     encryption yet: it has no encryption hooks, so it would store plaintext in the encrypted \
     columns. Deploy the app with `deploy` or the HTTP deploy route, and open it with a client \
     that has encryption";
 
-/// Refuse `schema` if it holds Jazz's system tables, which only an
-/// encrypted app's schema does.
-pub fn refuse_encrypted_app(schema: &JazzSchema) -> Result<(), Error> {
-    if schema
+/// Refuse to open `config`'s schema if it holds Jazz's system tables, which
+/// only an encrypted app's schema does, unless the configuration installs
+/// encryption hooks that declare encryption ([`DbConfig::with_e2ee`]). A
+/// build without the `e2ee-client` feature has no hooks to install and
+/// always refuses.
+pub fn refuse_encrypted_app(config: &DbConfig) -> Result<(), Error> {
+    if !config
+        .schema
         .tables()
         .iter()
         .any(|table| jazz_model::schema::is_system_table(&table.name))
     {
-        return Err(Error::new(ErrorCode::Schema, ENCRYPTED_APP_REFUSAL));
+        return Ok(());
     }
-    Ok(())
+    #[cfg(feature = "e2ee-client")]
+    if config
+        .e2ee
+        .as_ref()
+        .is_some_and(|hooks| !hooks.declarations().tables.is_empty())
+    {
+        return Ok(());
+    }
+    Err(Error::new(ErrorCode::Schema, ENCRYPTED_APP_REFUSAL))
 }
 
 /// Open an in-memory database. `history_complete` needs nothing: every
 /// SQLite store keeps full history. A schema with Jazz's system tables is
-/// refused ([`refuse_encrypted_app`]).
+/// refused unless the configuration has encryption hooks
+/// ([`refuse_encrypted_app`]).
 pub async fn open_memory(db_config: DbConfig) -> Result<Db, Error> {
-    refuse_encrypted_app(&db_config.schema)?;
+    refuse_encrypted_app(&db_config)?;
     Db::open(db_config).await
 }
 
@@ -710,7 +723,7 @@ pub async fn open_file(
     path: &std::path::Path,
     options: crate::db::FileOptions,
 ) -> Result<Db, Error> {
-    refuse_encrypted_app(&db_config.schema)?;
+    refuse_encrypted_app(&db_config)?;
     Db::open_at(db_config, path, options).await
 }
 
