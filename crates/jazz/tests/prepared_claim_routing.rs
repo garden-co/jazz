@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::protocol::{CurrentWriteSchema, LensOp, MigrationLens, SchemaVersion, TableLens};
+use jazz::protocol::{LensOp, MigrationLens, SchemaVersion, TableLens};
 use jazz::query::{OrderDirection, Query, col, eq, param};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
@@ -1202,15 +1202,7 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
         ],
     )
     .expect("valid migration lens");
-    let publication = db
-        .author_schema_lineage_publication(v2.clone(), lens)
-        .expect("authority authors v1-to-v2 lineage");
-    block_on(db.publish_schema_with_lens(publication)).expect("publish v1-to-v2 lineage");
-    block_on(db.activate_catalogue_schema_for_test(CurrentWriteSchema {
-        revision: 1,
-        schema: v2.id,
-    }))
-    .expect("select v2 schema");
+    block_on(db.activate_schema_with_lenses(v2.schema.clone(), &[lens])).expect("select v2 schema");
 
     let prepared_v2_a = db
         .prepare_query_bound(
@@ -1323,15 +1315,7 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
         ],
     )
     .expect("valid migration lens");
-    let publication = db
-        .author_schema_lineage_publication(v2.clone(), lens)
-        .expect("authority authors v1-to-v2 lineage");
-    block_on(db.publish_schema_with_lens(publication)).expect("publish v1-to-v2 lineage");
-    block_on(db.activate_catalogue_schema_for_test(CurrentWriteSchema {
-        revision: 1,
-        schema: v2.id,
-    }))
-    .expect("activate v2");
+    block_on(db.activate_schema_with_lenses(v2.schema.clone(), &[lens])).expect("activate v2");
     block_on(db.update(
         DOCUMENTS,
         row(0x41),
@@ -1466,15 +1450,7 @@ fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
         ],
     )
     .expect("valid migration lens");
-    let publication = db
-        .author_schema_lineage_publication(v2.clone(), lens)
-        .expect("authority authors v1-to-v2 lineage");
-    block_on(db.publish_schema_with_lens(publication)).expect("publish v2 with lineage lens");
-    block_on(db.activate_catalogue_schema_for_test(CurrentWriteSchema {
-        revision: 1,
-        schema: v2.id,
-    }))
-    .expect("activate v2");
+    block_on(db.activate_schema_with_lenses(v2.schema.clone(), &[lens])).expect("activate v2");
 
     // A distinct v2 prepared shape occupies the fresh runtime before the old
     // handle is read, so correctness cannot rely on an accidentally matching
