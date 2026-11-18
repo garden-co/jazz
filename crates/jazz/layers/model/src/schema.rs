@@ -72,7 +72,7 @@ pub const SUPERSEDED_WRITES_STORE: &str = "jazz_superseded_writes_v1";
 /// The reserved name prefix of system tables: catalogue tables whose
 /// definitions and policies come from Jazz, not from the application.
 /// Only Jazz's own schema fragment is meant to define a table with it: the
-/// app-file reader refuses an application table (in the current version) or
+/// app-file reader refuses an application table (in any version) or
 /// a permissions entry with this prefix. A schema built in code, as Jazz's
 /// own and its tests' are, may define one, and schema validation then
 /// relaxes its address correlations.

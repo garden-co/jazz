@@ -53,6 +53,8 @@ mod deleted_rows;
 mod deployment_preparation;
 #[path = "../dynamic_schema_views.rs"]
 mod dynamic_schema_views;
+#[path = "../e2ee_declarations.rs"]
+mod e2ee_declarations;
 #[path = "../enum_tags.rs"]
 mod enum_tags;
 #[path = "../error_code_strings.rs"]
