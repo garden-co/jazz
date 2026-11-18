@@ -1,6 +1,6 @@
 // The app's backend: a small Node server that runs Jazz (createJazz) and
 // serves sync under /jazz. The app has no sign-in, so every device is a
-// local-first guest. Run it with `pnpm backend`, then point the app at it
+// guest on a device account. Run it with `pnpm backend`, then point the app at it
 // with EXPO_PUBLIC_JAZZ_SERVER_URL (see the README).
 import { createServer } from "node:http";
 import { acceptDeviceAccounts, createJazz, sqlite } from "jazz-tools/backend";
