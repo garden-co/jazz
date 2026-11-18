@@ -146,7 +146,8 @@ function decorate<Client>(
     observed = client;
     stopStatus?.();
     stopStatus = (client as ObservedClient | undefined)?.db?.onSyncStatusChange?.((status) => {
-      if (status.link.state === "offline" && status.link.reason === "auth") watch.authRefused();
+      if (status.link.state === "offline" && status.link.reason === "auth")
+        watch.authRefused(status.link.authReason);
       else if (status.link.state === "connected") watch.connected();
     });
   };

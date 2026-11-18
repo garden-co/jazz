@@ -133,7 +133,7 @@ impl Jazz {
                 "subscribing to history; read it with Jazz::all".into(),
             ));
         }
-        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, receiver) = tokio::sync::mpsc::channel(subscription::SUBSCRIPTION_ITEMS);
         let implementations = self.info.implementations.clone();
         self.with_client(move |client| async move {
             let client = BranchView::scope(branch.as_ref(), client)?;
