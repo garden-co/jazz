@@ -48,10 +48,10 @@ export function JazzProvider(props: JazzProviderProps) {
       loading={loading === undefined ? <p role="status">Loading…</p> : loading}
       error={
         error === undefined
-          ? (state) => (
+          ? ({ retry }) => (
               <section role="alert">
                 <p>Jazz couldn’t start. Please try again.</p>
-                <button type="button" onClick={() => void state.retry().catch(() => {})}>
+                <button type="button" onClick={() => void retry()}>
                   Try again
                 </button>
               </section>
