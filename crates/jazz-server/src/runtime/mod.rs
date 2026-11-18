@@ -336,6 +336,9 @@ struct Owner {
     catalogue: Catalogue,
     /// The app this store serves, named in slow-query reports.
     app: Option<String>,
+    /// Whether the account registry the checks beside the account tables
+    /// read is installed.
+    registry_installed: bool,
     /// Runs a network chunk store's I/O beside this thread.
     #[cfg(feature = "native")]
     chunk_io: Option<ChunkIoRunner>,
@@ -1033,6 +1036,7 @@ impl Owner {
     /// [`Self::open_on`]): a network one gets its I/O runner, which wakes
     /// the store thread through `wake`.
     #[cfg(feature = "native")]
+    #[allow(clippy::too_many_arguments)]
     fn open(
         schema: JazzSchema,
         file: StoreFile,
@@ -1041,6 +1045,7 @@ impl Owner {
         any_stored_catalogue: bool,
         app: Option<String>,
         registry: Option<HostReader>,
+        registry_required: bool,
     ) -> Result<Self, String> {
         let chunk_io = match &chunk_store {
             Some(choice) if choice.network => {
@@ -1065,12 +1070,29 @@ impl Owner {
         owner.chunk_io = chunk_io;
         // The checks beside the E2EE account tables' policies read the
         // account registry the store keeps beside the rows.
-        if let (Some(reader), Some(app)) = (registry, owner.app.as_deref()) {
-            let app = jazz::tools::AppId::from_string(app)
-                .unwrap_or_else(|_| jazz::tools::AppId::from_name(app));
-            owner.db.set_account_registry(Rc::new(
-                crate::server::account_store::RegistryFounders::new(reader, *app.uuid()),
-            ));
+        // The registry names the app's founding namespace, parsed as device
+        // accounts' ids derive from it (`local_first_founding_app`).
+        let installed = match (registry, owner.app.as_deref()) {
+            (Some(reader), Some(app)) => {
+                let app = crate::portable::accounts::local_first_founding_app(app);
+                owner.db.set_account_registry(Rc::new(
+                    crate::server::account_store::RegistryFounders::new(reader, *app.uuid()),
+                ));
+                true
+            }
+            _ => false,
+        };
+        // Without a registry an account founded locally that later signs in
+        // through an external login would count as founded by the app, so
+        // an encrypted app is not served without one.
+        owner.registry_installed = installed;
+        if registry_required && !installed && owner.encrypts()? {
+            return Err(
+                "this app encrypts columns, which needs the account registry \
+                 of an app's store: open the store for an app (`set_app`) with its \
+                 host tables"
+                    .to_owned(),
+            );
         }
         Ok(owner)
     }
@@ -1132,11 +1154,20 @@ impl Owner {
             slice: Rc::default(),
             catalogue,
             app,
+            registry_installed: false,
             #[cfg(feature = "native")]
             chunk_io: None,
             #[cfg(all(test, feature = "native"))]
             fail_next_reload: false,
         })
+    }
+
+    /// Whether the app's schema has Jazz's E2EE system tables.
+    fn encrypts(&self) -> Result<bool, String> {
+        self.db
+            .table_identity(jazz::tools::deployment::artifact::system_tables::MEMBERS)
+            .map(|identity| identity.is_some())
+            .map_err(|error| format!("read the schema: {error}"))
     }
 
     fn reload_catalogue(&mut self) -> Result<(), String> {
@@ -3427,6 +3458,41 @@ mod tests {
                 .map_err(|error| format!("the root the registry names: {error}"))
         }))
         .unwrap();
+        store.close().unwrap();
+    }
+
+    /// A store opened for no app has no account registry, so an encrypted
+    /// app is not served from it: an account founded locally that later
+    /// signs in through an external login would count as app-founded.
+    #[test]
+    fn an_encrypted_app_is_not_served_without_the_account_registry() {
+        use jazz::tools::deployment::artifact::system_tables::with_e2ee_fragment;
+        let tables = with_e2ee_fragment(
+            &SchemaBuilder::new()
+                .table(TableSchema::builder("projects").column("ownerId", ColumnType::Uuid))
+                .build(),
+        );
+        let schema = || JazzSchema::new(&tables).unwrap();
+        let store = AppStore::memory().unwrap();
+        let Err(error) = store.start_runtime(schema(), NodeRole::Core, false) else {
+            panic!("no app named, so no registry");
+        };
+        assert!(error.contains("account registry"), "{error}");
+        store.close().unwrap();
+
+        // Nor from a runtime started through the public API, which owns its
+        // store and has no registry.
+        let Err(error) = ServerRuntimeHandle::start_with_storage(schema(), StorageConfig::InMemory)
+        else {
+            panic!("a store-owning runtime has no registry either");
+        };
+        assert!(error.contains("account registry"), "{error}");
+
+        let store = AppStore::memory().unwrap();
+        store.set_app("the-encrypted-app");
+        store
+            .start_runtime(schema(), NodeRole::Core, false)
+            .expect("an app's store serves it");
         store.close().unwrap();
     }
 }

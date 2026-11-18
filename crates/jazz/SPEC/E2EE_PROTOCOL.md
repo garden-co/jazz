@@ -520,6 +520,20 @@ Account and device tables (fixed policies):
   is `local-first` exactly when the account was founded by a local-first
   identity (Jazz's account registry); an account founded otherwise writes
   `app` roots.
+  An encrypting app serves local-first accounts founded for its own app id
+  only. A local-first identity's account ID derives from the audience its
+  proof names (§2.3), which may be another than the app's, and the registry
+  keeps no record of which one founded an account, so such an account could
+  not be told from the app's own. The server therefore refuses to found one
+  for an app that encrypts (`found-local-first`, and a guest's first
+  admission), and accepts no identity or root (R5, R6) for an account whose
+  identities are all local-first and none of which derives its ID in the
+  app's namespace: neither a `local-first` nor an `app` root, so neither a
+  bootstrap nor a reset. An account with an external identity is not told
+  apart from one the app founded: a local-first account of another audience
+  that was linked to an external login before the app encrypted counts as
+  the app's, so that login can reset it (§2.11), like any account's own
+  login.
 - R7. Challenges, proofs, approvals, device deliveries: insert by `$createdBy`
   only, referencing a request or challenge of the same account; read by
   creator.
@@ -529,10 +543,17 @@ Account and device tables (fixed policies):
   request and the approved device's request belong to that account; a
   recovery approval's `recoveryRootId` names a recovery root of that account.
   Both successor tables: `accountId = session account`; the signer request
-  and the target (removed device's request or retired recovery root) belong
-  to that account; the target columns match `action` (§1.2); the
-  private and public rows share their ID and are inserted in one
-  transaction. Removal requests: `accountId = session account`, and the
+  and the removed device's request belong to that account; the target
+  columns match `action` (§1.2). The server does not check that a retired
+  recovery root belongs to the account: the target is an ID in a list column,
+  which no policy reads. Clients check it on replay (§2.4 step 3: the target
+  must be a valid, earlier, unretired recovery root of the account's own
+  ledger), so a successor retiring another account's root is not accepted. A
+  public successor requires the private one with its ID, inserted in the same
+  transaction. The reverse is not enforced: two rows cannot each require the
+  other of one transaction, and a private approval or successor without its
+  public half is inert (replay reads only public rows, and private
+  verification drops a private row no public one pairs with). Removal requests: `accountId = session account`, and the
   request of `deviceId` belongs to that account.
 - R9. Recovery roots: `accountId = session account`, signer request of the
   same account. Recovery deliveries: the root's `accountId` is the session

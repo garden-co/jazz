@@ -8,7 +8,7 @@
 //! The router builder [`create_router`] re-exports unchanged from this module
 //! so existing callers (`server::routes::create_router`) continue to resolve.
 
-mod accounts;
+pub(in crate::server) mod accounts;
 pub(crate) mod http;
 mod metered_socket;
 mod utils;
