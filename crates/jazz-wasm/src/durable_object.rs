@@ -738,6 +738,42 @@ mod smoke {
         serde_json::to_string(&request).expect("deploy request JSON")
     }
 
+    /// The deploy body an app that encrypts a column publishes, from its
+    /// loaded files (a task's title is encrypted in its project's space);
+    /// with `retyped`, the same schema whose declaration types the title as
+    /// an integer instead of text.
+    #[wasm_bindgen(js_name = testEncryptedDeployBody)]
+    pub fn test_encrypted_deploy_body(retyped: bool) -> String {
+        let app = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": {
+                "projects": { "columns": { "name": "string", "ownerId": "uuid" } },
+                "tasks": {
+                    "columns": { "projectId": "uuid", "title": "bytes", "__e2ee_eq_title": "bytes" },
+                    "relations": { "project": { "rel": "projects", "column": "projectId" } },
+                    "encryption": { "space": "projectId", "scope": "projects",
+                        "columns": { "title": "string" }, "equality": ["title"] }
+                }
+            } }"#
+            .replace(r#""title": "string""#, if retyped { r#""title": "int""# } else { r#""title": "string""# });
+        let members = "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.id, accountId = session.user)";
+        let permissions = serde_json::json!({
+            "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+            "tables": {
+                "projects": {
+                    "read": members,
+                    "insert": "$createdBy.account = session.user",
+                    "update": "ownerId = session.user",
+                },
+                "tasks": { "read": "allowedTo.read(project)", "insert": "allowedTo.update(project)" },
+            },
+        })
+        .to_string();
+        jazz::tools::deployment::artifact::load(app.as_bytes(), permissions.as_bytes())
+            .expect("the app's files load")
+            .deployment_body(false)
+            .to_string()
+    }
+
     /// A local-first guest (keys from `seed`, a byte repeated) proving
     /// itself for `audience` at `now_seconds`: `{ proof, peer, subject }`,
     /// its self-signed proof, the peer identity its client names (with the
