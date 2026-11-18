@@ -54,6 +54,24 @@ pub(crate) async fn deploy_body(
     let deployment =
         portable::prepare_encrypted(&index, body, super::catalogue::unix_timestamp_millis())?;
     let staged = &deployment.staged;
+    // An encrypted app needs the account registry its checks read, as when
+    // a runtime opens (`Owner::open`): a deployment that brings one to a
+    // runtime without it is refused before anything is applied.
+    if let Some(runtime) = state.runtime()
+        && deployment.prepared.schemas().iter().any(|schema| {
+            jazz::tools::deployment::artifact::system_tables::check_e2ee_fragment(schema)
+                .unwrap_or(false)
+        })
+        && !runtime
+            .has_account_registry()
+            .await
+            .map_err(DeployError::internal)?
+    {
+        return Err(DeployError::invalid(
+            "this app encrypts columns, which needs the account registry of an app's store; \
+             the server's runtime has none",
+        ));
+    }
     if !staged.response.changed {
         // Nothing to commit, but the runtime's view of the catalogue may be
         // behind the store's: a deployment that committed and then failed

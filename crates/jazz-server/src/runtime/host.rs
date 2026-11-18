@@ -33,6 +33,10 @@ pub(super) enum Work {
 pub(super) struct Runtime {
     pub(super) schema: JazzSchema,
     pub(super) any_stored_catalogue: bool,
+    /// Whether the runtime serves an app from its host's store, so an
+    /// encrypted app needs the account registry there. A runtime that owns
+    /// its store (a standalone or scratch one) has none to read.
+    pub(super) registry_required: bool,
 }
 
 /// Open the runtime on the store.
@@ -595,6 +599,7 @@ impl AppStore {
             runtime: Runtime {
                 schema,
                 any_stored_catalogue,
+                registry_required: !owns_store,
             },
             reply,
         }))?;
@@ -894,6 +899,7 @@ impl StoreLoop {
                     runtime.any_stored_catalogue,
                     self.app.lock().ok().and_then(|app| app.clone()),
                     self.source.reader().ok(),
+                    runtime.registry_required,
                 )
             }))
             .unwrap_or_else(|panic| {
@@ -1613,6 +1619,12 @@ impl ServerRuntimeHandle {
     /// which a change that committed and then failed may have left behind.
     pub async fn reload_catalogue(&self) -> Result<(), String> {
         self.run(|owner| owner.reload_catalogue()).await
+    }
+
+    /// Whether the runtime has the account registry its checks read, which
+    /// an app that encrypts columns needs.
+    pub async fn has_account_registry(&self) -> Result<bool, String> {
+        self.run(|owner| Ok(owner.registry_installed)).await
     }
 
     /// Tests: how many sessions (sync and thin) the runtime serves now.

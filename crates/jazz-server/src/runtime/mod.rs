@@ -336,6 +336,9 @@ struct Owner {
     catalogue: Catalogue,
     /// The app this store serves, named in slow-query reports.
     app: Option<String>,
+    /// Whether the account registry the checks beside the account tables
+    /// read is installed.
+    registry_installed: bool,
     /// Runs a network chunk store's I/O beside this thread.
     #[cfg(feature = "native")]
     chunk_io: Option<ChunkIoRunner>,
@@ -1041,6 +1044,7 @@ impl Owner {
         any_stored_catalogue: bool,
         app: Option<String>,
         registry: Option<HostReader>,
+        registry_required: bool,
     ) -> Result<Self, String> {
         let chunk_io = match &chunk_store {
             Some(choice) if choice.network => {
@@ -1080,7 +1084,9 @@ impl Owner {
         // Without a registry an account founded locally that later signs in
         // through an external login would count as founded by the app, so
         // an encrypted app is not served without one.
-        if !installed
+        owner.registry_installed = installed;
+        if registry_required
+            && !installed
             && owner
                 .db
                 .table_identity(jazz::tools::deployment::artifact::system_tables::MEMBERS)
@@ -1154,6 +1160,7 @@ impl Owner {
             slice: Rc::default(),
             catalogue,
             app,
+            registry_installed: false,
             #[cfg(feature = "native")]
             chunk_io: None,
             #[cfg(all(test, feature = "native"))]

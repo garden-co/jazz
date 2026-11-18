@@ -90,3 +90,159 @@ async fn a_raw_deploy_of_a_foreign_system_table_is_refused() {
     let (status, deployed) = publish(&router, body("notes")).await;
     assert_eq!(status, StatusCode::OK, "{deployed}");
 }
+
+/// An encrypted schema as a deploy body: tasks encrypt their title in their
+/// project's space.
+fn encrypted_body() -> Value {
+    use jazz::tools::deployment::artifact::DeclaredEncryption;
+    use jazz::tools::deployment::artifact::system_tables::with_e2ee_fragment;
+    use jazz::tools::public_schema::{EncryptedColumn, EncryptionEntry, PlainType, SweepBy};
+    use std::collections::BTreeMap;
+    let schema = with_e2ee_fragment(
+        &SchemaBuilder::new()
+            .table(TableSchema::builder("projects").column("ownerId", ColumnType::Uuid))
+            .table(
+                TableSchema::builder("tasks")
+                    .fk_column("projectId", "projects")
+                    .column("title", ColumnType::Bytea),
+            )
+            .build(),
+    );
+    let hash = SchemaHash::compute(&schema).to_string();
+    let entries = BTreeMap::from([(
+        "tasks".to_owned(),
+        EncryptionEntry {
+            space: "projectId".to_owned(),
+            scope: "projects".to_owned(),
+            columns: BTreeMap::from([(
+                "title".to_owned(),
+                EncryptedColumn {
+                    plain: PlainType {
+                        column_type: ColumnType::Text,
+                        nullable: false,
+                    },
+                    sealed_type: None,
+                    from: None,
+                    to: None,
+                    convert: None,
+                    reverse: None,
+                },
+            )]),
+            equality: Vec::new(),
+            backfill: Vec::new(),
+            rehome: None,
+            sweep: SweepBy::Updaters,
+        },
+    )]);
+    let declared = DeclaredEncryption {
+        settings: Default::default(),
+        versions: BTreeMap::from([(hash.clone(), entries)]),
+    };
+    json!({
+        "targetSchemaHash": hash,
+        "schemas": [{ "hash": hash, "schema": schema }],
+        "migrations": [],
+        "permissions": {},
+        "encryption": declared,
+    })
+}
+
+/// A server with its account registry deploys an encrypted schema to a
+/// fresh store.
+#[tokio::test]
+async fn an_encrypted_schema_deploys_to_a_server_with_its_registry() {
+    let router = router().await;
+    let (status, deployed) = publish(&router, encrypted_body()).await;
+    assert_eq!(status, StatusCode::OK, "{deployed}");
+}
+
+/// A deployment that brings an encrypted schema to a runtime without the
+/// account registry is refused before anything is applied, and one that
+/// brings an ordinary schema is not.
+///
+/// ```text
+/// runtime (no registry) ◄── encrypted schema ──✗ refused
+/// runtime (no registry) ◄── ordinary schema ──✓
+/// ```
+#[tokio::test]
+async fn an_encrypted_schema_is_not_deployed_to_a_runtime_without_the_registry() {
+    use crate::runtime::ServerRuntimeHandle;
+    use crate::runtime::StorageConfig;
+    let server = ServerBuilder::new(app_id())
+        .with_auth_config(AuthConfig {
+            admin_secret: Some("test-admin".into()),
+            ..Default::default()
+        })
+        .with_storage(StorageBackend::InMemory)
+        .build()
+        .await
+        .unwrap();
+    // A standalone runtime reads no host tables, so it has no registry.
+    let schema = SchemaBuilder::new()
+        .table(TableSchema::builder("notes").column("body", ColumnType::Text))
+        .build();
+    *server.state.core_server_shell.write().unwrap() = Some(
+        ServerRuntimeHandle::start_with_storage(
+            jazz::schema::JazzSchema::new(&schema).unwrap(),
+            StorageConfig::InMemory,
+        )
+        .unwrap(),
+    );
+    let router = create_router(server.state.clone());
+    let (status, refusal) = publish(&router, encrypted_body()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("account registry"),
+        "{refusal}"
+    );
+    let hash = SchemaHash::compute(&schema).to_string();
+    let (status, deployed) = publish(
+        &router,
+        json!({
+            "targetSchemaHash": hash,
+            "schemas": [{ "hash": hash, "schema": schema }],
+            "migrations": [],
+            "permissions": {},
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deployed}");
+}
+
+/// A host without the native store (a Durable Object) deploys through the
+/// portable route with no declarations, which refuses Jazz's system tables:
+/// a schema that has them must declare encryption.
+#[test]
+fn the_portable_deploy_refuses_system_tables_without_declarations() {
+    use crate::portable::catalogue::CatalogueIndex;
+    use crate::portable::deployment::{DeployRequest, DeploySchema, prepare};
+    use jazz::tools::deployment::artifact::system_tables::with_e2ee_fragment;
+    let schema = with_e2ee_fragment(
+        &SchemaBuilder::new()
+            .table(TableSchema::builder("notes").column("body", ColumnType::Text))
+            .build(),
+    );
+    let hash = SchemaHash::compute(&schema).to_string();
+    let index = CatalogueIndex::from_rows(&Default::default(), None);
+    let Err(refusal) = prepare(
+        &index,
+        DeployRequest {
+            target_schema_hash: hash.clone(),
+            schemas: vec![DeploySchema { hash, schema }],
+            migrations: Vec::new(),
+            permissions: Default::default(),
+            allow_dropping_history: false,
+        },
+        1_000,
+    ) else {
+        panic!("a schema with system tables and no declarations is refused");
+    };
+    assert!(
+        refusal.body.to_string().contains("declares no encryption"),
+        "{}",
+        refusal.body
+    );
+}
