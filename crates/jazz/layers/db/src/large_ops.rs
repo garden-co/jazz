@@ -240,6 +240,7 @@ impl Inner {
         column: &str,
         identity: Option<AuthorSubject>,
     ) -> Result<(crate::values::Column, Sql), Error> {
+        whole_only(self, table, column)?;
         let t = self.schema.table(table)?;
         if !t.branch_by.is_empty() {
             return Err(unsupported(
@@ -316,6 +317,7 @@ impl Inner {
         reader: Option<AuthorSubject>,
         policies: &Schema,
     ) -> Result<Vec<LargeValueDeltaSplice>, Error> {
+        whole_only(self, table, column)?;
         let t = self.schema.table(table)?;
         let governed = policies.table(table)?;
         if !t.branch_by.is_empty() {
@@ -1057,7 +1059,9 @@ impl Db {
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
     ) -> Result<WriteHandle, Error> {
-        let mut upload = self.begin_streaming_value_upload(table, &cells, column)?;
+        let target = view_target(head.clone(), base.clone());
+        let mut upload =
+            self.begin_streaming_value_upload_for(table, row, &cells, column, &target)?;
         let mut buffer = vec![0_u8; 64 * 1024];
         loop {
             match reader.read(&mut buffer) {
@@ -1101,6 +1105,51 @@ impl Db {
         column: &str,
     ) -> Result<StreamingValueUpload, Error> {
         self.inner().require_mutation_admission()?;
+        whole_only(&self.inner(), table, column)?;
+        self.begin_upload(table, cells, column)
+    }
+
+    /// [`Self::begin_streaming_value_upload`] of the value of `column` of
+    /// row `row`, whose write goes to `target`. With encryption hooks, the
+    /// value of an encrypted column is sealed as it streams: the hooks
+    /// check the column and choose the key here, before any source byte is
+    /// read, and a missing key refuses the call (protocol §5.5).
+    pub fn begin_streaming_value_upload_for(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: &BTreeMap<String, Value>,
+        column: &str,
+        target: &WriteTarget,
+    ) -> Result<StreamingValueUpload, Error> {
+        #[cfg(feature = "e2ee-client")]
+        {
+            self.inner().require_mutation_admission()?;
+            let sealer = self
+                .inner()
+                .stream_sealer(table, row, cells, column, target)?;
+            if let Some((sealer, space)) = sealer {
+                let mut upload = self.begin_upload(table, cells, column)?;
+                upload.sealer = Some(sealer);
+                upload.sealed_for = Some(SealedFor {
+                    row,
+                    target: target.clone(),
+                    space,
+                });
+                return Ok(upload);
+            }
+        }
+        #[cfg(not(feature = "e2ee-client"))]
+        let _ = (row, target);
+        self.begin_streaming_value_upload(table, cells, column)
+    }
+
+    fn begin_upload(
+        &self,
+        table: &str,
+        cells: &BTreeMap<String, Value>,
+        column: &str,
+    ) -> Result<StreamingValueUpload, Error> {
         let col = streaming_column(&self.inner(), table, column)?;
         if cells.contains_key(column) {
             return Err(Error::new(
@@ -1137,6 +1186,12 @@ impl Db {
                 }),
             )),
             emitted,
+            #[cfg(feature = "e2ee-client")]
+            sealer: None,
+            #[cfg(feature = "e2ee-client")]
+            sealed_for: None,
+            #[cfg(feature = "e2ee-client")]
+            header_written: false,
         })
     }
 
@@ -1144,6 +1199,26 @@ impl Db {
     /// piece over the staging policy's ingress budget, or one that fails
     /// validation, closes the upload and releases what it stored.
     pub async fn push_streaming_value_upload(
+        &self,
+        upload: &mut StreamingValueUpload,
+        bytes: &[u8],
+    ) -> Result<(), Error> {
+        // An encrypted value is sealed before the chunker sees it.
+        #[cfg(feature = "e2ee-client")]
+        if let Some(sealer) = upload.sealer.as_mut() {
+            let mut sealed = Vec::new();
+            if !upload.header_written {
+                sealed = sealer.header()?;
+                upload.header_written = true;
+            }
+            sealed.extend(sealer.push(bytes)?);
+            return self.feed_streaming_upload(upload, &sealed);
+        }
+        self.feed_streaming_upload(upload, bytes)
+    }
+
+    /// Feed stored bytes to an upload's chunker.
+    fn feed_streaming_upload(
         &self,
         upload: &mut StreamingValueUpload,
         bytes: &[u8],
@@ -1233,55 +1308,68 @@ impl Db {
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
     ) -> Result<WriteHandle, Error> {
-        if let Some(value) = self.seal_streaming_upload(&mut upload, table, &mut cells, column)? {
+        let target = view_target(head.clone(), base.clone());
+        if let Some(value) =
+            self.seal_streaming_upload(&mut upload, table, row, &mut cells, column, &target)?
+        {
             self.inner().derived.push(value);
         }
-        let result = match mutation {
+        // The value was sealed as it streamed: this write, and no other,
+        // leaves the column to the hooks as it is, in the row and space it
+        // was sealed for.
+        #[cfg(feature = "e2ee-client")]
+        let sealed_for = upload.sealed_for.take();
+        #[cfg(feature = "e2ee-client")]
+        let streamed = sealed_for.as_ref().map(|sealed| StreamedSeal {
+            column,
+            row: sealed.row,
+            space: sealed.space.as_ref(),
+        });
+        #[cfg(not(feature = "e2ee-client"))]
+        let streamed = None;
+        let op = match mutation {
             StreamingMutationKind::Insert if base.is_some() => Err(Error::new(
                 ErrorCode::WriteRejected,
                 "a streamed insert writes one exact branch, not a branch view",
             )),
-            StreamingMutationKind::Insert => {
-                self.insert(
-                    table,
-                    cells,
-                    InsertOptions {
-                        row_id: Some(row),
-                        identity,
-                        target: head.map_or(ExactWriteTarget::Root, ExactWriteTarget::Branch),
-                        updated_at_ms: now_ms,
-                    },
-                )
-                .await
+            StreamingMutationKind::Insert => Ok(StagedOp::Insert(
+                table.to_owned(),
+                cells,
+                InsertOptions {
+                    row_id: Some(row),
+                    identity,
+                    target: head.map_or(ExactWriteTarget::Root, ExactWriteTarget::Branch),
+                    updated_at_ms: now_ms,
+                },
+            )),
+            StreamingMutationKind::Update => Ok(StagedOp::Update(
+                table.to_owned(),
+                row,
+                cells,
+                UpdateOptions {
+                    identity,
+                    target: view_target(head, base),
+                    updated_at_ms: now_ms,
+                },
+            )),
+            StreamingMutationKind::Upsert => Ok(StagedOp::Upsert(
+                table.to_owned(),
+                row,
+                cells,
+                BTreeMap::new(),
+                UpsertOptions {
+                    identity,
+                    target: view_target(head, base),
+                    updated_at_ms: now_ms,
+                },
+            )),
+        };
+        let result = match op {
+            Ok(op) => {
+                self.fetching_with(op, |op| self.write_op_streamed(op, who(identity), streamed))
+                    .await
             }
-            StreamingMutationKind::Update => {
-                let target = view_target(head, base);
-                self.update(
-                    table,
-                    row,
-                    cells,
-                    UpdateOptions {
-                        identity,
-                        target,
-                        updated_at_ms: now_ms,
-                    },
-                )
-                .await
-            }
-            StreamingMutationKind::Upsert => {
-                let target = view_target(head, base);
-                self.upsert(
-                    table,
-                    row,
-                    cells,
-                    UpsertOptions {
-                        identity,
-                        target,
-                        updated_at_ms: now_ms,
-                    },
-                )
-                .await
-            }
+            Err(error) => Err(error),
         };
         let mut inner = self.inner();
         inner.clear_derived();
@@ -1296,8 +1384,10 @@ impl Db {
         &self,
         upload: &mut StreamingValueUpload,
         table: &str,
+        row: RowUuid,
         cells: &mut BTreeMap<String, Value>,
         column: &str,
+        target: &WriteTarget,
     ) -> Result<Option<lv::LargeValueRef>, Error> {
         self.inner().require_mutation_admission()?;
         self.check_streaming_upload(upload)?;
@@ -1306,10 +1396,40 @@ impl Db {
                 "streaming upload target differs from its original table or column",
             ));
         }
+        // A value sealed as it streamed is bound to the row, target and
+        // space it was sealed for: published anywhere else, it would never
+        // open, and nothing would seal it again.
+        // Refused here early when the finish names another row, target or
+        // space; the write's staging, which sees its transaction's own
+        // writes, checks the space it is sealed in (`Inner::seal_op`).
+        #[cfg(feature = "e2ee-client")]
+        if let Some(sealed) = &upload.sealed_for {
+            let named = self.inner().named_space(table, row, cells);
+            if sealed.row != row
+                || sealed.target != *target
+                || named.is_some_and(|named| Some(named) != sealed.space)
+            {
+                return Err(sealed_elsewhere());
+            }
+        }
+        #[cfg(not(feature = "e2ee-client"))]
+        let _ = (row, target);
         if cells.contains_key(column) {
             return Err(rejected(
                 "the streamed column is also set in the other cells",
             ));
+        }
+        // A sealed value ends with its final record (and starts with its
+        // header, even when no byte was pushed).
+        #[cfg(feature = "e2ee-client")]
+        if let Some(mut sealer) = upload.sealer.take() {
+            let mut tail = Vec::new();
+            if !upload.header_written {
+                tail = sealer.header()?;
+                upload.header_written = true;
+            }
+            tail.extend(sealer.finish()?);
+            self.feed_streaming_upload(upload, &tail)?;
         }
         let value = {
             let inner = self.inner();
@@ -1441,6 +1561,45 @@ pub struct StreamingValueUpload {
     initialized: bool,
     preparation: Option<lv::PushStreamingPreparation<Stage>>,
     emitted: Rc<RefCell<Vec<lv::StagedChunk>>>,
+    /// Seals an encrypted column's value as it streams.
+    #[cfg(feature = "e2ee-client")]
+    sealer: Option<Box<dyn crate::e2ee::StreamSealer>>,
+    /// The row, target and space the value was sealed for as it streamed:
+    /// only a write of that row, to that target, in that space publishes
+    /// it, and leaves it to the hooks as it is.
+    #[cfg(feature = "e2ee-client")]
+    sealed_for: Option<SealedFor>,
+    #[cfg(feature = "e2ee-client")]
+    header_written: bool,
+}
+
+/// The one column of a write whose value was sealed as it streamed, with
+/// the row and space it was sealed for: the write's staging refuses any
+/// other, and leaves that column as it is.
+#[derive(Clone, Copy)]
+#[cfg_attr(not(feature = "e2ee-client"), allow(dead_code))]
+pub(crate) struct StreamedSeal<'a> {
+    pub(crate) column: &'a str,
+    pub(crate) row: RowUuid,
+    pub(crate) space: Option<&'a Value>,
+}
+
+/// The refusal of a sealed stream published anywhere but where it was
+/// sealed for: there it would never open, and nothing would seal it again.
+#[cfg(feature = "e2ee-client")]
+pub(crate) fn sealed_elsewhere() -> Error {
+    schema_error(
+        "a sealed streaming upload is published to the row, target and space it was sealed for",
+    )
+}
+
+/// What a sealed stream was sealed for (see
+/// [`Db::begin_streaming_value_upload_for`]).
+#[cfg(feature = "e2ee-client")]
+struct SealedFor {
+    row: RowUuid,
+    target: WriteTarget,
+    space: Option<Value>,
 }
 
 /// Drop schedules cleanup on the next maintenance tick without borrowing the
@@ -1466,6 +1625,19 @@ pub(crate) fn renew_upload_leases(inner: &Inner, leases: &[UploadLease]) -> Resu
         }
     }
     Ok(())
+}
+
+/// Refuse to read or write `column` of `table` other than whole when it is
+/// encrypted: a range, a JSON pointer, a delta, an edit or a streamed
+/// value (protocol §5.5).
+fn whole_only(inner: &Inner, table: &str, column: &str) -> Result<(), Error> {
+    #[cfg(feature = "e2ee-client")]
+    return inner.refuse_encrypted_part(table, column);
+    #[cfg(not(feature = "e2ee-client"))]
+    {
+        let _ = (inner, table, column);
+        Ok(())
+    }
 }
 
 fn streaming_column(
@@ -1775,6 +1947,40 @@ impl Inner {
 }
 
 impl TxRef<'_> {
+    /// [`Db::begin_streaming_value_upload_for`] in this transaction: the
+    /// row's space, when the cells leave it to the stored row, is the one
+    /// the transaction sees, its own writes included, so a value can be
+    /// streamed into a row the transaction inserted.
+    pub fn begin_streaming_value_upload_for(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: &BTreeMap<String, Value>,
+        column: &str,
+        target: &WriteTarget,
+    ) -> Result<StreamingValueUpload, Error> {
+        #[cfg(feature = "e2ee-client")]
+        {
+            self.db.inner.staging().require_mutation_admission()?;
+            let sealer = self.db.in_overlay(self.id, None, |inner, _| {
+                inner.stream_sealer(table, row, cells, column, target)
+            })?;
+            if let Some((sealer, space)) = sealer {
+                let mut upload = self.db.begin_upload(table, cells, column)?;
+                upload.sealer = Some(sealer);
+                upload.sealed_for = Some(SealedFor {
+                    row,
+                    target: target.clone(),
+                    space,
+                });
+                return Ok(upload);
+            }
+        }
+        #[cfg(not(feature = "e2ee-client"))]
+        let _ = (row, target);
+        self.db.begin_streaming_value_upload(table, cells, column)
+    }
+
     /// [`Db::finish_streaming_value_upload`] staged in an open batch. The
     /// batch holds the upload's lease, so the streamed chunks stay until it
     /// commits or is abandoned; a commit after the lease expired (untouched
@@ -1799,9 +2005,14 @@ impl TxRef<'_> {
                 "a streamed insert writes one exact branch, not a branch view",
             ));
         }
-        let large = self
-            .db
-            .seal_streaming_upload(&mut upload, table, &mut cells, column)?;
+        let large = self.db.seal_streaming_upload(
+            &mut upload,
+            table,
+            row,
+            &mut cells,
+            column,
+            &view_target(head.clone(), base.clone()),
+        )?;
         let op = match mutation {
             StreamingMutationKind::Insert => StagedOp::Insert(
                 table.to_owned(),
@@ -1840,7 +2051,20 @@ impl TxRef<'_> {
             derived: large.into_iter().collect(),
             pending_nodes: Vec::new(),
         };
-        self.db.stage_with_edits(self.id, op, edits)?;
+        // The value was sealed as it streamed: this write, and no other,
+        // leaves the column to the hooks as it is, in the row and space it
+        // was sealed for.
+        #[cfg(feature = "e2ee-client")]
+        let sealed_for = upload.sealed_for.take();
+        #[cfg(feature = "e2ee-client")]
+        let streamed = sealed_for.as_ref().map(|sealed| StreamedSeal {
+            column,
+            row: sealed.row,
+            space: sealed.space.as_ref(),
+        });
+        #[cfg(not(feature = "e2ee-client"))]
+        let streamed = None;
+        self.db.stage_streamed(self.id, op, edits, streamed)?;
         // An inline value is in its cell: its upload ends as the handle drops.
         if held {
             self.db.hold_upload(self.id, upload._lease)?;

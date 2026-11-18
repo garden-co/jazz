@@ -1959,9 +1959,23 @@ impl Binding {
             Some(id) => self.staged_identity(id, identity)?,
             None => identity,
         };
-        let upload = self
-            .db
-            .begin_streaming_value_upload(&table, &cells, &column)?;
+        let target = match &head {
+            Some(head) => crate::options::WriteTarget::BranchView {
+                head: head.clone(),
+                base: base.clone(),
+            },
+            None => crate::options::WriteTarget::Root,
+        };
+        // In a transaction, the row's space is the one the transaction sees.
+        let upload = match transaction {
+            Some(id) => self
+                .db
+                .tx_ref(id)
+                .begin_streaming_value_upload_for(&table, row, &cells, &column, &target)?,
+            None => self
+                .db
+                .begin_streaming_value_upload_for(&table, row, &cells, &column, &target)?,
+        };
         Ok(StreamingMutation {
             state: Some(Box::new(StreamingState {
                 binding: self.clone(),

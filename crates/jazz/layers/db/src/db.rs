@@ -55,6 +55,7 @@ pub use sync::{
     set_follow_read_hook_for_test,
 };
 pub use sync::{ORIGIN_ENTRY_RETENTION_MS, origin_node};
+
 #[cfg(feature = "e2ee-client")]
 #[path = "e2ee_ledger.rs"]
 pub(crate) mod e2ee_ledger;
@@ -64,7 +65,9 @@ mod e2ee_query;
 #[cfg(feature = "e2ee-client")]
 #[path = "e2ee_read.rs"]
 mod e2ee_read;
-
+#[cfg(feature = "e2ee-client")]
+#[path = "e2ee_write.rs"]
+mod e2ee_write;
 #[path = "shard.rs"]
 pub mod shard;
 pub use crate::names::LensEffects;
@@ -3979,7 +3982,21 @@ impl Db {
 
     /// One write. On a client, a local (unauthenticated) write is also an
     /// upload: it is recorded for the authority, which decides its fate.
-    fn write_op(&self, mut op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
+    fn write_op(&self, op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
+        self.write_op_streamed(op, who, None)
+    }
+
+    /// [`Db::write_op`] of a write whose `streamed` column holds a value the
+    /// encryption hooks sealed as it streamed: they seal the write's other
+    /// cells and leave that one as it is.
+    pub(crate) fn write_op_streamed(
+        &self,
+        mut op: StagedOp,
+        who: Who,
+        streamed: Option<large_ops::StreamedSeal<'_>>,
+    ) -> Result<WriteHandle, Error> {
+        #[cfg(not(feature = "e2ee-client"))]
+        let _ = streamed;
         self.inner().require_mutation_admission()?;
         // A write while a callback transaction is open joins its commit:
         // only one made as that transaction's identity may (its own).
@@ -3997,15 +4014,21 @@ impl Db {
                 let mark = inner.changed.borrow().len();
                 (inner.seq, mark)
             };
+            // Internal rows the encryption hooks stage with the write: they
+            // commit, and upload, before it.
+            #[cfg_attr(not(feature = "e2ee-client"), allow(unused_mut))]
+            let mut ops = Vec::new();
             let (notify, handle) = self.write_unnotified(&table, |inner, seq| {
-                let edits = inner.chunk_large_cells(&mut op)?;
-                inner.counter_deltas(&mut op)?;
-                inner.derived.extend(edits.derived);
-                inner.pending_nodes.extend(edits.pending_nodes);
-                let applied = inner.apply_as(&op, who, seq);
-                inner.clear_derived();
-                applied
+                #[cfg(feature = "e2ee-client")]
+                {
+                    ops = inner.seal_op(&mut op, None, streamed)?;
+                    for companion in &mut ops {
+                        inner.apply_authored(companion, who, seq)?;
+                    }
+                }
+                inner.apply_authored(&mut op, who, seq)
             })?;
+            ops.push(op);
             // A standalone write that changed nothing made no commit: its
             // handle names the row's current version, which may be the
             // newest commit's own seq, so recording it would upload a
@@ -4014,7 +4037,7 @@ impl Db {
             // The upload record joins the write's SQLite transaction: if it
             // fails, `with_upload` rolls both back, and nobody has been told.
             if let Err(error) = committed
-                .then(|| self.record_upload(vec![op], handle.tx, sync::Kind::Mergeable, None))
+                .then(|| self.record_upload(ops, handle.tx, sync::Kind::Mergeable, None))
                 .transpose()
             {
                 let mut inner = self.inner();
@@ -10925,6 +10948,23 @@ impl Inner {
     }
 
     /// Apply one write as `who`: policies apply for a session identity.
+    /// Apply `op`, a write this store authors as `who`, at `seq`: its
+    /// large values chunked and its counter changes resolved first.
+    fn apply_authored(
+        &mut self,
+        op: &mut StagedOp,
+        who: Who,
+        seq: u64,
+    ) -> Result<WriteHandle, Error> {
+        let edits = self.chunk_large_cells(op)?;
+        self.counter_deltas(op)?;
+        self.derived.extend(edits.derived);
+        self.pending_nodes.extend(edits.pending_nodes);
+        let applied = self.apply_as(op, who, seq);
+        self.clear_derived();
+        applied
+    }
+
     fn apply_as(&mut self, op: &StagedOp, who: Who, seq: u64) -> Result<WriteHandle, Error> {
         let author = match who {
             Who::Session(author) | Who::Attributed(author) => author,
@@ -11771,8 +11811,38 @@ impl Db {
     }
 
     /// [`Self::stage`] a write whose large values a partial update built:
-    /// the batch keeps what it built for every later apply.
+    /// the batch keeps what it built for every later apply. The encryption
+    /// hooks seal it first, so a refusal surfaces here, not at commit.
     pub(crate) fn stage_with_edits(
+        &self,
+        id: OpenTransactionId,
+        op: StagedOp,
+        edits: LargeEdits,
+    ) -> Result<(), Error> {
+        self.stage_streamed(id, op, edits, None)
+    }
+
+    /// [`Self::stage_with_edits`] of a write whose `streamed` column holds a
+    /// value the encryption hooks sealed as it streamed (see
+    /// [`Db::write_op_streamed`]).
+    pub(crate) fn stage_streamed(
+        &self,
+        id: OpenTransactionId,
+        op: StagedOp,
+        edits: LargeEdits,
+        streamed: Option<large_ops::StreamedSeal<'_>>,
+    ) -> Result<(), Error> {
+        #[cfg(feature = "e2ee-client")]
+        return self.stage_sealed(id, op, edits, None, streamed);
+        #[cfg(not(feature = "e2ee-client"))]
+        {
+            let _ = streamed;
+            self.stage_chunked(id, op, edits)
+        }
+    }
+
+    /// [`Self::stage_with_edits`] of a write already sealed.
+    pub(crate) fn stage_chunked(
         &self,
         id: OpenTransactionId,
         mut op: StagedOp,
