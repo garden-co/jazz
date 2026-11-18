@@ -27,6 +27,10 @@ export const STORE_HELD_BY_ANOTHER_TAB_ERROR_CODE = "store_held_by_another_tab";
  * Calling it while the store is still held fails at once with this error.
  * Live queries that read only this tab's own data keep running throughout.
  *
+ * `db.deleteClientStorage()` waits for the store the same way, and fails
+ * with this error past the same patience; called again once the other tab
+ * lets go, it deletes the store.
+ *
  * Detect it with {@link isStoreHeldByAnotherTabError}, which checks the
  * stable `code`.
  */

@@ -1,5 +1,5 @@
-import { afterEach, expect, it } from "vitest";
-import { registerPageDb, type PageDb } from "./page-handle.js";
+import { afterEach, expect, it, vi } from "vitest";
+import { ensureWindowJazz, registerPageDb, type PageDb } from "./page-handle.js";
 import {
   syncStatus,
   CONNECTED,
@@ -91,4 +91,69 @@ it("lists nothing outside a browser page", () => {
   const db = fakeDb(syncStatus(CONNECTED, uploadStatusFromCount(0)));
   registerPageDb(db, "x")();
   expect((globalThis as { window?: Window }).window).toBeUndefined();
+});
+
+it("leaves a window.__jazz the app set alone, warns once, and doesn't fail", () => {
+  // Before: `TypeError: Cannot add property clearStorage, object is not
+  // extensible` at the upgrade to local-first, for a sealed one (rc.1), then
+  // a thrown "window.__jazz is reserved for Jazz" (rc.2) that failed
+  // `linkDeviceAccount()` (#5262).
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    for (const own of [Object.seal({ debug: true }), { status: "mine" }, "app", null]) {
+      warn.mockClear();
+      const window = page();
+      (window as { __jazz?: unknown }).__jazz = own;
+      const db = fakeDb(syncStatus(CONNECTED, uploadStatusFromCount(0)));
+      const unlist = registerPageDb(db, "app-1");
+      // The handle still works for whoever holds it, just not from the page.
+      expect(ensureWindowJazz(window).status()).toEqual(db.getSyncStatus());
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]![0])).toMatch(
+        /^window\.__jazz is Jazz's page handle \(.*\), but this page already has a window\.__jazz that Jazz didn't set \((object|string|null)\)\. Jazz leaves it as it is/,
+      );
+      // Left as the app set it.
+      expect((window as { __jazz?: unknown }).__jazz).toBe(own);
+      if (own && typeof own === "object") {
+        expect(Object.getOwnPropertySymbols(own)).toEqual([]);
+        expect(Object.keys(own)).toHaveLength(1);
+      }
+      unlist();
+    }
+  } finally {
+    warn.mockRestore();
+  }
+});
+
+it("extends the window.__jazz Jazz installed, from any copy of Jazz on the page", () => {
+  const window = page();
+  const unlist = registerPageDb(fakeDb(syncStatus(CONNECTED, uploadStatusFromCount(0))), "a");
+  const installed = window.__jazz!;
+  // Another client (or another copy of jazz-tools) installs it again: same object.
+  expect(ensureWindowJazz(window)).toBe(installed);
+  expect(installed[Symbol.for("jazz-tools.window-jazz") as never]).toBe(true);
+  unlist();
+});
+
+it("extends a window.__jazz an older Jazz copy set before the ownership mark existed", () => {
+  const window = page();
+  // alpha.60's handle: version 1, no mark.
+  const older = { version: 1, status: () => null, pending: () => 0 };
+  (window as { __jazz?: unknown }).__jazz = older;
+  const unlist = registerPageDb(fakeDb(syncStatus(CONNECTED, uploadStatusFromCount(0))), "a");
+  expect(window.__jazz).toBe(older);
+  expect(window.__jazz!.listLiveStorageNamespaces()).toEqual([]);
+  expect(older[Symbol.for("jazz-tools.window-jazz") as never]).toBe(true);
+  unlist();
+  // An object that only looks a little like it is still the app's.
+  const own = { version: 1 };
+  (window as { __jazz?: unknown }).__jazz = own;
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    ensureWindowJazz(window);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(own).toEqual({ version: 1 });
+  } finally {
+    warn.mockRestore();
+  }
 });

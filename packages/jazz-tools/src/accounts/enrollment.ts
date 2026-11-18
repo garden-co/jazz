@@ -2,11 +2,13 @@ import { signChallenge } from "../local-first-auth/index.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import {
   AccountAuthError,
+  isWhitespaceOnlySecret,
   LINK_GUEST_KEY_MISSING_MESSAGE,
   LINK_NEEDS_GUEST_MESSAGE,
   requestBackendLinkChallenge,
   requestBackendSignIn,
   readAccountAssignment,
+  WHITESPACE_BACKEND_SECRET,
 } from "./registry-client.js";
 export { AccountAuthError } from "./registry-client.js";
 import { isReservedJazzIssuer, parseJwtPayload } from "../runtime/client-session.js";
@@ -26,8 +28,23 @@ import {
 const LINK_REFUSED_MESSAGE =
   "link_refused: the backend won't link this device account to the signed-in user, most likely because they already have an account (from another device). Call refresh() to open their account instead. The device account stays signed in on this device until then, and linking never moves its data into an existing account.";
 
-/** @internal A local-first account's self-minted token, or its refresh callback. */
-export type JWTAuth = string | { getToken(): Promise<string> };
+/**
+ * The app's core admits no device accounts at all: nothing about this user.
+ * Linking can pass once the core does (a backend fix, then a retry).
+ */
+const LINK_GUESTS_OFF_MESSAGE =
+  "local_first_auth_disabled: the backend's core admits no device accounts, so this device account can't be linked (or sync) yet. It is a backend setup problem, not this user's: the device account stays signed in on this device, with its data, and linking can be retried once the core admits device accounts (a core of an older jazz-tools with local-first auth off: upgrade it).";
+
+/**
+ * @internal A local-first account's self-minted token, or its refresh
+ * callback. `fresh`: a renewal, which must not get a cached token back (the
+ * server may have refused it, e.g. on a device whose clock is behind).
+ */
+export type JWTAuth = string | { getToken(request?: TokenRequest): Promise<string> };
+/** @internal */
+export interface TokenRequest {
+  fresh?: boolean;
+}
 
 export interface BackendAuth {
   readonly backendSecret: string;
@@ -88,12 +105,12 @@ function identityFromToken(token: string): AccountIdentity {
 function sameIdentity(a: AccountIdentity, b: AccountIdentity): boolean {
   return a.issuer === b.issuer && a.subject === b.subject;
 }
-async function tokenFor(auth: JWTAuth): Promise<string> {
+async function tokenFor(auth: JWTAuth, request?: TokenRequest): Promise<string> {
   if (typeof auth === "string") return auth;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      Promise.resolve().then(() => auth.getToken()),
+      Promise.resolve().then(() => auth.getToken(request)),
       new Promise<never>((_resolve, reject) => {
         timeout = setTimeout(
           () => reject(new AccountAuthError("credential_refresh_timeout")),
@@ -141,14 +158,18 @@ export function exportLocalFirstSecret(handle: AccountHandle): string {
 }
 
 /** @internal Context creation validates the opaque handle and refresh identity. */
-export async function accountToken(handle: AccountHandle, registry: string): Promise<string> {
+export async function accountToken(
+  handle: AccountHandle,
+  registry: string,
+  request?: TokenRequest,
+): Promise<string> {
   const material = credentials.get(handle);
   if (!material || material.registry !== registry)
     throw new AccountAuthError("invalid_account_handle");
   if (material.delegated) throw new AccountAuthError("backend_signed_in_account_has_no_token");
   if (material.backend || !material.auth)
     throw new AccountAuthError("backend_account_requires_backend_host");
-  const token = await tokenFor(material.auth);
+  const token = await tokenFor(material.auth, request);
   if (credentials.get(handle) !== material) throw new AccountAuthError("account_logged_out");
   if (!sameIdentity(identityFromToken(token), handle.identity))
     throw new AccountAuthError("credential_identity_changed");
@@ -317,6 +338,12 @@ export function createAccountManagerWithRuntime(options: {
         if (!options.backend) throw new AccountAuthError("backend_host_unavailable");
         if (typeof auth?.backendSecret !== "string" || !auth.backendSecret)
           throw new AccountAuthError("invalid_backend_secret");
+        if (isWhitespaceOnlySecret(auth.backendSecret))
+          throw new AccountAuthError(
+            "invalid_backend_secret",
+            undefined,
+            WHITESPACE_BACKEND_SECRET,
+          );
         const backendSecret = auth.backendSecret;
         const { nodeId } = await options.backend.admitBackend({ backendSecret });
         assertCurrent(started);
@@ -371,6 +398,8 @@ export function createAccountManagerWithRuntime(options: {
           }).catch((error: unknown) => {
             if (error instanceof AccountAuthError && error.code === "link_refused")
               throw new AccountAuthError(error.code, error.status, LINK_REFUSED_MESSAGE);
+            if (error instanceof AccountAuthError && error.code === "local_first_auth_disabled")
+              throw new AccountAuthError(error.code, error.status, LINK_GUESTS_OFF_MESSAGE);
             throw error;
           });
         });

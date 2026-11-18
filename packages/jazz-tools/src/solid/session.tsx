@@ -1,10 +1,11 @@
 import {
-  createContext,
   createEffect,
   createSignal,
   onCleanup,
   onMount,
+  Match,
   Show,
+  Switch,
   useContext,
   type Accessor,
   type JSX,
@@ -12,28 +13,27 @@ import {
 import type { JazzClient } from "../web/create-jazz-client.js";
 import {
   attachJazzSessionConsumer,
+  clientOnlySessionActions,
+  clientOnlySnapshot,
   jazzSessionActions,
+  jazzSessionErrorViewProps,
   ownJazzSession,
   startJazzSession,
   type JazzSession,
+  type JazzSessionErrorViewProps,
   type JazzSessionSnapshot,
 } from "../session/jazz-session.js";
 import { openBrowserSessionCore, type JazzClientConfig } from "../session/create-jazz-session.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import { createSolidJazzClientStore } from "./solid-jazz-client-store.js";
-import { JazzClientProvider } from "./provider.js";
+import { JazzClientContext } from "./provider.js";
+import { SessionContext } from "./session-context.js";
 import { assertNoClassicProviderProps } from "../classic-api.js";
 import {
   refuseAutoAttachDevTools,
   type NoAutoAttachDevTools,
 } from "../runtime/removed-provider-props.js";
 import type { SolidJazzClient } from "./create-solid-jazz-client.js";
-
-type ProvidedSession = {
-  session: JazzSession<JazzClient>;
-  snapshot: Accessor<JazzSessionSnapshot<JazzClient>>;
-};
-const SessionContext = createContext<ProvidedSession>();
 
 /** `useJazzSession()`: the session's state as an accessor, and its operations. */
 export type UseJazzSession = Omit<JazzSession<JazzClient>, "getSnapshot" | "subscribe" | "db"> & {
@@ -52,7 +52,16 @@ export function useJazzSession(session?: JazzSession<JazzClient>): UseJazzSessio
   // provider lives, even in a view that has since been disposed.
   const provided = session ? undefined : useContext(SessionContext);
   if (provided) return withActions(provided.session, provided.snapshot);
-  if (!session) throw new Error("useJazzSession requires <JazzProvider> or a session argument");
+  if (!session) {
+    // A client opened outside a session (`<JazzClientProvider client>`): its
+    // user, always ready, with operations that reject naming why.
+    const client = useContext(JazzClientContext);
+    if (!client)
+      throw new Error(
+        "useJazzSession requires <JazzProvider>, <JazzClientProvider> or a session argument",
+      );
+    return { ...clientOnlySessionActions(), snapshot: () => clientOnlySnapshot(client) };
+  }
   const own = session;
   const [snapshot, setSnapshot] = createSignal(own.getSnapshot());
   onCleanup(own.subscribe(() => setSnapshot(own.getSnapshot())));
@@ -72,8 +81,17 @@ export type JazzProviderProps = NoAutoAttachDevTools & {
   signedOut?: JSX.Element;
   /** Shown while the session starts or switches users. */
   loading?: JSX.Element;
-  /** Shown when there is no usable client (`status: "error"`). */
-  error?: (error: Error, retry: () => Promise<void>) => JSX.Element;
+  /**
+   * Shown when there is no usable client (`status: "error"`), with
+   * `{ error, recovery, retry }`. The rest of the session is in `useJazzSession()`.
+   */
+  error?: (props: JazzSessionErrorViewProps) => JSX.Element;
+  /**
+   * Shown once the session is closed (`status: "closed"`, after
+   * `session.close()`): it has no client and never starts again. Nothing by
+   * default.
+   */
+  closed?: JSX.Element;
 } & (
     | {
         /** Open and own a session with this configuration (captured at creation). */
@@ -106,12 +124,14 @@ export function ActiveClient(props: { client: JazzClient; children: JSX.Element 
     },
     getSubscriptionStore(client),
   );
-  return <JazzClientProvider client={adapted}>{props.children}</JazzClientProvider>;
+  // The session's own client: its children still read the session.
+  return <JazzClientContext.Provider value={adapted}>{props.children}</JazzClientContext.Provider>;
 }
 /**
  * Jazz for a Solid app: owns a session (`config`) or shows yours (`session`),
  * renders `children` with its client once someone is signed in, and
- * `signedOut`, `loading` or `error` otherwise.
+ * `signedOut`, `loading` or `error` otherwise, and `closed` (nothing by
+ * default) once the session is closed.
  */
 export function JazzProvider(props: JazzProviderProps) {
   refuseAutoAttachDevTools("JazzProvider", props);
@@ -128,7 +148,7 @@ export function JazzProvider(props: JazzProviderProps) {
   const session =
     props.session ?? ownJazzSession({ ...props.config! }, openBrowserSessionCore, { start: false });
   const [snapshot, setSnapshot] = createSignal(session.getSnapshot());
-  const lease = attachJazzSessionConsumer(session);
+  const lease = attachJazzSessionConsumer(session, "Solid <JazzProvider>");
   const stop = session.subscribe(() => setSnapshot(session.getSnapshot()));
   onMount(() => {
     if (owned) void startJazzSession(session as JazzSession<unknown>).catch(() => {});
@@ -143,27 +163,30 @@ export function JazzProvider(props: JazzProviderProps) {
     // Solid's synchronous keyed Show disposal and cleanup run before this queued acknowledgement.
     queueMicrotask(() => lease.acknowledge(observed));
   });
-  const retry = () => session.retry().catch(() => {});
+  // A new view per snapshot in `error` is right: the session is in `error`
+  // only before its core exists or while the core itself is in `error`, and
+  // the core leaves `error` only through another status. So a new snapshot
+  // here always brings a new failure (or recovery) to show.
   const fallback = () => (
     <Show
-      when={snapshot().status === "error" ? snapshot().error : undefined}
+      when={
+        snapshot().status === "error" ? jazzSessionErrorViewProps(session, snapshot()) : undefined
+      }
       keyed
       fallback={
-        <Show
-          when={snapshot().status === "signed-out"}
-          fallback={props.loading ?? <p role="status">Loading...</p>}
-        >
-          {props.signedOut}
-        </Show>
+        <Switch fallback={props.loading ?? <p role="status">Loading...</p>}>
+          <Match when={snapshot().status === "signed-out"}>{props.signedOut}</Match>
+          <Match when={snapshot().status === "closed"}>{props.closed}</Match>
+        </Switch>
       }
     >
-      {(error) =>
+      {(view) =>
         props.error ? (
-          props.error(error, retry)
+          props.error(view)
         ) : (
           <>
-            <p role="alert">{error.message}</p>
-            <button onClick={() => void retry()}>Retry</button>
+            <p role="alert">{view.error.message}</p>
+            <button onClick={() => void view.retry()}>Retry</button>
           </>
         )
       }

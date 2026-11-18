@@ -220,7 +220,7 @@ for (const [entrypoint, provider] of [
       // Jazz 2's provider renders its loading view during SSR: it starts
       // its session only once mounted.
       const current = createElement(
-        ${JSON.stringify(entrypoint)} === "react-core" ? binding.JazzSessionProvider : binding.JazzProvider,
+        ${JSON.stringify(entrypoint)} === "react-core" ? binding.JazzHostSessionProvider : binding.JazzProvider,
         {
           config: await accountConfig("classic-coexistence"),
           loading: createElement("p", {}, "loading"),

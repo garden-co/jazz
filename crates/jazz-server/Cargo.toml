@@ -1,18 +1,47 @@
 [package]
 name = "jazz-server"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
+description = "The Jazz sync server, as a library."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+# Only what builds the library: tests, benches and their fixtures stay in the repo.
+include = ["src/**", "build.rs", "README.md"]
 
 [features]
-default = []
-otel = ["dep:jazz-otel", "dep:opentelemetry"]
-embedded-server = ["jazz/runtime", "dep:tower"]
+default = ["native"]
+# The native process host: the HTTP/WebSocket server, its store thread and
+# network clients. Without it only the host-independent engine side
+# (`runtime`'s engine, `portable`) builds, as a Durable Object host
+# (jazz-wasm) uses it on wasm32.
+native = [
+  "jazz/runtime",
+  "dep:axum",
+  "dep:hyper",
+  "dep:hyper-util",
+  "dep:jsonwebtoken",
+  "dep:reqwest",
+  "dep:rusqlite",
+  "dep:tower-http",
+  "dep:tokio-tungstenite",
+  "dep:tungstenite",
+  "tokio/macros",
+  "tokio/net",
+  "tokio/rt",
+  "tokio/rt-multi-thread",
+  "tokio/signal",
+  "tokio/time",
+]
+otel = ["native", "dep:jazz-otel", "dep:opentelemetry"]
+embedded-server = ["native", "jazz/runtime", "dep:tower"]
 test = ["embedded-server", "jazz/testing"]
 
 [dependencies]
-jazz = { workspace = true, default-features = false, features = ["runtime"] }
+jazz = { workspace = true, default-features = false }
 jazz-otel = { workspace = true, optional = true }
-axum = { version = "0.8.9", default-features = false, features = [
+axum = { optional = true, version = "0.8.9", default-features = false, features = [
   "http1",
   "json",
   "matched-path",
@@ -27,14 +56,19 @@ bytes = "1"
 futures = "0.3"
 futures-util = "0.3"
 http = "1"
-jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
+hyper = { optional = true, version = "1", default-features = false }
+hyper-util = { optional = true, version = "0.1", default-features = false, features = ["tokio"] }
+jsonwebtoken = { optional = true, version = "10.4", default-features = false, features = [
+  "rust_crypto",
+  "use_pem",
+] }
 hex = "0.4"
 hmac = "0.12"
 opentelemetry = { version = "0.31", optional = true }
 postcard = { version = "1.1.3", features = ["alloc"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { optional = true, version = "0.40", features = ["bundled"] }
 thiserror = "2"
-reqwest = { version = "0.12", default-features = false, features = [
+reqwest = { optional = true, version = "0.12", default-features = false, features = [
   "json",
   "stream",
   "rustls-tls",
@@ -42,26 +76,34 @@ reqwest = { version = "0.12", default-features = false, features = [
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10"
-tokio = { version = "1", features = [
-  "macros",
-  "net",
-  "rt",
-  "rt-multi-thread",
-  "signal",
-  "sync",
-  "time",
-] }
+tokio = { version = "1", default-features = false, features = ["sync"] }
 tower = { version = "0.5", features = ["util"], optional = true }
-tower-http = { version = "0.6.8", default-features = false, features = ["cors", "trace"] }
-tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+tower-http = { optional = true, version = "0.6.8", default-features = false, features = [
+  "cors",
+  "trace",
+] }
+tokio-tungstenite = { optional = true, version = "0.29", default-features = false, features = [
+  "handshake",
+] }
 tracing = "0.1"
-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+tungstenite = { optional = true, version = "0.29", default-features = false, features = [
+  "handshake",
+] }
+web-time = "1.1"
 uuid = { version = "1.18.1", features = ["serde", "v4", "v5", "v7"] }
+
+# Without `native`, the engine side builds for wasm32 (a Durable Object
+# host): randomness comes from the JavaScript host there.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+uuid = { version = "1.18.1", features = ["js"] }
 
 [dev-dependencies]
 flate2 = "1"
 jazz = { workspace = true, default-features = false, features = ["testing"] }
 tempfile = "3.27.0"
+tokio = { version = "1", features = ["io-util", "test-util"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = [
   "connect",
   "rustls-tls-native-roots",

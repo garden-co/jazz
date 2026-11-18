@@ -1,10 +1,9 @@
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
 
 const role = () => s.enum("viewer", "editor");
 
-const schema = {
-  // A display name for an anonymous local-first account, so members and file
+export const schema = s.defineSchema({
+  // A display name for an anonymous device account, so members and file
   // owners read as people rather than account ids. The row id is the account
   // id, so each account has exactly one profile. The reverse relations let
   // permissions show a name only to the other side of a membership.
@@ -73,16 +72,4 @@ const schema = {
     )
     // The browser always opens one folder at a time.
     .indexOnly(["folder_id"]),
-};
-
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
-
-/**
- * Folder access is inherited through a bounded policy expansion, so a share
- * reaches this many levels of subfolders. The UI stops offering "New folder"
- * at this depth.
- */
-export const MAX_FOLDER_DEPTH = 8;
-
-export type FolderRole = "viewer" | "editor";
+});

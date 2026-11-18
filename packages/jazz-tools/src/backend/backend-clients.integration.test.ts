@@ -7,7 +7,7 @@ import type { AddressInfo } from "node:net";
 import { exportJWK, generateKeyPair, SignJWT, type JWTPayload } from "jose";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp, testPermissions } from "../testing/index.js";
 import {
   createJazz,
   createJazzClient,
@@ -22,18 +22,16 @@ import {
   encodeWireClientHello,
 } from "../runtime/native-runtime/websocket.js";
 
-const app = s.defineApp(
-  {
-    todos: s.table({ title: s.string(), owner: s.uuid() }, {}),
-  },
-  { migrations: "none" },
-);
-const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user });
-  policy.todos.allowInsert.where({ owner: session.user });
-  policy.todos.allowUpdate.never();
-  policy.todos.allowDelete.never();
+const app = testApp({
+  tables: { todos: { columns: { title: "string", owner: "uuid" } } },
 });
+// Updates and deletes are denied.
+const permissionsFile = {
+  format: 1,
+  tables: { todos: { read: "owner = session.user", insert: "owner = session.user" } },
+};
+/** The engine's permissions, for the backend clients. */
+const permissions = testPermissions(app, permissionsFile);
 
 const AUDIENCE = "https://app.example.test";
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -114,7 +112,7 @@ async function serve(jazz: Jazz): Promise<string> {
 async function appWith(backendClients: Parameters<typeof createJazz>[0]["backendClients"]) {
   const jazz = await createJazz({
     app,
-    permissions,
+    permissions: permissionsFile,
     store: memory(),
     authenticate,
     backendClients,
@@ -417,6 +415,47 @@ describe("trusted backend clients", () => {
     expect(code).toBe(1008);
   });
 
+  it("acts for users only with the permissions the main backend publishes (jazz#5808)", async () => {
+    const { jazz, appId, origin } = await appWith([
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
+    ]);
+    await jazz.createAccountFor("alice");
+    // The main backend names the bundle it pins a trusted client to.
+    const admit = await fetch(`${origin}/jazz/apps/${appId}/backend/admit`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${await sign({ sub: "ops" })}` },
+    });
+    expect(admit.status).toBe(204);
+    expect(admit.headers.get("x-jazz-bundle")).toMatch(/^[0-9a-f]+$/);
+    const open = async (file: typeof permissionsFile) => {
+      const session = await createJazzClient({
+        appId,
+        app,
+        permissions: file,
+        serverUrl: `${origin}/jazz`,
+        driver: { type: "memory" },
+        credential: () => sign({ sub: "ops" }),
+      });
+      cleanups.push(() => session.close());
+      return session.getSnapshot().client!;
+    };
+    // The same jazz.permissions.json: the bundles agree.
+    const current = await open(permissionsFile);
+    await expect(current.forUser("alice")).resolves.toBeDefined();
+    // A laxer copy would widen what alice's reads return: refused, naming both bundles.
+    const lax = await open({
+      format: 1,
+      tables: { todos: { read: "true", insert: "owner = session.user" } },
+    });
+    const refusal = await lax.forUser("alice").catch((error: unknown) => error);
+    expect(refusal).toMatchObject({ code: "bundle_mismatch" });
+    expect((refusal as Error).message).toMatch(
+      /^forUser: this client's permissions \(bundle [0-9a-f]+\) are not the ones the main backend publishes \(bundle [0-9a-f]+\)/,
+    );
+    // The client itself still syncs with backend authority.
+    await expect(lax.db.all(app.todos)).resolves.toBeDefined();
+  });
+
   it("acts for a user with no account only once one is created", async () => {
     const { jazz, appId, origin } = await appWith([
       trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
@@ -505,7 +544,7 @@ describe("trusted backend clients", () => {
     cleanups.push(() => core.stop());
     const jazz = await createJazz({
       app,
-      permissions,
+      permissions: permissionsFile,
       store: remote({ url: core.url, appId, secret: core.adminSecret }),
       authenticate,
       backendClients: [

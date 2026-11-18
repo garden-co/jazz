@@ -9,6 +9,7 @@ import {
   deserializeBrowserRelayError,
   type BrowserFollowerPortEvent,
   type BrowserFollowerPortRequest,
+  type BrowserWorkerLinkFate,
   type InspectorAttachmentBinding,
 } from "./browser-worker-protocol.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
@@ -20,9 +21,15 @@ import {
 } from "./inspector-control-lifecycle.js";
 import { toError } from "../util.js";
 
+/** What a reply carries beyond its success (see the worker's `result`). */
+type RequestReply = { pendingUploads?: number };
+
+/** A storage deletion: how many of the store's writes it took that the server hadn't confirmed. */
+export type StorageDeletion = { pendingUploads?: number };
+
 type PendingRequest = {
   type: BrowserFollowerPortRpcRequest["type"] | "open-inspector-control";
-  resolve: () => void;
+  resolve: (reply?: RequestReply) => void;
   reject: (error: Error) => void;
 };
 
@@ -38,6 +45,7 @@ type BrowserFollowerPortRpcRequest =
   | { type: "flush-pending-writes" }
   | { type: "close"; releaseContext?: boolean }
   | { type: "prepare-storage-reset" }
+  | { type: "store-pending-uploads" }
   | { type: "finish-storage-reset" }
   | { type: "abort-storage-reset" }
   | { type: "reconnect"; authJson: string; sessionClaims: Record<string, unknown> };
@@ -85,6 +93,12 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   private probeNonce: number | null = null;
   private watchdogTimer: number | NodeJS.Timeout | null = null;
   private watchdogEpoch = 0;
+  /**
+   * The parts of the worker's link fate this connection last applied;
+   * `undefined` until its first one arrives (with its admission).
+   */
+  private appliedFailure: string | null | undefined = undefined;
+  private appliedAuthFailure: string | null | undefined = undefined;
 
   constructor(
     private readonly runtime: NativeRuntimeAdapter,
@@ -200,10 +214,10 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     await this.request({ type: "disconnect" });
   }
 
-  async deleteStorage(): Promise<void> {
+  async deleteStorage(): Promise<StorageDeletion> {
     await this.ready();
     if (!this.dbName) throw new Error("Browser storage reset requires its IndexedDB name");
-    await this.request({ type: "prepare-storage-reset" });
+    const prepared = await this.request({ type: "prepare-storage-reset" });
     try {
       await IndexedDbPageStore.destroy(this.dbName);
     } catch (error) {
@@ -211,6 +225,15 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       throw error;
     }
     await this.request({ type: "finish-storage-reset" });
+    return { pendingUploads: prepared?.pendingUploads };
+  }
+
+  async storePendingUploads(): Promise<number | undefined> {
+    await this.ready();
+    const answer = (await this.request({ type: "store-pending-uploads" })) as
+      | { pendingUploads?: number }
+      | undefined;
+    return answer?.pendingUploads;
   }
 
   async openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort> {
@@ -222,7 +245,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     let rejectPending: (error: Error) => void = () => {};
     const promise = new Promise<void>((resolve, reject) => {
       rejectPending = reject;
-      this.pending.set(id, { type: "open-inspector-control", resolve, reject });
+      this.pending.set(id, { type: "open-inspector-control", resolve: () => resolve(), reject });
     });
     let controlClosed = false;
     const closeControl = () => {
@@ -295,6 +318,33 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     this.dispose(new Error("Browser follower connection is closed"));
   }
 
+  /**
+   * Detach from the worker now, without waiting for it: the page is leaving
+   * for the back/forward cache (see `page-cache`). The worker detaches the
+   * tab and sends nothing back, so Chrome has no message to evict the cached
+   * page for. The runtime keeps its writes; the connection that replaces
+   * this one on return replays them, as after a worker failure.
+   *
+   * Declines (`false`) while work waits on the worker (an operation, or a
+   * write the worker hasn't settled yet): its outcome would be lost. That page keeps its connection, and with it its liveness
+   * lock, while it is cached.
+   */
+  leaveForPageCache(): boolean {
+    if (this.closed || this.failed || !this.established || this.hasPendingWork()) return false;
+    try {
+      // As a tab that closes: the last tab out releases the worker's hold on
+      // the store, so a tab under another sign-in may open it meanwhile.
+      this.port.postMessage({
+        type: "close",
+        releaseContext: true,
+      } satisfies BrowserFollowerPortRequest);
+    } catch {
+      // A port that can't send is as good as closed; disposal still detaches it.
+    }
+    this.dispose(new Error("Browser follower connection left for the back/forward cache"));
+    return true;
+  }
+
   async waitForPendingWrites(): Promise<void> {
     await this.flushLocal();
     await this.request({ type: "flush-pending-writes" });
@@ -313,12 +363,12 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     this.dispose(new Error("Browser follower connection is reconnecting"));
   }
 
-  private request(request: BrowserFollowerPortRpcRequest): Promise<void> {
+  private request(request: BrowserFollowerPortRpcRequest): Promise<RequestReply | undefined> {
     if (this.failed) return Promise.reject(this.failed);
     if (this.closed) return Promise.reject(new Error("Browser follower connection is closed"));
     const id = this.nextRequestId++;
     const message = { ...request, id };
-    const promise = new Promise<void>((resolve, reject) => {
+    const promise = new Promise<RequestReply | undefined>((resolve, reject) => {
       this.pending.set(id, { type: request.type, resolve, reject });
     });
     this.armWatchdog();
@@ -428,23 +478,12 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       else this.pendingFrames.push(message.frames);
       return;
     }
-    if (message.type === "auth-failure") {
-      this.callbacks.onAuthFailure(message.reason as AuthFailureReason);
-      return;
-    }
-    if (message.type === "auth-restored") {
-      this.callbacks.onAuthRestored();
-      return;
-    }
     if (message.type === "transport-state") {
       this.callbacks.onExplicitOfflineChange?.(message.explicitlyDisconnected);
       return;
     }
-    if (message.type === "remote-link") {
-      // The worker keeps reconnecting after a published outage. Once it is
-      // live again, release the relayed error so Global reads work again.
-      if (message.state === "connected") this.runtime.clearRemoteServerTransportError();
-      this.callbacks.onRemoteLinkChange?.(message.state, message.link);
+    if (message.type === "link-fate") {
+      this.applyLinkFate(message.fate);
       return;
     }
     if (message.type === "mutation-error") {
@@ -453,16 +492,6 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     }
     if (message.type === "storage-failure") {
       this.runtime.reportLocalStorageFailure(message.message);
-      return;
-    }
-    if (message.type === "transport-error") {
-      // Keep this distinct from a fate rejection. The runtime records the
-      // error before any later port teardown so active Global waits and
-      // remote subscriptions wake, while Local durability stays valid.
-      this.runtime.reportRemoteServerTransportError(
-        deserializeBrowserRelayError(message.error),
-        message.retrying === true,
-      );
       return;
     }
     if (message.type === "storage-reset") {
@@ -505,9 +534,44 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
         this.peerAuthority = message.peerAuthority;
         this.workerRealmId = message.workerRealmId;
       }
-      pending.resolve();
+      pending.resolve({ pendingUploads: message.pendingUploads });
     }
   };
+
+  /**
+   * Make this tab's runtime hold the worker's link fate. A fate arriving with
+   * admission and one arriving later are applied alike (#4808): the upstream
+   * failure fails the tab's Global and Remote waits without rejecting its
+   * writes, the link status follows the worker's, and an auth refusal holds
+   * until the worker's clears. Unchanged parts are not applied again.
+   */
+  private applyLinkFate(fate: BrowserWorkerLinkFate): void {
+    const failure = fate.failure && JSON.stringify(fate.failure);
+    if (fate.failure && failure !== this.appliedFailure) {
+      // Keep this distinct from a fate rejection. The runtime records the
+      // error before any later port teardown so active Global waits and
+      // remote subscriptions wake, while Local durability stays valid.
+      this.runtime.reportRemoteServerTransportError(
+        deserializeBrowserRelayError(fate.failure.error),
+        fate.failure.retrying,
+      );
+    } else if (!fate.failure && (this.appliedFailure || fate.state === "connected")) {
+      // The worker's failure ended (it reconnected): Global reads work again.
+      this.runtime.clearRemoteServerTransportError();
+    }
+    this.appliedFailure = failure;
+    if (fate.authFailure !== this.appliedAuthFailure) {
+      // A connection's first fate also clears what a previous connection's
+      // worker refused, if this one's no longer does.
+      if (fate.authFailure !== null) {
+        this.callbacks.onAuthFailure(fate.authFailure as AuthFailureReason);
+      } else {
+        this.callbacks.onAuthRestored();
+      }
+      this.appliedAuthFailure = fate.authFailure;
+    }
+    this.callbacks.onRemoteLinkChange?.(fate.state, fate.link);
+  }
 
   private readonly onMessageError = (): void => {
     this.fail(new Error("Browser follower port message error"));

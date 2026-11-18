@@ -6,13 +6,15 @@
    with your app. It works best on serverless platforms like Vercel; Cloudflare support is coming.
    You don't need to deploy to start: locally, Jazz uses a SQLite file.
    Default: Vercel for a Next.js app, your own server otherwise.
+   On Vercel, `vercel()` also needs a `region` for its cores, fixed once they exist: the region the
+   project's functions run in (`iad1` unless the project changed it).
    See /docs/setup/deployment/vercel, /docs/setup/deployment/own-server
 2. **What auth provider or library should be used?** Jazz is unopinionated here: it hooks into
    however your backend already does auth, including roles and claims from your identity provider,
    which policies can check directly.
    Default: keep what the project uses; for a new app, Better Auth.
    See /docs/setup/auth/backend, /docs/setup/auth/better-auth, /docs/setup/auth/workos,
-   /docs/setup/auth/custom, /docs/setup/auth/local-first
+   /docs/setup/auth/custom, /docs/setup/auth/device-accounts
 3. **Which backend framework should be used?** Next.js, Hono, Express / Node, Bun or Effect. Each
    setup page has a tab per framework.
    Default: what the project already has; for a new app, Next.js with React, or Hono or Express
@@ -33,6 +35,13 @@
      current bundle sizes.
    - Which frontend framework? React, Vue, Svelte, Solid, Effect or plain TypeScript.
      Default: thin client, React.
+   - `<JazzProvider>` gives you the thin client. For local-first, pass
+     `config={{ serverUrl: "/jazz", client: () => import("jazz-tools/local-first"), localFirst: "now" }}`.
+     Without `localFirst: "now"`, the app starts thin and becomes local-first in the background.
+   - With the thin client, writes aren't optimistic: they show after one round trip to your
+     backend, so a controlled checkbox or toggle flips a moment after the click. For controls like
+     that, show the clicked state at once (local UI state until the write lands), or use the
+     local-first client with `localFirst: "now"`, whose writes show instantly.
 
 ## Design the data
 
@@ -44,6 +53,26 @@
    - For existing apps migrating from another data store, the existing data should constrain this
      enough.
    - Write permission tests next to the policies: /docs/tooling/testing
+   - Write the tables and the policies in `schema.ts`, at the app root (or `src/`, `src/lib/`):
+     `export const schema = s.defineSchema({ … })` with `s.table(…)` entries, then
+     `export const permissions = schema.definePermissions({ … })`, listing every table. Policies are
+     TypeScript: `exists.chatMembers({ chatId: chat.id, userId: session.user })`,
+     `allowedTo.read(message.chat)`, `{ $createdBy: session.user }`, `{ role: ["admin", "owner"] }`.
+     Factor repeated conditions into plain functions.
+   - After changing `schema.ts`, run `npx jazz-tools generate`: it writes `jazz.app.json`,
+     `jazz.permissions.json` and `jazz.generated.ts`, the typed bindings app code imports
+     (`import { app } from "./jazz.generated"`). Commit all of them; they are generated, so never
+     edit them by hand (`generate` refuses a hand-edited file). An error from `generate` points at
+     the spot in `schema.ts`. Backends pass the permissions to `createJazz`:
+     `import permissions from "./jazz.permissions.json" with { type: "json" }`.
+   - When `generate` says the tables changed since the last version, run
+     `npx jazz-tools migrations create --name <name>`: it writes a migration to `migrations/*.ts`.
+     Fill in what it asks for, then run `generate` again (/docs/schemas/migrations). Never delete or
+     move the store to get past a schema error: it means a migration is missing, and the user's
+     data is in that store.
+   - An alpha.65 app (`schema.ts` with `s.defineApp`, and `permissions.ts`): run
+     `npx jazz-tools@2.0.0-alpha.66 upgrade` first, before bumping the dependency, and review the
+     diff (/docs/operating/backups-and-upgrades#upgrading-from-alpha65).
    - In either case, use these Jazz features instead of modeling them yourself:
      - Built-in metadata columns like `$createdBy`, `$createdAt`, `$updatedBy` and `$updatedAt`:
        /docs/reading/metadata

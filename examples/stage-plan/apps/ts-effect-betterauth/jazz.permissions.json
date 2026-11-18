@@ -1,0 +1,213 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "821d208aec2ad491bc215b196661c79f1fccacf621da66d9bc5c1f631aa5bc0e"
+  },
+  "tables": {
+    "activity": {
+      "read": {
+        "anyOf": [
+          "exists showCrew(showId = this.showId, account = session.user)",
+          "exists shows(id = this.showId, chiefAccount = session.user)"
+        ]
+      },
+      "insert": {
+        "allOf": [
+          {
+            "anyOf": [
+              "exists showCrew(showId = this.showId, account = session.user)",
+              "exists shows(id = this.showId, chiefAccount = session.user)"
+            ]
+          },
+          "exists crew(id = this.actorId, account = session.user)"
+        ]
+      }
+    },
+    "better_auth_account": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_jwks": { "read": "false", "insert": "false", "update": "false", "delete": "false" },
+    "better_auth_session": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_user": { "read": "false", "insert": "false", "update": "false", "delete": "false" },
+    "better_auth_verification": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "checklistItems": {
+      "read": "ownerAccount = session.user",
+      "insert": "ownerAccount = session.user",
+      "update": "ownerAccount = session.user",
+      "delete": "ownerAccount = session.user"
+    },
+    "comments": {
+      "read": "allowedTo.read(task)",
+      "insert": {
+        "allOf": ["allowedTo.read(task)", "exists crew(id = this.authorId, account = session.user)"]
+      },
+      "delete": "exists crew(id = this.authorId, account = session.user)"
+    },
+    "crew": {
+      "read": "true",
+      "insert": "account = session.user",
+      "update": "account = session.user"
+    },
+    "showCrew": {
+      "read": {
+        "anyOf": [
+          "exists showCrew(showId = this.showId, account = session.user)",
+          "exists shows(id = this.showId, chiefAccount = session.user)"
+        ]
+      },
+      "insert": {
+        "anyOf": [
+          {
+            "allOf": [
+              { "allOf": ["account = session.user", "role = 'chief'"] },
+              "exists shows(id = this.showId, chiefAccount = session.user)",
+              "exists crew(id = this.crewId, account = session.user)"
+            ]
+          },
+          {
+            "allOf": [
+              { "allOf": ["account = session.user", "role = 'crew'"] },
+              "exists crew(id = this.crewId, account = session.user)",
+              "exists showInvites(showId = this.showId, code = this.inviteCode)"
+            ]
+          }
+        ]
+      },
+      "update": {
+        "old": "account = session.user",
+        "new": {
+          "allOf": [
+            { "allOf": ["account = session.user", "inviteCode = null"] },
+            "exists crew(id = this.crewId, account = session.user)",
+            {
+              "anyOf": [
+                {
+                  "allOf": [
+                    "role = 'crew'",
+                    "exists showCrew(id = this.id, showId = this.showId, role = 'crew')"
+                  ]
+                },
+                {
+                  "allOf": [
+                    "role = 'chief'",
+                    "exists shows(id = this.showId, chiefAccount = session.user)",
+                    "exists showCrew(id = this.id, showId = this.showId)"
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "delete": {
+        "anyOf": [
+          "account = session.user",
+          "exists shows(id = this.showId, chiefAccount = session.user)"
+        ]
+      }
+    },
+    "showInvites": {
+      "read": "exists shows(id = this.showId, chiefAccount = session.user)",
+      "insert": "exists shows(id = this.showId, chiefAccount = session.user)",
+      "update": {
+        "old": "exists shows(id = this.showId, chiefAccount = session.user)",
+        "new": {
+          "allOf": [
+            "exists shows(id = this.showId, chiefAccount = session.user)",
+            "exists showInvites(id = this.id, showId = this.showId)"
+          ]
+        }
+      },
+      "delete": "exists shows(id = this.showId, chiefAccount = session.user)"
+    },
+    "shows": {
+      "read": {
+        "anyOf": [
+          "exists showCrew(showId = this.id, account = session.user)",
+          "exists shows(id = this.id, chiefAccount = session.user)"
+        ]
+      },
+      "insert": "chiefAccount = session.user",
+      "update": "chiefAccount = session.user",
+      "delete": "chiefAccount = session.user"
+    },
+    "tasks": {
+      "read": {
+        "anyOf": [
+          "exists showCrew(showId = this.showId, account = session.user)",
+          "exists shows(id = this.showId, chiefAccount = session.user)"
+        ]
+      },
+      "insert": {
+        "allOf": [
+          {
+            "anyOf": [
+              "exists showCrew(showId = this.showId, account = session.user)",
+              "exists shows(id = this.showId, chiefAccount = session.user)"
+            ]
+          },
+          {
+            "anyOf": [
+              "assigneeId = null",
+              "exists showCrew(showId = this.showId, crewId = this.assigneeId)"
+            ]
+          }
+        ]
+      },
+      "update": {
+        "old": {
+          "anyOf": [
+            "exists showCrew(showId = this.showId, account = session.user)",
+            "exists shows(id = this.showId, chiefAccount = session.user)"
+          ]
+        },
+        "new": {
+          "allOf": [
+            {
+              "anyOf": [
+                "exists showCrew(showId = this.showId, account = session.user)",
+                "exists shows(id = this.showId, chiefAccount = session.user)"
+              ]
+            },
+            {
+              "anyOf": [
+                "assigneeId = null",
+                "exists showCrew(showId = this.showId, crewId = this.assigneeId)"
+              ]
+            }
+          ]
+        }
+      },
+      "delete": {
+        "anyOf": [
+          "exists shows(id = this.showId, chiefAccount = session.user)",
+          {
+            "allOf": [
+              "$createdBy.account = session.user",
+              {
+                "anyOf": [
+                  "exists showCrew(showId = this.showId, account = session.user)",
+                  "exists shows(id = this.showId, chiefAccount = session.user)"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

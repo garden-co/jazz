@@ -1,0 +1,5 @@
+{
+  "extends": "../../../tsconfig.tests.json",
+  "compilerOptions": { "types": ["node", "svelte"] },
+  "include": ["./*.ts", "../../../src/types/**/*.d.ts"]
+}

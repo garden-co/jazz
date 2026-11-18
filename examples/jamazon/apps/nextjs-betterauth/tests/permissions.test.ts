@@ -1,8 +1,8 @@
 import type { Db } from "jazz-tools";
 import type { PolicyTestApp } from "jazz-tools/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { MAX_LINE_QUANTITY } from "../permissions";
-import { app } from "../schema";
+import { MAX_LINE_QUANTITY } from "../src/store/limits";
+import { app } from "../jazz.generated";
 import { ids } from "../src/lib/ids";
 import { seedCatalogue } from "../src/server/seed";
 import { guest, shopper, startStore } from "./helpers";

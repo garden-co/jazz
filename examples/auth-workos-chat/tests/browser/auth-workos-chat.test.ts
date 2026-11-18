@@ -2,7 +2,7 @@
  * Jazz permission-DSL tests for auth-workos-chat.
  *
  * Signs test users in through the app's backend with the `role` claim its
- * `authenticate` reads from a WorkOS session, or as a local-first guest, and
+ * `authenticate` reads from a WorkOS session, or as a guest on a device account, and
  * asserts allow/deny outcomes for posting to ANNOUNCEMENTS_CHAT_ID vs CHAT_ID.
  *
  * NOT covered by `pnpm test`: the WorkOS OAuth flow, the
@@ -16,16 +16,16 @@ import {
   acquireBrowserTestAccount,
   createBrowserTestDb,
 } from "../../../../packages/jazz-tools/tests/browser/account-fixtures.js";
-import { deploy } from "../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   getJazzServerInfo,
   jazzAppUserUrl,
   loginAtJazzAppUser,
   startJazzApp,
   type JazzServerInfo,
+  deploy,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server.js";
-import { app } from "../../schema.js";
-import permissions from "../../permissions.js";
+import { app } from "../../jazz.generated.js";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID } from "../../constants.js";
 
 /** A test user's client: its Db, and how to close it. */
@@ -41,7 +41,7 @@ type Role = "admin" | "member";
 // it. Its `authenticate` names each test user with their role claim.
 beforeAll(async () => {
   const core = await getJazzServerInfo(__APP_ID__);
-  await deploy({ ...core, schema: app, permissions });
+  await deploy({ ...core, app, permissions });
   server = await startJazzApp(core, { schema: app, permissions });
 });
 
@@ -51,7 +51,7 @@ afterEach(async () => {
   }
 });
 
-/** A client signed in with `role`, or a local-first guest without one. */
+/** A client signed in with `role`, or a guest on a device account without one. */
 async function makeClient(role?: Role): Promise<JazzClient> {
   let serverUrl = server.serverUrl;
   let account;

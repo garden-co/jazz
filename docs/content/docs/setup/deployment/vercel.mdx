@@ -1,10 +1,11 @@
 ---
 title: Vercel
 description: "Learn how to run Jazz inside your Next.js app on Vercel, with each environment's data in its own Sandbox."
+languageTabs: main-backend
 ---
 
-On Vercel, your Next.js app is the whole deployment. The `vercel()` store keeps each environment's
-data in a persistent [Vercel Sandbox](https://vercel.com/docs/vercel-sandbox) that your functions
+On Vercel, your Next.js app is the whole deployment. The `vercel()` store keeps each namespace's
+data (production, a preview branch, …) in a persistent [Vercel Sandbox](https://vercel.com/docs/vercel-sandbox) that your functions
 start on demand. There's no separate service to set up and no secrets to copy.
 
 This page sets up your **main backend**: the backend that runs `createJazz`, serves sync to your
@@ -24,14 +25,20 @@ pnpm add @vercel/sandbox
 Use the `vercel()` store:
 
 ```ts title="jazz.server.ts"
-import { createJazz, vercel } from "jazz-tools/backend";
-import { app } from "./schema";
-import permissions from "./permissions";
+import { createJazz, perBranch, vercel } from "jazz-tools/backend";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const jazz = createJazz({
   app,
   permissions,
-  store: vercel(),
+  // Production gets one core, and each preview branch its own.
+  store: vercel({
+    namespace: ({ environment, branch }) =>
+      environment === "production" ? "production" : perBranch(branch),
+    // Where the cores run and keep their data: your functions' region.
+    region: "iad1",
+  }),
   authenticate: async (request) => {
     const session = await getSession(request); // your own auth
     if (!session) return null;
@@ -72,16 +79,45 @@ export const { GET, POST, DELETE } = jazz.next();
 ```
 
 Then deploy as usual with `git push` or `vercel deploy`. Your functions authenticate to Vercel with
-their own OIDC token, and the core's secrets are generated inside the Sandbox, so there are no
-environment variables to set.
+their own OIDC token, and the core's secrets are generated inside the Sandbox, so Jazz needs no
+environment variables of its own. Your auth may: Better Auth, for example, needs
+`BETTER_AUTH_SECRET` in each environment.
 
 On Vercel, sync uses a WebSocket (through `upgradeWebSocket` from `@vercel/functions`). Under plain
 `next dev`, which can't upgrade sockets, the browser
 switches to an HTTP stream on its own.
 
-Without `ws`, the backend logs once at startup "jazz: next() on Vercel needs the ws package: npm
-install ws. Without it, sync sockets can't open: clients sync over the HTTP stream instead." Clients
-still sync, but the HTTP stream needs a single instance or sticky routing, so install `ws`.
+Install `ws`. Without it, the backend still builds and starts, and logs once at startup "jazz: next()
+on Vercel needs the ws package: npm install ws. Without it, sync sockets can't open: clients sync
+over the HTTP stream instead." Clients still sync then, but the HTTP stream needs a single instance
+or sticky routing.
+
+Set `publicUrl` to the URLs browsers reach `/jazz` at. Without it, the backend takes its URL from
+each request's headers, and logs "createJazz: vouched for a device account of …, taken from the
+request's headers. Set publicUrl …" the first time a device account signs in. With `publicUrl` set,
+the backend accepts device accounts only for the URLs it lists and refuses others with a warning
+("refused a device account whose proof is for …"), so list every URL your users reach `/jazz`
+at, a second custom domain included. Device accounts belong to one origin: a guest on your
+production domain and one on a deployment URL are different accounts, while signed-in users see the
+same data on every URL. Vercel's system environment variables name the production domain and the
+current deployment's URLs:
+
+```ts title="jazz.server.ts"
+export const jazz = createJazz({
+  // …
+  publicUrl: [
+    process.env.VERCEL_PROJECT_PRODUCTION_URL,
+    process.env.VERCEL_BRANCH_URL,
+    process.env.VERCEL_URL,
+  ]
+    .filter(Boolean)
+    .map((host) => `https://${host}/jazz`),
+});
+```
+
+Your auth library needs storage that outlives a function call. Better Auth with a local SQLite
+file, as in its quick start, loses its users on Vercel: give it a hosted database, or keep its
+tables in Jazz with the [Jazz adapter](/docs/setup/auth/better-auth#use-jazz-as-the-database).
 
 <include>../../../partials/main-backend-use.mdx</include>
 
@@ -103,25 +139,28 @@ To choose yourself, pass `blobs`:
 ```ts title="jazz.server.ts"
 import { s3, vercel, vercelBlob } from "jazz-tools/backend";
 
-vercel(); // Vercel Blob if a Blob store is connected, otherwise SQLite
-vercel({ blobs: vercelBlob({ storeId: "store_..." }) }); // a specific Blob store
-vercel({ blobs: s3() }); // an S3 bucket connected through the Vercel Marketplace
-vercel({ blobs: "sqlite" }); // always the core's SQLite file
+// `namespace` and `region` as in "Set it up" above
+vercel({ namespace, region }); // Vercel Blob if a Blob store is connected, otherwise SQLite
+vercel({ namespace, region, blobs: vercelBlob({ storeId: "store_..." }) }); // a specific Blob store
+vercel({ namespace, region, blobs: s3() }); // an S3 bucket connected through the Vercel Marketplace
+vercel({ namespace, region, blobs: "sqlite" }); // always the core's SQLite file
 ```
 
 `s3()` reads `S3_BUCKET_NAME`, `AWS_REGION` and `AWS_ROLE_ARN`, which the Marketplace's AWS
 integration sets, and the core assumes that role with your function's OIDC token. The bucket can be in
 any region: on Vercel, `AWS_REGION` is the function's region, so if it doesn't match the bucket, the
 backend learns the bucket's region from S3's first reply, signs for it from then on, and logs a
-warning suggesting you set `AWS_REGION` to it. Putting the bucket in your Sandbox's region still
-keeps latency and transfer costs down. Its options are the same
+warning suggesting you set `AWS_REGION` to it. Putting the bucket in the core's `region` still
+keeps latency and transfer costs down, and the backend warns when it knows the bucket is elsewhere. Its options are the same
 as for [your own server](/docs/setup/deployment/own-server#large-values).
 
 Each Blob store or bucket serves one Vercel environment. A store you connect spans every
 environment unless you limit it, so create one store per environment, connect each to its own
-environment only, and enable OIDC for each environment in the project's settings. A store created
-through the API or CLI is connected to production, preview and development alike, and a second
-one fails with `project_env_var_not_unique`; connect and limit stores in the dashboard instead. A core given another environment's store refuses to start, for
+environment only, and enable OIDC for each environment in the project's settings. With the CLI,
+name the environment when you create the store, for example
+`vercel blob create-store my-app-production --access private --environment production --yes`.
+Without `--environment`, a store created through the CLI or the API is connected to production,
+preview and development alike, and a second one then fails with `project_env_var_not_unique`. A core given another environment's store refuses to start, for
 example "Blob store … serves the production environment, not preview; connect a separate Blob store
 to each environment". Both `vercelBlob()` and `s3()` also take a `prefix`, by default
 `jazz/<store id>/`.
@@ -146,12 +185,61 @@ A change to the `vercelBlob()` or `s3()` options doesn't reach a core that is al
 same `jazz-tools` version. It applies the next time the core starts: after it stops when idle, or
 when you deploy a new `jazz-tools` version.
 
+## Production, previews and development
+
+`namespace` decides which core, and so which data, a deployment uses. Each core is a Sandbox named
+`jazz-<VERCEL_PROJECT_ID>-<namespace>` with its own Drive. The function gets the deployment's
+`environment` (`"production"`, `"preview"`, or a custom environment's slug) and its Git `branch`.
+Pick one of these setups:
+
+```ts title="jazz.server.ts"
+import { perBranch, vercel } from "jazz-tools/backend";
+
+// Production, and one core per preview branch: each branch starts with its own data.
+vercel({
+  namespace: ({ environment, branch }) =>
+    environment === "production" ? "production" : perBranch(branch),
+  region: "iad1",
+});
+
+// One core per Vercel environment: every preview shares one core, as a staging environment
+// (a custom environment such as "staging" gets its own).
+vercel({ namespace: ({ environment }) => environment, region: "iad1" });
+```
+
+- **Per branch** isolates each pull request: a migration or test data on one branch never reaches
+  another. `perBranch` gives the same core names as earlier versions, so existing preview cores
+  keep their data. A preview deployed with `vercel deploy` or through the API has no
+  branch unless the Vercel project is connected to a Git repository, even when you run the CLI
+  inside a checkout. Such a preview has no branch to name, and the store throws when it opens; use
+  `perBranch(branch) || "cli-previews"` to give such previews a core of their own.
+- **Shared** keeps one set of preview data that all branches see. It needs fewer cores, but the
+  branches share one schema history too, so a schema change or migration deployed from one branch
+  applies to the data every preview uses.
+- **Production's core is never shared.** A core trusts the environment whose deployment started it
+  first and refuses the others. So a fixed string namespace isn't a setup: whichever environment
+  deploys first pins the core, and if a preview starts it first, production's own deploys are
+  refused. Name production's core from `environment`, as both setups above do.
+
+To reset a preview's data, delete its Sandbox and the Drive attached to it (the one it mounts at
+`/data`) in the Vercel dashboard. This can't be undone. Production's Sandbox and Drive are in the
+same list with similar names, and a long preview Drive name is shortened with a hash, so check the
+Sandbox's name (`jazz-<project>-<namespace>`) and pick the Drive from the Sandbox itself. The next
+request creates both again, with an empty database and a new app ID. Large values already in Vercel Blob or S3 stay there; delete them from the store if you
+need to. Nothing deletes the cores of merged or deleted branches yet.
+
+Blob stores follow environments, not namespaces: connect one store to production and one to preview
+(see [Large values](#large-values)).
+
+When `vercel()` opens, it logs which core it uses once per process, for example
+`jazz: store vercel namespace "production" (core jazz-prj-…-production)`.
+
 ## Local development
 
 Outside Vercel, `vercel()` uses a local store instead, by default `sqlite({ path: ".jazz/local" })`.
 Only production and preview deployments use the Sandbox: `next dev`, `vercel dev` and an
 environment pulled with `vercel env pull` all run against a SQLite file on your machine. Pass `local` to
-choose a different one, such as `vercel({ local: sqlite({ path: ".jazz/dev" }) })` to keep data you
+choose a different one, such as `vercel({ namespace, region, local: sqlite({ path: ".jazz/dev" }) })` to keep data you
 already have.
 
 Add `.jazz/` to `.gitignore`.
@@ -165,37 +253,66 @@ each server its own `path`.
 
 ## Options
 
-All options are optional.
+`namespace` and `region` are required; the other options are optional.
 
-| Option           | Default                                                               | What it does                                                     |
-| :--------------- | :-------------------------------------------------------------------- | :--------------------------------------------------------------- |
-| `name`           | `jazz-<VERCEL_PROJECT_ID>-production`, or `-preview-<branch>-<hash>`  | The Sandbox and Drive name, one per production or preview branch |
-| `region`         | `iad1`                                                                | Where the Sandbox runs; put it near your functions               |
-| `vcpus`          | `1`                                                                   | Sandbox size, 2 GB of memory per vCPU                            |
-| `maxDriveBytes`  | 10 GiB                                                                | The most data the environment's Drive holds                      |
-| `idleMs`         | 5 minutes                                                             | How long the Sandbox stays up with no requests or clients        |
-| `coreTarballUrl` | the Linux `jazz-napi` package for your installed `jazz-tools` version | Which Jazz core build the Sandbox runs                           |
-| `blobs`          | `vercelBlob()` if a Blob store is connected, otherwise `"sqlite"`     | Where large values go; see [Large values](#large-values)         |
-| `local`          | `sqlite({ path: ".jazz/local" })`                                     | The store used outside Vercel                                    |
+| Option           | Default                                                               | What it does                                                                                                                                                         |
+| :--------------- | :-------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `namespace`      | required                                                              | Which core a deployment uses: a string, or a function of `{ environment, branch }`; see [Production, previews and development](#production-previews-and-development) |
+| `region`         | required                                                              | Where the core's Sandbox runs and its Drive keeps the data; see [Region](#region)                                                                                    |
+| `vcpus`          | `1`                                                                   | Sandbox size, 2 GB of memory per vCPU                                                                                                                                |
+| `maxDriveBytes`  | 10 GiB                                                                | The most data the environment's Drive holds                                                                                                                          |
+| `idleMs`         | 5 minutes                                                             | How long the Sandbox stays up with no requests or clients                                                                                                            |
+| `coreTarballUrl` | the Linux `jazz-napi` package for your installed `jazz-tools` version | Which Jazz core build the Sandbox runs                                                                                                                               |
+| `blobs`          | `vercelBlob()` if a Blob store is connected, otherwise `"sqlite"`     | Where large values go; see [Large values](#large-values)                                                                                                             |
+| `local`          | `sqlite({ path: ".jazz/local" })`                                     | The store used outside Vercel                                                                                                                                        |
 
-The default `name` uses Vercel's system environment variables, which are exposed by default. If
-they aren't, `vercel()` throws and asks you to pass `name`. While `vercel()` throws, the browser
-stays on its loading state, so check the function logs when a deployment never finishes loading. It also throws for a preview with no
-Git branch, such as a deploy through the Vercel API or from the CLI outside a Git checkout: pass
-`name` to give such previews a core of their own.
+`vercel()` without `namespace` throws when it's called, in `next dev` too, and names the usual
+choices. The namespace is lowercased, other characters become `-`, and the whole Sandbox name may be
+at most 128 characters (about 90 for the namespace); an empty or longer one throws. `environment`
+and `branch` come from Vercel's system environment variables, which are exposed by default. While
+`vercel()` throws, the browser stays on its loading state, so check the function logs when a
+deployment never finishes loading.
+
+Upgrading from `name`: `vercel({ name })` now throws, and when it can, the error gives the exact
+namespace to use. A name of the form `jazz-<project>-<rest>` becomes `namespace: "<rest>"`, where
+`<project>` is your Vercel project ID lowercased, with each run of characters other than `a-z` and
+`0-9` turned into one `-` (`prj_AbC1` becomes `prj-abc1`). A name of any other form (`myapp-core`,
+uppercase letters, the raw `prj_…` ID) can't be reached by a namespace: that core keeps its data,
+but this version opens another one, and the error says so. Without `name`, earlier versions used
+the per-branch setup above, which keeps those cores. Copy that one when upgrading: the
+one-core-per-environment setup (as on the home page) moves previews onto a new, empty core.
 
 The default `coreTarballUrl` covers every published `jazz-tools` version, release candidates
 included; set it only for a build you made yourself. If the Sandbox can't download the core, the
 function's error says so and the Sandbox is stopped. A Sandbox that already holds another
 app's core is refused.
 
+## Region
+
+`region` is the [Vercel region](https://vercel.com/docs/sandbox/concepts/regions) where each core's
+Sandbox runs and its Drive keeps the data. Pick the region your functions run in (the project's
+Function Region setting): every request to the core goes from the function to the Sandbox, so a
+core in another region adds a round trip between the two to each one. When the two differ, the
+backend logs a warning once per process naming both regions.
+
+A core's region is fixed when it's created. Moving an existing core to another region isn't
+supported yet ([#5441](https://github.com/garden-co/jazz/issues/5441)): it needs its data copied.
+If `region` doesn't match where an existing core's Sandbox (or Drive) is, the store throws when it
+opens, naming the core's region, rather than using it anyway or creating an empty core elsewhere.
+
+`vercel()` without `region` throws when it's called, in `next dev` too. Earlier versions created
+every core in `iad1`, so `region: "iad1"` keeps existing cores and their data where they are.
+
+Upgrading: add `region: "iad1"`. Core and Drive names don't depend on the region, so the same
+cores open with their data.
+
 ## Limits
 
-- Production and each preview branch get one persistent Sandbox and its Drive.
-  Two apps in one project need their own `name`. The smallest size is 2 GB of memory and 1 vCPU.
-- Production has one core. Each Git branch's previews get their own core and data
-  (`jazz-<VERCEL_PROJECT_ID>-preview-<branch>-<hash>`). Nothing cleans up the Sandboxes and Drives
-  of merged or deleted branches yet; delete them in the Vercel dashboard.
+- Each namespace gets one persistent Sandbox and its Drive. Two apps in one Vercel project need
+  namespaces that differ per environment too, for example
+  `` ({ environment }) => `chat-${environment}` ``. The smallest size is 2 GB of memory and 1 vCPU.
+- Nothing cleans up the Sandboxes and Drives of merged or deleted branches yet; delete them in the
+  Vercel dashboard.
 - The first request in an environment takes longer: it creates the Sandbox and downloads the Jazz
   server onto the Drive. Vercel's own checks of a new deployment can make that first request,
   or wake a stopped Sandbox, so the cold start may already be over when you first open the page.

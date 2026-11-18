@@ -588,29 +588,17 @@ fn outer_doc() -> RelationPredicate {
     )
 }
 
-/// Under `Or`, `Not` or an enum payload, a row correlation cannot become a
+/// Under `Or` or `Not`, a row correlation cannot become a
 /// join. Dropping it as `true` would let every access row authorize the
 /// document.
 #[test]
-fn policy_row_correlation_under_or_not_or_enum_payload_is_rejected() {
+fn policy_row_correlation_under_or_or_not_is_rejected() {
     let cases = [
         (
             "Or",
             RelationPredicate::Or(vec![outer_doc(), RelationPredicate::False]),
         ),
         ("Not", RelationPredicate::Not(Box::new(outer_doc()))),
-        (
-            "EnumMatch",
-            RelationPredicate::EnumMatch {
-                column: column("access", "team"),
-                case: "member".to_owned(),
-                payload: Box::new(RelationPredicate::Cmp {
-                    left: RelationColumnRef::unscoped("doc"),
-                    op: RelationCmpOp::Eq,
-                    right: RelationValueRef::RowId(RelationRowIdRef::Outer),
-                }),
-            },
-        ),
     ];
     for (under, predicate) in cases {
         let error = policy_access_error(predicate);
@@ -932,5 +920,41 @@ fn correlations_deeper_than_one_nested_join_are_rejected() {
             error.contains("beyond one nested join"),
             "{correlated}: {error}"
         );
+    }
+}
+
+/// Past a hop, only the hop's key can be correlated with the protected row:
+/// the error names the column, what is supported, and where to correlate
+/// instead (adopter eval on alpha.61 rc.1 got only "must use its join key").
+#[test]
+fn a_correlation_past_a_hop_off_its_key_names_the_column() {
+    let joined = RelationExpr::Join {
+        left: Box::new(scan("doc_access", Some("access"))),
+        right: Box::new(scan("teams", Some("t"))),
+        on: vec![RelationJoinCondition {
+            left: column("access", "team"),
+            right: column("t", "id"),
+        }],
+        join_kind: RelationJoinKind::Inner,
+    };
+    let error = access_policy_error(filter(
+        joined,
+        RelationPredicate::And(vec![
+            outer_doc(),
+            equals(
+                "t",
+                "owner_id",
+                RelationValueRef::OuterColumn(RelationColumnRef::unscoped("workspace")),
+            ),
+        ]),
+    ));
+    for part in [
+        "`teams.owner_id`",
+        "`workspace`",
+        "not supported in policies yet",
+        "`teams.id`",
+        "`doc_access`",
+    ] {
+        assert!(error.contains(part), "{part}: {error}");
     }
 }

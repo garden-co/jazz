@@ -45,8 +45,8 @@ jobs:
       - id: resolve
         run: |
           set -euo pipefail
-          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+-rc\.[0-9]+$ ]]; then
-            echo "::error::version must look like 2.0.0-alpha.N-rc.M, got '${VERSION}'"
+          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+(\.[0-9]+)?-rc\.[0-9]+$ ]]; then
+            echo "::error::version must look like 2.0.0-alpha.N-rc.M or 2.0.0-alpha.N.K-rc.M, got '${VERSION}'"
             exit 1
           fi
           release=$(gh release view "v${VERSION}" --json isDraft,isPrerelease,assets)
@@ -178,6 +178,9 @@ jobs:
           tar -tf "${out}/jazz-tools-${VERSION}.tgz" > "${RUNNER_TEMP}/jazz-tools-files.txt"
           grep -qx "package/dist/dev/inspector-overlay/embedded/embedded.html" "${RUNNER_TEMP}/jazz-tools-files.txt"
           grep -qx "package/dist/dev/inspector-overlay/embedded/backend.html" "${RUNNER_TEMP}/jazz-tools-files.txt"
+          # createJazz serves the Inspector from this module, which ships wherever the code does.
+          tar -xOf "${out}/jazz-tools-${VERSION}.tgz" package/dist/backend/inspector-ui-files.js > "${RUNNER_TEMP}/inspector-ui-files.js"
+          grep -Fq '"backend.html":' "${RUNNER_TEMP}/inspector-ui-files.js"
           ls -la "${out}"
 
       - name: Link the tarballs to this release

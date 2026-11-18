@@ -605,6 +605,39 @@ fn many_versions_with_small_edits_share_one_epoch() {
     assert_eq!(db.large_value_epochs_for_test().unwrap().0, 1);
 }
 
+/// SQLite rolling back by itself (a full disk, an I/O error) a transaction
+/// that appended to a committed chunked value leaves the committed value
+/// readable: the rolled-back append's edits are gone, the committed ones
+/// stay. On an in-memory store the chunk cache is the only copy of the
+/// value's epoch, so the rollback must not drop the committed epoch the
+/// append extended.
+///
+/// ```text
+/// insert 300 KiB ── append ×3 (committed) ── tx { append; SQLite rolls back } ── read
+/// ```
+#[test]
+fn sqlite_rolling_back_an_append_keeps_the_committed_value() {
+    let db = db();
+    let mut expected = text(36, LARGE);
+    insert(&db, 1, &expected, b"");
+    for n in 0..3 {
+        let more = format!("[{n}]");
+        block_on(db.append_value("docs", row(1), "body", more.clone().into_bytes())).unwrap();
+        expected.push_str(&more);
+    }
+    let failed: Result<((), _), _> = block_on(db.transaction(async |_| {
+        db.append_value("docs", row(1), "body", b"[lost]".to_vec())
+            .await?;
+        db.rollback_sqlite_transaction_for_test();
+        Err(jazz::db::Error::new(
+            jazz::db::ErrorCode::Storage,
+            "disk I/O error".to_owned(),
+        ))
+    }));
+    assert!(failed.is_err());
+    assert_eq!(body(&db, 1), expected);
+}
+
 #[test]
 fn an_inline_value_grown_past_the_threshold_is_chunked() {
     let db = db();
@@ -660,6 +693,136 @@ fn splices_edit_chunked_values_in_place() {
         expected,
         "and leaves the row unchanged"
     );
+}
+
+/// UTF-8 text splices count bytes and refuse an offset inside a code point,
+/// in the stored value or in an earlier splice's insert, without rebuilding
+/// the whole chunked value.
+#[test]
+fn partial_updates_refuse_utf8_offsets_off_a_char_boundary() {
+    let db = db();
+    let original = format!("{}{}", "é\u{1F600}".repeat(30_000), "tail");
+    assert!(original.len() > LARGE / 2);
+    insert(&db, 1, &original, b"");
+    let splice = |within: std::ops::Range<usize>, splices: Vec<LargeValueUpdateSplice>| {
+        vec![LargeValueUpdate::Splice {
+            column: "body".into(),
+            within: LargeValueUpdatePage::text(within),
+            splices,
+        }]
+    };
+    let update = |edits| {
+        let before = jazz::large_values::full_materializations_for_test();
+        let result = block_on(db.update_with_large_value_mutations(
+            "docs",
+            row(1),
+            BTreeMap::new(),
+            edits,
+            Default::default(),
+        ));
+        assert_eq!(
+            jazz::large_values::full_materializations_for_test(),
+            before,
+            "a UTF-8 splice reads only the bytes at its ends"
+        );
+        result
+    };
+    // "é" is 2 bytes and "😀" 4: one repeat is 6 bytes.
+    let middle = 6 * 20_000;
+    for (at, delete) in [
+        (middle + 1, 0),
+        (middle, 1),
+        (middle + 2, 2),
+        (middle + 3, 0),
+    ] {
+        let error = update(splice(
+            0..original.len(),
+            vec![LargeValueUpdateSplice::text(at, delete, "x")],
+        ))
+        .expect_err("an offset inside a code point is refused");
+        assert!(
+            error.to_string().contains(jazz::db::NOT_CHAR_BOUNDARY),
+            "{at}+{delete}: {error:?}"
+        );
+    }
+    // The second splice lands inside the first one's "ü".
+    let error = update(splice(
+        middle..middle + 6,
+        vec![
+            LargeValueUpdateSplice::text(0, 2, "ü"),
+            LargeValueUpdateSplice::text(1, 0, "x"),
+        ],
+    ))
+    .expect_err("an offset inside an earlier insert's code point is refused");
+    assert!(error.to_string().contains(jazz::db::NOT_CHAR_BOUNDARY));
+    assert_eq!(body(&db, 1), original, "refused splices change nothing");
+
+    // On boundaries: "é" → "ü", then the emoji after it → "🚀!".
+    update(splice(
+        middle..middle + 6,
+        vec![
+            LargeValueUpdateSplice::text(0, 2, "ü"),
+            LargeValueUpdateSplice::text(2, 4, "\u{1F680}!"),
+        ],
+    ))
+    .unwrap();
+    let mut expected = original.clone();
+    expected.replace_range(middle..middle + 6, "ü\u{1F680}!");
+    assert_eq!(body(&db, 1), expected);
+
+    // Later offsets map back through earlier splices that change the
+    // length: a shrinking splice (a 90 KB delete across chunks), then one
+    // after it; a growing one, then one inside the next "é"; and empty
+    // inserts at 0 and at the end.
+    let start = 6 * 1_000;
+    let cut = 6 * 15_000;
+    let whole = |len: usize| 0..len;
+    let after_cut = start + 2; // right after "ab"
+    let error = update(splice(
+        whole(expected.len()),
+        vec![
+            LargeValueUpdateSplice::text(start, cut, "ab"),
+            // Byte 6 after "ab" is byte 4 of a "😀" in the stored value,
+            // though byte 6 of the stored value is a boundary.
+            LargeValueUpdateSplice::text(start + 6, 0, "x"),
+        ],
+    ))
+    .expect_err("an offset inside a code point after a shrinking splice is refused");
+    assert!(error.to_string().contains(jazz::db::NOT_CHAR_BOUNDARY));
+    let error = update(splice(
+        whole(expected.len()),
+        vec![
+            LargeValueUpdateSplice::text(start, 0, "grown"),
+            // Byte 6 after "grown" is byte 1 of an "é" in the stored value.
+            LargeValueUpdateSplice::text(start + 6, 0, "x"),
+        ],
+    ))
+    .expect_err("an offset inside a code point after a growing splice is refused");
+    assert!(error.to_string().contains(jazz::db::NOT_CHAR_BOUNDARY));
+    let error = update(splice(
+        whole(expected.len()),
+        vec![LargeValueUpdateSplice::text(start, cut + 3, "")],
+    ))
+    .expect_err("a delete across chunks ending inside a code point is refused");
+    assert!(error.to_string().contains(jazz::db::NOT_CHAR_BOUNDARY));
+    assert_eq!(body(&db, 1), expected, "refused splices change nothing");
+
+    let len = expected.len();
+    update(splice(
+        whole(len),
+        vec![
+            LargeValueUpdateSplice::text(start, cut, "ab"),
+            LargeValueUpdateSplice::text(after_cut, 0, "-"),
+            LargeValueUpdateSplice::text(0, 0, "<"),
+            LargeValueUpdateSplice::text(len - cut + 2 + 1 + 1, 0, ">"),
+        ],
+    ))
+    .unwrap();
+    expected.replace_range(start..start + cut, "ab");
+    expected.insert(after_cut, '-');
+    expected.insert(0, '<');
+    expected.push('>');
+    assert_eq!(body(&db, 1), expected);
 }
 
 #[test]
@@ -994,5 +1157,80 @@ fn idle_ticks_run_no_reclaim_pass_until_something_is_released() {
     assert!(
         db.large_value_reclaim_passes_for_test() <= passes + 1,
         "once the queue is empty, idle ticks run no pass"
+    );
+}
+
+/// UTF-8 splice ends are checked in the value the earlier splices of the
+/// batch left (also when they changed its length), and the value's end is a
+/// boundary.
+#[test]
+fn utf8_offsets_follow_earlier_splices_and_end_is_a_boundary() {
+    let db = db();
+    let original = format!("{}{}", "é\u{1F600}".repeat(30_000), "tail");
+    insert(&db, 1, &original, b"");
+    let update = |within: std::ops::Range<usize>, splices: Vec<LargeValueUpdateSplice>| {
+        block_on(db.update_with_large_value_mutations(
+            "docs",
+            row(1),
+            BTreeMap::new(),
+            vec![LargeValueUpdate::Splice {
+                column: "body".into(),
+                within: LargeValueUpdatePage::text(within),
+                splices,
+            }],
+            Default::default(),
+        ))
+    };
+    let middle = 6 * 20_000;
+    // "é" (2 bytes) -> "a" (1 byte); the emoji now starts at page offset 1.
+    // Accepted only if offsets are mapped back through the first splice.
+    update(
+        middle..middle + 6,
+        vec![
+            LargeValueUpdateSplice::text(0, 2, "a"),
+            LargeValueUpdateSplice::text(1, 4, "b"),
+        ],
+    )
+    .expect("on a boundary after a shrinking splice");
+    let mut expected = original.clone();
+    expected.replace_range(middle..middle + 6, "ab");
+    assert_eq!(body(&db, 1), expected);
+    // Grow: "a" -> "ééé" (6 bytes), so the page reads "éééb" then "é" at
+    // 7..9: offset 8 is inside that "é", which only the mapping back through
+    // the first splice tells.
+    let next = middle + 2; // after "ab" comes "é😀..."
+    let error = update(
+        middle..next + 6,
+        vec![
+            LargeValueUpdateSplice::text(0, 1, "ééé"),
+            LargeValueUpdateSplice::text(6 + 1 + 1, 0, "x"),
+        ],
+    )
+    .expect_err("inside é after a growing splice");
+    assert!(
+        error.to_string().contains(jazz::db::NOT_CHAR_BOUNDARY),
+        "{error:?}"
+    );
+    // Delete spanning many chunks, ending on a boundary, then an empty insert
+    // at the very end and at 0.
+    let len = body(&db, 1).len();
+    update(
+        0..len,
+        vec![
+            LargeValueUpdateSplice::text(0, 6 * 15_000, ""),
+            LargeValueUpdateSplice::text(len - 6 * 15_000, 0, ""),
+            LargeValueUpdateSplice::text(0, 0, ""),
+        ],
+    )
+    .expect("boundaries at 0 and len");
+    // Delete spanning chunks whose end is inside a code point.
+    let error = update(
+        0..body(&db, 1).len(),
+        vec![LargeValueUpdateSplice::text(0, 6 * 9_000 + 3, "")],
+    )
+    .expect_err("end inside 😀");
+    assert!(
+        error.to_string().contains(jazz::db::NOT_CHAR_BOUNDARY),
+        "{error:?}"
     );
 }

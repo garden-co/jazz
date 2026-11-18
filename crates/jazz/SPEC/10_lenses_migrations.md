@@ -17,11 +17,11 @@ Invariant digest:
 - `INV-LENS-4`: Every stored content/register history row MUST carry a schema-version alias, and every wire `VersionRecord` MUST expose the full `SchemaVersionId`.
 - `INV-LENS-5`: Unknown-schema commit units MUST park without ingesting a transaction and MUST drain when the corresponding `SchemaVersion` catalogue value arrives.
 - `INV-LENS-6`: Unknown-schema shape registrations MUST park and MUST register only after the named schema-version catalogue value arrives.
-- `INV-LENS-7`: `CurrentWriteSchema` updates MUST be monotone by `revision`; stale revisions MUST leave `current_write_schema` unchanged.
-- `INV-LENS-8`: Durable catalogue schemas, lenses, current-write pointer, schema-version aliases, and physical mappings MUST survive node restart; installing an authority snapshot MUST preserve the node-local storage identity of an already-open schema so pre-snapshot local writes remain addressable.
+- `INV-LENS-7`: A deployment MUST NOT make any schema or permissions current, and a running store MUST NOT switch its current schema: a deployment admits its schemas and publishes a bundle, and a store's schema is installed when it opens (a legacy server store starts under the permissions revision it recorded; no new revision is written). Sessions write by the bundle they pin to.
+- `INV-LENS-8`: Durable catalogue schemas, lenses, the current schema, schema-version aliases, and physical mappings MUST survive node restart; installing an authority snapshot MUST preserve the node-local storage identity of an already-open schema so pre-snapshot local writes remain addressable.
 - `INV-LENS-9`: Publishing a non-genesis schema and its lineage-defining lens MUST durably stage the complete ordered bundle, keep it invisible while every physical table and schema variant is registered, then durably activate it before acknowledging or draining parked work; one activation batch MUST replace its durable pending obligation with the schema, lens, physical mapping, and active receipt; reopen MUST resume staged activation idempotently.
-- `INV-LENS-10`: New local writes MUST retain `current_write_schema.schema` as their schema discriminator and resolve storage through that schema's durable physical mapping.
-- `INV-LENS-11`: Incoming commit units MUST retain their authored schema discriminator and resolve storage through that schema's durable physical mapping, even when the current write pointer names another schema.
+- `INV-LENS-10`: New local writes MUST retain the store's current schema as their schema discriminator and resolve storage through that schema's durable physical mapping.
+- `INV-LENS-11`: Incoming commit units MUST retain their authored schema discriminator and resolve storage through that schema's durable physical mapping, even when the store's current schema is another one.
 - `INV-LENS-12`: Natural lens reads MUST select winners from the shared physical lineage before projecting rows into the requested schema.
 - `INV-LENS-13`: Natural lens projection MUST apply supported operations deterministically in both directions and MUST reject unsupported transformations.
 - `INV-LENS-14`: For every non-rejected natural lens delta sequence, translating then applying MUST equal applying then translating for all known schema materializations.
@@ -32,7 +32,7 @@ Invariant digest:
 - `INV-LENS-20`: Published physical lineages and authored schema variants MUST NOT be automatically garbage-collected.
 - `INV-LENS-21`: A compatible table rename MUST retain its `PhysicalTableId`; deletion history and combined-current state therefore continue under that id without copying, rewriting, or rescanning unrelated lineages.
 - `INV-LENS-23`: A store MUST be reopened only by the storage format it was written in (`_jazz_format`); another format, an unstamped or damaged file, or a pre-SQLite store MUST be refused with a typed error, the file left unchanged.
-- `INV-LENS-25`: The deploy catalogue MUST be the store's typed catalogue tables (§10.2), written in the same transaction as the admission and activation they describe. A change that fails leaves no rows; nothing is recovered from blobs or replayed on open; every permissions revision is kept.
+- `INV-LENS-25`: The deploy catalogue MUST be the store's typed catalogue tables (§10.2), written in the same transaction as the admission they describe. A change that fails leaves no rows; nothing is recovered from blobs or replayed on open; permissions revisions a store recorded before are kept and read.
 - `INV-LENS-22`: A content version's explicit authored-column presence MUST be stored only as a nullable, strictly increasing array of nonzero local `PhysicalColumnId`s; the exact authored schema/table mapping converts it to or from logical wire names, and malformed or unmapped ids MUST fail before any derived current row is persisted.
 - `INV-LENS-24`: A stored table or column name MUST never be reused for another logical column; only a compatible re-addition keeps its predecessor's identity (§10.7).
 
@@ -91,14 +91,13 @@ before it. Every revision is kept. A server's store has no revisions: its
 sessions are governed by the bundle they pin (SPEC 8), never by a current
 schema.
 
-`Db::apply_catalogue(CatalogueChange { put, admit, activate })` writes new
-definition rows, admits versions with their lenses and makes a write schema
-current at a revision in one savepoint: a change that fails leaves neither
-rows nor in-memory state behind. A server deploy computes that change from
+`Db::apply_catalogue(CatalogueChange { put, admit })` writes new
+definition rows and admits versions with their lenses in one savepoint: a
+change that fails leaves neither rows nor in-memory state behind. A change
+cannot make a schema current: there is no operation that does. A server deploy computes that change from
 the stored rows (`prepare_catalogue_change`) and applies it in one
 transaction, so a deploy is never half written. A deploy only puts and admits
-(the store's first version included); it never activates, and a server
-refuses a change that does (`INV-LENS-7`). Admitted versions are
+(the store's first version included); it never activates (`INV-LENS-7`). Admitted versions are
 immutable: a deploy that gives an admitted version a new incoming lens is
 refused and must publish a new convergent target instead. Lenses are needed
 only at admission, because the cells they produce are persisted in
@@ -216,9 +215,10 @@ earlier request. A separate `PublishLens` operation is the only way to add an
 agreeing cross-lens. Reusing a request id, sequence, or target for different
 canonical content fails before id allocation, registration, or durable mutation.
 
-`CurrentWriteSchema` is the single moving write pointer. Updates are monotone by
-`revision`, and a stale revision is acknowledged with `applied: false` without
-changing the pointer (`INV-LENS-7`).
+A store's current write schema is the one it was opened under (or, for a
+server, its genesis; sessions write by the bundle they pin). Core ships with
+its backend, so a new deployment's schema, permissions and migrations take
+effect when the store opens, never by a runtime switch (`INV-LENS-7`).
 
 A commit unit or shape registration that names an unknown schema version cannot
 be interpreted yet, so it **parks** as a catalogue orphan. The orphan drains
@@ -234,7 +234,7 @@ uses the caller schema to decode the unavailable unit, and a retransmit with
 the same `tx_id` but different canonical content fails as a conflicting commit
 unit.
 
-Current-pointer messages and child schema bundles whose dependencies are not
+Child schema bundles whose dependencies are not
 Active park durably across reopen. They retry after each activation, in
 catalogue order; a transient missing dependency is not a terminal rejection and
 never exposes the pointer early.
@@ -447,7 +447,7 @@ context; the serialized `author` field is provenance and cannot let a forged
 client self-declare `SYSTEM` authority.
 
 _Further invariants._ `INV-LENS-8` — durable catalogue schemas, lenses, the
-current-write pointer, aliases, and physical mappings survive node restart and
+current schema, aliases, and physical mappings survive node restart and
 are recovered before the full Groove database is constructed. Aliases are
 node-local, while physical UUID identities are global and immutable. When a
 client has already opened and written under a schema before receiving an
@@ -504,12 +504,12 @@ record. Commit units carry no union cells.
 
 ### 10.4 Writes: authored schema variants
 
-New local writes carry the schema selected by `current_write_schema` as their
+New local writes carry the store's current schema as their
 Groove discriminator and resolve their table and columns through that schema's
 durable physical mapping (`INV-LENS-10`).
 
 Incoming work retains the schema under which it was authored, regardless of the
-current write pointer (`INV-LENS-11`). Before ingest, Jazz verifies that every
+store's current schema (`INV-LENS-11`). Before ingest, Jazz verifies that every
 known authored schema has a local alias, physical mapping, and registered Groove
 descriptor variant. A schema-and-lineage bundle normally installs those facts
 atomically before the schema becomes Active; the ingest preflight also closes
@@ -676,7 +676,7 @@ schema version.
   one.
 - The app's lenses make the names agree. An app ships its schema versions
   and the lenses between them (`DbConfig::with_migrations`; the JSON a
-  deployment publishes, which `jazz-tools validate` and `deploy` write to
+  deployment publishes, which `jazz-tools generate` and `deploy` write to
   `migrations/index.ts` beside `schema.ts`, and which TypeScript apps pass
   to `defineApp`). A store opening, or viewing, a version it has not
   admitted first admits the versions on a lens path to it, starting at one
@@ -729,8 +729,7 @@ and no other store ever sees one.
   follows its file: a savepoint that rolls back puts back the tags it
   interned or renumbered.
 - **The current schema's order is tag order.** When a store makes a version
-  current (activation, or opening under a version newer than any it
-  admitted), it renumbers each of that version's enum columns so its
+  current (by opening under a version newer than any it admitted), it renumbers each of that version's enum columns so its
   declared variants are tags `0..n` in declaration order and every other
   name follows in its previous tag order, rewriting the column's cells in
   every row version in the same transaction. Appending a variant changes
@@ -785,33 +784,524 @@ as `now()` require a deterministic authority/origin rule before they can be
 accepted. Merge-strategy-only changes still change schema identity because they
 change future merge behavior.
 
-### Active schema and local schema
+### 10.10 The app's files (`jazz.app.json`, `jazz.permissions.json`)
 
-The authority's **active schema** selects one structural schema and one explicit
-permission bundle at a single monotone revision. Policy-only updates advance
-that revision without changing structural schema identity or creating migration
-lenses. Admitting structural schemas or lenses does not activate them. Activation
-requires an admitted migration path, traversing each lens in either direction.
-For example, `A → B` and `A → C` permit switching from B to C through A.
-An explicit empty permission bundle is a valid deny-all selection. The node's local API schema remains independent, so
-older clients retain their schema view across authority activations.
+An app is described by two readable JSON files beside its `schema.ts`:
 
-The server catalogue retains the existing permissions-bundle/head encodings and
-HTTP endpoints as compatibility boundaries. Internally they describe the active
-schema. Runtime activation persists its selection and authorization source in
-one batch before installing the new authorization view. Structural catalogue
-entries do not need to be rewritten with permissions on policy updates.
+- `jazz.app.json`: the app's tables, the relations between them, and its
+  schema history. The app and its clients ship it, in every language.
+- `jazz.permissions.json`: the current version's permissions. Only backends
+  read it, so no client bundle carries the app's policies.
 
-Opening a legacy store without an active-schema record recovers its selected
-schema and grants from the old write pointer and schema payload, then persists
-an active-schema record at revision zero. The old independent write counter is
-not an authority revision. Server startup installs the durable administrative
-selection before serving traffic. Reopening the upgraded store preserves its
-active revision; snapshots have no legacy revision exception. Standalone schema
-publications cannot replace grants, and standalone write pointers cannot change
-the active selection. Interoperation with old running nodes is not supported.
-The existing snapshot wire layout is retained: the active authorization source
-is projected into its schema payload at serialization and extracted on receipt.
+The files are meant to be read by people and agents. From alpha.66 they are
+never authored: TypeScript is the only source, and they are generated from
+it (see **Generated files** below; in alpha.65 they were the source). In
+stage 1 (alpha.63) they are an IR: `jazz-tools generate` and
+`jazz-tools migrations create` compile the TS DSL (`schema.ts`,
+`permissions.ts`, `migrations/*.ts`) to them through the Rust writer
+(`jazz::tools::deployment::artifact::write`), and `validate --check` fails
+when the committed files differ from that output. TS apps keep running from
+their TS. Other languages read the files with `artifact::load` (backends,
+both files) and `artifact::load_client` (clients, `jazz.app.json` alone).
+Neither file carries a schema hash or bundle id: loaders compute them.
+
+**Conventions.**
+
+- Plain JSON. Unknown keys are refused at every level, except `$comment`
+  (a string, allowed in every object) and a top-level `$generated` (see
+  **Generated files** below: ignored on load, but its shape is checked).
+  Repeated keys are refused.
+- **Versioning.** A required top-level `$schema` names the file's JSON Schema
+  and so its version: `https://jazz.tools/schemas/jazz.app.v1.json`, resp.
+  `https://jazz.tools/schemas/jazz.permissions.v1.json`. The writer puts it
+  first; the reader reads it first, so a file from a newer Jazz
+  (`….v2.json`) is refused as such ("written by a newer Jazz") rather than
+  for fields this version doesn't know. A file without `$schema` is refused
+  with a hint to run `jazz-tools generate`; any other URL is refused.
+  There is no `format` field.
+- **Legacy files.** Jazz before alpha.66 wrote `"format": 1` and the unversioned
+  `https://jazz.tools/schemas/jazz.app.schema.json`, resp.
+  `jazz.permissions.schema.json`. A file carrying `"format": 1` and/or the
+  unversioned URL still loads, as version 1 (another `format` is refused like
+  an unknown version). Any `$schema` next to `"format": 1` is accepted: it
+  was only an editor hint then. `jazz-tools upgrade` writes the versioned
+  form; tools that write the files whole write it too. Both unversioned JSON
+  Schemas stay published for editors.
+- Column and table names are identifiers: `[A-Za-z_][A-Za-z0-9_]*`.
+- Object key order is significant only for `columns` (declared order, which
+  the schema hash covers) and `history` (oldest first). The writer lists
+  tables by name.
+- Tool-written text is canonical: two-space indent, keys in the order this
+  section lists them, a value on one line when its line fits in 100
+  characters and expanded otherwise, and a trailing newline. Writing the same
+  app twice gives the same bytes.
+
+**Generated files.** When TypeScript is an app's source, `npx jazz-tools
+generate` writes both files from it, and marks each with a top-level
+`$generated`, first after `$schema`:
+
+```json
+"$generated": {
+  "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+  "sha256": "3fa1c2d9…"
+}
+```
+
+- `by` is a string for people reading the file: what wrote it.
+- `sha256` is 64 lowercase hex characters: the SHA-256 of the file's
+  canonical text (the conventions above, as the writer prints it: two-space
+  indent, one line when it fits in 100 characters, a trailing newline,
+  UTF-8, no BOM) of the file's parsed JSON with the `$generated` member
+  removed, the other members in the order the file has them. For a file the
+  writer wrote, that is exactly the text it produces without the marker
+  (`artifact::write`), so the digest covers the bytes that are tool-written.
+- No other key is allowed in it. Loaders ignore it, but refuse a malformed
+  one (not an object, a missing or non-string `by`, a `sha256` that isn't 64
+  lowercase hex characters, another key).
+- `artifact::verify_generated(text)` tells a file with no marker
+  (`Unmarked`), one whose digest matches (`Matches`, unchanged since it was
+  written, give or take formatting: indent, line ends, a BOM) and one whose
+  digest doesn't (`Mismatch`, edited by hand since), so tools can refuse to
+  overwrite a hand edit. `artifact::write_generated(input, by)` writes the
+  files with the marker, `artifact::mark_generated(text, by)` marks one
+  text, and `artifact::rewrite(app, permissions, by?)` checks two readable
+  files as `load` does and re-renders them through the writer (keeping
+  migration `name`s; dropping `$comment`s), with the marker when asked.
+- Only `npx jazz-tools generate` and `npx jazz-tools migrations create`
+  write an app's files, bindings and migrations, and only from `schema.ts`
+  (in the app's directory, `src/` or `src/lib/`). An app with
+  `jazz.app.json` but no `schema.ts` is refused by both, with a pointer to
+  `npx jazz-tools upgrade` (which writes `schema.ts` from the files,
+  keeping the schema hashes and bundle id): editing the JSON is not
+  a second authoring path. The standalone `jazz-tools` binary can't read
+  TypeScript, so it never writes: its `generate` and `migrations create`
+  refuse, pointing to `npx jazz-tools …` (or, without `schema.ts`, to
+  `upgrade` as above), while `generate --check` (for CI gates) checks the
+  committed files, their `$generated` digests (when present) and the
+  bindings, and, for an app with `schema.ts`, notes that freshness from the
+  TypeScript is `npx jazz-tools generate --check`'s to check.
+
+#### `jazz.app.json`
+
+| Field        | Type                  | Meaning                                                                |
+| ------------ | --------------------- | ---------------------------------------------------------------------- |
+| `$schema`    | string                | `https://jazz.tools/schemas/jazz.app.v1.json`, read first.             |
+| `tables`     | map name → Table      | The current schema: the version the app's code is written against.     |
+| `history`    | map version → Version | Optional. Earlier versions the app still ships, by name, oldest first. |
+| `migrations` | array of Migration    | Optional. Lenses between versions.                                     |
+| `transforms` | map name → Transform  | Optional. Transforms columns name, implemented in every language.      |
+
+**Table** `{columns, relations?, indexes?, branchBy?, history?, computed?}`:
+
+- `columns`: map name → Column, in declared order.
+- `relations`: map name → Relation, separate from columns, as in the DSL:
+  - `{"rel": "<table>", "column": "<column>"}`: this table's `column` holds
+    the id of a row of `table` (`s.rel`). The column is a reference to it.
+  - `{"reverse": "<table>", "relation": "<name>"}`: rows of `table` whose
+    forward relation `name` points here (`s.reverse`).
+- `indexes`: array; a name is a single-column index, an array of names a
+  composite index (`compositeIndex`, which may name `$createdAt` and
+  `$updatedAt`). When any single names are listed, only those columns get
+  single-column indexes (`indexOnly`); otherwise every column does.
+- `branchBy`: array of column names.
+- `history`: `"latest"` keeps only each row's newest version; absent keeps
+  full history.
+- `computed`: map name → `{"type": <Column type>, "from": [<column>, …]}`,
+  fields computed in code from the listed stored columns of the same table
+  (or `id`), in the order the implementation takes them; not stored, so the
+  engine schema and its hash don't include them. `type` is a column type
+  with an optional `?` and no options. A name may not be a column, a
+  relation, `id` or another computed field, and `from` names only stored
+  columns. Every language's bindings require an implementation of each
+  (in TS, `jazz.computed.ts`; a missing one is a compile error).
+
+**Column** is a type string, or an object when it needs options.
+
+- Type strings: `string`, `int`, `bigint`, `float`, `boolean`, `timestamp`,
+  `uuid`, `bytes`; a trailing `?` makes the column optional (`"string?"`).
+- Objects carry one type key and options:
+  - `{"type": "<scalar>"}`;
+  - `{"enum": ["todo", "done"]}` (an object of cases with fields is
+    refused: Jazz has no such columns, see jazz#5758);
+  - `{"json": <JSON Schema>}` or `{"json": true}` for any JSON;
+  - `{"array": <Column type>}`.
+  - Options: `"optional": true`, `"default": <Value>`,
+    `"merge": "counter" | "g-set" | "text" | "markdown" | "html"`, and
+    `"references": "<table>"` for a column that references a table no
+    forward relation names (a forward relation's column references its
+    table without it; history versions, which carry no relations, use it),
+    and `"transform": "<name>"` for a column whose stored value goes
+    through a transform of the top-level `transforms` (whose `stored` type
+    must be the column's type).
+- Values are JSON in the column's type: strings for `string`, enums and
+  `uuid`, numbers for `int`/`float`, a decimal string for `bigint`, the
+  engine's integer for `timestamp`, milliseconds since the Unix epoch (an ISO
+  8601 form is not supported yet),
+  base64 for `bytes`, any JSON for `json`, arrays for `array`, and `null`.
+
+**Transform** `{stored, view}`: two column types without `?` or options.
+The engine stores `stored`; code reads and writes `view`, converting with
+the transform every language implements (in TS, `jazz.computed.ts`). The
+column naming it says whether it is optional. A transform is a pure
+function of its one column: one that reads other columns (the .63 DSL's
+`dependsOn`) is not supported. Permissions can't reference computed or
+transformed values: they see the stored columns.
+
+**Version** `{tables, $comment?}`: an earlier schema in the same Table form
+(without relations, computed fields or transforms). The writer names a version by its short schema hash,
+the first 12 hex characters (`3fa1c2d9e0b4`), as snapshot names end; a
+hand-written file may use any name.
+
+**Migration** `{name?, from, to?, createTables?, dropTables?, renameTables?, migrate?}`,
+the readable form of `defineMigration`:
+
+- `name`: what `migrations create --name` recorded; the engine ignores it.
+- `from`, `to`: version names; `to` absent means the current `tables`.
+- `createTables` / `dropTables`: arrays of table names.
+- `renameTables`: map new name → old name.
+- `migrate`: map table → column → op:
+  - `{"add": <Column type>, "default": <Value>}` (`m.add.*`); the type
+    carries no `?`, as a lens carries no nullability, and a missing
+    `default` is `null`;
+  - `{"drop": <Column type>, "backwardsDefault": <Value>}` (`m.drop.*`);
+  - `{"renameFrom": "<old>"}` (`m.renameFrom`).
+
+Every migration must pass the lens checks a deployment runs (§10.6).
+
+**TODOs.** A string starting with `TODO:` where the tools write
+placeholders (any value in `migrations`, a computed field's `type`, a
+transform's `stored` or `view`, or the `json` of such a type) is a
+decision `jazz-tools migrations create` or `jazz-tools upgrade` left to the
+author. Every loader refuses a file that has one, listing each by JSON path
+and text, so a half-written migration never deploys. Elsewhere (a column
+default, an enum variant, a JSON Schema's text, a `$comment`) `TODO:` is
+plain text.
+
+**Every version leads to the current one.** Each `history` version must be
+connected to the current `tables` by a chain of migrations (lenses run both
+ways). A version that isn't, but whose rows pass unchanged to a later one
+(the same tables and columns, by name, of the same type and optionality;
+an enum may gain variants at the end), is joined to the next such version
+by the identity step that change implies, as files written before alpha.65
+hold them (their `migrations create` wrote no migration for an index,
+merge-strategy or column-order change). Any other loads with a warning
+(such files are what `jazz-tools validate` wrote before alpha.65 while a
+migration was still to be written), and `generate` refuses it, since
+bindings must not ship a version clients couldn't open; `migrations create`
+writes the migration that connects it.
+
+**Relation names.** A relation may not take the name of a column of its
+table, nor `id`, as the TS DSL refused.
+
+**Indexes** name stored columns of their table (a composite index also
+`$createdAt` and `$updatedAt`); a computed field isn't stored, so it can't
+be indexed.
+
+**References.** A migration may not move a kept column's reference to
+another table: its values name rows of the old one (add a new column and
+drop this one later). A reference to a table the same migration renames
+follows it.
+
+**Files from alpha.63.** A file's `slices` (schema slicing is gone in
+alpha.65) and a table's `tsOnly` load with a warning that they are ignored.
+`jazz-tools upgrade` removes `slices`; the fields `tsOnly` held are declared
+in `schema.ts` with `s.computed(…)` or `.transform(…)`.
+
+#### `jazz.permissions.json`
+
+| Field     | Type                      | Meaning                                                       |
+| --------- | ------------------------- | ------------------------------------------------------------- |
+| `$schema` | string                    | `https://jazz.tools/schemas/jazz.permissions.v1.json`, first. |
+| `tables`  | map table → TablePolicies | Every key must be a table of `jazz.app.json`'s `tables`.      |
+
+**TablePolicies** `{read?, insert?, update?, delete?}`. An absent operation
+is denied, as today.
+
+- `read`, `insert`, `delete`: a Policy. A policy with both sides (a read
+  or delete with a check, an insert with `using`), which the DSL doesn't
+  write but the engine can hold, is `{"using": Policy, "withCheck": Policy}`.
+- `update`: a Policy (the same check before and after), or
+  `{"old": Policy, "new": Policy}` (`whereOld` / `whereNew`).
+
+**Policy**, where a policy can appear:
+
+- an expression string (the grammar below);
+- `{"anyOf": [Policy, …]}` or `{"allOf": [Policy, …]}` (non-empty);
+- `{"$comment": "…", "where": Policy}`, a commented policy.
+
+There is no other form: every policy the engine holds has an expression
+string, so every policy a TS app can declare round-trips through this file
+as text.
+
+There are no named definitions: a policy says everything it checks. A
+`defs` key, which files written by hand for alpha.63–65 could hold, is
+refused with a hint to inline each definition or author the app in
+`schema.ts` (`jazz-tools upgrade` does both for an alpha.65 app).
+
+**Expressions.** SQL-like, with JSON's double quotes left to the file:
+string literals use single quotes, and a name that isn't a plain identifier
+(or is a keyword) is quoted with backticks, `` `order` ``.
+
+```ebnf
+expr        = disjunction ;
+disjunction = conjunction , { "or" , conjunction } ;
+conjunction = negation , { "and" , negation } ;
+negation    = "not" , negation | atom ;
+atom        = "(" , expr , ")" | "true" | "false"
+            | ( "anyOf" | "allOf" ) , "(" , [ expr , { "," , expr } ] , ")"
+            | exists | allowed | comparison ;
+
+comparison  = operand , ( cmp_op , operand
+                        | "in" , ( list | session )
+                        | "contains" , operand ) ;
+cmp_op      = "=" | "!=" | "<" | "<=" | ">" | ">=" ;
+operand     = column | value ;
+column      = [ ( "this" | "outer" | name ) , "." ] , ( name | magic ) ;
+magic       = ( "$createdBy" | "$updatedBy" | "$deletedBy" ) , [ "." , ( "account" | "identity" ) ]
+            | "$createdAt" | "$updatedAt" | "$deletedAt" ;
+value       = literal | "null" | session ;
+session     = "session" , "." , name , { "." , name } ;
+list        = "[" , [ value , { "," , value } ] , "]" ;
+
+literal     = string | number | "true" | "false" | typed ;
+typed       = "literal" , "(" , ( string | number | "true" | "false" | "null" ) , ")"
+            | ( "int" | "bigint" | "timestamp" ) , "(" , number , ")"
+            | "double" , "(" , ( number | string ) , ")"   (* 'NaN', 'inf', '-inf' *)
+            | ( "text" | "uuid" | "bytes" | "txid" ) , "(" , string , ")"
+            | "bool" , "(" , ( "true" | "false" ) , ")"
+            | "array" , "(" , [ typed_arg , { "," , typed_arg } ] , ")"
+            | "row" , "(" , ( "uuid" , "(" , string , ")" | "null" ) , { "," , typed_arg } , ")" ;
+typed_arg   = typed | "null" ;
+
+exists      = "exists" , source , [ "as" , name ] , "(" , [ conditions ] , ")" ,
+              { "." , name , "(" , [ conditions ] , ")" }
+            | "exists" , "(" , query , ")" ;
+source      = name ;
+conditions  = expr , { "," , expr } ;
+allowed     = "allowedTo." , ( "read" | "insert" | "update" | "delete" ) , "(" ,
+              ( name | "via" , [ name , "." ] , name ) ,
+              [ "," , "maxDepth" , ":" , integer ] , ")" ;
+
+(* The relation IR, inside `exists ( … )`. *)
+query       = "from" , from_source , { clause } ;
+from_source = name , [ "as" , name ] | "(" , query , ")" | union | recursive ;
+clause      = [ "left" ] , "join" , from_source ,
+                [ "on" , colref , "=" , colref , { "and" , colref , "=" , colref } ]
+            | "where" , predicate
+            | "select" , ( key , "as" , name , { "," , key , "as" , name } | "(" , ")" )
+            | "distinct" , "on" , "(" , [ key , { "," , key } ] , ")"
+            | "order" , "by" , ( colref , [ "asc" | "desc" ] ,
+                                 { "," , colref , [ "asc" | "desc" ] } | "(" , ")" )
+            | "limit" , integer | "offset" , integer ;
+union       = "union" , "(" , [ name , ":" , query , { "," , name , ":" , query } ] , ")" ;
+recursive   = "recursive" , "(" , "seed" , ":" , query , "," , "step" , ":" , query , "," ,
+              "frontier" , ":" , key , "," , "dedupe" , ":" , "(" , [ key , { "," , key } ] , ")" ,
+              "," , "maxDepth" , ":" , ( integer | "fixpoint" ) , ")" ;
+key         = colref | "id" , "(" , ( "row" | "outer" | "frontier" ) , ")" ;
+colref      = [ name , "." ] , name ;
+
+predicate   = p_or ;
+p_or        = p_and , { "or" , p_and } ;
+p_and       = p_not , { "and" , p_not } ;
+p_not       = "not" , p_not | p_atom ;
+p_atom      = "(" , predicate , ")" | "true" | "false"
+            | ( "anyOf" | "allOf" ) , "(" , [ predicate , { "," , predicate } ] , ")"
+            | colref , ( cmp_op , value_ref | "=" , "null" | "!=" , "null"
+                       | "in" , "[" , [ value_ref , { "," , value_ref } ] , "]"
+                       | "contains" , value_ref
+                       | "is" , name , "(" , predicate , ")" ) ;
+value_ref   = r_literal | session | "param" , "." , name
+            | ( "outer" | "frontier" ) , "." , colref
+            | "id" , "(" , ( "row" | "outer" | "frontier" ) , ")" ;
+r_literal   = string | number | "true" | "false" | typed | "json" , "(" , string , ")" ;
+
+name        = ident | "`" , { char - "`" | "``" } , "`" ;
+ident       = letter , { letter | digit | "_" } ;
+string      = "'" , { char - "'" | "''" } , "'" ;
+number      = [ "-" ] , digit , { digit } , [ "." , digit , { digit } ] ;
+```
+
+Meaning:
+
+- **Scopes.** At the top of a policy, a bare column (or `this.col`, or
+  `<table>.col`) names a column of the row being checked. Inside
+  `exists t(…)` (or `exists t as a(…)`), a bare column (or `a.col`) names a
+  column of `t`, and the checked row is a value: `this.col`, `outer.col` or
+  `<table>.col`. In an `exists` inside another `exists`, a condition names
+  only its own row's columns: the engine refuses an outer-row reference
+  there, and the TS DSL never builds one. The writer refuses such a policy
+  with the engine's message ("not supported in policies yet: an `exists`
+  inside another `exists` can't refer to the checked row's columns"),
+  naming its JSON path, as it refuses an outer-row reference outside any
+  `exists`. `session.__jazz_outer_row…` is not a session value: the reader
+  refuses it.
+- **Session values.** `session.user` (the account: `$createdBy =
+session.user` matches rows written through any identity linked to it),
+  `session.identity` (the exact login: `$createdBy.identity =
+session.identity` matches only rows it wrote), `session.claims.<path>`,
+  `session.identity.subject`, `session.identity.issuer` and
+  `session.authMode`; any other path is refused as a typo.
+- **Comparisons.** A comparison compares a column with a value, a column
+  with another column (`ownerId = authorId` inside one table is refused, as
+  the engine has no such policy; a column of the enclosing row is a value:
+  `id = this.chatId`), or a session claim with a literal. `col = null` and
+  `col != null` test for null (`not col = null` is the engine's
+  `Not(IsNull)`, kept apart from `col != null`), and `col = literal(null)`
+  compares with a null value. `col in [v, …]` and `col in session.claims.teams`
+  test membership; `col contains v` tests text or an array column.
+- **Literals.** A plain literal takes the type of the column it is compared
+  with; one that can't (e.g. `'x'` for an `int`, a non-UUID for a `uuid`) is
+  refused. Compared with a session claim, `'…'` is text, `1` an int, `1.5` a
+  float. A typed literal (`int(5)`, `text('5')`, `uuid('…')`,
+  `timestamp(1700000000000)`, `bytes('0aff')`, `array(int(1), int(2))`,
+  `row(null, text('a'))`) is exactly that
+  value, whatever it is compared with; the writer uses one only where a plain
+  literal would read back as another value.
+- **`exists`.** `exists t(c₁, c₂, …)` holds when some row of `t` satisfies
+  every condition (the engine's `Exists`; one condition is that condition, no
+  conditions is `true`, and `allOf(c)` keeps a one-item `And`).
+  `exists t(…).rel(…)` hops along `t`'s relation `rel` to the rows it leads to,
+  filtered by that hop's conditions (`hopTo`); it is the relation
+  `from t join <target> as __hop_0 on … where … select __hop_0.id as id`
+  TS builds, and the writer prints a relation of exactly that shape in this
+  form, so the `__hop_<i>` names never appear in a file TS wrote. A hop's conditions
+  compare its table's columns with values and with the checked row's
+  (`this.col`).
+  `exists ( query )` is any relation (`ExistsRel`).
+- **Relations.** A query reads like SQL, each clause wrapping what comes
+  before it in order: `from t as a` is `TableScan`, `join` and `left join` are
+  `Join` (an absent `on` joins every pair), `where` is `Filter`, `select` is
+  `Project`, `distinct on` is `Distinct`, `order by` is `OrderBy` (`asc` is
+  the default), `limit`/`offset` are `Limit`/`Offset`, `union(label: q, …)` is
+  `Union` and `recursive(seed: …, step: …, frontier: …, dedupe: (…), maxDepth:
+n | fixpoint)` is `Gather`. In a predicate, a column is `scope.col` or
+  `col`; `outer.col` and `frontier.col` are the outer and frontier rows'
+  columns, `id(row)`, `id(outer)` and `id(frontier)` their row ids,
+  `param.name` a query parameter, `session.…` a session value, and
+  `json('…')` a literal JSON value the relation IR holds as is.
+- **Inheritance.** `allowedTo.op(rel)` holds when the row relation `rel`
+  leads to allows `op`. `allowedTo.op(via col)` names the forward column
+  itself and `allowedTo.op(via t.col)` the rows of `t` pointing here, for a
+  link no relation names. `maxDepth` bounds recursive chains of forward
+  relations; a reverse relation (or `via t.col`) takes none, as the TS DSL
+  refused one: the engine checks every row pointing here and refuses
+  reverse inheritance cycles when it compiles the schema, so a bound would
+  be dropped rather than applied. A recursive relation's `maxDepth` is at
+  most 64.
+  `allowedTo` is a rule's own check: it is not supported inside an
+  `exists` yet (its conditions, a hop's, or a relation's predicate), since
+  the engine checks inheritance only on the row a rule is for. The reader
+  refuses it there ("`allowedTo.op(…)` inside `exists` is not supported
+  yet"), naming the rule and pointing at the `allowedTo`; the TS DSL's
+  types and builder refuse it too. Repeat the other table's rule inside
+  the `exists` instead. Nor is `allowedTo` supported under `not` (through
+  `anyOf` / `allOf` / `not`), since the engine checks inheritance only as
+  a grant: the reader refuses it with "`not allowedTo.op(…)` is not
+  supported yet", the same way.
+- `anyOf(…)` and `allOf(…)` inside an expression are `Or`/`And` of any
+  number of items; the writer uses them only for fewer than two.
+- Nesting deeper than 64 levels is refused.
+- `and` binds tighter than `or`; `not` tighter than both. The writer adds
+  parentheses wherever a nested `and`/`or` must stay its own node.
+
+Policies map one to one onto the engine's PolicyExpr (§7): comparisons to
+`Cmp`/`SessionCmp`/`IsNull`/`IsNotNull`/`In`/`InList`/`SessionInList`/
+`Contains`/`SessionContains`, `exists` to `Exists`/`ExistsRel`, `allowedTo` to
+`Inherits`/`InheritsReferencing`, `anyOf`/`or` to `Or`, `allOf`/`and` and
+condition lists to `And`, `not` to `Not`. The checked row inside `exists`
+(`this.col`, `c.col`, `outer.col`) is the session path
+`["__jazz_outer_row", col]` the TS DSL compiles it to. The writer prints top-level `Or`/`And` as `anyOf`/`allOf`
+objects and every other policy as one string: the shortest spelling that
+reads back as exactly the same policy, and otherwise the explicit spelling
+(typed literals, `literal(null)`, `exists ( from … )`, `via`), which always
+does.
+No policy is refused for its shape: only what a deployment would refuse.
+
+**Errors.** Every refusal names the file, the JSON path and, inside an
+expression, the exact span, with a suggestion and a correct example:
+
+```text
+jazz.permissions.json: tables.chatMembers.read.anyOf[1]:
+  exists chatMembers(chatId = this.chatId, userID = session.user)
+                                           ^^^^^^
+  unknown column `userID` in chatMembers; did you mean `userId`?
+  Grammar: https://jazz.tools/docs/reference/app-files#expressions
+```
+
+Names are suggested by edit distance among the columns, tables, relations,
+operations or keys in scope; syntax errors (`==`, `"…"` strings, a
+missing `and`) add a correct example (`e.g. …`).
+
+**Loading.** `artifact::load(app, permissions)` checks both files: every
+reference resolves, every policy compiles against the current schema as a
+deployment compiles it, every migration passes its lens checks. It computes
+each schema hash and the bundle id. `artifact::load_client(app)` checks the
+schemas and migrations alone. `write` runs the same checks, so it never
+emits files `load` would refuse, and it reads its output back: if the files
+don't reproduce the engine input exactly (schema hashes, lenses,
+permissions), it refuses with "not supported … yet" rather than write files
+that would publish something else.
+
+**Bindings.** Every language opens the same files (alpha.65 made them the
+app's source in every language; from alpha.66 they are generated from
+`schema.ts`). `crates/jazz-codegen` generates typed bindings from
+`jazz.app.json` (`jazz.generated.ts` in TS), which apps commit. They embed
+the file's `source`, `sha256:` and the hex SHA-256 of its canonical text
+(the parsed file printed canonically, so reformatting the file leaves it
+alone; `artifact::source_hash`), and the compiled app a runtime opens
+along: `{current, schemas: [{hash, schema}], migrations}`, the bundle
+`load_client` lowers, so no runtime parses the readable file. Their second
+line names the bindings format. Bindings are stale when their `source` or
+format differs; reformatting them doesn't make them stale, and bindings
+that can't be read are regenerated (`--check` refuses them). A backend with
+only the bindings loads its permissions against their compiled app
+(`artifact::load_backend`), with every check `load` runs.
+
+The bindings also record the version the app last generated against, which
+is how `jazz-tools generate` tells edits apart: when the file's versions
+don't include the bindings' current schema, `tables` changed without a
+migration, and generate refuses
+("the schema changed since the last version: run `jazz-tools migrations
+create --name <name>`") before it overwrites the only copy of that version.
+`migrations create` moves that version into `history` under its short hash
+and appends a migration (`name`, `from`, and the steps the diff decides:
+tables created, dropped or renamed when a removed table is identical to
+exactly one added one; columns added with their default or `null`, dropped
+with theirs; enums gaining variants at the end need no step). What only the
+author can decide is a `TODO:` string: a required column's value for
+existing rows, an added column shaped like a removed one (a rename, or an
+add and a drop), or a table change no step describes. A kept column's
+type or optionality can't change in place and is refused with the
+supported alternative.
+
+Fixtures: `crates/jazz/fixtures/app-artifact/`; generated bindings:
+`crates/jazz-codegen/tests/apps/`.
+
+### Current schema and local schema
+
+A store's current schema is installed when it opens; nothing switches it while
+it runs. Core is deployed together with its backend: a deployment's schemas,
+lenses and permission bundle ship with the binary, are admitted at startup
+(`prepare_catalogue_change`), and sessions write by the bundle they pin. No
+production path (deploy, HTTP or admin endpoint, sync) activates a schema,
+bumps a revision or switches policies at runtime.
+
+Opening under a version newer than any the store admitted installs it: along
+the app's lenses when they lead to it (all or nothing), else named against the
+latest admitted version. Either way its declaration order becomes tag order
+(§10.8), and a version that drops a branch column of the one it follows is
+refused. Opening under an older admitted version (an older client, a server
+under its genesis) installs nothing.
+
+Admitting a schema never makes it current, and older clients keep their own
+local schema view: a client reads and writes by its version's names through
+the lenses (§10.5), whatever schema the backend opened under.
+
+Legacy stores remain readable. `_jazz_permissions` and its `activated_seq` and
+`read_digest` columns keep their layout; a server whose store holds a
+permissions revision from before this change starts under that revision's
+schema and policies, and a subscription resume still opens fresh when it began
+at or before the last recorded `activated_seq`. No new revision is activated.
 
 ## Open Questions
 
@@ -820,18 +1310,12 @@ is projected into its schema payload at serialization and extracted on receipt.
 ### Detailed issue context
 
 - **Binding-facing lens facade.** TS/WASM/NAPI should expose published
-  schemas, migration lenses, current-write-schema movement, and catalogue acks
+  schemas, migration lenses, and catalogue acks
   as stable facade operations rather than leaking branch-key storage details. The
   ABI should use opaque `SchemaVersionId`/`MigrationLensId` bytes plus structured
   validation errors and deterministic golden fixtures for natural lens behavior.
 - **Catalogue admin set.** `AuthorSubject::SYSTEM` is the catalogue admin; the
   implementation has no broader admin set.
-- **Policy pin movement validation.** Schema versions/lenses may be published
-  ahead of the permission-evaluation pin moving, but policy stays on the pinned
-  schema until the admin moves the pin — at which point the new current schema
-  must have a valid bundle, and a lens that drops a column referenced by the
-  active bundle is rejected at publish (same family as the
-  missing-backwards-default check).
 - **Explicit schema-version GC.** `INV-LENS-20` forbids automatic deletion of
   published physical lineages or authored variants. If explicit GC is ever added, what completeness,
   branch-key/history, lens, and audit evidence must authorize it?
@@ -841,10 +1325,8 @@ is projected into its schema payload at serialization and extracted on receipt.
   identities from multiple independently evolved parents, define an atomic
   multi-parent lineage proof rather than making arrival order authoritative.
 - **Catalogue sequence unification.** Schema-lineage activation requires an
-  authoritative database-wide monotone catalogue sequence. Current-write
-  pointers and later ordered catalogue mutations should enter the same sequence;
-  the remaining work is migrating the pointer API from its legacy independent
-  revision field to the common committed envelope.
+  authoritative database-wide monotone catalogue sequence; later ordered
+  catalogue mutations should enter the same sequence.
 - **`RenameTable` payload.** `RenameTable`'s payload is ignored in favor of
   `TableLens` source/target during evaluation. Decide whether the op should be
   removed or the redundant payload should be validated.

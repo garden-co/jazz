@@ -1,5 +1,5 @@
 // World Tour (Vue + Vite, local-first account): the first visitor of a fresh
-// sync server claims the demo band. First visit, reload, public link, invite
+// store claims the demo band. First visit, reload, public link, invite
 // link and join, invitee reload, live rename.
 import { device, mark, poll, random, visible } from "../harness.mjs";
 
@@ -19,18 +19,18 @@ export default function worldTour({ server, browser }) {
     devices.delete(d);
     await d?.close();
   };
-  /** The first visit after a fresh sync server: all 12 demo stops. */
+  /** The first visit to a fresh store: all 12 demo stops. */
   const claim = async (page) => {
     await page.goto(url);
     await visible(page.getByText("Your band."), { timeout: 90_000 });
     await visible(stop(page, 12), { ...attached, timeout: 60_000 });
   };
   let owner, invitee, stops, inviteLink, publicLink;
-  // The owner, links and invitee belong to one sync server; a cold visit
-  // replaces it, so they are made again on first use after one.
+  // The owner, links and invitee belong to one store; a cold visit replaces
+  // it, so they are made again on first use after one.
   const ensureOwner = async () => {
     if (owner) return;
-    await server.restartSync();
+    await server.restartStore();
     owner = await open();
     const { page } = owner;
     await claim(page);
@@ -58,7 +58,7 @@ export default function worldTour({ server, browser }) {
           await close(owner);
           await close(invitee);
           owner = invitee = undefined;
-          await server.restartSync();
+          await server.restartStore();
           return { d: await open() };
         },
         run: ({ d }) => claim(d.page),

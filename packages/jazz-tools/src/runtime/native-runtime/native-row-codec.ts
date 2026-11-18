@@ -1,5 +1,5 @@
 import { Utf8Decoder } from "../utf8.js";
-import { bytesToHex, formatUuidAt } from "../hex.js";
+import { bytesToHex, formatUuidAt, parseUuidBytes } from "../hex.js";
 import type { ColumnDescriptor, ColumnType, Value, WasmRow } from "../../drivers/types.js";
 import { exactSignedI64 } from "./exact-integer.js";
 import { concatBytes, isValidUtf8 } from "../util.js";
@@ -740,6 +740,13 @@ function encodeNativeNonNullValue(type: ColumnType, value: Value): Uint8Array {
       if (value.type !== "Timestamp" || !Number.isSafeInteger(value.value)) {
         throw new Error(`expected ${type.type} value`);
       }
+      // Stored as u64 Unix milliseconds, as Rust's `Value::Timestamp`: a
+      // pre-1970 date would wrap around to a far-future one (#5928).
+      if (value.value < 0) {
+        throw new Error(
+          `Timestamp value must be a non-negative safe integer (dates before 1970 are not supported), got ${value.value}`,
+        );
+      }
       const bytes = new Uint8Array(8);
       new DataView(bytes.buffer).setBigUint64(0, BigInt(value.value), true);
       return bytes;
@@ -761,16 +768,6 @@ function encodeNativeNonNullValue(type: ColumnType, value: Value): Uint8Array {
     case "Enum":
       if (value.type !== "Text") throw new Error(`expected ${type.type} value`);
       return concatBytes([Uint8Array.of(0), new TextEncoder().encode(value.value)]);
-    case "EnumPayload": {
-      if (value.type !== "Enum") throw new Error("expected Enum payload value");
-      const entry = type.cases.find((candidate) => candidate.name === value.value.case);
-      if (!entry || entry.fields.length !== value.value.values.length) {
-        throw new Error("invalid Enum payload case or width");
-      }
-      const name = new TextEncoder().encode(entry.name);
-      const payload = encodeNativeRowValue(entry.fields, { values: value.value.values });
-      return concatBytes([encodeU32Le(name.length), name, payload]);
-    }
     case "Uuid":
       if (value.type !== "Uuid") throw new Error("expected Uuid value");
       return parseUuid(value.value);
@@ -831,15 +828,13 @@ export function encodeU32Le(value: number): Uint8Array {
 }
 
 function parseUuid(value: string): Uint8Array {
-  const hex = value.replaceAll("-", "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) {
-    throw new Error(`invalid UUID value ${value}`);
-  }
-  return Uint8Array.from(hex.match(/../g)!.map((byte) => Number.parseInt(byte, 16)));
+  const bytes = parseUuidBytes(value);
+  if (!bytes) throw new Error(`invalid UUID value ${value}`);
+  return bytes;
 }
 
 export function storageColumnValueType(column: ColumnDescriptor): ValueType {
-  let valueType = storageColumnTypeToValueType(column.column_type, column.name);
+  let valueType = storageColumnTypeToValueType(column.column_type);
   if (column.nullable) valueType = { tag: 15, inner: valueType };
   return column.sparse ? { tag: 15, inner: valueType } : valueType;
 }
@@ -869,7 +864,7 @@ export function logicalStorageColumns(
   }));
 }
 
-export function storageColumnTypeToValueType(type: ColumnType, enumName = "enum"): ValueType {
+export function storageColumnTypeToValueType(type: ColumnType): ValueType {
   switch (type.type) {
     case "Boolean":
       return { tag: 7 };
@@ -885,26 +880,12 @@ export function storageColumnTypeToValueType(type: ColumnType, enumName = "enum"
     case "Json":
     case "Enum":
       return { tag: 8 };
-    case "EnumPayload":
-      return {
-        tag: 17,
-        enumSchema: {
-          name: enumName,
-          cases: type.cases.map((entry) => ({
-            name: entry.name,
-            payload: entry.fields.map((field) => ({
-              name: field.name,
-              valueType: storageColumnValueType(field),
-            })),
-          })),
-        },
-      };
     case "Bytea":
       return { tag: 9 };
     case "Uuid":
       return { tag: 11 };
     case "Array":
-      return { tag: 14, inner: storageColumnTypeToValueType(type.element, enumName) };
+      return { tag: 14, inner: storageColumnTypeToValueType(type.element) };
     case "Row":
       return { tag: 9 };
   }
@@ -927,21 +908,6 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
     case "Json":
     case "Enum":
       return { type: "Text", value: textDecoder.decode(decodeInlineScalar(bytes)) };
-    case "EnumPayload": {
-      if (bytes.length < 4) throw new Error("invalid Enum payload value");
-      const nameLength = view.getUint32(0, true);
-      if (bytes.length < 4 + nameLength) throw new Error("invalid Enum payload case");
-      const caseName = textDecoder.decode(bytes.subarray(4, 4 + nameLength));
-      const entry = type.cases.find((candidate) => candidate.name === caseName);
-      if (!entry) throw new Error("unknown Enum payload case");
-      return {
-        type: "Enum",
-        value: {
-          case: caseName,
-          values: decodeRowValue(entry.fields, bytes.subarray(4 + nameLength)).values,
-        },
-      };
-    }
     case "Uuid":
       return { type: "Uuid", value: formatUuid(bytes) };
     case "Bytea":

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PersistedWriteRejectedError } from "jazz-tools";
-import { useAll, useSession } from "jazz-tools/react";
+import { useAll, useJazzSession } from "jazz-tools/react";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
@@ -11,7 +11,7 @@ import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Heading } from "@astryxdesign/core/Heading";
 import { HStack } from "@astryxdesign/core/HStack";
 import { Spinner } from "@astryxdesign/core/Spinner";
-import { app, type Track } from "@/schema";
+import { app, type Track } from "@/jazz.generated";
 import { ROLE_LABELS, strongestRole } from "@/lib/roles";
 import { MAX_TRACKS } from "@/lib/instruments";
 import { addTrack, stepRow } from "@/lib/session-setup";
@@ -29,7 +29,7 @@ import { TransportBar } from "@/components/transport-bar";
 import { usePlayhead, useSequencerAudio } from "@/components/use-sequencer-audio";
 
 export function SessionPage({ sessionId }: { sessionId: string }) {
-  const author = useSession()?.user;
+  const author = useJazzSession().user?.accountId;
   const {
     data: sessions = [],
     isLoading,

@@ -1,4 +1,10 @@
 import { EXPECTED_NATIVE_ARTIFACT_FINGERPRINTS } from "./native-artifact-fingerprints.js";
+import { NativeArtifactMismatchError } from "./native-artifact-mismatch-error.js";
+
+export {
+  NATIVE_ARTIFACT_MISMATCH,
+  NativeArtifactMismatchError,
+} from "./native-artifact-mismatch-error.js";
 
 type NativeArtifactModule = {
   nativeArtifactFingerprint?: unknown;
@@ -17,22 +23,32 @@ export function assertNativeArtifactCompatibility(
 ): void {
   const expected = EXPECTED_NATIVE_ARTIFACT_FINGERPRINTS[kind.toLowerCase() as "napi" | "wasm"];
   if (typeof artifact.nativeArtifactFingerprint !== "function") {
-    throw new Error(
+    throw new NativeArtifactMismatchError(
       `Jazz ${kind} artifact is stale or incompatible: missing nativeArtifactFingerprint (expected ${expected}). ` +
         "In this monorepo rebuild generated bindings; for installed packages reinstall matching Jazz package versions.",
+      kind,
+      expected,
+      undefined,
     );
   }
   const actual = artifact.nativeArtifactFingerprint();
   if (actual !== expected) {
-    throw new Error(
+    throw new NativeArtifactMismatchError(
       `Jazz ${kind} artifact ABI mismatch: expected ${expected}, got ${String(actual)}. ` +
         "In this monorepo rebuild generated bindings; for installed packages reinstall matching Jazz package versions.",
+      kind,
+      expected,
+      String(actual),
     );
   }
   for (const name of requiredExports) {
     if (typeof (artifact as Record<string, unknown>)[name] !== "function")
-      throw new Error(
+      throw new NativeArtifactMismatchError(
         `Jazz ${kind} artifact is incomplete despite matching fingerprint: missing ${name}.`,
+        kind,
+        expected,
+        expected,
+        name,
       );
   }
 }

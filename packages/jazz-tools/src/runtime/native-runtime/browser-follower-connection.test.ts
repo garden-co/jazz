@@ -1,11 +1,27 @@
 import { describe, expect, it, vi } from "vitest";
+import { AuthorityChangedError, isAuthorityChangedError } from "../authority-changed-error.js";
 import { MessagePortBrowserFollowerConnection } from "./browser-follower-connection.js";
 import {
   BrowserWorkerUnresponsiveError,
   serializeBrowserRelayError,
   type BrowserFollowerPortEvent,
   type BrowserFollowerPortRequest,
+  type BrowserWorkerLinkFate,
 } from "./browser-worker-protocol.js";
+
+/** A worker link fate: connected and failure-free unless `parts` say otherwise. */
+function linkFate(parts: Partial<BrowserWorkerLinkFate>) {
+  return {
+    type: "link-fate" as const,
+    fate: {
+      state: "connected" as const,
+      link: { state: "connected" } as BrowserWorkerLinkFate["link"],
+      failure: null,
+      authFailure: null,
+      ...parts,
+    } satisfies BrowserWorkerLinkFate,
+  };
+}
 
 class TestPort {
   readonly close = vi.fn();
@@ -646,7 +662,9 @@ describe("MessagePortBrowserFollowerConnection", () => {
       stack:
         "WorkerTransportError: Protocol: terminal upstream failure\n    at worker-core.ts:700:9",
     });
-    port.emit({ type: "transport-error", error: serializeBrowserRelayError(failure) });
+    port.emit(
+      linkFate({ failure: { error: serializeBrowserRelayError(failure), retrying: false } }),
+    );
 
     expect(runtime.reportRemoteServerTransportError).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -666,11 +684,14 @@ describe("MessagePortBrowserFollowerConnection", () => {
     expect(port.close).not.toHaveBeenCalled();
 
     // An outage the worker keeps retrying reaches the tab as one (#3923).
-    port.emit({
-      type: "transport-error",
-      error: serializeBrowserRelayError(new Error("websocket closed")),
-      retrying: true,
-    });
+    port.emit(
+      linkFate({
+        failure: {
+          error: serializeBrowserRelayError(new Error("websocket closed")),
+          retrying: true,
+        },
+      }),
+    );
     expect(runtime.reportRemoteServerTransportError).toHaveBeenLastCalledWith(
       expect.objectContaining({ message: "websocket closed" }),
       true,
@@ -678,6 +699,108 @@ describe("MessagePortBrowserFollowerConnection", () => {
 
     connection.detachForReconnect();
   });
+  it("applies the worker's link fate alike at admission and later (#4808)", async () => {
+    const port = new TestPort();
+    const transport = {
+      recvWireFrames: () => [],
+      sendWireFrame: () => undefined,
+      tick: () => 0,
+    };
+    const runtime = {
+      connectUpstreamPeer: vi.fn(() => transport),
+      onPeerTransportWork: vi.fn(() => () => undefined),
+      onLocalSettlementChange: vi.fn(() => () => undefined),
+      progressPeerTransport: vi.fn(async () => undefined),
+      retirePeerTransport: vi.fn(async () => undefined),
+      clearRemoteServerTransportError: vi.fn(),
+      reportRemoteServerTransportError: vi.fn(),
+      reportRemoteMutationError: vi.fn(),
+    };
+    const onAuthFailure = vi.fn();
+    const onAuthRestored = vi.fn();
+    const onRemoteLinkChange = vi.fn();
+    const connection = new MessagePortBrowserFollowerConnection(
+      runtime as never,
+      port as unknown as MessagePort,
+      {},
+      null,
+      { onAuthFailure, onAuthRestored, onRemoteLinkChange, onFailure: vi.fn() },
+    );
+    const init = port.sent[0];
+    if (!init || init.type !== "init") throw new Error("follower did not initialize");
+
+    // A tab attaching to a worker whose upstream was already refused.
+    const refused = linkFate({
+      state: "unavailable",
+      link: { state: "offline", reason: "authority-changed", willRetry: false } as never,
+      failure: {
+        error: serializeBrowserRelayError(new AuthorityChangedError("store recreated")),
+        retrying: false,
+      },
+      authFailure: "expired",
+    });
+    port.emit(refused);
+    port.emit({ type: "result", id: init.id });
+    await connection.ready();
+    expect(runtime.reportRemoteServerTransportError).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ code: "authority_changed" }),
+      false,
+    );
+    expect(
+      isAuthorityChangedError(runtime.reportRemoteServerTransportError.mock.calls[0]![0]),
+    ).toBe(true);
+    expect(onAuthFailure).toHaveBeenCalledExactlyOnceWith("expired");
+    expect(onRemoteLinkChange).toHaveBeenLastCalledWith("unavailable", refused.fate.link);
+
+    // The same fate again changes nothing in the tab's runtime.
+    port.emit(refused);
+    expect(runtime.reportRemoteServerTransportError).toHaveBeenCalledOnce();
+    expect(onAuthFailure).toHaveBeenCalledOnce();
+
+    // The worker recovered: the error and the auth refusal both clear.
+    port.emit(linkFate({}));
+    expect(runtime.clearRemoteServerTransportError).toHaveBeenCalledOnce();
+    expect(onAuthRestored).toHaveBeenCalledOnce();
+    expect(onRemoteLinkChange).toHaveBeenLastCalledWith("connected", { state: "connected" });
+
+    connection.detachForReconnect();
+  });
+
+  it("clears an auth error a previous worker connection left when the new one has none", async () => {
+    const port = new TestPort();
+    const runtime = {
+      connectUpstreamPeer: vi.fn(() => ({
+        recvWireFrames: () => [],
+        sendWireFrame: () => undefined,
+        tick: () => 0,
+      })),
+      onPeerTransportWork: vi.fn(() => () => undefined),
+      onLocalSettlementChange: vi.fn(() => () => undefined),
+      progressPeerTransport: vi.fn(async () => undefined),
+      retirePeerTransport: vi.fn(async () => undefined),
+      clearRemoteServerTransportError: vi.fn(),
+      reportRemoteServerTransportError: vi.fn(),
+    };
+    const onAuthFailure = vi.fn();
+    const onAuthRestored = vi.fn();
+    const connection = new MessagePortBrowserFollowerConnection(
+      runtime as never,
+      port as unknown as MessagePort,
+      {},
+      null,
+      { onAuthFailure, onAuthRestored, onFailure: vi.fn() },
+    );
+    const init = port.sent[0];
+    if (!init || init.type !== "init") throw new Error("follower did not initialize");
+    port.emit(linkFate({}));
+    port.emit({ type: "result", id: init.id });
+    await connection.ready();
+    expect(onAuthRestored).toHaveBeenCalledOnce();
+    expect(onAuthFailure).not.toHaveBeenCalled();
+    expect(runtime.reportRemoteServerTransportError).not.toHaveBeenCalled();
+    connection.detachForReconnect();
+  });
+
   it("cancels a silent inspector control opening and protocol-closes its channel", async () => {
     const port = new TestPort();
     const transport = {
@@ -783,5 +906,59 @@ describe("MessagePortBrowserFollowerConnection", () => {
     await expect(opening).rejects.toThrow("reconnecting");
     await expect(closed).resolves.toEqual({ type: "close" });
     request.port.close();
+  });
+});
+
+describe("MessagePortBrowserFollowerConnection.leaveForPageCache", () => {
+  it("detaches an idle follower at once: a close that wants no reply, no failure", async () => {
+    const { connection, port, onFailure } = await createWatchdogFollower();
+    port.sent.length = 0;
+    expect(connection.leaveForPageCache()).toBe(true);
+    expect(port.sent).toEqual([{ type: "close", releaseContext: true }]);
+    expect(port.close).toHaveBeenCalledOnce();
+    expect(onFailure).not.toHaveBeenCalled();
+    await expect(connection.flushLocal()).rejects.toThrow("Browser follower connection is closed");
+    expect(connection.leaveForPageCache()).toBe(false);
+  });
+
+  it("declines while an operation waits on the worker, and keeps it", async () => {
+    const { connection, port } = await createWatchdogFollower();
+    port.sent.length = 0;
+    const waiting = connection.waitForServerConnection();
+    await vi.waitFor(() =>
+      expect(port.sent.map((message) => message.type)).toContain("wait-server"),
+    );
+    expect(connection.leaveForPageCache()).toBe(false);
+    expect(port.sent.map((message) => message.type)).not.toContain("close");
+    expect(port.close).not.toHaveBeenCalled();
+    const request = port.sent.find((message) => message.type === "wait-server");
+    port.emit({ type: "result", id: (request as { id: number }).id });
+    await waiting;
+    expect(connection.leaveForPageCache()).toBe(true);
+  });
+
+  it("declines while a write waits for the worker to settle it, and keeps it", async () => {
+    const { connection, port, setLocalSettlementsPending } = await createWatchdogFollower();
+    port.sent.length = 0;
+    setLocalSettlementsPending(true);
+    expect(connection.leaveForPageCache()).toBe(false);
+    expect(port.close).not.toHaveBeenCalled();
+    setLocalSettlementsPending(false);
+    expect(connection.leaveForPageCache()).toBe(true);
+  });
+
+  it("declines before the worker admitted it", () => {
+    const port = new TestPort();
+    const connection = new MessagePortBrowserFollowerConnection(
+      {
+        onLocalSettlementChange: () => () => undefined,
+      } as never,
+      port as unknown as MessagePort,
+      {},
+      null,
+      { onAuthFailure: vi.fn(), onAuthRestored: vi.fn(), onFailure: vi.fn() },
+    );
+    expect(connection.leaveForPageCache()).toBe(false);
+    expect(port.close).not.toHaveBeenCalled();
   });
 });

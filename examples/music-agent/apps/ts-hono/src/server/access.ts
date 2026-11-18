@@ -1,5 +1,5 @@
 import type { AccountAuthError, Db } from "jazz-tools";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { auth } from "@/src/lib/auth";
 import { backendJazzClient } from "@/src/lib/backend-jazz-client";
 

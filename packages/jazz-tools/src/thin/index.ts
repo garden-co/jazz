@@ -22,6 +22,7 @@ import type { WasmSchema } from "../drivers/types.js";
 
 export { ThinRuntimeSource } from "./thin-runtime-source.js";
 export {
+  ThinCommitOutcomeUnknownError,
   ThinConnectionLostError,
   ThinRequestNotSentError,
   ThinTransactionLostError,
@@ -87,7 +88,12 @@ export async function upgradeToLocalFirst(thin: Db, open: () => Promise<Db>): Pr
   // the server down, waiting for them would hold the upgrade until it is
   // back. Shutting `next` down ends the wait, and the thin runtime closes.
   runtime?.endUnsentReads();
-  next.onShutdown(() => thin.abortGracefulShutdown());
+  // A stream still sending its value finishes first, unless `next` shuts down.
+  const streams = thin.letStreamsFinish();
+  next.onShutdown(() => {
+    streams.abort();
+    thin.abortGracefulShutdown();
+  });
   void thin
     .shutdown({ waitForSync: true })
     .catch(() => thin.shutdown())
@@ -237,3 +243,6 @@ export function mintLocalFirstTokenInJs(secret: string, audience: string): strin
     nowSeconds: BigInt(Math.floor(Date.now() / 1000)),
   });
 }
+
+// Removed in alpha.61: stubs that throw, naming the replacement (one release).
+export { AccountManager, createAccountManager } from "../removed-api.js";

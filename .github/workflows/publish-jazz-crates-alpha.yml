@@ -1,39 +1,231 @@
 name: Publish Jazz crates alpha
 
+# Publishes Jazz's Rust crates to crates.io at the version npm just got, in
+# dependency order (dev/scripts/publish-crates.mjs). "Publish jazz-tools
+# alpha" dispatches it (mode=publish, tag=v<version>) once npm has the
+# release; it publishes that tag's commit. crates.io trusted publishing
+# refuses workflow_run, so this workflow is only ever dispatched.
+#
+# Auth, per crate (the script asks crates.io):
+# - a crate that exists on crates.io: trusted publishing (OIDC), bound to this
+#   workflow and the `publish` environment;
+# - a crate that doesn't exist yet: the `publish` environment's
+#   CRATES_IO_BOOTSTRAP_TOKEN secret, a short-lived publish-new token. Only
+#   the first publish of a new crate uses it; see dev/RELEASE_RUNBOOK.md.
+#
+# mode=dry-run (manual, e.g. on the rc) runs `cargo publish --dry-run` for
+# every crate, needs no credential and runs outside the `publish` environment.
+#
+# The filename is what the crates.io trusted publishers are bound to; keep it.
+# The publish job waits for the `publish` environment's required reviewer
+# however it was dispatched.
+
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "dry-run or publish"
+        description: "dry-run (cargo publish --dry-run, no credential, publishes nothing) or publish"
         required: true
         default: dry-run
         type: choice
         options:
           - dry-run
           - publish
+      tag:
+        description: "For mode=publish: the release tag (v2.0.0-alpha.N) to publish. A dry run uses the dispatched ref."
+        required: false
+        type: string
+
+concurrency:
+  group: publish-crates
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
-  publish-crates:
+  resolve:
+    name: Resolve release
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    permissions:
-      contents: read
+    # Up to 15 minutes waiting for npm to list the release.
+    timeout-minutes: 20
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      version: ${{ steps.resolve.outputs.version }}
+      crates: ${{ steps.resolve.outputs.crates }}
+      dry_run: ${{ steps.resolve.outputs.dry_run }}
+      publish: ${{ steps.resolve.outputs.publish }}
+    steps:
+      - id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DISPATCH_SHA: ${{ github.sha }}
+          DRY_RUN: ${{ inputs.mode == 'dry-run' }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          RC=false
+          if [ "${DRY_RUN}" = "true" ]; then
+            SHA="${DISPATCH_SHA}"
+          else
+            # A release candidate (v2.0.0-alpha.N.K-rc.M, named to sort
+            # below 2.0.0-alpha.N+1) is never on npm: its crates publish
+            # without waiting for jazz-tools there. Every other check holds.
+            if [[ "${TAG}" =~ ^v2\.0\.0-alpha\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
+              RC=true
+            elif ! [[ "${TAG}" =~ ^v2\.0\.0-alpha\.[0-9]+$ ]]; then
+              echo "::error::A real publish needs tag=v2.0.0-alpha.N (or v2.0.0-alpha.N.K-rc.M), got '${TAG}'."
+              exit 1
+            fi
+            SHA=$(gh api "repos/${REPO}/commits/${TAG}" --jq .sha)
+          fi
+          VERSION=$(gh api "repos/${REPO}/contents/packages/jazz-tools/package.json?ref=${SHA}" --jq .content | base64 -d | jq -r .version)
+          # Only a release commit whose crates are versioned with npm publishes
+          # crates. A release cut from an older branch, without the crates.io
+          # packaging (or with crates behind npm), publishes none.
+          # Only a missing file (HTTP 404) means "no packaging"; any other
+          # API error fails the run rather than skipping a release.
+          CRATES=false
+          if probe=$(gh api "repos/${REPO}/contents/dev/scripts/publish-crates.mjs?ref=${SHA}" --silent 2>&1); then
+            # awk reads to the end (no `exit`): closing the pipe early fails
+            # base64 with EPIPE under pipefail.
+            CRATE_VERSION=$(gh api "repos/${REPO}/contents/Cargo.toml?ref=${SHA}" --jq .content | base64 -d \
+              | awk '/^\[workspace\.package\]/{p=1; next} /^\[/{p=0} p && !found && /^version *=/{gsub(/[" ]/, "", $0); sub(/^version=/, "", $0); print; found=1}')
+            if [ "${CRATE_VERSION}" != "${VERSION}" ]; then
+              echo "::error::The crates at ${SHA} are '${CRATE_VERSION}', not jazz-tools' ${VERSION}. Run dev/scripts/sync-crate-versions.mjs on the release branch."
+              exit 1
+            fi
+            CRATES=true
+          elif printf '%s' "${probe}" | grep -q "HTTP 404"; then
+            echo "::notice::${SHA} has no crates.io packaging; no crates to publish."
+          else
+            echo "::error::Could not check ${SHA} for crates.io packaging: ${probe}"
+            exit 1
+          fi
+          PUBLISH=${CRATES}
+          if [ "${DRY_RUN}" != "true" ] && [ "${CRATES}" = "true" ]; then
+            # Only after npm has the release: a dry-run "Publish jazz-tools
+            # alpha" also completes successfully, and publishes nothing. The
+            # registry can lag the npm job by minutes, so wait for it.
+            listed=false
+            for _ in $(seq 1 30); do
+              if [ "${RC}" = "true" ]; then
+                listed=true
+                break
+              fi
+              if curl -sfo /dev/null --max-time 20 "https://registry.npmjs.org/jazz-tools/${VERSION}"; then
+                listed=true
+                break
+              fi
+              sleep 30
+            done
+            if [ "${listed}" != "true" ]; then
+              echo "::warning::jazz-tools@${VERSION} is not on npm after 15 minutes; no crates published. Dispatch this workflow with mode=publish, tag=v${VERSION} once it is."
+              PUBLISH=false
+            else
+              TAG_SHA=$(gh api "repos/${REPO}/commits/v${VERSION}" --jq .sha 2>/dev/null || true)
+              if [ "${TAG_SHA}" != "${SHA}" ]; then
+                echo "::error::v${VERSION} points at '${TAG_SHA}', not the release commit ${SHA}."
+                exit 1
+              fi
+            fi
+          fi
+          echo "Release ${VERSION} at ${SHA} (crates=${CRATES}, dry_run=${DRY_RUN}, publish=${PUBLISH})"
+          {
+            echo "sha=${SHA}"
+            echo "version=${VERSION}"
+            echo "crates=${CRATES}"
+            echo "dry_run=${DRY_RUN}"
+            echo "publish=${PUBLISH}"
+          } >> "${GITHUB_OUTPUT}"
 
-    env:
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
+  dry-run:
+    name: cargo publish --dry-run
+    needs: resolve
+    if: needs.resolve.outputs.dry_run == 'true' && needs.resolve.outputs.crates == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.93.1
 
-      - name: Ensure jq is available
-        run: |
-          if ! command -v jq >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y jq
-          fi
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
 
-      - name: Publish crates in dependency order
-        run: ./dev/scripts/publish-crates-alpha.sh "${{ inputs.mode }}"
+      - name: Check lockstep versions
+        run: node dev/scripts/check-lockstep-versions.mjs
+
+      - name: Dry-run publish in dependency order
+        run: node dev/scripts/publish-crates.mjs --dry-run
+
+  publish:
+    name: Publish to crates.io
+    needs: resolve
+    if: needs.resolve.outputs.dry_run != 'true' && needs.resolve.outputs.publish == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # The crates.io trusted publishers and CRATES_IO_BOOTSTRAP_TOKEN are bound
+    # to this environment.
+    environment: publish
+    permissions:
+      contents: read
+      # Trusted publishing: the job's OIDC token is exchanged for a
+      # short-lived crates.io token.
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+
+      - name: Check lockstep versions
+        run: node dev/scripts/check-lockstep-versions.mjs
+
+      # Builds every crate against the others before any token exists, so
+      # the publish below fits in the OIDC token's lifetime.
+      - name: Verify packages
+        run: node dev/scripts/publish-crates.mjs --verify
+
+      # Before anything is published: which crates need which credential.
+      # Fails if a new crate needs CRATES_IO_BOOTSTRAP_TOKEN and it's missing.
+      - name: Plan auth per crate
+        id: plan
+        env:
+          CRATES_IO_BOOTSTRAP_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
+        run: node dev/scripts/publish-crates.mjs --plan
+
+      # Also before anything is published: proves the OIDC exchange works
+      # (a trusted publisher for this workflow and environment exists), so a
+      # missing one stops the run instead of leaving it half published.
+      - name: Check trusted publishing
+        if: steps.plan.outputs.needs_oidc == 'true'
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+
+      - name: Publish new crates, up to the first that needs OIDC
+        env:
+          CRATES_IO_BOOTSTRAP_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
+        run: node dev/scripts/publish-crates.mjs --publish --stop-before-oidc
+
+      # A fresh token for the rest: trusted-publishing tokens last 30 minutes.
+      - name: Get a crates.io token (trusted publishing)
+        id: crates-io-auth
+        if: steps.plan.outputs.needs_oidc == 'true'
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+
+      - name: Publish the rest in dependency order
+        env:
+          CRATES_IO_OIDC_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+          CRATES_IO_BOOTSTRAP_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
+        run: node dev/scripts/publish-crates.mjs --publish

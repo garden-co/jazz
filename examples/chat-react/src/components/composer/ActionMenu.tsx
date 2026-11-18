@@ -1,4 +1,4 @@
-import { useDb, useSession } from "jazz-tools/react";
+import { useDb, useJazzSession } from "jazz-tools/react";
 import { BrushIcon, PlusIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { waitForWrite } from "@/lib/db-write";
-import { app } from "../../../schema.js";
+import { app } from "../../../jazz.generated.js";
 import { DurabilityTier } from "jazz-tools";
 
 interface ActionMenuProps {
@@ -19,8 +19,8 @@ interface ActionMenuProps {
 
 export function ActionMenu({ chatId, disabled = false }: ActionMenuProps) {
   const db = useDb();
-  const session = useSession();
-  const userId = session?.user;
+  const session = useJazzSession();
+  const userId = session.user?.accountId;
   const sharedWriteOptions: { tier: DurabilityTier } = {
     tier: db.getConfig().serverUrl ? "global" : "local",
   };

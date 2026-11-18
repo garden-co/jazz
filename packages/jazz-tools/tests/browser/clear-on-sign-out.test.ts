@@ -1,12 +1,14 @@
 import { afterEach, expect, it } from "vitest";
-import { schema } from "../../src/index.js";
-import { deploy } from "../../src/dev/catalogue.js";
 import { openBrowserSessionCore as createJazzClient } from "../../src/session/create-jazz-session.js";
 import { createDb as createLocalFirstDb } from "../../src/runtime/default-create-db.js";
 import { resolveDefaultPersistentDbName } from "../../src/runtime/db.js";
 import { isThinDb } from "../../src/runtime/local-first-upgrade.js";
 import { uniqueDbName, waitForCondition } from "./support.js";
+import { vfsPages, vfsPath } from "./idb-vfs.js";
+import { app } from "./apps/clear-on-sign-out/jazz.generated.js";
+import permissions from "./apps/clear-on-sign-out/jazz.permissions.json";
 import {
+  deploy,
   getJazzServerInfo,
   jazzAppFetch,
   jazzAppUserUrl,
@@ -18,57 +20,12 @@ import {
 // while no page of theirs is open (a server-side logout, or the tab closed)
 // must leave nothing of theirs in IndexedDB once the next page loads (rc.4
 // R49). The replica is the local-first SQLite file in the IndexedDB VFS.
-
-const app = schema.defineApp(
-  { notes: schema.table({ text: schema.string() }, {}) },
-  { migrations: "none" },
-);
-const permissions = schema.definePermissions(app, ({ policy }) => [
-  policy.notes.allowRead.always(),
-  policy.notes.allowInsert.always(),
-]);
+// The app (apps/clear-on-sign-out): notes every user may read and insert.
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup().catch(() => {});
 });
-
-/** The IndexedDB VFS's path for a browser store (see `StoreSpec` in jazz-wasm). */
-async function vfsPath(physicalName: string): Promise<string> {
-  const digest = new Uint8Array(
-    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(physicalName)),
-  );
-  const hex = digest
-    .slice(0, 16)
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-  return `/jazz-${hex}.sqlite`;
-}
-
-/** The pages of `path` in the IndexedDB VFS, and how many hold `needle`. */
-async function vfsPages(path: string, needle: string): Promise<{ pages: number; holding: number }> {
-  const db = await new Promise<IDBDatabase>((resolve, reject) => {
-    const open = indexedDB.open("jazz-idb");
-    open.onsuccess = () => resolve(open.result);
-    open.onerror = () => reject(open.error);
-  });
-  try {
-    if (!db.objectStoreNames.contains("blocks")) return { pages: 0, holding: 0 };
-    const rows = await new Promise<Array<{ path: string; data: Uint8Array }>>((resolve, reject) => {
-      const request = db.transaction("blocks").objectStore("blocks").getAll();
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
-    const decoder = new TextDecoder();
-    const mine = rows.filter((row) => row.path === path);
-    return {
-      pages: mine.length,
-      holding: mine.filter((row) => decoder.decode(row.data).includes(needle)).length,
-    };
-  } finally {
-    db.close();
-  }
-}
 
 it("wipes a user signed out while no page was open from IndexedDB on the next load", async () => {
   const {
@@ -76,10 +33,16 @@ it("wipes a user signed out while no page was open from IndexedDB on the next lo
     serverUrl: coreUrl,
     adminSecret,
   } = await getJazzServerInfo(uniqueDbName("clear-on-sign-out"));
-  await deploy({ appId, serverUrl: coreUrl, adminSecret, schema: app.wasmSchema, permissions });
+  await deploy({
+    appId,
+    serverUrl: coreUrl,
+    adminSecret,
+    app,
+    permissions: permissions,
+  });
   const backend = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
-    { schema: app.wasmSchema, permissions },
+    { schema: app, permissions },
   );
   const aliceUrl = await jazzAppUserUrl(backend, "alice");
   // The backend answers no CORS: send the session's own requests to it from Node.

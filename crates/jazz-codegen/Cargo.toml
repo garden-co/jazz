@@ -1,0 +1,16 @@
+[package]
+name = "jazz-codegen"
+version.workspace = true
+edition = "2024"
+description = "Typed bindings and migration stubs generated from an app's jazz.app.json"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+# Only what builds the library: tests, benches and their fixtures stay in the repo.
+include = ["src/**", "build.rs", "README.md"]
+
+[dependencies]
+jazz = { workspace = true, default-features = false }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"

@@ -1,5 +1,5 @@
 import type { Db } from "jazz-tools";
-import { app, type ToolCall, type Turn } from "@/schema";
+import { app, type ToolCall, type Turn } from "@/jazz.generated";
 import { backendJazzClient } from "@/src/lib/backend-jazz-client";
 import { retryOnConflict } from "@/src/lib/retry";
 import { isSerializationConflict } from "@/src/lib/write-errors";

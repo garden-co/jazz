@@ -2,6 +2,7 @@
 name = "jazz-native-relay"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [lib]
 crate-type = ["rlib", "staticlib"]
@@ -16,6 +17,7 @@ postcard = { version = "1.1.3", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2.0.17"
+tracing = "0.1"
 url = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 rusqlite = { version = "0.40", features = ["bundled"] }

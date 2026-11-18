@@ -18,7 +18,7 @@ struct AccountSessionRequest {
     account_id: jazz::account_registry::AccountId,
     issuer: String,
     subject: String,
-    /// A local-first account's own token: it proves the account and is what
+    /// A device account's own token: it proves the account and is what
     /// its socket presents.
     #[serde(default)]
     jwt: Option<String>,
@@ -115,7 +115,7 @@ impl AccountSessionRequest {
             }
             self.server_url = Some(transport.to_string());
         }
-        let local_first = self.issuer == jazz::tools::identity::LOCAL_FIRST_ISSUER;
+        let local_first = self.issuer == jazz::tools::identity::DEVICE_ACCOUNT_ISSUER;
         // Exactly one credential, of the account's kind: a core admits no
         // other token, and an app's backend reads only its own bearer.
         let (author, bearer, backend_session) = match (local_first, self.jwt, self.bearer) {
@@ -345,7 +345,8 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_refresh_account_session(
         } else {
             return Err(JazzNativeRelayStatus::InvalidHandle);
         };
-        let local_first = author.principal_parts().0 == jazz::tools::identity::LOCAL_FIRST_ISSUER;
+        let local_first =
+            author.principal_parts().0 == jazz::tools::identity::DEVICE_ACCOUNT_ISSUER;
         let token = match (local_first, &refresh.jwt, &refresh.bearer) {
             (true, Some(jwt), None) => {
                 if jazz::tools::unverified_jwt_scope_subject(jwt) != Some(author.principal_parts())
@@ -424,6 +425,8 @@ impl NativeRelayHost {
                         author,
                         session,
                         self.socket_connector(),
+                        self.socket_network_path(),
+                        self.socket_link_policy(),
                     )?)
                 }
                 _ => None,
@@ -996,7 +999,7 @@ mod tests {
         request.jwt = Some(
             jazz::tools::identity::mint_jazz_self_signed_token(
                 &[9; 32],
-                jazz::tools::identity::LOCAL_FIRST_ISSUER,
+                jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
                 &request.app_id,
                 3600,
             )
@@ -1006,10 +1009,8 @@ mod tests {
             jazz::tools::unverified_jwt_scope_subject(request.jwt.as_deref().unwrap()).unwrap();
         request.issuer = issuer;
         request.subject = subject.clone();
-        request.account_id = jazz::account_registry::local_first_account_id(
-            request.app_id.parse().unwrap(),
-            &subject,
-        );
+        request.account_id =
+            jazz::account_registry::device_account_id(request.app_id.parse().unwrap(), &subject);
         let account = request.account_id;
         let token = request.jwt.clone();
         let prepared = request.prepare(root.path()).unwrap();
@@ -1017,7 +1018,7 @@ mod tests {
         let mut forged = external("unused");
         forged.bearer = None;
         forged.jwt = token;
-        forged.issuer = jazz::tools::identity::LOCAL_FIRST_ISSUER.into();
+        forged.issuer = jazz::tools::identity::DEVICE_ACCOUNT_ISSUER.into();
         forged.subject = subject;
         assert!(
             forged.prepare(root.path()).is_err(),

@@ -170,6 +170,17 @@ pub fn contains(left: Operand, right: Operand) -> Predicate {
     Predicate::Contains(left, right)
 }
 
+/// Construct a text prefix predicate: `left` begins with `right`, bytewise
+/// (UTF-8, case-sensitive); NULL never matches.
+pub fn starts_with(left: Operand, right: Operand) -> Predicate {
+    Predicate::StartsWith(left, right)
+}
+
+/// Construct a text suffix predicate; as [`starts_with`].
+pub fn ends_with(left: Operand, right: Operand) -> Predicate {
+    Predicate::EndsWith(left, right)
+}
+
 /// Construct a nullable-is-null predicate.
 pub fn is_null(operand: Operand) -> Predicate {
     Predicate::IsNull(operand)

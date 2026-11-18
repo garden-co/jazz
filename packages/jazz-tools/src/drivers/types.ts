@@ -21,7 +21,6 @@ export type Value =
       type: "Row";
       value: { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> };
     }
-  | { type: "Enum"; value: { case: string; values: Value[] } }
   | { type: "Null" };
 
 export type InsertValues = Record<string, Value>;
@@ -101,6 +100,11 @@ export interface RuntimeSubscriptionRemovedRow {
 /** Structured root changes published by a runtime adapter to the TS facade. */
 export interface RuntimeSubscriptionDelta {
   reset?: boolean;
+  /**
+   * On a reset: `"backlog"` when it replaces deltas the subscriber fell too
+   * far behind to be told one by one (its backlog passed `backlogRows`).
+   */
+  reason?: "backlog";
   added: RuntimeSubscriptionAddedRow[];
   removed: RuntimeSubscriptionRemovedRow[];
   updated: RuntimeSubscriptionUpdatedRow[];
@@ -115,7 +119,6 @@ export type ColumnType =
   | { type: "Text" }
   | { type: "Json"; schema?: Record<string, unknown> }
   | { type: "Enum"; variants: string[] }
-  | { type: "EnumPayload"; cases: Array<{ name: string; fields: ColumnDescriptor[] }> }
   | { type: "Timestamp" }
   | { type: "Uuid" }
   | { type: "Bytea" }

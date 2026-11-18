@@ -75,7 +75,7 @@ pub fn author_policy_claims(author: AuthorSubject) -> BTreeMap<String, Value> {
 
 fn auth_mode_for_author_issuer(issuer: &str) -> &'static str {
     match issuer {
-        AuthorSubject::LOCAL_FIRST_ISSUER => "local-first",
+        AuthorSubject::DEVICE_ACCOUNT_ISSUER => "local-first",
         AuthorSubject::ANONYMOUS_ISSUER => "anonymous",
         _ => "external",
     }
@@ -150,12 +150,9 @@ pub fn json_value_to_policy_claim(
         serde_json::Value::Null => Some(Value::Nullable(None)),
         serde_json::Value::Bool(value) => Some(Value::Bool(value)),
         serde_json::Value::Number(value) => Some(json_number_to_policy_claim(value, origin)?),
-        serde_json::Value::String(value) => Some(
-            value
-                .parse()
-                .map(Value::Uuid)
-                .unwrap_or(Value::String(value)),
-        ),
+        // A string stays the text it is: a policy compares it as the type
+        // of what it meets (a UUID column reads it as the UUID it spells).
+        serde_json::Value::String(value) => Some(Value::String(value)),
         serde_json::Value::Array(values) => {
             let mut projected = Vec::with_capacity(values.len());
             for value in values {
@@ -273,7 +270,7 @@ mod tests {
     #[test]
     fn canonical_binding_derives_reserved_auth_modes_from_reserved_issuers() {
         for (issuer, expected) in [
-            (AuthorSubject::LOCAL_FIRST_ISSUER, "local-first"),
+            (AuthorSubject::DEVICE_ACCOUNT_ISSUER, "local-first"),
             (AuthorSubject::ANONYMOUS_ISSUER, "anonymous"),
         ] {
             let author = AuthorSubject::reserved(issuer, "alice").unwrap();

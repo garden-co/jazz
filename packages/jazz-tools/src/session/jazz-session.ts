@@ -1,12 +1,20 @@
 import {
   attachSessionCoreConsumer,
+  onJazzSessionClientUpgraded,
   type SessionCore,
   type SessionCoreConsumer,
   type SessionCoreSnapshot,
 } from "./state.js";
 import type { AccountHandle } from "../accounts/state.js";
+import { NoKeptDeviceAccountError } from "./no-kept-device-account-error.js";
 import { exportLocalFirstSecret } from "../accounts/enrollment.js";
 import { createListeners, toError } from "../runtime/util.js";
+import {
+  localFirstUnavailableOf,
+  type LocalFirstUnavailable,
+} from "../runtime/local-first-unavailable.js";
+
+export type { LocalFirstUnavailable };
 
 const DEVICE_ISSUER = "urn:jazz:local-first";
 const SYSTEM_ISSUER = "urn:jazz:system";
@@ -53,10 +61,16 @@ export function userOfAccount(account: AccountHandle | undefined): JazzUser | nu
   });
 }
 
+function clientIsLocalFirst(client: unknown): boolean {
+  const db = (client as { db?: { isLocalFirst?(): boolean } } | undefined)?.db;
+  return db?.isLocalFirst?.() === true;
+}
+
 /** An operation a session is running (`snapshot.pending`). */
 export type JazzSessionOperation =
   | "createDeviceAccount"
   | "restoreDeviceAccount"
+  | "reopenDeviceAccount"
   | "linkDeviceAccount"
   | "refresh"
   | "signOut"
@@ -65,6 +79,7 @@ export type JazzSessionOperation =
 const CORE_OPERATION: Record<string, JazzSessionOperation> = {
   createLocalFirst: "createDeviceAccount",
   restoreLocalFirst: "restoreDeviceAccount",
+  reopenLocalFirst: "reopenDeviceAccount",
   linkWithBackend: "linkDeviceAccount",
   loginWithBackend: "refresh",
   logout: "signOut",
@@ -87,6 +102,21 @@ export interface JazzSessionSnapshot<Client> {
   readonly user: JazzUser | null;
   /** Only while `status` is `ready`. */
   readonly client?: Client;
+  /**
+   * Whether `client` reads and writes through a local store, so it works
+   * offline: `client.db.isLocalFirst()`, as a field you can subscribe to. A
+   * thin client turns local-first in place when the session upgrades it (the
+   * same `client` and `db` carry on). False while there is no client.
+   */
+  readonly localFirst: boolean;
+  /**
+   * Why `client` runs thin although the session was given a local-first
+   * client (`client`): set when loading or opening it failed, for example
+   * `{ reason: "wasm-mismatch", message: "local-first unavailable: WASM
+   * fingerprint mismatch" }` for a stale or mismatched `.wasm` asset. The
+   * client still works, against the server only. Cleared once it upgrades.
+   */
+  readonly localFirstUnavailable?: LocalFirstUnavailable;
   readonly pending?: JazzSessionOperation;
   readonly error?: Error;
   /**
@@ -126,6 +156,13 @@ export interface JazzSession<Client> {
   /** Sign in as the device account a key from `exportDeviceKey()` names. */
   restoreDeviceAccount(key: string): Promise<void>;
   /**
+   * Sign in again as the device account that was signed in last on this
+   * device, with its id and its data: signing out keeps a device account's
+   * key (except with `clearOnSignOut`, which forgets it and wipes its data).
+   * Rejects when the device keeps none.
+   */
+  reopenDeviceAccount(): Promise<void>;
+  /**
    * Keep the signed-in device account and its data when its user signs up:
    * after your own sign-up, your backend links this device account to the
    * user it now names, and the session continues as that user.
@@ -135,12 +172,17 @@ export interface JazzSession<Client> {
    * Your auth changed: call this after your own sign-in, sign-out or account
    * switch. Jazz asks your backend who is signed in now (its `authenticate`
    * decides, from your session cookie or bearer) and follows its answer.
+   * If your backend can't be asked (offline, or its `authenticate` failed),
+   * it rejects and the snapshot shows the failure too: a usable client stays
+   * `ready`, with `error` set and `recovery: "action"` (`retry()` asks again).
    */
   refresh(): Promise<void>;
   /**
    * The signed-in device account's key, to restore it elsewhere with
    * `restoreDeviceAccount(key)`. Anyone holding it is that account: keep it
-   * secret. Throws when the session isn't signed in as a device account.
+   * secret. While signed out, the key of the device account
+   * `reopenDeviceAccount()` would reopen. Throws when signed in as someone
+   * else, or when signed out and the device keeps no device account.
    */
   exportDeviceKey(): string;
   signOut(): Promise<void>;
@@ -154,7 +196,7 @@ type RefreshingCore = { reauthenticate?(): Promise<void> };
 
 interface SessionInternals<Client> {
   start(): Promise<void>;
-  attachConsumer(): {
+  attachConsumer(name?: string): {
     acknowledge(snapshot: JazzSessionSnapshot<Client>): void;
     release(): void;
   };
@@ -174,10 +216,12 @@ export function startJazzSession(session: JazzSession<unknown>): Promise<void> {
  */
 export function attachJazzSessionConsumer<Client>(
   session: JazzSession<Client>,
+  /** Names the view in the warning when it misses a transition's deadline. */
+  name?: string,
 ): ReturnType<SessionInternals<Client>["attachConsumer"]> {
   const own = internals.get(session);
   if (!own) throw new Error("Unknown Jazz session");
-  return (own as SessionInternals<Client>).attachConsumer();
+  return (own as SessionInternals<Client>).attachConsumer(name);
 }
 
 /**
@@ -204,10 +248,14 @@ export function ownJazzSession<Config, Client>(
   let pendingSignOuts = 0;
   let retrying: Promise<void> | undefined;
   let lastAccount: AccountHandle | undefined;
-  let snapshot: JazzSessionSnapshot<Client> = Object.freeze({ status: "starting", user: null });
+  let snapshot: JazzSessionSnapshot<Client> = Object.freeze({
+    status: "starting",
+    user: null,
+    localFirst: false,
+  });
   const versions = new WeakMap<object, SessionCoreSnapshot<Client>>();
   const listeners = createListeners("Jazz session observer failed");
-  const consumers = new Set<{ lease?: SessionCoreConsumer<Client> }>();
+  const consumers = new Set<{ name?: string; lease?: SessionCoreConsumer<Client> }>();
 
   function publish(force = false) {
     if (closed && !force) return;
@@ -240,6 +288,9 @@ export function ownJazzSession<Config, Client>(
           : "session"))
       : undefined;
     const account = current?.account;
+    const localFirst = status === "ready" && clientIsLocalFirst(current?.client);
+    const localFirstUnavailable =
+      status === "ready" && !localFirst ? localFirstUnavailableOf(current?.client) : undefined;
     const next: JazzSessionSnapshot<Client> = {
       status,
       user:
@@ -247,6 +298,8 @@ export function ownJazzSession<Config, Client>(
           ? snapshot.user
           : userOfAccount(account),
       ...(status === "ready" ? { client: current?.client } : {}),
+      localFirst,
+      ...(localFirstUnavailable ? { localFirstUnavailable } : {}),
       ...(current?.pending ? { pending: CORE_OPERATION[current.pending] } : {}),
       ...(error ? { error } : {}),
       ...(recovery ? { recovery } : {}),
@@ -256,6 +309,8 @@ export function ownJazzSession<Config, Client>(
       snapshot.status === next.status &&
       snapshot.client === next.client &&
       snapshot.user === next.user &&
+      snapshot.localFirst === next.localFirst &&
+      snapshot.localFirstUnavailable === next.localFirstUnavailable &&
       snapshot.pending === next.pending &&
       snapshot.error === next.error &&
       snapshot.recovery === next.recovery &&
@@ -328,11 +383,20 @@ export function ownJazzSession<Config, Client>(
           return;
         }
         core = created;
-        for (const consumer of consumers) consumer.lease = attachSessionCoreConsumer(created);
-        unsubscribeCore = created.subscribe(() => publish(closed));
+        for (const consumer of consumers)
+          consumer.lease = attachSessionCoreConsumer(created, consumer.name);
+        const stopCore = created.subscribe(() => publish(closed));
+        const stopUpgrades = onJazzSessionClientUpgraded(created, () => publish(closed));
+        unsubscribeCore = () => {
+          stopCore();
+          stopUpgrades();
+        };
         publish();
       })
       .catch((cause) => {
+        // Settled before the failure shows: a retry() its observers call
+        // starts again instead of joining this failed attempt.
+        if (pending === task) pending = undefined;
         failure = toError(cause);
         publish();
         throw cause;
@@ -365,6 +429,7 @@ export function ownJazzSession<Config, Client>(
     subscribe: listeners.subscribe,
     createDeviceAccount: action((current) => current.createLocalFirst()),
     restoreDeviceAccount: action((current, key: string) => current.restoreLocalFirst(key)),
+    reopenDeviceAccount: action((current) => current.reopenLocalFirst()),
     linkDeviceAccount: action((current) => current.linkWithBackend()),
     async refresh() {
       failure = undefined;
@@ -394,7 +459,12 @@ export function ownJazzSession<Config, Client>(
     },
     exportDeviceKey() {
       const account = core?.getSnapshot().account;
-      if (!account || account.identity.issuer !== DEVICE_ISSUER)
+      if (!account) {
+        const kept = core?.keptLocalFirstKey();
+        if (!kept) throw new NoKeptDeviceAccountError("exportDeviceKey()");
+        return kept;
+      }
+      if (account.identity.issuer !== DEVICE_ISSUER)
         throw new Error("exportDeviceKey(): this session isn't signed in as a device account");
       return exportLocalFirstSecret(account);
     },
@@ -476,9 +546,9 @@ export function ownJazzSession<Config, Client>(
 
   internals.set(session, {
     start,
-    attachConsumer() {
+    attachConsumer(name?: string) {
       if (closed) throw new Error("Jazz session is closed");
-      const consumer = { lease: core ? attachSessionCoreConsumer(core) : undefined };
+      const consumer = { name, lease: core ? attachSessionCoreConsumer(core, name) : undefined };
       consumers.add(consumer);
       return {
         acknowledge(value: JazzSessionSnapshot<Client>) {
@@ -526,6 +596,37 @@ export function coreInitial(initial: unknown): "local-first" | "signed-out" | un
 }
 
 /**
+ * What a provider's `error` view receives, in every framework, while the
+ * session has no usable client (`status: "error"`).
+ */
+export interface JazzSessionErrorViewProps {
+  /** Why there is no usable client. */
+  readonly error: Error;
+  /**
+   * What `retry()` does: repeat the operation that failed (`action`), or
+   * reopen the signed-in account (`session`).
+   */
+  readonly recovery: "action" | "session";
+  /**
+   * Try again. Never rejects: if it fails again, the error view shows the new
+   * failure, so `onClick={retry}` is safe.
+   */
+  retry(): Promise<void>;
+}
+
+/** @internal The error view's props for a session snapshot in `status: "error"`. */
+export function jazzSessionErrorViewProps(
+  session: Pick<JazzSession<unknown>, "retry">,
+  snapshot: Pick<JazzSessionSnapshot<unknown>, "error" | "recovery">,
+): JazzSessionErrorViewProps {
+  return {
+    error: snapshot.error ?? new Error("Jazz could not start"),
+    recovery: snapshot.recovery ?? "session",
+    retry: () => session.retry().catch(() => {}),
+  };
+}
+
+/**
  * @internal A session's operations, bound and without its state, for the
  * framework hooks (never a spread: `db` is a getter that throws while there
  * is no client).
@@ -536,6 +637,7 @@ export function jazzSessionActions<Client>(
   return {
     createDeviceAccount: session.createDeviceAccount,
     restoreDeviceAccount: session.restoreDeviceAccount,
+    reopenDeviceAccount: session.reopenDeviceAccount,
     linkDeviceAccount: session.linkDeviceAccount,
     refresh: session.refresh,
     exportDeviceKey: session.exportDeviceKey,
@@ -543,6 +645,78 @@ export function jazzSessionActions<Client>(
     retry: session.retry,
     close: session.close,
   };
+}
+
+/**
+ * @internal The user a client opened outside a session (`<JazzClientProvider
+ * client>`) reads as, from its permission session (`client.session`). Null
+ * for an anonymous or internal reader.
+ */
+export function userOfPublicSession(
+  session: PublicSessionLike | null | undefined,
+): JazzUser | null {
+  if (!session?.user || session.authMode === "anonymous") return null;
+  const issuer = session.identity?.issuer;
+  if (!issuer || issuer === SYSTEM_ISSUER) return null;
+  return Object.freeze({
+    accountId: session.user,
+    kind: issuer === DEVICE_ISSUER ? "device" : "backend",
+    identity: Object.freeze({ issuer, subject: session.identity.subject }),
+    claims: Object.freeze({ ...session.claims }),
+  });
+}
+
+type PublicSessionLike = {
+  user: string | null;
+  identity: { issuer: string; subject: string };
+  claims?: Readonly<Record<string, unknown>>;
+  authMode?: string;
+};
+
+const CLIENT_ONLY_SESSION =
+  "This client was opened outside a Jazz session (<JazzClientProvider client>), " +
+  "so it has no session operations: use <JazzProvider config> (or session) to sign users in and out";
+
+/** @internal The snapshot `useJazzSession()` reads under `<JazzClientProvider client>`. */
+export function clientOnlySnapshot<Client>(
+  client: Client,
+  session: PublicSessionLike | null | undefined = (
+    client as { session?: PublicSessionLike | null } | undefined
+  )?.session,
+): JazzSessionSnapshot<Client> {
+  return Object.freeze({
+    status: "ready",
+    user: userOfPublicSession(session),
+    client,
+    localFirst: clientIsLocalFirst(client),
+  });
+}
+
+/**
+ * @internal The operations `useJazzSession()` has under `<JazzClientProvider
+ * client>`: there is no session to sign in or out, so each one refuses,
+ * naming why.
+ */
+export function clientOnlySessionActions<Client>(): Omit<
+  JazzSession<Client>,
+  "getSnapshot" | "subscribe" | "db"
+> {
+  const refuse = async (): Promise<never> => {
+    throw new Error(CLIENT_ONLY_SESSION);
+  };
+  return Object.freeze({
+    createDeviceAccount: refuse,
+    restoreDeviceAccount: refuse,
+    reopenDeviceAccount: refuse,
+    linkDeviceAccount: refuse,
+    refresh: refuse,
+    exportDeviceKey: () => {
+      throw new Error(CLIENT_ONLY_SESSION);
+    },
+    signOut: refuse,
+    retry: refuse,
+    close: refuse,
+  });
 }
 
 /**

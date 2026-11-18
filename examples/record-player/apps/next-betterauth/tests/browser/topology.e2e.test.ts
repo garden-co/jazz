@@ -1,8 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { schema as s, type Db } from "jazz-tools";
-import type { RowRefValue } from "jazz-tools/permissions";
+import type { Db } from "jazz-tools";
 import { createBrowserTestDb } from "../../../../../../packages/jazz-tools/tests/browser/account-fixtures.js";
-import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   TestCleanup,
   uniqueDbName,
@@ -18,10 +16,16 @@ import {
   jazzAppUserUrl,
   loginAtJazzAppUser,
   startJazzApp,
+  deploy as deployApp,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
-import { betterAuthPermissions, betterAuthSchema } from "../../auth-schema.js";
-import permissions from "../../permissions.js";
-import { app } from "../../schema.js";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
+import { app } from "../../jazz.generated.js";
+import { app as acknowledgementApp } from "./apps/acknowledgement/jazz.generated.js";
+import acknowledgementPermissions from "./apps/acknowledgement/jazz.permissions.json" with { type: "json" };
+import { app as recipientApp } from "./apps/recipient/jazz.generated.js";
+import recipientPermissions from "./apps/recipient/jazz.permissions.json" with { type: "json" };
+import { app as relationalRecipientApp } from "./apps/relational-recipient/jazz.generated.js";
+import relationalRecipientPermissions from "./apps/relational-recipient/jazz.permissions.json" with { type: "json" };
 import {
   ALBUM_TRACK_LIMIT,
   JazzRecordPlayerStore,
@@ -34,197 +38,17 @@ import { seedDemoLibrary } from "../../src/upload.js";
 const ctx = new TestCleanup();
 afterEach(async () => ctx.cleanup());
 
-const acknowledgementApp = s.defineApp(
-  {
-    receipts: s.table({ label: s.string() }, {}),
-  },
-  { migrations: "none" },
-);
-const acknowledgementPermissions = s.definePermissions(acknowledgementApp, ({ policy }) => {
-  policy.receipts.allowRead.always();
-  policy.receipts.allowInsert.always();
-});
+// A one-table app, committed as files with its bindings: browsers can't
+// compile apps (tests/browser/apps/acknowledgement).
 
 // Keep this intentionally separate from RecordPlayer's relational policies:
 // it is the smallest external-JWT receipt for a row routed to a recipient by
 // an application-owned canonical session user rather than by `$createdBy`.
-const recipientApp = s.defineApp(
-  {
-    invitations: s.table({ subject: s.uuid(), label: s.string() }, {}),
-  },
-  { migrations: "none" },
-);
-const recipientPermissions = s.definePermissions(recipientApp, ({ policy, session, anyOf }) => {
-  policy.invitations.allowRead.where(
-    anyOf([{ subject: session.user }, { label: "unmatched control branch" }]),
-  );
-  policy.invitations.allowInsert.always();
-});
-
+// (tests/browser/apps/recipient)
 // This adds exactly the branch which distinguishes RecordPlayer from the
 // scalar control: a correlated owner path through a referenced playlist.
-const relationalRecipientApp = s.defineApp(
-  {
-    ...betterAuthSchema,
-    albums: s
-      .table(
-        {
-          title: s.string(),
-          artist: s.string(),
-          cover_locator: s.string().optional(),
-          cover_image: s.bytes().optional(),
-          cover_mime: s.string().optional(),
-        },
-        { tracksViaAlbum: s.reverse("tracks", "album") },
-      )
-      .indexOnly(["title"]),
-    tracks: s
-      .table(
-        {
-          album_id: s.uuid(),
-          title: s.string(),
-          ordinal: s.int(),
-          duration_ms: s.int(),
-          audio_bytes: s.bytes().optional(),
-          audio_mime: s.string().optional(),
-          audio_byte_length: s.int().optional(),
-        },
-        {
-          album: s.rel("albums", "album_id"),
-          playlist_entriesViaTrack: s.reverse("playlist_entries", "track"),
-          playback_positionsViaTrack: s.reverse("playback_positions", "track"),
-        },
-      )
-      .indexOnly(["album_id", "ordinal"]),
-    playlists: s.table(
-      { name: s.string() },
-      {
-        playlist_entriesViaPlaylist: s.reverse("playlist_entries", "playlist"),
-        invitationsViaPlaylist: s.reverse("invitations", "playlist"),
-        playback_positionsViaPlaylist: s.reverse("playback_positions", "playlist"),
-      },
-    ),
-    playlist_entries: s
-      .table(
-        {
-          playlist_id: s.uuid(),
-          track_id: s.uuid(),
-          position: s.float(),
-        },
-        { playlist: s.rel("playlists", "playlist_id"), track: s.rel("tracks", "track_id") },
-      )
-      .indexOnly(["playlist_id", "position"]),
-    invitations: s.table(
-      {
-        playlist_id: s.uuid(),
-        subject: s.uuid(),
-        role: s.enum("listener", "editor"),
-        status: s.enum("pending", "accepted", "revoked"),
-      },
-      { playlist: s.rel("playlists", "playlist_id") },
-    ),
-    playback_positions: s.table(
-      {
-        playlist_id: s.uuid(),
-        track_id: s.uuid(),
-        position_ms: s.int(),
-      },
-      { playlist: s.rel("playlists", "playlist_id"), track: s.rel("tracks", "track_id") },
-    ),
-  },
-  { migrations: "none" },
-);
-const relationalRecipientPermissions = {
-  ...betterAuthPermissions,
-  ...s.definePermissions(relationalRecipientApp, ({ policy, session, allOf, anyOf, allowedTo }) => {
-    policy.albums.allowRead.where({});
-    policy.albums.allowInsert.where({ "$createdBy.account": session.user });
-    policy.tracks.allowRead.where({});
-    policy.tracks.allowInsert.where({ "$createdBy.account": session.user });
-    const hasEditorInvitation = (playlistId: RowRefValue) =>
-      policy.invitations.exists.where({
-        playlist_id: playlistId,
-        subject: session.user,
-        role: "editor",
-        status: "accepted",
-      });
-    const canEditPlaylist = (playlistId: RowRefValue) =>
-      anyOf([{ "$createdBy.account": session.user }, hasEditorInvitation(playlistId)]);
-    const canReadPlaylist = (playlistId: RowRefValue) =>
-      anyOf([
-        { "$createdBy.account": session.user },
-        policy.invitations.exists.where({
-          playlist_id: playlistId,
-          subject: session.user,
-          status: "accepted",
-        }),
-      ]);
-    policy.playlists.allowRead.where((playlist) => canReadPlaylist(playlist.id));
-    policy.playlists.allowInsert.always();
-    policy.playlists.allowUpdate.where({ "$createdBy.account": session.user });
-    policy.playlist_entries.allowRead.where(allowedTo.read("playlist"));
-    policy.playlist_entries.allowInsert.where((entry) =>
-      anyOf([allowedTo.update("playlist"), hasEditorInvitation(entry.playlist_id)]),
-    );
-    policy.playlist_entries.allowUpdate.where((entry) => canEditPlaylist(entry.playlist_id));
-    policy.playlist_entries.allowDelete.where((entry) => canEditPlaylist(entry.playlist_id));
-    policy.invitations.allowRead.where((invite) =>
-      anyOf([
-        { subject: session.user },
-        policy.playlists.exists.where({
-          id: invite.playlist_id,
-          "$createdBy.account": session.user,
-        }),
-      ]),
-    );
-    policy.invitations.allowInsert.where((invite) =>
-      policy.playlists.exists.where({
-        id: invite.playlist_id,
-        "$createdBy.account": session.user,
-      }),
-    );
-    policy.invitations.allowUpdate
-      .whereOld((invite) =>
-        anyOf([
-          policy.playlists.exists.where({
-            id: invite.playlist_id,
-            "$createdBy.account": session.user,
-          }),
-          { subject: session.user, status: "pending" },
-        ]),
-      )
-      .whereNew((invite) =>
-        anyOf([
-          policy.playlists.exists.where({
-            id: invite.playlist_id,
-            "$createdBy.account": session.user,
-          }),
-          allOf([
-            policy.invitations.exists.where({
-              id: invite.id,
-              playlist_id: invite.playlist_id,
-              subject: invite.subject,
-              role: invite.role,
-              status: "pending",
-            }),
-            { subject: session.user, status: "accepted" },
-          ]),
-        ]),
-      );
-    policy.invitations.allowDelete.where((invite) =>
-      policy.playlists.exists.where({
-        id: invite.playlist_id,
-        "$createdBy.account": session.user,
-      }),
-    );
-    policy.playback_positions.allowRead.where({ "$createdBy.account": session.user });
-    policy.playback_positions.allowInsert.always();
-    policy.playback_positions.allowUpdate
-      .whereOld({ "$createdBy.account": session.user })
-      .whereNew({ "$createdBy.account": session.user });
-    policy.playback_positions.allowDelete.where({ "$createdBy.account": session.user });
-  }),
-};
+// It is its own app (tests/browser/apps/relational-recipient), kept equal to
+// RecordPlayer's current schema and policies by the first test below.
 
 describe("RecordPlayer authenticated playlist topology", () => {
   it("keeps the phased recipient control schema and access paths identical to RecordPlayer", () => {
@@ -234,11 +58,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
 
   it("delivers RecordPlayer pending invitations outside the scenario envelope", async () => {
     const core = await getJazzServerInfo(uniqueDbName("record-player-recipient-settlement"));
-    await deploy({
+    await deployApp({
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: app,
+      app: app,
       permissions,
     });
     const server = await startJazzApp(core, { schema: app, permissions });
@@ -300,11 +124,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
 
   it("settles an observed recipient pending-to-accepted transition at edge", async () => {
     const core = await getJazzServerInfo(uniqueDbName("record-player-acceptance-settlement"));
-    await deploy({
+    await deployApp({
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: app,
+      app: app,
       permissions,
     });
     const server = await startJazzApp(core, { schema: app, permissions });
@@ -347,11 +171,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
 
   it("settles a RecordPlayer owner playlist at edge outside the scenario envelope", async () => {
     const core = await getJazzServerInfo(uniqueDbName("record-player-owner-settlement"));
-    await deploy({
+    await deployApp({
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: app,
+      app: app,
       permissions,
     });
     const server = await startJazzApp(core, { schema: app, permissions });
@@ -378,11 +202,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
 
   it("settles an identical one-table write at edge", async () => {
     const core = await getJazzServerInfo(uniqueDbName("record-player-ack-probe"));
-    await deploy({
+    await deployApp({
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: acknowledgementApp,
+      app: acknowledgementApp,
       permissions: acknowledgementPermissions,
     });
     const server = await startJazzApp(core, {
@@ -415,11 +239,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
 
   it("delivers an external-JWT row through a raw scalar recipient subject", async () => {
     const core = await getJazzServerInfo(uniqueDbName("record-player-recipient-scalar"));
-    await deploy({
+    await deployApp({
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: recipientApp,
+      app: recipientApp,
       permissions: recipientPermissions,
     });
     const server = await startJazzApp(core, {
@@ -460,11 +284,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
 
   it("delivers a scalar recipient grant alongside a correlated playlist-owner branch", async () => {
     const core = await getJazzServerInfo(uniqueDbName("record-player-recipient-relation"));
-    await deploy({
+    await deployApp({
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: relationalRecipientApp,
+      app: relationalRecipientApp,
       permissions: relationalRecipientPermissions,
     });
     const server = await startJazzApp(core, {
@@ -566,11 +390,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
               const core = await getJazzServerInfo(
                 uniqueDbName("record-player-recipient-full-phase"),
               );
-              await deploy({
+              await deployApp({
                 appId: core.appId,
                 serverUrl: core.serverUrl,
                 adminSecret: core.adminSecret,
-                schema: relationalRecipientApp,
+                app: relationalRecipientApp,
                 permissions: relationalRecipientPermissions,
               });
               const server = await startJazzApp(core, {
@@ -647,11 +471,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
   // accept it for themselves.
   it("rejects an owner transferring an invitation onto another owner's playlist", async () => {
     const core = await getJazzServerInfo(uniqueDbName("record-player-invitation-transfer"));
-    await deploy({
+    await deployApp({
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: app,
+      app: app,
       permissions,
     });
     const server = await startJazzApp(core, { schema: app, permissions });
@@ -817,11 +641,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
               console.info("[record-player-topology] start server");
               const core = await getJazzServerInfo(uniqueDbName("record-player-topology"));
               console.info("[record-player-topology] deploy authority");
-              await deploy({
+              await deployApp({
                 appId: core.appId,
                 serverUrl: core.serverUrl,
                 adminSecret: core.adminSecret,
-                schema: app,
+                app: app,
                 permissions,
               });
               server = await startJazzApp(core, { schema: app, permissions });
@@ -1592,11 +1416,11 @@ function signIn(server: { appId: string }, userUrl: string) {
 describe("RecordPlayer after a streamed upload", () => {
   it("keeps an open listener live and reopens both clients", async () => {
     const core = await getJazzServerInfo(uniqueDbName("record-player-streamed-reload"));
-    await deploy({
+    await deployApp({
       appId: core.appId,
       serverUrl: core.serverUrl,
       adminSecret: core.adminSecret,
-      schema: app,
+      app: app,
       permissions,
     });
     const server = await startJazzApp(core, { schema: app, permissions });

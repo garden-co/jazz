@@ -47,10 +47,11 @@ use node_lease::{ForegroundNodeLease, ForegroundNodeLeasePool};
 /// existing commands, so a JS bundle and native build from different ABIs
 /// refuse to open rather than misread a failure; 3 added its `reason_name`;
 /// 4 ends each subscription delta with its updated rows' splices; 5 attaches
-/// the app's migrations beside its schema's tables.
+/// the app's migrations beside its schema's tables; 6 ends a tick's upstream
+/// failure with the refusal's error code.
 /// Append-only commands use optional native capabilities while existing
 /// command layouts remain stable.
-pub const NATIVE_RELAY_ABI_V1: u16 = 5;
+pub const NATIVE_RELAY_ABI_V1: u16 = 6;
 
 const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
 const FOREGROUND_WAKE_CANCELLED: u8 = 3;
@@ -166,7 +167,7 @@ struct PendingPrivateSession {
 struct PrivateRelaySocketSession {
     server_url: String,
     app_id: String,
-    /// What the socket presents: a local-first account's own token, or, for
+    /// What the socket presents: a device account's own token, or, for
     /// a user signed in through the app's backend, the app's own bearer.
     bearer: String,
     /// Set for a user signed in through the app's backend: the session the
@@ -531,6 +532,13 @@ pub enum ForegroundDbCommandRequest {
     /// refused since it opened (append-only: an older native build answers
     /// it with an error and the host falls back to `PendingUploadCount`).
     UploadStatus,
+    /// Delete the scope's local store (`deleteClientStorage()` in
+    /// jazz-tools, ABI 6): close every foreground, the socket worker and the
+    /// relay of this foreground's scope, then delete its SQLite files. The
+    /// account and the admitted scope stay, so the next open starts a fresh
+    /// store that syncs everything again. Writes the server had not confirmed
+    /// are dropped, and counted in the answer.
+    DeleteStore,
 }
 
 /// One refusal of a scope's credential by its upstream. Every refusal gets a
@@ -539,6 +547,9 @@ pub enum ForegroundDbCommandRequest {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct NativeAuthRejection {
     pub sequence: u64,
+    /// The classified refusal, `AuthFailureReason::as_str`: `expired`,
+    /// `missing`, `invalid`, `disabled` or `revoked`. Builds before it sent
+    /// the server's message in this same string, which hosts still classify.
     pub reason: String,
 }
 
@@ -554,6 +565,10 @@ pub struct NativeUpstreamFailure {
     pub sequence: u64,
     pub reason: String,
     pub retrying: bool,
+    /// The core's stable error code when the relay's database refused its
+    /// upstream (`authority_changed`, say), so the app can tell that refusal
+    /// apart as napi and wasm hosts do; `None` for any other failure.
+    pub code: Option<String>,
 }
 
 /// Source of [`NativeAuthRejection::sequence`] and
@@ -737,6 +752,11 @@ pub enum ForegroundDbCommandResponse {
     UploadStatus {
         status_json: String,
     },
+    /// Answer to [`ForegroundDbCommandRequest::DeleteStore`]: how many writes
+    /// the server had not confirmed were dropped with the store.
+    StoreDeleted {
+        pending_uploads: u64,
+    },
 }
 
 /// One already-materialized subscription event.  The byte payload deliberately
@@ -829,6 +849,12 @@ pub struct NativeRelayHost {
     /// Production always uses [`NativeWebSocketConnector`].
     #[cfg(test)]
     socket_connector: Option<Arc<dyn NativeTransportConnector>>,
+    /// Host-level tests drive their own network path and retry timing
+    /// instead of the process-wide ones.
+    #[cfg(test)]
+    network_path: Option<tokio::sync::watch::Receiver<NetworkPath>>,
+    #[cfg(test)]
+    link_policy: Option<jazz::link::LinkPolicy>,
 }
 
 #[derive(Clone)]
@@ -898,10 +924,13 @@ impl WorkerLink {
 
     fn on_event(&mut self, event: LinkEvent) {
         match event {
-            LinkEvent::AuthFailed { message, .. } => {
+            // The link already classified the refusal; forward that, so
+            // the host never re-reads the server's wording, which is not
+            // part of compatibility (`wire.rs`).
+            LinkEvent::AuthFailed { reason, .. } => {
                 self.auth_rejected = Some(NativeAuthRejection {
                     sequence: next_upstream_event(),
-                    reason: message,
+                    reason: reason.as_str().to_owned(),
                 });
             }
             LinkEvent::AuthRestored => {}
@@ -924,6 +953,7 @@ impl WorkerLink {
                         sequence: next_upstream_event(),
                         reason,
                         retrying,
+                        code: None,
                     },
                 });
                 self.status = Some(status);
@@ -1036,6 +1066,10 @@ impl Default for NativeRelayHost {
             next_handle: 1,
             #[cfg(test)]
             socket_connector: None,
+            #[cfg(test)]
+            network_path: None,
+            #[cfg(test)]
+            link_policy: None,
         }
     }
 }
@@ -1153,6 +1187,8 @@ impl NativeRelayHost {
             peer_identity,
             session,
             self.socket_connector(),
+            self.socket_network_path(),
+            self.socket_link_policy(),
         )?;
         worker._worker.activate();
         self.private_scope_workers.insert(scope.clone(), worker);
@@ -1167,12 +1203,30 @@ impl NativeRelayHost {
         Arc::new(NativeWebSocketConnector)
     }
 
+    fn socket_network_path(&self) -> tokio::sync::watch::Receiver<NetworkPath> {
+        #[cfg(test)]
+        if let Some(path) = &self.network_path {
+            return path.clone();
+        }
+        network_path()
+    }
+
+    fn socket_link_policy(&self) -> jazz::link::LinkPolicy {
+        #[cfg(test)]
+        if let Some(policy) = self.link_policy {
+            return policy;
+        }
+        jazz::link::LinkPolicy::default()
+    }
+
     fn prepare_private_scope_worker(
         admitted_scope: AdmissionCapability,
         relay: NativeRelay,
         peer_identity: jazz::ids::AuthorSubject,
         session: PrivateRelaySocketSession,
         connector: Arc<dyn NativeTransportConnector>,
+        network_path: tokio::sync::watch::Receiver<NetworkPath>,
+        link_policy: jazz::link::LinkPolicy,
     ) -> Result<PrivateScopeSocketWorker, JazzNativeRelayStatus> {
         let link = Arc::new(Mutex::new(WorkerLink::default()));
         let link_for_event = Arc::clone(&link);
@@ -1203,6 +1257,8 @@ impl NativeRelayHost {
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .on_event(event);
                 }),
+                network_path,
+                link_policy,
             },
             connector,
         )
@@ -1300,9 +1356,22 @@ impl NativeRelayHost {
     }
 
     fn private_scope_upstream_failure(&self, scope: &RelayScope) -> Option<NativeUpstreamFailure> {
-        self.private_scope_workers
+        let mut failure = self
+            .private_scope_workers
             .get(scope)
-            .and_then(|worker| worker.link().failure.clone())
+            .and_then(|worker| worker.link().failure.clone())?;
+        // A link stopped by the relay's own refusal carries its code.
+        if !failure.retrying
+            && let Some(refusal) = self
+                .relays
+                .values()
+                .find(|opened| &opened.scope == scope)
+                .and_then(|opened| opened.relay.upstream_refusal().ok().flatten())
+            && refusal.reason == failure.reason
+        {
+            failure.code = Some(refusal.code);
+        }
+        Some(failure)
     }
 
     fn execute(
@@ -2102,6 +2171,63 @@ impl NativeRelayHost {
         Ok(admitted)
     }
 
+    /// Delete the local store of `foreground`'s scope (see
+    /// [`ForegroundDbCommandRequest::DeleteStore`]). Returns how many writes
+    /// the server had not confirmed it dropped.
+    fn delete_scope_store(&mut self, foreground: u64) -> Result<u64, JazzNativeRelayStatus> {
+        let scope = self
+            .foregrounds
+            .get(&foreground)
+            .ok_or(JazzNativeRelayStatus::InvalidHandle)?
+            .scope
+            .clone();
+        let sqlite_path = self
+            .admitted_scopes
+            .values()
+            .find(|admitted| admitted.config.scope == scope)
+            .map(|admitted| admitted.config.sqlite_path.clone())
+            .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
+        let relay_handles = self
+            .relays
+            .iter()
+            .filter_map(|(handle, opened)| (opened.scope == scope).then_some(*handle))
+            .collect::<Vec<_>>();
+        let pending = relay_handles
+            .first()
+            .and_then(|handle| self.relays.get(handle))
+            .and_then(|opened| opened.relay.unconfirmed_writes().ok())
+            .unwrap_or(0);
+        // The socket worker first: dropping it cancels and joins its socket.
+        self.private_scope_workers.remove(&scope);
+        let foregrounds = self
+            .foregrounds
+            .iter()
+            .filter_map(|(handle, opened)| (opened.scope == scope).then_some(*handle))
+            .collect::<Vec<_>>();
+        for handle in foregrounds {
+            let _ = self.teardown_foreground(handle, ForegroundTeardown::Retire);
+        }
+        for relay_handle in relay_handles {
+            self.relays.remove(&relay_handle);
+            let client_handles = self
+                .clients
+                .iter()
+                .filter_map(|(handle, (owner, _))| (*owner == relay_handle).then_some(*handle))
+                .collect::<Vec<_>>();
+            for client_handle in client_handles {
+                if let Some((_, client)) = self.clients.remove(&client_handle) {
+                    let _ = client.close();
+                }
+            }
+        }
+        // Closes the store synchronously, before its files go.
+        self.registry.close(&scope).map_err(relay_status)?;
+        relay::delete_store_files(&sqlite_path)
+            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        relay::forget_rebuilt_marker(&sqlite_path);
+        Ok(pending as u64)
+    }
+
     fn revoke_scope(
         &mut self,
         admitted_scope: AdmissionCapability,
@@ -2281,6 +2407,19 @@ pub extern "C" fn jazz_native_relay_abi_version() -> u16 {
 #[unsafe(no_mangle)]
 pub extern "C" fn jazz_native_relay_supports_snapshot_capture() -> bool {
     true
+}
+
+/// The platform's network monitor reports the device's path (on iOS, every
+/// `NWPathMonitor` update). `interfaces` is a mask of the
+/// `JAZZ_NATIVE_RELAY_NETWORK_*` bits. Safe from any thread, at any time,
+/// before or after a relay exists; outside the command layout, so it does
+/// not change the ABI.
+#[unsafe(no_mangle)]
+pub extern "C" fn jazz_native_relay_network_path_changed(satisfied: bool, interfaces: u32) {
+    report_network_path(NetworkPath {
+        satisfied,
+        interfaces,
+    });
 }
 
 /// Run one C ABI body written with `?` and collapse it into its status code.
@@ -2944,6 +3083,9 @@ impl NativeRelayHost {
             }
             Request::Close => Response::Closed {
                 closed: self.close_foreground(foreground)?,
+            },
+            Request::DeleteStore => Response::StoreDeleted {
+                pending_uploads: self.delete_scope_store(foreground)?,
             },
             Request::DrainTickEvents => {
                 let scope = self

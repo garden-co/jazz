@@ -551,3 +551,183 @@ fn serializable_view_commit_rejects_concurrent_local_row_change() {
         );
     });
 }
+
+mod executing_policy_context {
+    use crate::common::{compile_schema, read_and_allow_all_writes};
+    use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, ReadTier, block_on};
+    use jazz::ids::{AuthorSubject, NodeUuid};
+    use jazz::query::Query;
+    use jazz::records::Value;
+    use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TableSchemaBuilder};
+
+    fn schema(read: bool) -> jazz::tools::public_schema::Schema {
+        SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("body", ColumnType::Text)
+                    .policies(read_and_allow_all_writes(if read {
+                        PolicyExpr::True
+                    } else {
+                        PolicyExpr::False
+                    })),
+            )
+            .build()
+    }
+    fn config(schema: jazz::schema::JazzSchema) -> DbConfig {
+        DbConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([19; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )
+    }
+    /// The owner on a store file, with its note.
+    fn owner_at(path: &std::path::Path) -> Db {
+        let db = block_on(Db::open_at(
+            config(compile_schema(&schema(true))),
+            path,
+            jazz::db::FileOptions::default(),
+        ))
+        .unwrap();
+        block_on(db.insert(
+            "notes",
+            [("body".into(), Value::String("private note".into()))].into(),
+            Default::default(),
+        ))
+        .unwrap();
+        db
+    }
+    fn read(db: &Db, query: &jazz::db::PreparedQuery) -> usize {
+        block_on(db.all_for_identity(
+            query,
+            ReadOpts {
+                tier: ReadTier::LocalOnly,
+                ..Default::default()
+            },
+            AuthorSubject::for_test_bytes([1; 16]),
+        ))
+        .unwrap()
+        .len()
+    }
+    fn pinned(db: &Db, bundle: &jazz::catalogue::BundleId) -> Db {
+        db.pinned_view(db.current_schema().version_id(), Some(bundle))
+            .unwrap()
+            .unwrap()
+    }
+    /// The owner's store reopened under `closed`: its owner policies change
+    /// only when it opens (a running store never switches schema).
+    fn revoke(db: Db, path: &std::path::Path, closed: &jazz::tools::public_schema::Schema) -> Db {
+        crate::common::reinstall(db, path, config(compile_schema(closed)), Vec::new())
+    }
+
+    /// Alice explicitly pins an open bundle; Bob changing the current owner policy
+    /// must leave that bundle's documented permission contract intact.
+    #[test]
+    fn pinned_view_keeps_its_bundle_after_owner_policy_revocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owner.sqlite");
+        let db = owner_at(&path);
+        let bundle = block_on(db.publish_bundle(&schema(true))).unwrap();
+        let db = revoke(db, &path, &schema(false));
+        let pinned = pinned(&db, &bundle);
+        let query = pinned.prepare_query(&Query::from("notes")).unwrap();
+        assert_eq!(read(&pinned, &query), 1);
+    }
+
+    /// Alice's governed handle cannot insert once the owner reopens with
+    /// INSERT revoked; a pinned open bundle keeps its selected policy.
+    #[test]
+    fn governed_write_uses_current_policy_but_pin_stays_fixed() {
+        use jazz::db::{InsertOptions, WriteIdentity};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owner.sqlite");
+        let db = owner_at(&path);
+        let bundle = block_on(db.publish_bundle(&schema(true))).unwrap();
+        let closed = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("body", ColumnType::Text)
+                    .policies(
+                        jazz::tools::TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::False),
+                    ),
+            )
+            .build();
+        let db = revoke(db, &path, &closed);
+        let governed = db.governed_view(db.current_schema().version_id()).unwrap();
+        let pinned = pinned(&db, &bundle);
+        let opts = InsertOptions {
+            identity: WriteIdentity::Session(AuthorSubject::for_test_bytes([1; 16])),
+            ..Default::default()
+        };
+        let cells = [("body".into(), Value::String("new note".into()))].into();
+        assert!(block_on(governed.insert("notes", cells, opts.clone())).is_err());
+        let cells = [("body".into(), Value::String("pinned note".into()))].into();
+        block_on(pinned.insert("notes", cells, opts)).unwrap();
+    }
+
+    fn serialized_count(result: jazz::db::SerializedReadResult) -> usize {
+        match result {
+            jazz::db::SerializedReadResult::Rows(rows) => rows.len(),
+            jazz::db::SerializedReadResult::Relation(_) => panic!("plain notes query"),
+        }
+    }
+
+    /// Alice reads through a governed handle using the ordinary binding
+    /// route once the owner reopens with SELECT revoked.
+    #[test]
+    fn serialized_identity_read_observes_revocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owner.sqlite");
+        let db = revoke(owner_at(&path), &path, &schema(false));
+        let retained = db.governed_view(db.current_schema().version_id()).unwrap();
+        let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+        let result = block_on(retained.all_serialized_query(
+            &query,
+            ReadOpts::for_read_tier(ReadTier::LocalOnly),
+            None,
+            Some((AuthorSubject::for_test_bytes([1; 16]), Default::default())),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(
+            serialized_count(result),
+            0,
+            "serialized read retained revoked SELECT"
+        );
+    }
+
+    /// Alice's explicit bundle stays fixed, and an unfiltered ordinary cache
+    /// read stays unfiltered, once the owner reopens with other policies.
+    /// These are distinct from a current-governed identity read.
+    #[test]
+    fn serialized_reads_preserve_pins_and_unfiltered_semantics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owner.sqlite");
+        let db = owner_at(&path);
+        let bundle = block_on(db.publish_bundle(&schema(true))).unwrap();
+        let db = revoke(db, &path, &schema(false));
+        let pinned = pinned(&db, &bundle);
+        let governed = db.governed_view(db.current_schema().version_id()).unwrap();
+        let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+        for (view, scope) in [
+            (
+                &pinned,
+                Some((AuthorSubject::for_test_bytes([1; 16]), Default::default())),
+            ),
+            (&governed, None),
+        ] {
+            let result = block_on(view.all_serialized_query(
+                &query,
+                ReadOpts::for_read_tier(ReadTier::LocalOnly),
+                None,
+                scope,
+                None,
+            ))
+            .unwrap();
+            assert_eq!(serialized_count(result), 1);
+        }
+    }
+}

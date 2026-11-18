@@ -4,6 +4,12 @@ import { renderToString } from "react-dom/server";
 import { afterEach, expect, it, onTestFinished, vi } from "vitest";
 import { AccountManager } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
+import {
+  ownJazzSession,
+  startJazzSession,
+  type JazzSession,
+  type JazzSessionErrorViewProps,
+} from "../session/jazz-session.js";
 import { JazzSessionProvider, useJazzSession, type UseJazzSessionResult } from "./session.js";
 import { useJazzClient } from "./provider.js";
 import { makeFakeAccount, makeFakeClient } from "./test-utils.js";
@@ -135,6 +141,35 @@ it("keeps auth fallback mounted to acknowledge a backend-driven sign-out", async
   await waitFor(() => expect(view.container.textContent).toBe("signed-out"));
   expect(client.shutdown).toHaveBeenCalled();
 });
+it("renders nothing once its session is closed, or the closed view", async () => {
+  for (const closed of [
+    undefined,
+    <p>Session closed</p>,
+    (state: UseJazzSessionResult) => <p>Session {state.status}</p>,
+  ]) {
+    const { factory } = fixture();
+    const session = ownJazzSession({}, factory, { start: false });
+    await startJazzSession(session as JazzSession<unknown>);
+    const view = render(
+      <JazzSessionProvider
+        session={session}
+        openCore={factory}
+        loading={<p>Loading</p>}
+        closed={closed}
+      >
+        <p>data</p>
+      </JazzSessionProvider>,
+    );
+    await waitFor(() => expect(view.container.textContent).toBe("data"));
+    await act(async () => {
+      await session.close();
+    });
+    expect(session.getSnapshot().status).toBe("closed");
+    // Before: the loading view, forever.
+    expect(view.container.textContent).toBe(closed ? "Session closed" : "");
+    view.unmount();
+  }
+});
 it("logs a startup failure even when the app renders no error UI", async () => {
   const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
   onTestFinished(() => consoleError.mockRestore());
@@ -152,22 +187,35 @@ it("logs a startup failure even when the app renders no error UI", async () => {
   );
   expect(view.container.textContent).toBe("");
 });
-it("exposes safe retry in custom initialization error UI", async () => {
+it("gives a custom error view { error, recovery, retry }, whose retry never rejects", async () => {
   const { factory } = fixture();
-  const create = vi.fn().mockRejectedValueOnce(new Error("offline")).mockImplementation(factory);
+  const create = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("offline"))
+    .mockRejectedValueOnce(new Error("still offline"))
+    .mockImplementation(factory);
+  const seen: JazzSessionErrorViewProps[] = [];
   const view = render(
     <JazzSessionProvider
       config={{}}
       openCore={create}
       loading={<Status />}
-      error={(state) => (
-        <button onClick={() => void state.retry()}>Retry {state.error?.message}</button>
-      )}
+      error={(props) => {
+        seen.push(props);
+        return (
+          <button onClick={props.retry}>
+            Retry {props.error.message} ({props.recovery})
+          </button>
+        );
+      }}
     >
       <Status />
     </JazzSessionProvider>,
   );
-  await waitFor(() => expect(view.container.textContent).toBe("Retry offline"));
+  await waitFor(() => expect(view.container.textContent).toBe("Retry offline (session)"));
+  expect(Object.keys(seen.at(-1)!).sort()).toEqual(["error", "recovery", "retry"]);
+  await expect(seen.at(-1)!.retry()).resolves.toBeUndefined();
+  await waitFor(() => expect(view.container.textContent).toBe("Retry still offline (session)"));
   await act(async () => {
     view.getByRole("button").click();
   });

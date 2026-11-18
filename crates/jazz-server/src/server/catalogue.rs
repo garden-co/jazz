@@ -1,58 +1,22 @@
 mod deployment;
-pub(crate) use deployment::DeploymentResponse;
 
 #[cfg(test)]
-use std::collections::VecDeque;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
+pub(crate) use crate::portable::catalogue::ConnectionSchemaDiagnostics;
+pub(crate) use crate::portable::catalogue::{CatalogueIndex, MigrationGraph};
 use crate::server::catalogue_storage::{CatalogueStorage, CatalogueStorageError};
-use jazz::catalogue::CatalogueRows;
 #[cfg(any(test, feature = "embedded-server"))]
 use jazz::catalogue::{CatalogueLens, CataloguePut};
 use jazz::tools::ObjectId;
-use jazz::tools::public_schema::{Schema, SchemaHash, TablePolicies};
+use jazz::tools::public_schema::{Schema, SchemaHash};
+#[cfg(any(test, feature = "embedded-server"))]
 use jazz::tools::schema_lens::Lens;
 #[cfg(test)]
 use jazz::tx::DurabilityTier;
-
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ConnectionSchemaDiagnostics {
-    pub client_schema_hash: SchemaHash,
-    pub disconnected_permissions_schema_hash: Option<SchemaHash>,
-    pub unreachable_schema_hashes: Vec<SchemaHash>,
-}
-
-#[cfg(test)]
-impl ConnectionSchemaDiagnostics {
-    pub(crate) fn has_issues(&self) -> bool {
-        self.disconnected_permissions_schema_hash.is_some()
-            || !self.unreachable_schema_hashes.is_empty()
-    }
-}
-
-/// HTTP graph inventory, captured under one catalogue index lock.
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct MigrationGraph {
-    /// The schema of the bundle published last, which new sessions pin to.
-    latest_bundle_schema_hash: Option<String>,
-    schemas: Vec<String>,
-    migrations: Vec<MigrationGraphEdge>,
-}
-
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MigrationGraphEdge {
-    from_hash: String,
-    to_hash: String,
-    /// Derived capability, not persisted provenance: no migration file is needed.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    automatic: bool,
-}
 
 /// Errors from server-local catalogue operations.
 #[allow(dead_code)]
@@ -129,14 +93,14 @@ impl StoredCatalogue {
     /// The permissions bundle published last, if any.
     #[cfg(feature = "embedded-server")]
     pub(crate) fn latest_bundle(&self) -> Option<jazz::catalogue::BundleId> {
-        Some(self.index.lock().ok()?.bundles.last()?.id)
+        self.index.lock().ok()?.latest_bundle()
     }
 
     /// Every published permissions bundle, oldest first.
     pub(crate) fn published_bundles(&self) -> Vec<jazz::catalogue::CatalogueBundle> {
         self.index
             .lock()
-            .map(|index| index.bundles.clone())
+            .map(|index| index.published_bundles().to_vec())
             .unwrap_or_default()
     }
 
@@ -144,7 +108,7 @@ impl StoredCatalogue {
         initial_schema: Option<Schema>,
         storage: CatalogueStorage,
     ) -> Result<Self, CatalogueError> {
-        let index = CatalogueIndex::from_rows(&storage.read()?, initial_schema.as_ref())?;
+        let index = CatalogueIndex::from_rows(&storage.read()?, initial_schema.as_ref());
         Ok(Self {
             initial_schema,
             index: Mutex::new(index),
@@ -225,6 +189,15 @@ impl StoredCatalogue {
         Ok(index.latest_published_schema())
     }
 
+    /// The catalogue as it reads now.
+    pub(crate) fn index(&self) -> Result<CatalogueIndex, CatalogueError> {
+        Ok(self
+            .index
+            .lock()
+            .map_err(|_| CatalogueError::LockError)?
+            .clone())
+    }
+
     #[cfg(test)]
     pub(crate) fn connection_schema_diagnostics(
         &self,
@@ -241,7 +214,7 @@ impl StoredCatalogue {
     }
 
     fn reindex(&self, storage: &CatalogueStorage) -> Result<(), CatalogueError> {
-        let index = CatalogueIndex::from_rows(&storage.read()?, self.initial_schema.as_ref())?;
+        let index = CatalogueIndex::from_rows(&storage.read()?, self.initial_schema.as_ref());
         *self.index.lock().map_err(|_| CatalogueError::LockError)? = index;
         Ok(())
     }
@@ -271,176 +244,10 @@ pub(crate) fn unix_timestamp_millis() -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-/// The catalogue as the HTTP routes read it, rebuilt from the store's
-/// rows after every change.
-#[derive(Debug, Default, Clone, PartialEq)]
-struct CatalogueIndex {
-    schemas: HashMap<SchemaHash, Schema>,
-    schema_published_at: HashMap<SchemaHash, u64>,
-    lens_edges: HashSet<(SchemaHash, SchemaHash)>,
-    lenses: HashMap<(SchemaHash, SchemaHash), Lens>,
-    /// Every published permissions bundle (see [`jazz::catalogue`]),
-    /// oldest first.
-    bundles: Vec<jazz::catalogue::CatalogueBundle>,
-    /// The admitted schemas, oldest first.
-    admitted: Vec<SchemaHash>,
-}
-
-impl CatalogueIndex {
-    fn from_rows(
-        rows: &CatalogueRows,
-        initial_schema: Option<&Schema>,
-    ) -> Result<Self, CatalogueError> {
-        let mut index = Self::default();
-        for schema in &rows.schemas {
-            index.schemas.insert(schema.hash, schema.schema.clone());
-            if let Some(published_at) = schema.published_at {
-                index.schema_published_at.insert(schema.hash, published_at);
-            }
-        }
-        for lens in &rows.lenses {
-            let lens = Lens::new(lens.source, lens.target, lens.forward.clone());
-            if !lens.is_draft() {
-                index
-                    .lens_edges
-                    .insert((lens.source_hash, lens.target_hash));
-                index
-                    .lenses
-                    .insert((lens.source_hash, lens.target_hash), lens);
-            }
-        }
-        index.bundles = rows.bundles.clone();
-        index
-            .bundles
-            .sort_by_key(|bundle| (bundle.published_at, bundle.id.0));
-        let mut admitted: Vec<_> = rows
-            .schemas
-            .iter()
-            .filter_map(|schema| Some((schema.admitted?, schema.hash)))
-            .collect();
-        admitted.sort_by_key(|(n, _)| *n);
-        index.admitted = admitted.into_iter().map(|(_, hash)| hash).collect();
-        if let Some(schema) = initial_schema {
-            // The store's data was written under it too: the deploy guard
-            // counts it as admitted (SPEC 4 §4.9), oldest.
-            let hash = index.add_schema(schema.clone());
-            if !index.admitted.contains(&hash) {
-                index.admitted.insert(0, hash);
-            }
-        }
-        Ok(index)
-    }
-
-    fn add_schema(&mut self, schema: Schema) -> SchemaHash {
-        let hash = SchemaHash::compute(&schema);
-        self.schemas.entry(hash).or_insert(schema);
-        hash
-    }
-
-    fn known_schema_hashes(&self) -> Vec<SchemaHash> {
-        let mut hashes = self.schemas.keys().copied().collect::<Vec<_>>();
-        hashes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-        hashes
-    }
-
-    fn latest_published_schema(&self) -> Option<Schema> {
-        let mut candidates = self
-            .schema_published_at
-            .iter()
-            .map(|(hash, published_at)| (*published_at, *hash))
-            .collect::<Vec<_>>();
-        candidates.sort_by(|(left_time, left_hash), (right_time, right_hash)| {
-            left_time
-                .cmp(right_time)
-                .then_with(|| left_hash.as_bytes().cmp(right_hash.as_bytes()))
-        });
-        let (_, hash) = candidates.pop()?;
-        self.schemas.get(&hash).cloned()
-    }
-
-    #[cfg(test)]
-    fn connection_schema_diagnostics(
-        &self,
-        client_schema_hash: SchemaHash,
-    ) -> ConnectionSchemaDiagnostics {
-        let active_permissions_hash = self.known_schema_hashes().into_iter().next();
-        let reachable_hashes = self.non_draft_reachable_hashes(client_schema_hash);
-        let disconnected_permissions_schema_hash = active_permissions_hash
-            .filter(|permissions_hash| !reachable_hashes.contains(permissions_hash));
-
-        let mut unreachable_schema_hashes: Vec<_> = self
-            .known_schema_hashes()
-            .into_iter()
-            .filter(|hash| *hash != client_schema_hash)
-            .filter(|hash| !reachable_hashes.contains(hash))
-            .filter(|hash| Some(*hash) != disconnected_permissions_schema_hash)
-            .collect();
-        unreachable_schema_hashes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-
-        ConnectionSchemaDiagnostics {
-            client_schema_hash,
-            disconnected_permissions_schema_hash,
-            unreachable_schema_hashes,
-        }
-    }
-
-    #[cfg(test)]
-    fn non_draft_reachable_hashes(&self, schema_hash: SchemaHash) -> HashSet<SchemaHash> {
-        if !self.schemas.contains_key(&schema_hash) {
-            return HashSet::new();
-        }
-
-        let mut seen = HashSet::from([schema_hash]);
-        let mut queue = VecDeque::from([schema_hash]);
-        while let Some(current) = queue.pop_front() {
-            for &(source, target) in &self.lens_edges {
-                let next = if source == current {
-                    Some(target)
-                } else if target == current {
-                    Some(source)
-                } else {
-                    None
-                };
-                if let Some(next) = next
-                    && seen.insert(next)
-                {
-                    queue.push_back(next);
-                }
-            }
-        }
-        seen
-    }
-}
-
 impl CatalogueStore for StoredCatalogue {
     fn migration_graph(&self) -> Result<MigrationGraph, CatalogueError> {
         let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
-        let mut schemas: Vec<_> = index.schemas.keys().map(ToString::to_string).collect();
-        schemas.sort();
-        let mut migrations: Vec<_> = index
-            .lenses
-            .values()
-            .map(|lens| MigrationGraphEdge {
-                from_hash: lens.source_hash.to_string(),
-                to_hash: lens.target_hash.to_string(),
-                automatic: lens.forward.ops.is_empty()
-                    && lens.backward.ops.is_empty()
-                    && !lens.is_draft()
-                    && index
-                        .schemas
-                        .get(&lens.source_hash)
-                        .zip(index.schemas.get(&lens.target_hash))
-                        .is_some_and(|(from, to)| {
-                            jazz::tools::deployment::schemas_are_compatible(from, to)
-                        }),
-            })
-            .collect();
-        migrations.sort_by(|a, b| (&a.from_hash, &a.to_hash).cmp(&(&b.from_hash, &b.to_hash)));
-        Ok(MigrationGraph {
-            latest_bundle_schema_hash: index.bundles.last().map(|bundle| bundle.schema.to_string()),
-            schemas,
-            migrations,
-        })
+        Ok(index.migration_graph())
     }
 
     fn known_schema_hashes(&self) -> Result<Vec<SchemaHash>, CatalogueError> {
@@ -450,18 +257,18 @@ impl CatalogueStore for StoredCatalogue {
 
     fn known_schema(&self, schema_hash: &SchemaHash) -> Result<Option<Schema>, CatalogueError> {
         let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
-        Ok(index.schemas.get(schema_hash).cloned())
+        Ok(index.known_schema(schema_hash).cloned())
     }
 
     #[cfg(feature = "embedded-server")]
     fn known_lenses(&self) -> Result<Vec<Lens>, CatalogueError> {
         let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
-        Ok(index.lenses.values().cloned().collect())
+        Ok(index.known_lenses().cloned().collect())
     }
 
     fn schema_published_at(&self, schema_hash: &SchemaHash) -> Result<Option<u64>, CatalogueError> {
         let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
-        Ok(index.schema_published_at.get(schema_hash).copied())
+        Ok(index.schema_published_at(schema_hash))
     }
 
     #[cfg(any(test, feature = "embedded-server"))]

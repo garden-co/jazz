@@ -2,23 +2,21 @@ import React, { useState } from "react";
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { WebSocket as NodeWebSocket } from "undici";
-import { schema as s } from "../schema-namespace.js";
-import { definePermissions } from "../permissions/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb, type LocalFirstLoader } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
-import { startTestJazz, type TestJazz } from "../testing/index.js";
+import { startTestJazz, testApp, type TestJazz } from "../testing/index.js";
 import { createJazzClient } from "../session/create-jazz-session.js";
 import type { JazzSession } from "../session/jazz-session.js";
 import type { JazzClient } from "./create-jazz-client.js";
 import { JazzProvider } from "./provider.js";
 import { useAll } from "./use-all.js";
 
-const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
-const permissions = definePermissions(app, ({ policy, session }) => {
-  policy.notes.allowRead.where({ $createdBy: session.user });
-  policy.notes.allowInsert.always();
-});
+const app = testApp({ tables: { notes: { columns: { text: "string" } } } });
+const permissions = {
+  format: 1,
+  tables: { notes: { read: "$createdBy = session.user", insert: "true" } },
+};
 const loadLocalFirst: LocalFirstLoader = async () => ({ createClient: createLocalFirstDb });
 
 // The DOM environment's WebSocket can't reach the test server; Node's can.
@@ -62,7 +60,7 @@ it("upgrades to the local-first client under a mounted tree, keeping its state a
   server = await startTestJazz({
     app,
     permissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   const opened = await createJazzClient({
     scope: server.appId,

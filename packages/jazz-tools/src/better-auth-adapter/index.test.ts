@@ -1,18 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
 import { betterAuth, type BetterAuthOptions, type DBAdapter } from "better-auth";
+import { bearer, jwt } from "better-auth/plugins";
+import { createLocalJWKSet, jwtVerify } from "jose";
 import { createJazzContext, type JazzContext } from "../backend/create-jazz-context.js";
 import {
   startLocalJazzServer,
   deploy as deployFixture,
+  testPermissions,
   type LocalJazzServerHandle,
 } from "../testing/index.js";
 import {
   app as fixtureApp,
+  appFile as fixtureAppFile,
   permissions as fixturePermissions,
-  schema as fixtureSchema,
+  permissionsFile as fixturePermissionsFile,
   wasmSchema as wasmSchemaExample,
-} from "./fixtures/schema.js";
+} from "./fixtures/app.js";
 import { jazzAdapter } from "./index.js";
+import { UnsupportedBetterAuthQueryError } from "./utils.js";
 import { accountRegistryUrl } from "../accounts/context.js";
 import { readAccountAssignment, requestVouchedAccount } from "../accounts/registry-client.js";
 
@@ -73,9 +78,11 @@ async function appUserSession(
 describe("jazzAdapter", () => {
   describe("generated auth-table permissions", () => {
     it("denies client CRUD for every generated Better Auth table", () => {
-      expect(Object.keys(fixturePermissions).sort()).toEqual(Object.keys(fixtureSchema).sort());
+      expect(Object.keys(fixturePermissions).sort()).toEqual(
+        Object.keys(fixtureAppFile.tables).sort(),
+      );
 
-      for (const tableName of Object.keys(fixtureSchema)) {
+      for (const tableName of Object.keys(fixtureAppFile.tables)) {
         const tablePermissions = fixturePermissions[tableName]!;
 
         expect(tablePermissions.select?.using).toEqual({ type: "False" });
@@ -88,16 +95,14 @@ describe("jazzAdapter", () => {
   });
 
   it("rejects ordinary-session reads and writes to Better Auth tables", async () => {
-    const server = await startLocalJazzServer({
-      allowLocalFirstAuth: true,
-    });
+    const server = await startLocalJazzServer({});
     // Published as createJazz publishes it; the backend link is pinned to it.
     const { bundle } = await deployFixture({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
-      schema: fixtureApp,
-      permissions: fixturePermissions,
+      app: fixtureApp,
+      permissions: fixturePermissionsFile,
     });
     const context = createJazzContext({
       appId: server.appId,
@@ -154,8 +159,8 @@ describe("jazzAdapter", () => {
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
-      schema: fixtureApp,
-      permissions: fixturePermissions,
+      app: fixtureApp,
+      permissions: fixturePermissionsFile,
     });
     const context = createJazzContext({
       appId: server.appId,
@@ -196,7 +201,6 @@ describe("jazzAdapter", () => {
       const account = await adapter.create<any>({
         model: "account",
         data: {
-          issuer: "external-policy-issuer",
           accountId: "external-policy-account",
           providerId: "test",
           userId: user.id,
@@ -282,6 +286,140 @@ describe("jazzAdapter", () => {
     }
   }, 30_000);
 
+  /** A row for each Better Auth table, as its adapter would write it. */
+  const betterAuthRows = (userId: string): Record<string, Record<string, unknown>> => ({
+    better_auth_user: {
+      name: "Denied",
+      email: `denied-${crypto.randomUUID()}@example.com`,
+      emailVerified: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    },
+    better_auth_session: {
+      expiresAt: new Date(Date.now() + 60_000),
+      token: `denied-${crypto.randomUUID()}`,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      userId,
+    },
+    better_auth_account: {
+      accountId: "denied-account",
+      providerId: "test",
+      userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    },
+    better_auth_verification: {
+      identifier: "denied-verification",
+      value: "backend-only",
+      expiresAt: new Date(Date.now() + 60_000),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    },
+    better_auth_jwks: {
+      publicKey: "denied-public-key",
+      privateKey: "denied-private-key",
+      createdAt: new Date(),
+    },
+  });
+
+  // Deny-all must hold for a client both for tables absent from
+  // jazz.permissions.json and as the generated schema-better-auth/schema.ts
+  // writes them (`false` for each operation).
+  it.each([
+    ["absent from jazz.permissions.json", {}],
+    [
+      "as schema-better-auth/schema.ts writes them",
+      Object.fromEntries(
+        Object.keys(fixtureAppFile.tables).map((name) => [
+          name,
+          { read: "false", insert: "false", update: "false", delete: "false" },
+        ]),
+      ),
+    ],
+  ])(
+    "denies a verified client session every operation on Better Auth tables %s",
+    async (label, betterAuthTables: Record<string, unknown>) => {
+      const permissionsFile = { ...fixturePermissionsFile, tables: betterAuthTables };
+      const tableNames = Object.keys(fixtureAppFile.tables);
+      expect(tableNames.sort()).toEqual(Object.keys(betterAuthRows("")).sort());
+      const server = await startLocalJazzServer();
+      const { bundle } = await deployFixture({
+        serverUrl: server.url,
+        appId: server.appId,
+        adminSecret: server.adminSecret,
+        app: fixtureApp,
+        permissions: permissionsFile,
+      });
+      const context = createJazzContext({
+        appId: server.appId,
+        app: fixtureApp,
+        permissions: testPermissions(fixtureApp, permissionsFile),
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        backendSecret: server.backendSecret,
+        bundle,
+      });
+      const table = (name: string) => (fixtureApp as Record<string, any>)[name];
+
+      try {
+        const backend = context.asBackend(fixtureApp);
+        const user = (await backend
+          .insert(table("better_auth_user"), betterAuthRows("").better_auth_user)
+          .wait({ tier: "global" })) as { id: string };
+        const ids: Record<string, string> = { better_auth_user: user.id };
+        for (const name of tableNames.filter((name) => name !== "better_auth_user")) {
+          const row = (await backend
+            .insert(table(name), betterAuthRows(user.id)[name])
+            .wait({ tier: "global" })) as { id: string };
+          ids[name] = row.id;
+        }
+
+        const sessionDb = context.forSession(
+          await appUserSession(server, `deny-${label.split(" ")[0]}`),
+        );
+        const denied =
+          /AuthorizationDenied|Write rejected by server authorization|read policy denied/;
+        const attempt = (write: () => { wait(options: { tier: "global" }): Promise<unknown> }) =>
+          Promise.resolve().then(() => write().wait({ tier: "global" }));
+        for (const name of tableNames) {
+          await expect(
+            sessionDb.all(table(name), { tier: "remote" }),
+            `${name} read`,
+          ).resolves.toEqual([]);
+          await expect(
+            attempt(() => sessionDb.insert(table(name), betterAuthRows(user.id)[name])),
+            `${name} insert`,
+          ).rejects.toThrow(denied);
+          await expect(
+            attempt(() => sessionDb.update(table(name), ids[name]!, { createdAt: new Date(0) })),
+            `${name} update`,
+          ).rejects.toThrow(denied);
+          await expect(
+            attempt(() => sessionDb.delete(table(name), ids[name]!)),
+            `${name} delete`,
+          ).rejects.toThrow(denied);
+        }
+        // The rows are there, unchanged: the client saw none because it was denied.
+        for (const name of tableNames) {
+          const rows = (await backend.all(table(name), { tier: "remote" })) as {
+            id: string;
+            createdAt: Date;
+          }[];
+          expect(
+            rows.map((row) => row.id),
+            `${name} rows`,
+          ).toEqual([ids[name]]);
+          expect(rows[0]!.createdAt.getTime(), `${name} updated`).not.toBe(0);
+        }
+      } finally {
+        await context.shutdown();
+        await server.stop();
+      }
+    },
+    60_000,
+  );
+
   describe("adapter methods", () => {
     let adapter: DBAdapter<BetterAuthOptions>;
     let context: JazzContext;
@@ -296,8 +434,8 @@ describe("jazzAdapter", () => {
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schema: fixtureApp,
-        permissions: fixturePermissions,
+        app: fixtureApp,
+        permissions: fixturePermissionsFile,
       });
 
       context = createJazzContext({
@@ -441,6 +579,7 @@ describe("jazzAdapter", () => {
         }),
       ).resolves.toBeNull();
 
+      // OR is refused rather than answered by loading the whole table.
       await expect(
         adapter.deleteMany({
           model: "user",
@@ -448,6 +587,13 @@ describe("jazzAdapter", () => {
             { field: "email", operator: "eq", value: "missing@example.com", connector: "AND" },
             { field: "name", operator: "contains", value: "mm", connector: "OR" },
           ],
+        }),
+      ).rejects.toThrow(UnsupportedBetterAuthQueryError);
+
+      await expect(
+        adapter.deleteMany({
+          model: "user",
+          where: [{ field: "name", operator: "contains", value: "mm", connector: "AND" }],
         }),
       ).resolves.toBe(1);
 
@@ -459,6 +605,124 @@ describe("jazzAdapter", () => {
       });
 
       expect(remaining.map((row) => row.id)).toEqual([beta.id]);
+    });
+
+    it("sorts and pages in the engine: byte order, nulls first ascending, Date equality", async () => {
+      const users = [];
+      for (const [name, image] of [
+        ["charlie", "c.png"],
+        ["Zulu", null],
+        ["alpha", "a.png"],
+        ["Bravo", "b.png"],
+      ] as const) {
+        users.push(
+          await adapter.create<any>({
+            model: "user",
+            data: { name, email: `${name}@sort.example`, emailVerified: false, image },
+          }),
+        );
+      }
+      const ids = users.map((user) => user.id);
+      const names = (rows: any[]) => rows.map((row) => row.name);
+      const page = (
+        sortBy: { field: string; direction: "asc" | "desc" },
+        limit?: number,
+        offset?: number,
+      ) =>
+        adapter.findMany<any>({
+          model: "user",
+          where: [{ field: "id", operator: "in", value: ids, connector: "AND" }],
+          sortBy,
+          limit,
+          offset,
+        });
+
+      // Bytewise, uppercase sorts before lowercase (`localeCompare` would give alpha, Bravo, charlie, Zulu).
+      expect(names(await page({ field: "name", direction: "asc" }))).toEqual([
+        "Bravo",
+        "Zulu",
+        "alpha",
+        "charlie",
+      ]);
+      expect(names(await page({ field: "name", direction: "asc" }, 2, 1))).toEqual([
+        "Zulu",
+        "alpha",
+      ]);
+      expect(names(await page({ field: "name", direction: "desc" }, 2))).toEqual([
+        "charlie",
+        "alpha",
+      ]);
+      // NULL sorts first ascending and last descending.
+      expect(names(await page({ field: "image", direction: "asc" }, 1))).toEqual(["Zulu"]);
+      expect(names(await page({ field: "image", direction: "desc" }, 1, 3))).toEqual(["Zulu"]);
+
+      // A Date compares by instant, not by object identity.
+      await expect(
+        adapter.findMany<any>({
+          model: "user",
+          where: [
+            { field: "id", operator: "in", value: ids, connector: "AND" },
+            {
+              field: "createdAt",
+              operator: "eq",
+              value: new Date(users[2]!.createdAt.getTime()),
+              connector: "AND",
+            },
+          ],
+        }),
+      ).resolves.toMatchObject([{ id: users[2]!.id }]);
+    });
+
+    it("checks starts_with and ends_with exactly, then sorts and pages", async () => {
+      for (const name of ["ann-1", "ann-2", "ann-3", "joann-4", "ann-5x"]) {
+        await adapter.create<any>({
+          model: "user",
+          data: { name, email: `${name}@prefix.example`, emailVerified: false, image: null },
+        });
+      }
+
+      const prefixed = await adapter.findMany<any>({
+        model: "user",
+        where: [
+          { field: "name", operator: "starts_with", value: "ann-", connector: "AND" },
+          { field: "email", operator: "ends_with", value: "@prefix.example", connector: "AND" },
+        ],
+        sortBy: { field: "name", direction: "desc" },
+        limit: 2,
+        offset: 1,
+      });
+      expect(prefixed.map((row) => row.name)).toEqual(["ann-3", "ann-2"]);
+
+      await expect(
+        adapter.count({
+          model: "user",
+          where: [{ field: "name", operator: "ends_with", value: "x", connector: "AND" }],
+        }),
+      ).resolves.toBe(1);
+    });
+
+    it("refuses where shapes the engine cannot answer with a typed error", async () => {
+      await expect(
+        adapter.findMany<any>({
+          model: "user",
+          where: [
+            { field: "name", operator: "eq", value: "a", connector: "AND" },
+            { field: "name", operator: "eq", value: "b", connector: "OR" },
+          ],
+        }),
+      ).rejects.toMatchObject({
+        code: "unsupported_better_auth_query",
+        message:
+          'Reading "better_auth_user" with an OR connector is not supported by the Jazz Better Auth adapter yet',
+      });
+      await expect(
+        adapter.findMany<any>({
+          model: "user",
+          where: [
+            { field: "emailVerified", operator: "starts_with", value: "t", connector: "AND" },
+          ],
+        }),
+      ).rejects.toThrow(UnsupportedBetterAuthQueryError);
     });
 
     it("supports findMany, count, select, sort, limit, and offset on Jazz ids", async () => {
@@ -839,7 +1103,6 @@ describe("jazzAdapter", () => {
       const account = await adapter.create<any>({
         model: "account",
         data: {
-          issuer: "github",
           accountId: "github-account",
           providerId: "github",
           userId: user.id,
@@ -929,10 +1192,9 @@ describe("jazzAdapter", () => {
           image: null,
         },
       });
-      const account = (issuer: string, accountId: string, userId: string) => ({
-        issuer,
+      const account = (providerId: string, accountId: string, userId: string) => ({
         accountId,
-        providerId: "test",
+        providerId,
         userId,
         accessToken: null,
         refreshToken: null,
@@ -947,7 +1209,7 @@ describe("jazzAdapter", () => {
 
       const primary = await adapter.create<any>({
         model: "account",
-        data: account("issuer-a", "same-account", firstUser.id),
+        data: account("provider-a", "same-account", firstUser.id),
       });
       await expect(
         adapter.update({
@@ -959,19 +1221,19 @@ describe("jazzAdapter", () => {
       await expect(
         adapter.create({
           model: "account",
-          data: account("issuer-a", "same-account", secondUser.id),
+          data: account("provider-a", "same-account", secondUser.id),
         }),
-      ).rejects.toThrow(/issuer, accountId/);
+      ).rejects.toThrow(/providerId, accountId/);
       await expect(
         adapter.create({
           model: "account",
-          data: account("issuer-b", "same-account", secondUser.id),
+          data: account("provider-b", "same-account", secondUser.id),
         }),
-      ).resolves.toMatchObject({ issuer: "issuer-b", accountId: "same-account" });
+      ).resolves.toMatchObject({ providerId: "provider-b", accountId: "same-account" });
 
       const movable = await adapter.create<any>({
         model: "account",
-        data: account("issuer-a", "other-account", secondUser.id),
+        data: account("provider-a", "other-account", secondUser.id),
       });
       await expect(
         adapter.update({
@@ -979,7 +1241,7 @@ describe("jazzAdapter", () => {
           where: [{ field: "id", operator: "eq", value: movable.id, connector: "AND" }],
           update: { accountId: primary.accountId },
         }),
-      ).rejects.toThrow(/issuer, accountId/);
+      ).rejects.toThrow(/providerId, accountId/);
       await expect(
         adapter.incrementOne({
           model: "account",
@@ -987,17 +1249,17 @@ describe("jazzAdapter", () => {
           increment: {},
           set: { accountId: primary.accountId },
         }),
-      ).rejects.toThrow(/issuer, accountId/);
+      ).rejects.toThrow(/providerId, accountId/);
 
-      await adapter.create({ model: "account", data: account("issuer-c", "one", firstUser.id) });
-      await adapter.create({ model: "account", data: account("issuer-c", "two", secondUser.id) });
+      await adapter.create({ model: "account", data: account("provider-c", "one", firstUser.id) });
+      await adapter.create({ model: "account", data: account("provider-c", "two", secondUser.id) });
       await expect(
         adapter.updateMany({
           model: "account",
-          where: [{ field: "issuer", operator: "eq", value: "issuer-c", connector: "AND" }],
+          where: [{ field: "providerId", operator: "eq", value: "provider-c", connector: "AND" }],
           update: { accountId: "shared" },
         }),
-      ).rejects.toThrow(/issuer, accountId/);
+      ).rejects.toThrow(/providerId, accountId/);
     });
 
     it("allows inserts when unique column value is null or undefined", async () => {
@@ -1088,7 +1350,7 @@ describe("jazzAdapter", () => {
       expect(changed).toBe(1);
     });
 
-    it("accepts app-like schema sources from root schema.ts modules", async () => {
+    it("accepts app-like schema sources", async () => {
       const authSchema = { wasmSchema: wasmSchemaExample };
       const appAdapter = jazzAdapter({
         db: () => context.asBackend(authSchema),
@@ -1117,7 +1379,7 @@ describe("jazzAdapter", () => {
       });
     });
 
-    it("creates root schema.ts output for Better Auth CLI generation", async () => {
+    it("creates schema-better-auth/schema.ts for Better Auth CLI generation", async () => {
       const generated = await (adapter as any).createSchema({
         tables: {
           user: {
@@ -1136,17 +1398,13 @@ describe("jazzAdapter", () => {
         path: "./schema-better-auth/schema.ts",
         overwrite: true,
       });
-      expect(generated.code).toContain('import { schema as s } from "jazz-tools";');
+      expect(generated.code).toContain("export const tables = {");
+      expect(generated.code).toContain("better_auth_user: s.table(");
+      expect(generated.code).toContain("name: s.string(),");
+      // No client may read or write the table.
       expect(generated.code).toContain(
-        'export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });',
+        "better_auth_user: { read: false, insert: false, update: false, delete: false },",
       );
-      expect(generated.code).toContain(
-        "export const permissions = s.definePermissions(app, ({ policy }) => {",
-      );
-      expect(generated.code).toContain("policy.better_auth_user.allowRead.never();");
-      expect(generated.code).toContain("policy.better_auth_user.allowInsert.never();");
-      expect(generated.code).toContain("policy.better_auth_user.allowUpdate.never();");
-      expect(generated.code).toContain("policy.better_auth_user.allowDelete.never();");
     });
   });
 
@@ -1167,8 +1425,8 @@ describe("jazzAdapter", () => {
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schema: fixtureApp,
-        permissions: fixturePermissions,
+        app: fixtureApp,
+        permissions: fixturePermissionsFile,
       });
 
       context = createJazzContext({
@@ -1221,7 +1479,6 @@ describe("jazzAdapter", () => {
       const account = await adapter.create({
         model: "account",
         data: {
-          issuer: "credential",
           userId: user.id,
           providerId: "credential",
           accountId: user.id,
@@ -1446,7 +1703,6 @@ describe("jazzAdapter", () => {
       const account = await adapter.create({
         model: "account",
         data: {
-          issuer: "github",
           userId: user.id,
           providerId: "github",
           accountId: "account000",
@@ -1539,8 +1795,8 @@ describe("jazzAdapter", () => {
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schema: fixtureApp,
-        permissions: fixturePermissions,
+        app: fixtureApp,
+        permissions: fixturePermissionsFile,
       });
 
       context = createJazzContext({
@@ -1604,6 +1860,61 @@ describe("jazzAdapter", () => {
         updatedAt: expect.any(Date),
       });
     });
+
+    test(
+      "issues verified JWTs and rejects signed-out and expired sessions",
+      { timeout: 10_000 },
+      async () => {
+        const sessionAuth = betterAuth({
+          ...auth.options,
+          secret: "better-auth-upgrade-test-secret-32-characters",
+          session: { expiresIn: 60 },
+          plugins: [bearer(), jwt({ jwks: { keyPairConfig: { alg: "ES256" } } })],
+        });
+        const body = {
+          name: "Session user",
+          email: "session@example.com",
+          password: "Password123!",
+        };
+        const signUp = await sessionAuth.api.signUpEmail({ body, returnHeaders: true });
+        const headers = new Headers({
+          origin: "http://localhost:3000",
+          cookie: signUp.headers
+            .getSetCookie()
+            .map((cookie) => cookie.split(";")[0])
+            .join("; "),
+        });
+        expect(await sessionAuth.api.getSession({ headers })).toMatchObject({
+          user: { id: signUp.response.user.id },
+        });
+        const { token } = await sessionAuth.api.getToken({ headers });
+        const jwks = await sessionAuth.api.getJwks();
+        const { payload } = await jwtVerify(token, createLocalJWKSet(jwks), {
+          issuer: "http://localhost:3000",
+        });
+        expect(payload.sub).toBe(signUp.response.user.id);
+
+        await sessionAuth.api.signOut({ headers });
+        await expect(sessionAuth.api.getSession({ headers })).resolves.toBeNull();
+        await expect(sessionAuth.api.getToken({ headers })).rejects.toThrow();
+
+        const expiringAuth = betterAuth({ ...sessionAuth.options, session: { expiresIn: 1 } });
+        const signIn = await expiringAuth.api.signInEmail({ body, returnHeaders: true });
+        headers.set(
+          "cookie",
+          signIn.headers
+            .getSetCookie()
+            .map((cookie) => cookie.split(";")[0])
+            .join("; "),
+        );
+        expect(await sessionAuth.api.getSession({ headers })).toMatchObject({
+          user: { id: signUp.response.user.id },
+        });
+        await new Promise((resolve) => setTimeout(resolve, 1_100));
+        await expect(sessionAuth.api.getSession({ headers })).resolves.toBeNull();
+        await expect(sessionAuth.api.getToken({ headers })).rejects.toThrow();
+      },
+    );
   });
 
   describe("better-auth usage with local Jazz server + memory driver", () => {
@@ -1620,8 +1931,8 @@ describe("jazzAdapter", () => {
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schema: fixtureApp,
-        permissions: fixturePermissions,
+        app: fixtureApp,
+        permissions: fixturePermissionsFile,
       });
 
       context = createJazzContext({
@@ -1687,8 +1998,8 @@ describe("jazzAdapter", () => {
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schema: fixtureApp,
-        permissions: fixturePermissions,
+        app: fixtureApp,
+        permissions: fixturePermissionsFile,
       });
 
       const ctx1 = createJazzContext({
@@ -1764,8 +2075,8 @@ describe("jazzAdapter", () => {
           serverUrl: server.url,
           appId: server.appId,
           adminSecret: server.adminSecret,
-          schema: fixtureApp,
-          permissions: fixturePermissions,
+          app: fixtureApp,
+          permissions: fixturePermissionsFile,
         });
         const ctx1 = createJazzContext({
           appId: server.appId,
@@ -1808,7 +2119,6 @@ describe("jazzAdapter", () => {
             { timeout: 15_000 },
           );
           const account = {
-            issuer: "issuer-race",
             accountId: "same-account",
             providerId: "test",
             userId: user.id,

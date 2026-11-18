@@ -46,10 +46,18 @@ export function formatUuidAt(bytes: ArrayLike<number>, offset: number): string {
   );
 }
 
-/** The 16 bytes of UUID text (dashes ignored), or undefined unless it is 32 hex digits. */
+const HYPHENATED_UUID =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+const SIMPLE_UUID = /^[0-9a-fA-F]{32}$/;
+
+/**
+ * The 16 bytes of UUID text, or undefined unless it is hyphenated
+ * `8-4-4-4-12` or 32 plain hex digits: the forms Rust's `Uuid::parse_str`
+ * reads too. Dashes anywhere else are refused.
+ */
 export function parseUuidBytes(text: string): Uint8Array | undefined {
+  if (!HYPHENATED_UUID.test(text) && !SIMPLE_UUID.test(text)) return undefined;
   const hex = text.replaceAll("-", "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) return undefined;
   const bytes = new Uint8Array(16);
   for (let i = 0; i < 16; i += 1) {
     bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);

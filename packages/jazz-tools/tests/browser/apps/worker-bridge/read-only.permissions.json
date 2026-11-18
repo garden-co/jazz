@@ -1,0 +1,8 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "projects": { "read": "true", "insert": "false", "update": "false", "delete": "false" },
+    "todos": { "read": "true", "insert": "false", "update": "false", "delete": "false" }
+  }
+}

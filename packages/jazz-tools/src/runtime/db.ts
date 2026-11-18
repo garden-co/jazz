@@ -7,7 +7,7 @@ import { Utf8Decoder } from "./utf8.js";
 import { parseSnapshotRef, type SnapshotRef } from "./snapshot-ref.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import type { AccountHandle } from "../accounts/state.js";
-import { GracefulShutdownSyncError } from "./graceful-shutdown-error.js";
+import { DbClosedError, GracefulShutdownSyncError } from "./graceful-shutdown-error.js";
 import { accountToken, accountRegistry } from "../accounts/enrollment.js";
 import { assertAccountConfig, copyAccountConfigAdmission } from "../accounts/config-capability.js";
 /**
@@ -26,6 +26,7 @@ import type { ColumnDescriptor, WasmSchema, WasmRow, StorageDriver } from "../dr
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
   SerializableWriteHandle,
+  EmptyTransactionWriteResult,
   SerializableWriteResult,
   WriteResult,
   JazzClient,
@@ -49,12 +50,14 @@ import {
   type BranchView,
   type OpenTransactionId,
   type TxId,
+  type ExplainedRows,
   type PermissionAdvice,
   type StreamingMutationKind,
   type StreamingValueSource,
   validateWriteWaitTimeout,
   WriteWaitTimeoutError,
 } from "./client.js";
+import { assertBacklogRows } from "./backlog-rows.js";
 import { sameSyncStatus, type SyncStatus } from "./sync-status.js";
 import type { TextAnchors } from "./text-anchors.js";
 import {
@@ -65,26 +68,20 @@ import {
 import type { AuthFailureReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
 import { resolveQueryOutputTable } from "./query-output-table.js";
-import {
-  applyColumnTransforms,
-  createRowTransformer,
-  transformRow,
-  unwrapValue,
-} from "./row-transformer.js";
+import { applyColumnTransforms, createRowTransformer, transformRow } from "./row-transformer.js";
 import { getOwnerPreparation, runAfterPreparation, WritePreparation } from "./write-preparation.js";
 import { nativeCoreErrorCode, unreadableTargetError } from "./native-runtime/native-error-code.js";
 import { writeRow } from "./write-row.js";
 import {
   ComputedReadState,
   MissingComputedDependency,
-  columnTransformDependencies,
   computedColumnValues,
-  dependencyContext,
-  storedDependencyValues,
+  computedColumns,
   type ColumnTransform,
   type ColumnTransformMap,
   type ColumnTransformRegistry,
 } from "./column-transforms.js";
+
 export type {
   ColumnTransform,
   ColumnTransformMap,
@@ -99,7 +96,9 @@ import {
 } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import { AuthRenewalBackoff } from "./auth-renewal-backoff.js";
+import { accountAppId } from "../accounts/local-first.js";
 import {
+  LOCAL_FIRST_JWT_ISSUER,
   parseJwtPayload,
   internalSessionFromVerifiedReservedJwtPayload,
   resolveClientInternalSessionSync,
@@ -137,6 +136,9 @@ import { toError } from "./util.js";
 import { isThinDb, upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-first-upgrade.js";
 import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 import { RuntimeClosedError } from "./runtime-closed-error.js";
+
+/** `getDeviceAccountProof` hands out a session's sync proof only with this long left. */
+const SESSION_PROOF_MIN_REMAINING_SECONDS = 30;
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyRuntimeSource = RuntimeSource<any>;
@@ -194,6 +196,14 @@ export type DbConfig = {
    * log off).
    */
   slowQueryThresholdMs?: number;
+  /**
+   * How many changed rows a subscription's undelivered deltas may hold before
+   * they are coalesced into one update of its current result, marked
+   * `reason: "backlog"` (default 10000). It bounds the memory a subscriber
+   * that falls behind a fast writer holds, and cannot be turned off. A query
+   * can set its own with `backlogRows`.
+   */
+  subscriptionBacklogRows?: number;
 } & (
   | {
       /** Local-first auth via a local seed. */
@@ -276,6 +286,13 @@ export type QueryOptions = ReadTierOptions & {
    * (see {@link DbSubscriptionUpdate}). One-shot reads ignore it.
    */
   splices?: readonly string[];
+  /**
+   * How many changed rows a subscription's undelivered deltas may hold before
+   * they are replaced by one update of the current result (marked
+   * `reason: "backlog"`). Overrides {@link DbConfig.subscriptionBacklogRows}
+   * (default 10000). A whole number, at least 1. One-shot reads ignore it.
+   */
+  backlogRows?: number;
 };
 
 type InternalDbQueryOptions = Omit<QueryOptions, "tier"> & {
@@ -310,6 +327,13 @@ export interface DbSubscriptionUpdate {
    * say): read its new value from the rows instead.
    */
   splices: ReadonlyMap<string, ValueSplices>;
+  /**
+   * `"backlog"` when this update replaced the result wholesale because the
+   * subscriber fell too far behind to be told every change (more than
+   * `backlogRows` changed rows waited undelivered): the rows are current,
+   * the intermediate states were skipped, and `splices` is empty.
+   */
+  reason?: "backlog";
 }
 
 /** Package-internal callbacks for incremental subscription consumers. */
@@ -346,6 +370,11 @@ function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptio
       throw new Error("splices must be an array of column names.");
     }
     if (splices.length > 0) lowered.splices = [...splices];
+  }
+  const backlogRows = (candidate as { backlogRows?: unknown }).backlogRows;
+  if (backlogRows !== undefined) {
+    assertBacklogRows(backlogRows, "backlogRows");
+    lowered.backlogRows = backlogRows;
   }
   if (isInspectorLocalQueryOptions(options)) lowered.tier = "local-only";
   return lowered;
@@ -398,6 +427,7 @@ const FORWARDED_TO_SUCCESSOR = [
   "updateAuthToken",
   "updateCookieSession",
   "getAuthState",
+  "getDeviceAccountProof",
   "getLocalFirstIdentityProof",
   "onAuthChanged",
   "onMutationError",
@@ -432,6 +462,7 @@ const FORWARDED_TO_SUCCESSOR = [
   "serializableTransaction",
   "upgradeToLocalFirst",
   "deleteClientStorage",
+  "storePendingUploads",
   "logout",
   "all",
   "allInternal",
@@ -860,7 +891,6 @@ function lowerUpdate(
   const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
   const editedFrom = options?.editedFrom;
   if (editedFrom === undefined) {
-    rejectIncompleteDependencies(table, data, Object.keys(options?.applyDiffs ?? {}));
     return { replacements: data, descriptors };
   }
   if (typeof editedFrom !== "object" || editedFrom === null || Array.isArray(editedFrom)) {
@@ -886,10 +916,6 @@ function lowerUpdate(
     edited.push(column);
     descriptors.push({ kind: "text_edit", column, text, edited_from: from });
   }
-  rejectIncompleteDependencies(table, replacements, [
-    ...Object.keys(options?.applyDiffs ?? {}),
-    ...edited,
-  ]);
   return { replacements, descriptors };
 }
 
@@ -1097,9 +1123,14 @@ function applyPartialValueSelections<T>(
       projected[column] = jsonPointerValue(value, selection.at);
       continue;
     }
+    // Like the engine (#5502): a range past the end of the value clamps to
+    // it, empty when it starts past it; an inverted range fails.
     if (value instanceof Uint8Array) {
-      if ("fromUtf8" in selection || selection.from > selection.to || selection.to > value.length) {
-        throw new Error(`Byte range for "${column}" is out of bounds.`);
+      if ("fromUtf8" in selection) {
+        throw new Error(`Byte range for "${column}" takes from and to, not fromUtf8 and toUtf8.`);
+      }
+      if (selection.from > selection.to) {
+        throw new Error(`Byte range for "${column}" ends before it starts.`);
       }
       projected[column] = value.slice(selection.from, selection.to);
       continue;
@@ -1109,29 +1140,29 @@ function applyPartialValueSelections<T>(
     }
     if ("fromUtf8" in selection) {
       const bytes = new TextEncoder().encode(value);
-      if (
-        selection.fromUtf8 > selection.toUtf8 ||
-        selection.toUtf8 > bytes.length ||
-        (selection.fromUtf8 < bytes.length &&
-          (bytes[selection.fromUtf8]! & 0b1100_0000) === 0b1000_0000) ||
-        (selection.toUtf8 < bytes.length &&
-          (bytes[selection.toUtf8]! & 0b1100_0000) === 0b1000_0000)
-      ) {
-        throw new Error(`UTF-8 range for "${column}" splits a code point or is out of bounds.`);
+      const to = Math.min(selection.toUtf8, bytes.length);
+      const from = Math.min(selection.fromUtf8, to);
+      if (selection.fromUtf8 > selection.toUtf8) {
+        throw new Error(`UTF-8 range for "${column}" ends before it starts.`);
       }
-      projected[column] = new Utf8Decoder({ fatal: true }).decode(
-        bytes.slice(selection.fromUtf8, selection.toUtf8),
-      );
+      if (
+        (from < bytes.length && (bytes[from]! & 0b1100_0000) === 0b1000_0000) ||
+        (to < bytes.length && (bytes[to]! & 0b1100_0000) === 0b1000_0000)
+      ) {
+        throw new Error(`UTF-8 range for "${column}" splits a code point.`);
+      }
+      projected[column] = new Utf8Decoder({ fatal: true }).decode(bytes.slice(from, to));
       continue;
     }
-    if (
-      selection.from > selection.to ||
-      !utf16Boundary(value, selection.from) ||
-      !utf16Boundary(value, selection.to)
-    ) {
-      throw new Error(`UTF-16 range for "${column}" splits a surrogate pair or is out of bounds.`);
+    const to = Math.min(selection.to, value.length);
+    const from = Math.min(selection.from, to);
+    if (selection.from > selection.to) {
+      throw new Error(`UTF-16 range for "${column}" ends before it starts.`);
     }
-    projected[column] = value.slice(selection.from, selection.to);
+    if (!utf16Boundary(value, from) || !utf16Boundary(value, to)) {
+      throw new Error(`UTF-16 range for "${column}" splits a surrogate pair.`);
+    }
+    projected[column] = value.slice(from, to);
   }
   return projected as T;
 }
@@ -1222,12 +1253,10 @@ function prepareTransformRead<T>(
     let partial = partialSelect;
     const selectAll = !select.length || select.includes("*");
     let visibleTransforms: ColumnTransformMap | undefined;
-    let dependencies: Set<string> | undefined;
     let hidden: string[] | undefined;
     let computed: string[] | undefined;
     const addDependency = (dependency: string) => {
       if (transforms?.[dependency]?.computed) return;
-      (dependencies ??= new Set()).add(dependency);
       if (!selectAll && dependency !== "id" && !physical.includes(dependency)) {
         if (physical === select) physical = [...select];
         physical.push(dependency);
@@ -1249,8 +1278,6 @@ function prepareTransformRead<T>(
           (computed ??= []).push(column);
           for (const dependency of computedState.storedColumns(transforms, column))
             addDependency(dependency);
-        } else {
-          for (const dependency of transforms[column]!.dependsOn ?? []) addDependency(dependency);
         }
       }
     if (!selectAll && !physical.length) physical = ["id"];
@@ -1277,7 +1304,6 @@ function prepareTransformRead<T>(
       }
       if (prepared.finish) finishIncludes.push([name, prepared.finish]);
     }
-    const dependencyColumns = dependencies ? [...dependencies] : noWriteDependencies;
     const hasPartial = Object.keys(partialSelect).length > 0;
     // Selections the engine did not apply: those whose column it read whole.
     const wholeRead = Object.fromEntries(
@@ -1292,13 +1318,8 @@ function prepareTransformRead<T>(
       finish:
         visibleTransforms || hasPartial || finishIncludes.length
           ? (row: Record<string, unknown>): Record<string, unknown> => {
-              const stored = computed
-                ? { ...row }
-                : visibleTransforms
-                  ? storedDependencyValues(dependencyColumns, row)
-                  : undefined;
               const appValues = computed
-                ? computedColumnValues(transforms!, computed, stored!, computedState, partial)
+                ? computedColumnValues(transforms!, computed, { ...row }, computedState, partial)
                 : undefined;
               const result = sliceWhole ? applyPartialValueSelections(row, wholeRead) : row;
               if (visibleTransforms)
@@ -1306,7 +1327,6 @@ function prepareTransformRead<T>(
                   result,
                   visibleTransforms,
                   excluded,
-                  stored,
                   appValues,
                   hasPartial ? partialSelect : undefined,
                 );
@@ -1418,89 +1438,41 @@ function transformOutputColumns(
   }
 
   const record = row as Record<string, unknown>;
-  const computed = columnTransformDependencies(source._columnTransforms).computedColumns;
+  const computed = computedColumns(source._columnTransforms);
   const appValues = computed.length
     ? computedColumnValues(source._columnTransforms, computed, record)
     : undefined;
-  applyColumnTransforms(record, source._columnTransforms, [], undefined, appValues);
+  applyColumnTransforms(record, source._columnTransforms, [], appValues);
   for (const column of computed) record[column] = appValues!.get(column);
   return record;
+}
+
+/** Refuse writes to computed fields before a write is staged or deferred. */
+function rejectComputedWrites(table: TableProxy<any, any>, data: Record<string, unknown>): void {
+  const transforms = table._columnTransforms;
+  if (!transforms) return;
+  for (const column of Object.keys(data))
+    if (transforms[column]?.computed)
+      throw new TypeError(`Computed field "${column}" is read-only.`);
 }
 
 function transformInputColumns(
   table: TableProxy<any, any, any, any, any>,
   data: unknown,
-  storedValues?: Record<string, unknown>,
-  creation = false,
 ): Record<string, unknown> {
   const record = data as Record<string, unknown>;
-  if (!table._columnTransforms) {
-    return record;
-  }
-
   const transforms = table._columnTransforms;
-  let hasTransform = false;
-  let hasDependencies = false;
+  if (!transforms) return record;
+  let result: Record<string, unknown> | undefined;
   for (const column in record) {
-    if (Object.hasOwn(record, column) && transforms[column]?.computed)
-      throw new TypeError(`Computed field "${column}" is read-only.`);
-    if (!Object.hasOwn(record, column) || record[column] === undefined) continue;
+    if (!Object.hasOwn(record, column)) continue;
     const transform = transforms[column];
-    if (transform) {
-      hasTransform = true;
-      if (transform.dependsOn?.length) hasDependencies = true;
-    }
+    if (transform?.computed) throw new TypeError(`Computed field "${column}" is read-only.`);
+    if (!transform || record[column] === undefined) continue;
+    (result ??= { ...record })[column] = transform.to(record[column]);
   }
-  if (!hasTransform) return record;
-  if (!hasDependencies) {
-    const result = { ...record };
-    for (const column in record) {
-      if (!Object.hasOwn(record, column) || record[column] === undefined) continue;
-      const transform = transforms[column];
-      if (transform)
-        result[column] = transform.to(record[column], dependencyContext(transform, record));
-    }
-    return result;
-  }
-  const stored = { ...storedValues };
-  const app: Record<string, unknown> = {};
-  const resolved = new Set<string>();
-  const resolve = (column: string) => {
-    if (resolved.has(column)) return;
-    const transform = table._columnTransforms?.[column];
-    for (const dependency of transform?.dependsOn ?? []) resolve(dependency);
-    if (Object.hasOwn(record, column) && record[column] !== undefined) {
-      app[column] = record[column];
-      stored[column] = transform
-        ? transform.to(record[column], dependencyContext(transform, app))
-        : record[column];
-    } else {
-      if (creation && !Object.hasOwn(stored, column)) {
-        const descriptor = table._schema[table._table]!.columns.find(
-          (item) => item.name === column,
-        );
-        if (descriptor?.default !== undefined)
-          stored[column] = unwrapValue(descriptor.default, descriptor.column_type);
-        else if (descriptor?.nullable) stored[column] = null;
-      }
-      if (!Object.hasOwn(stored, column))
-        throw new Error(`Transform dependency "${column}" is unavailable.`);
-      app[column] = transform
-        ? transform.from(stored[column], dependencyContext(transform, stored))
-        : stored[column];
-    }
-    resolved.add(column);
-  };
-  const result = { ...record };
-  for (const column of Object.keys(record)) {
-    if (record[column] === undefined) continue;
-    resolve(column);
-    result[column] = stored[column];
-  }
-  return result;
+  return result ?? record;
 }
-
-const noWriteDependencies: readonly string[] = [];
 
 /**
  * How long an update of a row this replica hasn't loaded waits for the
@@ -1538,97 +1510,6 @@ function loadRow(
   return Promise.race([read, timeout]).finally(() => clearTimeout(timer));
 }
 
-function missingWriteDependencies(
-  table: TableProxy<any, any>,
-  data: Record<string, unknown>,
-  id?: string,
-): readonly string[] {
-  if (!table._columnTransforms) return noWriteDependencies;
-  const { byColumn } = columnTransformDependencies(table._columnTransforms);
-  let missing: Set<string> | undefined;
-  for (const column of Object.keys(data)) {
-    if (table._columnTransforms[column]?.computed)
-      throw new TypeError(`Computed field "${column}" is read-only.`);
-    if (data[column] === undefined) continue;
-    for (const dependency of byColumn.get(column) ?? noWriteDependencies) {
-      if (dependency !== "id" || id === undefined) {
-        if (!Object.hasOwn(data, dependency) || data[dependency] === undefined)
-          (missing ??= new Set()).add(dependency);
-      }
-    }
-  }
-  return missing ? [...missing] : noWriteDependencies;
-}
-
-function prepareInputColumns(
-  table: TableProxy<any, any>,
-  data: Record<string, unknown>,
-  operation: WriteOperationName,
-  id: string | undefined,
-  client: JazzClient,
-  session?: Session,
-  openTransactionId?: OpenTransactionId,
-  options?: Pick<NonNullable<ReturnType<typeof normalizeViewOptions>>, "branch">,
-  missing?: readonly string[],
-): Record<string, unknown> | Promise<Record<string, unknown>> {
-  if (!table._columnTransforms) return data;
-  missing ??= missingWriteDependencies(table, data, id);
-  const stored = id === undefined ? {} : { id };
-  if (operation === "Insert" || operation === "Restore" || missing.length === 0)
-    return transformInputColumns(
-      table,
-      data,
-      stored,
-      operation === "Insert" || operation === "Restore",
-    );
-  const built = JSON.stringify({
-    table: table._table,
-    conditions: [{ column: "id", op: "eq", value: id }],
-    select: missing.filter((column) => column !== "id"),
-    limit: 1,
-    includeDeleted: operation === "Upsert",
-  });
-  return client
-    .queryInternal(
-      translateQuery(built, table._schema),
-      {
-        ...(options?.branch ? { branch: options.branch } : {}),
-        ...(openTransactionId ? { openTransactionId, localUpdates: "deferred" as const } : {}),
-      },
-      session,
-    )
-    .then((rows) => {
-      const row = rows[0];
-      if (!row && operation !== "Upsert")
-        throw new Error("Transform dependency row is unavailable.");
-      if (!row && !client.readCanEstablishAbsence(session, openTransactionId))
-        throw new Error(
-          "Transform dependencies are unavailable: a scoped read cannot establish that the upsert row is absent.",
-        );
-      const existing = row
-        ? transformRow<Record<string, unknown>>(row, table._schema, table._table, {}, missing)
-        : stored;
-      return transformInputColumns(table, data, existing, !row && operation === "Upsert");
-    });
-}
-
-function rejectIncompleteDependencies(
-  table: TableProxy<any, any>,
-  data: Record<string, unknown>,
-  incomplete: readonly string[],
-) {
-  if (!table._columnTransforms || !incomplete.length) return;
-  const { byColumn } = columnTransformDependencies(table._columnTransforms);
-  for (const column of Object.keys(data)) {
-    for (const dependency of byColumn.get(column) ?? noWriteDependencies) {
-      if (incomplete.includes(dependency))
-        throw new Error(
-          `Transform dependency "${dependency}" requires a whole-value replacement in this write.`,
-        );
-    }
-  }
-}
-
 /**
  * @internal The row an insert or restore of `data` as row `id` writes, as
  * the table's schema alone decides it: for writes made before a client
@@ -1642,7 +1523,7 @@ export function previewWrittenRow<T, Init>(
 ): T {
   assertWritableTable(table);
   const transformedData = table._columnTransforms
-    ? transformInputColumns(table, data, { id }, true)
+    ? transformInputColumns(table, data)
     : (data as Record<string, unknown>);
   return immediateWriteRow(
     table,
@@ -1655,13 +1536,6 @@ export function previewWrittenRow<T, Init>(
 export function reserveRowId(): string {
   const hex = createOpenTransactionId();
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-function hasDependentTransforms(table: TableProxy<any, any>): boolean {
-  return (
-    !!table._columnTransforms &&
-    columnTransformDependencies(table._columnTransforms).hasWriteDependencies
-  );
 }
 
 function immediateWriteRow<T>(
@@ -1830,7 +1704,17 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
   }
   let committed: TransactionCommitHandle<TKind>;
   try {
-    committed = await transaction.commit();
+    // A callback that wrote nothing has nothing to commit: its result
+    // resolves at once (an explicit `commit()` of an empty mergeable
+    // transaction still refuses).
+    const outcome = await transaction.commitUnlessEmpty();
+    if (outcome === "empty") {
+      return new EmptyTransactionWriteResult(
+        resolvedValue,
+        resultClient(),
+      ) as unknown as TransactionWriteResult<Awaited<TResult>, TKind>;
+    }
+    committed = outcome;
   } catch (error) {
     try {
       await transaction.rollback();
@@ -1978,6 +1862,39 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   }
 
   /**
+   * @internal The callback form's commit: a mergeable transaction that staged
+   * no write is rolled back instead, as there is nothing to commit, and
+   * `"empty"` is returned. Anything else commits as {@link commit} does.
+   */
+  async commitUnlessEmpty(): Promise<TransactionCommitHandle<TKind> | "empty"> {
+    if (this.kind !== "mergeable") return this.commit();
+    const { ownerClient, openTransactionId, preparation } = this.requireBinding("commit");
+    // Staged, or this runtime can't tell: commit at once, as `commit` does
+    // (reads still in flight settle through the commit's `txId`).
+    if (ownerClient.hasStagedTransactionWrites(openTransactionId) !== false) return this.commit();
+    // Nothing staged yet, but a write still being prepared may stage. Reads
+    // stage nothing, so only preparations are waited for, and the
+    // transaction takes no more operations meanwhile.
+    if (preparation.pending || preparation.failed) {
+      this.committing = true;
+      let drained = true;
+      try {
+        await preparation.drain();
+      } catch {
+        drained = false;
+      } finally {
+        this.committing = false;
+      }
+      // A preparation that failed fails the commit, as for `commit`.
+      if (!drained || ownerClient.hasStagedTransactionWrites(openTransactionId) !== false) {
+        return this.commit();
+      }
+    }
+    await this.rollback();
+    return "empty";
+  }
+
+  /**
    * Roll back this transaction locally.
    *
    * Pending rows remain pending, but this transaction can no longer be committed.
@@ -2052,24 +1969,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       `${mutation}Streaming`,
     );
     const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
-    rejectIncompleteDependencies(table, ordinaryData, [column]);
-    const rowId =
-      id ??
-      (missingWriteDependencies(table, ordinaryData).includes("id") ? reserveRowId() : undefined);
+    rejectComputedWrites(table, ordinaryData);
     const stage = async () => {
-      const record =
-        mutation === "insert"
-          ? transformInputColumns(table, ordinaryData, rowId ? { id: rowId } : {}, true)
-          : await prepareInputColumns(
-              table,
-              ordinaryData,
-              operation,
-              rowId!,
-              client,
-              session,
-              undefined,
-              normalizeViewOptions(table._schema, table._table, options as UpdateOptions),
-            );
+      const record = transformInputColumns(table, ordinaryData);
       const values = toWriteRecordForOperation(operation, record, table._schema, table._table);
       const branch =
         mutation === "insert" ? deriveStreamingInsertBranch(table, ordinaryData) : undefined;
@@ -2077,7 +1979,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         mutation === "insert"
           ? normalizeSelectorOptions(table._schema, table._table, {
               ...options,
-              ...(rowId ? { id: rowId } : {}),
+              ...(id ? { id } : {}),
               ...(branch ? { branch } : {}),
             })
           : normalizeViewOptions(table._schema, table._table, options as UpdateOptions);
@@ -2091,7 +1993,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         normalized,
         session,
         attribution,
-        rowId,
+        id,
       );
     };
     return Promise.resolve(
@@ -2115,7 +2017,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     this.bindTable(table);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution, preparation } = this.requireBinding("insert");
-    let id = options?.id ?? (hasDependentTransforms(table) ? reserveRowId() : undefined);
+    let id = options?.id;
     const { values, value } = this.prepareCreation(table, data, id, "Insert");
     if (!id && (preparation.pending || getOwnerPreparation(client)?.pending)) id = reserveRowId();
     let row: ReturnType<typeof client.insertInternal> | undefined;
@@ -2196,7 +2098,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     let record: Record<string, unknown>;
     try {
       record = table._columnTransforms
-        ? transformInputColumns(table, data, id === undefined ? undefined : { id }, true)
+        ? transformInputColumns(table, data)
         : (data as Record<string, unknown>);
     } catch (error) {
       this.requireBinding(operation).preparation.failure = error;
@@ -2230,24 +2132,17 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     this.bindTable(table);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("upsert");
-    this.prepareMutation(
-      table,
-      id,
-      data as Record<string, unknown>,
-      "Upsert",
-      options,
-      (values) => {
-        client.upsertInternal(
-          table._table,
-          id,
-          values,
-          normalizeViewOptions(table._schema, table._table, options),
-          session,
-          attribution,
-          openTransactionId,
-        );
-      },
-    );
+    this.prepareMutation(table, data as Record<string, unknown>, "Upsert", (values) => {
+      client.upsertInternal(
+        table._table,
+        id,
+        values,
+        normalizeViewOptions(table._schema, table._table, options),
+        session,
+        attribution,
+        openTransactionId,
+      );
+    });
   }
 
   /**
@@ -2290,7 +2185,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("update");
     const normalizedOptions = normalizeViewOptions(table._schema, table._table, options);
-    this.prepareMutation(table, id, replacements, "Update", options, (updates) => {
+    this.prepareMutation(table, replacements, "Update", (updates) => {
       if (descriptors.length > 0) {
         client.updateLargeValuesInternal(
           table._table,
@@ -2320,19 +2215,13 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
 
   private prepareMutation(
     table: TableProxy<any, any>,
-    id: string,
     data: Record<string, unknown>,
     operation: "Update" | "Upsert",
-    options: UpdateOptions | undefined,
     stage: (values: ReturnType<typeof toWriteRecord>) => void,
   ): void {
-    const { ownerClient, openTransactionId, preparation } = this.requireBinding(operation);
-    if (
-      preparation.pending ||
-      getOwnerPreparation(ownerClient)?.pending ||
-      missingWriteDependencies(table, data, id).length
-    )
-      data = { ...data };
+    const { ownerClient, preparation } = this.requireBinding(operation);
+    rejectComputedWrites(table, data);
+    if (preparation.pending || getOwnerPreparation(ownerClient)?.pending) data = { ...data };
     if (preparation.cancelled) {
       stage({});
       return;
@@ -2340,29 +2229,15 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     preparation.run(() =>
       runAfterPreparation(ownerClient, () => {
         if (preparation.cancelled) return;
-        let prepared: ReturnType<typeof prepareInputColumns>;
+        let record: Record<string, unknown>;
         try {
-          prepared = prepareInputColumns(
-            table,
-            data,
-            operation,
-            id,
-            ownerClient,
-            this.context?.readSession,
-            openTransactionId,
-            normalizeViewOptions(table._schema, table._table, options),
-          );
+          record = transformInputColumns(table, data);
         } catch (error) {
           preparation.failure = error;
           throw error;
         }
-        const finish = (record: Record<string, unknown>) => {
-          if (preparation.cancelled) return;
-          if (preparation.failed) throw preparation.failure;
-          const values = toWriteRecordForOperation(operation, record, table._schema, table._table);
-          stage(values);
-        };
-        return prepared instanceof Promise ? prepared.then(finish) : finish(prepared);
+        if (preparation.failed) throw preparation.failure;
+        stage(toWriteRecordForOperation(operation, record, table._schema, table._table));
       }),
     );
   }
@@ -2500,6 +2375,23 @@ export interface ShutdownOptions {
   waitForSync?: boolean;
 }
 
+/**
+ * Where a {@link Db} is in its life. It only moves forward:
+ *
+ * - `open`: it reads and writes. A graceful shutdown (`waitForSync`) drains
+ *   here first: while it waits for pending writes to upload, the Db takes no
+ *   new work, but its connection stays up and keeps recovering, since the
+ *   upload needs it. A drain that fails or is cancelled rejects with a
+ *   {@link GracefulShutdownSyncError} and leaves the Db open: the shutdown
+ *   never started, so nothing moved back, and the app may retry it (an
+ *   offline sign-out does).
+ * - `closing`: teardown started. Final: nothing reopens the Db, and its
+ *   connection manager stops recovering its connection.
+ * - `closed`: teardown ended. If it failed, the shutdown promise says so;
+ *   the Db stays closed either way.
+ */
+export type DbPhase = "open" | "closing" | "closed";
+
 export class Db {
   private config: DbConfig;
   private readonly runtimeSource: AnyRuntimeSource;
@@ -2509,7 +2401,17 @@ export class Db {
   private localFirstRefreshOwned = false;
   private readonly localFirstRenewals = new AuthRenewalBackoff();
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-  private shutdownPromise: Promise<void> | null = null;
+  /** See {@link DbPhase}. Only {@link beginTeardown} and its end move it. */
+  private phase: DbPhase = "open";
+  /** A graceful shutdown waiting for pending writes, while still `open`. */
+  private gracefulDrain: {
+    done: Promise<void>;
+    cancel(): void;
+    /** A plain shutdown arrived meanwhile: a failed drain still tears down. */
+    teardownAnyway: boolean;
+  } | null = null;
+  /** Teardown's outcome, from the moment the Db enters `closing`. */
+  private teardown: Promise<void> | null = null;
   /** Set once the session that owned this Db moved on to another one. */
   private replaced: DbReplacedError | null = null;
   /** Ends each live subscription with a terminal error. */
@@ -2593,8 +2495,11 @@ export class Db {
       get runtimeSource() {
         return thisDb.runtimeSource;
       },
-      get isShuttingDown() {
-        return thisDb.shutdownPromise !== null;
+      get phase() {
+        return thisDb.phase;
+      },
+      get draining() {
+        return thisDb.gracefulDrain !== null;
       },
       markUnauthenticated: (reason) => this.markUnauthenticated(reason),
       renewsCredential: (reason) =>
@@ -2686,7 +2591,7 @@ export class Db {
   }
 
   private refreshLocalFirstToken(): void {
-    if (!this._localFirstSecret || this.shutdownPromise) return;
+    if (!this._localFirstSecret || this.stopping) return;
 
     try {
       const ttlSeconds = 3600;
@@ -2700,12 +2605,12 @@ export class Db {
         "local-first",
       );
       if (!trustedReservedSession) {
-        throw new Error("Minted local-first token is missing its reserved session identity");
+        throw new Error("Minted device account token is missing its reserved session identity");
       }
       this.applyAuthUpdate(newToken, trustedReservedSession);
       this.scheduleLocalFirstRefresh(ttlSeconds);
     } catch (e) {
-      console.error("Failed to refresh local-first token:", e);
+      console.error("Failed to refresh device account token:", e);
     }
   }
 
@@ -2934,7 +2839,8 @@ export class Db {
     )
       throw new Error("Account context mismatch");
     try {
-      const token = await accountToken(account, accountRegistry(account));
+      // A renewal: never the token the server may just have refused.
+      const token = await accountToken(account, accountRegistry(account), { fresh: true });
       if (this.shutdownAbort.signal.aborted) throw new Error("Account context closed");
       const reserved =
         account.identity.issuer === "urn:jazz:local-first"
@@ -2966,17 +2872,42 @@ export class Db {
   }
 
   /**
-   * Mint a short-lived local-first JWT proving possession of the current identity.
-   * Returns `null` if the current session is not local-first.
+   * A short-lived JWT proving possession of the current device account: what
+   * a device account sends its own backend's routes as
+   * `Authorization: Bearer` (`jazz.forReqUser(request)` there). Returns
+   * `null` if the current session is not a device account.
+   *
+   * A Db opened by a session (`createJazzClient`, a provider) doesn't hold the
+   * device key: it returns the session's current sync proof, which lasts up
+   * to an hour and is for this app, so `ttlSeconds` doesn't apply and any
+   * other `audience` returns `null`, as does one with under 30 seconds left
+   * (the session renews it). Ask for one per request, and don't log or
+   * forward it: until it expires it also opens this account's sync.
    */
-  getLocalFirstIdentityProof(options?: { ttlSeconds?: number; audience?: string }): string | null {
+  getDeviceAccountProof(options?: { ttlSeconds?: number; audience?: string }): string | null {
     if (!this._localFirstSecret) {
-      return null;
+      const token = this.config.jwtToken;
+      const payload = token ? parseJwtPayload(token) : null;
+      if (
+        !token ||
+        payload?.iss !== LOCAL_FIRST_JWT_ISSUER ||
+        typeof payload.exp !== "number" ||
+        // One about to expire could lapse on its way to the backend.
+        payload.exp <= Date.now() / 1000 + SESSION_PROOF_MIN_REMAINING_SECONDS ||
+        (options?.audience !== undefined && payload.aud !== accountAppId(options.audience))
+      )
+        return null;
+      return token;
     }
 
     const ttl = options?.ttlSeconds ?? 60;
     const audience = options?.audience ?? clientScope(this.config);
     return this.mintLocalFirstToken(this._localFirstSecret, audience, ttl);
+  }
+
+  /** @deprecated Renamed to {@link getDeviceAccountProof}; this alias goes in a later release. */
+  getLocalFirstIdentityProof(options?: { ttlSeconds?: number; audience?: string }): string | null {
+    return this.getDeviceAccountProof(options);
   }
 
   /** @internal This Db's own runtime's auth state changes, which never move to a successor. */
@@ -3058,7 +2989,7 @@ export class Db {
    * agents and tests read the same through `window.__jazz.status()`.
    */
   getSyncStatus(): SyncStatus {
-    const next = this.connection.syncStatus();
+    const next = withAuthReason(this.connection.syncStatus(), this.authStateStore.getState().error);
     if (this.syncStatusSnapshot && sameSyncStatus(next, this.syncStatusSnapshot)) {
       return this.syncStatusSnapshot;
     }
@@ -3101,12 +3032,17 @@ export class Db {
       { once: true },
     );
     let published = this.getSyncStatus();
-    this.connection.onSyncStatusChange(() => {
+    const publish = () => {
       const status = this.getSyncStatus();
       if (status === published) return;
       published = status;
       listener(status);
-    }, subscription.signal);
+    };
+    this.connection.onSyncStatusChange(publish, subscription.signal);
+    // Why the server refused the credential may be known after the link
+    // went offline: the status says it then (`authReason`).
+    const stopAuth = this.authStateStore.onChange(publish);
+    subscription.signal.addEventListener("abort", stopAuth, { once: true });
     return end;
   }
 
@@ -3143,12 +3079,17 @@ export class Db {
             timeoutMs,
           );
     try {
-      await this.connection.waitForSync(control.signal);
+      await this.waitForUpstreamSync(control.signal);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       signal?.removeEventListener("abort", forward);
       this.shutdownAbort.signal.removeEventListener("abort", shutdown);
     }
+  }
+
+  /** @internal How {@link waitForSync} waits; a backend `Db` waits on its client. */
+  protected waitForUpstreamSync(signal: AbortSignal): Promise<void> {
+    return this.connection.waitForSync(signal);
   }
 
   getConfig(): DbConfig {
@@ -3176,7 +3117,7 @@ export class Db {
    * {@link reconnect} to resume sync using the same Db instance.
    */
   async disconnect(): Promise<void> {
-    if (this.shutdownPromise) {
+    if (this.stopping) {
       throw new Error("Cannot disconnect a Db that is shutting down.");
     }
 
@@ -3191,7 +3132,7 @@ export class Db {
   async reconnect(): Promise<void> {
     // Sync recovery is safe before teardown starts; it must remain available
     // while a graceful transition waits for previously committed writes.
-    if (this.shutdownPromise && !this.cancelSyncShutdown) {
+    if (this.phase !== "open") {
       throw new Error("Cannot reconnect a Db that is shutting down.");
     }
 
@@ -3247,9 +3188,9 @@ export class Db {
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): WriteResult<T> {
     assertWritableTable(table);
     const client = this.getClient(table._schema);
-    let id = options?.id ?? (hasDependentTransforms(table) ? reserveRowId() : undefined);
+    let id = options?.id;
     const transformedData = table._columnTransforms
-      ? transformInputColumns(table, data, id ? { id } : undefined, true)
+      ? transformInputColumns(table, data)
       : (data as Record<string, unknown>);
     const values = toWriteRecordForOperation(
       "Insert",
@@ -3301,13 +3242,11 @@ export class Db {
     assertWritableTable(table);
     const client = this.getClient(table._schema);
     const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
-    rejectIncompleteDependencies(table, ordinaryData, [column]);
+    rejectComputedWrites(table, ordinaryData);
     notifyLocalWrite(this);
-    const id =
-      options?.id ??
-      (missingWriteDependencies(table, ordinaryData).includes("id") ? reserveRowId() : undefined);
+    const id = options?.id;
     return runAfterPreparation(client, async () => {
-      const transformedData = transformInputColumns(table, ordinaryData, id ? { id } : {}, true);
+      const transformedData = transformInputColumns(table, ordinaryData);
       const values = toWriteRecordForOperation(
         "Insert",
         transformedData,
@@ -3345,20 +3284,11 @@ export class Db {
     assertWritableTable(table);
     const client = this.getClient(table._schema);
     const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
-    rejectIncompleteDependencies(table, ordinaryData, [column]);
+    rejectComputedWrites(table, ordinaryData);
     notifyLocalWrite(this);
     const context = this.getAccessContext();
     return runAfterPreparation(client, async () => {
-      const transformedData = await prepareInputColumns(
-        table,
-        ordinaryData,
-        "Update",
-        id,
-        client,
-        context?.readSession,
-        undefined,
-        normalizeViewOptions(table._schema, table._table, options),
-      );
+      const transformedData = transformInputColumns(table, ordinaryData);
       const values = toWriteRecordForOperation(
         "Update",
         transformedData,
@@ -3387,20 +3317,11 @@ export class Db {
     assertWritableTable(table);
     const client = this.getClient(table._schema);
     const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
-    rejectIncompleteDependencies(table, ordinaryData, [column]);
+    rejectComputedWrites(table, ordinaryData);
     notifyLocalWrite(this);
     const context = this.getAccessContext();
     return runAfterPreparation(client, async () => {
-      const transformedData = await prepareInputColumns(
-        table,
-        ordinaryData,
-        "Upsert",
-        id,
-        client,
-        context?.readSession,
-        undefined,
-        normalizeViewOptions(table._schema, table._table, options),
-      );
+      const transformedData = transformInputColumns(table, ordinaryData);
       const values = toWriteRecordForOperation(
         "Upsert",
         transformedData,
@@ -3434,7 +3355,7 @@ export class Db {
     assertWritableTable(table);
     const client = this.getClient(table._schema);
     const transformedData = table._columnTransforms
-      ? transformInputColumns(table, data, { id }, true)
+      ? transformInputColumns(table, data)
       : (data as Record<string, unknown>);
     const values = toWriteRecordForOperation(
       "Restore",
@@ -3492,38 +3413,14 @@ export class Db {
     stage?: (values: ReturnType<typeof toWriteRecord>) => WriteHandle,
   ): WriteHandle {
     const client = this.getClient(table._schema);
-    const missing = missingWriteDependencies(table, data, id);
-    if (getOwnerPreparation(client)?.pending || missing.length) data = { ...data };
+    rejectComputedWrites(table, data);
+    if (getOwnerPreparation(client)?.pending) data = { ...data };
     const context = this.getAccessContext();
     const normalized = normalizeViewOptions(table._schema, table._table, options);
     const result = runAfterPreparation(client, () => {
-      const submit = (record: Record<string, unknown>, transaction?: OpenTransactionId) => {
+      const submit = (record: Record<string, unknown>) => {
         const values = toWriteRecordForOperation(operation, record, table._schema, table._table);
         if (stage) return stage(values);
-        if (transaction) {
-          if (operation === "Upsert")
-            client.upsertInternal(
-              table._table,
-              id,
-              values,
-              normalized,
-              context?.writeSession,
-              context?.attribution,
-              transaction,
-            );
-          else
-            client.updateInternal(
-              table._table,
-              id,
-              values,
-              normalized?.updatedAt,
-              context?.writeSession,
-              context?.attribution,
-              transaction,
-              normalized?.branch,
-            );
-          return client.commitTransaction(transaction);
-        }
         return operation === "Upsert"
           ? client.upsert(
               table._table,
@@ -3542,66 +3439,32 @@ export class Db {
               context?.attribution,
             );
       };
-      if (missing.length === 0) {
-        const record = table._columnTransforms ? transformInputColumns(table, data, { id }) : data;
-        if (operation !== "Update") return submit(record);
-        try {
-          return submit(record);
-        } catch (error) {
-          // An update stages against the row's current cells. When this
-          // replica has not loaded the row yet (a fresh process, another
-          // instance), read it through the caller's session and stage again;
-          // later writes wait behind this one, so their order holds.
-          if (nativeCoreErrorCode(error) !== "not_observed") throw error;
-          // The read's row count is not the answer: this replica may filter
-          // out a row it now holds, lacking the rows that grant the session
-          // access, and only the authority decides whether the session may
-          // write it. Stage again whatever came back.
-          return loadRow(client, table, id, context?.readSession, normalized?.branch).then(() => {
-            try {
-              return submit(record);
-            } catch (retryError) {
-              // Still not held: the server sent no row, so it does not exist
-              // or the session may not read it, and the two are refused alike,
-              // with the denial's code, as the authority answers.
-              if (nativeCoreErrorCode(retryError) !== "not_observed") throw retryError;
-              throw unreadableTargetError("Update", table._table);
-            }
-          });
-        }
-      }
-      const transaction = client.beginTransaction(
-        "mergeable",
-        context?.writeSession,
-        context?.attribution,
-      );
-      // An empty mergeable transaction has no staged overlay or read set. Native branch reads
-      // currently require the ordinary scoped path; explicit transactions still fail closed.
-      return Promise.resolve(
-        prepareInputColumns(
-          table,
-          data,
-          operation,
-          id,
-          client,
-          context?.readSession,
-          normalized?.branch ? undefined : transaction,
-          normalized,
-          missing,
-        ),
-      )
-        .then(async (record) => {
-          // Partial edits already own their native transaction; mergeable reads add no read precondition.
-          if (stage) {
-            await client.rollbackTransaction(transaction);
+      const record = transformInputColumns(table, data);
+      if (operation !== "Update") return submit(record);
+      try {
+        return submit(record);
+      } catch (error) {
+        // An update stages against the row's current cells. When this
+        // replica has not loaded the row yet (a fresh process, another
+        // instance), read it through the caller's session and stage again;
+        // later writes wait behind this one, so their order holds.
+        if (nativeCoreErrorCode(error) !== "not_observed") throw error;
+        // The read's row count is not the answer: this replica may filter
+        // out a row it now holds, lacking the rows that grant the session
+        // access, and only the authority decides whether the session may
+        // write it. Stage again whatever came back.
+        return loadRow(client, table, id, context?.readSession, normalized?.branch).then(() => {
+          try {
             return submit(record);
+          } catch (retryError) {
+            // Still not held: the server sent no row, so it does not exist
+            // or the session may not read it, and the two are refused alike,
+            // with the denial's code, as the authority answers.
+            if (nativeCoreErrorCode(retryError) !== "not_observed") throw retryError;
+            throw unreadableTargetError("Update", table._table);
           }
-          return submit(record, transaction);
-        })
-        .catch(async (error) => {
-          await client.rollbackTransaction(transaction).catch(() => {});
-          throw error;
         });
+      }
     });
     return this.wrapWriteWait(
       result instanceof Promise
@@ -3700,6 +3563,17 @@ export class Db {
     const values = writeRecord("Insert", table, data);
     const context = this.getAccessContext();
     return client.requestInsertPermissionAdvice(table._table, values, context?.writeSession);
+  }
+
+  /**
+   * @internal The Inspector's `explain`: for each of `ids` of `table`, which
+   * clauses of its read policy (the arms of its top-level `Or`) hold for
+   * this Db's session. Backend only.
+   */
+  explainReadClauses<T, Init>(table: TableProxy<T, Init>, ids: string[]): ExplainedRows {
+    const session = this.getAccessContext()?.readSession;
+    if (!session) throw new Error("explain needs a Db acting as a user");
+    return this.getClient(table._schema).explainReadClauses(table._table, ids, session);
   }
 
   /** Request authoritative permission advice for reading a row. */
@@ -3859,12 +3733,22 @@ export class Db {
   }
 
   /**
+   * @internal How many writes the server hasn't confirmed in this Db's
+   * store: every tab's in the browser, where the worker can say; otherwise
+   * this Db's own.
+   */
+  async storePendingUploads(): Promise<number> {
+    const store = await this.connection.storePendingUploads().catch(() => undefined);
+    return store ?? this.getSyncStatus().pendingUploads;
+  }
+
+  /**
    * @internal Whether this Db still reads and writes: it isn't shutting down
    * or replaced, and its storage wasn't reset under it. A session whose
    * sign-out or sign-in failed keeps a usable Db rather than ending in error.
    */
   isUsable(): boolean {
-    return !this.shutdownPromise && !this.replaced && this.connection.isUsable();
+    return !this.stopping && !this.replaced && this.connection.isUsable();
   }
 
   /**
@@ -3981,7 +3865,10 @@ export class Db {
             splices.set(change.id, change.splices);
           }
         }
-        onUpdate(update.all, { splices });
+        onUpdate(update.all, {
+          splices,
+          ...(update.reset && update.reason ? { reason: update.reason } : {}),
+        });
       },
       ...(onError === undefined ? {} : { onError }),
     };
@@ -4223,7 +4110,7 @@ export class Db {
         // Native initial snapshots may arrive synchronously. Defer the next
         // generation to avoid recursive installation as new inputs are found.
         queueMicrotask(() => {
-          if (!this.shutdownPromise) startNativeSubscription(replacement);
+          if (!this.stopping) startNativeSubscription(replacement);
         });
       }
     };
@@ -4322,7 +4209,7 @@ export class Db {
     };
     const ready = initialReadiness
       ?.then(() => {
-        if (unsubscribed || terminalized || activeSubscription === null || this.shutdownPromise) {
+        if (unsubscribed || terminalized || activeSubscription === null || this.stopping) {
           return;
         }
         deliveryReady = true;
@@ -4332,7 +4219,7 @@ export class Db {
         }
       })
       .catch((error: unknown) => {
-        if (unsubscribed || terminalized || activeSubscription === null || this.shutdownPromise) {
+        if (unsubscribed || terminalized || activeSubscription === null || this.stopping) {
           return;
         }
         // Admission failed after native registration. Terminalize the same
@@ -4362,7 +4249,7 @@ export class Db {
       void this.ensureReady(requirement, readyAbort.signal)
         .then(() => startNativeSubscription(initialSubscription))
         .catch((error: unknown) => {
-          if (unsubscribed || readyAbort.signal.aborted || this.shutdownPromise) return;
+          if (unsubscribed || readyAbort.signal.aborted || this.stopping) return;
           terminalizeSubscription(initialSubscription, error);
         });
     } else {
@@ -4404,7 +4291,9 @@ export class Db {
     // asks `next` instead: only the drain below waits for that server.
     own?.endUnsentReads?.();
     // Upload what this runtime still holds, then stop it. Until then its
-    // writes count in the sync status and in waitForSync.
+    // writes count in the sync status and in waitForSync. A stream still
+    // sending its value finishes first, unless the app shuts down.
+    const streams = this.letStreamsFinish();
     let draining = true;
     const drainListeners = new Set<() => void>();
     const drained = this.shutdown({ waitForSync: true }).finally(() => {
@@ -4414,6 +4303,7 @@ export class Db {
     void drained.catch(() => {});
     this.drain = {
       done: drained,
+      endStreamWait: () => streams.abort(),
       abort: () => {
         if (draining) this.abortGracefulShutdown();
       },
@@ -4535,17 +4425,38 @@ export class Db {
   private offlineRequested: boolean | undefined;
 
   /** Set once this Db adopted a successor: its own runtime's last uploads. */
-  private drain: { done: Promise<void>; abort(): void } | null = null;
+  private drain: { done: Promise<void>; endStreamWait(): void; abort(): void } | null = null;
+
+  /** Set by {@link letStreamsFinish}. */
+  private streamsMayFinish: AbortController | null = null;
+
+  /**
+   * @internal This Db's graceful shutdown lets streaming writes in flight on
+   * its own runtime finish (and waits for their writes) before closing it,
+   * until the returned controller aborts. Only the drain after the
+   * local-first upgrade asks for this: the app didn't ask for that shutdown,
+   * so it must not cut off an upload the app is making. A shutdown the app
+   * asks for (a sign-out, an account switch, a close) aborts it, so it is
+   * never held by a slow or stalled stream; the stream then fails saying why.
+   */
+  letStreamsFinish(): AbortController {
+    this.streamsMayFinish?.abort();
+    this.streamsMayFinish = new AbortController();
+    return this.streamsMayFinish;
+  }
 
   /**
    * @internal Stop this Db's own runtime after the upgrade. With
    * `waitForSync`, its writes upload first, the way a local-first client's
    * do when it shuts down; without, they are dropped, as when a thin client
-   * closes.
+   * closes. Either way a streaming write still sending its value is cut off
+   * (it fails saying why) rather than holding the app's shutdown.
    */
   async stopOwnRuntime(options: ShutdownOptions = {}): Promise<void> {
     const drain = this.drain;
     if (!drain) return this.shutdown(options);
+    // The app is shutting down: streams in flight no longer hold the drain.
+    drain.endStreamWait();
     if (!options.waitForSync) drain.abort();
     await drain.done.catch(() => {});
     // An aborted or failed drain leaves the runtime open: stop it now.
@@ -4561,66 +4472,121 @@ export class Db {
    * Shutdown the Db and release all resources.
    * Closes the Db's runtime client.
    *
+   * With `waitForSync`, pending writes upload first (see {@link DbPhase}): if
+   * that fails, this rejects with a `GracefulShutdownSyncError` and the Db
+   * stays open. Otherwise, or once they uploaded, the Db moves to `closing`
+   * and on to `closed`, for good.
+   *
+   * A plain shutdown (no `waitForSync`) always ends `closed`. One asked for
+   * while a drain runs waits for that drain, as before, but if the drain
+   * fails it tears down anyway: the drain's own caller still gets the
+   * `GracefulShutdownSyncError`, but the Db no longer stays open.
+   *
    * Idempotent: concurrent or repeated calls share the same in-flight promise.
    */
   shutdown(options: ShutdownOptions = {}): Promise<void> {
-    if (this.shutdownPromise) return this.shutdownPromise;
-    // Publish the promise before teardown can synchronously call back into Db.
-    let resolveShutdown!: (result: Promise<void>) => void;
-    const shutdown = new Promise<void>((resolve) => {
-      resolveShutdown = resolve;
+    if (this.teardown) return this.teardown;
+    if (this.gracefulDrain) {
+      if (options.waitForSync) return this.gracefulDrain.done;
+      this.gracefulDrain.teardownAnyway = true;
+      return this.gracefulDrain.done.catch(() => this.beginTeardown());
+    }
+    if (!options.waitForSync) return this.beginTeardown();
+    // Publish the drain before it starts: waiting can call back into the Db.
+    let resolveDrain!: (result: Promise<void>) => void;
+    const done = new Promise<void>((resolve) => {
+      resolveDrain = resolve;
     });
-    this.shutdownPromise = shutdown;
-    resolveShutdown(this.runShutdown(options));
-    return shutdown;
+    const syncAbort = new AbortController();
+    let rejectCancelled!: (error: Error) => void;
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      rejectCancelled = reject;
+    });
+    const drain = {
+      done,
+      cancel: () => {
+        syncAbort.abort();
+        rejectCancelled(new Error("Graceful shutdown cancelled"));
+      },
+      teardownAnyway: false,
+    };
+    this.gracefulDrain = drain;
+    resolveDrain(
+      (async () => {
+        try {
+          await Promise.race([
+            this.runtimeSource.waitForPendingWrites?.(syncAbort.signal) ??
+              this.connection.waitForPendingWrites({
+                inFlightStreams: this.streamsMayFinish?.signal,
+              }),
+            cancelled,
+          ]);
+        } catch (error) {
+          syncAbort.abort();
+          if (this.gracefulDrain === drain) this.gracefulDrain = null;
+          // The Db never left `open`, and takes work again, unless a plain
+          // shutdown asked for it meanwhile: that one closes it now, with no
+          // moment in between where it reads as open.
+          if (drain.teardownAnyway) void this.beginTeardown().catch(() => {});
+          throw new GracefulShutdownSyncError(error);
+        }
+        // Teardown takes over from here: a caller that shares this promise
+        // waits for it, and the Db is no longer draining but closing.
+        const teardown = this.beginTeardown();
+        if (this.gracefulDrain === drain) this.gracefulDrain = null;
+        return teardown;
+      })(),
+    );
+    void cancelled.catch(() => {});
+    return done;
   }
-
-  private cancelSyncShutdown: (() => void) | undefined;
 
   /** @internal Credential invalidation must interrupt a graceful sync wait. */
   abortGracefulShutdown(): void {
-    this.cancelSyncShutdown?.();
+    this.gracefulDrain?.cancel();
+  }
+
+  /** Whether the Db takes no new work: it is draining for a shutdown, or past `open`. */
+  private get stopping(): boolean {
+    return this.phase !== "open" || this.gracefulDrain !== null;
   }
 
   protected assertOpen(): void {
     if (this.replaced) throw this.replaced;
-    if (this.shutdownPromise) {
-      throw new Error("Cannot operate on a Db that is shutting down or closed.");
-    }
+    if (this.phase !== "open") throw new DbClosedError(this.phase);
+    if (this.gracefulDrain) throw new DbClosedError("draining");
   }
 
   private readonly shutdownListeners = new Set<() => void>();
 
   /** @internal Dispose account refresh and invalidation observers with the context. */
   onShutdown(listener: () => void): () => void {
-    if (this.shutdownPromise) listener();
+    // A drain may fail and leave the Db open: a listener registered during
+    // one waits for the teardown, if it comes.
+    if (this.phase !== "open") listener();
     else this.shutdownListeners.add(listener);
     return () => this.shutdownListeners.delete(listener);
   }
 
-  private async runShutdown(options: ShutdownOptions): Promise<void> {
-    if (options.waitForSync) {
-      const syncAbort = new AbortController();
-      const cancelled = new Promise<never>((_resolve, reject) => {
-        this.cancelSyncShutdown = () => {
-          syncAbort.abort();
-          reject(new Error("Graceful shutdown cancelled"));
-        };
-      });
-      try {
-        await Promise.race([
-          this.runtimeSource.waitForPendingWrites?.(syncAbort.signal) ??
-            this.connection.waitForPendingWrites(),
-          cancelled,
-        ]);
-      } catch (error) {
-        syncAbort.abort();
-        this.shutdownPromise = null;
-        throw new GracefulShutdownSyncError(error);
-      } finally {
-        this.cancelSyncShutdown = undefined;
-      }
-    }
+  /** Move `open` → `closing`, and to `closed` once teardown ends, however it ends. */
+  private beginTeardown(): Promise<void> {
+    if (this.teardown) return this.teardown;
+    this.phase = "closing";
+    // Publish the promise before teardown can synchronously call back into Db.
+    let resolveTeardown!: (result: Promise<void>) => void;
+    const teardown = new Promise<void>((resolve) => {
+      resolveTeardown = resolve;
+    });
+    this.teardown = teardown;
+    resolveTeardown(
+      this.runTeardown().finally(() => {
+        this.phase = "closed";
+      }),
+    );
+    return teardown;
+  }
+
+  private async runTeardown(): Promise<void> {
     for (const listener of this.shutdownListeners) {
       try {
         listener();
@@ -5000,4 +4966,11 @@ function isRuntimeClosed(error: unknown): boolean {
   for (let current = error; current instanceof Error; current = current.cause)
     if (current instanceof RuntimeClosedError) return true;
   return false;
+}
+
+/** The status with why the server refused the credential, while the link is offline for it. */
+function withAuthReason(status: SyncStatus, reason: AuthFailureReason | undefined): SyncStatus {
+  const { link } = status;
+  if (link.state !== "offline" || link.reason !== "auth" || reason === undefined) return status;
+  return { ...status, link: { ...link, authReason: reason } };
 }

@@ -1,5 +1,4 @@
 import {
-  createContext,
   useContext,
   useEffect,
   useLayoutEffect,
@@ -11,30 +10,58 @@ import {
 } from "react";
 import {
   attachJazzSessionConsumer,
+  clientOnlySessionActions,
+  clientOnlySnapshot,
   jazzSessionActions,
+  jazzSessionErrorViewProps,
   ownJazzSession,
   startJazzSession,
   type JazzSession,
+  type JazzSessionErrorViewProps,
   type JazzSessionSnapshot,
 } from "../session/jazz-session.js";
 import type { SessionCore } from "../session/state.js";
-import { JazzClientProvider, type CoreJazzClient } from "./provider.js";
+import {
+  JazzClientContextProvider,
+  useOptionalJazzClientContext,
+  type CoreJazzClient,
+} from "./provider.js";
+import { SessionContext } from "./session-context.js";
 
 /** `useJazzSession()`: the session's state, and its operations. */
 export type UseJazzSessionResult<Client = CoreJazzClient> = JazzSessionSnapshot<Client> &
   Omit<JazzSession<Client>, "getSnapshot" | "subscribe" | "db">;
-const SessionContext = createContext<UseJazzSessionResult<any> | null>(null);
 
 /**
  * Who is signed in and what the session is doing, with its operations
  * (`createDeviceAccount`, `refresh`, `signOut`, ...). Available everywhere
- * under `<JazzProvider>`, including its `signedOut`, `loading` and `error`
- * views. Operations reject on failure; the failure also shows in `error`.
+ * under `<JazzProvider>`, including its `signedOut`, `loading`, `error` and
+ * `closed` views. Operations reject on failure; the failure also shows in `error`.
+ *
+ * `user` is who your permissions see as `session`: `user.accountId` is
+ * `session.user`, with `user.identity` and `user.claims`.
+ *
+ * Under `<JazzClientProvider client>` (a client you opened yourself) it is
+ * `ready` with that client's user, and its operations reject: that client has
+ * no session to sign in or out.
  */
 export function useJazzSession<Client = CoreJazzClient>(): UseJazzSessionResult<Client> {
-  const value = useContext(SessionContext);
-  if (!value) throw new Error("useJazzSession must be used within <JazzProvider>");
-  return value;
+  const value = useContext(SessionContext) as UseJazzSessionResult<Client> | null;
+  // A client opened outside a session (`<JazzClientProvider client>`): its
+  // user, always ready, with operations that reject naming why. Its context
+  // value changes when the client's auth does.
+  const clientContext = useOptionalJazzClientContext();
+  const clientOnly = useMemo(
+    () =>
+      value || !clientContext
+        ? undefined
+        : { ...clientOnlySnapshot(clientContext.client), ...clientOnlySessionActions() },
+    [value, clientContext],
+  );
+  const state = value ?? clientOnly;
+  if (!state)
+    throw new Error("useJazzSession must be used within <JazzProvider> or <JazzClientProvider>");
+  return state as UseJazzSessionResult<Client>;
 }
 
 /** What `<JazzProvider>` shows for each session status. */
@@ -44,8 +71,18 @@ export type JazzSessionViewProps<Client = CoreJazzClient> = {
   signedOut?: ReactNode;
   /** Shown while the session starts or switches users. */
   loading?: ReactNode | ((state: UseJazzSessionResult<Client>) => ReactNode);
-  /** Shown when there is no usable client (`status: "error"`). */
-  error?: ReactNode | ((state: UseJazzSessionResult<Client>) => ReactNode);
+  /**
+   * Shown when there is no usable client (`status: "error"`), with
+   * `{ error, recovery, retry }`. The rest of the session is in `useJazzSession()`.
+   */
+  error?: ReactNode | ((props: JazzSessionErrorViewProps) => ReactNode);
+  /**
+   * Shown once the session is closed (`status: "closed"`, after
+   * `session.close()`): it has no client and never starts again. Nothing by
+   * default. To start over, give the provider a new session (or a new React
+   * key for `config`).
+   */
+  closed?: ReactNode | ((state: UseJazzSessionResult<Client>) => ReactNode);
 };
 
 /** The two ways to give `<JazzProvider>` its session. */
@@ -107,6 +144,7 @@ function JazzSessionView<Client extends CoreJazzClient>({
   signedOut = null,
   loading = null,
   error = null,
+  closed = null,
 }: JazzSessionViewProps<Client> & { session: JazzSession<Client> }) {
   const snapshot = useSyncExternalStore(
     session.subscribe,
@@ -122,7 +160,7 @@ function JazzSessionView<Client extends CoreJazzClient>({
   );
   useLayoutEffect(() => {
     // Suspense hides layout effects while passive query subscriptions remain live.
-    consumer.lease ??= attachJazzSessionConsumer(session);
+    consumer.lease ??= attachJazzSessionConsumer(session, "React <JazzProvider>");
   }, [session, consumer]);
   useEffect(() => {
     ++consumer.epoch;
@@ -148,14 +186,21 @@ function JazzSessionView<Client extends CoreJazzClient>({
   );
   const render = (view: JazzSessionViewProps<Client>["loading"]) =>
     typeof view === "function" ? view(state) : view;
+
   return (
     <SessionContext.Provider value={state}>
       {state.status === "ready" && state.client ? (
-        <JazzClientProvider client={state.client}>{children}</JazzClientProvider>
+        <JazzClientContextProvider client={state.client}>{children}</JazzClientContextProvider>
       ) : state.status === "signed-out" ? (
         signedOut
       ) : state.status === "error" ? (
-        render(error)
+        typeof error === "function" ? (
+          error(jazzSessionErrorViewProps(session, state))
+        ) : (
+          error
+        )
+      ) : state.status === "closed" ? (
+        render(closed)
       ) : (
         render(loading)
       )}

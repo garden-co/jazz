@@ -1,5 +1,5 @@
 import { Badge } from "@astryxdesign/core/Badge";
-import type { Stock } from "@/schema";
+import type { Stock } from "@/jazz.generated";
 import { LOW_STOCK } from "@/src/catalogue/catalogue";
 
 export function StockBadge({ stock }: { stock?: Stock }) {

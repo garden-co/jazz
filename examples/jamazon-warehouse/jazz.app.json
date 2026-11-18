@@ -1,0 +1,370 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "d336086d8ec5201d63651b7caca74c09bc62fa329c15aa4f07ed404c1f7ed283"
+  },
+  "tables": {
+    "better_auth_account": {
+      "columns": {
+        "accountId": "string",
+        "providerId": "string",
+        "userId": "uuid",
+        "password": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_jwks": {
+      "columns": {
+        "publicKey": "string",
+        "privateKey": "string",
+        "createdAt": "timestamp",
+        "expiresAt": "timestamp?",
+        "alg": "string?",
+        "crv": "string?"
+      }
+    },
+    "better_auth_session": {
+      "columns": {
+        "expiresAt": "timestamp",
+        "token": "string",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp",
+        "ipAddress": "string?",
+        "userAgent": "string?",
+        "userId": "uuid"
+      },
+      "relations": { "user": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_user": {
+      "columns": {
+        "name": "string",
+        "email": "string",
+        "emailVerified": "boolean",
+        "image": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": {
+        "better_auth_accountViaUser": { "reverse": "better_auth_account", "relation": "user" },
+        "better_auth_sessionViaUser": { "reverse": "better_auth_session", "relation": "user" }
+      }
+    },
+    "better_auth_verification": {
+      "columns": {
+        "identifier": "string",
+        "value": "string",
+        "expiresAt": "timestamp",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      }
+    },
+    "customers": {
+      "columns": {
+        "warehouse_id": "uuid",
+        "district_id": "uuid",
+        "name": "string",
+        "balance_cents": "int"
+      },
+      "relations": {
+        "district": { "rel": "districts", "column": "district_id" },
+        "ordersViaCustomer": { "reverse": "orders", "relation": "customer" },
+        "paymentsViaCustomer": { "reverse": "payments", "relation": "customer" },
+        "warehouse": { "rel": "warehouses", "column": "warehouse_id" }
+      },
+      "indexes": ["warehouse_id", "district_id", "name"]
+    },
+    "deliveries": {
+      "columns": {
+        "warehouse_id": "uuid",
+        "district_id": "uuid",
+        "order_id": "uuid",
+        "status": "string"
+      },
+      "relations": {
+        "district": { "rel": "districts", "column": "district_id" },
+        "order": { "rel": "orders", "column": "order_id" },
+        "warehouse": { "rel": "warehouses", "column": "warehouse_id" }
+      },
+      "indexes": ["warehouse_id", "order_id"]
+    },
+    "districts": {
+      "columns": { "warehouse_id": "uuid", "name": "string", "next_order_number": "int" },
+      "relations": {
+        "customersViaDistrict": { "reverse": "customers", "relation": "district" },
+        "deliveriesViaDistrict": { "reverse": "deliveries", "relation": "district" },
+        "ordersViaDistrict": { "reverse": "orders", "relation": "district" },
+        "warehouse": { "rel": "warehouses", "column": "warehouse_id" }
+      },
+      "indexes": ["warehouse_id", "name"]
+    },
+    "items": {
+      "columns": {
+        "sku": "string",
+        "name": "string",
+        "unit_price_cents": "int",
+        "operator_id": "uuid"
+      },
+      "relations": {
+        "order_linesViaItem": { "reverse": "order_lines", "relation": "item" },
+        "stockViaItem": { "reverse": "stock", "relation": "item" }
+      },
+      "indexes": ["operator_id"]
+    },
+    "order_lines": {
+      "columns": {
+        "warehouse_id": "uuid",
+        "order_id": "uuid",
+        "line_number": "int",
+        "item_id": "uuid",
+        "quantity": "int",
+        "amount_cents": "int"
+      },
+      "relations": {
+        "item": { "rel": "items", "column": "item_id" },
+        "order": { "rel": "orders", "column": "order_id" },
+        "warehouse": { "rel": "warehouses", "column": "warehouse_id" }
+      },
+      "indexes": ["warehouse_id", "order_id"]
+    },
+    "orders": {
+      "columns": {
+        "warehouse_id": "uuid",
+        "district_id": "uuid",
+        "customer_id": "uuid",
+        "order_number": "int",
+        "status": "string",
+        "total_cents": "int",
+        "idempotency_key": "string",
+        "reserved_lines": "string?"
+      },
+      "relations": {
+        "customer": { "rel": "customers", "column": "customer_id" },
+        "deliveriesViaOrder": { "reverse": "deliveries", "relation": "order" },
+        "district": { "rel": "districts", "column": "district_id" },
+        "order_linesViaOrder": { "reverse": "order_lines", "relation": "order" },
+        "paymentsViaOrder": { "reverse": "payments", "relation": "order" },
+        "warehouse": { "rel": "warehouses", "column": "warehouse_id" }
+      },
+      "indexes": [
+        "warehouse_id",
+        "district_id",
+        "customer_id",
+        "status",
+        "order_number",
+        "idempotency_key"
+      ]
+    },
+    "payments": {
+      "columns": {
+        "warehouse_id": "uuid",
+        "customer_id": "uuid",
+        "order_id": "uuid?",
+        "amount_cents": "int",
+        "idempotency_key": "string"
+      },
+      "relations": {
+        "customer": { "rel": "customers", "column": "customer_id" },
+        "order": { "rel": "orders", "column": "order_id" },
+        "warehouse": { "rel": "warehouses", "column": "warehouse_id" }
+      },
+      "indexes": ["warehouse_id", "order_id", "idempotency_key"]
+    },
+    "stock": {
+      "columns": {
+        "warehouse_id": "uuid",
+        "item_id": "uuid",
+        "on_hand": "int",
+        "reorder_level": "int"
+      },
+      "relations": {
+        "item": { "rel": "items", "column": "item_id" },
+        "warehouse": { "rel": "warehouses", "column": "warehouse_id" }
+      },
+      "indexes": ["warehouse_id", "item_id", "on_hand"]
+    },
+    "warehouse_operators": {
+      "columns": { "warehouse_id": "uuid", "account_id": "uuid", "name": "string" },
+      "relations": { "warehouse": { "rel": "warehouses", "column": "warehouse_id" } },
+      "indexes": ["warehouse_id", "account_id"]
+    },
+    "warehouses": {
+      "columns": { "name": "string", "region": "string", "operator_id": "uuid" },
+      "relations": {
+        "customersViaWarehouse": { "reverse": "customers", "relation": "warehouse" },
+        "deliveriesViaWarehouse": { "reverse": "deliveries", "relation": "warehouse" },
+        "districtsViaWarehouse": { "reverse": "districts", "relation": "warehouse" },
+        "operatorsViaWarehouse": { "reverse": "warehouse_operators", "relation": "warehouse" },
+        "order_linesViaWarehouse": { "reverse": "order_lines", "relation": "warehouse" },
+        "ordersViaWarehouse": { "reverse": "orders", "relation": "warehouse" },
+        "paymentsViaWarehouse": { "reverse": "payments", "relation": "warehouse" },
+        "stockViaWarehouse": { "reverse": "stock", "relation": "warehouse" }
+      },
+      "indexes": ["operator_id"]
+    }
+  },
+  "history": {
+    "7ce960ad34dc": {
+      "tables": {
+        "better_auth_account": {
+          "columns": {
+            "issuer": "string",
+            "accountId": "string",
+            "providerId": "string",
+            "userId": { "type": "uuid", "references": "better_auth_user" },
+            "password": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_jwks": {
+          "columns": {
+            "publicKey": "string",
+            "privateKey": "string",
+            "createdAt": "timestamp",
+            "expiresAt": "timestamp?",
+            "alg": "string?",
+            "crv": "string?"
+          }
+        },
+        "better_auth_session": {
+          "columns": {
+            "expiresAt": "timestamp",
+            "token": "string",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp",
+            "ipAddress": "string?",
+            "userAgent": "string?",
+            "userId": { "type": "uuid", "references": "better_auth_user" }
+          }
+        },
+        "better_auth_user": {
+          "columns": {
+            "name": "string",
+            "email": "string",
+            "emailVerified": "boolean",
+            "image": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_verification": {
+          "columns": {
+            "identifier": "string",
+            "value": "string",
+            "expiresAt": "timestamp",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "customers": {
+          "columns": {
+            "warehouse_id": { "type": "uuid", "references": "warehouses" },
+            "district_id": { "type": "uuid", "references": "districts" },
+            "name": "string",
+            "balance_cents": "int"
+          },
+          "indexes": ["warehouse_id", "district_id", "name"]
+        },
+        "deliveries": {
+          "columns": {
+            "warehouse_id": { "type": "uuid", "references": "warehouses" },
+            "district_id": { "type": "uuid", "references": "districts" },
+            "order_id": { "type": "uuid", "references": "orders" },
+            "status": "string"
+          },
+          "indexes": ["warehouse_id", "order_id"]
+        },
+        "districts": {
+          "columns": {
+            "warehouse_id": { "type": "uuid", "references": "warehouses" },
+            "name": "string",
+            "next_order_number": "int"
+          },
+          "indexes": ["warehouse_id", "name"]
+        },
+        "items": {
+          "columns": {
+            "sku": "string",
+            "name": "string",
+            "unit_price_cents": "int",
+            "operator_id": "uuid"
+          },
+          "indexes": ["operator_id"]
+        },
+        "order_lines": {
+          "columns": {
+            "warehouse_id": { "type": "uuid", "references": "warehouses" },
+            "order_id": { "type": "uuid", "references": "orders" },
+            "line_number": "int",
+            "item_id": { "type": "uuid", "references": "items" },
+            "quantity": "int",
+            "amount_cents": "int"
+          },
+          "indexes": ["warehouse_id", "order_id"]
+        },
+        "orders": {
+          "columns": {
+            "warehouse_id": { "type": "uuid", "references": "warehouses" },
+            "district_id": { "type": "uuid", "references": "districts" },
+            "customer_id": { "type": "uuid", "references": "customers" },
+            "order_number": "int",
+            "status": "string",
+            "total_cents": "int",
+            "idempotency_key": "string",
+            "reserved_lines": "string?"
+          },
+          "indexes": [
+            "warehouse_id",
+            "district_id",
+            "customer_id",
+            "status",
+            "order_number",
+            "idempotency_key"
+          ]
+        },
+        "payments": {
+          "columns": {
+            "warehouse_id": { "type": "uuid", "references": "warehouses" },
+            "customer_id": { "type": "uuid", "references": "customers" },
+            "order_id": { "type": "uuid", "optional": true, "references": "orders" },
+            "amount_cents": "int",
+            "idempotency_key": "string"
+          },
+          "indexes": ["warehouse_id", "order_id", "idempotency_key"]
+        },
+        "stock": {
+          "columns": {
+            "warehouse_id": { "type": "uuid", "references": "warehouses" },
+            "item_id": { "type": "uuid", "references": "items" },
+            "on_hand": "int",
+            "reorder_level": "int"
+          },
+          "indexes": ["warehouse_id", "item_id", "on_hand"]
+        },
+        "warehouse_operators": {
+          "columns": {
+            "warehouse_id": { "type": "uuid", "references": "warehouses" },
+            "account_id": "uuid",
+            "name": "string"
+          },
+          "indexes": ["warehouse_id", "account_id"]
+        },
+        "warehouses": {
+          "columns": { "name": "string", "region": "string", "operator_id": "uuid" },
+          "indexes": ["operator_id"]
+        }
+      }
+    }
+  },
+  "migrations": [
+    {
+      "from": "7ce960ad34dc",
+      "migrate": {
+        "better_auth_account": { "issuer": { "drop": "string", "backwardsDefault": "" } }
+      }
+    }
+  ]
+}

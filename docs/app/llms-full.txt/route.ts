@@ -8,7 +8,8 @@ export async function GET() {
 
   return new Response(scanned.join("\n\n"), {
     headers: {
-      "Content-Type": "text/markdown; charset=utf-8",
+      // Markdown, served as plain text: some agent browsing tools refuse text/markdown (#2570).
+      "Content-Type": "text/plain; charset=utf-8",
     },
   });
 }

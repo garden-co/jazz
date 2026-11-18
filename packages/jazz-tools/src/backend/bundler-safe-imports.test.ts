@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 // What Next.js's bundlers (Turbopack, webpack) need of jazz-tools' backend,
@@ -10,11 +10,11 @@ import { describe, expect, it } from "vitest";
 //   import is not enough for that), and an installed one is bundled.
 // - Nothing finds a file through `import.meta.url` at runtime: bundlers
 //   bake the build machine's path into it, which a deployed function lacks.
-const sources = ["vercel-store.ts", "create-jazz.ts"].map((file) => ({
+const sources = ["vercel-store.ts", "create-jazz.ts", "ws-peer.ts"].map((file) => ({
   file,
   text: readFileSync(new URL(file, import.meta.url), "utf8"),
 }));
-const OPTIONAL_PEERS = ["@vercel/sandbox", "@vercel/functions", "@vercel/functions/oidc"];
+const OPTIONAL_PEERS = ["@vercel/sandbox", "@vercel/functions", "@vercel/functions/oidc", "ws"];
 
 describe("backend imports under bundlers", () => {
   it("imports optional peers as literals inside try", () => {
@@ -43,6 +43,20 @@ describe("backend imports under bundlers", () => {
         expect(after, `${peer} in ${file}`).not.toContain(".catch(");
       }
     }
+  });
+
+  it("loads ws only through ws-peer.ts", () => {
+    // ws-peer.ts is what bundler-optional-peer.turbopack.test.ts builds
+    // with Turbopack, without ws.
+    const src = new URL("../", import.meta.url);
+    const importers = (readdirSync(src, { recursive: true }) as string[])
+      .filter((file) => /\.tsx?$/.test(file) && !/\.test\.tsx?$/.test(file))
+      .filter((file) =>
+        /(?:from\s+|import\(\s*(?:\/\*[^*]*\*\/\s*)*|require\(\s*)["']ws["']/.test(
+          readFileSync(new URL(file, src), "utf8"),
+        ),
+      );
+    expect(importers).toEqual(["backend/ws-peer.ts"]);
   });
 
   it("finds no file through import.meta.url at runtime", () => {

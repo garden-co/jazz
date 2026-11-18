@@ -18,8 +18,10 @@
 // the point of the Inspector, and it is why the hook must be narrow.
 
 import { NoJazzAccountError } from "./no-account-error.js";
+import { accountAppId } from "../accounts/local-first.js";
+import { endpointScope } from "../runtime/client-scope.js";
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import type { ColumnType, WasmSchema } from "../drivers/types.js";
+import type { ColumnType, TablePolicies, WasmSchema } from "../drivers/types.js";
 import type { Db, QueryBuilder, TableProxy } from "../runtime/db.js";
 import { historySourceTable, historyTableName } from "../runtime/history-relation.js";
 import {
@@ -33,11 +35,18 @@ import {
   buildQueryJson,
   fromJsonForColumn,
   inspectorLink,
+  cleanTokenLabel,
+  fromJsonValue,
   isLoopbackHost,
+  policyClauses,
+  readsClaims,
+  renderPolicy,
   rowLimit,
+  summarizeLargeValue,
   toJsonValue,
   type InspectAs,
   type InspectErrorCode,
+  type InspectExplainAnswer,
   type InspectQuery,
   type InspectRequest,
   type InspectSessionInfo,
@@ -76,11 +85,15 @@ export interface InspectEvent {
   table?: string;
   /** The user whose permissions the call ran under, if not the backend's. */
   as?: string;
+  /** The names (not values) of the claims given for `as`, when some were. */
+  asClaims?: string[];
   /** Rows the answer carried, or rows the write touched. */
   rows?: number;
   write: boolean;
   /** The id of the agent token, when one was used. */
   tokenId?: string;
+  /** The agent token's label (what the agent asked access for), when one was used. */
+  label?: string;
   /** Set when the call was refused or failed. */
   error?: InspectErrorCode;
 }
@@ -142,6 +155,7 @@ interface Admitted {
   tables?: string[];
   expiresAt?: number;
   tokenId?: string;
+  label?: string;
 }
 
 interface TokenClaims {
@@ -164,7 +178,8 @@ const PROVENANCE = ["$createdBy", "$createdAt", "$updatedBy", "$updatedAt"];
 
 function defaultAudit(event: InspectEvent): void {
   const parts = [
-    `jazz inspect: ${event.by} (${event.via})`,
+    // The label is the agent's own text: quoted, so it can't forge a line.
+    `jazz inspect: ${event.by} (${event.via}${event.label ? ` ${JSON.stringify(event.label)}` : ""})`,
     event.op,
     event.table,
     event.as && `as ${event.as}`,
@@ -333,7 +348,7 @@ export function createInspector(deps: InspectorDeps) {
   async function mintToken(
     admitted: Admitted,
     request: Extract<InspectRequest, { op: "mint_token" }>,
-  ): Promise<{ token: string; expiresAt: number; tokenId: string }> {
+  ): Promise<{ token: string; expiresAt: number; tokenId: string; label?: string }> {
     // A token is a person's delegation: another token can't make one.
     if (admitted.via === "token") {
       throw new InspectError(
@@ -375,7 +390,7 @@ export function createInspector(deps: InspectorDeps) {
       by: admitted.by,
       write: request.write === true,
       ...(tables ? { tables: [...new Set(tables)] } : {}),
-      ...(request.label ? { label: String(request.label).slice(0, 200) } : {}),
+      ...(cleanTokenLabel(request.label) ? { label: cleanTokenLabel(request.label) } : {}),
       iat,
       exp: iat + ttl,
       jti: randomUUID(),
@@ -386,6 +401,7 @@ export function createInspector(deps: InspectorDeps) {
       token: `${INSPECT_TOKEN_PREFIX}${payload}.${mac}`,
       expiresAt: claims.exp,
       tokenId: claims.jti,
+      ...(claims.label ? { label: claims.label } : {}),
     };
   }
 
@@ -420,15 +436,20 @@ export function createInspector(deps: InspectorDeps) {
       ...(claims.tables ? { tables: claims.tables } : {}),
       expiresAt: claims.exp,
       tokenId: claims.jti,
+      ...(typeof claims.label === "string" && claims.label ? { label: claims.label } : {}),
     };
   }
 
   // ---------------------------------------------------------------- reads and writes
 
+  /** Where browsers reach this Jazz: its public URL, else this request's origin and basePath. */
+  function endpointUrl(request: Request): string {
+    if (deps.publicUrls[0]) return deps.publicUrls[0];
+    return `${new URL(request.url).origin}${deps.basePath}`;
+  }
+
   function inspectorUrl(request: Request): string {
-    if (deps.publicUrls[0]) return `${deps.publicUrls[0]}${INSPECT_PATH}/`;
-    const url = new URL(request.url);
-    return `${url.origin}${deps.basePath}${INSPECT_PATH}/`;
+    return `${endpointUrl(request)}${INSPECT_PATH}/`;
   }
 
   function tableOf(name: string): {
@@ -476,14 +497,43 @@ export function createInspector(deps: InspectorDeps) {
     } as unknown as TableProxy<Record<string, unknown>, Record<string, unknown>>;
   }
 
-  async function dbFor(as: InspectAs | undefined): Promise<{ db: Db; as?: string }> {
+  let claimsReadFor: { permissions: unknown; reads: boolean } | undefined;
+  /** Whether the app's permissions read anything from `session.claims`. */
+  function permissionsReadClaims(): boolean {
+    if (!claimsReadFor || claimsReadFor.permissions !== deps.permissions) {
+      claimsReadFor = { permissions: deps.permissions, reads: readsClaims(deps.permissions) };
+    }
+    return claimsReadFor.reads;
+  }
+
+  async function dbFor(
+    as: InspectAs | undefined,
+  ): Promise<{ db: Db; as?: string; asClaims?: string[]; warning?: string }> {
     if (as === undefined) return { db: deps.db() };
     const user = typeof as === "string" ? { userId: as } : as;
     if (!user || typeof user.userId !== "string" || !user.userId) {
       throw new InspectError("bad_request", "as must name a user id");
     }
+    if (
+      user.claims !== undefined &&
+      (user.claims === null || typeof user.claims !== "object" || Array.isArray(user.claims))
+    ) {
+      throw new InspectError("bad_request", "as.claims must be an object of the user's claims");
+    }
+    // A user's claims come from their sign-in, which the Inspector doesn't
+    // have: viewing as them without claims sees what a session with none
+    // would, and policies that read claims then quietly allow less.
+    const warning =
+      user.claims === undefined && permissionsReadClaims()
+        ? `This app's permissions read session claims, and none were given for ${user.userId}, so this ran as a session with no claims: rows or writes a claim would allow are missing or refused. Pass the user's claims with as: { userId, claims } (CLI: --claims '<json>'; MCP: claims; Inspector: the claims field next to "View as user").`
+        : undefined;
     try {
-      return { db: await deps.dbAs(user), as: user.userId };
+      return {
+        db: await deps.dbAs(user),
+        as: user.userId,
+        ...(user.claims ? { asClaims: Object.keys(user.claims).sort() } : {}),
+        ...(warning ? { warning } : {}),
+      };
     } catch (error) {
       // Viewing as a user who never signed in: there is no one to be.
       if (error instanceof NoJazzAccountError) throw new InspectError("not_found", error.message);
@@ -495,10 +545,13 @@ export function createInspector(deps: InspectorDeps) {
     admitted: Admitted,
     query: InspectQuery,
     as: InspectAs | undefined,
+    options: { summarize?: boolean; part?: { column: string; from: number; to: number } } = {},
   ): Promise<{
     rows: Record<string, unknown>[];
     truncated: boolean;
     as?: string;
+    asClaims?: string[];
+    warning?: string;
   }> {
     if (!query || typeof query !== "object") {
       throw new InspectError("bad_request", "query needs { table, ... }");
@@ -520,10 +573,21 @@ export function createInspector(deps: InspectorDeps) {
     const limit = rowLimit(query.limit);
     const { columns } = tableOf(query.table);
     // One more than the limit, to tell whether more matched.
-    const json = buildQueryJson(query, limit + 1, (column, value) =>
+    let json = buildQueryJson(query, limit + 1, (column, value) =>
       fromJsonForColumn(columns.get(column), value),
     );
-    const { db, as: asUser } = await dbFor(as);
+    // Only `from`–`to` of one bytes or text value: the store reads just the
+    // chunks that part covers.
+    if (options.part) {
+      const { column, from, to } = options.part;
+      json = JSON.stringify({
+        ...JSON.parse(json),
+        select: [column],
+        partialSelect: { [column]: { from, to } },
+      });
+    }
+    const summarize = options.summarize ?? true;
+    const { db, as: asUser, asClaims, warning } = await dbFor(as);
     const found = await db.all(queryBuilder(query.table, json), {
       tier: "remote",
     });
@@ -533,21 +597,49 @@ export function createInspector(deps: InspectorDeps) {
     for (const row of found.slice(0, limit)) {
       const shown = toJsonValue(row) as Record<string, unknown>;
       if (hidden) for (const column of hidden) if (column in shown) shown[column] = REDACTED;
-      bytes += JSON.stringify(shown).length;
-      if (bytes > MAX_ANSWER_BYTES) {
+      // A large value is summarized, so its row is listed (`get` with
+      // `column` answers the value itself).
+      if (summarize) {
+        for (const [column, value] of Object.entries(shown)) {
+          shown[column] = summarizeLargeValue(value);
+        }
+      }
+      let size = JSON.stringify(shown).length;
+      // Always the first row: a row that exists is never answered as none.
+      // Should it alone be larger than an answer carries (many values just
+      // under the limit), summarize its largest values until it fits.
+      if (rows.length === 0 && size > MAX_ANSWER_BYTES) {
+        const bySize = Object.entries(shown)
+          .filter(([column]) => column !== "id")
+          .map(([column, value]) => [column, JSON.stringify(value)?.length ?? 0] as const)
+          .sort((a, b) => b[1] - a[1]);
+        for (const [column] of bySize) {
+          if (size <= MAX_ANSWER_BYTES) break;
+          shown[column] = summarizeLargeValue(shown[column], 0);
+          size = JSON.stringify(shown).length;
+        }
+      }
+      bytes += size;
+      if (bytes > MAX_ANSWER_BYTES && rows.length > 0) {
         truncated = true;
         break;
       }
       rows.push(shown);
     }
-    return { rows, truncated, ...(asUser ? { as: asUser } : {}) };
+    return {
+      rows,
+      truncated,
+      ...(asUser ? { as: asUser } : {}),
+      ...(asClaims ? { asClaims } : {}),
+      ...(warning ? { warning } : {}),
+    };
   }
 
   async function write(
     admitted: Admitted,
     ops: InspectWriteOp[],
     as: InspectAs | undefined,
-  ): Promise<{ ids: string[]; as?: string }> {
+  ): Promise<{ ids: string[]; as?: string; asClaims?: string[]; warning?: string }> {
     if (!admitted.write) {
       throw new InspectError(
         "forbidden",
@@ -561,7 +653,10 @@ export function createInspector(deps: InspectorDeps) {
     }
     const prepared = ops.map((op) => {
       if (!op || typeof op !== "object" || !["insert", "update", "delete"].includes(op.kind)) {
-        throw new InspectError("bad_request", "each op is an insert, update or delete");
+        throw new InspectError(
+          "bad_request",
+          `each op needs kind: "insert", "update" or "delete" (got ${String(JSON.stringify(op && typeof op === "object" ? ((op as { kind?: unknown }).kind ?? null) : op)).slice(0, 60)})`,
+        );
       }
       if (typeof op.table !== "string" || !op.table) {
         throw new InspectError("bad_request", `${op.kind} needs a table`);
@@ -594,7 +689,7 @@ export function createInspector(deps: InspectorDeps) {
       }
       return { op, values };
     });
-    const { db, as: asUser } = await dbFor(as);
+    const { db, as: asUser, asClaims, warning } = await dbFor(as);
     const ids: string[] = [];
     let result;
     try {
@@ -617,9 +712,208 @@ export function createInspector(deps: InspectorDeps) {
       await result.wait({ tier: "global" });
     } catch (error) {
       if (error instanceof InspectError) throw error;
-      throw new InspectError("forbidden", `the write was refused: ${errorMessage(error)}`);
+      throw new InspectError(
+        "forbidden",
+        `the write was refused: ${errorMessage(error)}${warning ? `. ${warning}` : ""}`,
+      );
     }
-    return { ids, ...(asUser ? { as: asUser } : {}) };
+    return {
+      ids,
+      ...(asUser ? { as: asUser } : {}),
+      ...(asClaims ? { asClaims } : {}),
+      ...(warning ? { warning } : {}),
+    };
+  }
+
+  /** `get` with `column`: one value of one row, whole or `from`–`to` of it. */
+  async function getValue(
+    admitted: Admitted,
+    body: Extract<InspectRequest, { op: "get" }>,
+    url: string,
+  ) {
+    const column = body.column;
+    if (typeof column !== "string" || !column) {
+      throw new InspectError("bad_request", "column must name a column");
+    }
+    for (const bound of [body.from, body.to]) {
+      if (bound !== undefined && (!Number.isSafeInteger(bound) || bound < 0)) {
+        throw new InspectError("bad_request", "from and to must be whole numbers of at least 0");
+      }
+    }
+    const type = tableOf(body.table).columns.get(column);
+    if (!type) throw new InspectError("not_found", `${body.table} has no column ${column}`);
+    const ranged = type.type === "Bytea" || type.type === "Text";
+    const unit = type.type === "Bytea" ? "bytes" : "UTF-16 code units";
+    const partLimit = type.type === "Bytea" ? MAX_PART_BYTES : MAX_PART_TEXT;
+    const where = { table: body.table, where: { id: body.id }, select: [column], limit: 1 };
+    const read = (part?: { from: number; to: number }) =>
+      readRows(admitted, where, body.as, {
+        summarize: false,
+        ...(part ? { part: { column, ...part } } : {}),
+      }).then((answer) => {
+        const row = answer.rows[0];
+        if (!row)
+          throw new InspectError("not_found", `${body.table} has no row ${body.id} to read`);
+        return { answer, value: row[column] };
+      });
+    const answerWith = (
+      found: Awaited<ReturnType<typeof read>>,
+      extra: Record<string, unknown> = {},
+    ) => ({
+      answer: {
+        value: found.value,
+        ...extra,
+        ...(found.answer.warning ? { warning: found.answer.warning } : {}),
+        inspectorUrl: inspectorLink(url, { table: body.table, row: body.id, as: body.as }),
+      },
+      event: { table: body.table, rows: 1, as: found.answer.as, asClaims: found.answer.asClaims },
+    });
+
+    if (body.from !== undefined || body.to !== undefined) {
+      if (!ranged) {
+        throw new InspectError(
+          "bad_request",
+          `from and to are for a bytes or text column; ${column} is neither`,
+        );
+      }
+      const from = body.from ?? 0;
+      if (body.to === undefined) {
+        throw new InspectError(
+          "bad_request",
+          `give to as well: the part ends there (${column}'s size is in its row's $large summary)`,
+        );
+      }
+      if (body.to < from) throw new InspectError("bad_request", "to must not be before from");
+      if (body.to - from > partLimit) {
+        throw new InspectError(
+          "bad_request",
+          `a part is at most ${partLimit} ${unit}: ask for ${column} in smaller parts`,
+        );
+      }
+      // A partial select clamps a range past the end of the value
+      // (#5502); a part shorter than asked for ran past it. An empty part
+      // is past the end when the unit before it is too: a probe the store
+      // refuses for splitting a character starts inside the value.
+      const found = await read({ from, to: body.to });
+      const length = partLength(found.value);
+      const unitBefore = async () => {
+        try {
+          return partLength((await read({ from: from - 1, to: from })).value);
+        } catch (error) {
+          if (splitsCharacter(error)) return 1;
+          throw error;
+        }
+      };
+      const pastEnd =
+        length !== undefined &&
+        (length < body.to - from || (from === body.to && from > 0 && (await unitBefore()) === 0));
+      if (pastEnd) {
+        throw new InspectError(
+          "bad_request",
+          `${from}–${body.to} is past the end of ${column} (its size is in its row's $large summary)`,
+        );
+      }
+      return answerWith(found, { from, to: body.to });
+    }
+
+    if (ranged) {
+      // Not the whole value to find out it's too large: a part one past what
+      // an answer carries is either that long (too large) or clamped to a
+      // value that fits.
+      const probe = await read({ from: 0, to: partLimit + 1 });
+      if ((partLength(probe.value) ?? 0) > partLimit) {
+        throw new InspectError(
+          "bad_request",
+          `${column} is longer than one answer carries (${partLimit} ${unit}): ask for it in parts with from and to`,
+        );
+      }
+    }
+    const found = await read();
+    const encoded = JSON.stringify(found.value) ?? "";
+    if (encoded.length > MAX_ANSWER_BYTES) {
+      throw new InspectError(
+        "bad_request",
+        `${column} is larger than one answer carries; parts (from and to) are for bytes and text columns only`,
+      );
+    }
+    const size =
+      typeof found.value === "string"
+        ? found.value.length
+        : type.type === "Bytea" && found.value
+          ? (fromJsonValue(found.value) as Uint8Array).length
+          : undefined;
+    return answerWith(found, size !== undefined ? { size } : {});
+  }
+
+  /**
+   * Which read-policy clause let `as` see each row `query` matches with the
+   * backend's authority, or that none did. The clauses are the arms of the
+   * table's policy's top-level `or`.
+   */
+  async function explain(admitted: Admitted, query: InspectQuery, as: InspectAs | undefined) {
+    if (as === undefined) {
+      throw new InspectError("bad_request", "explain needs as: the user to explain for");
+    }
+    if (!query || typeof query !== "object" || typeof query.table !== "string") {
+      throw new InspectError("bad_request", "query needs { table, ... }");
+    }
+    if (historySourceTable(query.table) !== undefined) {
+      throw new InspectError("bad_request", "explain needs a table, not its history");
+    }
+    checkTable(admitted, query.table);
+    if (deps.schema()[query.table]?.branchBy?.length) {
+      throw new InspectError(
+        "not_supported",
+        "explain for a table with branches is not supported yet",
+      );
+    }
+    // Every row the query matches, whoever may see it; then, as the user,
+    // which clauses hold for each.
+    const read = await readRows(admitted, query, undefined);
+    const { db, as: asUser, asClaims, warning } = await dbFor(as);
+    const policies = (deps.permissions as Record<string, TablePolicies> | undefined)?.[query.table];
+    const policy = policies?.select?.using ?? policies?.select?.with_check;
+    const clauses = policyClauses(policy);
+    const ids = read.rows.map((row) => String(row.id));
+    const engine = db.explainReadClauses(tableProxy(query.table), ids);
+    // The clause numbers are the engine's, the text ours: both must split
+    // the same policy.
+    if (engine.clauses !== clauses.length) {
+      throw new InspectError(
+        "failed",
+        `the read policy this backend was given for ${query.table} has ${clauses.length} clause(s), but the store judges reads by one with ${engine.clauses}: explain can't say which is which`,
+      );
+    }
+    const found = new Map(engine.rows.map((row) => [row.id, row.holds]));
+    // A table-scoped token doesn't see the app's permissions (see `schema`),
+    // so it gets the clauses' numbers without their text. Nor which clause
+    // let a row through, for it or a token with redacted columns here: a
+    // clause's verdict tells about what it reads (a redacted column's
+    // value, a table outside the token's scope).
+    const scoped = admitted.via === "token" && admitted.tables !== undefined;
+    const showPolicy = !scoped;
+    const showWhy = !scoped && !redactedFor(admitted, query.table);
+    const answer: Omit<InspectExplainAnswer, "inspectorUrl"> = {
+      table: query.table,
+      as: asUser!,
+      clauses: clauses.map((clause, index) => ({
+        index,
+        ...(showPolicy ? { text: renderPolicy(clause) } : {}),
+      })),
+      rows: read.rows.flatMap((row) => {
+        const holds = found.get(String(row.id));
+        // Gone between the two reads.
+        if (!holds) return [];
+        const by = holds.flatMap((held, index) => (held ? [index] : []));
+        return [{ id: String(row.id), allowed: by.length > 0, ...(showWhy ? { by } : {}), row }];
+      }),
+      truncated: read.truncated,
+      ...(policy === undefined
+        ? { note: `${query.table} has no read policy, so every row is denied` }
+        : {}),
+      ...(warning ? { warning } : {}),
+    };
+    return { answer, as: asUser, asClaims };
   }
 
   function schemaAnswer(admitted: Admitted) {
@@ -652,11 +946,14 @@ export function createInspector(deps: InspectorDeps) {
       case "whoami": {
         const whoami: InspectWhoami = {
           appId: deps.appId,
+          clientAppId: accountAppId(endpointScope(endpointUrl(request))),
           by: admitted.by,
           via: admitted.via,
           write: admitted.write,
           ...(admitted.tables ? { tables: admitted.tables } : {}),
           ...(admitted.expiresAt ? { expiresAt: admitted.expiresAt } : {}),
+          ...(admitted.label ? { label: admitted.label } : {}),
+          maxTokenTtlSeconds: settings().maxTtl,
           inspectorUrl: url,
           protocol: INSPECT_PROTOCOL_VERSION,
         };
@@ -670,6 +967,7 @@ export function createInspector(deps: InspectorDeps) {
           answer: {
             rows: read.rows,
             truncated: read.truncated,
+            ...(read.warning ? { warning: read.warning } : {}),
             inspectorUrl: inspectorLink(url, {
               query: body.query,
               as: body.as,
@@ -679,11 +977,13 @@ export function createInspector(deps: InspectorDeps) {
             table: body.query.table,
             rows: read.rows.length,
             as: read.as,
+            asClaims: read.asClaims,
           },
         };
       }
       case "get": {
         if (typeof body.id !== "string") throw new InspectError("bad_request", "get needs an id");
+        if (body.column !== undefined) return getValue(admitted, body, url);
         const read = await readRows(
           admitted,
           {
@@ -697,13 +997,19 @@ export function createInspector(deps: InspectorDeps) {
         return {
           answer: {
             row: read.rows[0] ?? null,
+            ...(read.warning ? { warning: read.warning } : {}),
             inspectorUrl: inspectorLink(url, {
               table: body.table,
               row: body.id,
               as: body.as,
             }),
           },
-          event: { table: body.table, rows: read.rows.length, as: read.as },
+          event: {
+            table: body.table,
+            rows: read.rows.length,
+            as: read.as,
+            asClaims: read.asClaims,
+          },
         };
       }
       case "history": {
@@ -733,11 +1039,12 @@ export function createInspector(deps: InspectorDeps) {
       case "write": {
         const done = await write(admitted, body.ops, body.as);
         return {
-          answer: { ids: done.ids },
+          answer: { ids: done.ids, ...(done.warning ? { warning: done.warning } : {}) },
           event: {
             table: [...new Set(body.ops.map((op) => op.table))].join(","),
             rows: done.ids.length,
             as: done.as,
+            asClaims: done.asClaims,
             write: true,
           },
         };
@@ -758,11 +1065,21 @@ export function createInspector(deps: InspectorDeps) {
           },
           event: {},
         };
-      case "explain":
-        throw new InspectError(
-          "not_supported",
-          "explain (which policy allowed or denied each row) is not supported yet; compare `query` with and without `as` meanwhile",
-        );
+      case "explain": {
+        const explained = await explain(admitted, body.query, body.as);
+        return {
+          answer: {
+            ...explained.answer,
+            inspectorUrl: inspectorLink(url, { query: body.query, as: body.as }),
+          },
+          event: {
+            table: body.query?.table,
+            rows: explained.answer.rows.length,
+            as: explained.as,
+            asClaims: explained.asClaims,
+          },
+        };
+      }
       case "link": {
         if (body.query) checkTable(admitted, body.query.table);
         else if (body.table) checkTable(admitted, body.table);
@@ -782,7 +1099,11 @@ export function createInspector(deps: InspectorDeps) {
         const minted = await mintToken(admitted, body);
         return {
           answer: { token: minted.token, expiresAt: minted.expiresAt },
-          event: { tokenId: minted.tokenId, write: body.write === true },
+          event: {
+            tokenId: minted.tokenId,
+            write: body.write === true,
+            ...(minted.label ? { label: minted.label } : {}),
+          },
         };
       }
       default:
@@ -851,6 +1172,7 @@ export function createInspector(deps: InspectorDeps) {
       op: body.op,
       write: false,
       ...(admitted.tokenId ? { tokenId: admitted.tokenId } : {}),
+      ...(admitted.label ? { label: admitted.label } : {}),
     };
     try {
       const { answer: result, event } = await answer(request, admitted, body);
@@ -874,14 +1196,6 @@ export function createInspector(deps: InspectorDeps) {
         if (request.method !== "GET" && request.method !== "HEAD") {
           return new Response(null, { status: 405 });
         }
-        if (path === INSPECT_PATH) {
-          // The page's assets are relative to it, so it lives at `/inspect/`.
-          // A redirect keeps the fragment, which carries any deep link.
-          return new Response(null, {
-            status: 308,
-            headers: { Location: `${deps.basePath}${INSPECT_PATH}/` },
-          });
-        }
         const served = await deps.serveUi(request, path.slice(INSPECT_PATH.length));
         return (
           served ??
@@ -904,6 +1218,25 @@ export function createInspector(deps: InspectorDeps) {
 }
 
 export type Inspector = ReturnType<typeof createInspector>;
+
+/** The most of a bytes value `get` answers at once: its base64 stays within an answer. */
+const MAX_PART_BYTES = 512 * 1024;
+/** The most UTF-16 code units of a text value `get` answers at once. */
+const MAX_PART_TEXT = 256 * 1024;
+
+/** The store refused a range for splitting a code point or surrogate pair. */
+function splitsCharacter(error: unknown): boolean {
+  return /splits a (surrogate pair|code point)/.test(
+    error instanceof Error ? error.message : String(error),
+  );
+}
+
+/** The length of a part of a text (UTF-16 code units) or bytes value. */
+function partLength(value: unknown): number | undefined {
+  if (typeof value === "string") return value.length;
+  const bytes = fromJsonValue(value);
+  return bytes instanceof Uint8Array ? bytes.length : undefined;
+}
 
 function asInspectError(error: unknown): InspectError {
   if (error instanceof InspectError) return error;

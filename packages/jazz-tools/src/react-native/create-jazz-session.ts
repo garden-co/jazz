@@ -14,11 +14,13 @@ import {
   type JazzClient,
   type OpenJazzClientConfig,
 } from "../react-native/create-jazz-client.js";
+import { refuseInvalidSessionConfig } from "../session/config-options.js";
 import { refuseClientAppId } from "../runtime/client-scope.js";
+import { bearerFetch } from "../runtime/credentialed-transport.js";
 import {
   coreInitial,
   createStartedJazzSession,
-  refuseRemovedSessionOptions,
+  ownJazzSession,
   type JazzSession,
 } from "../session/jazz-session.js";
 
@@ -27,7 +29,7 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
     /**
      * Not for a client: the app id belongs to your backend's store
      * (`remote({ appId })`, or the id a store keeps). A client is scoped by its
-     * `serverUrl`; use `scope` to keep local-first users created under an
+     * `serverUrl`; use `scope` to keep guests' device accounts created under an
      * app id.
      */
     appId?: never;
@@ -64,6 +66,28 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
     onSignedOut?: () => SignedOutDecision | void | Promise<SignedOutDecision | void>;
   };
 
+/** Every option `createJazzClient` takes on this host, checked against its config type. */
+const NATIVE_SESSION_OPTIONS = {
+  serverUrl: true,
+  initial: true,
+  linkDeviceAccountOnSignUp: true,
+  onSignedOut: true,
+  scope: true,
+  driver: true,
+  env: true,
+  runtimeSources: true,
+  dbName: true,
+  initialSyncFlushEvery: true,
+  logLevel: true,
+  telemetryCollectorUrl: true,
+  devMode: true,
+  slowQueryThresholdMs: true,
+  subscriptionBacklogRows: true,
+  store: true,
+  bearer: true,
+  nativeRelay: true,
+} as const satisfies Record<Exclude<keyof JazzClientConfig, "appId" | "backendSecret">, true>;
+
 /**
  * Open a Jazz session on this device: who is signed in, and the client that
  * reads and writes as them. Resolves once it started; rejects if it can't.
@@ -74,12 +98,26 @@ export function createJazzClient(config: JazzClientConfig): Promise<JazzSession<
   return createStartedJazzSession(config, openNativeSessionCore);
 }
 
-/** @internal The session core `createJazzClient` and `<JazzProvider>` own. */
+/**
+ * Open a Jazz session on this device and return it at once, while it starts
+ * (`status: "starting"`), for apps that render without a framework provider:
+ * show a loading screen from `getSnapshot()` and `subscribe()`, then the app
+ * once it is `ready` (or `signed-out`). A startup that fails leaves the session
+ * in `error` with the cause in `snapshot.error`; `retry()` starts it again.
+ * Unlike `createJazzClient`, a failed start doesn't close the session: call
+ * `close()` when the app is done with it. Pass it to `<JazzProvider session>`
+ * to render it in a framework.
+ */
+export function startJazzClient(config: JazzClientConfig): JazzSession<JazzClient> {
+  return ownJazzSession(config, openNativeSessionCore);
+}
+
+/** @internal The session core `createJazzClient`, `startJazzClient` and `<JazzProvider>` own. */
 export async function openNativeSessionCore(
   config: JazzClientConfig,
 ): Promise<UserFollowingSession<JazzClient>> {
-  refuseClientAppId(config);
-  refuseRemovedSessionOptions(config);
+  if (config && typeof config === "object") refuseClientAppId(config);
+  refuseInvalidSessionConfig(config, NATIVE_SESSION_OPTIONS);
   const { serverUrl } = config;
   const initial = coreInitial(config.initial);
   // Jazz on this device only: no backend names a user, so the session opens
@@ -110,6 +148,9 @@ export async function openNativeSessionCore(
       linkGuest: config.linkDeviceAccountOnSignUp,
       forgotten: (account) => accountForgotten(accounts, account.id),
       onSignedOut,
+      // Ask "who is signed in" with the app's bearer, as sign-in does: a
+      // backend that authenticates by bearer, not cookie, never answers otherwise.
+      ...(config.bearer ? { fetch: bearerFetch(config.bearer) } : {}),
     }),
   });
   await firstBackendAnswer(session);

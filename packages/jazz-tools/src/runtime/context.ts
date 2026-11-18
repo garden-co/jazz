@@ -20,7 +20,11 @@ export interface RuntimeSourcesConfig {
   /** Explicit URL for the WASM binary. Overrides `baseUrl`. */
   wasmUrl?: string;
 
-  /** Explicit URL for the browser broker SharedWorker entry script. Overrides `baseUrl`. */
+  /**
+   * Explicit URL for the browser broker SharedWorker entry script, started as
+   * a module script. Overrides `baseUrl`. Leave it unset on Expo web, where
+   * the worker is the classic-script chunk Metro builds through `withJazz`.
+   */
   brokerWorkerUrl?: string;
 
   /**
@@ -155,4 +159,11 @@ export interface AppContext {
    * log off).
    */
   slowQueryThresholdMs?: number;
+
+  /**
+   * How many changed rows a subscription's undelivered deltas may hold before
+   * they are coalesced into one update of its current result, marked
+   * `reason: "backlog"` (default 10000; at least 1, it cannot be turned off).
+   */
+  subscriptionBacklogRows?: number;
 }

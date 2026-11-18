@@ -1,0 +1,142 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "b7d2c77c1dbf0bf4e80a30da91e4d0a0e1bfd7f2936eabd88f76b4f082d0a0f9"
+  },
+  "tables": {
+    "bandInvites": {
+      "read": "exists bands(id = this.bandId, ownerId = session.user)",
+      "insert": "exists bands(id = this.bandId, ownerId = session.user)",
+      "delete": "exists bands(id = this.bandId, ownerId = session.user)"
+    },
+    "bands": {
+      "read": "true",
+      "insert": "ownerId = session.user",
+      "update": {
+        "old": "exists members(bandId = this.id, userId = session.user)",
+        "new": {
+          "allOf": [
+            "exists members(bandId = this.id, userId = session.user)",
+            "exists bands(id = this.id, ownerId = this.ownerId)"
+          ]
+        }
+      },
+      "delete": "ownerId = session.user"
+    },
+    "members": {
+      "read": {
+        "anyOf": [
+          "userId = session.user",
+          "exists members(bandId = this.bandId, userId = session.user)"
+        ]
+      },
+      "insert": {
+        "allOf": [
+          "userId = session.user",
+          {
+            "anyOf": [
+              "exists bands(id = this.bandId, ownerId = session.user)",
+              "exists bandInvites(bandId = this.bandId, code = this.inviteCode)"
+            ]
+          }
+        ]
+      },
+      "delete": {
+        "anyOf": ["userId = session.user", "exists bands(id = this.bandId, ownerId = session.user)"]
+      }
+    },
+    "stopNotes": {
+      "read": "exists members(bandId = this.bandId, userId = session.user)",
+      "insert": {
+        "allOf": [
+          "exists members(bandId = this.bandId, userId = session.user)",
+          "exists stops(id = this.stopId, bandId = this.bandId)"
+        ]
+      },
+      "update": {
+        "old": "exists members(bandId = this.bandId, userId = session.user)",
+        "new": {
+          "allOf": [
+            "exists members(bandId = this.bandId, userId = session.user)",
+            "exists stops(id = this.stopId, bandId = this.bandId)"
+          ]
+        }
+      },
+      "delete": "exists members(bandId = this.bandId, userId = session.user)"
+    },
+    "stops": {
+      "read": {
+        "anyOf": [
+          "status = 'confirmed'",
+          "exists members(bandId = this.bandId, userId = session.user)"
+        ]
+      },
+      "insert": {
+        "allOf": [
+          "exists members(bandId = this.bandId, userId = session.user)",
+          "exists venues(id = this.venueId, bandId = this.bandId)"
+        ]
+      },
+      "update": {
+        "old": "exists members(bandId = this.bandId, userId = session.user)",
+        "new": {
+          "allOf": [
+            "exists members(bandId = this.bandId, userId = session.user)",
+            "exists venues(id = this.venueId, bandId = this.bandId)"
+          ]
+        }
+      },
+      "delete": "exists members(bandId = this.bandId, userId = session.user)"
+    },
+    "venues": {
+      "read": "true",
+      "insert": {
+        "allOf": [
+          "ownerId = session.user",
+          {
+            "anyOf": [
+              "bandId = null",
+              "exists members(bandId = this.bandId, userId = session.user)"
+            ]
+          }
+        ]
+      },
+      "update": {
+        "old": {
+          "anyOf": [
+            { "allOf": ["bandId = null", "ownerId = session.user"] },
+            "exists members(bandId = this.bandId, userId = session.user)"
+          ]
+        },
+        "new": {
+          "allOf": [
+            {
+              "anyOf": [
+                { "allOf": ["bandId = null", "ownerId = session.user"] },
+                "exists members(bandId = this.bandId, userId = session.user)"
+              ]
+            },
+            {
+              "anyOf": [
+                "exists venues(id = this.id, ownerId = this.ownerId, bandId = this.bandId)",
+                {
+                  "allOf": [
+                    "bandId = null",
+                    "exists venues(id = this.id, ownerId = this.ownerId, bandId = null)"
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "delete": {
+        "anyOf": [
+          { "allOf": ["bandId = null", "ownerId = session.user"] },
+          "exists members(bandId = this.bandId, userId = session.user)"
+        ]
+      }
+    }
+  }
+}

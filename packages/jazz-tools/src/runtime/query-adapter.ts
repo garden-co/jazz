@@ -447,46 +447,6 @@ function conditionToRelPredicate(
     };
     return cond.op === "eq" ? equality : { Not: equality };
   }
-  if (cond.op === "match") {
-    if (columnType.type !== "EnumPayload") {
-      throw new Error(`match is only supported on payload enum column "${column}".`);
-    }
-    if (typeof cond.value !== "object" || cond.value === null || Array.isArray(cond.value)) {
-      throw new Error('"match" requires { type, where } input.');
-    }
-    const match = cond.value as { type?: unknown; where?: unknown };
-    if (typeof match.type !== "string") throw new Error('"match.type" must be a string.');
-    const entry = columnType.cases.find((candidate) => candidate.name === match.type);
-    if (!entry) throw new Error(`unknown payload enum case "${match.type}".`);
-    if (
-      match.where !== undefined &&
-      (typeof match.where !== "object" || match.where === null || Array.isArray(match.where))
-    ) {
-      throw new Error('"match.where" must be an object.');
-    }
-    const filters = Object.entries((match.where ?? {}) as Record<string, unknown>).map(
-      ([field, value]) => {
-        const descriptor = entry.fields.find((candidate) => candidate.name === field);
-        if (!descriptor)
-          throw new Error(`unknown payload enum field "${field}" for case "${match.type}".`);
-        return {
-          Cmp: {
-            left: relColumn(field),
-            op: "Eq" as const,
-            right: { Literal: toRuntimeValue(value, descriptor.column_type) },
-          },
-        } satisfies RelPredicateExpr;
-      },
-    );
-    return {
-      EnumMatch: {
-        column: columnRef,
-        case: match.type,
-        payload:
-          filters.length === 0 ? "True" : filters.length === 1 ? filters[0]! : { And: filters },
-      },
-    };
-  }
   if (cond.op === "in" || cond.op === "notIn") {
     if (!Array.isArray(cond.value)) {
       throw new Error(`"${cond.op}" operator requires an array value.`);
@@ -514,15 +474,6 @@ function conditionToRelPredicate(
       : {
           Literal: toRuntimeValue(cond.value, valueTypeForCondition),
         };
-  if (columnType.type === "Bytea" && ["gt", "gte", "lt", "lte"].includes(cond.op)) {
-    throw new Error(`BYTEA column "${column}" only supports eq/ne operators.`);
-  }
-  if (columnType.type === "Bytea" && cond.op === "contains") {
-    throw new Error(`BYTEA column "${column}" does not support contains filters.`);
-  }
-  if (columnType.type === "Json" && ["gt", "gte", "lt", "lte", "contains"].includes(cond.op)) {
-    throw new Error(`JSON column "${column}" only supports eq/ne/in/isNull operators.`);
-  }
   switch (cond.op) {
     case "eq":
       return { Cmp: { left: columnRef, op: "Eq", right: rightLiteral } };
@@ -794,8 +745,6 @@ function translateBuiltRelationToRelExpr(
         },
         relation,
         first.outputTable,
-        first.outputTable,
-        schema,
       ),
       outputTable: first.outputTable,
     };
@@ -830,24 +779,18 @@ function translateBuiltRelationToRelExpr(
       Project: { input: expr, columns: relationColumnsForTable(outputTable, outputScope, schema) },
     };
   }
-  expr = applyRelationWindow(expr, relation, outputTable, outputScope, schema);
+  expr = applyRelationWindow(expr, relation, outputScope);
 
   return { expr, outputTable };
 }
 
-function applyRelationWindow(
-  input: RelExpr,
-  relation: BuiltRelation,
-  table: string,
-  scope: string,
-  schema: WasmSchema,
-): RelExpr {
+function applyRelationWindow(input: RelExpr, relation: BuiltRelation, scope: string): RelExpr {
   let expr = input;
   if (relation.orderBy?.length) {
     expr = {
       OrderBy: {
         input: expr,
-        terms: toRuntimeOrderBy(relation.orderBy, schema, table).map(({ column, direction }) => ({
+        terms: toRuntimeOrderBy(relation.orderBy).map(({ column, direction }) => ({
           column: relColumn(column, scope),
           direction,
         })),
@@ -914,33 +857,7 @@ function translateBuilderToRelationIr(
     relationTable = translated.outputTable;
   }
 
-  // The Rust relation facade identifies its output scope through Project. A
-  // payload match can be the only relation feature, so preserve the ordinary
-  // root-table result shape with an explicit identity projection in that case.
-  if (builder.hops.length === 0 && builder.gather === undefined && builder.union === undefined) {
-    const columns = schema[relationTable]?.columns;
-    if (!columns) throw new Error(`Unknown table "${relationTable}" in relation query.`);
-    relation = {
-      Project: {
-        input: relation,
-        columns: columns.map((column) => ({
-          alias: column.name,
-          expr: { Column: relColumn(column.name, relationTable) },
-        })),
-      },
-    };
-  }
-
   if (Array.isArray(builder.orderBy) && builder.orderBy.length > 0) {
-    for (const [column] of builder.orderBy) {
-      const columnType = getColumnType(schema, relationTable, stripQualifier(column));
-      if (columnType?.type === "Bytea") {
-        throw new Error(`BYTEA column "${column}" cannot be used in orderBy().`);
-      }
-      if (columnType?.type === "Json") {
-        throw new Error(`JSON column "${column}" cannot be used in orderBy().`);
-      }
-    }
     relation = {
       OrderBy: {
         input: relation,
@@ -976,31 +893,14 @@ function translateBuilderToRelationIr(
 }
 
 function usesNativeRelationFeatures(builder: ReturnType<typeof normalizeBuiltQuery>): boolean {
-  // Flat queries predate payload enum matching and have no representation for
-  // its nested predicate. Route it through the relation IR even without a hop
-  // so the public enum-match node reaches the Rust query compiler.
-  return (
-    builder.union !== undefined ||
-    builder.hops.length > 0 ||
-    builder.gather !== undefined ||
-    builder.conditions.some((condition) => condition.op === "match")
-  );
+  return builder.union !== undefined || builder.hops.length > 0 || builder.gather !== undefined;
 }
 
 function toRuntimeOrderBy(
   orderBy: Array<[string, "asc" | "desc"]>,
-  schema: WasmSchema,
-  table: string,
 ): Array<{ column: string; direction: "Asc" | "Desc" }> {
   return orderBy.map(([column, direction]) => {
     const strippedColumn = stripQualifier(column);
-    const columnType = getColumnType(schema, table, strippedColumn);
-    if (columnType?.type === "Bytea") {
-      throw new Error(`BYTEA column "${column}" cannot be used in orderBy().`);
-    }
-    if (columnType?.type === "Json") {
-      throw new Error(`JSON column "${column}" cannot be used in orderBy().`);
-    }
     return {
       column: strippedColumn,
       direction: direction === "desc" ? "Desc" : "Asc",
@@ -1067,7 +967,7 @@ export function translateQuery(
     });
   }
 
-  const orderBy = toRuntimeOrderBy(builder.orderBy, schema, builder.table);
+  const orderBy = toRuntimeOrderBy(builder.orderBy);
   const clientLimit = typeof builder.limit === "number" ? builder.limit : undefined;
   const clientOffset = typeof builder.offset === "number" ? builder.offset : undefined;
   const query = {

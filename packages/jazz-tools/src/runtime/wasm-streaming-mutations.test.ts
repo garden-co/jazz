@@ -1,6 +1,6 @@
 import { translateQuery } from "./query-adapter.js";
 import { describe, expect, it, onTestFinished } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/test-app.js";
 import type { TxId, WriteReceipt } from "./client.js";
 import {
   encodeCellsForRow,
@@ -15,31 +15,16 @@ import {
 } from "./testing/wasm-runtime-test-utils.js";
 import { testAccountId, testAuthorBytes } from "./testing/account-fixtures.js";
 
-const app = s.defineApp(
-  {
-    todos: s.table(
-      {
-        title: s.string(),
-        done: s.boolean(),
-        metadata: s.json().optional(),
-      },
-      {},
-    ),
+const app = testApp({
+  tables: {
+    todos: {
+      columns: { title: "string", done: "boolean", metadata: { json: true, optional: true } },
+    },
   },
-  { migrations: "none" },
-);
-const streamingApp = s.defineApp(
-  {
-    todos: s.table(
-      {
-        title: s.string().optional(),
-        done: s.boolean(),
-      },
-      {},
-    ),
-  },
-  { migrations: "none" },
-);
+});
+const streamingApp = testApp({
+  tables: { todos: { columns: { title: "string?", done: "boolean" } } },
+});
 
 function deferredVoid() {
   let resolve!: () => void;

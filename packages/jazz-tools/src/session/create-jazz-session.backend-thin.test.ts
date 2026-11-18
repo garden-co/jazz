@@ -1,7 +1,10 @@
+import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AddressInfo, Socket } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/index.js";
 import { createJazz, memory, type Jazz } from "../backend/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
@@ -13,14 +16,13 @@ import { decodeThinResponse, isThinResponse } from "../thin/wire.js";
 // The browser session against an app's own backend (`createJazz`), which
 // signs users in from their cookies: the hero examples' setup.
 
-const app = s.defineApp(
-  { todos: s.table({ title: s.string(), owner: s.uuid() }, {}) },
-  { migrations: "none" },
-);
-const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user });
-  policy.todos.allowInsert.where({ owner: session.user });
+const app = testApp({
+  tables: { todos: { columns: { title: "string", owner: "uuid" } } },
 });
+const permissions = {
+  format: 1,
+  tables: { todos: { read: "owner = session.user", insert: "owner = session.user" } },
+};
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
@@ -122,6 +124,16 @@ function tokenAuth(...initial: string[]) {
         : null;
     },
   };
+}
+
+/**
+ * A persistent store, so clearOnSignOut has something to wipe. Node keeps it
+ * in a directory (`dataPath`), which the browser session's driver type
+ * doesn't name.
+ */
+function persistentStore(prefix: string): { type: "persistent" } {
+  const dataPath = join(mkdtempSync(join(tmpdir(), prefix)), "store");
+  return { type: "persistent", dataPath } as { type: "persistent" };
 }
 
 function memoryStore(): AccountStore {
@@ -553,18 +565,418 @@ describe("browser session against the app's backend", () => {
 
     auth.valid.delete("alice:1");
     await jazz.revokeUser("alice");
+    await expect
+      .poll(() => session.getSnapshot().status, { timeout: 15_000, interval: 50 })
+      .toBe("signed-out");
+  }, 60_000);
+
+  // E6 as reported (Hono + Better Auth, a local-first client on a shared
+  // device): the backend deletes the user's auth sessions and calls
+  // revokeUser. The open, visible tab used to stay ready for ~30s, showing
+  // her rows and taking writes that never synced, then signed out and wiped
+  // them. It signs out at the second signed-out answer, a moment later, and
+  // until then its link reads offline: auth, not connected.
+  it("signs a revoked local-first tab out at the second signed-out answer (E6)", async () => {
+    const auth = tokenAuth("alice:1");
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: auth.authenticate,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const served = await listen(jazz);
+    cookies(served.origin, "alice:1");
+    vi.stubGlobal("document", { visibilityState: "visible" });
+    // Every "who is signed in" answer, as the browser would see it.
+    const answers: Array<{ at: number; status: number }> = [];
+    const cookieFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await cookieFetch(input, init);
+      if (String(input instanceof Request ? input.url : input).includes("backend-user"))
+        answers.push({ at: Date.now(), status: response.status });
+      return response;
+    }) as typeof fetch;
+    cleanups.push(async () => void (globalThis.fetch = cookieFetch));
+    const onSignedOut = vi.fn(() => "sign-out" as const);
+    const session = await createJazzClient({
+      serverUrl: `${served.origin}/jazz`,
+      store: memoryStore(),
+      // Persistent, so clearOnSignOut has storage to wipe.
+      driver: persistentStore("jazz-e6-"),
+      initial: "device",
+      clearOnSignOut: true,
+      onSignedOut,
+      client: async () => ({ createClient: createLocalFirstDb }),
+    });
+    cleanups.push(() => session.close());
+    await session.reauthenticate();
+    expect(session.getSnapshot().account?.identity.subject).toBe("alice");
+    await expect
+      .poll(() => isThinDb(session.getSnapshot().client!.db), { timeout: 15_000 })
+      .toBe(false);
+    const client = session.getSnapshot().client!;
+    const owner = client.session!.user!;
+    await client.db.insert(app.todos, { title: "private", owner }).wait({ tier: "global" });
+    const links: string[] = [];
+    const stop = client.db.onSyncStatusChange(({ link }) =>
+      links.push(link.state === "offline" ? `offline:${link.reason}` : link.state),
+    );
+    cleanups.push(async () => stop());
+
+    // The app's backend deletes her auth sessions, then ends her sync sessions.
+    auth.valid.delete("alice:1");
+    const before = answers.length;
+    expect(await jazz.revokeUser("alice")).toBe(1);
     const revokedAt = Date.now();
     await expect
-      .poll(() => session.getSnapshot().status, {
-        timeout: 70_000,
-        interval: 250,
-      })
+      .poll(() => session.getSnapshot().status, { timeout: 15_000, interval: 20 })
       .toBe("signed-out");
-    // The refusal reaches the watch within the re-check; it confirms after
-    // its grace for a cookie the app is refreshing (30s), then once more.
-    // Slow by design: it waits out that grace, with room for a loaded runner.
-    expect(Date.now() - revokedAt).toBeLessThan(50_000);
-  }, 90_000);
+    const signedOutAt = Date.now();
+    stop();
+
+    // Two signed-out answers, spaced by the confirmation wait (2s), then
+    // the sign-out: not a third and fourth one ~30s later. (Wall-clock
+    // bounds, loose for a loaded runner; the exact timing is unit-tested
+    // with fake timers in backend-watch.test.ts.)
+    const after = answers.slice(before);
+    expect(after.map((answer) => answer.status)).toEqual([200, 200]);
+    expect(after[1]!.at - after[0]!.at).toBeGreaterThanOrEqual(1_000);
+    expect(signedOutAt - revokedAt).toBeLessThan(20_000);
+    expect(onSignedOut).toHaveBeenCalledOnce();
+    // Until then the tab showed the auth loss, never connected again.
+    expect(links).toContain("offline:auth");
+    expect(links.slice(links.indexOf("offline:auth"))).not.toContain("connected");
+    // And no late check runs after: it stays signed out.
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    expect(answers.slice(before)).toHaveLength(2);
+    expect(session.getSnapshot().status).toBe("signed-out");
+  }, 60_000);
+
+  // A revoked tab in the background used to wait for focus before signing
+  // out. The refusal says why (link.authReason "revoked"), and a revoked
+  // background tab signs out as a visible one does: at the second
+  // signed-out answer, after onSignedOut.
+  for (const variant of ["thin", "local-first"] as const)
+    it(`signs a revoked ${variant} tab in the background out, and says it was revoked`, async () => {
+      const auth = tokenAuth("alice:1");
+      const jazz = await createJazz({
+        app,
+        permissions,
+        store: memory(),
+        authenticate: auth.authenticate,
+      }).ready();
+      cleanups.push(() => jazz.close());
+      const served = await listen(jazz);
+      cookies(served.origin, "alice:1");
+      vi.stubGlobal("document", { visibilityState: "hidden" });
+      const onSignedOut = vi.fn(() => "sign-out" as const);
+      const session = await createJazzClient({
+        serverUrl: `${served.origin}/jazz`,
+        store: memoryStore(),
+        driver: { type: "memory" },
+        onSignedOut,
+        ...(variant === "local-first"
+          ? { client: async () => ({ createClient: createLocalFirstDb }) }
+          : {}),
+      });
+      cleanups.push(() => session.close());
+      await session.loginWithBackend();
+      if (variant === "local-first")
+        await expect
+          .poll(() => isThinDb(session.getSnapshot().client!.db), { timeout: 15_000 })
+          .toBe(false);
+      const client = session.getSnapshot().client!;
+      const owner = client.session!.user!;
+      await client.db.insert(app.todos, { title: "private", owner }).wait({ tier: "global" });
+      const links: unknown[] = [];
+      const stop = client.db.onSyncStatusChange(({ link }) => links.push(link));
+      cleanups.push(async () => stop());
+
+      auth.valid.delete("alice:1");
+      expect(await jazz.revokeUser("alice")).toBe(1);
+      await expect
+        .poll(() => session.getSnapshot().status, { timeout: 15_000, interval: 20 })
+        .toBe("signed-out");
+      expect(onSignedOut).toHaveBeenCalledOnce();
+      expect(links).toContainEqual({
+        state: "offline",
+        reason: "auth",
+        retrying: false,
+        authReason: "revoked",
+      });
+    }, 60_000);
+
+  // A revoke the backend doesn't follow with a sign-out (say to make the
+  // user sign in again) leaves the tab signed in and connected again. The
+  // refusal's reason must not outlive that: a later ordinary refusal (an
+  // expired cookie) in the background waits for focus, as any does.
+  for (const variant of ["thin", "local-first"] as const)
+    it(`forgets a ${variant} tab's revoked refusal once it is admitted again`, async () => {
+      const auth = tokenAuth("alice:1");
+      const jazz = await createJazz({
+        app,
+        permissions,
+        store: memory(),
+        authenticate: auth.authenticate,
+      }).ready();
+      cleanups.push(() => jazz.close());
+      const served = await listen(jazz);
+      cookies(served.origin, "alice:1");
+      vi.stubGlobal("document", { visibilityState: "hidden" });
+      const onSignedOut = vi.fn(() => "sign-out" as const);
+      const session = await createJazzClient({
+        serverUrl: `${served.origin}/jazz`,
+        store: memoryStore(),
+        driver: { type: "memory" },
+        onSignedOut,
+        ...(variant === "local-first"
+          ? { client: async () => ({ createClient: createLocalFirstDb }) }
+          : {}),
+      });
+      cleanups.push(() => session.close());
+      await session.loginWithBackend();
+      if (variant === "local-first")
+        await expect
+          .poll(() => isThinDb(session.getSnapshot().client!.db), { timeout: 15_000 })
+          .toBe(false);
+      const client = session.getSnapshot().client!;
+      const owner = client.session!.user!;
+      await client.db.insert(app.todos, { title: "first", owner }).wait({ tier: "global" });
+
+      // Revoked, but her cookie still holds: the tab reconnects as her.
+      expect(await jazz.revokeUser("alice")).toBe(1);
+      await expect
+        .poll(() => client.db.getSyncStatus().link, { timeout: 15_000, interval: 20 })
+        .toEqual({ state: "connected" });
+      expect(client.db.getAuthState().error).toBeUndefined();
+
+      // Later her cookie expires and the server restarts: an ordinary refusal.
+      const links: unknown[] = [];
+      const stop = client.db.onSyncStatusChange(({ link }) => links.push(link));
+      cleanups.push(async () => stop());
+      auth.valid.delete("alice:1");
+      await served.close();
+      await listen(jazz, Number(new URL(served.origin).port));
+      await expect
+        .poll(() => client.db.getSyncStatus().link, { timeout: 15_000, interval: 20 })
+        .toMatchObject({ state: "offline", reason: "auth" });
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+      // In the background, it waits for focus: not signed out, never "revoked".
+      expect(session.getSnapshot().status).toBe("ready");
+      expect(onSignedOut).not.toHaveBeenCalled();
+      expect(links).not.toContainEqual(expect.objectContaining({ authReason: "revoked" }));
+    }, 60_000);
+
+  // E12: a revoked tab with a write that can never upload used to hang in
+  // `transitioning` (signOut) for good, its write's wait neither resolving
+  // nor rejecting: sign-out waited for an upload the server will never take.
+  for (const variant of ["thin", "local-first", "local-first, clearOnSignOut"] as const)
+    it(`signs a revoked ${variant} tab with a pending write out, and fails the write (E12)`, async () => {
+      const auth = tokenAuth("alice:1");
+      const jazz = await createJazz({
+        app,
+        permissions,
+        store: memory(),
+        authenticate: auth.authenticate,
+      }).ready();
+      cleanups.push(() => jazz.close());
+      const served = await listen(jazz);
+      cookies(served.origin, "alice:1");
+      vi.stubGlobal("document", { visibilityState: "visible" });
+      const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+      cleanups.push(async () => warned.mockRestore());
+      const localFirst = variant !== "thin";
+      // The wipe runs only for storage that persists.
+      const driver =
+        variant === "local-first, clearOnSignOut"
+          ? persistentStore("jazz-e12-")
+          : ({ type: "memory" } as const);
+      const session = await createJazzClient({
+        serverUrl: `${served.origin}/jazz`,
+        store: memoryStore(),
+        driver,
+        clearOnSignOut: variant === "local-first, clearOnSignOut",
+        ...(localFirst
+          ? {
+              client: async () => ({
+                createClient: createLocalFirstDb,
+                // A browser deletes the store through its worker; here, its directory.
+                deleteLocalFirstStore: async () => {
+                  const { dataPath } = driver as { dataPath?: string };
+                  if (dataPath) rmSync(dataPath, { recursive: true, force: true });
+                  return "deleted" as const;
+                },
+              }),
+            }
+          : {}),
+      });
+      cleanups.push(() => session.close());
+      await session.loginWithBackend();
+      await expect
+        .poll(() => isThinDb(session.getSnapshot().client!.db), { timeout: 15_000 })
+        .toBe(!localFirst);
+      const client = session.getSnapshot().client!;
+      const owner = client.session!.user!;
+      await client.db.insert(app.todos, { title: "before", owner }).wait({ tier: "global" });
+
+      auth.valid.delete("alice:1");
+      await jazz.revokeUser("alice");
+      // The tab sees the refusal first, then takes a write (as a form would).
+      await expect
+        .poll(() => client.db.getSyncStatus().link, { timeout: 15_000 })
+        .toMatchObject({ state: "offline", reason: "auth" });
+      const pending = client.db.insert(app.todos, { title: "after the ban", owner });
+      const outcome = pending.wait({ tier: "global" }).then(
+        () => "landed",
+        (error: unknown) => error,
+      );
+      await expect
+        .poll(() => session.getSnapshot().status, { timeout: 15_000, interval: 50 })
+        .toBe("signed-out");
+      // The write fails, saying the server refused this user, not timing out.
+      const error = (await outcome) as Error;
+      expect(error).toBeInstanceOf(Error);
+      expect(error.name).not.toBe("WriteWaitTimeoutError");
+      if (localFirst) expect(error.message).toMatch(/session revoked/);
+      else {
+        expect(error.name).toBe("ThinRequestNotSentError");
+        expect(error.message).toMatch(/the server refused this client's sign-in/);
+      }
+      // The sign-out says what became of it.
+      const warnings = warned.mock.calls.map((call) => String(call[0]));
+      expect(warnings).toContainEqual(
+        expect.stringMatching(
+          variant === "local-first, clearOnSignOut"
+            ? /wiped 1 write\(s\)/
+            : /dropped 1 write\(s\) the server refused/,
+        ),
+      );
+      expect((await jazz.db.all(app.todos)).map((todo) => todo.title)).toEqual(["before"]);
+    }, 60_000);
+
+  // #5261: `revokeUser` ended only sessions already admitted. A socket
+  // still signing in (a reconnect, a planned re-authentication) whose
+  // `authenticate` had read the user's cookie before the app ended their
+  // auth session was admitted after the revoke, and stayed connected as
+  // them, taking their writes, until its expiresAt.
+  it("refuses a session revokeUser met while its sign-in was still being admitted", async () => {
+    const auth = tokenAuth("alice:1");
+    // Holds the socket's admission after `authenticate` read the cookie.
+    let hold: { reached(): void; until: Promise<void> } | undefined;
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: async (request: Request) => {
+        const answer = auth.authenticate(request);
+        const held = request.headers.get("upgrade") === "websocket" ? hold : undefined;
+        if (held) {
+          held.reached();
+          await held.until;
+        }
+        return answer;
+      },
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const served = await listen(jazz);
+    cookies(served.origin, "alice:1");
+    vi.stubGlobal("document", { visibilityState: "visible" });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const session = await createJazzClient({
+      serverUrl: `${served.origin}/jazz`,
+      store: memoryStore(),
+      driver: { type: "memory" },
+    });
+    cleanups.push(() => session.close());
+    await session.loginWithBackend();
+    const client = session.getSnapshot().client!;
+    const owner = client.session!.user!;
+    await client.db.insert(app.todos, { title: "before", owner }).wait({ tier: "global" });
+
+    // The tab reconnects; its admission has read the still valid cookie.
+    let release!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      hold = { reached: resolve, until: new Promise((done) => (release = done)) };
+    });
+    await client.db.disconnect();
+    void client.db.reconnect();
+    await reached;
+    hold = undefined;
+    // Now the app bans her: auth session gone, then revokeUser.
+    auth.valid.delete("alice:1");
+    await jazz.revokeUser("alice");
+    release();
+
+    // The socket is refused as revoked, and the tab signs out.
+    await expect
+      .poll(() => client.db.getSyncStatus().link, { timeout: 10_000 })
+      .toMatchObject({ state: "offline", reason: "auth" });
+    expect(client.db.getSyncStatus().lastError?.message ?? "").toMatch(/session revoked/);
+    await expect
+      .poll(() => session.getSnapshot().status, { timeout: 15_000, interval: 50 })
+      .toBe("signed-out");
+    expect((await jazz.db.all(app.todos)).map((todo) => todo.title)).toEqual(["before"]);
+  }, 60_000);
+
+  // Another user signs in on a tab whose user was revoked and that holds a
+  // write the server will never take: the switch completes (it doesn't fail
+  // and retry for as long as the refusal lasts), and the write fails.
+  it("switches users from a revoked thin tab with a pending write", async () => {
+    const auth = tokenAuth("alice:1");
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: auth.authenticate,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const served = await listen(jazz);
+    // A background tab: the watch leaves the sign-out to focus or the app.
+    const jar = cookies(served.origin, "alice:1");
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    cleanups.push(async () => warned.mockRestore());
+    const session = await createJazzClient({
+      serverUrl: `${served.origin}/jazz`,
+      store: memoryStore(),
+      driver: { type: "memory" },
+    });
+    cleanups.push(() => session.close());
+    await session.loginWithBackend();
+    const client = session.getSnapshot().client!;
+    expect(isThinDb(client.db)).toBe(true);
+    const owner = client.session!.user!;
+    await client.db.insert(app.todos, { title: "before", owner }).wait({ tier: "global" });
+
+    auth.valid.delete("alice:1");
+    await jazz.revokeUser("alice");
+    await expect
+      .poll(() => client.db.getSyncStatus().link, { timeout: 15_000 })
+      .toMatchObject({ state: "offline", reason: "auth" });
+    const outcome = client.db
+      .insert(app.todos, { title: "after the ban", owner })
+      .wait({ tier: "global" })
+      .then(
+        () => "landed",
+        (error: unknown) => error,
+      );
+    await expect.poll(() => client.db.getSyncStatus().pendingUploads).toBe(1);
+
+    // Bob signs in on this device; the app tells Jazz.
+    auth.valid.add("bob:1");
+    jar.user = jar.socketUser = "bob:1";
+    await session.reauthenticate();
+    expect(session.getSnapshot()).toMatchObject({ status: "ready" });
+    expect(session.getSnapshot().account?.identity.subject).toBe("bob");
+    expect(session.getSnapshot().error).toBeUndefined();
+    const error = (await outcome) as Error;
+    expect(error.name).toBe("ThinRequestNotSentError");
+    expect(error.message).toMatch(/the server refused this client's sign-in/);
+    expect(warned.mock.calls.map((call) => String(call[0]))).toContainEqual(
+      expect.stringMatching(/dropped 1 write\(s\) the server refused/),
+    );
+    expect((await jazz.db.all(app.todos)).map((todo) => todo.title)).toEqual(["before"]);
+  }, 60_000);
 
   // Node, Deno, a CLI: no cookie carries the backend's session on the sync
   // connection, so a backend sign-in would report ready and never sync.
@@ -748,6 +1160,12 @@ describe("a shared device (clearOnSignOut)", () => {
       client: async () => ({ createClient: createLocalFirstDb }),
     });
     cleanups.push(() => next.close());
+    // A sign-out lasts across reloads (E7), and nothing on the device holds
+    // Kim's root to reopen her with.
+    expect(next.getSnapshot().status).toBe("signed-out");
+    await expect(next.reopenLocalFirst()).rejects.toThrow(/keeps no device account/);
+    // The next person starts a guest of their own.
+    await next.createLocalFirst();
     expect(next.getSnapshot().client!.session!.user).not.toBe(account);
     expect(stored).not.toContain(root);
   }, 60_000);

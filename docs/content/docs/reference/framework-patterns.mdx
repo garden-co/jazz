@@ -19,7 +19,6 @@ full details.
 | Single-row query   | `useOne(query)`            | `useOne(query)`            | `new QuerySubscriptionOne(query)` | `useOne(() => ({ query }))` |
 | DB access          | `useAll(query).db`         | `useAll(query).db`         | `subscription.db`                 | `useAll(...).db`            |
 | Write-only DB      | `useDb()`                  | `useDb()`                  | `getDb()`                         | `useDb()`                   |
-| Permission session | `useSession()`             | `useSession()`             | `getSession().current`            | `useSession()`              |
 | Client without UI  | `createJazzClient(config)` | `createJazzClient(config)` | `createJazzClient(config)`        | `createJazzClient(config)`  |
 
 ## Provider setup
@@ -28,8 +27,16 @@ Wrap your app in `<JazzProvider config={…}>`. `config` takes the same options 
 `createJazzClient` (`serverUrl`, `client`, `initial` and the rest; see
 [Thin Client](/docs/setup/web-client/thin-client)). The provider shows its `signedOut` view while no
 one is signed in, `loading` while Jazz starts or switches users, and `error` when there is no usable
-client. `useJazzSession()` (Svelte: `getJazzSession()`) reads the session anywhere below, including
+client. Once its session is closed (`session.close()`), it shows its `closed` view: nothing unless
+you give one. A closed session never starts again: give the provider a new session, or a new `key`
+for its `config`. `useJazzSession()` (Svelte: `getJazzSession()`) reads the session anywhere below, including
 in those views.
+
+The `error` view receives the same `{ error, recovery, retry }` in every framework: as a function's
+argument in React, React Native and Solid, as slot props in Vue, and as a snippet's argument in
+Svelte. `recovery` says what `retry()` does: repeat the operation that failed (`"action"`) or
+reopen the signed-in account (`"session"`). This `retry()` never rejects: a new failure shows in
+the `error` view again, so you can hand it straight to a button.
 
 <Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
   <Tab value="React">
@@ -42,7 +49,7 @@ in those views.
           config={{ serverUrl: "/jazz", client: () => import("jazz-tools/local-first") }}
           signedOut={<SignIn />}
           loading={<p>Loading…</p>}
-          error={(state) => <button onClick={state.retry}>{state.error?.message}: retry</button>}
+          error={({ error, retry }) => <button onClick={retry}>{error.message}: retry</button>}
         >
           <App />
         </JazzProvider>
@@ -84,14 +91,15 @@ in those views.
       <TodoApp />
       {#snippet signedOut()}<SignIn />{/snippet}
       {#snippet loading()}<p>Loading…</p>{/snippet}
-      {#snippet error(error, retry)}
+      {#snippet error({ error, retry })}
         <button onclick={retry}>{error.message}: retry</button>
       {/snippet}
     </JazzProvider>
     ```
 
     Call `getDb()`, `getJazzSession()` and the other `get…` helpers during component setup (the
-    top level of a component's `<script>`), not later in an event handler.
+    top level of a component's `<script>`), not later in an event handler: they read Svelte
+    context. Stores and utility modules can't, so pass them the db from there.
 
     In SvelteKit, render the provider only in the browser (`{#if browser}` from `$app/environment`)
     and load server-rendered data in `+page.server.ts` with
@@ -111,7 +119,7 @@ in those views.
           config={{ serverUrl: "/jazz", client: () => import("jazz-tools/local-first") }}
           signedOut={<SignIn />}
           loading={<p>Loading…</p>}
-          error={(error, retry) => <button onClick={retry}>{error.message}: retry</button>}
+          error={({ error, retry }) => <button onClick={retry}>{error.message}: retry</button>}
         >
           <App />
         </JazzProvider>
@@ -124,8 +132,8 @@ in those views.
 
 Leave out `client` for a thin client. The provider creates its session when it mounts and closes it
 when it unmounts; use a `key` to replace it with a new config. To show a session you opened yourself
-with `createJazzClient`, pass `session={session}` instead of `config`; the provider then leaves
-closing it to you.
+with `createJazzClient` (or `startJazzClient`, which returns it while it starts), pass
+`session={session}` instead of `config`; the provider then leaves closing it to you.
 
 ## Query subscriptions
 
@@ -188,15 +196,22 @@ Get a handle to the database for inserts, updates, and deletes. See [Writing Dat
 
 ## Session/user identity
 
-Two things are called a session, and they answer different questions:
+One hook tells you who is signed in: `useJazzSession()` (Svelte: `getJazzSession()`, a store you
+read as `$session`). Its `user` is `{ accountId, kind, identity, claims }`, or `null` when no one is
+signed in. `kind` is `"device"` for a device account (a guest) and `"backend"` for a user your
+backend signed in. It also carries the operations: `refresh()`, `signOut()`,
+`createDeviceAccount()` and the rest.
 
-- **Who is signed in on this device:** the Jazz session, from `useJazzSession()` (Svelte:
-  `getJazzSession()`). Its `user` is `{ accountId, kind, identity, claims }`, with `kind`
-  `"device"` for a device account (a guest) and `"backend"` for a user your backend signed in, or
-  `null`. It also carries the operations: `refresh()`, `signOut()`, `createDeviceAccount()` and the
-  rest.
-- **What your permissions see:** `useSession()` (Svelte: `getSession()`), the read-only session a
-  query or write runs with, whose `user` is the account ID your policies compare.
+`user` is also what your permissions see: `session.user` in a policy is `user.accountId`, and
+`session.identity` and `session.claims` are `user.identity` and `user.claims`. Compare a row's owner
+column with `user.accountId`.
+
+| Framework            | Signed-in user                                           |
+| -------------------- | -------------------------------------------------------- |
+| React / React Native | `useJazzSession().user`                                  |
+| Vue                  | `useJazzSession().snapshot.value.user`                   |
+| Solid                | `useJazzSession().snapshot().user`                       |
+| Svelte               | `$session.user`, with `const session = getJazzSession()` |
 
 See [How Auth Works](/docs/setup/auth/backend#the-session) for details on authentication modes and identity linking.
 

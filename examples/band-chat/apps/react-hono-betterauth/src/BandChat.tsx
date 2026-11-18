@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import type { JazzClientConfig } from "jazz-tools";
-import { JazzProvider, useAll, useSession } from "jazz-tools/react";
+import { JazzProvider, useAll, useJazzSession } from "jazz-tools/react";
 import { AppShell, Button, Center, EmptyState, Spinner } from "@astryxdesign/core";
-import { app, type Profile } from "../schema";
+import { app, type Profile } from "../jazz.generated";
 import { ThemeProvider } from "../components/theme-provider";
 import { JoinRoom } from "./components/JoinRoom";
 import { NewRoomDialog } from "./components/NewRoomDialog";
@@ -21,12 +21,12 @@ export interface BandChatProps {
 
 /** Rendered inside the external-auth provider in the Next dashboard. */
 export function BandChat(props: BandChatProps) {
-  const session = useSession();
-  const author = session?.user;
+  const session = useJazzSession();
+  const author = session.user?.accountId;
   return author ? <Workspace author={author} {...props} /> : <Loading label="Loading identity…" />;
 }
 
-/** Browser receipt entrypoint. The production dashboard never uses local-first auth here. */
+/** Browser receipt entrypoint. The production dashboard never uses device accounts here. */
 export function BandChatPreview({
   config,
   initialParams,

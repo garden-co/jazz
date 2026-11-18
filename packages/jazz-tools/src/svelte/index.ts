@@ -11,12 +11,30 @@ export * from "../accounts/exports.js";
 export { syncStatus } from "./sync-status.js";
 export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
 
-export { createJazzClient, type JazzClientConfig } from "../session/create-jazz-session.js";
+export {
+  createJazzClient,
+  startJazzClient,
+  type JazzClientConfig,
+} from "../session/create-jazz-session.js";
 export type {
   JazzSession,
   JazzSessionSnapshot,
+  JazzSessionErrorViewProps,
   JazzSessionOperation,
   JazzUser,
 } from "../session/jazz-session.js";
 export { default as JazzProvider } from "./JazzProvider.svelte";
 export { sessionState, getJazzSession, type JazzSessionState } from "./session-state.js";
+
+// Removed in alpha.61: stubs that throw, naming the replacement (one release).
+export {
+  AccountManager,
+  BrowserAuthSecretStore,
+  JazzSessionProvider,
+  JazzSvelteProvider,
+  LocalFirstAuth,
+  accountState,
+  createAccountManager,
+  exportLocalFirstSecret,
+  useJazzAuth,
+} from "../removed-api.js";

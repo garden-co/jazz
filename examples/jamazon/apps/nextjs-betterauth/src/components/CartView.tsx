@@ -10,7 +10,7 @@ import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import NextLink from "next/link";
 import { Fragment } from "react";
-import { MAX_LINE_QUANTITY } from "@/permissions";
+import { MAX_LINE_QUANTITY } from "@/src/store/limits";
 import { FREE_STANDARD_FROM_CENTS, formatMoney } from "@/src/store/pricing";
 import { useCart, type CartItem } from "@/src/store/cart";
 import { OrderSummary } from "./OrderSummary";

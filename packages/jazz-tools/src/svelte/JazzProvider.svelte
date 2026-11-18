@@ -4,9 +4,11 @@
   import { openBrowserSessionCore, type JazzClientConfig } from "../session/create-jazz-session.js";
   import {
     attachJazzSessionConsumer,
+    jazzSessionErrorViewProps,
     ownJazzSession,
     startJazzSession,
     type JazzSession,
+    type JazzSessionErrorViewProps,
   } from "../session/jazz-session.js";
   import type { JazzClient } from "./create-jazz-client.js";
   import JazzSvelteClientProvider from "./JazzSvelteClientProvider.svelte";
@@ -18,12 +20,15 @@
     children: Snippet;
     signedOut?: Snippet;
     loading?: Snippet;
-    error?: Snippet<[Error, () => Promise<void>]>;
+    /** Shown when there is no usable client (`status: "error"`), with `{ error, recovery, retry }`. */
+    error?: Snippet<[JazzSessionErrorViewProps]>;
+    /** Shown once the session is closed (`session.close()`): nothing by default. */
+    closed?: Snippet;
   } & (
       | { config: JazzClientConfig; session?: never }
       | { session: JazzSession<JazzClient>; config?: never }
     );
-  let { children, signedOut, loading, error, config, session: external, ...rest }: Props = $props();
+  let { children, signedOut, loading, error, closed, config, session: external, ...rest }: Props = $props();
   // Re-checked whenever the props change: Classic configuration arriving
   // later is refused too.
   $effect.pre(() => {
@@ -47,7 +52,18 @@
   });
   setJazzSession(session);
   const snapshotStore = writable(session.getSnapshot());
-  const retry = () => session.retry().catch(() => {});
+  // The client as its own signal, changing only when the session's client
+  // does. Passing `$snapshotStore.client` straight on would re-read the whole
+  // store: every new snapshot with the same client (the in-place
+  // local-first upgrade publishes one) would re-run the client provider,
+  // which clears its context and remounts the app, dropping component state
+  // such as a half-typed form (#5459).
+  const client = $derived(
+    $snapshotStore.status === "ready" ? $snapshotStore.client : undefined,
+  );
+  const errorView = $derived(
+    $snapshotStore.status === "error" ? jazzSessionErrorViewProps(session, $snapshotStore) : undefined,
+  );
   onMount(() => {
     const lease = attachJazzSessionConsumer(session);
     const update = () => {
@@ -67,22 +83,24 @@
 </script>
 
 {#snippet pending()}
-  {#if $snapshotStore.status === "error" && $snapshotStore.error}
-    {#if error}{@render error($snapshotStore.error, retry)}{:else}
-      <p role="alert">{$snapshotStore.error.message}</p>
-      <button onclick={() => void retry()}>Retry</button>
+  {#if errorView}
+    {#if error}{@render error(errorView)}{:else}
+      <p role="alert">{errorView.error.message}</p>
+      <button onclick={() => void errorView.retry()}>Retry</button>
     {/if}
   {:else if $snapshotStore.status === "signed-out"}
     {@render signedOut?.()}
+  {:else if $snapshotStore.status === "closed"}
+    {@render closed?.()}
   {:else if loading}
     {@render loading()}
   {:else}
     <p role="status">Loading...</p>
   {/if}
 {/snippet}
-{#if $snapshotStore.status === "ready" && $snapshotStore.client}
-  {#key $snapshotStore.client}
-    <JazzSvelteClientProvider client={$snapshotStore.client}>
+{#if client}
+  {#key client}
+    <JazzSvelteClientProvider {client} inSession>
       {#snippet children()}{@render children()}{/snippet}
       {#snippet fallback()}{@render pending()}{/snippet}
     </JazzSvelteClientProvider>

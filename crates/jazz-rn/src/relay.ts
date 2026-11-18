@@ -176,6 +176,8 @@ export type NativeForegroundCommand =
   | { type: "pendingUploadCount" }
   /** The upload status: pending, since when, refusals (append-only command). */
   | { type: "uploadStatus" }
+  /** Delete the scope's local store (ABI 6). */
+  | { type: "deleteStore" }
   | {
       type: "beginStreamingMutation";
       mutation: "insert" | "update" | "upsert";
@@ -253,7 +255,13 @@ export type NativeForegroundResponse =
        * credential, and whether the native socket is still retrying it. Each
        * failure has a new `sequence`.
        */
-      upstreamFailure: { sequence: number; reason: string; retrying: boolean } | null;
+      upstreamFailure: {
+        sequence: number;
+        reason: string;
+        retrying: boolean;
+        /** The core's error code when the relay refused its upstream (ABI 6). */
+        code: string | null;
+      } | null;
     }
   | { type: "streamingMutationOpened"; upload: number }
   | { type: "streamingMutationPushed" }
@@ -264,7 +272,8 @@ export type NativeForegroundResponse =
   | { type: "slowQueryReport"; lines: string[] }
   | { type: "slowQueryThresholdSet" }
   | { type: "pendingUploadCount"; count: number }
-  | { type: "uploadStatus"; statusJson: string };
+  | { type: "uploadStatus"; statusJson: string }
+  | { type: "storeDeleted"; pendingUploads: number };
 
 export type NativeForegroundSubscriptionEvent =
   | {
@@ -417,6 +426,7 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
   if (command.type === "drainTickEvents") return Uint8Array.of(35);
   if (command.type === "pendingUploadCount") return Uint8Array.of(38);
   if (command.type === "uploadStatus") return Uint8Array.of(39);
+  if (command.type === "deleteStore") return Uint8Array.of(40);
   if (command.type === "takeSlowQueryReport") {
     return concatForegroundBytes(
       Uint8Array.of(36),
@@ -762,7 +772,8 @@ export function decodeNativeForegroundResponse(bytes: Uint8Array): NativeForegro
   if (tag === 26) {
     // TickEvents: postcard events string, then `Option<NativeAuthRejection>`
     // (0, or 1, the sequence varint and the reason string), then
-    // `Option<NativeUpstreamFailure>` (the same, then a retrying bool).
+    // `Option<NativeUpstreamFailure>` (the same, then a retrying bool and,
+    // since ABI 6, an `Option<String>` error code).
     const [eventsJson, afterEvents] = decodeForegroundPrefixedString(bytes, 1, "tick events");
     const readSequenced = (offset: number, label: string): [number, string, number] | null => {
       const option = bytes[offset];
@@ -781,7 +792,24 @@ export function decodeNativeForegroundResponse(bytes: Uint8Array): NativeForegro
     const afterRejection = rejection ? rejection[2] : afterEvents + 1;
     const failure = readSequenced(afterRejection, "upstream failure");
     const retrying = failure ? bytes[failure[2]] : undefined;
-    const end = failure ? failure[2] + 1 : afterRejection + 1;
+    let code: string | null = null;
+    let end = afterRejection + 1;
+    if (failure) {
+      const option = bytes[failure[2] + 1];
+      if (option === 1) {
+        const [value, next] = decodeForegroundPrefixedString(
+          bytes,
+          failure[2] + 2,
+          "upstream failure code",
+        );
+        code = value;
+        end = next;
+      } else if (option === 0) {
+        end = failure[2] + 2;
+      } else {
+        throw new Error("Malformed native operation tick events");
+      }
+    }
     if (end !== bytes.length || (failure && retrying !== 0 && retrying !== 1))
       throw new Error("Malformed native operation tick events");
     return {
@@ -789,7 +817,7 @@ export function decodeNativeForegroundResponse(bytes: Uint8Array): NativeForegro
       eventsJson,
       authRejection: rejection ? { sequence: rejection[0], reason: rejection[1] } : null,
       upstreamFailure: failure
-        ? { sequence: failure[0], reason: failure[1], retrying: retrying === 1 }
+        ? { sequence: failure[0], reason: failure[1], retrying: retrying === 1, code }
         : null,
     };
   }
@@ -810,6 +838,12 @@ export function decodeNativeForegroundResponse(bytes: Uint8Array): NativeForegro
     return {
       type: "uploadStatus",
       statusJson: decodeForegroundString(bytes.subarray(1), "upload status"),
+    };
+  }
+  if (tag === 31) {
+    return {
+      type: "storeDeleted",
+      pendingUploads: decodeForegroundU64(bytes.subarray(1), "deleted store's pending uploads"),
     };
   }
   if (

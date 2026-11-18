@@ -25,15 +25,33 @@ export type { LocalFirstLoader, LocalFirstModule } from "../runtime/local-first-
 
 export * from "../accounts/exports.js";
 
-export { createJazzClient, type JazzClientConfig } from "../session/create-jazz-session.js";
+export {
+  createJazzClient,
+  startJazzClient,
+  type JazzClientConfig,
+} from "../session/create-jazz-session.js";
 export type {
   JazzSession,
   JazzSessionSnapshot,
+  JazzSessionErrorViewProps,
   JazzSessionOperation,
   JazzUser,
+  LocalFirstUnavailable,
 } from "../session/jazz-session.js";
 export {
   useJazzSession,
   type UseJazzSessionResult,
   type JazzSessionViewProps,
 } from "../react-core/session.js";
+
+// Removed in alpha.61: stubs that throw, naming the replacement (one release).
+export {
+  AccountManager,
+  JazzSessionProvider,
+  createAccountManager,
+  exportLocalFirstSecret,
+  useAccountState,
+  useJazzAuth,
+  useJazzSessionOwner,
+  useLocalFirstAuth,
+} from "../removed-api.js";

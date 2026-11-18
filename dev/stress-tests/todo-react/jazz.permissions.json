@@ -1,0 +1,11 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "5d8dc9ac38666ec7b09ab16798e9a4a7390bac820d7af8525c756b290e23a0b0"
+  },
+  "tables": {
+    "projects": { "read": "true", "insert": "true", "update": "true", "delete": "true" },
+    "todos": { "read": "true", "insert": "true", "update": "true", "delete": "true" }
+  }
+}

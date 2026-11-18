@@ -7,10 +7,11 @@ export {
 } from "../classic-api.js";
 export * from "../accounts/exports.js";
 
-export { createJazzClient, type JazzClientConfig } from "./create-jazz-session.js";
+export { createJazzClient, startJazzClient, type JazzClientConfig } from "./create-jazz-session.js";
 export type {
   JazzSession,
   JazzSessionSnapshot,
+  JazzSessionErrorViewProps,
   JazzSessionOperation,
   JazzUser,
 } from "../session/jazz-session.js";
@@ -26,3 +27,15 @@ export { useAll, useAllSuspense } from "../react-native/use-all.js";
 export { useOne, useOneSuspense } from "../react-native/use-one.js";
 export { useSyncStatus } from "../react-core/use-sync-status.js";
 export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
+
+// Removed in alpha.61: stubs that throw, naming the replacement (one release).
+export {
+  ExpoAuthSecretStore,
+  JazzSessionProvider,
+  createAccountManager,
+  expoAuthSecretStore,
+  useAccountState,
+  useJazzAuth,
+  useJazzSessionOwner,
+  useLocalFirstAuth,
+} from "../removed-api.js";

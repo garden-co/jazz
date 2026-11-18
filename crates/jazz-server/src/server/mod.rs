@@ -13,10 +13,9 @@ mod catalogue_storage;
 mod data_dir_corpus;
 #[cfg(feature = "embedded-server")]
 mod embedded;
+mod identity;
 pub use crate::runtime::{ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle};
-pub mod alpha59_alpha60;
 pub(crate) mod deployment;
-mod permissions_validation;
 pub mod routes;
 #[cfg(any(test, feature = "embedded-server"))]
 pub(crate) mod runtime_catalogue;
@@ -30,6 +29,10 @@ pub(crate) use catalogue_storage::CatalogueStorage;
 #[cfg(feature = "embedded-server")]
 pub use embedded::{
     EmbeddedOutgoing, EmbeddedServer, EmbeddedSocketPeer, EmbeddedSocketSender, OpenSocketRefused,
+};
+pub use identity::{
+    IdentityOpen, RecordedIdentity, StoreIdentity, detach_store_identity, open_store_identity,
+    read_store_identity, set_store_app_id,
 };
 pub use shutdown::{ShutdownController, ShutdownPhase, WebSocketEntryRefused};
 #[cfg(feature = "embedded-server")]
@@ -63,16 +66,19 @@ pub async fn push_catalogue_in_memory(
     Ok(())
 }
 
-/// Cap on concurrent connections sharing a single `client_id`. When a new
-/// connection would exceed this cap, the oldest connection(s) for the same
-/// `client_id` are evicted so a reconnecting client is never locked out by
-/// its own zombies. Bounds the fan-out memory described in jaz0-a803.
+/// Default cap on live public-session WebSocket connections sharing one
+/// authenticated identity (one user).
 ///
-/// Value of 4 gives headroom for the realistic legitimate case (a brief
-/// overlap between an old half-open socket and a new reconnect, plus a
-/// small amount of slack for unusual topologies) without giving an
-/// attacker meaningful amplification before the cap bites.
-pub(crate) const PER_CLIENT_CONNECTION_CAP: usize = 4;
+/// Connections are bounded mostly by backpressure: each holds at most its
+/// per-session ingress and egress budgets, and `DEFAULT_MAX_WEBSOCKET_CONNECTIONS`
+/// bounds the process. This cap only stops a pathological number of sockets
+/// for one user (the fan-out memory of jaz0-a803), so it sits far above any
+/// real multi-tab, multi-device use: a thin-client tab holds one socket, and a
+/// browser profile or device running the local-first client holds one for all
+/// its tabs. Past the cap a connection silent for longer than a keepalive (a
+/// zombie) is evicted to make room; live connections never are, and with none
+/// to evict the newcomer is refused with a retryable `backpressure` error.
+pub const DEFAULT_MAX_WEBSOCKET_CONNECTIONS_PER_IDENTITY: usize = 128;
 /// Default cap on live WebSocket connections per server process.
 ///
 /// Every connection may hold up to its per-session ingress and egress

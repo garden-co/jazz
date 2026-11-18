@@ -21,6 +21,7 @@ import { registerBrowserInspectorControl } from "../../dev/inspector-overlay/bro
 import { assertBrowserStorageOwnerUnchanged } from "../browser-worker-config.js";
 import { waitForInspectorOpening } from "../native-runtime/inspector-control-lifecycle.js";
 import { toError } from "../util.js";
+import { holdAcrossPageCache } from "../page-cache.js";
 
 interface BrowserConnectionScope {
   readonly connection: BrowserWorkerConnection;
@@ -68,6 +69,17 @@ export class BrowserConnectionManager extends ConnectionManager {
   /** The other tab has held the store past that patience: report it. */
   private heldTooLong = false;
   declare protected foregroundNodeLease: BrowserForegroundNodeLease | undefined;
+  /**
+   * The page is in the back/forward cache: it let go of its connection (and
+   * its page lock) and opens a new one when it returns (see `page-cache`).
+   * What needs the connection meanwhile waits for that one.
+   */
+  private pageAway: {
+    left: BrowserWorkerConnection;
+    reopened: Promise<BrowserWorkerConnection | null>;
+    reopen: (connection: BrowserWorkerConnection | null) => void;
+  } | null = null;
+  private stopHoldingAcrossPageCache: (() => void) | null = null;
   private shutdownStarted = false;
   private shutdownFailure: {
     connection: BrowserWorkerConnection | null;
@@ -92,6 +104,24 @@ export class BrowserConnectionManager extends ConnectionManager {
       this.host.runtimeSource.acquireBrowserForegroundNodeLease(this.host.config));
   }
 
+  /**
+   * The Db takes no new work: it drains for a graceful shutdown, or its
+   * teardown started. Waits for readiness end early then.
+   */
+  private get dbStopping(): boolean {
+    return this.host.phase !== "open" || this.host.draining;
+  }
+
+  /**
+   * The Db's teardown started: final (see `DbPhase`). Only then does this
+   * manager stop recovering its worker connection. While the Db merely
+   * drains, the connection keeps recovering: the drain's upload needs it,
+   * and a failed drain leaves the Db open with a working connection.
+   */
+  private get dbClosing(): boolean {
+    return this.host.phase !== "open";
+  }
+
   override getClient(schema: WasmSchema): JazzClient {
     if (this.shutdownStarted) throw new Error("Browser connection manager is shut down");
     if (this.storageResetError) throw this.storageResetError;
@@ -102,6 +132,78 @@ export class BrowserConnectionManager extends ConnectionManager {
   protected override onClientCreated(input: ConnectionManagerClientInput): void {
     this.browserConnectionInput = input;
     this.openBrowserWorkerConnection();
+    this.stopHoldingAcrossPageCache ??= holdAcrossPageCache({
+      leave: () => this.leaveForPageCache(),
+      return: () => this.returnFromPageCache(),
+    });
+  }
+
+  /**
+   * Let go of the worker connection, and with it this tab's liveness lock,
+   * while the page is in the back/forward cache: the worker would count a
+   * cached page as a live tab (see `page-cache`).
+   * Only a connected, idle connection leaves (see `leaveForPageCache` on the
+   * connection); any other stays, and the page stays as it was.
+   */
+  private leaveForPageCache(): void {
+    const connection = this.connection;
+    if (
+      !connection ||
+      this.pageAway ||
+      this.shutdownStarted ||
+      this.dbStopping ||
+      this.storageReset ||
+      this.recoverableConnectionFailure ||
+      this.configurationAdmissionRetry ||
+      // A tab the inspector attached reconnects only when asked.
+      this.connectionScope?.inspectorAttachment ||
+      !connection.leaveForPageCache?.()
+    )
+      return;
+    let reopen!: (connection: BrowserWorkerConnection | null) => void;
+    const reopened = new Promise<BrowserWorkerConnection | null>((resolve) => (reopen = resolve));
+    this.pageAway = { left: connection, reopened, reopen };
+    this.clearWorkerRecoveryTimer();
+    this.unregisterInspectorControl?.();
+    this.unregisterInspectorControl = null;
+    this.host.clearAuthenticatedInspectorLocalReads();
+    this.connection = null;
+    this.connectionReady = null;
+    this.initialExplicitOfflineStateKnown = false;
+  }
+
+  /**
+   * Back from the back/forward cache: open a new connection to the worker.
+   * The runtime kept its writes and transaction identities; the new
+   * connection replays what the worker hasn't seen, as after a worker
+   * failure. Unless the store was deleted, reset or invalidated meanwhile
+   * (the worker told only the tabs attached then): this page's runtime
+   * shows what is gone, so it reloads, as an attached tab does.
+   */
+  private returnFromPageCache(): void | "stop" {
+    const away = this.pageAway;
+    if (!away) return;
+    this.pageAway = null;
+    if (this.shutdownStarted || this.dbClosing || !this.browserConnectionInput) {
+      away.reopen(null);
+      return;
+    }
+    if (away.left.storeChangedSinceLeaving?.()) {
+      // Never reconnected, even when the reload guard refuses (a second
+      // invalidation within its window): what needs the worker fails instead.
+      this.connectionError = new Error(
+        "This page's store was reset while the page was in the back/forward cache: reload the page",
+      );
+      reloadAfterStorageInvalidation();
+      away.reopen(null);
+      return "stop";
+    }
+    try {
+      away.reopen(this.openBrowserWorkerConnection());
+    } catch (error) {
+      away.reopen(null);
+      throw error;
+    }
   }
 
   private openBrowserWorkerConnection(): BrowserWorkerConnection {
@@ -236,7 +338,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (this.heldPatienceTimer !== null || this.heldTooLong) return;
     this.heldPatienceTimer = setTimeout(() => {
       this.heldPatienceTimer = null;
-      if (this.shutdownStarted || this.host.isShuttingDown) return;
+      if (this.shutdownStarted || this.dbClosing) return;
       // Still waiting: the other tab is frozen in the background, or never
       // follows (another build). Say so, and fail what waits, so the app can
       // ask the user to close it; the retries go on.
@@ -278,7 +380,7 @@ export class BrowserConnectionManager extends ConnectionManager {
           this.connection === failed &&
           !this.heldTooLong &&
           !this.shutdownStarted &&
-          !this.host.isShuttingDown &&
+          !this.dbStopping &&
           !signal?.aborted
         )
           return;
@@ -300,7 +402,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (
       this.workerRecoveryTimer !== null ||
       this.shutdownStarted ||
-      this.host.isShuttingDown ||
+      this.dbClosing ||
       this.storageReset ||
       // A tab the inspector attached recovers only on an explicit call, but
       // waiting for another tab's sign-in is no failure of its own.
@@ -315,7 +417,7 @@ export class BrowserConnectionManager extends ConnectionManager {
         if (
           this.connection !== failed ||
           this.shutdownStarted ||
-          this.host.isShuttingDown ||
+          this.dbClosing ||
           this.storageReset
         )
           return;
@@ -344,7 +446,7 @@ export class BrowserConnectionManager extends ConnectionManager {
   }
 
   async ensureReady(requirement: ConnectionRequirement, signal?: AbortSignal): Promise<void> {
-    if (this.host.isShuttingDown || signal?.aborted) return;
+    if (this.dbStopping || signal?.aborted) return;
     const reset = this.storageReset;
     // Capture before yielding: callers already waiting on a rejected attempt
     // must see that rejection, even if a later API call starts a replacement.
@@ -352,12 +454,15 @@ export class BrowserConnectionManager extends ConnectionManager {
     const retry = connection !== null && this.observedConfigurationAdmissionFailure === connection;
     await reset;
     if (this.storageResetError) throw this.storageResetError;
-    if (this.host.isShuttingDown || signal?.aborted) return;
+    if (this.dbStopping || signal?.aborted) return;
     // Between a retry's shutdown of the refused connection and its
     // replacement there is none: wait for the replacement.
-    connection ??= this.connection ?? (await this.configurationAdmissionRetry);
+    connection ??=
+      this.connection ??
+      (await this.pageAway?.reopened) ??
+      (await this.configurationAdmissionRetry);
     if (retry && connection) connection = await this.retryConfigurationAdmission(connection);
-    if (this.host.isShuttingDown || signal?.aborted) return;
+    if (this.dbStopping || signal?.aborted) return;
     for (;;) {
       try {
         await (connection ? this.readinessByConnection.get(connection) : this.connectionReady);
@@ -368,7 +473,7 @@ export class BrowserConnectionManager extends ConnectionManager {
         if (connection && this.admissionRefused(connection) && !signal?.aborted) {
           if (this.heldTooLong) throw new StoreHeldByAnotherTabError(undefined, { cause: error });
           await this.replacementOf(connection, signal);
-          if (this.host.isShuttingDown || this.shutdownStarted || signal?.aborted) return;
+          if (this.dbStopping || this.shutdownStarted || signal?.aborted) return;
           connection = this.connection ?? (await this.configurationAdmissionRetry);
           continue;
         }
@@ -382,16 +487,16 @@ export class BrowserConnectionManager extends ConnectionManager {
       }
     }
     await this.connectionReady;
-    if (this.host.isShuttingDown) return;
+    if (this.dbStopping) return;
     if (this.connectionError) throw this.connectionError;
     if (requirement !== "runtime") {
       for (;;) {
         while (this.disconnected) {
           await this.waitForReconnect(signal);
-          if (this.host.isShuttingDown || signal?.aborted) return;
+          if (this.dbStopping || signal?.aborted) return;
         }
         await this.transportTransition;
-        if (!this.disconnected || this.host.isShuttingDown || signal?.aborted) break;
+        if (!this.disconnected || this.dbStopping || signal?.aborted) break;
       }
     }
     if (this.host.config.serverUrl && requirement === "server") {
@@ -406,7 +511,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (failed !== this.connection) return Promise.resolve(this.connection);
     const retry = (async () => {
       await failed.shutdown();
-      if (this.host.isShuttingDown || failed !== this.connection) return null;
+      if (this.dbClosing || failed !== this.connection) return null;
       this.connection = null;
       this.connectionReady = null;
       this.connectionError = null;
@@ -475,6 +580,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     }
     await this.enqueueTransportTransition(async () => {
       if (this.shutdownStarted) throw new Error("Browser connection manager is shut down");
+      if (this.pageAway) await this.pageAway.reopened;
       if (this.recoverableConnectionFailure) this.reopenFailedFollower();
       await this.connectionReady;
       if (this.connectionError) throw this.connectionError;
@@ -515,7 +621,7 @@ export class BrowserConnectionManager extends ConnectionManager {
       });
   }
 
-  async deleteClientStorage(): Promise<void> {
+  async deleteClientStorage(): Promise<{ pendingUploads?: number } | void> {
     // A reset already in progress (e.g. another tab deleted the shared
     // storage) has detached this Db's client and connection; it is the
     // delete, so wait for it rather than reopening mid-reset.
@@ -524,11 +630,28 @@ export class BrowserConnectionManager extends ConnectionManager {
     // without one there would be nothing to delete through: open it, as the
     // direct manager opens its client, so the delete reaches the storage.
     if (!this.connection && !this.getCurrentClient()) this.getClient({});
-    await this.connectionReady;
+    // Another tab may hold this account's store under another sign-in (a
+    // guest signed up here and now signs out, while another tab is still the
+    // guest). Wait for it to let go, as reads and writes do: it follows the
+    // sign-up and sign-out, or closes. Past the patience this fails with a
+    // `StoreHeldByAnotherTabError`, and the delete can be tried again: a
+    // delete asked for past the patience tries to join at once, rather than
+    // at the next background attempt, and fails at once if still held.
+    const held = this.connection;
+    if (held && this.heldTooLong && this.admissionRefused(held))
+      await this.retryConfigurationAdmission(held);
+    await this.ensureReady("runtime");
+    if (this.storageReset) return this.storageReset;
     if (!this.connection)
       throw new Error("deleteClientStorage(): the browser worker is not connected");
-    await this.connection?.deleteStorage();
+    const deletion = await this.connection.deleteStorage();
     await this.storageReset;
+    return deletion;
+  }
+
+  override async storePendingUploads(): Promise<number | undefined> {
+    if (!this.connection || this.storageReset) return undefined;
+    return (await this.connection.storePendingUploads?.().catch(() => undefined)) ?? undefined;
   }
 
   override isUsable(): boolean {
@@ -616,13 +739,18 @@ export class BrowserConnectionManager extends ConnectionManager {
   }
 
   override async waitForPendingWrites(): Promise<void> {
-    await this.connection?.waitForPendingWrites();
+    const connection = this.connection ?? (await this.pageAway?.reopened);
+    await connection?.waitForPendingWrites();
   }
 
   override async shutdown(): Promise<void> {
     if (this.shutdownStarted) return;
     this.shutdownStarted = true;
     this.clearWorkerRecoveryTimer();
+    this.stopHoldingAcrossPageCache?.();
+    this.stopHoldingAcrossPageCache = null;
+    this.pageAway?.reopen(null);
+    this.pageAway = null;
     if (this.heldPatienceTimer !== null) clearTimeout(this.heldPatienceTimer);
     this.heldPatienceTimer = null;
     this.wakeReplacementWaiters();

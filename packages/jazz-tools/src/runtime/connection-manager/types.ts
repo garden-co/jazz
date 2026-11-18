@@ -4,7 +4,7 @@ import { getRuntimeSchemaCacheKey } from "../../drivers/schema-wire.js";
 import type { WasmSchema } from "../../drivers/types.js";
 import { setCredentialRenewal } from "../client.js";
 import type { AuthUpdate, JazzClient, MutationErrorEvent } from "../client.js";
-import type { DbConfig } from "../db.js";
+import type { DbConfig, DbPhase } from "../db.js";
 import type { Session } from "../context.js";
 import type { ForegroundNodeLease, RuntimeSource } from "../runtime-source.js";
 import { resolveTelemetryCollectorUrlFromEnv } from "../sync-telemetry.js";
@@ -68,7 +68,18 @@ export interface ConnectionManagerClientInput {
 export interface DbForConnection {
   readonly config: DbConfig;
   readonly runtimeSource: RuntimeSource<any>;
-  readonly isShuttingDown: boolean;
+  /**
+   * The Db's lifecycle phase (see `DbPhase`). `closing` and `closed` are
+   * final: a manager stops recovering its connection then.
+   */
+  readonly phase: DbPhase;
+  /**
+   * Whether the Db, still `open`, waits for its pending writes to upload
+   * before a graceful shutdown. It takes no new work, but its connection must
+   * keep (re)connecting for that upload. If the wait fails, the Db is
+   * plainly open again.
+   */
+  readonly draining: boolean;
   markUnauthenticated(reason: AuthFailureReason): void;
   /** Whether something renews the credential after this refusal. */
   renewsCredential?(reason: AuthFailureReason): boolean;
@@ -94,6 +105,7 @@ export abstract class ConnectionManager {
   private clientSchema: WasmSchema | null = null;
   private disposeRuntimeTelemetry: (() => void) | null = null;
   private remoteLinkHintBinding: AbortController | null = null;
+  private readonly clientCreatedListeners = new Set<() => void>();
   private readonly syncStatusListeners = new Set<() => void>();
   private syncStatusBinding: AbortController | null = null;
 
@@ -134,6 +146,10 @@ export abstract class ConnectionManager {
       schema: runtimeSchema,
       migrations: shippedMigrations(schema),
       onAuthFailure: (reason) => this.host.markUnauthenticated(reason),
+      // Admitted again: the refusal's reason (`db.getAuthState().error`, and
+      // the sync status's `authReason`) no longer holds, as `onAuthRestored`
+      // clears it for a browser worker's connection.
+      onAuthRestored: () => this.host.clearAuthError(),
       foregroundNodeLease: this.foregroundNodeLease,
     });
     client.onMutationError((event) => this.host.onMutationError(event));
@@ -144,6 +160,7 @@ export abstract class ConnectionManager {
     this.bindRemoteLinkHint(client);
     this.bindSyncStatus();
     this.onClientCreated({ schemaKey, schema: runtimeSchema, client });
+    for (const listener of [...this.clientCreatedListeners]) listener();
     return client;
   }
 
@@ -247,7 +264,24 @@ export abstract class ConnectionManager {
   }
 
   protected onTransportLinkStateChange(listener: () => void, signal: AbortSignal): void {
-    this.getCurrentClient()?.getRuntime().onRemoteLinkStateChange?.(listener, signal);
+    if (signal.aborted) return;
+    const bind = () => {
+      this.getCurrentClient()?.getRuntime().onRemoteLinkStateChange?.(listener, signal);
+      listener();
+    };
+    if (this.getCurrentClient()) {
+      bind();
+      return;
+    }
+    // Lifecycle listeners can precede the first query's lazy runtime creation.
+    const cancel = () => this.clientCreatedListeners.delete(created);
+    const created = () => {
+      cancel();
+      signal.removeEventListener("abort", cancel);
+      if (!signal.aborted) bind();
+    };
+    this.clientCreatedListeners.add(created);
+    signal.addEventListener("abort", cancel, { once: true });
   }
 
   /** Whether this Db's writes reached the server; see {@link SyncStatus}. */
@@ -333,6 +367,7 @@ export abstract class ConnectionManager {
     await runtime.waitForPendingWrites("global", {
       throughOutage: true,
       signal,
+      sync: {},
     });
   }
 
@@ -377,7 +412,15 @@ export abstract class ConnectionManager {
     this.client?.updateCookieSession(auth.cookieSession);
   }
 
-  abstract deleteClientStorage(): Promise<void>;
+  abstract deleteClientStorage(): Promise<{ pendingUploads?: number } | void>;
+
+  /**
+   * How many of the store's writes (every tab's, in the browser) the server
+   * hasn't confirmed, or `undefined` where only this client can say.
+   */
+  async storePendingUploads(): Promise<number | undefined> {
+    return undefined;
+  }
 
   /**
    * Whether this connection can still serve its Db: no storage reset took
@@ -428,12 +471,17 @@ export abstract class ConnectionManager {
       }) ?? null;
   }
 
-  async waitForPendingWrites(): Promise<void> {
+  /**
+   * Wait until every write committed so far is answered, for a graceful
+   * shutdown. With `inFlightStreams`, streaming writes still sending their
+   * value finish first, until that signal aborts (see `Db.letStreamsFinish`).
+   */
+  async waitForPendingWrites(options: { inFlightStreams?: AbortSignal } = {}): Promise<void> {
     const runtime = this.getCurrentClient()?.getRuntime();
     if (!runtime) return;
     if (!runtime.waitForPendingWrites)
       throw new Error("Runtime does not support graceful sync shutdown");
-    await runtime.waitForPendingWrites("global");
+    await runtime.waitForPendingWrites("global", { inFlightStreams: options.inFlightStreams });
   }
 
   async shutdown(): Promise<void> {

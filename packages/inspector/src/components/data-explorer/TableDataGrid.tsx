@@ -51,6 +51,7 @@ import {
 } from "./row-mutation-form.js";
 import { buildRelationFilterHref } from "./relation-navigation.js";
 import { stringifyForPresentation } from "../../utility/presentation-serialization.js";
+import { isLargeValueSummary } from "jazz-tools/inspect";
 import styles from "./TableDataGrid.module.css";
 
 const NULL_CELL_MARKER = "<null>";
@@ -109,6 +110,8 @@ interface GridColumn {
   hiddenByDefault?: true;
 }
 
+// Who created and last changed a row is shown by default too, as the last
+// columns, after the row's own columns and the provenance timestamps.
 const PROVENANCE_GRID_COLUMNS: readonly GridColumn[] = [
   {
     id: "$createdAt",
@@ -117,16 +120,15 @@ const PROVENANCE_GRID_COLUMNS: readonly GridColumn[] = [
     enableSorting: true,
   },
   {
-    id: "$createdBy",
-    accessorKey: "$createdBy",
-    header: "$createdBy",
-    enableSorting: true,
-    hiddenByDefault: true,
-  },
-  {
     id: "$updatedAt",
     accessorKey: "$updatedAt",
     header: "$updatedAt",
+    enableSorting: true,
+  },
+  {
+    id: "$createdBy",
+    accessorKey: "$createdBy",
+    header: "$createdBy",
     enableSorting: true,
   },
   {
@@ -134,7 +136,6 @@ const PROVENANCE_GRID_COLUMNS: readonly GridColumn[] = [
     accessorKey: "$updatedBy",
     header: "$updatedBy",
     enableSorting: true,
-    hiddenByDefault: true,
   },
 ];
 
@@ -2279,7 +2280,10 @@ function PlainTableView({
         name: column.header,
         sortable: column.enableSorting,
         resizable: true,
-        editable: isEditable,
+        // A value the backend summarized (too large to list) isn't here to edit.
+        editable: isEditable
+          ? (row: EditableGridRow) => !isLargeValueSummary(row.sourceRow[column.id])
+          : false,
         width: isIdColumn ? "minmax(148px, 1fr)" : "minmax(120px, 1fr)",
         minWidth: isIdColumn ? 148 : 120,
         headerCellClass: column.enableSorting ? styles.sortableHeaderCell : styles.gridHeaderCell,

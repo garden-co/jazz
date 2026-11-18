@@ -21,6 +21,8 @@ export interface RuntimeClientContext<RuntimeConfig extends DbConfig = DbConfig>
   /** The migrations the app defining `schema` ships (see {@link ClientMigrations}). */
   migrations?: ClientMigrations;
   onAuthFailure: (reason: AuthFailureReason) => void;
+  /** The server admitted the client's link (again): an earlier refusal no longer holds. */
+  onAuthRestored?: () => void;
   /**
    * Browser-only identity leased by the durable SharedWorker before the
    * synchronous foreground client is constructed.
@@ -71,11 +73,26 @@ export interface BrowserWorkerConnection {
   updateAuth(authJson: string, sessionClaims: Record<string, unknown>): Promise<void>;
   disconnect(): Promise<void>;
   reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void>;
-  deleteStorage(): Promise<void>;
+  /** Delete the store; resolves with how many unconfirmed writes it took, when the worker says. */
+  deleteStorage(): Promise<{ pendingUploads?: number } | void>;
+  /** How many of the store's writes (every tab's) the server hasn't confirmed, when the worker says. */
+  storePendingUploads?(): Promise<number | undefined>;
   flushLocal(): Promise<void>;
   waitForPendingWrites(): Promise<void>;
   openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort>;
   shutdown(): Promise<void>;
+  /**
+   * Close now, without waiting for the worker, and let go of every page
+   * lock: the page is leaving for the back/forward cache (see `page-cache`).
+   * `false` when it can't (not connected, or an operation waits on the
+   * worker): it stays as it was.
+   */
+  leaveForPageCache?(): boolean;
+  /**
+   * After `leaveForPageCache`: whether the store was deleted, reset or
+   * invalidated meanwhile, which the worker told only the tabs attached.
+   */
+  storeChangedSinceLeaving?(): boolean;
   /** Present only after an authenticated Inspector control-port attachment. */
   getAuthenticatedInspectorAttachmentPhysicalDbName?(): string | null;
 }

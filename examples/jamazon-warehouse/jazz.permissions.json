@@ -1,0 +1,327 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "cbbc3a8a270246b6731599b415a34e5bd51a1959f127b140a682a3a2ccaab895"
+  },
+  "tables": {
+    "better_auth_account": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_jwks": { "read": "false", "insert": "false", "update": "false", "delete": "false" },
+    "better_auth_session": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_user": { "read": "false", "insert": "false", "update": "false", "delete": "false" },
+    "better_auth_verification": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "customers": {
+      "read": "true",
+      "insert": {
+        "allOf": [
+          {
+            "anyOf": [
+              "allowedTo.update(warehouse)",
+              "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+            ]
+          },
+          "exists districts(id = this.district_id, warehouse_id = this.warehouse_id)"
+        ]
+      },
+      "update": {
+        "old": {
+          "anyOf": [
+            "allowedTo.update(warehouse)",
+            "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+          ]
+        },
+        "new": {
+          "allOf": [
+            {
+              "anyOf": [
+                "allowedTo.update(warehouse)",
+                "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+              ]
+            },
+            "exists districts(id = this.district_id, warehouse_id = this.warehouse_id)"
+          ]
+        }
+      },
+      "delete": {
+        "anyOf": [
+          "allowedTo.update(warehouse)",
+          "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+        ]
+      }
+    },
+    "deliveries": {
+      "read": "true",
+      "insert": {
+        "allOf": [
+          {
+            "anyOf": [
+              "allowedTo.update(warehouse)",
+              "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+            ]
+          },
+          "exists orders(id = this.order_id, warehouse_id = this.warehouse_id, district_id = this.district_id)"
+        ]
+      },
+      "update": {
+        "old": {
+          "anyOf": [
+            "allowedTo.update(warehouse)",
+            "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+          ]
+        },
+        "new": {
+          "allOf": [
+            {
+              "anyOf": [
+                "allowedTo.update(warehouse)",
+                "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+              ]
+            },
+            "exists orders(id = this.order_id, warehouse_id = this.warehouse_id, district_id = this.district_id)"
+          ]
+        }
+      },
+      "delete": {
+        "anyOf": [
+          "allowedTo.update(warehouse)",
+          "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+        ]
+      }
+    },
+    "districts": {
+      "read": "true",
+      "insert": {
+        "anyOf": [
+          "allowedTo.update(warehouse)",
+          "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+        ]
+      },
+      "update": {
+        "anyOf": [
+          "allowedTo.update(warehouse)",
+          "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+        ]
+      },
+      "delete": {
+        "anyOf": [
+          "allowedTo.update(warehouse)",
+          "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+        ]
+      }
+    },
+    "items": {
+      "read": "true",
+      "insert": "operator_id = session.user",
+      "update": "operator_id = session.user",
+      "delete": "operator_id = session.user"
+    },
+    "order_lines": {
+      "read": "true",
+      "insert": {
+        "allOf": [
+          {
+            "anyOf": [
+              "allowedTo.update(warehouse)",
+              "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+            ]
+          },
+          "exists orders(id = this.order_id, warehouse_id = this.warehouse_id)",
+          "exists stock(warehouse_id = this.warehouse_id, item_id = this.item_id)"
+        ]
+      },
+      "update": {
+        "old": {
+          "anyOf": [
+            "allowedTo.update(warehouse)",
+            "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+          ]
+        },
+        "new": {
+          "allOf": [
+            {
+              "anyOf": [
+                "allowedTo.update(warehouse)",
+                "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+              ]
+            },
+            "exists orders(id = this.order_id, warehouse_id = this.warehouse_id)",
+            "exists stock(warehouse_id = this.warehouse_id, item_id = this.item_id)"
+          ]
+        }
+      },
+      "delete": {
+        "anyOf": [
+          "allowedTo.update(warehouse)",
+          "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+        ]
+      }
+    },
+    "orders": {
+      "read": "true",
+      "insert": {
+        "allOf": [
+          {
+            "anyOf": [
+              "allowedTo.update(warehouse)",
+              "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+            ]
+          },
+          "exists districts(id = this.district_id, warehouse_id = this.warehouse_id)",
+          "exists customers(id = this.customer_id, warehouse_id = this.warehouse_id, district_id = this.district_id)"
+        ]
+      },
+      "update": {
+        "old": {
+          "anyOf": [
+            "allowedTo.update(warehouse)",
+            "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+          ]
+        },
+        "new": {
+          "allOf": [
+            {
+              "anyOf": [
+                "allowedTo.update(warehouse)",
+                "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+              ]
+            },
+            "exists districts(id = this.district_id, warehouse_id = this.warehouse_id)",
+            "exists customers(id = this.customer_id, warehouse_id = this.warehouse_id, district_id = this.district_id)"
+          ]
+        }
+      },
+      "delete": {
+        "anyOf": [
+          "allowedTo.update(warehouse)",
+          "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+        ]
+      }
+    },
+    "payments": {
+      "read": "true",
+      "insert": {
+        "allOf": [
+          {
+            "anyOf": [
+              "allowedTo.update(warehouse)",
+              "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+            ]
+          },
+          "exists customers(id = this.customer_id, warehouse_id = this.warehouse_id)",
+          {
+            "anyOf": [
+              "order_id = null",
+              "exists orders(id = this.order_id, warehouse_id = this.warehouse_id, customer_id = this.customer_id)"
+            ]
+          }
+        ]
+      },
+      "update": {
+        "old": {
+          "anyOf": [
+            "allowedTo.update(warehouse)",
+            "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+          ]
+        },
+        "new": {
+          "allOf": [
+            {
+              "anyOf": [
+                "allowedTo.update(warehouse)",
+                "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+              ]
+            },
+            "exists customers(id = this.customer_id, warehouse_id = this.warehouse_id)",
+            {
+              "anyOf": [
+                "order_id = null",
+                "exists orders(id = this.order_id, warehouse_id = this.warehouse_id, customer_id = this.customer_id)"
+              ]
+            }
+          ]
+        }
+      },
+      "delete": {
+        "anyOf": [
+          "allowedTo.update(warehouse)",
+          "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+        ]
+      }
+    },
+    "stock": {
+      "read": "true",
+      "insert": {
+        "allOf": [
+          {
+            "anyOf": [
+              "allowedTo.update(warehouse)",
+              "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+            ]
+          },
+          "exists items(id = this.item_id)",
+          { "allOf": ["on_hand >= 0", "reorder_level >= 0", "reorder_level <= 100"] }
+        ]
+      },
+      "update": {
+        "old": {
+          "anyOf": [
+            "allowedTo.update(warehouse)",
+            "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+          ]
+        },
+        "new": {
+          "allOf": [
+            {
+              "anyOf": [
+                "allowedTo.update(warehouse)",
+                "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+              ]
+            },
+            "exists items(id = this.item_id)",
+            { "allOf": ["on_hand >= 0", "reorder_level >= 0", "reorder_level <= 100"] }
+          ]
+        }
+      },
+      "delete": {
+        "anyOf": [
+          "allowedTo.update(warehouse)",
+          "exists warehouse_operators(warehouse_id = this.warehouse_id, account_id = session.user)"
+        ]
+      }
+    },
+    "warehouse_operators": {
+      "read": "true",
+      "insert": "allowedTo.update(warehouse)",
+      "update": "false",
+      "delete": { "anyOf": ["allowedTo.update(warehouse)", "account_id = session.user"] }
+    },
+    "warehouses": {
+      "read": "true",
+      "insert": "operator_id = session.user",
+      "update": {
+        "old": "operator_id = session.user",
+        "new": {
+          "anyOf": [
+            "operator_id = session.user",
+            "exists warehouse_operators(warehouse_id = this.id, account_id = this.operator_id)"
+          ]
+        }
+      }
+    }
+  }
+}

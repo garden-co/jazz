@@ -38,39 +38,41 @@ Or have it run `npm create jazz`, which prints the same quickstart.
 - **Local-first when you want it.** Clients start thin. Switch one to local-first for offline use
   and instant reads: it runs the same Rust engine on the device, with the same queries.
 
-### 1. Install in your backend and define a schema
+### 1. Install in your backend and declare a schema
 
-```ts
-// schema.ts
-import { schema as s } from "jazz-tools";
-
-const schema = {
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-      owner_id: s.uuid(),
-    },
-    {},
-  ),
-};
-
-export const app = s.defineApp(schema);
-
-export const permissions = s.definePermissions(app, ({ policy, session }) => {
-  const mine = { owner_id: session.user };
-
-  policy.todos.allowRead.where(mine);
-  policy.todos.allowInsert.where(mine);
-  policy.todos.allowUpdate.whereOld(mine).whereNew(mine);
-  policy.todos.allowDelete.where(mine);
-});
+```json
+// jazz.app.json
+{
+  "format": 1,
+  "tables": {
+    "todos": { "columns": { "title": "string", "done": "boolean", "owner_id": "uuid" } }
+  }
+}
 ```
+
+```json
+// jazz.permissions.json (read by your backend only)
+{
+  "format": 1,
+  "tables": {
+    "todos": {
+      "read": "owner_id = session.user",
+      "insert": "owner_id = session.user",
+      "update": "owner_id = session.user",
+      "delete": "owner_id = session.user"
+    }
+  }
+}
+```
+
+`npx jazz-tools generate` checks both files and writes `jazz.generated.ts`,
+the app's typed bindings. Commit all three.
 
 ```ts
 // jazz.server.ts
 import { createJazz, sqlite } from "jazz-tools/backend";
-import { app, permissions } from "./schema";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const jazz = createJazz({
   app,
@@ -127,7 +129,7 @@ export function OpenTodos() {
 ## Setup guides
 
 - **Deploy:** [Vercel](https://jazz.tools/docs/setup/deployment/vercel) &middot; [your own server](https://jazz.tools/docs/setup/deployment/own-server) &middot; [Jazz Cloud](https://jazz.tools/docs/setup/deployment/jazz-cloud)
-- **Auth:** [how it works](https://jazz.tools/docs/setup/auth/backend) &middot; [Better Auth](https://jazz.tools/docs/setup/auth/better-auth) &middot; [WorkOS](https://jazz.tools/docs/setup/auth/workos) &middot; [custom](https://jazz.tools/docs/setup/auth/custom) &middot; [local-first](https://jazz.tools/docs/setup/auth/local-first)
+- **Auth:** [how it works](https://jazz.tools/docs/setup/auth/backend) &middot; [Better Auth](https://jazz.tools/docs/setup/auth/better-auth) &middot; [WorkOS](https://jazz.tools/docs/setup/auth/workos) &middot; [custom](https://jazz.tools/docs/setup/auth/custom) &middot; [device accounts (guests)](https://jazz.tools/docs/setup/auth/device-accounts)
 - **Clients:** [thin web client](https://jazz.tools/docs/setup/web-client/thin-client) &middot; [local-first web client](https://jazz.tools/docs/setup/web-client/local-first-client) &middot; [React Native](https://jazz.tools/docs/setup/react-native) &middot; [backend clients](https://jazz.tools/docs/setup/backend-client)
 - **Examples:** [complete apps for each framework and auth setup](https://jazz.tools/docs/reference/examples)
 

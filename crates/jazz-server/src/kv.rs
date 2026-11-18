@@ -14,21 +14,20 @@
 use std::sync::{Arc, mpsc};
 
 use jazz::host::HostReader;
-#[cfg(test)]
 use jazz::host::{HostPair, HostTable, HostTables};
-use rusqlite::Connection;
+use jazz::storage::Storage;
 
 /// Errors are reported as text: callers wrap them in their own error types.
 pub(crate) type KvResult<T> = Result<T, String>;
 
-#[cfg(test)]
 pub(crate) struct HostKv {
     table: HostTable,
+    /// Reads go here; servers only write through `HostKv` so far.
+    #[cfg_attr(not(test), allow(dead_code))]
     reader: Arc<HostReader>,
     store: crate::runtime::HostSender,
 }
 
-#[cfg(test)]
 impl HostKv {
     pub(crate) fn new(
         table: HostTable,
@@ -57,6 +56,7 @@ impl HostKv {
             .map_err(|_| "server store closed before answering".to_owned())?
     }
 
+    #[cfg(test)]
     pub(crate) fn get(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
         self.reader
             .get(self.table, key)
@@ -70,6 +70,7 @@ impl HostKv {
     }
 
     /// Every pair whose key starts with `prefix`, in key order.
+    #[cfg(test)]
     pub(crate) fn prefix(&self, prefix: &[u8]) -> KvResult<Vec<HostPair>> {
         self.reader
             .prefix(self.table, prefix)
@@ -108,7 +109,7 @@ impl HostSql {
     /// when it began.
     pub(crate) fn read<T>(
         &self,
-        f: impl FnOnce(&Connection) -> Result<T, jazz::db::Error>,
+        f: impl FnOnce(&Storage) -> Result<T, jazz::db::Error>,
     ) -> KvResult<T> {
         #[cfg(test)]
         if self
@@ -125,7 +126,7 @@ impl HostSql {
     /// `f` fails.
     pub(crate) fn write<T: Send + 'static>(
         &self,
-        f: impl FnOnce(&Connection) -> Result<T, jazz::db::Error> + Send + 'static,
+        f: impl FnOnce(&Storage) -> Result<T, jazz::db::Error> + Send + 'static,
     ) -> KvResult<T> {
         let (reply, answer) = mpsc::sync_channel(1);
         self.store.send(Box::new(move |tables| {

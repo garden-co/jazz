@@ -85,12 +85,8 @@ pub enum BlobStore {
     VercelBlob(crate::vercel_blob::VercelBlobOptions),
 }
 
-/// Records which [`BlobStore`] a data directory was started with.
-const BLOB_STORE_MARKER: &str = "blob-store";
-/// A data directory's own id, which its blob directory is claimed for.
-const STORE_ID_FILE: &str = "store-id";
 /// In a blob directory: the id of the data directory that owns it.
-const BLOB_OWNER_FILE: &str = "owner";
+pub(super) const BLOB_OWNER_FILE: &str = "owner";
 
 pub struct ServerBuilder {
     app_id: AppId,
@@ -102,16 +98,14 @@ pub struct ServerBuilder {
     shutdown_timeout: Duration,
     heap_profiler: Option<HeapProfileDump>,
     max_websocket_connections: usize,
+    max_websocket_connections_per_user: usize,
 }
 
 impl ServerBuilder {
     pub fn new(app_id: AppId) -> Self {
         Self {
             app_id,
-            auth_config: AuthConfig {
-                allow_local_first_auth: true,
-                ..Default::default()
-            },
+            auth_config: AuthConfig::default(),
             schema_mode: ServerSchemaMode::Dynamic,
             blobs: BlobStore::Sqlite,
             storage_backend: StorageBackend::Persistent {
@@ -121,16 +115,13 @@ impl ServerBuilder {
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
             heap_profiler: None,
             max_websocket_connections: crate::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
+            max_websocket_connections_per_user:
+                crate::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS_PER_IDENTITY,
         }
     }
 
     pub fn with_auth_config(mut self, auth_config: AuthConfig) -> Self {
         self.auth_config = auth_config;
-        self
-    }
-
-    pub fn with_local_first_auth(mut self, enabled: bool) -> Self {
-        self.auth_config.allow_local_first_auth = enabled;
         self
     }
 
@@ -142,6 +133,15 @@ impl ServerBuilder {
     /// Cap live WebSocket connections; upgrades beyond it get `503`.
     pub fn with_max_websocket_connections(mut self, max: usize) -> Self {
         self.max_websocket_connections = max;
+        self
+    }
+
+    /// Cap live WebSocket connections of one signed-in user; past it, the
+    /// user's silent (zombie) connections are evicted, and with none a new
+    /// connection is refused with a retryable error. Live ones are never
+    /// evicted. See [`crate::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS_PER_IDENTITY`].
+    pub fn with_max_websocket_connections_per_user(mut self, max: usize) -> Self {
+        self.max_websocket_connections_per_user = max;
         self
     }
 
@@ -217,18 +217,54 @@ impl ServerBuilder {
         if self.max_websocket_connections == 0 {
             return Err("max websocket connections must be at least 1".to_owned());
         }
-        if let StorageBackend::Persistent { path } = &self.storage_backend {
-            refuse_pre_sqlite_data_dir(path)?;
+        if self.max_websocket_connections_per_user == 0 {
+            return Err("max websocket connections per user must be at least 1".to_owned());
         }
+        let identity = match &self.storage_backend {
+            StorageBackend::Persistent { path } => {
+                refuse_pre_sqlite_data_dir(path)?;
+                Some(super::identity::open_store_identity(
+                    path,
+                    super::identity::IdentityOpen::Server {
+                        app_id: &self.app_id.to_string(),
+                    },
+                )?)
+            }
+            StorageBackend::InMemory => None,
+        };
         log_auth_config(&auth_config);
 
         // One store per app: the catalogue and the account registry are host
         // tables in the file the runtime's rows live in, all on its thread.
-        let (storage_config, blob_store_record) = self.build_core_server_shell_storage_config()?;
+        let ShellStorage {
+            config: storage_config,
+            record: blob_store_record,
+            s3,
+        } = self.build_core_server_shell_storage_config(identity.as_ref())?;
+        if let Some(s3) = s3 {
+            s3.check_at_startup()
+                .await
+                .map_err(|error| format!("app {}: {error}", self.app_id))?;
+        }
         let store = AppStore::open(&storage_config)?;
         // Only a store that opened is recorded as having moved its blobs.
         if let Some(record) = blob_store_record {
-            record.write()?;
+            store
+                .kv(super::identity::IDENTITY)?
+                .write_many(&[(
+                    super::identity::BLOB_STORE.to_vec(),
+                    record.contents.trim_end().as_bytes().to_vec(),
+                )])
+                .map_err(|error| format!("record the blob store: {error}"))?;
+            if let (StorageBackend::Persistent { path }, Some(identity)) =
+                (&self.storage_backend, &identity)
+            {
+                super::identity::mirror_blob_store(
+                    path,
+                    &identity.store_id,
+                    record.contents.trim_end(),
+                )?;
+            }
         }
         store.set_app(self.app_id.to_string());
         let (catalogue_store, latest_catalogue_schema) = self.build_catalogue_store(&store)?;
@@ -247,9 +283,9 @@ impl ServerBuilder {
             backend_credential,
             workload_secrets,
             core_server_shell: std::sync::RwLock::new(core_server_shell),
-            websocket_admissions: Arc::new(
-                crate::server::routes::WebSocketAdmissionState::default(),
-            ),
+            websocket_admissions: Arc::new(crate::server::routes::WebSocketAdmissionState::new(
+                self.max_websocket_connections_per_user,
+            )),
             max_websocket_connections: self.max_websocket_connections,
             store: Some(store),
             runtime_catalogue_publication: tokio::sync::Mutex::new(()),
@@ -325,42 +361,51 @@ impl ServerBuilder {
         Ok(Some(store.start_runtime(schema, role, dynamic)?))
     }
 
-    /// The storage to open, and the blob-store record to write once it has
-    /// opened (if it changes).
+    /// The storage to open ([`ShellStorage`]).
     fn build_core_server_shell_storage_config(
         &self,
-    ) -> Result<(StorageConfig, Option<BlobStoreRecord>), String> {
+        identity: Option<&super::identity::StoreIdentity>,
+    ) -> Result<ShellStorage, String> {
         match &self.storage_backend {
-            StorageBackend::InMemory => Ok((StorageConfig::InMemory, None)),
+            StorageBackend::InMemory => Ok(ShellStorage {
+                config: StorageConfig::InMemory,
+                record: None,
+                s3: None,
+            }),
             StorageBackend::Persistent { path } => {
-                std::fs::create_dir_all(path)
-                    .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
+                let identity = identity.ok_or("a persistent store opens with its identity")?;
+                let store_id = identity.store_id.clone();
                 let blobs = match &self.blobs {
                     // A bucket's default prefix is this store's own.
                     BlobStore::S3(options) if options.prefix.is_empty() => {
                         let mut options = options.clone();
-                        options.prefix = format!("jazz/{}/", store_id(path)?);
+                        options.prefix = format!("jazz/{store_id}/");
                         BlobStore::S3(options)
                     }
                     BlobStore::VercelBlob(options) if options.prefix.is_empty() => {
                         let mut options = options.clone();
-                        options.prefix = format!("jazz/{}/", store_id(path)?);
+                        options.prefix = format!("jazz/{store_id}/");
                         BlobStore::VercelBlob(options)
                     }
                     blobs => blobs.clone(),
                 };
-                let plan = plan_blob_store(path, &blobs)?;
+                let plan = plan_blob_store(path, identity.blob_store.as_deref(), &blobs)?;
+                let mut s3 = None;
                 let config = match (&plan.blob_dir, &blobs) {
                     (Some(dir), _) => {
-                        claim_blob_dir(path, dir)?;
+                        claim_blob_dir(&store_id, dir)?;
                         StorageConfig::data_dir(path).with_blob_dir(dir.clone())
                     }
                     (None, BlobStore::S3(options)) => {
                         warn_on_distant_bucket(options);
-                        let store = crate::s3::S3ChunkStore::new(options.clone(), store_id(path)?)?;
+                        let store = Arc::new(crate::s3::S3ChunkStore::new(
+                            options.clone(),
+                            store_id.clone(),
+                        )?);
+                        s3 = Some(Arc::clone(&store));
                         StorageConfig::data_dir(path).with_blobs(crate::runtime::Blobs::Network(
                             crate::runtime::NetworkChunkStore {
-                                store: Arc::new(store),
+                                store,
                                 name: options.describe(),
                             },
                         ))
@@ -368,7 +413,7 @@ impl ServerBuilder {
                     (None, BlobStore::VercelBlob(options)) => {
                         let store = crate::vercel_blob::VercelBlobChunkStore::new(
                             options.clone(),
-                            store_id(path)?,
+                            store_id.clone(),
                         )?;
                         StorageConfig::data_dir(path).with_blobs(crate::runtime::Blobs::Network(
                             crate::runtime::NetworkChunkStore {
@@ -379,7 +424,11 @@ impl ServerBuilder {
                     }
                     (None, _) => StorageConfig::data_dir(path),
                 };
-                Ok((config, plan.record))
+                Ok(ShellStorage {
+                    config,
+                    record: plan.record,
+                    s3,
+                })
             }
         }
     }
@@ -390,6 +439,14 @@ impl ServerBuilder {
     }
 }
 
+/// The storage a server opens, the blob-store record to write once it has
+/// opened (if it changes), and the S3 store to check before it opens.
+struct ShellStorage {
+    config: StorageConfig,
+    record: Option<BlobStoreRecord>,
+    s3: Option<Arc<crate::s3::S3ChunkStore>>,
+}
+
 /// Where a data directory's large values go, and the record of that choice
 /// still to be written.
 struct BlobStorePlan {
@@ -398,16 +455,10 @@ struct BlobStorePlan {
     record: Option<BlobStoreRecord>,
 }
 
-/// A data directory's blob-store record, written once its store has opened.
+/// A store's blob-store record (`blob_store` in its identity, and the
+/// `blob-store` mirror's contents), written once the store has opened.
 struct BlobStoreRecord {
-    marker: PathBuf,
     contents: String,
-}
-
-impl BlobStoreRecord {
-    fn write(&self) -> Result<(), String> {
-        write_durably(&self.marker, self.contents.as_bytes())
-    }
 }
 
 /// Refuse to start `data_dir` with a blob store other than the one it was
@@ -417,13 +468,12 @@ impl BlobStoreRecord {
 /// The record names the blob directory relative to the data directory when
 /// it is inside it (so the two move together) and absolute otherwise, so a
 /// relative `dir` means the same directory whatever the working directory.
-fn plan_blob_store(data_dir: &Path, blobs: &BlobStore) -> Result<BlobStorePlan, String> {
-    let marker = data_dir.join(BLOB_STORE_MARKER);
-    let recorded = match std::fs::read_to_string(&marker) {
-        Ok(recorded) => recorded.trim_end_matches('\n').to_owned(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "sqlite".to_owned(),
-        Err(error) => return Err(format!("read {}: {error}", marker.display())),
-    };
+fn plan_blob_store(
+    data_dir: &Path,
+    recorded: Option<&str>,
+    blobs: &BlobStore,
+) -> Result<BlobStorePlan, String> {
+    let recorded = recorded.unwrap_or("sqlite").to_owned();
     let data_dir = absolute(data_dir)?;
     let (wanted, blob_dir) = match blobs {
         BlobStore::Sqlite => ("sqlite".to_owned(), None),
@@ -459,7 +509,6 @@ fn plan_blob_store(data_dir: &Path, blobs: &BlobStore) -> Result<BlobStorePlan, 
     Ok(BlobStorePlan {
         blob_dir,
         record: Some(BlobStoreRecord {
-            marker,
             contents: format!("{wanted}\n"),
         }),
     })
@@ -520,8 +569,7 @@ pub fn aws_region_of_vercel(vercel: &str) -> Option<&'static str> {
 /// directory would delete each other's values. The claim is exclusive: the
 /// owner file is created only if none exists, so of two data dirs claiming
 /// one blob dir at once, one wins and the other reads its id.
-fn claim_blob_dir(data_dir: &Path, blob_dir: &Path) -> Result<(), String> {
-    let id = store_id(data_dir)?;
+fn claim_blob_dir(id: &str, blob_dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(blob_dir)
         .map_err(|e| format!("failed to create blob dir '{}': {e}", blob_dir.display()))?;
     let owner_file = blob_dir.join(BLOB_OWNER_FILE);
@@ -589,19 +637,6 @@ fn read_owner(owner_file: &Path) -> Result<String, String> {
     ))
 }
 
-/// The data directory's id, made on first use.
-fn store_id(data_dir: &Path) -> Result<String, String> {
-    let file = data_dir.join(STORE_ID_FILE);
-    match std::fs::read_to_string(&file) {
-        Ok(id) => return Ok(id.trim().to_owned()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("read {}: {error}", file.display())),
-    }
-    let id = uuid::Uuid::new_v4().to_string();
-    write_durably(&file, format!("{id}\n").as_bytes())?;
-    Ok(id)
-}
-
 /// `path` as one name per directory, read the way the file system reads it:
 /// each part that exists is canonicalized as it is reached (so a symlink,
 /// and a `..` after it, resolve as they would on disk), and parts that do
@@ -652,12 +687,17 @@ fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
     path
 }
 
+/// A temporary name next to `path`, unique to this write.
+fn temporary_beside(path: &Path) -> PathBuf {
+    path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()))
+}
+
 /// Write `path` so that a crash leaves either the old file or the whole
 /// new one: a synced temporary file renamed into place, then the directory
-/// synced.
-fn write_durably(path: &Path, contents: &[u8]) -> Result<(), String> {
+/// synced. A `private` file is readable by its owner alone.
+pub(super) fn write_durably(path: &Path, contents: &[u8], private: bool) -> Result<(), String> {
     let temporary = temporary_beside(path);
-    let written = write_synced(&temporary, contents).and_then(|()| {
+    let written = write_synced_with(&temporary, contents, private).and_then(|()| {
         std::fs::rename(&temporary, path)
             .map_err(|e| format!("rename {}: {e}", temporary.display()))
     });
@@ -668,15 +708,24 @@ fn write_durably(path: &Path, contents: &[u8]) -> Result<(), String> {
     sync_dir(path.parent().unwrap_or(Path::new(".")))
 }
 
-/// A temporary name next to `path`, unique to this write.
-fn temporary_beside(path: &Path) -> PathBuf {
-    path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()))
+fn write_synced(path: &Path, contents: &[u8]) -> Result<(), String> {
+    write_synced_with(path, contents, false)
 }
 
-fn write_synced(path: &Path, contents: &[u8]) -> Result<(), String> {
+fn write_synced_with(path: &Path, contents: &[u8], private: bool) -> Result<(), String> {
     use std::io::Write;
-    let mut file =
-        std::fs::File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    if private {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    let mut file = options
+        .open(path)
+        .map_err(|e| format!("create {}: {e}", path.display()))?;
     let written = file
         .write_all(contents)
         .and_then(|()| file.sync_all())
@@ -747,8 +796,7 @@ fn validate_server_config(auth_config: &AuthConfig) -> Result<(), String> {
 
 fn log_auth_config(auth_config: &AuthConfig) {
     info!(
-        "Auth configured: local_first={}, backend={}, admin={}",
-        auth_config.allow_local_first_auth,
+        "Auth configured: backend={}, admin={}",
         auth_config.backend_secret.is_some(),
         auth_config.admin_secret.is_some()
     );
@@ -757,6 +805,10 @@ fn log_auth_config(auth_config: &AuthConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What earlier releases kept beside a store, and stores still mirror.
+    const BLOB_STORE_MARKER: &str = "blob-store";
+    const STORE_ID_FILE: &str = "store-id";
     use crate::server::catalogue::CatalogueStore;
     use jazz::tools::AppId;
 
@@ -981,6 +1033,95 @@ mod tests {
         assert_ne!(recorded[0], recorded[1]);
     }
 
+    /// A server whose bucket refuses its keys does not start: its large
+    /// values could only ever stay on its own disk. One whose bucket is
+    /// failing or unreachable starts, and the store retries.
+    #[test]
+    fn a_bucket_that_refuses_the_keys_stops_startup() {
+        use std::sync::atomic::Ordering;
+        let bucket = crate::s3::mock::MockS3::start();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let start = |options: crate::s3::S3Options| {
+            let data_dir = tempfile::TempDir::new().expect("temp data dir");
+            let built = rt.block_on(
+                ServerBuilder::new(AppId::from_name("s3-startup-check"))
+                    .with_storage(StorageBackend::Persistent {
+                        path: data_dir.path().to_path_buf(),
+                    })
+                    .with_blob_store(BlobStore::S3(options))
+                    .build(),
+            );
+            match built {
+                Ok(server) => {
+                    rt.block_on(server.shutdown());
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            }
+        };
+        let mut wrong = bucket.options("app/");
+        wrong.credentials = crate::s3::S3Credentials::Static(crate::s3::Keys {
+            access_key_id: "AKIAWRONG".to_owned(),
+            secret_access_key: "nope".to_owned(),
+            session_token: None,
+        });
+        let error = start(wrong).expect_err("wrong keys refuse to start");
+        assert!(error.contains("InvalidAccessKeyId"), "{error}");
+        assert!(
+            error.contains("check the S3 access key and secret"),
+            "{error}"
+        );
+        assert!(
+            error.contains(&AppId::from_name("s3-startup-check").to_string()),
+            "the error names the app: {error}"
+        );
+
+        start(bucket.options("app/")).expect("the right keys start");
+
+        bucket.state.failing.store(true, Ordering::Relaxed);
+        start(bucket.options("other/")).expect("a failing bucket still starts");
+        bucket.state.failing.store(false, Ordering::Relaxed);
+
+        // Another store's prefix is refused for good too.
+        let owned = bucket.options("app/");
+        let error = start(owned).expect_err("another store's prefix refuses to start");
+        assert!(error.contains("belongs to store"), "{error}");
+
+        // A bucket that does not exist is refused for good, with a hint.
+        bucket.state.no_bucket.store(true, Ordering::Relaxed);
+        let error =
+            start(bucket.options("missing/")).expect_err("a missing bucket refuses to start");
+        assert!(error.contains("NoSuchBucket"), "{error}");
+        assert!(
+            error.contains("check the bucket name and region"),
+            "{error}"
+        );
+        bucket.state.no_bucket.store(false, Ordering::Relaxed);
+
+        // A bucket that does not answer only delays startup, by at most the
+        // check's budget.
+        bucket.state.stalled.store(true, Ordering::Relaxed);
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let began = std::time::Instant::now();
+        let server = rt
+            .block_on(
+                ServerBuilder::new(AppId::from_name("s3-startup-check"))
+                    .with_storage(StorageBackend::Persistent {
+                        path: data_dir.path().to_path_buf(),
+                    })
+                    .with_blob_store(BlobStore::S3(bucket.options("slow/")))
+                    .build(),
+            )
+            .expect("a bucket that does not answer still starts");
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(10),
+            "startup waited {:?}",
+            began.elapsed()
+        );
+        bucket.state.stalled.store(false, Ordering::Relaxed);
+        rt.block_on(server.shutdown());
+    }
+
     /// A Blob store's default prefix is the data dir's own too.
     #[tokio::test]
     async fn a_vercel_blob_store_without_a_prefix_gets_one_per_data_dir() {
@@ -1108,6 +1249,7 @@ mod tests {
         let through_link = root.path().join("link/../blobs");
         let plan = plan_blob_store(
             &data_dir,
+            None,
             &BlobStore::Files {
                 dir: Some(through_link),
             },
@@ -1127,9 +1269,14 @@ mod tests {
                 let (data, blob) = (dir.path().to_path_buf(), blobs.path().to_path_buf());
                 let start = start.clone();
                 std::thread::spawn(move || {
-                    let id = store_id(&data).unwrap();
+                    let id = super::super::identity::open_store_identity(
+                        &data,
+                        super::super::identity::IdentityOpen::Server { app_id: "claims" },
+                    )
+                    .unwrap()
+                    .store_id;
                     start.wait();
-                    (id, claim_blob_dir(&data, &blob).is_ok())
+                    (id.clone(), claim_blob_dir(&id, &blob).is_ok())
                 })
             })
             .collect();
@@ -1150,7 +1297,7 @@ mod tests {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let outside = tempfile::TempDir::new().expect("temp blob dir");
         let plan = |dir: PathBuf| {
-            plan_blob_store(data_dir.path(), &BlobStore::Files { dir: Some(dir) })
+            plan_blob_store(data_dir.path(), None, &BlobStore::Files { dir: Some(dir) })
                 .expect("plan")
                 .record
                 .expect("a record to write")

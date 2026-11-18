@@ -22,7 +22,8 @@ export type NativeCoreErrorCode =
   | "not_observed"
   | "historical_read_requires_server"
   | "unsupported_storage_codecs"
-  | "authority_changed";
+  | "authority_changed"
+  | "store_opened_without_migrations";
 
 /** Read the string `code` of a thrown value, or `undefined` when it has none. */
 export function nativeErrorCode(error: unknown): string | undefined {
@@ -43,6 +44,7 @@ const NATIVE_CORE_ERROR_CODES: ReadonlySet<string> = new Set<NativeCoreErrorCode
   "historical_read_requires_server",
   "unsupported_storage_codecs",
   "authority_changed",
+  "store_opened_without_migrations",
 ]);
 
 /** The core `ErrorCode` a thrown value carries, or `undefined` for any other value. */
@@ -73,7 +75,8 @@ export type NativeCoreErrorReason =
   | "missing_chunks"
   | "predecessor_rejected"
   | "schema_version_not_deployed"
-  | "identity_mismatch";
+  | "identity_mismatch"
+  | "schema_version_unsupported";
 
 /** Every reason this build knows; a test checks it against the engine's `Reason::ALL`. */
 export const NATIVE_CORE_ERROR_REASONS: ReadonlySet<string> = new Set<NativeCoreErrorReason>([
@@ -89,6 +92,7 @@ export const NATIVE_CORE_ERROR_REASONS: ReadonlySet<string> = new Set<NativeCore
   "predecessor_rejected",
   "schema_version_not_deployed",
   "identity_mismatch",
+  "schema_version_unsupported",
 ]);
 
 /** The core `Reason` a thrown value carries, or `undefined` when it has none this build knows. */

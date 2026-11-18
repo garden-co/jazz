@@ -32,7 +32,8 @@ export function localFirstAccountId(appId: string, subject: string): string {
 /** Hosts provide the existing Rust-backed synchronous token minting function. */
 export function localFirstFactory(options: {
   appId: string;
-  mintToken(secret: string, audience: string): string;
+  /** `fresh`: sign a new token, even where a cached one would do. */
+  mintToken(secret: string, audience: string, request?: { fresh?: boolean }): string;
   retainSecret(secret: string): void | Promise<void>;
   generateSecret?(): string;
   isSecretRetained?(secret: string): Promise<boolean>;
@@ -42,20 +43,20 @@ export function localFirstFactory(options: {
     const token = options.mintToken(secret, options.appId);
     const payload = parseJwtPayload(token);
     if (payload?.iss !== "urn:jazz:local-first" || typeof payload.sub !== "string") {
-      throw new Error("Native runtime returned an invalid local-first identity");
+      throw new Error("Native runtime returned an invalid device account identity");
     }
     const retained = Promise.resolve(options.retainSecret(secret));
     // A synchronous handle may exist before asynchronous platform persistence
     // finishes, but no context can use its key before durable retention.
     // Observe rejection immediately even if the app never opens a context.
     void retained.catch(() => {});
-    const getToken = async () => {
+    const getToken = async (request?: { fresh?: boolean }) => {
       await retained.catch(async (failure) => {
         // An explicit host persistence retry may have retained this exact root.
         // Checking durability never changes selection or invents another handle.
         if (!(await options.isSecretRetained?.(secret))) throw failure;
       });
-      return options.mintToken(secret, options.appId);
+      return options.mintToken(secret, options.appId, request);
     };
     return {
       secret,

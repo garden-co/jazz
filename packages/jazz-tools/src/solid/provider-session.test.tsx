@@ -3,6 +3,12 @@ import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
+import {
+  ownJazzSession,
+  startJazzSession,
+  type JazzSession,
+  type JazzSessionErrorViewProps,
+} from "../session/jazz-session.js";
 import { attachSubscriptionStore } from "../subscription-store-internal.js";
 import { JazzProvider, useJazzSession } from "./session.js";
 import { useJazzClient } from "./provider.js";
@@ -110,6 +116,43 @@ it("retries startup through the default UI and exposes unified auth to children"
   await flush();
   expect(auth!.snapshot().error?.message).toBe("logout failed");
 });
+it("gives a custom error view { error, recovery, retry }, whose retry never rejects", async () => {
+  const { owner } = await setup();
+  await owner.createLocalFirst();
+  factory
+    .mockRejectedValueOnce(new Error("startup unavailable"))
+    .mockRejectedValueOnce(new Error("still unavailable"));
+  const seen: JazzSessionErrorViewProps[] = [];
+  const node = document.createElement("div");
+  document.body.append(node);
+  dispose = render(
+    () => (
+      <JazzProvider
+        config={{ scope: "test" }}
+        error={(props) => {
+          seen.push(props);
+          return (
+            <button onClick={props.retry}>
+              {props.error.message} ({props.recovery})
+            </button>
+          );
+        }}
+      >
+        <p>PRIVATE</p>
+      </JazzProvider>
+    ),
+    node,
+  );
+  await flush();
+  expect(node.textContent).toBe("startup unavailable (session)");
+  expect(Object.keys(seen.at(-1)!).sort()).toEqual(["error", "recovery", "retry"]);
+  await expect(seen.at(-1)!.retry()).resolves.toBeUndefined();
+  await flush();
+  expect(node.textContent).toBe("still unavailable (session)");
+  node.querySelector("button")!.click();
+  await flush();
+  expect(node.textContent).toBe("PRIVATE");
+});
 it("follows the backend on refresh and releases children before shutdown", async () => {
   const { owner, events } = await setup();
   backend.user = null;
@@ -177,4 +220,32 @@ it("refuses the removed autoAttachDevTools prop instead of passing it to the cli
     ),
   ).toThrow(/JazzProvider takes no autoAttachDevTools.*mountInspector/);
   expect(factory).not.toHaveBeenCalled();
+});
+
+it("renders nothing once its session is closed, or the closed view", async () => {
+  for (const closed of [undefined, <p>Session closed</p>]) {
+    const { owner } = await setup();
+    await owner.createLocalFirst();
+    const session = ownJazzSession({}, async () => owner, { start: false });
+    await startJazzSession(session as JazzSession<unknown>);
+    const node = document.createElement("div");
+    document.body.append(node);
+    dispose = render(
+      () => (
+        <JazzProvider session={session as never} loading={<p>Loading</p>} closed={closed}>
+          <p>data</p>
+        </JazzProvider>
+      ),
+      node,
+    );
+    await flush();
+    expect(node.textContent).toBe("data");
+    await session.close();
+    await flush();
+    expect(session.getSnapshot().status).toBe("closed");
+    // Before: the loading view, forever.
+    expect(node.textContent).toBe(closed ? "Session closed" : "");
+    dispose();
+    dispose = undefined;
+  }
 });

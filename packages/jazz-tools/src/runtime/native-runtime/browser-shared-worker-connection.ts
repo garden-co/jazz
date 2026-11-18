@@ -2,7 +2,10 @@ import {
   createBrowserWorkerAssetScope,
   resolveBrowserWorkerRuntimeSources,
   resolveBrowserWorkerUrl,
+  vitePrebundledBrokerWorkerUrl,
 } from "../browser-worker-config.js";
+import { browserRuntimeModuleUrl, bundledBrowserWorkerType } from "../browser-worker-assets.js";
+import { isMetroBundle, METRO_SETUP_ERROR } from "../metro-setup-error.js";
 import {
   BrowserWorkerUnresponsiveError,
   deserializeBrowserRelayError,
@@ -17,6 +20,8 @@ import {
   type BrowserFollowerPortRequest,
   type BrowserInspectorControlEvent,
   type BrowserWorkerInitOptions,
+  type BrowserDeleteStoreRequest,
+  type BrowserDeleteStoreResponse,
   BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN,
 } from "./browser-worker-protocol.js";
 import type {
@@ -28,6 +33,12 @@ import { MessagePortBrowserFollowerConnection } from "./browser-follower-connect
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import { waitForInspectorOpening } from "./inspector-control-lifecycle.js";
 import { toError } from "../util.js";
+import {
+  browserStoreGeneration,
+  browserStoreGenerationChanged,
+  renewBrowserStoreGeneration,
+} from "../browser-store-generation.js";
+import { describeBrokerWorkerLoadFailure } from "./broker-worker-load-failure.js";
 
 /**
  * The only place the broker SharedWorker is constructed.
@@ -44,13 +55,84 @@ function createBrokerSharedWorker(
   runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
   name: string,
 ): SharedWorker {
-  if (runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl || runtimeSources?.wasmVersion) {
-    return new SharedWorker(resolveBrowserWorkerUrl(runtimeSources), { type: "module", name });
+  if (usesJazzResolvedWorkerUrl(runtimeSources)) {
+    return new SharedWorker(resolveBrowserWorkerUrl(runtimeSources), {
+      // Metro cannot build the worker from the expression below. It names
+      // the worker it built by URL instead, as a classic script. A URL the
+      // app sets is started as a module, and the type is not part of the
+      // worker's name: under Metro, leave brokerWorkerUrl unset (documented).
+      type: (appServesWorker(runtimeSources) ? null : bundledBrowserWorkerType()) ?? "module",
+      name,
+    });
   }
-  return new SharedWorker(new URL("../../worker/jazz-broker-worker.js", import.meta.url), {
+  // Under the Vite dev server's pre-bundle the literal below points nowhere
+  // (Vite 6/7); the dev server resolves the worker by package instead.
+  const prebundledUrl = vitePrebundledBrokerWorkerUrl(browserRuntimeModuleUrl());
+  if (prebundledUrl) return new SharedWorker(prebundledUrl, { type: "module", name });
+  const worker = new SharedWorker(new URL("../../worker/jazz-broker-worker.js", import.meta.url), {
     type: "module",
     name,
   });
+  // Expo's Metro rewrites the expression above into a dedicated Worker, which
+  // has no port to attach a lease or a runtime to.
+  if (!("port" in worker)) {
+    (worker as { terminate?: () => void }).terminate?.();
+    throw new Error(METRO_SETUP_ERROR);
+  }
+  return worker;
+}
+
+function appServesWorker(runtimeSources: BrowserWorkerInitOptions["runtimeSources"]): boolean {
+  return Boolean(runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl);
+}
+
+/**
+ * Whether the worker starts from the URL Jazz resolves: one the app serves,
+ * or the one a bundler that can't build the worker from
+ * `new SharedWorker(new URL(...))` named for it (Metro).
+ *
+ * A `wasmVersion` alone doesn't: the bundler's worker URL already changes
+ * with its bytes, and the realm name carries the versioned asset scope
+ * (`createBrowserSharedWorkerBaseName`), so tabs of another deployment never
+ * share the worker.
+ */
+function usesJazzResolvedWorkerUrl(
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+): boolean {
+  return appServesWorker(runtimeSources) || bundledBrowserWorkerType() !== null;
+}
+
+/**
+ * Fail as soon as the browser reports that the broker worker script never
+ * started, naming the likely cause, instead of waiting out an admission
+ * timeout that can only say the worker was silent. Calls `onFailure` at most
+ * once; the returned function stops listening.
+ */
+function watchBrokerWorkerStart(
+  worker: Pick<SharedWorker, "port"> &
+    Partial<Pick<SharedWorker, "addEventListener" | "removeEventListener">>,
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+  onFailure: (error: Error) => void,
+): () => void {
+  if (typeof worker.addEventListener !== "function") return () => undefined;
+  let watching = true;
+  const onError = () => {
+    if (!watching) return;
+    stop();
+    void describeBrokerWorkerLoadFailure({
+      workerUrl: usesJazzResolvedWorkerUrl(runtimeSources)
+        ? resolveBrowserWorkerUrl(runtimeSources)
+        : vitePrebundledBrokerWorkerUrl(browserRuntimeModuleUrl()),
+      moduleUrl: browserRuntimeModuleUrl(),
+      metro: isMetroBundle(),
+    }).then(onFailure);
+  };
+  const stop = () => {
+    watching = false;
+    worker.removeEventListener?.("error", onError);
+  };
+  worker.addEventListener("error", onError);
+  return stop;
 }
 
 export type BrowserForegroundNodeLeaseOptions = Pick<
@@ -112,6 +194,64 @@ export function createBrowserSharedWorkerBaseName(
   dbName: string,
 ): string {
   return ["jazz-runtime", dbName, createBrowserWorkerAssetScope(runtimeSources)].join(":");
+}
+
+/** How long a store delete may take before the page gives up on the worker (it tries again later). */
+export const DELETE_STORE_TIMEOUT_MS = 30_000;
+
+/**
+ * Delete `dbName`'s store through its broker worker, without opening it
+ * (#5250). `"held"`, deleting nothing, while a tab has it open or another
+ * realm owns it. Rejects when the worker fails or doesn't answer in time.
+ */
+export function deleteBrowserStore(
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+  dbName: string,
+): Promise<"deleted" | "held"> {
+  const workerName = createBrowserSharedWorkerBaseName(runtimeSources, dbName);
+  const worker = createBrokerSharedWorker(
+    runtimeSources,
+    `${workerName}:generation-${readWorkerGeneration(workerName)}`,
+  );
+  const port = worker.port;
+  return new Promise<"deleted" | "held">((resolve, reject) => {
+    const timer = setTimeout(() => {
+      finish();
+      reject(new Error("Jazz's browser worker didn't answer a store delete in time"));
+    }, DELETE_STORE_TIMEOUT_MS);
+    const stopWatching = watchBrokerWorkerStart(worker, runtimeSources, (error) => {
+      finish();
+      reject(error);
+    });
+    const onMessage = (event: MessageEvent<BrowserDeleteStoreResponse>) => {
+      const answer = event.data;
+      if (answer?.type === "delete-store-result") {
+        finish();
+        // A tab in the back/forward cache meanwhile must not come back to it.
+        if (answer.outcome === "deleted") renewBrowserStoreGeneration(dbName);
+        resolve(answer.outcome);
+      } else if (answer?.type === "delete-store-error") {
+        finish();
+        reject(deserializeBrowserRelayError(answer.error));
+      }
+    };
+    function finish() {
+      clearTimeout(timer);
+      stopWatching();
+      port.removeEventListener("message", onMessage);
+      port.close();
+    }
+    port.addEventListener("message", onMessage);
+    port.start();
+    // Before as well as after: a tab coming back while the delete runs must
+    // not reconnect to it. A delete that deletes nothing costs it a reload.
+    renewBrowserStoreGeneration(dbName);
+    port.postMessage({
+      type: "delete-store",
+      dbName,
+      ...(runtimeSources ? { runtimeSources } : {}),
+    } satisfies BrowserDeleteStoreRequest);
+  });
 }
 
 function foregroundLeaseCleanupKey(workerName: string, storageOwner: string): string {
@@ -181,6 +321,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
           crypto.randomUUID(),
           remainingAdmissionMs,
           workerWasmPrefetch(runtimeSources),
+          runtimeSources,
         );
         if (outcome.type === "ready") return outcome.lease;
         if (outcome.type === "worker-closing") {
@@ -226,12 +367,14 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
   }
 
   private static acquireFromWorkerGeneration(
-    worker: Pick<SharedWorker, "port">,
+    worker: Pick<SharedWorker, "port"> &
+      Partial<Pick<SharedWorker, "addEventListener" | "removeEventListener">>,
     options: BrowserForegroundNodeLeaseOptions,
     cleanupKey: string,
     attemptId: string,
     timeoutMs: number,
     wasmPrefetch?: BrowserForegroundNodeLeaseProbeRequest["wasmPrefetch"],
+    runtimeSources?: BrowserWorkerInitOptions["runtimeSources"],
   ): Promise<ForegroundNodeLeaseAttemptOutcome> {
     const port = worker.port;
     return new Promise<ForegroundNodeLeaseAttemptOutcome>((resolve, reject) => {
@@ -266,6 +409,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
       const cleanup = () => {
         if (admissionTimeout) clearTimeout(admissionTimeout);
         admissionTimeout = null;
+        stopWatchingStart();
         // A successful concurrent admission never owned this retained cleanup.
         // Only its timeout owner may clear the shared key; otherwise it could
         // let a third caller accumulate another orphan-risking port.
@@ -345,6 +489,14 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
         port.close();
         rejectPublic(new Error("Shared browser foreground lease port message error"));
       };
+      // A worker whose script never loaded can hold no lease and will never
+      // acknowledge a cancellation, so there is nothing to retain: settle at
+      // once (or, after a timeout, release the retained cleanup).
+      const stopWatchingStart = watchBrokerWorkerStart(worker, runtimeSources, (error) => {
+        cleanup();
+        port.close();
+        rejectPublic(error);
+      });
       port.addEventListener("message", onMessage);
       port.addEventListener("messageerror", onMessageError);
       port.start();
@@ -474,6 +626,9 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   private cancelBootstrap: (() => void) | null = null;
   /** Lets go of this connection's liveness lock (see `holdLivenessLock`). */
   private releaseLivenessLock: (() => void) | null = null;
+  private readonly dbName: string;
+  /** The store's incarnation when the page left for the back/forward cache. */
+  private storeGenerationWhenLeft: string | null = null;
 
   constructor(
     runtime: NativeRuntimeAdapter,
@@ -497,6 +652,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     const runtimeSources = resolveBrowserWorkerRuntimeSources(options.runtimeSources);
     const workerName = createBrowserSharedWorkerBaseName(runtimeSources, options.dbName);
     this.workerName = workerName;
+    this.dbName = options.dbName;
     const createWorker = (name: string) => createBrokerSharedWorker(runtimeSources, name);
     // Retain admission failures as state rather than leaving a process-wide
     // bootstrap promise rejected. The manager converts this state back into
@@ -746,8 +902,16 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
             onExplicitOfflineChange: this.callbacks.onExplicitOfflineChange,
             onRemoteLinkChange: this.callbacks.onRemoteLinkChange,
             onFailure: this.callbacks.onFailure,
-            onStorageReset: this.callbacks.onStorageReset,
-            onStorageInvalidated: this.callbacks.onStorageInvalidated,
+            // Each tab that hears of a reset records it, for the tabs in the
+            // back/forward cache that don't (see `storeChangedSinceLeaving`).
+            onStorageReset: (resetId) => {
+              renewBrowserStoreGeneration(this.dbName);
+              this.callbacks.onStorageReset?.(resetId);
+            },
+            onStorageInvalidated: () => {
+              renewBrowserStoreGeneration(this.dbName);
+              this.callbacks.onStorageInvalidated?.();
+            },
           },
           options.logLevel === "trace",
         );
@@ -776,9 +940,18 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
       };
       const cleanup = () => {
         stopClock();
+        stopWatchingStart();
         port.removeEventListener("message", onMessage);
         port.removeEventListener("messageerror", onMessageError);
       };
+      // A realm that never ran admits nobody and acknowledges nothing: fail
+      // admission, or release a cancelled bootstrap's retained port.
+      const stopWatchingStart = watchBrokerWorkerStart(worker, options.runtimeSources, (error) => {
+        cleanup();
+        port.close();
+        if (this.worker === worker) this.worker = null;
+        settle({ connected: false, error });
+      });
       port.addEventListener("message", onMessage);
       port.addEventListener("messageerror", onMessageError);
       if (typeof document !== "undefined")
@@ -845,6 +1018,38 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     return this.heldByAnotherSignIn;
   }
 
+  /**
+   * The page is leaving for the back/forward cache: detach from the worker
+   * and let go of the liveness lock, now, so the worker doesn't count the
+   * page as a live tab while it is cached (see `page-cache`). This
+   * connection is closed after; the page opens a new one when it returns.
+   * Declines (`false`) unless connected and idle (see the follower's
+   * `leaveForPageCache`), or without localStorage to tell, on return,
+   * whether the store was reset meanwhile.
+   */
+  leaveForPageCache(): boolean {
+    if (this.closed || this.readyError || !this.connection) return false;
+    // Without localStorage a tab coming back couldn't tell a reset store:
+    // it keeps its connection and its locks, as before.
+    const generation = browserStoreGeneration(this.dbName);
+    if (generation === null || !this.connection.leaveForPageCache()) return false;
+    this.storeGenerationWhenLeft = generation;
+    this.closed = true;
+    this.connection = null;
+    this.worker = null;
+    this.releaseLivenessLock?.();
+    return true;
+  }
+
+  /**
+   * Whether the store was deleted, reset or invalidated (by another tab, or
+   * by clearing site data) since this connection left for the back/forward
+   * cache: the worker told the tabs attached then, not this one.
+   */
+  storeChangedSinceLeaving(): boolean {
+    return browserStoreGenerationChanged(this.dbName, this.storeGenerationWhenLeft);
+  }
+
   async shutdown(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -869,9 +1074,21 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     await this.connection?.flushLocal();
   }
 
-  async deleteStorage(): Promise<void> {
+  async deleteStorage(): Promise<{ pendingUploads?: number } | void> {
     await this.ready();
-    await this.connection?.deleteStorage();
+    // Before as well as after (see `storeChangedSinceLeaving`): a tab coming
+    // back mid-delete reloads rather than reconnect to what is going.
+    renewBrowserStoreGeneration(this.dbName);
+    try {
+      return await this.connection?.deleteStorage();
+    } finally {
+      renewBrowserStoreGeneration(this.dbName);
+    }
+  }
+
+  async storePendingUploads(): Promise<number | undefined> {
+    await this.ready();
+    return this.connection?.storePendingUploads();
   }
 
   async openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort> {

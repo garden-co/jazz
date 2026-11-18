@@ -1,15 +1,20 @@
-import { createJazz, remote, type Jazz } from "../../src/backend/create-jazz.js";
-import {
-  liveAuthorityApp as app,
-  liveAuthorityPermissions,
-  type LiveAuthoritySeed,
-} from "./live-authority-replay-schema.js";
+import { createTestJazz, remote, type Jazz } from "../../src/backend/create-jazz.js";
+import { readFileSync } from "node:fs";
+import { testApp } from "../../src/testing/test-app.js";
+import type { LiveAuthoritySeed } from "./live-authority-replay-schema.js";
 import type { JazzServerInfo } from "./testing-server.js";
 
-// The app's backend, run against the core in `info` (as the app runs it).
+// The app's backend, run against the test core in `info`, as the app runs it.
+// It reads the committed apps/live-authority-replay files: vitest bundles this
+// module into its config, where no jazz.generated.ts can be imported.
+const appDir = new URL("./apps/live-authority-replay/", import.meta.url);
+const app = testApp(readFileSync(new URL("jazz.app.json", appDir), "utf8"));
+const liveAuthorityPermissions = JSON.parse(
+  readFileSync(new URL("jazz.permissions.json", appDir), "utf8"),
+);
 const backends = new Map<string, Jazz>();
 export async function liveAuthorityBackendOpen(info: JazzServerInfo): Promise<LiveAuthoritySeed> {
-  const jazz = createJazz({
+  const jazz = createTestJazz({
     app,
     permissions: liveAuthorityPermissions,
     store: remote({ url: info.serverUrl, appId: info.appId, secret: info.adminSecret }),

@@ -9,7 +9,7 @@ As you develop your Jazz application, you might find yourself needing to test fu
 
 If your application uses a Jazz `Db` directly, you can open a session that keeps Jazz on this device
 only (`serverUrl: null`) and use its `session.db`. It signs in as a
-[device account](/docs/setup/auth/local-first), so it needs no backend:
+[device account](/docs/setup/auth/device-accounts), so it needs no backend:
 
 ```typescript
 import { createJazzClient } from "jazz-tools/client";
@@ -45,8 +45,8 @@ and permissions, and gives you session-scoped database clients for assertions.
 ```typescript title="permissions.test.ts" custom="noscroll"
 import { createPolicyTestApp, type PolicyTestApp } from "jazz-tools/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { app } from "../schema.js";
-import permissions from "../permissions.js";
+import { app } from "../jazz.generated";
+import permissions from "../jazz.permissions.json" with { type: "json" };
 
 let testApp: PolicyTestApp;
 
@@ -99,8 +99,50 @@ describe("todo permissions", () => {
 });
 ```
 
-`createPolicyTestApp` takes the app created with `defineApp(...)`, the
-permissions object created with `definePermissions(...)`, and your test runner's `expect` function.
+`createPolicyTestApp(app, permissions, expect)` takes the `app` your `jazz.generated.ts` exports,
+your `jazz.permissions.json` (imported as JSON, or an inline object of the same shape), and your test
+runner's `expect` function. Like a backend, it checks the permissions against the app and refuses
+ones that don't fit it.
+
+To try out a policy without changing your app's files, write the permissions inline:
+
+```typescript
+const testApp = await createPolicyTestApp(
+  app,
+  {
+    tables: {
+      todos: {
+        read: "ownerId = session.user",
+        insert: "ownerId = session.user",
+        update: "ownerId = session.user",
+      },
+    },
+  },
+  expect,
+);
+```
+
+A test can also define a whole app inline with `testApp` from `jazz-tools/testing`. It takes an
+object in the shape `jazz-tools generate` writes to `jazz.app.json`, and compiles it the way `jazz-tools generate`
+does. Its rows are loosely typed, since there are no generated bindings:
+
+```typescript
+import { createPolicyTestApp, testApp } from "jazz-tools/testing";
+
+const app = testApp({
+  tables: {
+    todos: { columns: { title: "string", ownerId: "uuid" } },
+  },
+});
+const permissions = {
+  tables: { todos: { read: "ownerId = session.user", insert: "true" } },
+};
+
+const policyTestApp = await createPolicyTestApp(app, permissions, expect);
+```
+
+If the inline app declares computed fields or transforms, pass their implementations (what
+`jazz.computed.ts` exports) as the second argument: `testApp(file, { computed, transforms })`.
 
 The returned `PolicyTestApp` provides:
 
@@ -109,8 +151,14 @@ The returned `PolicyTestApp` provides:
 - `testApp.accountFor(session)`&hairsp;—&hairsp;get the account a session acts for, for example to seed rows a guest (device account) owns
 - `testApp.sessionFor(session)`&hairsp;—&hairsp;get the session `as()` acts with, including a guest's derived `user_id`
 - `testDb.expectAllowed(fn)`&hairsp;—&hairsp;check that a write can be staged locally, then roll it back; this does not prove that the server will accept it
-- `testDb.expectDenied(fn)`&hairsp;—&hairsp;wait for the server to reject a write because of a policy
+- `testDb.expectDenied(fn)`&hairsp;—&hairsp;check that a write is denied: either at once, as it is staged (for example a write to a row deleted on this replica), or by the server once it arrives
 - `testApp.shutdown()`&hairsp;—&hairsp;stop the local client and server
+
+`as()` acts for any user, whether or not they have a Jazz account yet. Your real backend is
+stricter: `jazz.forReqUser` throws `NoJazzAccountError` for a user who has no account until they
+sign in from a Jazz client or you call `jazz.createAccountFor(userId)` (see
+[Users without an account](/docs/setup/deployment/own-server#users-without-an-account)). Test
+that path through `startTestJazz` below.
 
 To test as a guest (a device account), pass `authMode: "local-first"` and leave out `issuer` and
 `account_id`, with empty `claims`. The test app derives a device account key from `user_id` and acts
@@ -154,20 +202,26 @@ as its store and a stand-in `authenticate`:
 
 ```typescript
 import { startTestJazz, type TestJazz } from "jazz-tools/testing";
-import permissions from "../permissions.js";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated";
+import permissions from "../jazz.permissions.json" with { type: "json" };
 
 const testJazz: TestJazz = await startTestJazz({ app, permissions });
 ```
 
 - **Guests** (anonymous clients, or device accounts) connect to `testJazz.url`.
-- **Signed-in users** call `await testJazz.as(userId, claims)`. Each user gets their own origin,
-  which stands in for their browser's session cookie, and your permissions see `userId` and
-  `claims` as the signed-in user. Pass its `serverUrl` to `createJazzClient` and call
-  `refresh()`, as below.
-- **Clients that send `Authorization: Bearer`** (React Native, Node, a CLI) use
-  `testJazz.bearer(userId, claims)` as their token against `testJazz.url`, for example
-  `bearer: () => token` on `createJazzClient`.
+- **Signed-in users where there is no DOM** (plain Node Vitest, a CLI) sign in with a bearer
+  token: `testJazz.bearer(userId, claims)` returns one your permissions see as that user. Pass it
+  as `bearer: () => token` on `createJazzClient`, with `serverUrl: testJazz.url`, and call
+  `refresh()`, as below. There, the `serverUrl` from `testJazz.as()` doesn't sign anyone in:
+  `refresh()` throws "loginWithBackend and linkWithBackend need a browser".
+- **Signed-in users in a real browser** (Vitest browser mode, Playwright) call
+  `await testJazz.as(userId, claims)` instead and point the client at its `serverUrl`: each user
+  gets their own origin, which stands in for their session cookie. `bearer` is refused wherever
+  there is a DOM. jsdom and happy-dom have one too, but can't run a syncing client (see
+  [UI tests](#ui-tests)), so test signed-in sync in a real browser or in plain Node.
+- **React Native logic** runs in plain Node the same way (see
+  [React Native](/docs/setup/react-native#testing-without-a-device)), not under the React Native
+  Jest preset, where `bearer` on `createJazzClient` from `jazz-tools/client` is refused.
 - `testJazz.jazz` is the app's `Jazz` handle, for `forReqUser`, `db` and the rest of your backend
   code.
 - `await testJazz.stop()` stops everything it started.
@@ -175,12 +229,12 @@ const testJazz: TestJazz = await startTestJazz({ app, permissions });
 ```typescript
 import { createJazzClient } from "jazz-tools/client";
 
-// A test client keeps its account in memory and signs in as `userId`.
+// A test client signs in as `userId` with a bearer token; outside a browser it keeps that in memory.
 async function clientAs(userId: string) {
-  let saved: string | null = null;
+  const token = testJazz.bearer(userId);
   const session = await createJazzClient({
-    serverUrl: (await testJazz.as(userId)).serverUrl,
-    store: { read: async () => saved, update: async (change) => void (saved = change(saved)) },
+    serverUrl: testJazz.url,
+    bearer: () => token,
   });
   await session.refresh(); // ask the backend who is signed in
   return session;
@@ -208,8 +262,8 @@ store and sign in through it the way the browser does:
 ```typescript custom="noscroll"
 import { afterEach, expect, it } from "vitest";
 import { createJazz, memory, type Jazz } from "jazz-tools/backend";
-import permissions from "../permissions.js";
-import { app } from "../schema.js";
+import { app } from "../jazz.generated";
+import permissions from "../jazz.permissions.json" with { type: "json" };
 
 let jazz: Jazz | undefined;
 afterEach(() => jazz?.close());
@@ -248,9 +302,10 @@ it("signs in the user authenticate names", async () => {
 
 ### UI tests
 
-For browser or framework tests, start one `startTestJazz` for the test project (for example in
-Vitest's [globalSetup](https://vitest.dev/config/globalsetup)) and point your app's Jazz client
-at it: `testJazz.url` for guests, or the `serverUrl` from `testJazz.as(userId)` for a signed-in
+For browser or framework tests, start one `startTestJazz` for the test project and point your
+app's Jazz client at it. `startTestJazz` runs in Node (it starts HTTP servers), so in Vitest browser
+mode start it in [globalSetup](https://vitest.dev/config/globalsetup) and hand the URLs to the
+tests, for example with `provide`/`inject`: `testJazz.url` for guests, or the `serverUrl` from `testJazz.as(userId)` for a signed-in
 user. Your framework's bindings then create their own clients against it.
 
 If you need to isolate data across tests, give each client its own `dbName`.
@@ -282,73 +337,64 @@ only the clock: `vi.useFakeTimers({ toFake: ["Date"] })`.
 
 #### Testing migrations
 
-`testJazz.redeploy({ app, permissions, migration })` deploys a new version of your app the way a
-real redeploy does: it publishes the new bundle with its migration and restarts your app's Jazz on
-it. Every origin keeps its port, so clients reconnect where they were. A client still using the
-old schema keeps reading and writing through the migration's lens:
+`testJazz.redeploy({ app, permissions })` deploys a new version of your app the way a
+real redeploy does: it publishes the new app with the schema history and migrations it ships, and
+restarts your app's Jazz on it. Every origin keeps its port, so clients reconnect where they were. A
+client still using the old schema keeps reading and writing through the migration's lens.
+
+In an app, the next version is your `jazz.app.json` after
+[`jazz-tools migrations create`](/docs/schemas/migrations). A test can write both versions inline
+with `testApp`: the new one lists the old tables in `history` and the migration from them in
+`migrations`.
 
 ```typescript custom="noscroll"
-import { schema as s, migration as m } from "jazz-tools";
 import { createJazzClient } from "jazz-tools/client";
-import { appMigrations, startTestJazz, type TestJazz } from "jazz-tools/testing";
+import { startTestJazz, testApp, type TestJazz } from "jazz-tools/testing";
 import { expect, it, vi } from "vitest";
 
 async function clientAs(testJazz: TestJazz, userId: string) {
-  let saved: string | null = null;
+  const token = testJazz.bearer(userId);
   const session = await createJazzClient({
-    serverUrl: (await testJazz.as(userId)).serverUrl,
-    store: { read: async () => saved, update: async (change) => void (saved = change(saved)) },
+    serverUrl: testJazz.url,
+    bearer: () => token,
   });
   await session.refresh(); // ask the backend who is signed in
   return session;
 }
 
-const oldSchema = {
-  todos: s.table({ title: s.string(), done: s.boolean() }, {}),
+const oldTables = {
+  todos: { columns: { title: "string", done: "boolean" } },
 };
-const newSchema = {
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-      tags: s.array(s.string()).default([]),
+const oldApp = testApp({ tables: oldTables });
+const newApp = testApp({
+  tables: {
+    todos: {
+      columns: {
+        title: "string",
+        done: "boolean",
+        tags: { array: "string", default: [] },
+      },
     },
-    {},
-  ),
+  },
+  history: { v1: { tables: oldTables } },
+  migrations: [
+    {
+      name: "add-tags",
+      from: "v1",
+      migrate: { todos: { tags: { add: { array: "string" }, default: [] } } },
+    },
+  ],
+});
+const permissions = {
+  tables: { todos: { read: "true", insert: "true" } },
 };
-const migration = m.defineMigration({
-  from: oldSchema,
-  to: newSchema,
-  migrate: { todos: { tags: m.add.array({ of: s.string(), default: [] }) } },
-});
-
-// In an app these come from the generated `migrations/index.ts`. A test that
-// defines its schemas in code builds the same bundle with `appMigrations`.
-const oldApp = s.defineApp(oldSchema, {
-  migrations: await appMigrations(oldSchema),
-});
-const newApp = s.defineApp(newSchema, {
-  migrations: await appMigrations(oldSchema, { to: newSchema, migration }),
-});
-const allowAll = (app: typeof oldApp | typeof newApp) =>
-  s.definePermissions(app, ({ policy }) => [
-    policy.todos.allowRead.always(),
-    policy.todos.allowInsert.always(),
-  ]);
 
 it("lets old-schema clients write rows new-schema clients can read", async () => {
-  const testJazz = await startTestJazz({
-    app: oldApp,
-    permissions: allowAll(oldApp),
-  });
+  const testJazz = await startTestJazz({ app: oldApp, permissions });
   const alice = await clientAs(testJazz, "alice");
   const oldDb = alice.db;
 
-  await testJazz.redeploy({
-    app: newApp,
-    permissions: allowAll(newApp),
-    migration,
-  });
+  await testJazz.redeploy({ app: newApp, permissions });
   const bob = await clientAs(testJazz, "bob");
   const newDb = bob.db;
 

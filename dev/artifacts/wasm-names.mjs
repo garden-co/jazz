@@ -106,6 +106,66 @@ export function stripSymbolHashes(module) {
   return concat(parts);
 }
 
+/** The function names in `module`'s name section, in subsection order. */
+export function functionNames(module) {
+  const bytes = module instanceof Uint8Array ? module : new Uint8Array(module);
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const names = [];
+  let offset = 8;
+  while (offset < bytes.length) {
+    const id = bytes[offset];
+    const [size, start] = readU32(bytes, offset + 1);
+    if (start + size > bytes.length) throw new Error("truncated section in WASM module");
+    const payload = bytes.subarray(start, start + size);
+    offset = start + size;
+    if (id !== CUSTOM_SECTION) continue;
+    const [nameLength, nameStart] = readU32(payload, 0);
+    const nameEnd = nameStart + nameLength;
+    if (decoder.decode(payload.subarray(nameStart, nameEnd)) !== "name") continue;
+    let sub = nameEnd;
+    while (sub < payload.length) {
+      const subId = payload[sub];
+      const [subSize, subStart] = readU32(payload, sub + 1);
+      if (subStart + subSize > payload.length) throw new Error("truncated name subsection");
+      if (subId === FUNCTION_NAMES) {
+        const body = payload.subarray(subStart, subStart + subSize);
+        let [count, at] = readU32(body, 0);
+        while (count--) {
+          let length;
+          [, at] = readU32(body, at);
+          [length, at] = readU32(body, at);
+          if (at + length > body.length) throw new Error("truncated function name");
+          names.push(decoder.decode(body.subarray(at, at + length)));
+          at += length;
+        }
+      }
+      sub = subStart + subSize;
+    }
+  }
+  return names;
+}
+
+// SQLite extensions the browser build compiles out
+// (vendor/sqlite-wasm-rs/JAZZ_PATCH.md), by their C function-name prefixes.
+// dbstat and sqlite_stmt use generic prefixes (ANALYZE has `statInit`), so
+// they match exact names.
+const OMITTED_SQLITE_EXTENSION =
+  /^(sqlite3Fts5|fts5|sqlite3Rtree|rtree|sqlite3session|sqlite3changeset|sqlite3changegroup|sqlite3rebaser|dbpage|bytecodevtab)|^(statConnect|statBestIndex|stmtConnect|stmtBestIndex)$/;
+
+/**
+ * Throw when `module` still links a SQLite extension the browser build
+ * omits. Needs the name section, which release builds keep (`wasm-opt -g`).
+ */
+export function assertNoOmittedSqliteExtensions(module) {
+  const names = functionNames(module);
+  if (!names.length) throw new Error("WASM module has no function names to check");
+  const found = names.filter((name) => OMITTED_SQLITE_EXTENSION.test(name));
+  if (found.length)
+    throw new Error(
+      `WASM links omitted SQLite extensions (${found.length} functions, e.g. ${found.slice(0, 3).join(", ")}); see vendor/sqlite-wasm-rs/JAZZ_PATCH.md`,
+    );
+}
+
 /** Rewrite the WASM file at `path` in place. */
 export function stripSymbolHashesInFile(path) {
   writeFileSync(path, stripSymbolHashes(readFileSync(path)));

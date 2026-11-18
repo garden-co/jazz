@@ -378,8 +378,8 @@ fn variants_sort_in_the_current_declaration_order_and_removed_ones_last() {
     let db = authority_at(v1(), &path);
     insert(&db, 1, "done");
     insert(&db, 2, "todo");
-    // v2 declares `blocked` first: activating it renumbers the tags.
-    block_on(db.activate_schema_with_lenses(v2(), &[lens(&v1(), &v2(), vec![])])).unwrap();
+    // v2 declares `blocked` first: opening under it renumbers the tags.
+    let db = common::reinstall(db, &path, config(v2(), 0), vec![lens(&v1(), &v2(), vec![])]);
     insert(&db, 3, "blocked");
     assert_eq!(
         statuses(&db, by_status()),
@@ -392,7 +392,12 @@ fn variants_sort_in_the_current_declaration_order_and_removed_ones_last() {
 
     // v3 drops `doing` and adds `review`.
     let v3 = tasks(&["blocked", "todo", "review", "done"]);
-    block_on(db.activate_schema_with_lenses(v3.clone(), &[lens(&v2(), &v3, vec![])])).unwrap();
+    let db = common::reinstall(
+        db,
+        &path,
+        config(v3.clone(), 0),
+        vec![lens(&v2(), &v3, vec![])],
+    );
     insert(&db, 4, "review");
     // v3's variants are tags 0-3, and the removed `doing` follows them.
     assert_eq!(
@@ -421,7 +426,8 @@ fn variants_sort_in_the_current_declaration_order_and_removed_ones_last() {
 #[test]
 fn a_replica_tags_variants_itself_and_rows_travel_by_name() {
     let dir = tempfile::tempdir().unwrap();
-    let server = authority_at(v1(), &dir.path().join("server.sqlite"));
+    let server_path = dir.path().join("server.sqlite");
+    let server = authority_at(v1(), &server_path);
     insert(&server, 1, "done");
     let client_path = dir.path().join("client.sqlite");
     let client = open_at(v1(), 1, &client_path);
@@ -446,12 +452,17 @@ fn a_replica_tags_variants_itself_and_rows_travel_by_name() {
             .ok()
     };
     assert_eq!(tags(&client_path), Some(3));
-    assert_eq!(tags(&dir.path().join("server.sqlite")), None);
+    assert_eq!(tags(&server_path), None);
 
-    // The authority admits v2 too, and the app updates to it: a row
-    // written under it travels by name.
-    block_on(server.activate_schema_with_lenses(v2(), &[lens(&v1(), &v2(), vec![])])).unwrap();
+    // The app and its backend are deployed at v2: both reopen under it,
+    // and a row written under it travels by name.
     drop((ahead, _sub, _link, client));
+    let server = common::reinstall(
+        server,
+        &server_path,
+        config(v2(), 0),
+        vec![lens(&v1(), &v2(), vec![])],
+    );
     let client = open_at(v2(), 1, &client_path);
     let _link = link(&client, &server);
     let q = client.prepare_query(&Query::from("tasks")).unwrap();
@@ -476,6 +487,100 @@ fn a_replica_tags_variants_itself_and_rows_travel_by_name() {
     assert_eq!(statuses(&server, by_status()), declared);
 }
 
+/// A deploy admits a version without making it current: the authority's
+/// own schema stays the first one. A session on a version that adds a
+/// variant still writes it, since its commits are checked by its own
+/// version's variants, and reads and filters by it; a session on the
+/// older version reads the row by the new name, and may not write it.
+///
+/// ```
+/// authority (current v1, admits v2)
+///   ▲ alice (v2) ──insert "blocked"──► accepted ──► bob (v1) reads "blocked"
+///   ▲ carol (v2) ──subscribe status = "blocked"──► the row
+///   ✗ bob (v1) ──insert "blocked"
+/// ```
+#[test]
+fn a_session_on_an_admitted_version_writes_the_variant_it_adds() {
+    // As a migration may add one: at the end of the list.
+    let v2 = || tasks(&["todo", "doing", "done", "blocked"]);
+    let dir = tempfile::tempdir().unwrap();
+    let server = authority_at(v1(), &dir.path().join("server.sqlite"));
+    block_on(server.admit_schema_with_lenses(v2(), &[lens(&v1(), &v2(), vec![])])).unwrap();
+    assert_eq!(server.current_schema().version_id(), v1().version_id());
+    let on_v2 = |node: u8, file: &str| {
+        block_on(Db::open_at(
+            config(v2(), node).with_migrations(vec![v1()], vec![lens(&v1(), &v2(), vec![])]),
+            &dir.path().join(file),
+            FileOptions::default(),
+        ))
+        .unwrap()
+    };
+    let alice = on_v2(1, "alice.sqlite");
+    let bob = open_at(v1(), 2, &dir.path().join("bob.sqlite"));
+    let carol = on_v2(3, "carol.sqlite");
+    let _links = [
+        link(&alice, &server),
+        link(&bob, &server),
+        link(&carol, &server),
+    ];
+    let everything = |db: &Db| {
+        let q = db.prepare_query(&Query::from("tasks")).unwrap();
+        block_on(db.subscribe(&q, ReadOpts::default())).unwrap()
+    };
+    let _alice = everything(&alice);
+    let _bob = everything(&bob);
+    let blocked = carol
+        .prepare_query(&Query::from("tasks").filter(status_is("blocked")))
+        .unwrap();
+    let _carol = block_on(carol.subscribe(&blocked, ReadOpts::default())).unwrap();
+    pump(&server, &[&alice, &bob, &carol]);
+
+    insert(&bob, 1, "todo");
+    insert(&alice, 2, "blocked");
+    pump(&server, &[&alice, &bob, &carol]);
+
+    // Accepted: it stays with its writer and reaches the authority and bob.
+    let both = [(1, "todo".to_owned()), (2, "blocked".to_owned())];
+    assert_eq!(statuses(&alice, by_status()), both);
+    assert_eq!(
+        statuses(&server, Query::from("tasks").filter(status_is("blocked"))),
+        [(2, "blocked".to_owned())]
+    );
+    // Bob, on v1, reads the new variant by its name.
+    assert_eq!(
+        statuses(&bob, Query::from("tasks").filter(status_is("todo"))),
+        [(1, "todo".to_owned())]
+    );
+    assert_eq!(ids(&bob, Query::from("tasks")), [1, 2]);
+    assert_eq!(
+        column(
+            &bob,
+            Query::from("tasks").filter(Predicate::Eq(
+                Operand::Column("title".into()),
+                Operand::Literal(name("task 2")),
+            )),
+            "status"
+        ),
+        [(2, Some(name("blocked")))]
+    );
+    // Carol's subscription, evaluated upstream, filters by the new variant.
+    assert_eq!(
+        statuses(&carol, Query::from("tasks").filter(status_is("blocked"))),
+        [(2, "blocked".to_owned())]
+    );
+    // Bob's own writes are still checked by v1's variants.
+    let refused = try_insert(
+        &bob,
+        3,
+        &[("title", name("t")), ("status", name("blocked"))],
+    )
+    .unwrap_err();
+    assert!(
+        refused.to_string().contains("not one of its variants"),
+        "{refused}"
+    );
+}
+
 /// An import of rows another store kept (alpha.59 keeps a variant a later
 /// schema removed) writes a variant it names as an earlier version's
 /// rather than refusing it; it reads back, and sorts after the declared
@@ -483,10 +588,15 @@ fn a_replica_tags_variants_itself_and_rows_travel_by_name() {
 #[test]
 fn an_import_keeps_a_variant_its_schema_no_longer_declares() {
     let dir = tempfile::tempdir().unwrap();
-    let db = authority_at(v1(), &dir.path().join("authority.sqlite"));
+    let path = dir.path().join("authority.sqlite");
+    let db = authority_at(v1(), &path);
     let dropped = tasks(&["todo", "done"]);
-    block_on(db.activate_schema_with_lenses(dropped.clone(), &[lens(&v1(), &dropped, vec![])]))
-        .unwrap();
+    let db = common::reinstall(
+        db,
+        &path,
+        config(dropped.clone(), 0),
+        vec![lens(&v1(), &dropped, vec![])],
+    );
     insert(&db, 1, "done");
     let doing = [("title", name("t")), ("status", name("doing"))];
     let refused = try_insert(&db, 2, &doing).unwrap_err();
@@ -515,7 +625,8 @@ fn an_import_keeps_a_variant_its_schema_no_longer_declares() {
 #[test]
 fn undeclared_and_oversized_variants_are_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let db = authority_at(v1(), &dir.path().join("authority.sqlite"));
+    let path = dir.path().join("authority.sqlite");
+    let db = authority_at(v1(), &path);
     let refused =
         try_insert(&db, 1, &[("title", name("t")), ("status", name("later"))]).unwrap_err();
     assert!(
@@ -611,9 +722,11 @@ fn rename_and_copy_lenses_keep_the_tags() {
     insert(&db, 2, "todo");
 
     let renamed = tasks_with("state", enumeration(&["todo", "doing", "done"]));
-    block_on(db.activate_schema_with_lenses(
-        renamed.clone(),
-        &[lens(
+    let db = common::reinstall(
+        db,
+        &path,
+        config(renamed.clone(), 0),
+        vec![lens(
             &v1(),
             &renamed,
             vec![LensOp::RenameColumn {
@@ -621,8 +734,7 @@ fn rename_and_copy_lenses_keep_the_tags() {
                 to: "state".into(),
             }],
         )],
-    ))
-    .unwrap();
+    );
     insert_state(&db, 3, "done");
     assert_eq!(raw_cells(&path), integers(&[0, 1, 2]));
     let by_state = Query::from("tasks").order_by("state", OrderDirection::Asc);
@@ -642,9 +754,11 @@ fn rename_and_copy_lenses_keep_the_tags() {
 
     // Copy `state` into a new `status`, alongside it.
     let copied = copied_schema();
-    block_on(db.activate_schema_with_lenses(
-        copied.clone(),
-        &[lens(
+    let db = common::reinstall(
+        db,
+        &path,
+        config(copied.clone(), 0),
+        vec![lens(
             &renamed,
             &copied,
             vec![LensOp::CopyColumn {
@@ -652,8 +766,7 @@ fn rename_and_copy_lenses_keep_the_tags() {
                 to: "status".into(),
             }],
         )],
-    ))
-    .unwrap();
+    );
     assert_eq!(
         statuses(&db, by_status()),
         [(2, "todo".into()), (1, "doing".into()), (3, "done".into())]
@@ -702,7 +815,7 @@ fn enum_and_text_never_share_a_stored_column() {
     insert(&db, 1, "doing");
 
     let text = tasks_with("status", ColumnType::Text);
-    let refused = block_on(db.activate_schema(text.clone())).unwrap_err();
+    let refused = block_on(db.admit_schema_with_lenses(text.clone(), &[])).unwrap_err();
     assert!(refused.message.contains("changing the type"), "{refused}");
 
     // Dropped, then re-added as text: a stored column of its own.
@@ -711,7 +824,7 @@ fn enum_and_text_never_share_a_stored_column() {
     let dropped = authority_at(v1(), &dropped_path);
     insert(&dropped, 1, "doing");
     let without = untracked();
-    block_on(dropped.activate_schema(without.clone())).unwrap();
+    let dropped = common::reinstall(dropped, &dropped_path, config(without.clone(), 0), vec![]);
     let readd = lens(
         &without,
         &text,
@@ -720,7 +833,7 @@ fn enum_and_text_never_share_a_stored_column() {
             default: name("unknown"),
         }],
     );
-    block_on(dropped.activate_schema_with_lenses(text.clone(), &[readd])).unwrap();
+    let dropped = common::reinstall(dropped, &dropped_path, config(text.clone(), 0), vec![readd]);
     assert_eq!(raw_cells(&dropped_path), integers(&[1]));
     assert_eq!(
         column(&dropped, Query::from("tasks"), "status"),
@@ -731,7 +844,7 @@ fn enum_and_text_never_share_a_stored_column() {
     let notes = tempfile::tempdir().unwrap();
     let texts = authority_at(text, &notes.path().join("text.sqlite"));
     try_insert(&texts, 1, &[("title", name("t")), ("status", name("todo"))]).unwrap();
-    let refused = block_on(texts.activate_schema(v1())).unwrap_err();
+    let refused = block_on(texts.admit_schema_with_lenses(v1(), &[])).unwrap_err();
     assert!(refused.message.contains("changing the type"), "{refused}");
 
     // Reopening agrees with the open store.
@@ -879,9 +992,11 @@ fn a_copy_and_its_source_tag_later_variants_independently() {
         )
     };
     let copied = schema(&["todo", "doing", "done"], &["todo", "doing", "done"]);
-    block_on(server.activate_schema_with_lenses(
-        copied.clone(),
-        &[lens(
+    let server = common::reinstall(
+        server,
+        &server_path,
+        config(copied.clone(), 0),
+        vec![lens(
             &v1(),
             &copied,
             vec![LensOp::CopyColumn {
@@ -889,14 +1004,17 @@ fn a_copy_and_its_source_tag_later_variants_independently() {
                 to: "copy".into(),
             }],
         )],
-    ))
-    .unwrap();
+    );
     let v4 = schema(
         &["todo", "doing", "done", "later"],
         &["todo", "doing", "done", "urgent"],
     );
-    block_on(server.activate_schema_with_lenses(v4.clone(), &[lens(&copied, &v4, vec![])]))
-        .unwrap();
+    let server = common::reinstall(
+        server,
+        &server_path,
+        config(v4.clone(), 0),
+        vec![lens(&copied, &v4, vec![])],
+    );
     try_insert(
         &server,
         2,
@@ -1026,8 +1144,12 @@ fn a_reorder_renumbers_the_tags_and_older_versions_keep_their_order() {
     insert(&db, 2, "todo");
     insert(&db, 3, "doing");
     let reversed = tasks(&["done", "doing", "todo"]);
-    block_on(db.activate_schema_with_lenses(reversed.clone(), &[lens(&v1(), &reversed, vec![])]))
-        .unwrap();
+    let db = common::reinstall(
+        db,
+        &path,
+        config(reversed.clone(), 0),
+        vec![lens(&v1(), &reversed, vec![])],
+    );
     assert_eq!(
         raw_tags(&path),
         [(0, "done".into()), (1, "doing".into()), (2, "todo".into())]
@@ -1104,16 +1226,19 @@ fn a_reorder_keeps_the_default_of_a_column_added_later() {
     let db = authority_at(v1(), &path);
     insert(&db, 1, "todo");
     let low_first = prioritized(&["low", "high"]);
-    block_on(db.activate_schema_with_lenses(low_first.clone(), &[lens(&v1(), &low_first, vec![])]))
-        .unwrap();
+    let db = common::reinstall(
+        db,
+        &path,
+        config(low_first.clone(), 0),
+        vec![lens(&v1(), &low_first, vec![])],
+    );
     let high_first = prioritized(&["high", "low"]);
-    block_on(
-        db.activate_schema_with_lenses(
-            high_first.clone(),
-            &[lens(&low_first, &high_first, vec![])],
-        ),
-    )
-    .unwrap();
+    let db = common::reinstall(
+        db,
+        &path,
+        config(high_first.clone(), 0),
+        vec![lens(&low_first, &high_first, vec![])],
+    );
     // SQLite's default is `low`'s old tag, now `high`'s.
     let defaults: Vec<(String, String)> = {
         let conn = rusqlite::Connection::open(&path).unwrap();
@@ -1255,7 +1380,12 @@ fn a_copy_sorts_like_its_source() {
     let server = authority_at(v1(), &sp);
     insert(&server, 1, "done");
     insert(&server, 2, "todo");
-    block_on(server.activate_schema_with_lenses(v2(), &[lens(&v1(), &v2(), vec![])])).unwrap();
+    let server = common::reinstall(
+        server,
+        &sp,
+        config(v2(), 0),
+        vec![lens(&v1(), &v2(), vec![])],
+    );
     insert(&server, 3, "blocked");
     let vars = ["blocked", "todo", "doing", "done"];
     let copied = compile_schema(
@@ -1275,9 +1405,11 @@ fn a_copy_sorts_like_its_source() {
             )
             .build(),
     );
-    block_on(server.activate_schema_with_lenses(
-        copied.clone(),
-        &[lens(
+    let server = common::reinstall(
+        server,
+        &sp,
+        config(copied.clone(), 0),
+        vec![lens(
             &v2(),
             &copied,
             vec![LensOp::CopyColumn {
@@ -1285,8 +1417,7 @@ fn a_copy_sorts_like_its_source() {
                 to: "copy".into(),
             }],
         )],
-    ))
-    .unwrap();
+    );
     let by = |c: &str| {
         column(
             &server,
@@ -1370,15 +1501,18 @@ fn in_order(db: &Db, query: &Query) -> Vec<u8> {
 fn a_subscription_under_an_older_version_keeps_its_order() {
     for limit in [None, Some(2usize)] {
         let dir = tempfile::tempdir().unwrap();
-        let db = authority_at(v1(), &dir.path().join("authority.sqlite"));
+        let path = dir.path().join("authority.sqlite");
+        let db = authority_at(v1(), &path);
         insert(&db, 1, "done");
         insert(&db, 3, "doing");
         insert(&db, 6, "doing");
         let reversed = tasks(&["done", "doing", "todo"]);
-        block_on(
-            db.activate_schema_with_lenses(reversed.clone(), &[lens(&v1(), &reversed, vec![])]),
-        )
-        .unwrap();
+        let db = common::reinstall(
+            db,
+            &path,
+            config(reversed.clone(), 0),
+            vec![lens(&v1(), &reversed, vec![])],
+        );
         let old = block_on(db.register_schema_view(v1())).unwrap();
         let mut query = by_status();
         if let Some(limit) = limit {
@@ -1416,7 +1550,8 @@ fn a_subscription_under_an_older_version_keeps_its_order() {
 #[test]
 fn a_range_with_an_unknown_variant_is_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let db = authority_at(v1(), &dir.path().join("authority.sqlite"));
+    let path = dir.path().join("authority.sqlite");
+    let db = authority_at(v1(), &path);
     insert(&db, 1, "todo");
     insert(&db, 2, "done");
     let read = |predicate: Predicate| {
@@ -1560,7 +1695,7 @@ fn a_policy_on_a_variant_keeps_its_rows_across_a_reorder() {
     };
     assert_eq!(sees(v1.clone()), [3]);
     let reversed = done_only(&["done", "doing", "todo"]);
-    block_on(server.activate_schema_with_lenses(reversed.clone(), &[lens(&v1, &reversed, vec![])]))
+    block_on(server.admit_schema_with_lenses(reversed.clone(), &[lens(&v1, &reversed, vec![])]))
         .unwrap();
     insert(&server, 4, "done");
     insert(&server, 5, "todo");
@@ -1573,7 +1708,8 @@ fn a_policy_on_a_variant_keeps_its_rows_across_a_reorder() {
 #[test]
 fn grouping_by_an_enum_follows_the_declaration_order() {
     let dir = tempfile::tempdir().unwrap();
-    let db = authority_at(v1(), &dir.path().join("authority.sqlite"));
+    let path = dir.path().join("authority.sqlite");
+    let db = authority_at(v1(), &path);
     insert(&db, 1, "done");
     insert(&db, 2, "todo");
     insert(&db, 3, "done");
@@ -1605,8 +1741,12 @@ fn grouping_by_an_enum_follows_the_declaration_order() {
     let names: Vec<&str> = in_v1_order.iter().map(|(s, ..)| s.as_str()).collect();
     assert_eq!(names, ["todo", "doing", "done"]);
     let reversed = tasks(&["done", "doing", "todo"]);
-    block_on(db.activate_schema_with_lenses(reversed.clone(), &[lens(&v1(), &reversed, vec![])]))
-        .unwrap();
+    let db = common::reinstall(
+        db,
+        &path,
+        config(reversed.clone(), 0),
+        vec![lens(&v1(), &reversed, vec![])],
+    );
     let mut reversed_order = groups(&db);
     let names: Vec<&str> = reversed_order.iter().map(|(s, ..)| s.as_str()).collect();
     assert_eq!(names, ["done", "doing", "todo"]);

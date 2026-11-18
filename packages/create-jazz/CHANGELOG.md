@@ -1,5 +1,19 @@
 # create-jazz
 
+## 2.0.0-alpha.67
+
+## 2.0.0-alpha.66
+
+## 2.0.0-alpha.65
+
+## 2.0.0-alpha.64
+
+## 2.0.0-alpha.63
+
+## 2.0.0-alpha.62
+
+## 2.0.0-alpha.61
+
 ## 2.0.0-alpha.60
 
 ### Patch Changes

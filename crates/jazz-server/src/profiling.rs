@@ -31,6 +31,7 @@ use jazz::tools::transport_error::ErrorResponse;
 
 use crate::middleware::AuthConfig;
 use crate::middleware::auth::validate_admin_secret;
+use crate::middleware::workload::constant_time_eq;
 
 /// Path of the heap profile on both listeners.
 pub const HEAP_PROFILE_PATH: &str = "/debug/pprof/heap";
@@ -139,7 +140,8 @@ async fn diagnostics_heap_profile_handler(
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "));
-        if provided != Some(expected.as_str()) {
+        let accepted = provided.is_some_and(|provided| constant_time_eq(provided, expected));
+        if !accepted {
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(ErrorResponse::unauthorized(
@@ -291,6 +293,15 @@ mod tests {
             get_with(router(), bearer("wrong")).await.0,
             StatusCode::UNAUTHORIZED
         );
+        // Same length, a prefix, and a longer token that starts with it:
+        // all refused, whatever part of the token they share.
+        for wrong in ["scrapf", "scrap", "scraper", ""] {
+            assert_eq!(
+                get_with(router(), bearer(wrong)).await.0,
+                StatusCode::UNAUTHORIZED,
+                "token {wrong:?}"
+            );
+        }
         assert_eq!(
             get_with(router(), Some(("authorization", "scrape".to_owned())))
                 .await

@@ -25,12 +25,20 @@ mod branch_view_sync;
 mod branch_views;
 #[path = "../bundle_permissions.rs"]
 mod bundle_permissions;
+#[path = "../callback_transaction_cancellation.rs"]
+mod callback_transaction_cancellation;
 #[path = "../catalogue_rows.rs"]
 mod catalogue_rows;
+#[path = "../catalogue_unsupported_versions.rs"]
+mod catalogue_unsupported_versions;
 #[path = "../claims_change.rs"]
 mod claims_change;
+#[path = "../claims_registry_refresh.rs"]
+mod claims_registry_refresh;
 #[path = "../column_defaults.rs"]
 mod column_defaults;
+#[path = "../column_operators.rs"]
+mod column_operators;
 #[path = "../commit_atomicity_frames.rs"]
 mod commit_atomicity_frames;
 #[path = "../composite_indexes.rs"]
@@ -49,10 +57,20 @@ mod enum_tags;
 mod error_code_strings;
 #[path = "../existential_joins.rs"]
 mod existential_joins;
+#[path = "../explain_read_clauses.rs"]
+mod explain_read_clauses;
+#[path = "../fanout_correlation.rs"]
+mod fanout_correlation;
 #[path = "../fanout_differential.rs"]
 mod fanout_differential;
+#[path = "../fanout_policy_pins.rs"]
+mod fanout_policy_pins;
 #[path = "../flat_joins.rs"]
 mod flat_joins;
+#[path = "../follow_memo.rs"]
+mod follow_memo;
+#[path = "../follow_memo_policy.rs"]
+mod follow_memo_policy;
 #[path = "../gather_policy_double_ref.rs"]
 mod gather_policy_double_ref;
 #[path = "../history_reads.rs"]
@@ -61,6 +79,8 @@ mod history_reads;
 mod host_tables;
 #[path = "../include_live.rs"]
 mod include_live;
+#[path = "../kept_plans.rs"]
+mod kept_plans;
 #[path = "../large_value_append.rs"]
 mod large_value_append;
 #[path = "../large_value_chunk_store.rs"]
@@ -77,6 +97,8 @@ mod large_value_sync;
 mod large_value_tx_update;
 #[path = "../large_values.rs"]
 mod large_values;
+#[path = "../late_enum_tags.rs"]
+mod late_enum_tags;
 #[path = "../latest_only_tables.rs"]
 mod latest_only_tables;
 #[path = "../link_identities.rs"]
@@ -85,12 +107,18 @@ mod link_identities;
 mod local_first_first_load_gate;
 #[path = "../local_first_server_wait.rs"]
 mod local_first_server_wait;
+#[path = "../managed_storage.rs"]
+mod managed_storage;
 #[path = "../maybe_conflicting.rs"]
 mod maybe_conflicting;
 #[path = "../mirrored_lens_defaults.rs"]
 mod mirrored_lens_defaults;
 #[path = "../mutation_admission.rs"]
 mod mutation_admission;
+#[path = "../nested_exists_outer_row.rs"]
+mod nested_exists_outer_row;
+#[path = "../nested_relation_reuse.rs"]
+mod nested_relation_reuse;
 #[path = "../order_by_unselected_column.rs"]
 mod order_by_unselected_column;
 #[path = "../parameterized_subscription_routing.rs"]
@@ -101,8 +129,10 @@ mod pending_commit_reopen;
 mod pending_rebase_scope;
 #[path = "../permission_advice.rs"]
 mod permission_advice;
-#[path = "../policy_activation.rs"]
-mod policy_activation;
+#[path = "../policy_check_plans.rs"]
+mod policy_check_plans;
+#[path = "../policy_claim_coercion.rs"]
+mod policy_claim_coercion;
 #[path = "../policy_support_rows.rs"]
 mod policy_support_rows;
 #[path = "../pre_sync_writes.rs"]
@@ -121,24 +151,36 @@ mod recheck_sync;
 mod reconnect_fanout;
 #[path = "../rejected_retry_store.rs"]
 mod rejected_retry_store;
+#[path = "../relation_literal_types.rs"]
+mod relation_literal_types;
 #[path = "../relation_policies.rs"]
 mod relation_policies;
+#[path = "../relation_policy_validation.rs"]
+mod relation_policy_validation;
 #[path = "../relation_queries.rs"]
 mod relation_queries;
 #[path = "../relation_results.rs"]
 mod relation_results;
 #[path = "../relational_delete_retraction.rs"]
 mod relational_delete_retraction;
+#[path = "../relations_parity.rs"]
+mod relations_parity;
 #[path = "../relay_local_seqs.rs"]
 mod relay_local_seqs;
 #[path = "../relay_policy_subscriptions.rs"]
 mod relay_policy_subscriptions;
 #[path = "../relay_serves_on_arrival.rs"]
 mod relay_serves_on_arrival;
+#[path = "../relayed_read_refusal.rs"]
+mod relayed_read_refusal;
+#[path = "../remote_read_after_bulk_writes.rs"]
+mod remote_read_after_bulk_writes;
 #[path = "../reopened_admitted_versions.rs"]
 mod reopened_admitted_versions;
 #[path = "../replica_lost_tail.rs"]
 mod replica_lost_tail;
+#[path = "../required_relation_policies.rs"]
+mod required_relation_policies;
 #[path = "../same_version_bundles.rs"]
 mod same_version_bundles;
 #[path = "../schema_activation.rs"]
@@ -151,6 +193,8 @@ mod serializable_relay;
 mod serializable_sqlite;
 #[path = "../serializable_sync.rs"]
 mod serializable_sync;
+#[path = "../serializable_windows.rs"]
+mod serializable_windows;
 #[path = "../server_store_reset.rs"]
 mod server_store_reset;
 #[path = "../session_policy_values.rs"]
@@ -175,12 +219,16 @@ mod streaming_transaction;
 mod streaming_upload_ownership;
 #[path = "../structured_result_tree.rs"]
 mod structured_result_tree;
+#[path = "../subscription_backlog.rs"]
+mod subscription_backlog;
 #[path = "../sync_access_loss.rs"]
 mod sync_access_loss;
 #[path = "../sync_aggregates.rs"]
 mod sync_aggregates;
 #[path = "../sync_connection_settled.rs"]
 mod sync_connection_settled;
+#[path = "../sync_debug_log.rs"]
+mod sync_debug_log;
 #[path = "../sync_differential.rs"]
 mod sync_differential;
 #[path = "../sync_echo.rs"]
@@ -191,6 +239,8 @@ mod sync_frame_bounds;
 mod sync_gather;
 #[path = "../sync_join.rs"]
 mod sync_join;
+#[path = "../sync_read_state.rs"]
+mod sync_read_state;
 #[path = "../sync_resume.rs"]
 mod sync_resume;
 #[path = "../sync_sessions.rs"]
@@ -203,12 +253,20 @@ mod sync_support_access;
 mod sync_untrusted_clients;
 #[path = "../sync_wire_corpus.rs"]
 mod sync_wire_corpus;
+#[path = "../sync_write_only.rs"]
+mod sync_write_only;
+#[path = "../text_affix_predicates.rs"]
+mod text_affix_predicates;
 #[path = "../text_merge.rs"]
 mod text_merge;
 #[path = "../text_splices.rs"]
 mod text_splices;
+#[path = "../thin_origin_entry_ages.rs"]
+mod thin_origin_entry_ages;
 #[path = "../thin_origin_writes.rs"]
 mod thin_origin_writes;
+#[path = "../thin_transactions.rs"]
+mod thin_transactions;
 #[path = "../transaction_commit_kind.rs"]
 mod transaction_commit_kind;
 #[path = "../transaction_handles.rs"]
@@ -219,6 +277,10 @@ mod transaction_policy_exists;
 mod transaction_read_tiers;
 #[path = "../union_queries.rs"]
 mod union_queries;
+#[path = "../unit_using_evidence.rs"]
+mod unit_using_evidence;
+#[path = "../unsupported_json_schemas.rs"]
+mod unsupported_json_schemas;
 #[path = "../uuid_page_probe.rs"]
 mod uuid_page_probe;
 #[path = "../write_check_evidence.rs"]

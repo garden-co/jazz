@@ -17,61 +17,25 @@ export {
   Profile,
 } from "./classic-api.js";
 
-// DSL for schema definitions
+// The TS authoring DSL (`schema.ts`, `migrations/*.ts`), read by `jazz-tools generate`.
+export { schema } from "./schema-namespace.js";
+export { migration } from "./migration-namespace.js";
+
+// Removed in alpha.65: stubs that throw, pointing at `jazz-tools upgrade`.
 export {
+  defineApp,
+  defineSchema,
+  defineSliceableApp,
+  definePermissions,
+  defineMigration,
+  renameTableFrom,
+  schemaToWasm,
   table,
-  getCollectedSchema,
-  resetCollectedState,
-  allowExternalProvenanceName,
-} from "./dsl.js";
-export type {
-  Schema as SchemaAst,
-  Table as SchemaAstTable,
-  Column,
-  ColumnMergeStrategy,
-  ColumnMergeStrategyName,
-  JsonSqlType,
-  PolicyExpr,
-  PolicyOperation,
-  PolicyCmpOp,
-  PolicyValue,
-  OperationPolicy,
-  TablePolicies,
-  TableLens,
-  Lens,
-  LensOp,
-  SqlType,
-  LensOpType,
-  AddOp,
-  DropOp,
-  RenameOp,
-  RenameTableFromOp,
-  JsonValue,
-  JsonSchema,
-  JsonSchemaToTs,
-} from "./schema.js";
-export type {
-  TypedColumnBuilder,
-  AnyTypedColumnBuilder,
-  ColumnAlias,
-  ColumnBuilderSqlType,
-  ColumnBuilderOptional,
-  ColumnBuilderReferences,
-  ColumnBuilderValue,
-  ColumnTransform,
-  ComputedColumn,
-  StringColumn,
-  UuidColumn,
-  BooleanColumn,
-  IntColumn,
-  TimestampColumn,
-  FloatColumn,
-  BytesColumn,
-  JsonColumn,
-  EnumColumn,
-  RefColumn,
-  ArrayColumn,
-} from "./dsl.js";
+  anyOf,
+  allOf,
+} from "./removed-schema-api.js";
+export type { JsonValue, JsonPrimitive } from "./json-value.js";
+
 export type {
   RelColumnRef,
   RelRowIdRef,
@@ -89,30 +53,27 @@ export type {
   PolicyIRExpr,
 } from "./ir.js";
 
-// Typed schema app
-export { schemaToWasm } from "./codegen/schema-reader.js";
-export {
-  defineSchema,
-  defineApp,
-  defineSliceableApp,
-  TypedTableQueryBuilder,
-} from "./typed-app.js";
-export { defineMigration, renameTableFrom } from "./migrations.js";
+// Typed app bindings (jazz.generated.ts calls bindApp)
+export { bindApp, TypedTableQueryBuilder } from "./typed-app.js";
 export {
   getSupportedWhereOperatorsForColumn,
   getSupportedWhereOperatorsForSchemaColumn,
 } from "./where-operators.js";
 export type { WhereOperator, WhereOperatorColumn } from "./where-operators.js";
 export type {
-  Schema,
-  TableDefinition,
+  AppTypes,
+  TableTypes,
+  ColumnTypes,
+  ColumnKind,
+  RelationTypes,
+  TransformTypes,
+  ComputedImpl,
+  TransformImpl,
+  BindAppOptions,
+  CompiledAppSchema,
   HistoryQuery,
   HistoryRow,
-  SchemaDefinition,
   Simplify,
-  CompactSchema,
-  DefinedSchema,
-  DefinedTable,
   TableRow,
   TableInit,
   TableStreamingInit,
@@ -134,7 +95,6 @@ export type {
   TableHandle,
   QueryHandle,
   App,
-  SliceableApp,
   TypedApp,
   RowOf,
   InsertOf,
@@ -145,17 +105,6 @@ export type {
   TableMetaOf,
   WhereOf,
 } from "./typed-app.js";
-export type {
-  DefinedMigration,
-  AddedTableShape,
-  MigrationShape,
-  MigrationTableShape,
-  RenameTableShape,
-  RemovedTableShape,
-} from "./migrations.js";
-
-export { schema } from "./schema-namespace.js";
-export { migration } from "./migration-namespace.js";
 
 // Storage drivers
 export * from "./drivers/index.js";
@@ -163,8 +112,6 @@ export * from "./drivers/index.js";
 // Runtime client
 export * from "./runtime/index.js";
 
-// Permissions DSL
-export * from "./permissions/index.js";
 // Inspector overlay host contract (types + global) and the host bridge that
 // publishes the handle for the same-origin overlay iframe.
 export * from "./dev/inspector-overlay/inspector-host-types.js";
@@ -174,13 +121,22 @@ export * from "./accounts/exports.js";
 
 export { accountRegistryUrl } from "./accounts/context.js";
 
-export { createJazzClient, type JazzClientConfig } from "./session/create-jazz-session.js";
+export {
+  createJazzClient,
+  startJazzClient,
+  type JazzClientConfig,
+} from "./session/create-jazz-session.js";
 export type {
   JazzSession,
   JazzSessionSnapshot,
+  JazzSessionErrorViewProps,
   JazzSessionOperation,
   JazzUser,
+  LocalFirstUnavailable,
 } from "./session/jazz-session.js";
+export { NativeArtifactMismatchError } from "./runtime/native-artifact-mismatch-error.js";
+export { NoKeptDeviceAccountError } from "./session/no-kept-device-account-error.js";
+export { DeviceAccountNeedsStoreError } from "./accounts/process-store.js";
 
 export type {
   ForwardRelationship,
@@ -188,3 +144,12 @@ export type {
   Relationship,
   Relationships,
 } from "./relationships.js";
+
+// Removed in alpha.61: stubs that throw, naming the replacement (one release).
+export {
+  AccountManager,
+  BrowserAuthSecretStore,
+  createAccountManager,
+  createDb,
+  exportLocalFirstSecret,
+} from "./removed-api.js";

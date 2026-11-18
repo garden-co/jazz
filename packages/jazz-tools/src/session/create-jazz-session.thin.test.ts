@@ -1,6 +1,5 @@
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { schema as s } from "../schema-namespace.js";
-import { definePermissions } from "../permissions/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb, type LocalFirstLoader } from "../runtime/local-first-upgrade.js";
 import { DbReplacedError } from "../runtime/db-replaced-error.js";
@@ -9,17 +8,22 @@ import { WriteWaitTimeoutError } from "../runtime/client.js";
 import { ThinConnectionLostError, ThinRemoteError, ThinRuntime } from "../thin/thin-runtime.js";
 import { RuntimeClosedError } from "../runtime/runtime-closed-error.js";
 import type { AccountStore } from "../accounts/persistence.js";
-import { startTestJazz, type TestJazz } from "../testing/index.js";
+import { startTestJazz, testApp, type TestJazz } from "../testing/index.js";
 import {
+  createJazzClient as createPublicJazzClient,
   openBrowserSessionCore as createJazzClient,
   type BrowserJazzSession,
 } from "./create-jazz-session.js";
+import type { JazzSession } from "./jazz-session.js";
+import type { JazzClient } from "../web/registered-jazz-client.js";
+import { assertNativeArtifactCompatibility } from "../runtime/native-artifact-compatibility.js";
+import { EXPECTED_NATIVE_ARTIFACT_FINGERPRINTS } from "../runtime/native-artifact-fingerprints.js";
 
-const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
-const permissions = definePermissions(app, ({ policy, session }) => {
-  policy.notes.allowRead.where({ $createdBy: session.user });
-  policy.notes.allowInsert.always();
-});
+const app = testApp({ tables: { notes: { columns: { text: "string" } } } });
+const permissions = {
+  format: 1,
+  tables: { notes: { read: "$createdBy = session.user", insert: "true" } },
+};
 
 let server: TestJazz | undefined;
 const sessions: BrowserJazzSession[] = [];
@@ -35,7 +39,7 @@ async function startServer(): Promise<TestJazz> {
   server = await startTestJazz({
     app: app,
     permissions: permissions,
-    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    coreOptions: { inMemory: true },
   });
   return server;
 }
@@ -80,6 +84,51 @@ async function open(
   });
   sessions.push(session);
   return session;
+}
+
+/**
+ * A 5 MiB text value (an adopter's file upload) streamed in 64 KiB parts,
+ * held after the first part (once the server has it) until `release()`.
+ * In the reported failure the upload started about 100 ms after load and the
+ * background upgrade closed the thin runtime about 300 ms later, mid-upload;
+ * the gate puts the upgrade at that point every time instead of by timing.
+ */
+function gatedStream() {
+  const parts = Array.from({ length: 80 }, (_, index) =>
+    String.fromCharCode(97 + (index % 26)).repeat(64 * 1024),
+  );
+  let release!: () => void;
+  let fail!: (error: Error) => void;
+  const gate = new Promise<void>((resolve, reject) => {
+    release = resolve;
+    fail = reject;
+  });
+  const stream = {
+    expected: parts.join(""),
+    firstPartSent: false,
+    release: () => release(),
+    /** The source fails at its next step instead. */
+    fail: (error: Error) => fail(error),
+    async *chunks(): AsyncGenerator<string> {
+      yield parts[0]!;
+      // Resumed only once the first part was sent and applied.
+      stream.firstPartSent = true;
+      await gate;
+      yield* parts.slice(1);
+    },
+  };
+  return stream;
+}
+
+/** The upgraded Db's own (thin) runtime finishing its last uploads and stopping. */
+function drainOf(kept: Db): Promise<void> {
+  const drain = (kept as unknown as { drain: { done: Promise<void> } | null }).drain;
+  if (!drain) throw new Error("this Db has not upgraded");
+  return drain.done;
+}
+
+function sha256(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
 }
 
 function db(session: BrowserJazzSession) {
@@ -248,6 +297,109 @@ describe("browser session", () => {
     expect((await kept.all(app.notes, { tier: "local-first" })).map((row) => row.text)).toEqual([
       "streamed text",
     ]);
+  }, 60_000);
+
+  it("lets a stream in flight finish across the upgrade, and its value lands intact", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    const stream = gatedStream();
+    const streaming = kept.insertStreaming(app.notes, { text: stream.chunks() });
+    // The server has the first part; the upgrade comes mid-stream.
+    await expect.poll(() => stream.firstPartSent).toBe(true);
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    expect(isThinDb(kept)).toBe(false);
+    stream.release();
+
+    const written = await streaming;
+    await written.wait({ tier: "global" });
+    // Then the thin runtime's drain ends.
+    await drainOf(kept);
+    const row = await kept.one(app.notes.where({ id: written.value.id }), { tier: "remote" });
+    expect(row?.text.length).toBe(stream.expected.length);
+    expect(sha256(row!.text)).toBe(sha256(stream.expected));
+    await expect
+      .poll(async () => {
+        const local = await kept.one(app.notes.where({ id: written.value.id }), {
+          tier: "local-first",
+        });
+        return local ? sha256(local.text) : null;
+      })
+      .toBe(sha256(stream.expected));
+  }, 60_000);
+
+  it("ends a stream in flight with an error saying why when the upgraded client shuts down", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    const stream = gatedStream();
+    const streaming = kept.insertStreaming(app.notes, { text: stream.chunks() });
+    void streaming.catch(() => {});
+    await expect.poll(() => stream.firstPartSent).toBe(true);
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+
+    // Without waitForSync (a sign-out that wipes this device): the thin
+    // runtime closes under the stream.
+    await session.getSnapshot().client!.shutdown();
+    stream.release();
+    const error = await streaming.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(error).toBeInstanceOf(ThinConnectionLostError);
+    expect((error as Error).message).toMatch(
+      /upgraded to local-first, and the app then shut the client down .*so the value was not written/,
+    );
+  }, 60_000);
+
+  // A sign-out or an account switch shuts the client down with waitForSync:
+  // a stalled upload must not hold it.
+  it("doesn't hold a waiting shutdown of the upgraded client for a stalled stream", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    const stream = gatedStream();
+    const streaming = kept.insertStreaming(app.notes, { text: stream.chunks() });
+    void streaming.catch(() => {});
+    await expect.poll(() => stream.firstPartSent).toBe(true);
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+
+    // The source never yields again: the shutdown completes anyway.
+    await session.getSnapshot().client!.shutdown({ waitForSync: true });
+    // The stream ends at its source's next step, saying why.
+    stream.release();
+    await expect(streaming).rejects.toThrow(/the app then shut the client down/);
+  }, 60_000);
+
+  it("keeps a source's own error from a stream that fails during the drain, and the drain ends", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    const stream = gatedStream();
+    const streaming = kept.insertStreaming(app.notes, { text: stream.chunks() });
+    void streaming.catch(() => {});
+    await expect.poll(() => stream.firstPartSent).toBe(true);
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+
+    stream.fail(new Error("the file could not be read"));
+    await expect(streaming).rejects.toThrow("the file could not be read");
+    await drainOf(kept);
+    expect(await kept.all(app.notes, { tier: "remote" })).toEqual([]);
+  }, 60_000);
+
+  it("doesn't hold a waiting shutdown of a thin client that never upgraded for a stream in flight", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    const stream = gatedStream();
+    const streaming = kept.insertStreaming(app.notes, { text: stream.chunks() });
+    void streaming.catch(() => {});
+    await expect.poll(() => stream.firstPartSent).toBe(true);
+
+    // As before: the shutdown closes the runtime under the stream.
+    await session.getSnapshot().client!.shutdown({ waitForSync: true });
+    stream.release();
+    await expect(streaming).rejects.toThrow(/the thin runtime is closed/);
   }, 60_000);
 
   it("upgrades with committed thin writes while the server is gone", async () => {
@@ -626,6 +778,104 @@ describe("browser session", () => {
     warn.mockRestore();
   }, 60_000);
 
+  describe("when the local-first client can't open", () => {
+    const publicSessions: JazzSession<JazzClient>[] = [];
+    afterEach(async () => {
+      for (const session of publicSessions.splice(0)) await session.close();
+    });
+
+    /**
+     * What `jazz-tools/local-first` does with a `.wasm` this build doesn't
+     * match (a stale asset, a cache, mixed versions): its WASM loader's
+     * fingerprint check throws before any runtime opens.
+     */
+    const loadMismatchedLocalFirst: LocalFirstLoader = async () => ({
+      createClient: async () => {
+        assertNativeArtifactCompatibility(
+          { nativeArtifactFingerprint: () => "9c1e-stale-wasm" },
+          "WASM",
+        );
+        throw new Error("unreachable");
+      },
+    });
+
+    async function openPublic(server: TestJazz, client: LocalFirstLoader) {
+      const session = await createPublicJazzClient({
+        scope: server.appId,
+        serverUrl: server.url,
+        store: memoryStore(),
+        initial: "device",
+        driver: { type: "memory" },
+        client,
+      });
+      publicSessions.push(session);
+      return session;
+    }
+
+    it("names a WASM fingerprint mismatch in the console and on the session", async () => {
+      const server = await startServer();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const session = await openPublic(server, loadMismatchedLocalFirst);
+      await expect
+        .poll(() => session.getSnapshot().localFirstUnavailable, { timeout: 10_000 })
+        .toBeDefined();
+
+      const snapshot = session.getSnapshot();
+      expect(snapshot.status).toBe("ready");
+      expect(snapshot.localFirst).toBe(false);
+      expect(snapshot.localFirstUnavailable).toMatchObject({
+        reason: "wasm-mismatch",
+        message: "local-first unavailable: WASM fingerprint mismatch",
+        expectedFingerprint: EXPECTED_NATIVE_ARTIFACT_FINGERPRINTS.wasm,
+        actualFingerprint: "9c1e-stale-wasm",
+      });
+      expect(snapshot.localFirstUnavailable?.error.message).toMatch(/WASM artifact ABI mismatch/);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toBe(
+        "Jazz local-first unavailable: WASM fingerprint mismatch " +
+          `(expected ${EXPECTED_NATIVE_ARTIFACT_FINGERPRINTS.wasm}, got 9c1e-stale-wasm); ` +
+          "staying thin, without offline use or local reads. The .wasm this page loaded does " +
+          "not match this jazz-tools build: serve the jazz-wasm asset from the same install " +
+          "(check caches and CDNs), reinstall matching Jazz package versions, or in the Jazz " +
+          "monorepo rebuild the generated bindings.",
+      );
+      // Still a working (thin) client.
+      await snapshot.client!.db.insert(app.notes, { text: "thin" }).wait({ tier: "global" });
+      warn.mockRestore();
+    }, 60_000);
+
+    it("says the client failed to load for any other failure", async () => {
+      const server = await startServer();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const session = await openPublic(server, async () => {
+        throw new Error("offline");
+      });
+      await expect
+        .poll(() => session.getSnapshot().localFirstUnavailable?.reason, { timeout: 10_000 })
+        .toBe("load-failed");
+      expect(session.getSnapshot().localFirstUnavailable?.error.message).toBe("offline");
+      expect(String(warn.mock.calls[0]?.[0])).toBe(
+        "Jazz could not upgrade to the local-first client; staying thin.",
+      );
+      warn.mockRestore();
+    }, 60_000);
+
+    it("clears the reason once a later upgrade succeeds", async () => {
+      const server = await startServer();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const session = await openPublic(server, loadMismatchedLocalFirst);
+      await expect
+        .poll(() => session.getSnapshot().localFirstUnavailable, { timeout: 10_000 })
+        .toBeDefined();
+
+      await session.getSnapshot().client!.db.upgradeToLocalFirst(loadLocalFirst);
+
+      expect(session.getSnapshot().localFirst).toBe(true);
+      expect(session.getSnapshot().localFirstUnavailable).toBeUndefined();
+      warn.mockRestore();
+    }, 60_000);
+  });
+
   it('opens the local-first client at once with localFirst: "now", on a first visit too', async () => {
     vi.stubGlobal("localStorage", memoryLocalStorage());
     const server = await startServer();
@@ -679,5 +929,26 @@ describe("browser session", () => {
     await expect(createJazzClient({ ...base, account: {} } as never)).rejects.toThrow(
       /takes no account: the session signs in itself/,
     );
+  });
+
+  it("refuses a missing config and unknown options, naming the options it takes", async () => {
+    // Before: `TypeError: Cannot read properties of undefined (reading 'appId')`.
+    await expect((createJazzClient as (config?: unknown) => Promise<unknown>)()).rejects.toThrow(
+      /^createJazzClient needs a config object, e\.g\. createJazzClient\(\{ serverUrl: "\/jazz" \}\), or createJazzClient\(\{\}\) for the defaults; got nothing\. Options: bearer, clearOnSignOut, client, .*serverUrl.*\.$/,
+    );
+    const base = { serverUrl: "https://app.example.test/jazz", store: memoryStore() };
+    // Before: accepted and ignored.
+    await expect(createJazzClient({ ...base, auth: {} } as never)).rejects.toThrow(
+      /createJazzClient has no option "auth": your backend decides who is signed in \(createJazz's `authenticate`\).*Options: .*initial/,
+    );
+    await expect(createJazzClient({ ...base, guest: true } as never)).rejects.toThrow(
+      /has no option "guest": guests are device accounts: use `initial: "device"`/,
+    );
+    await expect(createJazzClient({ ...base, serverURL: "/jazz" } as never)).rejects.toThrow(
+      /^createJazzClient has no option "serverURL"\. Options: /,
+    );
+    // Every documented option is still taken.
+    const session = await createJazzClient({ ...base, initial: "signed-out" });
+    await session.close();
   });
 });

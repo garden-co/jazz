@@ -112,6 +112,14 @@ describe("release config", () => {
         expect(runGate().status, page).not.toBe(0);
         fs.writeFileSync(staged, kept);
       }
+      // The module createJazz serves the Inspector from must carry the UI,
+      // not the empty placeholder tsc emits.
+      const uiModule = path.join(toolsDir, "dist/backend/inspector-ui-files.js");
+      const generated = fs.readFileSync(uiModule);
+      fs.writeFileSync(uiModule, "export const INSPECTOR_UI_FILES = null;\n");
+      expect(runGate().status, "placeholder module").not.toBe(0);
+      fs.writeFileSync(uiModule, generated);
+      expect(runGate().status).toBe(0);
     } finally {
       fs.rmSync(fixture, { recursive: true, force: true });
     }

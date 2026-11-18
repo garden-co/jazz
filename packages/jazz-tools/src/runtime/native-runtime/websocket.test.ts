@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
-import type { BrowserWebSocket } from "./websocket.js";
+import type { BrowserWebSocket, WireError } from "./websocket.js";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   CLIENT_WIRE_FEATURES,
@@ -9,6 +9,7 @@ import {
   isReauthenticateWireError,
   FEATURE_HEARTBEAT,
   FEATURE_PAYLOAD_ZSTD,
+  HANDSHAKE_TIMEOUT_MS,
   HEARTBEAT_SILENCE_MS,
   MAX_WIRE_PROTOCOL_VERSION,
   MIN_WIRE_PROTOCOL_VERSION,
@@ -792,6 +793,98 @@ describe("websocket frame carrier", () => {
     expect(delivered).toEqual([]);
     expect(socket!.closed).toBe(true);
   });
+  it("sends frames ahead right behind its hello, in order, in messages of their own", async () => {
+    let socket: SilentRecordingWebSocket | undefined;
+    const carrier = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: () => {},
+      WebSocket: class extends SilentRecordingWebSocket {
+        constructor(url: string) {
+          super(url, (created) => {
+            socket = created;
+          });
+        }
+      },
+    });
+    // Before the socket opened: queued behind the prelude and the hello.
+    carrier.sendAhead([Uint8Array.of(4, 1)]);
+    carrier.sendAhead([Uint8Array.of(4, 2), Uint8Array.of(4, 3)]);
+    expect(socket!.sent).toEqual([]);
+    await Promise.resolve();
+    await Promise.resolve();
+    // Opened, and the server has not said hello: still goes out at once.
+    carrier.sendAhead([Uint8Array.of(4, 4)]);
+
+    const [prelude, hello, ...ahead] = socket!.sent;
+    expect(typeof prelude === "string" || prelude instanceof Uint8Array).toBe(true);
+    // The hello's message holds the hello alone, as the server requires.
+    const helloFrames = decodeWebSocketFrameBatch(hello as Uint8Array);
+    expect(helloFrames).toHaveLength(1);
+    expect(isWireHello(helloFrames[0]!)).toBe(true);
+    expect(ahead.map((message) => decodeWebSocketFrameBatch(message as Uint8Array))).toEqual([
+      [Uint8Array.of(4, 1)],
+      [Uint8Array.of(4, 2), Uint8Array.of(4, 3)],
+      [Uint8Array.of(4, 4)],
+    ]);
+
+    // Once negotiated, frames sent ahead still go out in the order sent.
+    socket!.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n)]));
+    await carrier.ready();
+    carrier.sendAhead([Uint8Array.of(4, 5)]);
+    expect(decodeWebSocketFrameBatch(socket!.sent.at(-1) as Uint8Array)).toEqual([
+      Uint8Array.of(4, 5),
+    ]);
+  });
+
+  it("drops frames sent ahead once its hello is refused or it closes before sending one", async () => {
+    let socket: SilentRecordingWebSocket | undefined;
+    const errors: unknown[] = [];
+    const carrier = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: () => {},
+      onError: (error) => errors.push(error),
+      WebSocket: class extends SilentRecordingWebSocket {
+        constructor(url: string) {
+          super(url, (created) => {
+            socket = created;
+          });
+        }
+      },
+    });
+    carrier.sendAhead([Uint8Array.of(4, 1)]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(socket!.sent).toHaveLength(3);
+    socket!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(3, 1, "invalid token")]));
+    await expect(carrier.ready()).rejects.toThrow("authentication failed before server hello");
+    carrier.sendAhead([Uint8Array.of(4, 2)]);
+    expect(socket!.sent).toHaveLength(3);
+    expect(errors).toMatchObject([{ code: "auth_failed" }]);
+
+    // Closed before the socket opened: nothing sent ahead goes out.
+    let unopened: SilentRecordingWebSocket | undefined;
+    const closing = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: () => {},
+      WebSocket: class extends SilentRecordingWebSocket {
+        constructor(url: string) {
+          super(url, (created) => {
+            unopened = created;
+          });
+        }
+      },
+    });
+    closing.sendAhead([Uint8Array.of(4, 1)]);
+    closing.close();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(unopened!.sent).toEqual([]);
+    await expect(closing.ready()).rejects.toThrow();
+  });
+
   it("rejects readiness when intentionally closed before server hello and ignores late socket events", async () => {
     vi.useFakeTimers();
     try {
@@ -961,13 +1054,22 @@ describe("websocket frame carrier", () => {
     expect(isWireError(nonminimalTag)).toBe(false);
     expect(() => decodeWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
 
+    // A code or retry from a newer server is still the server's error: it is
+    // read, and the link retries it as a refusal (#5927 R10), instead of throwing.
     const unknownCode = encodeWireError(7, 3, "future code");
-    expect(() => isWireError(unknownCode)).toThrow("unknown WireErrorCode discriminant 7");
-    expect(() => decodeWireError(unknownCode)).toThrow("unknown WireErrorCode discriminant 7");
+    expect(isWireError(unknownCode)).toBe(true);
+    expect(decodeWireError(unknownCode)).toEqual({
+      code: "unknown:7",
+      retry: "later",
+      message: "future code",
+    });
 
     const unknownRetry = encodeWireError(6, 4, "future retry");
-    expect(() => isWireError(unknownRetry)).toThrow("unknown WireRetry discriminant 4");
-    expect(() => decodeWireError(unknownRetry)).toThrow("unknown WireRetry discriminant 4");
+    expect(decodeWireError(unknownRetry)).toEqual({
+      code: "not_ready",
+      retry: "unknown:4",
+      message: "future retry",
+    });
   });
 
   describe("heartbeat", () => {
@@ -1087,6 +1189,53 @@ describe("websocket frame carrier", () => {
       }
     });
 
+    // #5225: an attempt nobody answers (a proxy holding the upgrade for a
+    // backend that is down) used to hang forever, so the link never failed
+    // an attempt and never published the outage.
+    it("gives up an attempt whose server never says hello, as a network drop", async () => {
+      vi.useFakeTimers();
+      try {
+        const { carrier, socket, terminals } = heartbeatCarrier();
+        const ready = carrier.ready().catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(HANDSHAKE_TIMEOUT_MS);
+        expect(terminals).toEqual([]);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(terminals).toEqual([
+          expect.objectContaining({ code: "websocket_silent", retry: "later" }),
+        ]);
+        expect(isSocketDropWireError(terminals[0] as WireError)).toBe(true);
+        expect(socket.closed).toBe(true);
+        await expect(ready).resolves.toMatchObject({
+          message: "the server did not answer the connection within 10 s",
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps an attempt whose hello arrives within the handshake window", async () => {
+      vi.useFakeTimers();
+      try {
+        const { carrier, socket, terminals } = heartbeatCarrier();
+        await vi.advanceTimersByTimeAsync(HANDSHAKE_TIMEOUT_MS - 1_000);
+        socket.emitMessage(
+          encodeWebSocketFrameBatch([
+            encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+              features: CLIENT_WIRE_FEATURES | FEATURE_HEARTBEAT,
+            }),
+          ]),
+        );
+        await expect(carrier.ready()).resolves.toBeDefined();
+        await vi.advanceTimersByTimeAsync(HANDSHAKE_TIMEOUT_MS * 2);
+        expect(terminals).toEqual([]);
+        expect(socket.closed).toBe(false);
+        carrier.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("classes a silent link as a network drop, which clients retry", () => {
       expect(isSocketDropWireError({ code: "websocket_silent", retry: "later", message: "" })).toBe(
         true,
@@ -1141,6 +1290,52 @@ describe("websocket frame carrier", () => {
 
     expect(frames).toEqual([]);
     expect(errors).toEqual([{ code: "auth_failed", retry: "after_auth", message: "expired" }]);
+  });
+
+  // The HTTP stream hands a backend's last message and its close over in one
+  // read, so the close event comes before the message is handled. A refusal
+  // in that message (jazz.revokeUser's) must still read as a refusal, not as
+  // a dropped connection the link retries.
+  it("reports a refusal that arrives in the same tick as the close before the close", async () => {
+    const run = (frames: Uint8Array[]) => {
+      let socket: MessageWebSocket | undefined;
+      const errors: Array<{ code: string }> = [];
+      const terminals: Array<{ code: string }> = [];
+      const carrier = new WebSocketCarrier({
+        endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+        peerIdentity: new Uint8Array(16),
+        onFrame: () => {},
+        onError: (error) => errors.push(error),
+        onTerminal: (error) => terminals.push(error),
+        WebSocket: class extends MessageWebSocket {
+          constructor(url: string) {
+            super(url, (created) => {
+              socket = created;
+            });
+          }
+        },
+      });
+      // Refused before hello, readiness rejects: nothing here waits on it.
+      carrier.ready().catch(() => {});
+      socket!.emitMessage(encodeWebSocketFrameBatch(frames));
+      socket!.emitClose({ code: 1008, reason: "session revoked" });
+      return { errors, terminals };
+    };
+    const revoked = encodeWireError(3, 0, "session revoked: revokeUser");
+
+    // Admitted, then revoked: the refusal comes first, then the close.
+    const admitted = run([encodeServerHello(1n), revoked]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(admitted.errors.map((error) => error.code)).toEqual(["auth_failed", "websocket_closed"]);
+    expect(admitted.terminals.map((error) => error.code)).toEqual(["websocket_closed"]);
+
+    // Refused at sign-in (a stream reopened after the revoke): the refusal
+    // is what ends the carrier.
+    const refused = run([revoked]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(refused.terminals).toEqual([
+      { code: "auth_failed", retry: "never", message: "session revoked: revokeUser" },
+    ]);
   });
 
   it("passes the parts of a split sync message on, whatever bytes follow their marker", async () => {
@@ -1368,6 +1563,20 @@ class MessageWebSocket {
 
   emitClose(event: { code: number; reason: string }): void {
     for (const listener of this.closeListeners) listener(event);
+  }
+}
+
+/** Records what is sent and never answers: the server's hello comes when a test sends it. */
+class SilentRecordingWebSocket extends MessageWebSocket {
+  sent: Array<Uint8Array | string> = [];
+
+  constructor(url: string, onCreate?: (socket: SilentRecordingWebSocket) => void) {
+    super(url);
+    onCreate?.(this);
+  }
+
+  override send(data: Uint8Array | string): void {
+    this.sent.push(data);
   }
 }
 

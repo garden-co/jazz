@@ -9,7 +9,7 @@ import type { AccountStore, Db } from "jazz-tools";
 
 import { describe, it, expect, afterEach } from "vitest";
 import { startApp } from "../../src/main.js";
-import { app } from "../../schema.js";
+import { app } from "../../jazz.generated.js";
 import { SCOPE, SERVER_URL } from "./test-constants.js";
 import type { SessionOverrides } from "../../src/account.js";
 
@@ -228,12 +228,12 @@ describe("Vanilla TS Todo App E2E", () => {
     await waitFor(
       () => db1.getAuthState().authMode === "local-first",
       5000,
-      "App 1 should reach local-first auth",
+      "App 1 should reach a device account",
     );
     await waitFor(
       () => db2.getAuthState().authMode === "local-first",
       5000,
-      "App 2 should reach local-first auth",
+      "App 2 should reach a device account",
     );
     expect(db1.getAuthState().session?.authMode).toBe("local-first");
     expect(db2.getAuthState().session?.authMode).toBe("local-first");

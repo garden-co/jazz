@@ -38,6 +38,7 @@ export async function GET() {
   }
 
   return new Response(lines.join("\n") + "\n", {
-    headers: { "Content-Type": "text/markdown; charset=utf-8" },
+    // Markdown, served as plain text: some agent browsing tools refuse text/markdown (#2570).
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
   });
 }

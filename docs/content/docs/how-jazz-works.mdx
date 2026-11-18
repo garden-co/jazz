@@ -78,18 +78,22 @@ await window.__jazz.clearStorage("my-app::alice");
 
 The helper requires a live registered client on this page. Do not shut it down before calling the helper. If the client never finishes opening or no live namespace is listed, this helper cannot perform the reset.
 
-If you're working directly with a `Db` handle instead of the window helper, `await db.deleteClientStorage()` is the underlying API. See [Resetting browser storage](/docs/setup/auth/backend#resetting-browser-storage) for how this differs from logout and local-first identity storage.
+If you're working directly with a `Db` handle instead of the window helper, `await db.deleteClientStorage()` is the underlying API. See [Resetting browser storage](/docs/setup/auth/backend#resetting-browser-storage) for how this differs from logout and the device account key's storage.
 
 - Browser persistent storage only.
 - If exactly one live namespace exists, `clearStorage()` uses it automatically.
 - If multiple live namespaces exist, Jazz throws and lists the available namespaces until you choose one.
 - Can be initiated from either leader or follower tabs; Jazz coordinates the reset across tabs for that namespace.
-- Deletes only the selected IndexedDB namespace. Preserve `localStorage`, `sessionStorage`, cookies, and other databases; default local-first credentials are stored outside this data database. Apps with custom credential stores must check those separately.
+- Deletes only the selected IndexedDB namespace. Preserve `localStorage`, `sessionStorage`, cookies, and other databases; a device account's key is stored outside this data database. Apps with custom credential stores must check those separately.
 - Reopens a clean worker/runtime so the same live client remains usable after the wipe.
 
 This is useful when iterating on your schema during development. `window.__jazz` is registered by
 every browser client, production builds included: it resets this browser's own storage and
 closes this page's own clients, nothing more.
+
+`window.__jazz` is Jazz's name, as is `window.__jazzWindowStorageContexts__`. If your app (or
+another library) sets `window.__jazz` itself, Jazz leaves it alone, warns once on the console and
+works without the helper: rename your own global to get `window.__jazz.clearStorage()` back.
 
 </Accordion>
 
@@ -106,9 +110,9 @@ in local persistent storage, while other runtimes use their configured local dri
 
 </Accordion>
 
-<Accordion id="local-first-to-external" title="Can I upgrade from local-first auth to external auth without losing data?">
+<Accordion id="local-first-to-external" title="Can a guest on a device account sign up with external auth without losing data?">
 
-Yes. When a user signs up with an external provider, their identity carries over. See [Signing up with BetterAuth](/docs/setup/auth/local-first#signing-up-with-betterauth).
+Yes. When a user signs up with an external provider, their identity carries over. See [Signing up later](/docs/setup/auth/device-accounts#signing-up-later).
 
 </Accordion>
 

@@ -51,8 +51,10 @@ function isReservedIssuer(issuer: string): boolean {
  * It verifies the token's signature, expiry (`exp` is required; 60 seconds
  * of clock skew are allowed), `nbf`, issuer and audience, and names the
  * user by its `sub`. A request without a token, or with one that does
- * not verify, is signed out (null). A JWKS that cannot be fetched is the
- * server's problem and throws, so clients retry instead of signing out.
+ * not verify, is signed out (null). A JWKS that cannot be fetched (down,
+ * an error status, or no answer within 30 seconds) is the server's problem:
+ * createJazz answers 503 with Retry-After, so clients retry instead of
+ * signing out.
  *
  * The JWKS is cached for up to five minutes, so a key your issuer drops is
  * accepted until then. A token naming a key the cached JWKS doesn't publish
