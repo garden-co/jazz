@@ -39,7 +39,6 @@ use tracing::warn;
 
 use jazz::tools::AppId;
 use jazz::tools::Session;
-use jazz::tools::identity;
 use jazz::tools::transport_error::UnauthenticatedResponse;
 
 /// JWKS cache TTL — 5 minutes, matching the cloud server.
@@ -563,14 +562,6 @@ fn system_now_seconds() -> u64 {
     }
 }
 
-fn device_account_auth_error(message: String) -> UnauthenticatedResponse {
-    if message.starts_with("token expired:") {
-        UnauthenticatedResponse::expired("JWT has expired")
-    } else {
-        UnauthenticatedResponse::invalid(message)
-    }
-}
-
 // ============================================================================
 // Validation Functions
 // ============================================================================
@@ -834,28 +825,6 @@ pub async fn validate_jwt_with_cache_at(
     }
 }
 
-/// Check if a JWT has a Jazz self-signed `iss` (device account or anonymous) by
-/// decoding claims without verification.
-fn is_jazz_self_signed_identity_proof(token: &str) -> Option<&'static str> {
-    let parts: Vec<&str> = token.splitn(3, '.').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let claims_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(parts[1])
-        .ok()?;
-    #[derive(serde::Deserialize)]
-    struct IssOnly {
-        iss: Option<String>,
-    }
-    let claims = serde_json::from_slice::<IssOnly>(&claims_bytes).ok()?;
-    match claims.iss.as_deref() {
-        Some(identity::DEVICE_ACCOUNT_ISSUER) => Some(identity::DEVICE_ACCOUNT_ISSUER),
-        Some(identity::ANONYMOUS_ISSUER) => Some(identity::ANONYMOUS_ISSUER),
-        _ => None,
-    }
-}
-
 /// Header with which a trusted backend names the audience it already checked
 /// a device-account proof against.
 ///
@@ -876,31 +845,22 @@ pub fn device_account_audience(
     app_id: AppId,
     config: &AuthConfig,
 ) -> Result<String, UnauthenticatedResponse> {
-    let Some(audience) = headers.get(DEVICE_ACCOUNT_AUDIENCE_HEADER) else {
-        return Ok(app_id.to_string());
-    };
-    let audience = audience
-        .to_str()
-        .ok()
-        .map(str::trim)
-        .filter(|audience| !audience.is_empty())
-        .ok_or_else(|| UnauthenticatedResponse::invalid("Invalid device account audience"))?;
-    let provided = headers
-        .get("X-Jazz-Backend-Secret")
-        .and_then(|value| value.to_str().ok());
-    validate_backend_secret(provided, config).map_err(|(_, message)| {
-        UnauthenticatedResponse::invalid(match message {
-            "Invalid backend secret" => message,
-            _ => "A device account audience must be vouched for with the backend secret",
-        })
-    })?;
-    Ok(audience.to_owned())
+    // A header that is not text is refused as an empty audience is.
+    let stated = headers
+        .get(DEVICE_ACCOUNT_AUDIENCE_HEADER)
+        .map(|audience| audience.to_str().unwrap_or(""));
+    crate::portable::guest::guest_audience(stated, app_id, || {
+        let provided = headers
+            .get("X-Jazz-Backend-Secret")
+            .and_then(|value| value.to_str().ok());
+        validate_backend_secret(provided, config).map_err(|(_, message)| message)
+    })
 }
 
 /// The registry namespace a device-account founder's account id derives from:
 /// the audience its proof was verified against, read as an app id.
 pub fn device_account_founding_app(audience: &str) -> AppId {
-    AppId::from_string(audience).unwrap_or_else(|_| AppId::from_name(audience))
+    crate::portable::accounts::device_account_founding_app(audience)
 }
 
 /// Deprecated alias of [`device_account_audience`].
@@ -992,34 +952,18 @@ pub async fn extract_session(
         // permissions DSL. Which device-account identities sync is the app
         // backend's call (`acceptDeviceAccounts`): a core admits only the
         // sockets its backend opens.
-        if let Some(issuer) = is_jazz_self_signed_identity_proof(token) {
+        if let Some(issuer) = crate::portable::guest::self_signed_issuer(token) {
             let audience = device_account_audience(headers, app_id, config)?;
-            let verified = identity::verify_jazz_self_signed_proof_at(
+            return crate::portable::guest::self_signed_session(
                 token,
+                issuer,
                 &audience,
                 config.clock.now_seconds(),
             )
-            .map_err(device_account_auth_error)?;
-            let auth_mode = match issuer {
-                identity::ANONYMOUS_ISSUER => jazz::tools::AuthMode::Anonymous,
-                _ => jazz::tools::AuthMode::DeviceAccount,
-            };
-            return Ok(Some(Session {
-                account_id: None,
-                issuer: verified.issuer.to_owned(),
-                user_id: verified.user_id,
-                // The verified key proves the issuer-scoped subject above; it
-                // is transport proof material, not an application policy
-                // claim. In particular, fresh anonymous proofs intentionally
-                // share the same empty policy binding.
-                claims: serde_json::Value::Object(serde_json::Map::new()),
-                auth_mode,
-            }));
+            .map(Some);
         }
 
-        return Err(UnauthenticatedResponse::disabled(
-            "A core verifies no external JWTs: sign users in through your app's backend (createJazz)",
-        ));
+        return Err(crate::portable::guest::external_jwt_refused());
     }
 
     // No auth provided
@@ -1081,6 +1025,7 @@ pub fn validate_admin_secret(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jazz::tools::identity;
     use jazz::tools::transport_error::UnauthenticatedCode;
     use jsonwebtoken::{EncodingKey, Header, encode};
 

@@ -117,7 +117,7 @@ impl ThinSession {
     /// at the budget, if it is ([`super::ReadClock`]).
     pub(super) fn stalled_for(
         &self,
-        now: std::time::Instant,
+        now: web_time::Instant,
         min_rate: u64,
     ) -> Option<std::time::Duration> {
         self.clock.check(&self.egress, now, min_rate)
@@ -434,7 +434,7 @@ impl Owner {
     /// Thin-client transactions open on this core, across its sessions:
     /// the only thing it may hold between the calls it serves, until the
     /// core stops running them (the app's backend runs them instead).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "native"))]
     pub(super) fn open_thin_transactions(&self) -> usize {
         self.thin.values().map(|thin| thin.transactions.len()).sum()
     }
