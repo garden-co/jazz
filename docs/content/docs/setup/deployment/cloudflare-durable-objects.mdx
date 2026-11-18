@@ -1,0 +1,96 @@
+---
+title: Cloudflare Durable Objects (experimental)
+description: "Learn how to keep your app's data in a Cloudflare Durable Object, with your own backend in front for auth."
+languageTabs: main-backend
+---
+
+<Callout type="warn" title="Experimental">
+  Running the Jazz core in a Durable Object is new in this release. Try it, and tell us what breaks;
+  keep production data on [your own server](/docs/setup/deployment/own-server) or
+  [Vercel](/docs/setup/deployment/vercel) for now.
+</Callout>
+
+Your app's core (the part of Jazz that stores and syncs its data) runs in one Durable Object, in a
+Cloudflare Worker you deploy. Your own backend sits in front of it: browsers talk only to your
+backend, which signs users in with your auth and reaches the core with a secret only the two of them
+know.
+
+This page sets up your **main backend**: the backend that runs `createJazz`, serves sync to your
+browsers and apps, and decides who each user is. Other trusted machines reach Jazz through it as
+[backend clients](/docs/setup/backend-client).
+
+<include>../../../partials/install-alpha.mdx</include>
+
+## Deploy the core's Worker
+
+The Worker holds one SQLite-backed Durable Object for your app. Its module exports the object's
+class and forwards every request to it:
+
+```ts title="worker/index.ts"
+import { JazzCore, routeJazzRequest } from "jazz-tools/durable-object";
+
+export { JazzCore };
+export default { fetch: routeJazzRequest };
+```
+
+```jsonc title="worker/wrangler.jsonc"
+{
+  "name": "my-app-jazz",
+  "main": "index.ts",
+  "compatibility_date": "2026-04-01",
+  "durable_objects": { "bindings": [{ "name": "JAZZ", "class_name": "JazzCore" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["JazzCore"] }],
+}
+```
+
+The object is the app: it holds your app's data, and the app's ID, which it makes on its first
+start. One Worker serves one app, whatever app ID a request's path names. Keep the Worker's name, the `JazzCore` class and its migration as they are: a renamed Worker or
+a new class starts a new, empty app, and your backend publishes onto it without noticing.
+
+Give it a core secret: a random string of at least 32 characters (`openssl rand -hex 32`). Keep it
+the same across deployments; the core admits only requests that carry it.
+
+```bash
+npx wrangler secret put JAZZ_CORE_SECRET
+npx wrangler deploy
+```
+
+## Connect your backend
+
+Put the Worker's values in your backend's environment. They stay server-side; the core secret is
+like a database password:
+
+```bash title=".env"
+JAZZ_DO_URL="https://my-app-jazz.<your subdomain>.workers.dev"
+JAZZ_CORE_SECRET="<the same core secret>"
+```
+
+Then point `createJazz` at it with the `durableObjects()` store:
+
+```ts title="jazz.server.ts"
+import { createJazz, durableObjects } from "jazz-tools/backend";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
+
+export const jazz = createJazz({
+  app,
+  permissions,
+  store: durableObjects({
+    url: process.env.JAZZ_DO_URL!,
+    secret: process.env.JAZZ_CORE_SECRET!,
+  }),
+  // Read your session; return { userId, expiresAt, claims? } for a signed-in user, or null
+  authenticate: async (request) => null,
+});
+```
+
+<include>../../../partials/main-backend-config.mdx</include>
+
+## What a Durable Object core doesn't do yet
+
+- **Transactions run in your backend**, as with every core: the core never holds one open between
+  calls.
+- **No HTTP-stream fallback** between your backend and the core: they talk over WebSockets.
+- **Sockets keep the object awake** while they are open (no WebSocket hibernation yet).
+- **Your backend runs outside the Worker** (Node, Vercel, your own server). Running `createJazz`
+  inside a Worker comes later.
