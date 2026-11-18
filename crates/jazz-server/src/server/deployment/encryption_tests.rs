@@ -91,23 +91,29 @@ async fn a_raw_deploy_of_a_foreign_system_table_is_refused() {
     assert_eq!(status, StatusCode::OK, "{deployed}");
 }
 
-/// An encrypted schema as a deploy body: tasks encrypt their title in their
-/// project's space.
-fn encrypted_body() -> Value {
+/// The app's tables without Jazz's system tables.
+fn plain_app() -> jazz::tools::public_schema::Schema {
+    SchemaBuilder::new()
+        .table(TableSchema::builder("projects").column("ownerId", ColumnType::Uuid))
+        .table(
+            TableSchema::builder("tasks")
+                .fk_column("projectId", "projects")
+                .column("title", ColumnType::Bytea),
+        )
+        .build()
+}
+
+/// The app with Jazz's system tables, and the declarations that go with
+/// it: tasks encrypt their title in their project's space.
+fn encrypted_app() -> (
+    jazz::tools::public_schema::Schema,
+    jazz::tools::deployment::artifact::DeclaredEncryption,
+) {
     use jazz::tools::deployment::artifact::DeclaredEncryption;
     use jazz::tools::deployment::artifact::system_tables::with_e2ee_fragment;
     use jazz::tools::public_schema::{EncryptedColumn, EncryptionEntry, PlainType, SweepBy};
     use std::collections::BTreeMap;
-    let schema = with_e2ee_fragment(
-        &SchemaBuilder::new()
-            .table(TableSchema::builder("projects").column("ownerId", ColumnType::Uuid))
-            .table(
-                TableSchema::builder("tasks")
-                    .fk_column("projectId", "projects")
-                    .column("title", ColumnType::Bytea),
-            )
-            .build(),
-    );
+    let schema = with_e2ee_fragment(&plain_app());
     let hash = SchemaHash::compute(&schema).to_string();
     let entries = BTreeMap::from([(
         "tasks".to_owned(),
@@ -136,12 +142,59 @@ fn encrypted_body() -> Value {
     )]);
     let declared = DeclaredEncryption {
         settings: Default::default(),
-        versions: BTreeMap::from([(hash.clone(), entries)]),
+        versions: BTreeMap::from([(hash, entries)]),
     };
+    (schema, declared)
+}
+
+/// An encrypted schema as a deploy body.
+fn encrypted_body() -> Value {
+    let (schema, declared) = encrypted_app();
+    let hash = SchemaHash::compute(&schema).to_string();
     json!({
         "targetSchemaHash": hash,
         "schemas": [{ "hash": hash, "schema": schema }],
         "migrations": [],
+        "permissions": {},
+        "encryption": declared,
+    })
+}
+
+/// The plain app as a deploy body.
+fn plain_body() -> Value {
+    let schema = plain_app();
+    let hash = SchemaHash::compute(&schema).to_string();
+    json!({
+        "targetSchemaHash": hash,
+        "schemas": [{ "hash": hash, "schema": schema }],
+        "migrations": [],
+        "permissions": {},
+    })
+}
+
+/// The encrypted app as a deploy body over the plain one, which the
+/// server already runs: the migration adds Jazz's system tables.
+fn encryption_turned_on_body() -> Value {
+    use jazz::tools::deployment::artifact::system_tables::is_system_table;
+    let (schema, declared) = encrypted_app();
+    let hash = SchemaHash::compute(&schema).to_string();
+    let first = SchemaHash::compute(&plain_app()).to_string();
+    let added: Vec<Value> = schema
+        .keys()
+        .filter(|name| is_system_table(name.as_str()))
+        .map(|name| {
+            json!({
+                "table": name.as_str(),
+                "added": true,
+                "renamedFrom": null,
+                "operations": [],
+            })
+        })
+        .collect();
+    json!({
+        "targetSchemaHash": hash,
+        "schemas": [{ "hash": hash, "schema": schema }],
+        "migrations": [{ "fromHash": first, "toHash": hash, "forward": added }],
         "permissions": {},
         "encryption": declared,
     })
@@ -357,4 +410,57 @@ async fn an_encrypting_app_admits_a_local_first_founder_of_its_own_audience_only
     admit_local_founder(&server.state, &guest(4), &stating(&app_id().to_string()))
         .await
         .expect("the app's own id, stated");
+}
+
+/// A running server keeps its first schema while deployments admit later
+/// ones, so what it knows of encryption follows the catalogue: an app that
+/// turns encryption on in a later version, deployed to a server running its
+/// plain first version, refuses another audience's founders at once, not
+/// after a restart.
+#[tokio::test]
+async fn encryption_turned_on_by_a_later_deployment_refuses_foreign_founders_at_once() {
+    let router = router().await;
+    let found = |audience: Option<String>, subject: u8| {
+        let router = router.clone();
+        let mut body = json!({
+            "identity": {
+                "issuer": jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
+                "subject": uuid::Uuid::from_bytes([subject; 16]).to_string(),
+            },
+        });
+        if let Some(audience) = audience {
+            body["audience"] = audience.into();
+        }
+        async move {
+            router
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/apps/{}/admin/accounts/found-local-first",
+                            app_id()
+                        ))
+                        .header("X-Jazz-Admin-Secret", "test-admin")
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    let other = Some("https://other.example/jazz".to_owned());
+    let (status, deployed) = publish(&router, plain_body()).await;
+    assert_eq!(status, StatusCode::OK, "{deployed}");
+    assert_eq!(found(other.clone(), 1).await, StatusCode::OK);
+
+    let (status, deployed) = publish(&router, encryption_turned_on_body()).await;
+    assert_eq!(status, StatusCode::OK, "{deployed}");
+    assert_eq!(
+        found(other, 2).await,
+        StatusCode::BAD_REQUEST,
+        "the running server follows the catalogue"
+    );
+    assert_eq!(found(None, 3).await, StatusCode::OK);
 }
