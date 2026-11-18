@@ -7361,8 +7361,9 @@ impl Inner {
         cut: Cut,
     ) -> Result<bool, Error> {
         use jazz_model::schema::{ACCOUNT_IDENTITIES_TABLE, ACCOUNT_ROOTS_TABLE};
-        let identities = table.name == ACCOUNT_IDENTITIES_TABLE;
-        if !identities && table.name != ACCOUNT_ROOTS_TABLE {
+        let logical = self.logical_table_name(table);
+        let identities = logical == ACCOUNT_IDENTITIES_TABLE;
+        if !identities && logical != ACCOUNT_ROOTS_TABLE {
             return Ok(true);
         }
         let Some(account) = check.author.account_id() else {
@@ -7425,6 +7426,16 @@ impl Inner {
         self.holds_at(table, check.row, &check.key, Some(cut), |ctx| {
             ctx.policy_clause(Some(&previous), table, "a", &session)
         })
+    }
+
+    /// The name the owner's schema gives `table`. A write uploaded from a
+    /// client is staged under the stored view, whose tables are named by
+    /// their stored names: a table a later migration introduced is
+    /// `name~hash`, which Jazz's fixed names do not match.
+    fn logical_table_name<'a>(&'a self, table: &'a Table) -> &'a str {
+        self.owner
+            .by_stored(&table.stored)
+            .map_or(table.name.as_str(), |owned| owned.name.as_str())
     }
 
     /// Cell `column` of the account table row that `check` writes. A write
@@ -9411,15 +9422,16 @@ impl Inner {
         who: Who,
         seq: u64,
     ) -> Result<WriteHandle, Error> {
+        let schema = self.schema.clone();
+        let table = schema.table(table_name)?;
         // A system table's rows are never deleted by any writer, except
-        // member rows, which policies govern.
+        // member rows, which policies govern. The table may be named by its
+        // stored name (a client's upload), so compare the owner's name.
         if jazz_model::schema::is_system_table(table_name)
-            && table_name != jazz_model::schema::MEMBERS_TABLE
+            && self.logical_table_name(table) != jazz_model::schema::MEMBERS_TABLE
         {
             return Err(system_row_immutable(table_name, "deleted"));
         }
-        let schema = self.schema.clone();
-        let table = schema.table(table_name)?;
         // A delete by row id reads no user data (SPEC 7): its DELETE policy
         // alone decides, so a write-only principal may delete.
         let check = |inner: &Self, key: &[u8]| -> Result<(), Error> {

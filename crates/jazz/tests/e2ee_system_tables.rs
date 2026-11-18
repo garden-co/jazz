@@ -166,6 +166,47 @@ fn entries() -> BTreeMap<String, EncryptionEntry> {
     ])
 }
 
+/// The app's first version, before it turned encryption on: the same
+/// tables without the system tables, and policies that need none.
+fn first_version() -> JazzSchema {
+    common::compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("boards")
+                    .column("ownerId", ColumnType::Uuid)
+                    .policies(common::allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("projects")
+                    .column("ownerId", ColumnType::Uuid)
+                    .policies(common::allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("tasks")
+                    .fk_column("projectId", "projects")
+                    .column("title", ColumnType::Bytea)
+                    .policies(common::allow_all_policies()),
+            )
+            .build(),
+    )
+}
+
+/// The server's or a client's config for the app whose encryption came
+/// with a later version: it ships both versions and the lens between them.
+fn late_config(node: NodeUuid, author: AuthorSubject) -> DbConfig {
+    let (first, second) = (first_version(), schema_with(&late_settings()));
+    let lens = jazz::protocol::MigrationLens::new(first.version_id(), second.version_id(), vec![])
+        .unwrap();
+    DbConfig::new(second, DbIdentity { node, author }).with_migrations(vec![first], vec![lens])
+}
+
+fn late_settings() -> jazz::tools::public_schema::EncryptionSettings {
+    jazz::tools::public_schema::EncryptionSettings {
+        allow_account_reset: true,
+        ..Default::default()
+    }
+}
+
 /// The app's schema with the system tables and their derived policies.
 fn schema() -> JazzSchema {
     schema_with(&Default::default())
@@ -212,6 +253,12 @@ struct World {
     replicas: std::cell::RefCell<HashMap<AuthorSubject, std::rc::Rc<Db>>>,
     streams: std::cell::RefCell<Vec<jazz::db::SubscriptionStream>>,
     next_node: std::cell::Cell<u8>,
+    /// Whether the encryption fragment came with a later migration, so the
+    /// system tables are stored under `name~hash`.
+    late_fragment: bool,
+    /// Whether writes are made on the writer's own replica and uploaded,
+    /// not staged at the authority.
+    uploading: std::cell::Cell<bool>,
 }
 
 impl World {
@@ -228,6 +275,47 @@ impl World {
             },
         )))
         .unwrap();
+        Self::around(server, false)
+    }
+
+    /// An app that turned encryption on after its first version: the server
+    /// holds the version without the fragment and the lens into the one
+    /// with it, so the system tables are stored under `name~hash`.
+    fn late_fragment() -> Self {
+        let server = block_on(Db::open_history_complete(late_config(
+            NodeUuid::from_bytes([0xee; 16]),
+            AuthorSubject::SYSTEM,
+        )))
+        .unwrap();
+        let world = Self::around(server, true);
+        let (stored, _) = world.server.stored_column_for_test(MEMBERS, "scopeId");
+        assert!(
+            stored.contains('~'),
+            "the fragment's tables are stored under later names: {stored}"
+        );
+        world
+    }
+
+    /// Tick the authority and every replica until nothing more moves.
+    fn pump(&self) {
+        for _ in 0..20 {
+            for replica in self.replicas.borrow().values() {
+                block_on(replica.tick()).unwrap();
+            }
+            block_on(self.server.tick()).unwrap();
+        }
+    }
+
+    /// Whether the authority holds a live row `row` of `table`.
+    fn holds(&self, table: &str, row: RowUuid) -> bool {
+        let prepared = self.server.prepare_query(&Query::from(table)).unwrap();
+        block_on(self.server.all(&prepared, ReadOpts::default()))
+            .unwrap()
+            .iter()
+            .any(|found| found.row_uuid() == row)
+    }
+
+    fn around(server: Db, late_fragment: bool) -> Self {
         let projects = Value::Uuid(server.table_identity("projects").unwrap().unwrap().0);
         Self {
             server,
@@ -235,33 +323,26 @@ impl World {
             replicas: Default::default(),
             streams: Default::default(),
             next_node: std::cell::Cell::new(1),
+            late_fragment,
+            uploading: Default::default(),
         }
     }
 
     /// Commit `writes` as one unit by `who`, staged at the authority as
     /// `who`'s session.
     fn commit(&self, who: AuthorSubject, writes: &[(&str, RowUuid, Cells)]) -> Result<(), String> {
-        let id = OpenTransactionId::new();
-        block_on(self.server.begin_mergeable(id)).unwrap();
-        let tx = self.server.tx_ref(id);
-        for (table, row, cells) in writes {
-            let staged = block_on(tx.insert(
-                table,
-                cells.clone(),
-                InsertOptions {
-                    row_id: Some(*row),
-                    identity: WriteIdentity::Session(who),
-                    ..Default::default()
-                },
-            ));
-            if let Err(error) = staged {
-                let _ = self.server.abandon_transaction_handle(id);
-                return Err(error.message);
-            }
+        if !self.uploading.get() {
+            return commit_on(&self.server, WriteIdentity::Session(who), writes);
         }
-        block_on(self.server.commit_mergeable_handle(id))
-            .map(drop)
-            .map_err(|error| error.message)
+        // An upload is accepted if the authority ends up holding every row.
+        let replica = self.replica(who);
+        commit_on(&replica, WriteIdentity::Database, writes)?;
+        self.pump();
+        if writes.iter().all(|(table, row, _)| self.holds(table, *row)) {
+            Ok(())
+        } else {
+            Err("the authority refused the upload".to_owned())
+        }
     }
 
     fn address(&self, project: RowUuid) -> Cells {
@@ -346,13 +427,17 @@ impl World {
         let node = self.next_node.get() + 1;
         self.next_node.set(node);
         let db = std::rc::Rc::new(
-            block_on(Db::open(DbConfig::new(
-                schema(),
-                DbIdentity {
-                    node: NodeUuid::from_bytes([node; 16]),
-                    author: who,
-                },
-            )))
+            block_on(Db::open(if self.late_fragment {
+                late_config(NodeUuid::from_bytes([node; 16]), who)
+            } else {
+                DbConfig::new(
+                    schema(),
+                    DbIdentity {
+                        node: NodeUuid::from_bytes([node; 16]),
+                        author: who,
+                    },
+                )
+            }))
             .unwrap(),
         );
         let (client_side, server_side) = duplex();
@@ -393,6 +478,35 @@ impl World {
         ))
         .unwrap();
     }
+}
+
+/// Commit `writes` as one unit on `db`, written as `identity`.
+fn commit_on(
+    db: &Db,
+    identity: WriteIdentity,
+    writes: &[(&str, RowUuid, Cells)],
+) -> Result<(), String> {
+    let id = OpenTransactionId::new();
+    block_on(db.begin_mergeable(id)).unwrap();
+    let tx = db.tx_ref(id);
+    for (table, row, cells) in writes {
+        let staged = block_on(tx.insert(
+            table,
+            cells.clone(),
+            InsertOptions {
+                row_id: Some(*row),
+                identity,
+                ..Default::default()
+            },
+        ));
+        if let Err(error) = staged {
+            let _ = db.abandon_transaction_handle(id);
+            return Err(error.message);
+        }
+    }
+    block_on(db.commit_mergeable_handle(id))
+        .map(drop)
+        .map_err(|error| error.message)
 }
 
 fn project(owner: AuthorSubject) -> Cells {
@@ -1142,6 +1256,18 @@ impl World {
 
     /// Delete `row` of `table` as `who`'s session, alone in its unit.
     fn delete(&self, who: AuthorSubject, table: &str, row: RowUuid) -> Result<(), String> {
+        if self.uploading.get() {
+            let replica = self.replica(who);
+            self.pump();
+            block_on(replica.delete(table, row, DeleteOptions::default()))
+                .map_err(|error| error.message)?;
+            self.pump();
+            return if self.holds(table, row) {
+                Err("the authority refused the delete".to_owned())
+            } else {
+                Ok(())
+            };
+        }
         let id = OpenTransactionId::new();
         block_on(self.server.begin_mergeable(id)).unwrap();
         let staged = block_on(self.server.tx_ref(id).delete(
@@ -1846,4 +1972,53 @@ impl World {
             ("nonceCommitment".to_owned(), bytes("n")),
         ])
     }
+}
+
+/// Core recognises Jazz's system tables by the name the owner's schema gives
+/// them, whatever name a client's upload carries: an app that turns
+/// encryption on in a later version stores them as `name~hash`, and an
+/// uploaded identity or root still gets the account checks, and a member
+/// still leaves over sync.
+#[test]
+fn uploaded_account_records_to_a_later_fragment_get_the_same_checks() {
+    use system_tables::ACCOUNT_ROOTS;
+    let world = World::late_fragment();
+    world.uploading.set(true);
+    let (stored, _) = world.server.stored_column_for_test(ACCOUNT_ROOTS, "kind");
+    assert!(stored.contains('~'), "{stored}");
+    let device = world.device(alice());
+    world
+        .identity(alice(), device, 0, "local-first")
+        .expect_err("a root's kind names how its account was founded");
+    world
+        .identity(alice(), device, 0, "app")
+        .expect("the right kind");
+    world
+        .identity(alice(), device, 2, "app")
+        .expect_err("a reset follows the generation before it");
+    world
+        .identity(alice(), device, 1, "app")
+        .expect("a reset of an app-founded account");
+}
+
+/// A member leaves over sync from an app whose fragment came late.
+#[test]
+fn a_member_leaves_over_sync_from_a_later_fragment() {
+    let world = World::late_fragment();
+    world.uploading.set(true);
+    let p = new_row();
+    world
+        .commit(
+            alice(),
+            &[
+                ("projects", p, project(alice())),
+                (MEMBERS, new_row(), world.member(p, alice())),
+            ],
+        )
+        .unwrap();
+    let bobs = new_row();
+    world
+        .commit(alice(), &[(MEMBERS, bobs, world.member(p, bob()))])
+        .unwrap();
+    world.delete(bob(), MEMBERS, bobs).expect("a member leaves");
 }
