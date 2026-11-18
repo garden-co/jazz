@@ -1202,15 +1202,17 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
         ],
     )
     .expect("valid migration lens");
-    block_on(db.activate_schema_with_lenses(v2.schema.clone(), &[lens])).expect("select v2 schema");
+    block_on(db.admit_schema_with_lenses(v2.schema.clone(), &[lens])).expect("admit v2 schema");
+    // Admitting v2 rebuilds the runtime; a session on v2 reads by it.
+    let v2_db = block_on(db.register_schema_view(v2.schema.clone())).expect("v2 view");
 
-    let prepared_v2_a = db
+    let prepared_v2_a = v2_db
         .prepare_query_bound(
             &query,
             BTreeMap::from([("team".to_owned(), Value::Uuid(team_a.0))]),
         )
         .expect("reprepare v2 team A binding");
-    let prepared_v2_b = db
+    let prepared_v2_b = v2_db
         .prepare_query_bound(
             &query,
             BTreeMap::from([("team".to_owned(), Value::Uuid(team_b.0))]),
@@ -1226,10 +1228,10 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
         prepared_v2_b.shape().shape_id()
     );
     assert_eq!(
-        row_ids_for_identity(&db, &prepared_v2_a, user_a()),
+        row_ids_for_identity(&v2_db, &prepared_v2_a, user_a()),
         vec![document_a]
     );
-    let projected = block_on(db.all_for_identity(&prepared_v2_a, opts(), user_a()))
+    let projected = block_on(v2_db.all_for_identity(&prepared_v2_a, opts(), user_a()))
         .expect("read v2 defaulted document");
     assert_eq!(projected.len(), 1);
     assert_eq!(projected[0].cell_at(2), Some(Value::U64(0)));
@@ -1242,15 +1244,15 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
         vec![team_a]
     );
     assert!(
-        row_ids_for_identity(&db, &prepared_v2_a, user_b()).is_empty(),
+        row_ids_for_identity(&v2_db, &prepared_v2_a, user_b()).is_empty(),
         "principal B's claim must not select principal A's row after re-preparation"
     );
     assert!(
-        row_ids_for_identity(&db, &prepared_v2_b, user_a()).is_empty(),
+        row_ids_for_identity(&v2_db, &prepared_v2_b, user_a()).is_empty(),
         "principal A's claim must not select principal B's row after re-preparation"
     );
     assert_eq!(
-        row_ids_for_identity(&db, &prepared_v2_b, user_b()),
+        row_ids_for_identity(&v2_db, &prepared_v2_b, user_b()),
         vec![document_b]
     );
 }
@@ -1315,7 +1317,7 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
         ],
     )
     .expect("valid migration lens");
-    block_on(db.activate_schema_with_lenses(v2.schema.clone(), &[lens])).expect("activate v2");
+    block_on(db.admit_schema_with_lenses(v2.schema.clone(), &[lens])).expect("admit v2");
     block_on(db.update(
         DOCUMENTS,
         row(0x41),
@@ -1450,7 +1452,7 @@ fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
         ],
     )
     .expect("valid migration lens");
-    block_on(db.activate_schema_with_lenses(v2.schema.clone(), &[lens])).expect("activate v2");
+    block_on(db.admit_schema_with_lenses(v2.schema.clone(), &[lens])).expect("admit v2");
 
     // A distinct v2 prepared shape occupies the fresh runtime before the old
     // handle is read, so correctness cannot rely on an accidentally matching

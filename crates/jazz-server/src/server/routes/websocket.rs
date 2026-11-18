@@ -598,7 +598,10 @@ async fn ws_admission(
     if let Some(audience) = local_first_audience.as_deref() {
         let value = axum::http::HeaderValue::from_str(audience)
             .map_err(|error| format!("invalid local_first_audience value: {error}"))?;
-        headers.insert(crate::middleware::auth::LOCAL_FIRST_AUDIENCE_HEADER, value);
+        headers.insert(
+            crate::middleware::auth::DEVICE_ACCOUNT_AUDIENCE_HEADER,
+            value,
+        );
     }
     if let Some(session_value) = auth.backend_session.as_ref() {
         use base64::Engine as _;
@@ -625,7 +628,7 @@ async fn ws_admission(
     );
     // A core admits its own backend only: the app's backend (`createJazz`)
     // decides who a user is and opens their sessions with its credential,
-    // and relays a local-first guest's proof with it (or on an upgrade its
+    // and relays a device account's proof with it (or on an upgrade its
     // trusted workload vouched for).
     if !backend_credential && !vouched_upgrade {
         return Err(match backend_secret {
@@ -639,7 +642,7 @@ async fn ws_admission(
     if !has_jwt && !has_session_header {
         if !backend_credential {
             return Err(
-                "Session required. Provide a backend session or a local-first proof.".into(),
+                "Session required. Provide a backend session or a device-account proof.".into(),
             );
         }
         return Ok(WebSocketAdmission {
@@ -661,7 +664,9 @@ async fn ws_admission(
             .map_err(super::accounts::AdmissionError::from)?;
 
     let Some(mut session) = session else {
-        return Err("Session required. Provide a backend session or a local-first proof.".into());
+        return Err(
+            "Session required. Provide a backend session or a device-account proof.".into(),
+        );
     };
 
     // A session the backend states is policy-scoped, and its authority is the
@@ -678,7 +683,7 @@ async fn ws_admission(
             issuer: session.issuer.clone(),
             subject: session.user_id.clone(),
         };
-        if session.issuer == jazz::tools::identity::LOCAL_FIRST_ISSUER {
+        if session.issuer == jazz::tools::identity::DEVICE_ACCOUNT_ISSUER {
             super::accounts::admit_local_founder(state, &principal, &headers).await?;
         }
         let assignment = super::accounts::resolve_assignment(state, principal).await?;
@@ -1690,8 +1695,9 @@ mod tests {
     #[tokio::test]
     async fn account_watch_does_not_spin_once_the_registry_is_gone() {
         let registry = crate::server::accounts::AccountRegistryOwner::in_memory_for_test();
-        let identity = AuthorSubject::reserved(jazz::tools::identity::LOCAL_FIRST_ISSUER, "alice")
-            .expect("author");
+        let identity =
+            AuthorSubject::reserved(jazz::tools::identity::DEVICE_ACCOUNT_ISSUER, "alice")
+                .expect("author");
         let mut unaccounted = AccountWatch::subscribe(None, Some(&registry));
         let mut account = AccountWatch::subscribe(Some(identity), Some(&registry));
         registry.close().expect("close registry");
@@ -1812,7 +1818,7 @@ mod tests {
             ws_validate_session_identity(&external_session, same_subject_other_issuer).is_err(),
             "a shared provider subject must not bridge issuer domains"
         );
-        let local_first = Session::new(AuthorSubject::LOCAL_FIRST_ISSUER, "local-user")
+        let local_first = Session::new(AuthorSubject::DEVICE_ACCOUNT_ISSUER, "local-user")
             .with_auth_mode(AuthMode::LocalFirst);
         let local_first_peer =
             AuthorSubject::from_canonical(r#"["urn:jazz:local-first","local-user"]"#).unwrap();
@@ -2325,15 +2331,15 @@ mod tests {
         let seed = [0x71; 32];
         let proof = jazz::tools::identity::mint_jazz_self_signed_token(
             &seed,
-            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
             &state.app_id.to_string(),
             3_600,
         )
-        .expect("mint local-first proof");
+        .expect("mint device-account proof");
         let subject = jazz::tools::identity::derive_user_id(&seed).to_string();
-        let guest = AuthorSubject::reserved(jazz::tools::identity::LOCAL_FIRST_ISSUER, &subject)
-            .expect("local-first author")
-            .with_account(jazz::account_registry::local_first_account_id(
+        let guest = AuthorSubject::reserved(jazz::tools::identity::DEVICE_ACCOUNT_ISSUER, &subject)
+            .expect("device-account author")
+            .with_account(jazz::account_registry::device_account_id(
                 *state.app_id.uuid(),
                 &subject,
             ));
@@ -4076,7 +4082,7 @@ mod tests {
         .await
     }
 
-    /// A local-first guest of `core`: its proof, its founding author (with the
+    /// A device account of `core`: its proof, its founding author (with the
     /// account the core assigns it) and its subject. The only public session
     /// a core admits, relayed by the backend with its secret.
     #[cfg(feature = "embedded-server")]
@@ -4086,17 +4092,17 @@ mod tests {
     ) -> (String, AuthorSubject, String) {
         let token = jazz::tools::identity::mint_jazz_self_signed_token(
             &seed,
-            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
             &core.app_id().to_string(),
             3600,
         )
         .expect("mint guest proof");
         let subject = jazz::tools::identity::derive_user_id(&seed).to_string();
-        let account =
-            jazz::account_registry::local_first_account_id(*core.app_id().uuid(), &subject);
-        let identity = AuthorSubject::reserved(jazz::tools::identity::LOCAL_FIRST_ISSUER, &subject)
-            .expect("local-first author")
-            .with_account(account);
+        let account = jazz::account_registry::device_account_id(*core.app_id().uuid(), &subject);
+        let identity =
+            AuthorSubject::reserved(jazz::tools::identity::DEVICE_ACCOUNT_ISSUER, &subject)
+                .expect("device-account author")
+                .with_account(account);
         (token, identity, subject)
     }
 
@@ -4349,7 +4355,7 @@ mod tests {
 
         let revoked = revoke(
             &core,
-            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
             &alice_subject,
         )
         .await;
@@ -4392,7 +4398,7 @@ mod tests {
         core.shutdown().await;
     }
 
-    /// A browser without an app id signs its local-first proof for the
+    /// A browser without an app id signs its device-account proof for the
     /// endpoint it syncs with. Its backend verifies that audience and vouches
     /// for it with the backend secret; the core then admits the founder, with
     /// the account id namespaced by that audience. Without the backend secret
@@ -4416,19 +4422,19 @@ mod tests {
         let endpoint = "https://app.example.com/jazz";
         let token = jazz::tools::identity::mint_jazz_self_signed_token(
             &[0x5a; 32],
-            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
             endpoint,
             3600,
         )
         .expect("mint endpoint-scoped proof");
         let verified = jazz::tools::identity::verify_jazz_self_signed_proof(&token, endpoint)
             .expect("verify endpoint-scoped proof");
-        let account = jazz::account_registry::local_first_account_id(
-            *crate::middleware::auth::local_first_founding_app(endpoint).uuid(),
+        let account = jazz::account_registry::device_account_id(
+            *crate::middleware::auth::device_account_founding_app(endpoint).uuid(),
             &verified.user_id,
         );
         let identity = AuthorSubject::reserved(verified.issuer, &verified.user_id)
-            .expect("local-first author")
+            .expect("device-account author")
             .with_account(account);
 
         async fn first_frames(core: &JazzServer, prelude: serde_json::Value) -> Vec<WireFrame> {
@@ -4576,7 +4582,7 @@ mod tests {
         registry.fail_next_write_for_test();
         let revoked = revoke(
             &core,
-            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
             &alice_subject,
         )
         .await;
@@ -4594,7 +4600,7 @@ mod tests {
         let lookup = super::super::accounts::resolve_assignment(
             &core.server_state(),
             jazz::account_registry::Principal {
-                issuer: jazz::tools::identity::LOCAL_FIRST_ISSUER.into(),
+                issuer: jazz::tools::identity::DEVICE_ACCOUNT_ISSUER.into(),
                 subject: alice_subject.clone(),
             },
         )

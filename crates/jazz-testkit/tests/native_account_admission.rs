@@ -25,14 +25,14 @@ async fn a_relayed_guest_authors_as_its_founding_account_and_cannot_choose_anoth
             context.jwt_token = Some(
                 identity::mint_jazz_self_signed_token(
                     &seed,
-                    identity::LOCAL_FIRST_ISSUER,
+                    identity::DEVICE_ACCOUNT_ISSUER,
                     &server.app_id().to_string(),
                     3600,
                 )
                 .expect("mint guest proof"),
             );
             let account =
-                jazz::account_registry::local_first_account_id(*server.app_id().uuid(), &subject);
+                jazz::account_registry::device_account_id(*server.app_id().uuid(), &subject);
             context.account_id = Some(account);
             let client = connect(context.clone())
                 .await
@@ -61,7 +61,7 @@ async fn a_relayed_guest_authors_as_its_founding_account_and_cannot_choose_anoth
                             Value::Row {
                                 id: None,
                                 values: vec![
-                                    Value::Text(identity::LOCAL_FIRST_ISSUER.into()),
+                                    Value::Text(identity::DEVICE_ACCOUNT_ISSUER.into()),
                                     Value::Text(subject.clone()),
                                 ]
                             },

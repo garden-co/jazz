@@ -80,7 +80,7 @@ impl Session {
     pub fn author_subject(&self) -> Result<AuthorSubject, crate::ids::AuthorSubjectError> {
         let principal = match self.auth_mode {
             AuthMode::External => AuthorSubject::authenticated(&self.issuer, self.get_user_id()),
-            AuthMode::LocalFirst if self.issuer == AuthorSubject::LOCAL_FIRST_ISSUER => {
+            AuthMode::LocalFirst if self.issuer == AuthorSubject::DEVICE_ACCOUNT_ISSUER => {
                 AuthorSubject::reserved(&self.issuer, self.get_user_id())
             }
             AuthMode::Anonymous if self.issuer == AuthorSubject::ANONYMOUS_ISSUER => {
@@ -433,7 +433,7 @@ mod tests {
         ] {
             let issuer = match mode {
                 AuthMode::External => "https://issuer.example",
-                AuthMode::LocalFirst => AuthorSubject::LOCAL_FIRST_ISSUER,
+                AuthMode::LocalFirst => AuthorSubject::DEVICE_ACCOUNT_ISSUER,
                 AuthMode::Anonymous => AuthorSubject::ANONYMOUS_ISSUER,
             };
             let session = Session::new(issuer, "user-1").with_auth_mode(mode);

@@ -23,7 +23,9 @@
 //!   it selects and its per-table policies. The current one is the highest
 //!   revision; its parent is the revision before it. `activated_seq` is the
 //!   seq at which the read policies last changed when it was activated, and
-//!   `read_digest` a digest of them (both `NULL` until activated).
+//!   `read_digest` a digest of them. Nothing activates a revision any more
+//!   (a store installs its schema when it opens); stores written before
+//!   keep theirs, and they are still read.
 //!
 //! - `_jazz_bundles`: each permissions bundle a backend published, by its
 //!   content id (see [`bundle_id`]): the write schema it selects and its
@@ -33,9 +35,7 @@
 //!   rollback is publishing the older bundle again (a no-op).
 //!
 //! An authority's server writes these in the same transaction as the
-//! admission they describe, so a deploy is never half written. A store
-//! with no server writes schemas and permissions as it admits and
-//! activates them.
+//! admission they describe, so a deploy is never half written.
 
 use std::collections::BTreeMap;
 
@@ -742,69 +742,4 @@ pub(crate) fn activated_seq(conn: &Storage) -> Result<Option<u64>, Error> {
     .optional()
     .map(|seq| seq.map(|seq| seq as u64))
     .map_err(storage)
-}
-
-/// Record that `schema` (with its policies) was made current at `seq`,
-/// with a digest of its read policies: at `revision`, or, without one, at
-/// the current revision if it selects the same schema and policies, else
-/// at the next. The read policies take effect at `seq` only if their digest
-/// changed since the last activation.
-pub(crate) fn record_activation(
-    conn: &Storage,
-    revision: Option<u64>,
-    schema: &JazzSchema,
-    read_digest: u64,
-    seq: u64,
-) -> Result<(), Error> {
-    let (hash, _) = structural_def(schema.public_schema())?;
-    let def = canonical_json(&permissions_of(schema.public_schema()))?;
-    let head: Option<(i64, Vec<u8>, String)> = conn
-        .cached_row(
-            "SELECT revision, hash, def FROM _jazz_permissions ORDER BY revision DESC LIMIT 1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()
-        .map_err(storage)?;
-    let revision = match (revision, &head) {
-        (Some(revision), _) => revision as i64,
-        (None, Some((revision, head_hash, head_def)))
-            if *head_hash == hash.as_bytes() && *head_def == def =>
-        {
-            *revision
-        }
-        (None, Some((revision, ..))) => revision + 1,
-        (None, None) => 1,
-    };
-    let last: Option<(i64, i64)> = conn
-        .cached_row(
-            "SELECT activated_seq, read_digest FROM _jazz_permissions \
-             WHERE activated_seq IS NOT NULL ORDER BY revision DESC LIMIT 1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()
-        .map_err(storage)?;
-    let activated_seq = match last {
-        Some((at, digest)) if digest as u64 == read_digest => at,
-        _ => seq as i64,
-    };
-    conn.prepare_cached(
-        "INSERT INTO _jazz_permissions (revision, hash, published_at, activated_seq, read_digest, def) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (revision) DO UPDATE SET \
-         hash = excluded.hash, def = excluded.def, activated_seq = excluded.activated_seq, \
-         read_digest = excluded.read_digest",
-    )
-    .and_then(|mut statement| {
-        statement.execute(params![
-            revision,
-            hash.as_bytes().to_vec(),
-            now_millis() as i64,
-            activated_seq,
-            read_digest as i64,
-            def
-        ])
-    })
-    .map_err(storage)?;
-    Ok(())
 }

@@ -64,12 +64,12 @@ fn local_first_context(
     let audience = server.app_id().to_string();
     let token = identity::mint_jazz_self_signed_token(
         seed,
-        identity::LOCAL_FIRST_ISSUER,
+        identity::DEVICE_ACCOUNT_ISSUER,
         &audience,
         TOKEN_TTL_SECS,
     )
     .expect("mint local-first token");
-    ctx.account_id = Some(jazz::account_registry::local_first_account_id(
+    ctx.account_id = Some(jazz::account_registry::device_account_id(
         *server.app_id().uuid(),
         &user_id,
     ));
@@ -100,8 +100,8 @@ fn expected_author(
 
 fn expected_local_author(server: &JazzServer, subject: &str) -> Value {
     expected_author(
-        jazz::account_registry::local_first_account_id(*server.app_id().uuid(), subject),
-        identity::LOCAL_FIRST_ISSUER,
+        jazz::account_registry::device_account_id(*server.app_id().uuid(), subject),
+        identity::DEVICE_ACCOUNT_ISSUER,
         subject,
     )
 }
@@ -556,7 +556,7 @@ async fn expired_token_reconnect_flushes_queued_writes_impl() {
     ctx.jwt_token = Some(
         identity::mint_jazz_self_signed_token_at(
             &seed,
-            identity::LOCAL_FIRST_ISSUER,
+            identity::DEVICE_ACCOUNT_ISSUER,
             &audience,
             5,
             auth_clock.now_seconds(),
@@ -598,7 +598,7 @@ async fn expired_token_reconnect_flushes_queued_writes_impl() {
     fresh_ctx.jwt_token = Some(
         identity::mint_jazz_self_signed_token_at(
             &seed,
-            identity::LOCAL_FIRST_ISSUER,
+            identity::DEVICE_ACCOUNT_ISSUER,
             &audience,
             TOKEN_TTL_SECS,
             auth_clock.now_seconds(),
@@ -649,7 +649,7 @@ async fn token_refreshed_right_after_connect_is_used_on_reconnect_impl() {
     let mint = |ttl| {
         identity::mint_jazz_self_signed_token_at(
             &seed,
-            identity::LOCAL_FIRST_ISSUER,
+            identity::DEVICE_ACCOUNT_ISSUER,
             &audience,
             ttl,
             auth_clock.now_seconds(),

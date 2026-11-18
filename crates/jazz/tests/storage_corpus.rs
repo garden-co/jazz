@@ -628,8 +628,10 @@ fn produce_sqlite_storage_corpus_v1() {
         block_on(client.commit_serializable_handle(tx)).unwrap();
         drop(streams);
 
-        // Then the server renames a column.
-        block_on(server.activate_schema_with_lenses(v2(), &[rename_title()])).unwrap();
+        // Then the server renames a column. The pinned corpus was written
+        // when this made v2 current at runtime (recording a permissions
+        // revision); a deploy now only admits it.
+        block_on(server.admit_schema_with_lenses(v2(), &[rename_title()])).unwrap();
         insert_as(
             &server,
             "documents",
