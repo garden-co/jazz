@@ -105,6 +105,55 @@ fn unix_now_ms() -> u64 {
         })
 }
 
+/// The registry as core's checks beside the account tables' policies read
+/// it (E2EE protocol R5, R6): on a connection of its own, which sees what
+/// the registry committed, so a check never waits for the store's thread.
+pub(crate) struct RegistryFounders {
+    reader: jazz::host::HostReader,
+    app: Uuid,
+}
+
+impl RegistryFounders {
+    pub(crate) fn new(reader: jazz::host::HostReader, app: Uuid) -> Self {
+        Self { reader, app }
+    }
+}
+
+impl jazz::db::AccountRegistryView for RegistryFounders {
+    /// An account was founded by a local-first identity when one of its
+    /// local-first identities derives its id: linking a local-first
+    /// identity into another account keeps that account's id.
+    fn founded_local_first(&self, account: AccountId) -> Result<Option<bool>, String> {
+        let issuers = self.reader.sql(|conn| {
+            let mut statement = conn
+                .prepare_cached(
+                    "SELECT issuer, subject FROM _jazz_host_account_identities WHERE account = ?1",
+                )
+                .map_err(registry::storage_error)?;
+            let rows = statement
+                .query_map([account.0.as_bytes()], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(registry::storage_error)?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(registry::storage_error)
+        });
+        let identities = match issuers {
+            Ok(identities) => identities,
+            // A store whose registry never opened knows no account.
+            Err(error) if error.to_string().contains("no such table") => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        };
+        if identities.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(identities.iter().any(|(issuer, subject)| {
+            issuer == jazz::identity::DEVICE_ACCOUNT_ISSUER
+                && jazz::account_registry::device_account_id(self.app, subject) == account
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +217,51 @@ mod tests {
         );
         let bob = second.login_or_register(&principal("bob")).unwrap();
         assert_eq!(first.login(&principal("bob")).unwrap(), bob.assignment);
+    }
+
+    // Core's account-record checks read who founded an account through
+    // the registry's own read connection (E2EE protocol R5, R6). Internal:
+    // the view has no public reader of its own to observe it through.
+    #[test]
+    fn the_founders_view_tells_local_first_founded_accounts() {
+        use jazz::db::AccountRegistryView;
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::runtime::StorageConfig::data_dir(dir.path());
+        let store = crate::runtime::AppStore::open(&storage).unwrap();
+        let mut registry = StoredAccountRegistry::open(store.sql().unwrap()).unwrap();
+        let app = Uuid::from_bytes([7; 16]);
+        let external = registry
+            .login_or_register(&principal("alice"))
+            .unwrap()
+            .assignment
+            .account;
+        let founder = Principal {
+            issuer: jazz::identity::DEVICE_ACCOUNT_ISSUER.into(),
+            subject: Uuid::from_bytes([9; 16]).to_string(),
+        };
+        let AccountCommandResult::Assignment(founded) = registry
+            .execute(&AccountCommand::FoundDeviceAccount {
+                principal: founder,
+                app,
+            })
+            .unwrap()
+        else {
+            panic!("an assignment");
+        };
+        let view = RegistryFounders::new(
+            jazz::host::HostReader::open(
+                &dir.path().join(crate::server::identity::STORE_FILE),
+                None,
+            )
+            .unwrap(),
+            app,
+        );
+        assert_eq!(view.founded_local_first(founded.account), Ok(Some(true)));
+        assert_eq!(view.founded_local_first(external), Ok(Some(false)));
+        assert_eq!(
+            view.founded_local_first(AccountId(Uuid::from_bytes([3; 16]))),
+            Ok(None)
+        );
     }
 
     #[test]

@@ -1040,6 +1040,7 @@ impl Owner {
         wake: std_mpsc::Sender<Work>,
         any_stored_catalogue: bool,
         app: Option<String>,
+        registry: Option<HostReader>,
     ) -> Result<Self, String> {
         let chunk_io = match &chunk_store {
             Some(choice) if choice.network => {
@@ -1062,6 +1063,15 @@ impl Owner {
                 },
             )?;
         owner.chunk_io = chunk_io;
+        // The checks beside the E2EE account tables' policies read the
+        // account registry the store keeps beside the rows.
+        if let (Some(reader), Some(app)) = (registry, owner.app.as_deref()) {
+            let app = jazz::tools::AppId::from_string(app)
+                .unwrap_or_else(|_| jazz::tools::AppId::from_name(app));
+            owner.db.set_account_registry(Rc::new(
+                crate::server::account_store::RegistryFounders::new(reader, *app.uuid()),
+            ));
+        }
         Ok(owner)
     }
 
@@ -3252,5 +3262,170 @@ mod tests {
         backoff.ended_at(true, 7);
         assert!(backoff.waiting_at(7));
         assert!(!backoff.waiting_at(8));
+    }
+    /// An opened server checks an account root's `kind` against how the
+    /// account was founded, as the account registry in its own store says,
+    /// not against the session's issuer alone. The registry holds alice's
+    /// account as founded by an external login; a session of a local-first
+    /// identity writes as that account.
+    ///
+    /// ```text
+    /// registry: alice's account founded by an external login (app)
+    /// alice's account, from a local-first session:
+    ///   device request ──► ✓
+    ///   identity + root "local-first" ──► ✗ (founded by the app)
+    ///   identity + root "app"         ──► ✓
+    /// ```
+    #[test]
+    fn an_account_root_must_name_how_the_registry_says_its_account_was_founded() {
+        use crate::server::account_store::StoredAccountRegistry;
+        use jazz::db::{InsertOptions, WriteIdentity};
+        use jazz::ids::RowUuid;
+        use jazz::tools::OpenTransactionId;
+        use jazz::tools::deployment::artifact::system_tables::{
+            self, derive_e2ee_policies, with_e2ee_fragment,
+        };
+        use jazz::tools::public_schema::{EncryptedColumn, EncryptionEntry, PlainType, SweepBy};
+
+        let app = "founders-view-test";
+        let dir = tempfile::tempdir().unwrap();
+        let store = AppStore::open(&StorageConfig::data_dir(dir.path())).unwrap();
+        store.set_app(app);
+        let mut registry = StoredAccountRegistry::open(store.sql().unwrap()).unwrap();
+        let alice = registry
+            .login_or_register(&jazz::account_registry::Principal {
+                issuer: "https://issuer.example".into(),
+                subject: "alice".into(),
+            })
+            .unwrap()
+            .assignment
+            .account;
+
+        // Tasks encrypt their title in their project's space.
+        let encrypted = BTreeMap::from([(
+            "tasks".to_owned(),
+            EncryptionEntry {
+                space: "projectId".to_owned(),
+                scope: "projects".to_owned(),
+                columns: BTreeMap::from([(
+                    "title".to_owned(),
+                    EncryptedColumn {
+                        plain: PlainType {
+                            column_type: ColumnType::Text,
+                            nullable: false,
+                        },
+                        sealed_type: None,
+                        from: None,
+                        to: None,
+                        convert: None,
+                        reverse: None,
+                    },
+                )]),
+                equality: Vec::new(),
+                backfill: Vec::new(),
+                rehome: None,
+                sweep: SweepBy::Updaters,
+            },
+        )]);
+        let mut tables = with_e2ee_fragment(
+            &SchemaBuilder::new()
+                .table(TableSchema::builder("projects").column("ownerId", ColumnType::Uuid))
+                .table(
+                    TableSchema::builder("tasks")
+                        .fk_column("projectId", "projects")
+                        .column("title", ColumnType::Bytea),
+                )
+                .build(),
+        );
+        for (table, policies) in
+            derive_e2ee_policies(&tables, &encrypted, &Default::default()).unwrap()
+        {
+            tables.get_mut(&table).unwrap().policies = policies;
+        }
+        let runtime = store
+            .start_runtime(JazzSchema::new(&tables).unwrap(), NodeRole::Core, false)
+            .unwrap();
+
+        let subject = uuid::Uuid::from_bytes([0x1f; 16]).to_string();
+        let session = AuthorSubject::reserved(jazz::identity::DEVICE_ACCOUNT_ISSUER, &subject)
+            .unwrap()
+            .with_account(alice);
+        let bytes = move |text: &str| Value::Bytes(text.as_bytes().to_vec());
+        let device = RowUuid(uuid::Uuid::new_v4());
+        let epoch = uuid::Uuid::new_v4();
+        let commit =
+            move |db: &Db, writes: Vec<(&'static str, RowUuid, BTreeMap<String, Value>)>| {
+                let id = OpenTransactionId::new();
+                block_on(db.begin_mergeable(id)).map_err(|error| error.message)?;
+                let tx = db.tx_ref(id);
+                for (table, row, cells) in writes {
+                    let staged = block_on(tx.insert(
+                        table,
+                        cells,
+                        InsertOptions {
+                            row_id: Some(row),
+                            identity: WriteIdentity::Session(session),
+                            ..Default::default()
+                        },
+                    ));
+                    if let Err(error) = staged {
+                        let _ = db.abandon_transaction_handle(id);
+                        return Err(error.message);
+                    }
+                }
+                block_on(db.commit_mergeable_handle(id))
+                    .map(drop)
+                    .map_err(|error| error.message)
+            };
+        let request = BTreeMap::from([
+            ("publicKey".to_owned(), bytes("pk")),
+            ("mechanism".to_owned(), Value::String("m".to_owned())),
+            ("version".to_owned(), Value::I64(1)),
+            ("signingPublicKey".to_owned(), bytes("spk")),
+            ("signingMechanism".to_owned(), Value::String("s".to_owned())),
+            ("signingVersion".to_owned(), Value::I64(1)),
+            ("nonceCommitment".to_owned(), bytes("n")),
+        ]);
+        let identity_and_root = move |kind: &'static str| {
+            vec![
+                (
+                    system_tables::ACCOUNT_IDENTITIES,
+                    RowUuid(alice.0),
+                    BTreeMap::from([
+                        ("ledgerVersion".to_owned(), Value::I64(1)),
+                        ("generation".to_owned(), Value::I64(0)),
+                        ("deviceId".to_owned(), Value::Uuid(device.0)),
+                        ("epochId".to_owned(), Value::Uuid(epoch)),
+                        ("envelope".to_owned(), bytes("e")),
+                        ("verification".to_owned(), bytes("v")),
+                    ]),
+                ),
+                (
+                    system_tables::ACCOUNT_ROOTS,
+                    RowUuid(uuid::Uuid::new_v4()),
+                    BTreeMap::from([
+                        ("ledgerVersion".to_owned(), Value::I64(1)),
+                        ("generation".to_owned(), Value::I64(0)),
+                        ("accountId".to_owned(), Value::Uuid(alice.0)),
+                        ("deviceId".to_owned(), Value::Uuid(device.0)),
+                        ("epochId".to_owned(), Value::Uuid(epoch)),
+                        ("kind".to_owned(), Value::String(kind.to_owned())),
+                    ]),
+                ),
+            ]
+        };
+
+        block_on(runtime.with_db_for_test(move |db| {
+            commit(db, vec![(system_tables::DEVICE_REQUESTS, device, request)])
+                .map_err(|error| format!("the device request: {error}"))?;
+            // Without the registry the session's issuer would decide, and
+            // a local-first session's root would have to say "local-first".
+            commit(db, identity_and_root("local-first"))
+                .expect_err("the registry says the app founded the account");
+            commit(db, identity_and_root("app"))
+                .map_err(|error| format!("the root the registry names: {error}"))
+        }))
+        .unwrap();
+        store.close().unwrap();
     }
 }

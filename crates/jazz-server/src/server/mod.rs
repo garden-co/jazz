@@ -4,7 +4,7 @@ use std::thread;
 use crate::middleware::AuthConfig;
 use jazz::tools::AppId;
 
-mod account_store;
+pub(crate) mod account_store;
 mod accounts;
 mod builder;
 mod catalogue;
