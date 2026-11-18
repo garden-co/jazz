@@ -1,11 +1,511 @@
-//! An app's files and Jazz's reserved `__e2ee_` table prefix: the reader
-//! refuses an application table with it, whatever version of the app holds
-//! it.
+//! An app's encryption declarations in its files (E2EE protocol §1.5,
+//! migrations §3.1–§3.2): the `encryption` entry of each table and the
+//! top-level settings, read and written by the app-file reader and writer,
+//! recorded per schema version, returned by the loaders, and checked the way
+//! the deploy and `generate` check them.
+//!
+//! ```text
+//! jazz.app.json ──load──► schema + Jazz's system tables ──► one schema hash
+//!      │                         │
+//!      │                         └─ derived system policies ─► bundle id
+//!      └─ encryption entries (outside the hash) ─► client declarations
+//! ```
 
-use jazz::tools::deployment::artifact::{ArtifactError, load_app};
+use jazz::tools::AppId;
+use jazz::tools::deployment::artifact::system_tables::{MEMBERS, SPACES};
+use jazz::tools::deployment::artifact::{
+    ArtifactError, ArtifactInput, load, load_app, load_client_current, load_client_encrypted,
+    rewrite, write,
+};
+use jazz::tools::public_schema::{ColumnType, PlainType, TableName};
+
+/// A project-management app: projects are spaces, a task's title and notes
+/// are encrypted in its project's space.
+fn app(tasks_encryption: &str) -> String {
+    format!(
+        r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": {{
+            "projects": {{ "columns": {{ "name": "bytes", "ownerId": "uuid" }},
+                "encryption": {{ "space": "id", "scope": "projects", "columns": {{ "name": "string" }} }} }},
+            "tasks": {{
+                "columns": {{ "projectId": "uuid", "title": "bytes", "notes": "bytes", "__e2ee_eq_title": "bytes", "done": "boolean" }},
+                "relations": {{ "project": {{ "rel": "projects", "column": "projectId" }} }},
+                "encryption": {tasks_encryption}
+            }}
+        }},
+        "encryption": {{ "allowAccountReset": true }} }}"#
+    )
+}
+
+fn tasks_entry() -> &'static str {
+    r#"{ "space": "projectId", "scope": "projects",
+        "columns": { "title": "string", "notes": "string?" }, "equality": ["title"] }"#
+}
+
+const MEMBERS_RULE: &str = "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.id, accountId = session.user)";
+
+fn permissions(project_read: &str) -> String {
+    format!(
+        r#"{{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": {{
+            "projects": {{ "read": "{project_read}", "insert": "$createdBy.account = session.user", "update": "ownerId = session.user" }},
+            "tasks": {{ "read": "allowedTo.read(project)", "insert": "allowedTo.update(project)" }}
+        }} }}"#,
+        project_read = project_read.replace('"', "\\\"")
+    )
+}
 
 fn refusal(result: Result<impl std::fmt::Debug, ArtifactError>) -> String {
     result.expect_err("refused").to_string()
+}
+
+/// An app that declares encryption loads with Jazz's system tables in its
+/// schema, its declarations returned beside it, and its files rewrite to
+/// the same text, the system tables left out.
+#[test]
+fn an_encrypted_app_loads_with_its_system_tables_and_declarations() {
+    let app = app(tasks_entry());
+    let loaded = load(app.as_bytes(), permissions(MEMBERS_RULE).as_bytes())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let schema = loaded.current_schema();
+    for table in [MEMBERS, SPACES, "projects", "tasks"] {
+        assert!(schema.contains_key(&TableName::from(table)), "{table}");
+    }
+    let declared = loaded.encryption();
+    assert!(declared.settings.allow_account_reset);
+    let entries = declared
+        .entries(&loaded.current_hash().to_string())
+        .expect("the current version's entries");
+    assert_eq!(entries["tasks"].equality, ["title"]);
+    assert_eq!(
+        entries["tasks"].columns["notes"].plain,
+        PlainType {
+            column_type: ColumnType::Text,
+            nullable: true
+        }
+    );
+    // The app's own permissions travel; Jazz's are derived on both sides.
+    assert!(!loaded.permissions().contains_key(&TableName::from(MEMBERS)));
+    let body = loaded.deployment_body(false);
+    assert_eq!(body["encryption"]["settings"]["allowAccountReset"], true);
+
+    let (client_schema, _, declarations) =
+        load_client_encrypted(app.as_bytes(), AppId::from_name("tasks-app"), "production").unwrap();
+    assert_eq!(client_schema, *schema);
+    let declarations = declarations.expect("declared");
+    assert_eq!(declarations.environment, "production");
+    assert_eq!(declarations.tables, *entries);
+    assert_eq!(
+        load_client_current(app.as_bytes()).unwrap().0,
+        *schema,
+        "every loader computes the same schema"
+    );
+
+    let written = rewrite(app.as_bytes(), permissions(MEMBERS_RULE).as_bytes(), None)
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert!(!written.app.contains("__e2ee_members"));
+    assert!(written.app.contains("\"equality\""));
+    let again = rewrite(written.app.as_bytes(), written.permissions.as_bytes(), None).unwrap();
+    assert_eq!(again, written, "rewriting is idempotent");
+    assert_eq!(
+        load(written.app.as_bytes(), written.permissions.as_bytes())
+            .unwrap()
+            .bundle(),
+        loaded.bundle()
+    );
+}
+
+/// An app without declarations gains no system tables, so its schema hash
+/// is what it was.
+#[test]
+fn an_app_without_declarations_has_no_system_tables() {
+    let file = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": { "notes": { "columns": { "title": "string" } } } }"#;
+    let app = load_app(file.as_bytes()).unwrap();
+    assert_eq!(app.current_schema().len(), 1);
+    assert!(app.encryption().is_empty());
+}
+
+/// The reader refuses declarations the protocol rules out, naming where.
+#[test]
+fn malformed_declarations_are_refused() {
+    let cases = [
+        (
+            r#"{ "space": "projectId", "scope": "nope", "columns": {} }"#,
+            "no table nope",
+        ),
+        (
+            r#"{ "space": "id", "scope": "projects", "columns": {} }"#,
+            "only when the table is its own space table",
+        ),
+        (
+            r#"{ "space": "done", "scope": "projects", "columns": {} }"#,
+            "a `uuid` column referencing projects",
+        ),
+        (
+            r#"{ "space": "projectId", "scope": "projects", "columns": { "done": "boolean" } }"#,
+            "stored as required `bytes`",
+        ),
+        (
+            r#"{ "space": "projectId", "scope": "projects", "columns": { "title": "string" }, "equality": ["notes"] }"#,
+            "not an encrypted column",
+        ),
+        (
+            r#"{ "space": "projectId", "scope": "projects", "columns": { "title": { "type": "int", "from": "done" } } }"#,
+            "names a `convert` function",
+        ),
+        (
+            r#"{ "space": "projectId", "scope": "projects", "columns": {}, "unknown": 1 }"#,
+            "unknown key `unknown`",
+        ),
+    ];
+    for (entry, expected) in cases {
+        let error = refusal(load_app(app(entry).as_bytes()));
+        assert!(
+            error.contains(expected) && error.contains("tables.tasks.encryption"),
+            "{entry}: {error}"
+        );
+    }
+    let merged = app(tasks_entry()).replace(
+        r#""notes": "bytes""#,
+        r#""notes": { "type": "bytes", "merge": "counter" }"#,
+    );
+    assert!(refusal(load_app(merged.as_bytes())).contains("last-writer-wins"));
+}
+
+/// Jazz's system tables are Jazz's: the app may not define one, reference
+/// one, write its policies or reach one in a policy, except testing the
+/// members table with `exists`.
+#[test]
+fn an_app_may_not_define_or_reach_system_tables() {
+    let own = app(tasks_entry()).replace(
+        r#""tasks": {"#,
+        r#""__e2ee_notes": { "columns": { "x": "string" } }, "tasks": {"#,
+    );
+    assert!(refusal(load_app(own.as_bytes())).contains("reserved for Jazz's own"));
+    let referencing = app(tasks_entry()).replace(
+        r#""done": "boolean""#,
+        r#""done": "boolean", "member": { "type": "uuid", "references": "__e2ee_members" }"#,
+    );
+    assert!(refusal(load_app(referencing.as_bytes())).contains("system tables"));
+
+    let app = app(tasks_entry());
+    let entry = permissions(MEMBERS_RULE).replace(
+        r#""tables": {"#,
+        r#""tables": { "__e2ee_members": { "read": "true" },"#,
+    );
+    assert!(refusal(load(app.as_bytes(), entry.as_bytes())).contains("reserved for Jazz's own"));
+    let reach = format!("{MEMBERS_RULE} and exists __e2ee_spaces(identifier = this.id)");
+    assert!(
+        refusal(load(app.as_bytes(), permissions(&reach).as_bytes()))
+            .contains("reaches __e2ee_spaces")
+    );
+}
+
+/// A space table's read rule must come from the members table (R13):
+/// `M(T)`, or an `allOf` with `M(T)` among its direct conjuncts.
+#[test]
+fn a_space_table_read_rule_must_come_from_the_members_table() {
+    let app = app(tasks_entry());
+    for accepted in [
+        MEMBERS_RULE.to_owned(),
+        format!("{MEMBERS_RULE} and ownerId = session.user"),
+        "exists __e2ee_members(accountId = session.user, identifier = this.id, scopeId = table_id('projects'))".to_owned(),
+    ] {
+        load(app.as_bytes(), permissions(&accepted).as_bytes())
+            .unwrap_or_else(|e| panic!("{accepted}: {e}"));
+    }
+    for refused in [
+        "true".to_owned(),
+        "ownerId = session.user".to_owned(),
+        format!("{MEMBERS_RULE} or ownerId = session.user"),
+        format!("not ({MEMBERS_RULE})"),
+        "exists __e2ee_members(scopeId = table_id('tasks'), identifier = this.id, accountId = session.user)".to_owned(),
+        "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.id)".to_owned(),
+    ] {
+        let error = refusal(load(app.as_bytes(), permissions(&refused).as_bytes()));
+        assert!(
+            error.contains("space table projects: its read rule must come from the members table"),
+            "{refused}: {error}"
+        );
+    }
+}
+
+/// The deploy warns of what it can see: a broad update rule on a space
+/// table, and an encrypted table readable without its space row.
+#[test]
+fn the_deploy_warns_of_broad_rules_it_can_see() {
+    let app = app(tasks_entry());
+    let broad = permissions(MEMBERS_RULE)
+        .replace("ownerId = session.user", "true")
+        .replace("allowedTo.read(project)", "done = false");
+    let loaded = load(app.as_bytes(), broad.as_bytes()).unwrap();
+    let warnings = loaded.warnings().join("\n");
+    assert!(
+        warnings.contains("space table projects: its update rule is broad"),
+        "{warnings}"
+    );
+    assert!(
+        warnings.contains("table tasks: its read rule doesn't involve its space row"),
+        "{warnings}"
+    );
+    let quiet = load(app.as_bytes(), permissions(MEMBERS_RULE).as_bytes()).unwrap();
+    assert!(quiet.warnings().is_empty(), "{:?}", quiet.warnings());
+}
+
+/// Every schema version records its own declarations, and a migration may
+/// not change an encrypted column's type, scope or space without a
+/// conversion (migrations §3.1).
+#[test]
+fn migrations_are_checked_against_both_versions_declarations() {
+    let with_history = |current_title: &str, history_title: &str| {
+        format!(
+            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": {{
+                "notes": {{ "columns": {{ "title": "bytes", "body": "bytes" }},
+                    "encryption": {{ "space": "id", "scope": "notes", "columns": {{ "title": {current_title} }} }} }} }},
+            "history": {{ "v1": {{ "tables": {{
+                "notes": {{ "columns": {{ "title": "bytes" }},
+                    "encryption": {{ "space": "id", "scope": "notes", "columns": {{ "title": {history_title} }} }} }} }} }} }},
+            "migrations": [{{ "from": "v1", "migrate": {{ "notes": {{ "body": {{ "add": "bytes", "default": "" }} }} }} }}] }}"#
+        )
+    };
+    let app = load_app(with_history("\"string\"", "\"string\"").as_bytes())
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(app.encryption().versions.len(), 2, "both versions declare");
+    let error = refusal(load_app(with_history("\"int\"", "\"string\"").as_bytes()));
+    assert!(
+        error.contains("the encrypted column's type changes"),
+        "{error}"
+    );
+    load_app(
+        with_history(
+            r#"{ "type": "string?", "sealedType": "string" }"#,
+            "\"string\"",
+        )
+        .as_bytes(),
+    )
+    .unwrap_or_else(|e| panic!("making a column optional keeps its sealed type: {e}"));
+
+    // Encrypting a column that was an optional plaintext column in place.
+    let encrypt = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": { "notes": { "columns": { "bodyPlain": "string?", "body": { "type": "bytes", "default": "" } },
+            "encryption": { "space": "id", "scope": "notes", "columns": { "body": { "type": "string", "from": "bodyPlain" } } } } },
+        "history": { "v1": { "tables": { "notes": { "columns": { "body": "string?" } } } } },
+        "migrations": [{ "from": "v1", "migrate": { "notes": {
+            "bodyPlain": { "renameFrom": "body" },
+            "body": { "add": "bytes", "default": "" } } } }] }"#;
+    let error = refusal(load_app(encrypt.as_bytes()));
+    assert!(error.contains("was optional"), "{error}");
+
+    // Declaring encryption for the first time adds the system tables along
+    // the migration, so clients holding the earlier version open.
+    let first = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": { "notes": { "columns": { "title": "string", "secret": { "type": "bytes", "default": "" } },
+            "encryption": { "space": "id", "scope": "notes", "columns": { "secret": "string" } } } },
+        "history": { "v1": { "tables": { "notes": { "columns": { "title": "string" } } } } },
+        "migrations": [{ "from": "v1", "migrate": { "notes": { "secret": { "add": "bytes", "default": "" } } } }] }"#;
+    let app = load_app(first.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(app.encryption().versions.len(), 1);
+    assert_eq!(app.client_migrations().schemas.len(), 2);
+    let notes = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json", "tables": { "notes": {
+        "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
+    let written =
+        rewrite(first.as_bytes(), notes.as_bytes(), None).unwrap_or_else(|e| panic!("{e}"));
+    assert!(!written.app.contains("__e2ee_members"), "{}", written.app);
+    assert_eq!(
+        load_app(written.app.as_bytes()).unwrap().current_hash(),
+        app.current_hash()
+    );
+}
+
+/// A policy may not read an encrypted column's value, which the server
+/// sees only as ciphertext (migrations §4.1): not in its own table's
+/// policy, an `exists`, a relation (`exists (…)`), or through `this.col`.
+#[test]
+fn a_policy_may_not_read_an_encrypted_value() {
+    let app = app(tasks_entry());
+    for (table_policy, reads) in [
+        (r#""tasks": { "read": "title = null" }"#, "tasks.title"),
+        (
+            r#""tasks": { "read": "exists tasks(projectId = this.projectId, notes = null)" }"#,
+            "tasks.notes",
+        ),
+        (
+            r#""tasks": { "read": "exists projects(id = this.projectId, name = this.title)" }"#,
+            "projects.name",
+        ),
+        (
+            r#""tasks": { "read": "exists (from tasks as t where t.notes = null)" }"#,
+            "tasks.notes",
+        ),
+        (
+            r#""tasks": { "read": "exists (from projects join tasks as t on t.projectId = projects.id where projects.name = null)" }"#,
+            "projects.name",
+        ),
+    ] {
+        let permissions = permissions(MEMBERS_RULE).replace(
+            r#""tasks": { "read": "allowedTo.read(project)", "insert": "allowedTo.update(project)" }"#,
+            table_policy,
+        );
+        let error = refusal(load(app.as_bytes(), permissions.as_bytes()));
+        assert!(
+            error.contains(&format!("reads {reads}, an encrypted column")),
+            "{table_policy}: {error}"
+        );
+    }
+    // A relation over plaintext columns stays allowed.
+    let plaintext = permissions(MEMBERS_RULE).replace(
+        r#""tasks": { "read": "allowedTo.read(project)", "insert": "allowedTo.update(project)" }"#,
+        r#""tasks": { "read": "exists (from tasks as t where t.done = false)" }"#,
+    );
+    load(app.as_bytes(), plaintext.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// The server keeps each schema version's declarations in a named,
+/// versioned form, pinned here byte for byte; another form is refused.
+#[test]
+fn stored_declarations_are_pinned() {
+    use jazz::tools::deployment::artifact::encryption::{decode_stored, encode_stored};
+    let entries = load_app(app(tasks_entry()).as_bytes())
+        .unwrap()
+        .encryption()
+        .versions
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let stored = encode_stored(&entries).unwrap();
+    assert_eq!(
+        String::from_utf8(stored.clone()).unwrap(),
+        "jazz-e2ee-declarations-v1\n\
+         {\"projects\":{\"columns\":{\"name\":{\"type\":{\"columnType\":{\"type\":\"Text\"},\"nullable\":false}}},\"scope\":\"projects\",\"space\":\"id\"},\
+         \"tasks\":{\"columns\":{\"notes\":{\"type\":{\"columnType\":{\"type\":\"Text\"},\"nullable\":true}},\"title\":{\"type\":{\"columnType\":{\"type\":\"Text\"},\"nullable\":false}}},\"equality\":[\"title\"],\"scope\":\"projects\",\"space\":\"projectId\"}}"
+    );
+    assert_eq!(decode_stored(&stored).unwrap(), entries);
+    assert!(decode_stored(b"jazz-e2ee-declarations-v2\n{}").is_err());
+}
+
+/// Without kept declarations (a server with no store), a migration's
+/// source is judged by what the deployment says of it: a stored encrypted
+/// version left out of the body, its declarations dropped, is refused
+/// rather than read as plaintext.
+///
+/// ```text
+/// stored: v1 (system tables, title encrypted)
+/// body:   v2 + migration v1 → v2, declarations for v2 only   ✗
+/// ```
+#[test]
+fn a_migrations_stored_source_without_declarations_is_refused() {
+    use jazz::tools::deployment::{DeploymentCatalogue, prepare_encrypted_deployment};
+    let file = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": { "notes": { "columns": { "title": "bytes", "done": "boolean" },
+            "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } } },
+        "history": { "v1": { "tables": { "notes": { "columns": { "title": "bytes" },
+            "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } } } } },
+        "migrations": [{ "from": "v1", "migrate": { "notes": { "done": { "add": "boolean", "default": false } } } }] }"#;
+    let notes = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json", "tables": { "notes": {
+        "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
+    let app = load(file.as_bytes(), notes.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    let (v1, v1_schema) = app
+        .schemas()
+        .iter()
+        .find(|(hash, _)| *hash != app.current_hash())
+        .cloned()
+        .unwrap();
+    let stored = DeploymentCatalogue {
+        schemas: vec![v1_schema],
+        ..Default::default()
+    };
+    let mut request = app.deployment_request(false);
+    request.schemas.retain(|(hash, _)| *hash != v1);
+    let mut encryption = app.encryption().clone();
+    encryption.versions.remove(&v1.to_string());
+    let error = prepare_encrypted_deployment(&stored, request, &encryption)
+        .expect_err("the source's declarations are missing");
+    assert!(
+        error.to_string().contains("declares no encryption"),
+        "{error}"
+    );
+
+    let request = app.deployment_request(false);
+    prepare_encrypted_deployment(&stored, request, app.encryption())
+        .unwrap_or_else(|e| panic!("with them it deploys: {e}"));
+}
+
+/// A direct caller whose migration names a schema the deployment lacks
+/// gets the deployment's missing-schema error, not a panic.
+#[test]
+fn a_migration_to_an_unknown_schema_is_a_missing_schema() {
+    use jazz::tools::deployment::{
+        DeploymentCatalogue, DeploymentError, prepare_encrypted_deployment,
+    };
+    use jazz::tools::public_schema::SchemaHash;
+    use jazz::tools::schema_lens::{Lens, LensTransform};
+    let app = load(
+        app(tasks_entry()).as_bytes(),
+        permissions(MEMBERS_RULE).as_bytes(),
+    )
+    .unwrap();
+    let unknown = SchemaHash([7; 32]);
+    let mut request = app.deployment_request(false);
+    request.migrations.push(Lens::new(
+        unknown,
+        app.current_hash(),
+        LensTransform::with_ops(Vec::new()),
+    ));
+    let error =
+        prepare_encrypted_deployment(&DeploymentCatalogue::default(), request, app.encryption())
+            .expect_err("an unknown migration end");
+    assert!(
+        matches!(error, DeploymentError::MissingSchema { schema } if schema == unknown),
+        "{error}"
+    );
+}
+
+/// The writer leaves out Jazz's system tables only when they are exactly
+/// Jazz's fragment, which an encrypted app's schema holds; a table with the
+/// reserved prefix beside it, or an altered fragment, is refused before
+/// anything is written.
+///
+/// ```text
+/// schema + Jazz's fragment                 ──write──► files without the fragment ✓
+/// schema + fragment, one column dropped    ──write──► ✗ reserved table name
+/// schema + fragment + an `__e2ee_notes`    ──write──► ✗ reserved table name
+/// ```
+#[test]
+fn the_writer_omits_only_jazzs_complete_fragment() {
+    let app = app(tasks_entry());
+    let loaded = load(app.as_bytes(), permissions(MEMBERS_RULE).as_bytes())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let input = |mut schema: jazz::tools::public_schema::Schema| {
+        // The writer hashes the structure: a deployment drops the policies.
+        for table in schema.values_mut() {
+            table.policies = Default::default();
+        }
+        ArtifactInput {
+            current: jazz::tools::public_schema::SchemaHash::compute(&schema).to_string(),
+            schemas: vec![schema],
+            migrations: Vec::new(),
+            permissions: loaded.permissions().clone(),
+            codegen: loaded.codegen().clone(),
+        }
+    };
+    let written = write(input(loaded.current_schema().clone())).unwrap_or_else(|e| panic!("{e}"));
+    assert!(!written.app.contains("__e2ee_members"), "{}", written.app);
+    assert!(written.app.contains("\"equality\""));
+
+    let mut altered = loaded.current_schema().clone();
+    let spaces = altered.get_mut(&TableName::from(SPACES)).unwrap();
+    spaces.columns.columns.pop();
+    let error = refusal(write(input(altered)));
+    assert!(error.contains("are reserved for Jazz's own"), "{error}");
+
+    let mut foreign = loaded.current_schema().clone();
+    let copy = foreign[&TableName::from(SPACES)].clone();
+    foreign.insert(TableName::from("__e2ee_notes"), copy);
+    let error = refusal(write(input(foreign)));
+    assert!(error.contains("`__e2ee_notes`"), "{error}");
 }
 
 /// No app was deployed with a table of the reserved prefix, so one is

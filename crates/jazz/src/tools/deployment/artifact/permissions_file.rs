@@ -168,6 +168,27 @@ pub fn read(
                 }
             }
         }
+        let clauses = [
+            ("read", &policies.select),
+            ("insert", &policies.insert),
+            ("update", &policies.update),
+            ("delete", &policies.delete),
+        ];
+        for (op, policy) in clauses {
+            if let Some(system) = [&policy.using, &policy.with_check]
+                .into_iter()
+                .flatten()
+                .find_map(super::encryption::reaches_system_table)
+            {
+                return Err(refuse(
+                    format!("{path}.{op}"),
+                    format!(
+                        "the policy reaches {system}, one of Jazz's system tables; an app policy \
+                         may only test the members table with `exists __e2ee_members(…)`"
+                    ),
+                ));
+            }
+        }
         if policies != TablePolicies::default() {
             permissions.insert(TableName::from(table.as_str()), policies);
         }
