@@ -92,7 +92,7 @@ pnpm --filter jamazon-nextjs-betterauth test
 
 Runs against a local Jazz server started by `createPolicyTestApp`:
 
-- `tests/permissions.test.ts`: signed-in shoppers and real local-first guests. The catalogue is
+- `tests/permissions.test.ts`: signed-in shoppers and real guests on device accounts. The catalogue is
   public and read-only; guest carts work before sign-in and stay private; carts are private and
   lines cannot move between them; orders and payments are readable only by their shopper and
   never writable by clients.
