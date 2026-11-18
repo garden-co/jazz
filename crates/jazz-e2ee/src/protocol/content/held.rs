@@ -357,9 +357,12 @@ pub enum WriteChoice<'k> {
     /// No usable key: the runtime acquires one, or prepares the space's
     /// root, and the write is staged again (H2 `NeedsKey`).
     NeedsKey,
-    /// The space has no known valid root and this device's creation of it
-    /// was refused while the client runs: the write fails `space-pending`
-    /// without staging a root.
+    /// The write fails `space-pending` without staging a root: the space
+    /// has no known valid root and this device's creation of it was
+    /// refused while the client runs; or keys of more than one root of the
+    /// address are held and not `refused`, and this session has read no
+    /// chain of it, so it cannot tell which root is the space's. Either
+    /// way a later read of the chain decides.
     SpacePending,
 }
 
@@ -507,10 +510,14 @@ impl HeldKeys {
     /// depth that is not `refused`; at equal depth a published key wins
     /// over an unpublished one, then the smaller root ID. Once the device
     /// has read the address's chain, only keys of that chain's root count:
-    /// a creation that lost to it never takes a write. Without one, the
-    /// write fails `space-pending` when `creation_refused` (this device's
-    /// creation of the space was refused while the client runs, §3.2) and
-    /// no valid root of the address is known; otherwise it needs a key.
+    /// a creation that lost to it never takes a write. Without one, keys of
+    /// more than one root that are not `refused` take no write either (the
+    /// chain read is kept in memory only, so this holds after a restart
+    /// until a read): the write fails `space-pending`. Keys of one root
+    /// alone write without a read. Otherwise, with no key, the write fails
+    /// `space-pending` when `creation_refused` (this device's creation of
+    /// the space was refused while the client runs, §3.2) and no valid
+    /// root of the address is known, and needs a key when not.
     pub fn write_key<'k>(
         &'k self,
         address: &SpaceAddress,
@@ -518,7 +525,16 @@ impl HeldKeys {
     ) -> WriteChoice<'k> {
         let mut best: Option<WriteKey<'k>> = None;
         let known_root = self.known.get(address).map(KnownChain::root_id);
-        for space in self.roots_of(address) {
+        let roots = self.roots_of(address);
+        let competing = roots
+            .iter()
+            .filter(|space| space.held().any(|(_, mark)| *mark != KeyMark::Refused))
+            .count()
+            > 1;
+        if known_root.is_none() && competing {
+            return WriteChoice::SpacePending;
+        }
+        for space in roots {
             if known_root.is_some_and(|root_id| root_id != space.root.id) {
                 continue;
             }

@@ -824,9 +824,14 @@ fn an_unpublished_key_never_wins_a_tie_and_a_refused_key_never_writes() {
     assert!(held.holds_unpublished(&address));
     // Alone, the unpublished key writes.
     assert_eq!(write_key(&held, &address).root_id(), lost.root.id);
-    // The space's root at the same depth wins, whichever root ID sorts
-    // first.
+    // With the space's root at the same depth, no write before a read of
+    // the chain; then the space's root, whichever root ID sorts first.
     held.hold(acquire_held(&world, ALICE, ROW)).unwrap();
+    assert!(matches!(
+        held.write_key(&address, false),
+        WriteChoice::SpacePending
+    ));
+    held.observe_chain(&chain_of(&world, ROW));
     let space_root = chain_of(&world, ROW).root.row.id.clone();
     assert_eq!(write_key(&held, &address).root_id(), space_root);
     // Refused: never chosen, alone or not.
@@ -1469,6 +1474,55 @@ fn a_write_uses_only_the_known_roots_keys() {
     accepted.hold(acquire_held(&world, ALICE, ROW)).unwrap();
     accepted.observe_chain(&chain);
     assert_eq!(write_key(&accepted, &address).root_id(), space_root);
+}
+
+/// Keys of two roots of one address that are not `refused` take no write
+/// until this session has read the space's chain: the chain read is kept
+/// in memory only, so after a restart the device cannot tell which root is
+/// the space's. Keys of one root alone write without a read.
+#[test]
+fn competing_roots_take_no_write_before_a_chain_read() {
+    let world = world(41);
+    let address = space(ROW);
+    let chain = chain_of(&world, ROW);
+    let space_root = chain.root.row.id.clone();
+    let lost = root_from(&world, ROW, root_random(7, 8, 9));
+    // One root alone, either one: the write goes ahead without a read.
+    let mut own = HeldKeys::new();
+    own.hold(creation(&world, &lost, "tx-lost")).unwrap();
+    assert_eq!(write_key(&own, &address).root_id(), lost.root.id);
+    let real = held_of(&world, ALICE, ROW);
+    assert_eq!(write_key(&real, &address).root_id(), space_root);
+    // Both, as after a restart: no key, whatever the creation's fate.
+    let both = |fate: Option<CreationFate>| {
+        let mut held = HeldKeys::new();
+        let mut own = creation(&world, &lost, "tx-lost");
+        if let Some(fate) = fate {
+            own.settle(fate, Some(&lost.root.id));
+        }
+        held.hold(own).unwrap();
+        held.hold(acquire_held(&world, ALICE, ROW)).unwrap();
+        held
+    };
+    for fate in [None, Some(CreationFate::Accepted)] {
+        let mut held = both(fate);
+        for creation_refused in [false, true] {
+            assert!(matches!(
+                held.write_key(&address, creation_refused),
+                WriteChoice::SpacePending
+            ));
+        }
+        // A read of the chain names the real root: the write goes under it.
+        held.observe_chain(&chain);
+        assert_eq!(write_key(&held, &address).root_id(), space_root);
+    }
+    // A refused key does not compete: the real root writes without a read.
+    let mut refused = HeldKeys::new();
+    let mut own = creation(&world, &lost, "tx-lost");
+    own.settle(CreationFate::NotAccepted, None);
+    refused.hold(own).unwrap();
+    refused.hold(acquire_held(&world, ALICE, ROW)).unwrap();
+    assert_eq!(write_key(&refused, &address).root_id(), space_root);
 }
 
 /// A stream is reported stale only once a record authenticated under one
