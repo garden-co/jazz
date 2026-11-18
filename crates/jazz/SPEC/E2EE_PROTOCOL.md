@@ -530,7 +530,10 @@ Account and device tables (fixed policies):
   identities are all local-first and none of which derives its ID in the
   app's namespace: neither a `local-first` nor an `app` root, so neither a
   bootstrap nor a reset. An account with an external identity is not told
-  apart from one the app founded.
+  apart from one the app founded: a local-first account of another audience
+  that was linked to an external login before the app encrypted counts as
+  the app's, so that login can reset it (§2.11), like any account's own
+  login.
 - R7. Challenges, proofs, approvals, device deliveries: insert by `$createdBy`
   only, referencing a request or challenge of the same account; read by
   creator.
