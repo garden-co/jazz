@@ -1179,7 +1179,7 @@ impl ServerRuntimeHandle {
         claims: BTreeMap<String, Value>,
         bundle: Option<jazz::catalogue::BundleId>,
         trust: CommitUnitTrust,
-        _negotiated_features: jazz::wire::WireFeatures,
+        negotiated_features: jazz::wire::WireFeatures,
         _session_context: Option<ConnectionSessionContext>,
         link_admission: ServerLinkAdmission,
     ) -> Result<ServerSession, SessionOpenError> {
@@ -1203,7 +1203,15 @@ impl ServerRuntimeHandle {
         self.insert_edge(session, receiver, Arc::clone(&egress))?;
         let opened = self
             .run(move |owner| {
-                Ok(owner.open_session(session, served_as, claims, bundle, output, egress))
+                Ok(owner.open_session(
+                    session,
+                    served_as,
+                    claims,
+                    bundle,
+                    negotiated_features,
+                    output,
+                    egress,
+                ))
             })
             .await;
         self.settle_open(session, opened)

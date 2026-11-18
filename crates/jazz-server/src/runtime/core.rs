@@ -126,19 +126,21 @@ impl ServerCore {
         }
     }
 
-    /// Open a sync session for an admitted connection.
+    /// Open a sync session for an admitted connection whose `Hello`
+    /// negotiated `features`.
     pub fn open_session(
         &mut self,
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
         bundle: Option<jazz::catalogue::BundleId>,
         trust: CommitUnitTrust,
+        features: jazz::wire::WireFeatures,
     ) -> Result<ServerSession, SessionOpenError> {
         let served_as = trust.served_as(identity);
         let (session, output, egress) = self.new_edge();
         let opened = self
             .owner
-            .open_session(session, served_as, claims, bundle, output, egress);
+            .open_session(session, served_as, claims, bundle, features, output, egress);
         self.settle(session, opened)
     }
 
@@ -515,7 +517,13 @@ mod tests {
             matches!(&refused, Err(SessionOpenError::Refused(error)) if error.message.contains("served through createJazz")),
             "{refused:?}"
         );
-        let refused = core.open_session(alice, BTreeMap::new(), None, CommitUnitTrust::Session);
+        let refused = core.open_session(
+            alice,
+            BTreeMap::new(),
+            None,
+            CommitUnitTrust::Session,
+            jazz::wire::current_wire_features(),
+        );
         assert!(matches!(refused, Err(SessionOpenError::Refused(_))));
 
         let backend = thin_session(&mut core, alice, CommitUnitTrust::TrustedBackend);
@@ -664,6 +672,7 @@ mod tests {
                 BTreeMap::new(),
                 None,
                 CommitUnitTrust::TrustedBackend,
+                jazz::wire::current_wire_features(),
             )
             .unwrap();
         let replica = block_on(Db::open(jazz::db::DbConfig::new(
@@ -801,6 +810,7 @@ mod tests {
             BTreeMap::new(),
             Some(pinned),
             CommitUnitTrust::Session,
+            jazz::wire::current_wire_features(),
         );
         assert!(refused.is_err(), "{refused:?}");
 
@@ -822,6 +832,7 @@ mod tests {
             BTreeMap::new(),
             Some(pinned),
             CommitUnitTrust::Session,
+            jazz::wire::current_wire_features(),
         );
         assert!(opened.is_ok(), "{opened:?}");
     }
@@ -843,6 +854,7 @@ mod tests {
                 BTreeMap::new(),
                 Some(first),
                 CommitUnitTrust::Session,
+                jazz::wire::current_wire_features(),
             )
             .unwrap();
         let backend = core
@@ -851,6 +863,7 @@ mod tests {
                 BTreeMap::new(),
                 None,
                 CommitUnitTrust::TrustedBackend,
+                jazz::wire::current_wire_features(),
             )
             .unwrap();
         core.tick();
@@ -893,6 +906,7 @@ mod tests {
                 BTreeMap::new(),
                 Some(bundle(&first)),
                 CommitUnitTrust::Session,
+                jazz::wire::current_wire_features(),
             )
             .unwrap();
         core.tick();

@@ -5,7 +5,13 @@
 //! validate a serializable commit against an unreadable store. The errors are injected by hiding
 //! one of the store's own tables through a second connection. A reopened
 //! replica also resumes its subscriptions from the watermarks its file
-//! keeps.
+//! keeps. A refused commit's storage failure reaches its writer with the
+//! code `storage`, also as recorded and replayed after both stores reopen,
+//! and as the generic failure it always was over a link to an older peer.
+//!
+//! `duplex()` here negotiates no optional wire features, as a link to a
+//! build from before them does; `jazz::db::duplex()` negotiates this
+//! build's.
 
 use crate::common;
 
@@ -22,8 +28,8 @@ use std::task::{Context, Poll, Waker};
 
 use duplex_transport::duplex;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, ReadOpts, ReadSpan, SyncMessage,
-    Transport, block_on,
+    Db, DbConfig, DbIdentity, ErrorCode, FileOptions, InsertOptions, ReadOpts, ReadSpan,
+    SyncMessage, Transport, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
@@ -373,7 +379,7 @@ fn a_serializable_commit_is_not_validated_against_an_unreadable_store() {
     let server = block_on(Db::open_at(config(0xee), &path, FileOptions::default())).unwrap();
     server.set_authority();
     let client = block_on(Db::open(config(0x11))).unwrap();
-    let (client_side, server_side) = duplex();
+    let (client_side, server_side) = jazz::db::duplex();
     let _upstream = block_on(client.connect_upstream(client_side));
     server
         .accept_subscriber(server_side, AuthorSubject::SYSTEM)
@@ -408,15 +414,7 @@ fn a_serializable_commit_is_not_validated_against_an_unreadable_store() {
     .unwrap();
     let receipt = block_on(client.commit_serializable_handle(open)).unwrap();
 
-    let stored: String = rusqlite::Connection::open(&path)
-        .unwrap()
-        .query_row(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%items%' \
-             ORDER BY length(name) LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let stored = items_table(&path);
     hide(&path, &stored);
     for _ in 0..6 {
         let _ = block_on(client.tick());
@@ -428,6 +426,128 @@ fn a_serializable_commit_is_not_validated_against_an_unreadable_store() {
         client.wait_for_transaction(receipt.0, DurabilityTier::Global),
     );
     let error = outcome.expect_err("an unreadable read set is not accepted");
-    assert!(error.message.contains("Storage"), "{error:?}");
+    assert_eq!(error.code, ErrorCode::Storage, "{error:?}");
+    assert!(error.message.contains("no such table"), "{error:?}");
+    assert!(!error.message.starts_with("Storage:"), "{error:?}");
     assert_eq!(labels(&server), ["guard"]);
+}
+
+/// The table an authority's `items` rows are stored in.
+fn items_table(path: &Path) -> String {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%items%' \
+             ORDER BY length(name) LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// An authority on file at `path`.
+fn open_authority(path: &Path) -> Db {
+    let server = block_on(Db::open_at(config(0xee), path, FileOptions::default())).unwrap();
+    server.set_authority();
+    server
+}
+
+/// Alice uploads a write the authority cannot store: it ticks once with
+/// its rows' table hidden, so it records and sends a storage failure,
+/// which Alice has not taken yet.
+fn upload_unstorable(server_path: &Path, server: &Db, alice: &Db) -> u64 {
+    let tx = insert(alice, 1, "not accepted").unwrap();
+    // A host fault is injected through a second connection because the
+    // public write API cannot otherwise make the authority's SQL fail.
+    let stored = items_table(server_path);
+    hide(server_path, &stored);
+    block_on(alice.tick()).unwrap();
+    block_on(server.tick()).unwrap();
+    restore(server_path, &stored);
+    assert!(labels(server).is_empty());
+    tx
+}
+
+/// Over a link to a build from before typed storage failures (one that
+/// negotiated no `FEATURE_STORAGE_VERDICTS`), the authority sends the
+/// failure as the generic one such a build decodes, worded as before:
+/// it is not dropped for a fate it cannot read.
+#[test]
+fn a_storage_failure_reaches_an_older_peer_as_a_generic_failure() {
+    let server_path = scratch("storage-verdict-older-server");
+    let server = open_authority(&server_path);
+    let alice = block_on(Db::open(config(0xa1))).unwrap();
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(alice.connect_upstream(client_side));
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
+    let tx = upload_unstorable(&server_path, &server, &alice);
+    let error = drive(
+        &[&alice, &server, &alice],
+        alice.wait_for_transaction(tx, DurabilityTier::Global),
+    )
+    .expect_err("the write was not stored");
+    assert_eq!(error.code, ErrorCode::Protocol, "{error:?}");
+    assert!(error.message.starts_with("Storage: "), "{error:?}");
+    assert!(error.message.contains("no such table"), "{error:?}");
+    assert!(labels(&server).is_empty());
+}
+
+/// Alice's upload cannot be stored, but the authority records its failure.
+/// Alice disconnects before receiving it; after both stores reopen, her
+/// original pending upload receives the stored failure with code `storage`,
+/// and restoring storage does not turn it into an acceptance.
+///
+/// ```text
+/// alice ──upload──► authority ──storage failure──► recorded verdict
+///   └── closes before receiving it
+/// alice reopened ──same upload──► authority reopened ──storage error──► alice
+/// ```
+#[test]
+fn a_recorded_storage_failure_keeps_its_code_after_both_stores_reopen() {
+    let server_path = scratch("storage-verdict-server");
+    let client_path = scratch("storage-verdict-alice");
+    let tx = {
+        let server = open_authority(&server_path);
+        let alice = open_file(&client_path, 0xa1);
+        let (client_side, server_side) = jazz::db::duplex();
+        let _upstream = block_on(alice.connect_upstream(client_side));
+        server
+            .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+            .unwrap();
+        let tx = upload_unstorable(&server_path, &server, &alice);
+        assert_eq!(alice.pending_upload_count(), 1, "Alice has no verdict yet");
+        tx
+    };
+
+    let server = open_authority(&server_path);
+    let alice = open_file(&client_path, 0xa1);
+    alice.track_upstream_rejections();
+    let (client_side, server_side) = jazz::db::duplex();
+    let _upstream = block_on(alice.connect_upstream(client_side));
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
+    let error = drive(
+        &[&alice, &server, &alice],
+        alice.wait_for_transaction(tx, DurabilityTier::Global),
+    )
+    .expect_err("restoring storage must not turn the recorded failure into acceptance");
+    assert_eq!(error.code, ErrorCode::Storage, "{error:?}");
+    assert!(error.message.contains("no such table"), "{error:?}");
+    assert!(!error.message.starts_with("Storage:"), "{error:?}");
+    assert!(labels(&alice).is_empty());
+    assert!(labels(&server).is_empty());
+    // The originating retry store re-encodes the received verdict. Neither
+    // that hop nor reopening its bytes may add a display prefix.
+    let rejected = alice.rejected_transactions().unwrap();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0].error.message, error.message);
+    drop(alice);
+    let alice = open_file(&client_path, 0xa1);
+    let rejected = alice.rejected_transactions().unwrap();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0].error.code, ErrorCode::Storage);
+    assert_eq!(rejected[0].error.message, error.message);
 }

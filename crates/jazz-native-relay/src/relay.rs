@@ -1150,6 +1150,8 @@ impl RelayWorker {
             .persistent
             .accept_subscriber(identity.author, claims)
             .map_err(RelayError::Host)?;
+        // The foreground store runs this relay's build.
+        served.set_features(jazz::wire::current_wire_features());
         let link = binding.connect_upstream();
         // The foreground store and this relay run the same build.
         link.set_features(jazz::wire::current_wire_features());
@@ -1386,6 +1388,9 @@ impl RelayWorker {
                 .persistent
                 .accept_subscriber(author, claims.clone())
                 .map_err(|error| error.to_string())?;
+            client
+                .served
+                .set_features(jazz::wire::current_wire_features());
             client.link = client.binding.connect_upstream();
             client
                 .link

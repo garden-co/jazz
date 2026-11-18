@@ -383,6 +383,8 @@ struct SessionQueues {
     /// This tick took some of them.
     early_served: std::cell::Cell<bool>,
     slice: Rc<TickSlice>,
+    /// The optional wire features negotiated with the session's peer.
+    features: std::cell::Cell<jazz::wire::WireFeatures>,
 }
 
 /// How many sessions the tick in progress takes inbound messages from,
@@ -541,6 +543,7 @@ impl SessionQueues {
             early: std::cell::Cell::new(0),
             early_served: std::cell::Cell::new(false),
             slice,
+            features: std::cell::Cell::new(jazz::wire::FEATURE_NONE),
         }
     }
 
@@ -911,6 +914,11 @@ impl Transport for SessionTransport {
         queues.budget.set(budget - 1);
         queues.take()
     }
+
+    /// What the session's peer negotiated in its `Hello`.
+    fn features(&self) -> jazz::wire::WireFeatures {
+        self.0.features.get()
+    }
 }
 
 /// What the store's catalogue admitted, read from its rows (see
@@ -1248,12 +1256,14 @@ impl Owner {
         self.thin.clear();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn open_session(
         &mut self,
         session: ServerSession,
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
         bundle: Option<jazz::catalogue::BundleId>,
+        features: jazz::wire::WireFeatures,
         output: tokio_mpsc::UnboundedSender<Outbound>,
         egress: Arc<Egress>,
     ) -> Result<(), jazz::db::Error> {
@@ -1266,6 +1276,7 @@ impl Owner {
             Arc::clone(&egress),
             &self.limits,
         ));
+        queues.features.set(features);
         let subscriber = self.db.accept_pinned_subscriber(
             Box::new(SessionTransport(Rc::clone(&queues))),
             identity,
@@ -1670,6 +1681,7 @@ mod tests {
                     AuthorSubject::SYSTEM,
                     BTreeMap::new(),
                     None,
+                    jazz::wire::current_wire_features(),
                     output,
                     Arc::default(),
                 )
@@ -1729,6 +1741,7 @@ mod tests {
                     AuthorSubject::SYSTEM,
                     BTreeMap::new(),
                     None,
+                    jazz::wire::current_wire_features(),
                     output,
                     Arc::default(),
                 )
@@ -2248,6 +2261,7 @@ mod tests {
                         AuthorSubject::SYSTEM,
                         BTreeMap::new(),
                         None,
+                        jazz::wire::current_wire_features(),
                         output,
                         egress,
                     )

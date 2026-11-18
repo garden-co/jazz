@@ -150,3 +150,15 @@ cell with its kind and a native SQLite value, `_jazz_pending_deltas`,
 in the same layout), regenerated it the same way and re-pinned the browser
 corpus, whose store an open now gives the `_jazz_pending*` tables (the
 retry store's tables appear with the first refused commit).
+
+A commit refused for a storage failure records its fate with the appended
+`WireError::Storage(String)`, Postcard tag 3, in `_jazz_transactions.result`
+on the authority and in the originating retry store's `_jazz_rejected.error`
+(SPEC 8 §8.3). Tags 0 to 2 decode as before, and the pinned files hold no
+storage failure, so their bytes are unchanged. The message is stored as it
+was, without the `Storage:` display prefix, so relaying the fate and
+recording it again keep it. This is a downgrade limit, not a re-pin: a file
+that recorded such a fate cannot be reopened by a build from before tag 3
+(alpha.67 and earlier), which fails to decode that fate. Opening an older
+file with this build is unaffected. The wire is gated
+(`FEATURE_STORAGE_VERDICTS`); a stored fate is not.
