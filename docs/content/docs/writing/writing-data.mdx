@@ -504,8 +504,14 @@ or reloaded after the refusal: its `global` waits fail the same way and its sync
 `offline` with the reason `authority-changed`, while local reads and writes keep working.
 
 In the browser, `offline` can also have the reason `held-by-another-tab`, with `retrying: true`.
-When a guest signs up in one tab, another tab may still hold the account's local store as the
-guest. The signed-up tab shows `connecting` and joins once that tab follows or closes. If that
+One local store serves one sign-in and one schema at a time, so a tab waits for it when:
+
+- a guest signs up in one tab while another tab still holds the account's local store as the
+  guest. The signed-up tab waits for that tab to follow the sign-up or close.
+- a deploy changed the app's schema while a tab of the previous build is still open. A tab of the
+  new build waits for that tab to reload or close.
+
+Meanwhile the waiting tab shows `connecting`, and it joins once the other tab lets go. If that
 hasn't happened after 30 seconds (the other tab may be frozen in the background), the link reports
 `held-by-another-tab`, and waits fail with a `StoreHeldByAnotherTabError` (check with
 `isStoreHeldByAnotherTabError`), so the app can ask the user to close or reload the other tab. The

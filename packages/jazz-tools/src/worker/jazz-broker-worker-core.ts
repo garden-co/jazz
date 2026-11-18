@@ -33,6 +33,7 @@ import {
   type BrowserWorkerInitOptions,
   type BrowserWorkerLinkFate,
   BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN,
+  BROWSER_STORE_HELD_BY_ANOTHER_BUILD,
 } from "../runtime/native-runtime/browser-worker-protocol.js";
 // Worker failures cross a MessagePort boundary, so retain enough WASM frames to
 // identify the Rust call site before serializing them for the owning tab.
@@ -1094,7 +1095,9 @@ async function connectTab(
       throw new Error(
         admission === "held-by-another-sign-in"
           ? BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN
-          : "incompatible persistent browser configuration",
+          : admission === "held-by-another-build"
+            ? BROWSER_STORE_HELD_BY_ANOTHER_BUILD
+            : "incompatible persistent browser configuration",
       );
     }
     // Only an admitted tab keeps an idle context: a refused one must not
