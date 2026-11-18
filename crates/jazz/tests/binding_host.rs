@@ -686,17 +686,17 @@ fn a_relation_read_nests_each_relation_in_its_parents_cells() {
     );
 }
 
-/// A local-first account's proof for app `app`, and the canonical author it
+/// A device account's proof for app `app`, and the canonical author it
 /// proves.
 fn local_first_proof(seed: u8, app: &str) -> (String, String) {
-    use jazz::identity::{LOCAL_FIRST_ISSUER, derive_user_id, mint_jazz_self_signed_token};
+    use jazz::identity::{DEVICE_ACCOUNT_ISSUER, derive_user_id, mint_jazz_self_signed_token};
     let seed = [seed; 32];
-    let token = mint_jazz_self_signed_token(&seed, LOCAL_FIRST_ISSUER, app, 600).unwrap();
+    let token = mint_jazz_self_signed_token(&seed, DEVICE_ACCOUNT_ISSUER, app, 600).unwrap();
     let user = derive_user_id(&seed).to_string();
     let app = jazz::app_id::AppId::from_name(app);
-    let author = AuthorSubject::reserved(LOCAL_FIRST_ISSUER, &user)
+    let author = AuthorSubject::reserved(DEVICE_ACCOUNT_ISSUER, &user)
         .unwrap()
-        .with_account(jazz::account_registry::local_first_account_id(
+        .with_account(jazz::account_registry::device_account_id(
             *app.uuid(),
             &user,
         ));
@@ -713,7 +713,7 @@ fn a_backend_writes_as_a_local_first_account_only_once_admitted() {
     argument(backend.insert("notes", &title("before"), &as_account));
 
     backend
-        .admit_local_first_session(&token, "app", &author)
+        .admit_device_account_session(&token, "app", &author)
         .unwrap();
     let write = backend
         .insert("notes", &title("after"), &as_account)
@@ -723,15 +723,15 @@ fn a_backend_writes_as_a_local_first_account_only_once_admitted() {
 
     // Only a backend admits, and only the author its proof derives.
     let (other_token, other_author) = local_first_proof(8, "app");
-    argument(open(1).admit_local_first_session(&other_token, "app", &other_author));
-    argument(backend.admit_local_first_session(&other_token, "app", &author));
-    argument(backend.admit_local_first_session(&token, "other-app", &author));
+    argument(open(1).admit_device_account_session(&other_token, "app", &other_author));
+    argument(backend.admit_device_account_session(&other_token, "app", &author));
+    argument(backend.admit_device_account_session(&token, "other-app", &author));
 }
 
-/// A local-first account's proof for app `app` that expires `seconds` from
+/// A device account's proof for app `app` that expires `seconds` from
 /// now, and the canonical author it proves.
 fn local_first_proof_expiring(seed: u8, app: &str, seconds: u64) -> (String, String) {
-    use jazz::identity::{LOCAL_FIRST_ISSUER, mint_jazz_self_signed_token_at};
+    use jazz::identity::{DEVICE_ACCOUNT_ISSUER, mint_jazz_self_signed_token_at};
     let (_, author) = local_first_proof(seed, app);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -740,7 +740,7 @@ fn local_first_proof_expiring(seed: u8, app: &str, seconds: u64) -> (String, Str
     // Issued in the past, so a short remaining lifetime needs no long ttl.
     let token = mint_jazz_self_signed_token_at(
         &[seed; 32],
-        LOCAL_FIRST_ISSUER,
+        DEVICE_ACCOUNT_ISSUER,
         app,
         600,
         now + seconds - 600,
@@ -765,16 +765,16 @@ fn a_backend_drops_local_first_admissions_whose_proof_expired() {
     let backend = authority();
     let (alice_token, alice) = local_first_proof_expiring(7, "app", 2);
     backend
-        .admit_local_first_session(&alice_token, "app", &alice)
+        .admit_device_account_session(&alice_token, "app", &alice)
         .unwrap();
-    assert_eq!(backend.admitted_local_first_accounts(), 1);
+    assert_eq!(backend.admitted_device_accounts(), 1);
     std::thread::sleep(std::time::Duration::from_secs(3));
 
     let (bob_token, bob) = local_first_proof(8, "app");
     backend
-        .admit_local_first_session(&bob_token, "app", &bob)
+        .admit_device_account_session(&bob_token, "app", &bob)
         .unwrap();
-    assert_eq!(backend.admitted_local_first_accounts(), 1);
+    assert_eq!(backend.admitted_device_accounts(), 1);
     let as_alice = json!({ "author": alice.as_bytes() });
     argument(backend.insert("notes", &title("alice, expired"), &as_alice));
     let as_bob = json!({ "author": bob.as_bytes() });
@@ -804,10 +804,10 @@ fn a_later_admission_never_shortens_a_local_first_account_s_admission() {
     let (short_token, same_alice) = local_first_proof_expiring(7, "app", 2);
     assert_eq!(alice, same_alice);
     backend
-        .admit_local_first_session(&long_token, "app", &alice)
+        .admit_device_account_session(&long_token, "app", &alice)
         .unwrap();
     backend
-        .admit_local_first_session(&short_token, "app", &alice)
+        .admit_device_account_session(&short_token, "app", &alice)
         .unwrap();
     std::thread::sleep(std::time::Duration::from_secs(3));
     let as_alice = json!({ "author": alice.as_bytes() });

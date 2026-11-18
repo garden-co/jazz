@@ -82,7 +82,8 @@ fn auth_mode_is_derived_from_the_identitys_issuer() {
     ))
     .unwrap()
     .row_uuid();
-    let guest = AuthorSubject::reserved(AuthorSubject::LOCAL_FIRST_ISSUER, "guest-device").unwrap();
+    let guest =
+        AuthorSubject::reserved(AuthorSubject::DEVICE_ACCOUNT_ISSUER, "guest-device").unwrap();
     let staff = AuthorSubject::for_test_bytes([0x51; 16]);
     assert_eq!(read(&db, "guest_notes", guest), [note]);
     assert_eq!(read(&db, "guest_notes", staff), Vec::<RowUuid>::new());
@@ -173,7 +174,8 @@ fn a_policy_comparing_auth_mode_with_local_first_fails_closed() {
     ))
     .unwrap();
     let prepared = db.prepare_query(&Query::from("staff_notes")).unwrap();
-    let guest = AuthorSubject::reserved(AuthorSubject::LOCAL_FIRST_ISSUER, "guest-device").unwrap();
+    let guest =
+        AuthorSubject::reserved(AuthorSubject::DEVICE_ACCOUNT_ISSUER, "guest-device").unwrap();
     for who in [guest, AuthorSubject::for_test_bytes([0x51; 16])] {
         let error = block_on(db.all_for_identity(&prepared, ReadOpts::default(), who))
             .err()

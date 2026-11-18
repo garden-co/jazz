@@ -216,7 +216,7 @@ pub fn detach_store_identity(data_dir: &Path) -> Result<(), String> {
 /// Make the stopped store in `data_dir` serve `app_id` from its next start:
 /// for a store started with the wrong app id, or one whose app was renamed.
 /// A store refuses any app but its own, and this is the one way to change
-/// it. Rows and history stay as they are, but local-first guests' accounts
+/// it. Rows and history stay as they are, but device accounts' ids
 /// are derived from the app id, so they no longer match after a change.
 ///
 /// Call it under the data dir's lock ([`crate::lock_data_dir`]).

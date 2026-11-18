@@ -2,9 +2,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use jazz::ids::{AuthorSubject, AuthorSubjectError};
 use jazz_server::runtime::auth_admission::{
-    AdmissionSource, AuthAdmissionConfig, AuthAdmissionError, AuthHandshake, JwtVerifierConfig,
-    LOCAL_FIRST_JWT_ISSUER, admit_bearer_jwt, admit_local_first_jwt, admit_static_bearer,
-    admit_static_bearer_with_claims,
+    AdmissionSource, AuthAdmissionConfig, AuthAdmissionError, AuthHandshake,
+    DEVICE_ACCOUNT_JWT_ISSUER, JwtVerifierConfig, admit_bearer_jwt, admit_device_account_jwt,
+    admit_static_bearer, admit_static_bearer_with_claims,
 };
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::Serialize;
@@ -41,15 +41,15 @@ fn local_first_jwt_enabled_accepts_valid_token() {
     let token = local_first_token(
         "alice",
         expires_in(60),
-        Some(LOCAL_FIRST_JWT_ISSUER),
+        Some(DEVICE_ACCOUNT_JWT_ISSUER),
         Some("auth-app"),
         Some("auth-app"),
     );
 
-    let admitted = admit_local_first_jwt(&config, Some(&token)).unwrap();
+    let admitted = admit_device_account_jwt(&config, Some(&token)).unwrap();
 
     assert_eq!(admitted.subject, "alice");
-    assert_eq!(admitted.source, AdmissionSource::LocalFirstJwt);
+    assert_eq!(admitted.source, AdmissionSource::DeviceAccountJwt);
 }
 
 #[test]
@@ -58,13 +58,13 @@ fn local_first_jwt_wrong_audience_rejects() {
     let token = local_first_token(
         "alice",
         expires_in(60),
-        Some(LOCAL_FIRST_JWT_ISSUER),
+        Some(DEVICE_ACCOUNT_JWT_ISSUER),
         Some("other-app"),
         Some("auth-app"),
     );
 
     assert!(matches!(
-        admit_local_first_jwt(&config, Some(&token)),
+        admit_device_account_jwt(&config, Some(&token)),
         Err(AuthAdmissionError::InvalidJwt(_))
     ));
 }
@@ -75,13 +75,13 @@ fn local_first_jwt_wrong_app_id_rejects() {
     let token = local_first_token(
         "alice",
         expires_in(60),
-        Some(LOCAL_FIRST_JWT_ISSUER),
+        Some(DEVICE_ACCOUNT_JWT_ISSUER),
         Some("auth-app"),
         Some("other-app"),
     );
 
     assert_eq!(
-        admit_local_first_jwt(&config, Some(&token)),
+        admit_device_account_jwt(&config, Some(&token)),
         Err(AuthAdmissionError::InvalidJwt(
             "appId does not match expected audience".to_owned()
         ))
@@ -94,13 +94,13 @@ fn local_first_jwt_missing_subject_rejects() {
     let token = local_first_token_with_subject(
         None,
         expires_in(60),
-        Some(LOCAL_FIRST_JWT_ISSUER),
+        Some(DEVICE_ACCOUNT_JWT_ISSUER),
         None,
         None,
     );
 
     assert!(matches!(
-        admit_local_first_jwt(&config, Some(&token)),
+        admit_device_account_jwt(&config, Some(&token)),
         Err(AuthAdmissionError::InvalidJwt(_))
     ));
 }
@@ -111,12 +111,12 @@ fn local_first_jwt_disabled_rejects_valid_token() {
     let token = local_first_token(
         "alice",
         expires_in(60),
-        Some(LOCAL_FIRST_JWT_ISSUER),
+        Some(DEVICE_ACCOUNT_JWT_ISSUER),
         None,
         None,
     );
 
-    let error = admit_local_first_jwt(&config, Some(&token)).unwrap_err();
+    let error = admit_device_account_jwt(&config, Some(&token)).unwrap_err();
 
     assert_eq!(error, AuthAdmissionError::InvalidBearer);
 }
@@ -127,13 +127,13 @@ fn local_first_jwt_expired_rejects() {
     let token = local_first_token(
         "alice",
         expires_in(-3600),
-        Some(LOCAL_FIRST_JWT_ISSUER),
+        Some(DEVICE_ACCOUNT_JWT_ISSUER),
         None,
         None,
     );
 
     assert!(matches!(
-        admit_local_first_jwt(&config, Some(&token)),
+        admit_device_account_jwt(&config, Some(&token)),
         Err(AuthAdmissionError::InvalidJwt(_))
     ));
 }
@@ -144,7 +144,7 @@ fn local_first_jwt_missing_issuer_rejects() {
     let token = local_first_token("alice", expires_in(60), None, None, None);
 
     assert!(matches!(
-        admit_local_first_jwt(&config, Some(&token)),
+        admit_device_account_jwt(&config, Some(&token)),
         Err(AuthAdmissionError::InvalidJwt(_))
     ));
 }
@@ -155,7 +155,7 @@ fn local_first_jwt_wrong_issuer_rejects() {
     let token = local_first_token("alice", expires_in(60), Some("urn:jazz:other"), None, None);
 
     assert!(matches!(
-        admit_local_first_jwt(&config, Some(&token)),
+        admit_device_account_jwt(&config, Some(&token)),
         Err(AuthAdmissionError::InvalidJwt(_))
     ));
 }
@@ -164,7 +164,7 @@ fn local_first_jwt_wrong_issuer_rejects() {
 fn external_jwt_rejects_every_jazz_reserved_issuer_with_typed_error() {
     for issuer in [
         AuthorSubject::SYSTEM_ISSUER,
-        AuthorSubject::LOCAL_FIRST_ISSUER,
+        AuthorSubject::DEVICE_ACCOUNT_ISSUER,
         AuthorSubject::STATIC_BEARER_ISSUER,
         AuthorSubject::ANONYMOUS_ISSUER,
     ] {
@@ -193,20 +193,20 @@ fn local_first_jwt_same_subject_maps_same_author() {
     let first = local_first_token(
         "alice",
         expires_in(60),
-        Some(LOCAL_FIRST_JWT_ISSUER),
+        Some(DEVICE_ACCOUNT_JWT_ISSUER),
         None,
         None,
     );
     let second = local_first_token(
         "alice",
         expires_in(120),
-        Some(LOCAL_FIRST_JWT_ISSUER),
+        Some(DEVICE_ACCOUNT_JWT_ISSUER),
         None,
         None,
     );
 
-    let first = admit_local_first_jwt(&config, Some(&first)).unwrap();
-    let second = admit_local_first_jwt(&config, Some(&second)).unwrap();
+    let first = admit_device_account_jwt(&config, Some(&first)).unwrap();
+    let second = admit_device_account_jwt(&config, Some(&second)).unwrap();
 
     assert_eq!(first.author, second.author);
 }
@@ -217,20 +217,20 @@ fn local_first_jwt_different_subject_maps_different_author() {
     let first = local_first_token(
         "alice",
         expires_in(60),
-        Some(LOCAL_FIRST_JWT_ISSUER),
+        Some(DEVICE_ACCOUNT_JWT_ISSUER),
         None,
         None,
     );
     let second = local_first_token(
         "bob",
         expires_in(60),
-        Some(LOCAL_FIRST_JWT_ISSUER),
+        Some(DEVICE_ACCOUNT_JWT_ISSUER),
         None,
         None,
     );
 
-    let first = admit_local_first_jwt(&config, Some(&first)).unwrap();
-    let second = admit_local_first_jwt(&config, Some(&second)).unwrap();
+    let first = admit_device_account_jwt(&config, Some(&first)).unwrap();
+    let second = admit_device_account_jwt(&config, Some(&second)).unwrap();
 
     assert_ne!(first.author, second.author);
 }
@@ -242,12 +242,12 @@ fn subject_admission_rejects_blank_but_preserves_opaque_spelling() {
         let token = local_first_token(
             subject,
             expires_in(60),
-            Some(LOCAL_FIRST_JWT_ISSUER),
+            Some(DEVICE_ACCOUNT_JWT_ISSUER),
             None,
             None,
         );
         assert!(matches!(
-            admit_local_first_jwt(&config, Some(&token)),
+            admit_device_account_jwt(&config, Some(&token)),
             Err(AuthAdmissionError::InvalidJwt(_))
         ));
     }
@@ -256,15 +256,15 @@ fn subject_admission_rejects_blank_but_preserves_opaque_spelling() {
     let token = local_first_token(
         exact,
         expires_in(60),
-        Some(LOCAL_FIRST_JWT_ISSUER),
+        Some(DEVICE_ACCOUNT_JWT_ISSUER),
         None,
         None,
     );
-    let admitted = admit_local_first_jwt(&config, Some(&token)).unwrap();
+    let admitted = admit_device_account_jwt(&config, Some(&token)).unwrap();
     assert_eq!(admitted.subject, exact);
     assert_eq!(
         admitted.author.canonical(),
-        serde_json::to_string(&(LOCAL_FIRST_JWT_ISSUER, exact)).unwrap()
+        serde_json::to_string(&(DEVICE_ACCOUNT_JWT_ISSUER, exact)).unwrap()
     );
 
     let static_admitted = admit_static_bearer(
@@ -324,12 +324,12 @@ fn static_bearer_claim_admission_rejects_ascii_blank_and_preserves_exact_subject
     );
 }
 
-fn local_first_config(allow_local_first_auth: bool) -> AuthAdmissionConfig {
+fn local_first_config(allow_device_accounts: bool) -> AuthAdmissionConfig {
     AuthAdmissionConfig {
         jwt_verifier: Some(JwtVerifierConfig::ed_public_key_pem(
             ED25519_PUBLIC_KEY_PEM.as_bytes(),
         )),
-        allow_local_first_auth,
+        allow_device_accounts,
         ..AuthAdmissionConfig::default()
     }
 }

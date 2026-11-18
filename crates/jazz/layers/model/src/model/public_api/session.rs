@@ -84,7 +84,7 @@ impl Session {
     pub fn author_subject(&self) -> Result<AuthorSubject, crate::ids::AuthorSubjectError> {
         let principal = match self.auth_mode {
             AuthMode::External => AuthorSubject::authenticated(&self.issuer, self.get_user_id()),
-            AuthMode::DeviceAccount if self.issuer == AuthorSubject::LOCAL_FIRST_ISSUER => {
+            AuthMode::DeviceAccount if self.issuer == AuthorSubject::DEVICE_ACCOUNT_ISSUER => {
                 AuthorSubject::reserved(&self.issuer, self.get_user_id())
             }
             AuthMode::Anonymous if self.issuer == AuthorSubject::ANONYMOUS_ISSUER => {
@@ -437,7 +437,7 @@ mod tests {
         ] {
             let issuer = match mode {
                 AuthMode::External => "https://issuer.example",
-                AuthMode::DeviceAccount => AuthorSubject::LOCAL_FIRST_ISSUER,
+                AuthMode::DeviceAccount => AuthorSubject::DEVICE_ACCOUNT_ISSUER,
                 AuthMode::Anonymous => AuthorSubject::ANONYMOUS_ISSUER,
             };
             let session = Session::new(issuer, "user-1").with_auth_mode(mode);
@@ -457,7 +457,7 @@ mod tests {
 
     #[test]
     fn session_auth_mode_serializes_device_account_and_reads_the_old_spelling() {
-        let session = Session::new(AuthorSubject::LOCAL_FIRST_ISSUER, "u")
+        let session = Session::new(AuthorSubject::DEVICE_ACCOUNT_ISSUER, "u")
             .with_auth_mode(AuthMode::DeviceAccount);
         let json = serde_json::to_value(&session).unwrap();
         assert_eq!(json["auth_mode"], "device-account");

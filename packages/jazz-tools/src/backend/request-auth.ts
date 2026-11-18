@@ -89,7 +89,7 @@ function localFirstSessionFromVerifiedProof(payload: JwtPayload, verifiedUserId:
     throw new RequestAuthenticationError("Invalid JWT payload");
   }
   if (session.user_id !== verifiedUserId) {
-    throw new RequestAuthenticationError("Invalid local-first identity proof");
+    throw new RequestAuthenticationError("Invalid device account proof");
   }
   return session;
 }
@@ -112,7 +112,7 @@ export function localFirstSessionFromToken(token: string, appId: string): Sessio
     if (payload.iss !== LOCAL_FIRST_JWT_ISSUER) throw new Error("not local-first");
     subject = verifyLocalFirstToken(token, appId);
   } catch {
-    throw new Error("Invalid local-first identity proof");
+    throw new Error("Invalid device account proof");
   }
   const session = localFirstSessionFromVerifiedProof(payload, subject);
   session.account_id = localFirstAccountId(appId, session.user_id);
@@ -122,7 +122,7 @@ export function localFirstSessionFromToken(token: string, appId: string): Sessio
 
 /**
  * The device-account proof a plain HTTP request carries: a local-first
- * token as `Authorization: Bearer` (what `db.getLocalFirstIdentityProof()`
+ * token as `Authorization: Bearer` (what `db.getDeviceAccountProof()`
  * mints), or null for any other credential or none. Not verified here.
  */
 export function deviceProofOf(request: Request): string | null {

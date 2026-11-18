@@ -29,7 +29,7 @@
 //! Not supported yet, as explicit answers: trusted backend clients (`backendClients`,
 //! 501), the HTTP-stream fallback for hosts without WebSockets (501),
 //! renewing a cookie session in place (sessions reconnect at their expiry
-//! instead), and local-first proofs signed for an endpoint URL rather than
+//! instead), and device-account proofs signed for an endpoint URL rather than
 //! the app id.
 
 use std::collections::HashMap;
@@ -58,7 +58,7 @@ mod thin;
 /// The issuer `createJazz` names the app's users by.
 const BACKEND_ISSUER: &str = "jazz:backend";
 /// The issuer of a device account's self-signed token.
-const LOCAL_FIRST_ISSUER: &str = "urn:jazz:local-first";
+const DEVICE_ACCOUNT_ISSUER: &str = "urn:jazz:local-first";
 /// The prefix of the error that asks a client to connect again.
 const REAUTHENTICATE_PREFIX: &str = "reauthenticate:";
 const DEFAULT_BASE_PATH: &str = "/jazz";
@@ -75,8 +75,8 @@ const CORE_TIMEOUT: Duration = Duration::from_secs(30);
 const CLOSE_POLICY: u16 = 1008;
 /// How long a link challenge holds.
 const LINK_CHALLENGE_TTL: Duration = Duration::from_secs(120);
-/// The core's refusal of every local-first identity, when it admits none.
-const LOCAL_FIRST_AUTH_DISABLED: &str = "local_first_auth_disabled";
+/// The core's refusal of every device-account identity, when it admits none.
+const DEVICE_ACCOUNTS_DISABLED: &str = "local_first_auth_disabled";
 /// The largest prelude a socket may open with.
 const MAX_PRELUDE_BYTES: usize = 64 * 1024;
 /// The largest message a client may send: the core's own cap on a
@@ -246,7 +246,7 @@ impl AuthUser {
 pub enum Answer {
     /// This user is signed in.
     User(AuthUser),
-    /// Let a device account (a local-first guest, whose key lives on the
+    /// Let a device account (a guest whose key lives on the
     /// user's device) through, when the request comes from one: TS
     /// `acceptDeviceAccounts`. For any other request it means no one is
     /// signed in. Device accounts are refused unless `authenticate` answers
@@ -779,7 +779,7 @@ impl Endpoint {
             return Ok(Response::text(400, "invalid_link_challenge"));
         };
         let proof = body["proof"].as_str().unwrap_or_default();
-        let Ok(subject) = jazz::tools::identity::verify_local_first_challenge(proof, challenge)
+        let Ok(subject) = jazz::tools::identity::verify_device_account_challenge(proof, challenge)
         else {
             return Ok(Response::text(401, "invalid_local_first_proof"));
         };
@@ -793,8 +793,8 @@ impl Endpoint {
             _ => return Ok(Response::text(401, "invalid_local_first_proof")),
         }
         let subject = subject.to_string();
-        let account = jazz::account_registry::local_first_account_id(*app.uuid(), &subject);
-        let guest = json!({ "issuer": LOCAL_FIRST_ISSUER, "subject": subject });
+        let account = jazz::account_registry::device_account_id(*app.uuid(), &subject);
+        let guest = json!({ "issuer": DEVICE_ACCOUNT_ISSUER, "subject": subject });
         let user_is = async |expected: AccountId| matches!(self.accounts("resolve", &user.user_id).await, Ok(found) if found == expected);
         let linked = async {
             match self
@@ -806,7 +806,7 @@ impl Endpoint {
                 // user gets an answer (the retry of a link whose response
                 // was lost).
                 Err(Refused::Coded(403, code))
-                    if code != LOCAL_FIRST_AUTH_DISABLED && user_is(account).await =>
+                    if code != DEVICE_ACCOUNTS_DISABLED && user_is(account).await =>
                 {
                     return Ok(true);
                 }
@@ -830,8 +830,8 @@ impl Endpoint {
         };
         let revoked = match linked.await {
             Ok(revoked) => revoked,
-            Err(Refused::Coded(_, code)) if code == LOCAL_FIRST_AUTH_DISABLED => {
-                return Ok(Response::text(503, LOCAL_FIRST_AUTH_DISABLED));
+            Err(Refused::Coded(_, code)) if code == DEVICE_ACCOUNTS_DISABLED => {
+                return Ok(Response::text(503, DEVICE_ACCOUNTS_DISABLED));
             }
             // The core's own refusals refuse the link for good.
             Err(Refused::Coded(400 | 403 | 404 | 409, _)) => {
@@ -1402,7 +1402,7 @@ impl Endpoint {
             let claims = token_claims(token);
             let local_first = claims
                 .as_ref()
-                .is_some_and(|claims| claims.get("iss") == Some(&json!(LOCAL_FIRST_ISSUER)));
+                .is_some_and(|claims| claims.get("iss") == Some(&json!(DEVICE_ACCOUNT_ISSUER)));
             // The core verifies the token itself; the backend only checks
             // it is for this app. Proofs for an endpoint URL are not
             // supported yet.

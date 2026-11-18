@@ -2,7 +2,7 @@
 //!
 //! # Auth Methods
 //!
-//! 1. **Local-first Auth** (`Authorization: Bearer <self-signed Ed25519 JWT>`):
+//! 1. **Device-account auth** (`Authorization: Bearer <self-signed Ed25519 JWT>`):
 //!    Clients authenticate with a self-signed JWT containing an Ed25519 identity proof.
 //!
 //! 2. **Backend Secret** (`X-Jazz-Backend-Secret` + `X-Jazz-Session`): the app's
@@ -563,7 +563,7 @@ fn system_now_seconds() -> u64 {
     }
 }
 
-fn local_first_auth_error(message: String) -> UnauthenticatedResponse {
+fn device_account_auth_error(message: String) -> UnauthenticatedResponse {
     if message.starts_with("token expired:") {
         UnauthenticatedResponse::expired("JWT has expired")
     } else {
@@ -834,7 +834,7 @@ pub async fn validate_jwt_with_cache_at(
     }
 }
 
-/// Check if a JWT has a Jazz self-signed `iss` (local-first or anonymous) by
+/// Check if a JWT has a Jazz self-signed `iss` (device account or anonymous) by
 /// decoding claims without verification.
 fn is_jazz_self_signed_identity_proof(token: &str) -> Option<&'static str> {
     let parts: Vec<&str> = token.splitn(3, '.').collect();
@@ -850,30 +850,33 @@ fn is_jazz_self_signed_identity_proof(token: &str) -> Option<&'static str> {
     }
     let claims = serde_json::from_slice::<IssOnly>(&claims_bytes).ok()?;
     match claims.iss.as_deref() {
-        Some(identity::LOCAL_FIRST_ISSUER) => Some(identity::LOCAL_FIRST_ISSUER),
+        Some(identity::DEVICE_ACCOUNT_ISSUER) => Some(identity::DEVICE_ACCOUNT_ISSUER),
         Some(identity::ANONYMOUS_ISSUER) => Some(identity::ANONYMOUS_ISSUER),
         _ => None,
     }
 }
 
 /// Header with which a trusted backend names the audience it already checked
-/// a local-first proof against.
+/// a device-account proof against.
 ///
-/// A browser client without an app id signs its local-first proof for the
+/// A browser client without an app id signs its device-account proof for the
 /// endpoint it syncs with (its `serverUrl`), which only that endpoint's
 /// backend knows. The backend verifies the audience, then forwards the proof
 /// with this header and its backend secret; the core verifies the proof for
 /// that audience. The audience also namespaces the founder's account id.
-pub const LOCAL_FIRST_AUDIENCE_HEADER: &str = "X-Jazz-Local-First-Audience";
+pub const DEVICE_ACCOUNT_AUDIENCE_HEADER: &str = "X-Jazz-Local-First-Audience";
+/// Deprecated alias of [`DEVICE_ACCOUNT_AUDIENCE_HEADER`].
+#[deprecated(note = "renamed to DEVICE_ACCOUNT_AUDIENCE_HEADER")]
+pub const LOCAL_FIRST_AUDIENCE_HEADER: &str = DEVICE_ACCOUNT_AUDIENCE_HEADER;
 
-/// The audience local-first proofs on this request are verified against: the
+/// The audience device-account proofs on this request are verified against: the
 /// app id, or the audience a trusted backend vouches for.
-pub fn local_first_audience(
+pub fn device_account_audience(
     headers: &HeaderMap,
     app_id: AppId,
     config: &AuthConfig,
 ) -> Result<String, UnauthenticatedResponse> {
-    let Some(audience) = headers.get(LOCAL_FIRST_AUDIENCE_HEADER) else {
+    let Some(audience) = headers.get(DEVICE_ACCOUNT_AUDIENCE_HEADER) else {
         return Ok(app_id.to_string());
     };
     let audience = audience
@@ -881,23 +884,39 @@ pub fn local_first_audience(
         .ok()
         .map(str::trim)
         .filter(|audience| !audience.is_empty())
-        .ok_or_else(|| UnauthenticatedResponse::invalid("Invalid local-first audience"))?;
+        .ok_or_else(|| UnauthenticatedResponse::invalid("Invalid device account audience"))?;
     let provided = headers
         .get("X-Jazz-Backend-Secret")
         .and_then(|value| value.to_str().ok());
     validate_backend_secret(provided, config).map_err(|(_, message)| {
         UnauthenticatedResponse::invalid(match message {
             "Invalid backend secret" => message,
-            _ => "A local-first audience must be vouched for with the backend secret",
+            _ => "A device account audience must be vouched for with the backend secret",
         })
     })?;
     Ok(audience.to_owned())
 }
 
-/// The registry namespace a local-first founder's account id derives from:
+/// The registry namespace a device-account founder's account id derives from:
 /// the audience its proof was verified against, read as an app id.
-pub fn local_first_founding_app(audience: &str) -> AppId {
+pub fn device_account_founding_app(audience: &str) -> AppId {
     AppId::from_string(audience).unwrap_or_else(|_| AppId::from_name(audience))
+}
+
+/// Deprecated alias of [`device_account_audience`].
+#[deprecated(note = "renamed to device_account_audience")]
+pub fn local_first_audience(
+    headers: &HeaderMap,
+    app_id: AppId,
+    config: &AuthConfig,
+) -> Result<String, UnauthenticatedResponse> {
+    device_account_audience(headers, app_id, config)
+}
+
+/// Deprecated alias of [`device_account_founding_app`].
+#[deprecated(note = "renamed to device_account_founding_app")]
+pub fn local_first_founding_app(audience: &str) -> AppId {
+    device_account_founding_app(audience)
 }
 
 /// Extract session from headers with priority resolution.
@@ -965,22 +984,22 @@ pub async fn extract_session(
     };
 
     if let Some(token) = token {
-        // Self-signed JWT path (local-first or anonymous).
+        // Self-signed JWT path (device account or anonymous).
         //
         // Anonymous is accepted at the transport layer so public reads can
         // flow. The core fate authority structurally rejects its writes before
         // table-policy evaluation; apps still gate anonymous reads through the
-        // permissions DSL. Which local-first identities sync is the app
+        // permissions DSL. Which device-account identities sync is the app
         // backend's call (`acceptDeviceAccounts`): a core admits only the
         // sockets its backend opens.
         if let Some(issuer) = is_jazz_self_signed_identity_proof(token) {
-            let audience = local_first_audience(headers, app_id, config)?;
+            let audience = device_account_audience(headers, app_id, config)?;
             let verified = identity::verify_jazz_self_signed_proof_at(
                 token,
                 &audience,
                 config.clock.now_seconds(),
             )
-            .map_err(local_first_auth_error)?;
+            .map_err(device_account_auth_error)?;
             let auth_mode = match issuer {
                 identity::ANONYMOUS_ISSUER => jazz::tools::AuthMode::Anonymous,
                 _ => jazz::tools::AuthMode::DeviceAccount,
@@ -1804,7 +1823,7 @@ mod tests {
         let seed = [7u8; 32];
         let token = jazz::tools::identity::mint_jazz_self_signed_token(
             &seed,
-            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
             &app_id.to_string(),
             3600,
         )
@@ -1850,7 +1869,7 @@ mod tests {
         let app_id = test_app_id();
         let token = identity::mint_jazz_self_signed_token(
             &seed,
-            identity::LOCAL_FIRST_ISSUER,
+            identity::DEVICE_ACCOUNT_ISSUER,
             &app_id.to_string(),
             3600,
         )
@@ -1869,7 +1888,7 @@ mod tests {
     async fn local_first_auth_jwt_wrong_audience_rejected() {
         let token = identity::mint_jazz_self_signed_token(
             &alice_seed(),
-            identity::LOCAL_FIRST_ISSUER,
+            identity::DEVICE_ACCOUNT_ISSUER,
             "wrong-app",
             3600,
         )
@@ -1892,7 +1911,7 @@ mod tests {
         };
         let token = identity::mint_jazz_self_signed_token_at(
             &alice_seed(),
-            identity::LOCAL_FIRST_ISSUER,
+            identity::DEVICE_ACCOUNT_ISSUER,
             &app_id.to_string(),
             5,
             clock.now_seconds(),

@@ -192,7 +192,7 @@ same operations.
 
 ## Guests who sign up
 
-An app can start every visitor as a guest: a [device account](/docs/setup/auth/local-first)
+An app can start every visitor as a guest: a [device account](/docs/setup/auth/device-accounts)
 (`initial: "device"`), whose key lives on the device. Its backend lets device accounts sync by
 returning `acceptDeviceAccounts(request)` from `authenticate` for signed-out requests; they are
 refused otherwise:
