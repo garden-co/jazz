@@ -16,9 +16,11 @@ import {
   clientOnlySessionActions,
   clientOnlySnapshot,
   jazzSessionActions,
+  jazzSessionErrorViewProps,
   ownJazzSession,
   startJazzSession,
   type JazzSession,
+  type JazzSessionErrorViewProps,
   type JazzSessionSnapshot,
 } from "../session/jazz-session.js";
 import { openBrowserSessionCore, type JazzClientConfig } from "../session/create-jazz-session.js";
@@ -79,8 +81,11 @@ export type JazzProviderProps = NoAutoAttachDevTools & {
   signedOut?: JSX.Element;
   /** Shown while the session starts or switches users. */
   loading?: JSX.Element;
-  /** Shown when there is no usable client (`status: "error"`). */
-  error?: (error: Error, retry: () => Promise<void>) => JSX.Element;
+  /**
+   * Shown when there is no usable client (`status: "error"`), with
+   * `{ error, recovery, retry }`. The rest of the session is in `useJazzSession()`.
+   */
+  error?: (props: JazzSessionErrorViewProps) => JSX.Element;
   /**
    * Shown once the session is closed (`status: "closed"`, after
    * `session.close()`): it has no client and never starts again. Nothing by
@@ -158,10 +163,15 @@ export function JazzProvider(props: JazzProviderProps) {
     // Solid's synchronous keyed Show disposal and cleanup run before this queued acknowledgement.
     queueMicrotask(() => lease.acknowledge(observed));
   });
-  const retry = () => session.retry().catch(() => {});
+  // A new view per snapshot in `error` is right: the session is in `error`
+  // only before its core exists or while the core itself is in `error`, and
+  // the core leaves `error` only through another status. So a new snapshot
+  // here always brings a new failure (or recovery) to show.
   const fallback = () => (
     <Show
-      when={snapshot().status === "error" ? snapshot().error : undefined}
+      when={
+        snapshot().status === "error" ? jazzSessionErrorViewProps(session, snapshot()) : undefined
+      }
       keyed
       fallback={
         <Switch fallback={props.loading ?? <p role="status">Loading...</p>}>
@@ -170,13 +180,13 @@ export function JazzProvider(props: JazzProviderProps) {
         </Switch>
       }
     >
-      {(error) =>
+      {(view) =>
         props.error ? (
-          props.error(error, retry)
+          props.error(view)
         ) : (
           <>
-            <p role="alert">{error.message}</p>
-            <button onClick={() => void retry()}>Retry</button>
+            <p role="alert">{view.error.message}</p>
+            <button onClick={() => void view.retry()}>Retry</button>
           </>
         )
       }
