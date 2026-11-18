@@ -390,22 +390,47 @@ pub fn read_body(body: &[u8]) -> Result<DeployBody, DeployError> {
     serde_json::from_slice(body).map_err(DeployError::invalid)
 }
 
+/// The kept declarations, by schema hash.
+type Kept = HashMap<Vec<u8>, Vec<u8>>;
+
+/// Every kept declaration, read once from `tables` ([`DECLARATIONS`]): the
+/// checks see one moment of the table, and on the connection `tables` holds
+/// (a core's own, as native reads them on its store's thread), never a
+/// second connection that a shared in-memory database locks out during a
+/// write.
+fn read_kept(tables: &dyn jazz::host::HostTables) -> Result<Kept, DeployError> {
+    Ok(tables
+        .host_prefix(DECLARATIONS, &[])
+        .map_err(DeployError::internal)?
+        .into_iter()
+        .collect())
+}
+
 /// Stage the deploy `body` on `core`'s catalogue and apply it, for a host
-/// that holds the core and its store in one place. `store` is another
-/// handle on the core's own store: the declarations each version was first
-/// deployed with are read from it ([`DECLARATIONS`]). The ones this
-/// deployment names for the first time are written in the same transaction
-/// as the catalogue rows (`ServerCore::apply_catalogue_keeping`), so a
-/// version is deployed with its declarations or not at all; a deployment
-/// with nothing to commit writes them on their own. With `probe`, the core
-/// is a scratch one that stands in for the store (a deployment the
-/// catalogue refuses never creates it): nothing is kept, and a bundle new
-/// to it ends no session. Otherwise a bundle new to the store ends the
-/// sessions pinned to others. Nothing to commit reloads the core's
-/// catalogue.
+/// that holds the core and its store in one place. The declarations each
+/// version was first deployed with are read once from the core's own
+/// connection ([`DECLARATIONS`]). The ones this deployment names for the
+/// first time are written in the same transaction as the catalogue rows
+/// (`ServerCore::apply_catalogue_keeping`), so a version is deployed with
+/// its declarations or not at all; a deployment with nothing to commit
+/// writes them on their own. A bundle new to the store ends the sessions
+/// pinned to others. Nothing to commit reloads the core's catalogue.
 pub fn apply_to_core(
     core: &mut crate::runtime::ServerCore,
-    store: &jazz::host::StoreFile,
+    body: &[u8],
+    now: u64,
+) -> Result<DeploymentResponse, DeployError> {
+    let kept = read_kept(core.db())?;
+    apply_with_kept(core, &kept, body, now, false)
+}
+
+/// [`apply_to_core`] judged by `kept`. With `probe`, the core is a scratch
+/// one that stands in for the store (a deployment the catalogue refuses
+/// never creates it): nothing is kept, and a bundle new to it ends no
+/// session.
+fn apply_with_kept(
+    core: &mut crate::runtime::ServerCore,
+    kept: &Kept,
     body: &[u8],
     now: u64,
     probe: bool,
@@ -414,9 +439,7 @@ pub fn apply_to_core(
     let rows = core.db().catalogue().map_err(DeployError::internal)?;
     let index = CatalogueIndex::from_rows(&rows, None);
     let deployment = prepare_encrypted(&index, read_body(body)?, now, |version| {
-        store
-            .host_get(DECLARATIONS, &version.0)
-            .map_err(|error| error.to_string())
+        Ok(kept.get(version.0.as_slice()).cloned())
     })?;
     // As native refuses it: an encrypting app needs the registry its checks
     // read, whatever brings it to the core.
@@ -439,7 +462,7 @@ pub fn apply_to_core(
         // call at a time (a Durable Object) cannot have another deploy
         // write one in between: nothing here can meet a different value.
         for (table, key, value) in &first {
-            store
+            core.db()
                 .host_put_if_absent(*table, key, value)
                 .map_err(DeployError::internal)?;
         }
@@ -492,10 +515,10 @@ pub fn deploy(
         let store = host.store().map_err(DeployError::internal)?;
         let rows = store.catalogue().map_err(DeployError::internal)?;
         let index = CatalogueIndex::from_rows(&rows, None);
+        // No core holds a connection yet: this handle is the only one.
+        let kept = read_kept(&store)?;
         let deployment = prepare_encrypted(&index, read_body(body)?, now, |version| {
-            store
-                .host_get(DECLARATIONS, &version.0)
-                .map_err(|error| error.to_string())
+            Ok(kept.get(version.0.as_slice()).cloned())
         })?;
         if !deployment.staged.response.changed {
             // Nothing to commit; the declarations of a version deployed
@@ -513,7 +536,7 @@ pub fn deploy(
             .map_err(DeployError::internal)?;
         // The scratch store keeps nothing and ends no session; the
         // declarations the deployment is judged by are the real store's.
-        let probed = apply_to_core(&mut probe, &store, body, now, true).map(drop);
+        let probed = apply_with_kept(&mut probe, &kept, body, now, true).map(drop);
         probe.close();
         probed?;
         let mut opened = ServerCore::open(genesis, store, false, Some(app.to_owned()))
@@ -521,7 +544,6 @@ pub fn deploy(
         install_registry(host, &mut opened).map_err(DeployError::internal)?;
         *core = Some(opened);
     }
-    let store = host.store().map_err(DeployError::internal)?;
     let core = core.as_mut().expect("opened above");
-    apply_to_core(core, &store, body, now, false)
+    apply_to_core(core, body, now)
 }

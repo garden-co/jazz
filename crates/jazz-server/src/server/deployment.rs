@@ -59,14 +59,22 @@ pub(crate) async fn deploy_body(
         .catalogue_store
         .index()
         .map_err(DeployError::internal)?;
+    // The kept declarations, read once on the store's own thread (a read on
+    // another connection fails as locked on a memory store whose connection
+    // is inside a write): the checks see one moment of the table.
+    let kept_now: std::collections::HashMap<Vec<u8>, Vec<u8>> = match &kept {
+        Some(kept) => kept
+            .all_on_store()
+            .map_err(DeployError::internal)?
+            .into_iter()
+            .collect(),
+        None => Default::default(),
+    };
     let deployment = portable::prepare_encrypted(
         &index,
         body,
         super::catalogue::unix_timestamp_millis(),
-        |version| match &kept {
-            Some(kept) => kept.get(&version.0),
-            None => Ok(None),
-        },
+        |version| Ok(kept_now.get(version.0.as_slice()).cloned()),
     )?;
     let staged = &deployment.staged;
     // An encrypted app needs the account registry its checks read, as when

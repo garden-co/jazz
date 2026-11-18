@@ -307,10 +307,8 @@ fn an_account_root_of_the_wrong_kind_is_refused() {
         host.host.install_registry(&mut core).unwrap();
         apply_to_core(
             &mut core,
-            &host.host.store().unwrap(),
             app.deployment_body(false).to_string().as_bytes(),
             1,
-            false,
         )
         .unwrap_or_else(|error| panic!("{}", error.body));
         host.core = Some(core);
@@ -464,6 +462,20 @@ fn the_founders_view_reads_on_the_objects_connection_inside_a_scope() {
             .map_err(accounts::storage_error)?;
             let device = accounts::assignment_of(device).account;
             assert_eq!(view.founded_local_first(device), Ok(Some(true)));
+            // The check core runs inside the write passes the store's own
+            // connection, which is the one this scope is open on.
+            assert_eq!(
+                view.founded_local_first_on(&registry, device),
+                Ok(Some(true))
+            );
+            assert_eq!(
+                view.founded_local_first_on(&registry, alice),
+                Ok(Some(false))
+            );
+            assert_eq!(
+                view.founded_for_another_audience_on(&registry, device),
+                Ok(false)
+            );
             Ok(())
         })
         .unwrap();
@@ -519,10 +531,8 @@ fn an_encrypting_app_is_not_served_without_the_account_registry() {
     assert!(!core.has_account_registry());
     let refused = apply_to_core(
         &mut core,
-        &files.store().unwrap(),
         app.deployment_body(false).to_string().as_bytes(),
         1,
-        false,
     )
     .unwrap_err();
     assert_eq!(refused.status.as_u16(), 422, "{:?}", refused.body);
@@ -648,6 +658,33 @@ fn the_system_table_rules_hold_on_the_durable_object_host() {
             host.core.as_ref().unwrap().db().catalogue().unwrap(),
             before,
             "{name}: nothing was applied"
+        );
+    }
+}
+
+/// A registry that cannot be read refuses the check, never reads as "an
+/// account nobody founded", which would let the session's issuer decide: a
+/// store whose registry tables were never made, read on the object's
+/// connection.
+#[test]
+fn an_unreadable_registry_refuses_the_account_checks() {
+    use jazz::db::AccountRegistryView;
+    let object = ObjectHost::new();
+    let app = *accounts::local_first_founding_app(APP_NAME).uuid();
+    let view = super::accounts::RegistryFounders::new(object.handle(), app);
+    let account = jazz::account_registry::AccountId(uuid::Uuid::new_v4());
+    let handle = object.handle();
+    for result in [
+        view.founded_local_first(account).map(drop),
+        view.founded_local_first_on(&handle, account).map(drop),
+        view.founded_for_another_audience(account).map(drop),
+        view.founded_for_another_audience_on(&handle, account)
+            .map(drop),
+    ] {
+        let error = result.expect_err("the tables do not exist");
+        assert!(
+            error.contains("the account registry cannot be read"),
+            "{error}"
         );
     }
 }

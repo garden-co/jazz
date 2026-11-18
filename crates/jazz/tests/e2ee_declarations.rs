@@ -1286,3 +1286,51 @@ fn a_policy_may_read_a_column_that_is_plaintext_in_this_version() {
     ));
     assert!(error.contains("members table"), "{error}");
 }
+
+/// The system tables go only to versions a migration leads to from one that
+/// has them, as the server follows the migrations, not to every version the
+/// file lists after an encrypting one: a plain branch that merely comes
+/// later in the file stays plain, so a purely plaintext current version
+/// stays plain, and a server holding the tables refuses a plain sibling
+/// instead of the loader adding them silently.
+///
+/// ```text
+/// v1 ──► v3 ──► current          plain: no system tables
+/// v2 (encrypts, leads nowhere)   the only version with them
+/// ```
+#[test]
+fn the_system_tables_follow_the_migrations_not_the_order_of_the_file() {
+    let file = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": { "notes": { "columns": { "done": "boolean", "extra": "boolean?", "more": "boolean?" } } },
+        "history": {
+            "v1": { "tables": { "notes": { "columns": { "done": "boolean" } } } },
+            "v2": { "tables": { "notes": {
+                "columns": { "done": "boolean", "title": "bytes" },
+                "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } } } },
+            "v3": { "tables": { "notes": { "columns": { "done": "boolean", "extra": "boolean?" } } } } },
+        "migrations": [
+            { "from": "v1", "to": "v3", "migrate": { "notes": { "extra": { "add": "boolean?", "default": null } } } },
+            { "from": "v3", "migrate": { "notes": { "more": { "add": "boolean?", "default": null } } } }] }"#;
+    let members = TableName::from(MEMBERS);
+    let loaded = load(
+        file.as_bytes(),
+        br#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json", "tables": {} }"#,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let carrying: Vec<bool> = loaded
+        .schemas()
+        .iter()
+        .map(|(_, schema)| schema.contains_key(&members))
+        .collect();
+    assert_eq!(
+        carrying.iter().filter(|carries| **carries).count(),
+        1,
+        "only v2, the version that encrypts: {carrying:?}"
+    );
+    assert!(
+        !loaded.current_schema().contains_key(&members),
+        "the current version is plain"
+    );
+    // A client of the plain current version opens it as a plain app.
+    load_client_current(file.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+}
