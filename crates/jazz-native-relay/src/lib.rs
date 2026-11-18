@@ -167,7 +167,7 @@ struct PendingPrivateSession {
 struct PrivateRelaySocketSession {
     server_url: String,
     app_id: String,
-    /// What the socket presents: a local-first account's own token, or, for
+    /// What the socket presents: a device account's own token, or, for
     /// a user signed in through the app's backend, the app's own bearer.
     bearer: String,
     /// Set for a user signed in through the app's backend: the session the

@@ -228,12 +228,12 @@ describe("Vanilla TS Todo App E2E", () => {
     await waitFor(
       () => db1.getAuthState().authMode === "local-first",
       5000,
-      "App 1 should reach local-first auth",
+      "App 1 should reach a device account",
     );
     await waitFor(
       () => db2.getAuthState().authMode === "local-first",
       5000,
-      "App 2 should reach local-first auth",
+      "App 2 should reach a device account",
     );
     expect(db1.getAuthState().session?.authMode).toBe("local-first");
     expect(db2.getAuthState().session?.authMode).toBe("local-first");
