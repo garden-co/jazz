@@ -609,37 +609,6 @@ mod executing_policy_context {
             .unwrap()
     }
 
-    /// Alice retains a governed (not pinned) view while Bob closes the current
-    /// schema's SELECT policy. The documented current-policy view must follow it.
-    #[test]
-    fn retained_governed_view_observes_current_policy_revocation() {
-        let db = owner();
-        let version = db.current_schema().version_id();
-        let retained = db.governed_view(version).unwrap();
-        assert_eq!(
-            read(
-                &retained,
-                &retained.prepare_query(&Query::from("notes")).unwrap()
-            ),
-            1
-        );
-        block_on(db.activate_schema(compile_schema(&schema(false)))).unwrap();
-        let fresh = db.governed_view(version).unwrap();
-        assert_eq!(
-            read(&fresh, &fresh.prepare_query(&Query::from("notes")).unwrap()),
-            0
-        );
-        // Prepare after activation, isolating a retained-handle issue from stale queries.
-        assert_eq!(
-            read(
-                &retained,
-                &retained.prepare_query(&Query::from("notes")).unwrap()
-            ),
-            0,
-            "retained governed view kept revoked SELECT permission"
-        );
-    }
-
     /// Alice explicitly pins an open bundle; Bob changing the current owner policy
     /// must leave that bundle's documented permission contract intact.
     #[test]

@@ -302,6 +302,7 @@ const BACKEND_SESSION_OPTIONS = {
   accountId: true,
   bundle: true,
   slowQueryThresholdMs: true,
+  subscriptionBacklogRows: true,
 } as const satisfies Record<keyof JazzClientConfig, true>;
 
 /**

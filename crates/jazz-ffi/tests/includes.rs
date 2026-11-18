@@ -194,8 +194,7 @@ const RELATIONS_APP: &str = include_str!("fixtures/relations/jazz.app.json");
 
 /// A forward relation through a `uuid[]` column reads as an array of the
 /// referenced rows, as in TS; `required` keeps only rows whose every
-/// reference is readable. A reverse relation that reverses a forward one
-/// pointing at another table is refused, not lowered.
+/// reference is readable.
 #[test]
 fn forward_relations_through_uuid_arrays_read_as_arrays() {
     let jazz = JazzHandle::open(json!({ "app": RELATIONS_APP }).to_string()).unwrap();
@@ -235,12 +234,21 @@ fn forward_relations_through_uuid_arrays_read_as_arrays() {
     members.sort();
     assert_eq!(members, ["Ada", "Bo"]);
     assert_eq!(teams[0]["leadRow"]["name"], "Ada");
+}
 
-    let misdirected = jazz
-        .all(json!({ "table": "notes", "include": [{ "relation": "misdirected" }] }).to_string());
+/// A reverse relation that reverses a forward one pointing at another table
+/// is refused when the app opens, as the loader refuses it (#5927 R14), not
+/// dropped.
+#[test]
+fn a_misdirected_reverse_relation_is_refused_at_open() {
+    let mut app: Value = serde_json::from_str(RELATIONS_APP).unwrap();
+    app["tables"]["notes"]["relations"]["misdirected"] =
+        json!({ "reverse": "teams", "relation": "leadRow" });
+    let opened = JazzHandle::open(json!({ "app": app.to_string() }).to_string());
     assert!(
-        matches!(&misdirected, Err(JazzError::Refused { reason }) if reason.contains("no relation misdirected")),
-        "{misdirected:?}"
+        matches!(&opened, Err(JazzError::Refused { reason }) if reason.contains("teams has no forward relation leadRow to notes")),
+        "{:?}",
+        opened.as_ref().err()
     );
 }
 
