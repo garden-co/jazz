@@ -266,6 +266,8 @@ impl Inner {
             // Read under the schema this handle serves (a pinned session's
             // view and its bundle's policies), as its own reads are.
             schema: Some(self.schema.clone()),
+            #[cfg(feature = "e2ee-client")]
+            planned: None,
         };
         let compiled = self.compile(&prepared, identity, &ReadSpec::default())?;
         let cell: Option<Sql> = self

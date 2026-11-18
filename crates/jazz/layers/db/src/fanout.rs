@@ -447,6 +447,11 @@ struct GroupKey {
     /// The position the result reads as of: results of different upstream
     /// reads settle apart.
     position: String,
+    /// A rewritten query's residual (its filter and window on opened rows,
+    /// outside the SQL), as a digest: queries that differ only in it share
+    /// SQL but not rows.
+    #[cfg(feature = "e2ee-client")]
+    residual: Option<[u8; 32]>,
 }
 
 /// Whose queue a member's events go to.
@@ -939,6 +944,11 @@ impl Inner {
             partial: format!("{:?}", compiled.partial),
             splices: read.splices.clone(),
             position: format!("{:?}", read.position),
+            #[cfg(feature = "e2ee-client")]
+            residual: prepared
+                .planned
+                .as_ref()
+                .map(|planned| planned.residual_key),
         };
         let now = settled.get();
         // `opened`: the member's queue starts with an opening.
@@ -993,6 +1003,12 @@ impl Inner {
                 .compile(prepared, identity, visible)
                 .and_then(|compiled| self.execute(&compiled, &prepared.query.table)),
         };
+        // The opening leaves toward the subscription's members.
+        #[cfg(feature = "e2ee-client")]
+        let run = run.and_then(|mut rows| {
+            self.open_read(prepared, &visible, false, &mut rows)?;
+            Ok(rows)
+        });
         let (rows, awaiting) =
             match run.and_then(|rows| self.nest_relations(prepared, identity, &visible, rows)) {
                 Ok(rows) => (rows, false),
@@ -1917,6 +1933,17 @@ impl Inner {
         self.refresh_where(|_| true, true);
     }
 
+    /// Re-run the groups that read one of the stored tables `tables`: rows
+    /// the encryption hooks could not open before may open now, and arrive
+    /// as additions.
+    #[cfg(feature = "e2ee-client")]
+    pub(super) fn refresh_reading(&mut self, tables: &BTreeSet<String>) {
+        self.refresh_where(
+            |group| group.tables.iter().any(|table| tables.contains(table)),
+            false,
+        );
+    }
+
     /// `author`'s claims changed: re-run only the groups whose policy or
     /// claim operands read them. A group with no policy identity takes its
     /// claims from this node's own author. Only request claims matching
@@ -2183,6 +2210,12 @@ impl Inner {
         group: &mut Group,
         ids: &BTreeSet<RowUuid>,
     ) -> Option<Result<Option<SubscriptionEvent>, Error>> {
+        // A rewritten query filters and windows its opened rows: only a
+        // full run applies that.
+        #[cfg(feature = "e2ee-client")]
+        if group.prepared.planned.is_some() {
+            return None;
+        }
         #[cfg(any(test, feature = "testing"))]
         if FAIL_RECHECKS.with(|cell| {
             let left = cell.get();
@@ -2250,10 +2283,17 @@ impl Inner {
                 Err(error) => return Some(Err(error)),
             },
         };
-        let fresh = match self.execute(&narrowed, &group.prepared.query.table) {
+        #[cfg_attr(not(feature = "e2ee-client"), allow(unused_mut))]
+        let mut fresh = match self.execute(&narrowed, &group.prepared.query.table) {
             Ok(rows) => rows,
             Err(error) => return Some(Err(error)),
         };
+        // The changed rows leave toward the subscription's members: opened
+        // as a full run's are.
+        #[cfg(feature = "e2ee-client")]
+        if let Err(error) = self.open_read(&group.prepared, &read, false, &mut fresh) {
+            return Some(Err(error));
+        }
         // Relations of the changed roots only; the others' are unchanged.
         let fresh = match self.nest_relations_kept(
             &group.prepared,
@@ -2554,7 +2594,7 @@ impl Inner {
     fn group_rows(&self, group: &mut Group) -> Result<Vec<CurrentRow>, Error> {
         let read = self.visible_read(&group.read, &group.tables);
         group.applied = cut_of(&read);
-        let rows = self.run(&group.prepared, group.identity, &read)?;
+        let rows = self.run_for_reader(&group.prepared, group.identity, &read, false)?;
         self.nest_relations_kept(
             &group.prepared,
             group.identity,
@@ -3623,7 +3663,7 @@ mod oracle {
         }
         let read = fanout.visible_read(&group.read, &group.tables);
         let Ok(full) = fanout
-            .run(&group.prepared, group.identity, &read)
+            .run_for_reader(&group.prepared, group.identity, &read, false)
             .and_then(|rows| fanout.nest_relations(&group.prepared, group.identity, &read, rows))
         else {
             return;

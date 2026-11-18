@@ -1507,7 +1507,8 @@ impl Binding {
         let prepared = self.db.prepare_query(&query)?;
         let mut opts = ReadOpts::for_read_tier(ReadTier::LocalOnly);
         opts.read_view.include_deleted = true;
-        let rows = block_on(self.db.all(&prepared, opts))?;
+        // The row a mutation is built on: strict (protocol §4.4).
+        let rows = block_on(self.db.all_strict(&prepared, opts))?;
         Ok(crate::binding_codec::encode_rows(&rows)?)
     }
 

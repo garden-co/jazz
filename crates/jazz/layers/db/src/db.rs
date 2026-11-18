@@ -55,6 +55,12 @@ pub use sync::{
     set_follow_read_hook_for_test,
 };
 pub use sync::{ORIGIN_ENTRY_RETENTION_MS, origin_node};
+#[cfg(feature = "e2ee-client")]
+#[path = "e2ee_query.rs"]
+mod e2ee_query;
+#[cfg(feature = "e2ee-client")]
+#[path = "e2ee_read.rs"]
+mod e2ee_read;
 
 #[path = "shard.rs"]
 pub mod shard;
@@ -110,6 +116,9 @@ pub struct PreparedQuery {
     request_claims: Option<(AuthorSubject, BTreeMap<String, Value>)>,
     /// The schema view that prepared it; `None` follows the owner schema.
     schema: Option<Rc<Schema>>,
+    /// What the encryption hooks keep of a query they rewrote.
+    #[cfg(feature = "e2ee-client")]
+    planned: Option<Rc<e2ee_query::Planned>>,
 }
 
 impl PreparedQuery {
@@ -3538,9 +3547,22 @@ impl Db {
         let mut inner = self.inner();
         let normalized = normalize_relation(query, &inner.schema)?;
         let query = normalized.as_ref().unwrap_or(query);
-        let shape = jazz_types::sha256::hash(
-            format!("{query:?}{:?}", inner.schema.jazz.version_id()).as_bytes(),
-        );
+        // Encrypted equality filters become token filters before anything
+        // validates, stores or uploads the query.
+        #[cfg(feature = "e2ee-client")]
+        let (physical, planned) = inner.plan_query(query)?;
+        #[cfg(feature = "e2ee-client")]
+        let query = &physical;
+        #[cfg_attr(not(feature = "e2ee-client"), allow(unused_mut))]
+        let mut shape = format!("{query:?}{:?}", inner.schema.jazz.version_id());
+        // The held epochs a rewritten query's tokens were computed for: a
+        // new one is a new query, even offline, where its text is the same.
+        // So is a new residual: its filter and window are not in the text.
+        #[cfg(feature = "e2ee-client")]
+        if let Some(planned) = &planned {
+            shape.push_str(&format!("{:?}{:?}", planned.epochs, planned.residual_key));
+        }
+        let shape = jazz_types::sha256::hash(shape.as_bytes());
         let bound = jazz_types::sha256::hash(format!("{binding:?}").as_bytes());
         let key = (short(shape), short(bound));
         if !inner.validated_shapes.contains(&key) {
@@ -3564,6 +3586,8 @@ impl Db {
             binding_id: Binding(short(bound)),
             request_claims: None,
             schema: self.view.clone(),
+            #[cfg(feature = "e2ee-client")]
+            planned,
         })
     }
 
@@ -3576,7 +3600,22 @@ impl Db {
     ) -> Result<Vec<CurrentRow>, Error> {
         self.fetching(|| {
             let inner = self.inner();
-            inner.run(prepared, None, &ReadSpec::of(&opts, &inner)?)
+            inner.run_for_reader(prepared, None, &ReadSpec::of(&opts, &inner)?, false)
+        })
+        .await
+    }
+
+    /// [`Db::all`] as a strict read: one a write is built on, which fails
+    /// rather than leave out a row the encryption hooks cannot open
+    /// (protocol §4.4).
+    pub async fn all_strict(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.fetching(|| {
+            let inner = self.inner();
+            inner.run_for_reader(prepared, None, &ReadSpec::of(&opts, &inner)?, true)
         })
         .await
     }
@@ -3600,7 +3639,7 @@ impl Db {
             };
             let inner = self.inner();
             let read = ReadSpec::of(&opts, &inner)?;
-            let roots = inner.run(&prepared, identity, &read)?;
+            let roots = inner.run_for_reader(&prepared, identity, &read, false)?;
             inner.nest_relations(&prepared, identity, &read, roots)
         })
         .await
@@ -3619,8 +3658,12 @@ impl Db {
             .nest_relations(prepared, None, &ReadSpec::default(), roots)
     }
 
+    /// A read of the store as it is; inside a callback transaction, a
+    /// strict one (protocol §4.4).
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
-        self.inner().run(prepared, None, &ReadSpec::default())
+        let inner = self.inner();
+        let strict = inner.tx.is_some();
+        inner.run_for_reader(prepared, None, &ReadSpec::default(), strict)
     }
 
     pub async fn all_for_identity(
@@ -3631,7 +3674,12 @@ impl Db {
     ) -> Result<Vec<CurrentRow>, Error> {
         let prepared = self.execution_query(prepared);
         let inner = self.inner();
-        inner.run(&prepared, Some(identity), &ReadSpec::of(&opts, &inner)?)
+        inner.run_for_reader(
+            &prepared,
+            Some(identity),
+            &ReadSpec::of(&opts, &inner)?,
+            false,
+        )
     }
 
     pub async fn all_result_tree(
@@ -3641,7 +3689,7 @@ impl Db {
     ) -> Result<ResultTree, Error> {
         let inner = self.inner();
         let read = ReadSpec::of(&opts, &inner)?;
-        let roots = inner.run(prepared, None, &read)?;
+        let roots = inner.run_for_reader(prepared, None, &read, false)?;
         let mut run = RelationRun::new(&inner, prepared, None, &read);
         let tree = inner.nest(
             &mut run,
@@ -3848,7 +3896,7 @@ impl Db {
     ) -> Result<Vec<CurrentRow>, Error> {
         let inner = self.inner();
         let read = ReadSpec::of(&opts, &inner)?;
-        let rows = inner.run(prepared, identity, &read)?;
+        let rows = inner.run_for_reader(prepared, identity, &read, false)?;
         inner.nest_relations(prepared, identity, &read, rows)
     }
 
@@ -5523,6 +5571,25 @@ impl Inner {
         read: &ReadSpec,
     ) -> Result<Vec<CurrentRow>, Error> {
         Ok(self.run_with_deps(prepared, identity, read)?.0)
+    }
+
+    /// [`Inner::run`] for a reader: the rows leave the store, so the
+    /// encryption hooks open them first. A `strict` read fails rather than
+    /// leave out a row it cannot open (protocol §4.4).
+    pub(crate) fn run_for_reader(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+        strict: bool,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        #[cfg_attr(not(feature = "e2ee-client"), allow(unused_mut))]
+        let mut rows = self.run(prepared, identity, read)?;
+        #[cfg(feature = "e2ee-client")]
+        self.open_read(prepared, read, strict, &mut rows)?;
+        #[cfg(not(feature = "e2ee-client"))]
+        let _ = strict;
+        Ok(rows)
     }
 
     /// [`Inner::run`] for a caller that uses only each row's identity,
@@ -12220,7 +12287,7 @@ impl TxRef<'_> {
                         view: through.view.clone(),
                         ..ReadSpec::default()
                     };
-                    let roots = inner.run(&prepared, identity, &read)?;
+                    let roots = inner.run_for_reader(&prepared, identity, &read, true)?;
                     inner.nest_relations(&prepared, identity, &read, roots)
                 })?;
                 Ok((rows, prepared))

@@ -9064,6 +9064,8 @@ impl Db {
             binding_id: Binding([0; 16]),
             request_claims: None,
             schema: self.view.clone(),
+            #[cfg(feature = "e2ee-client")]
+            planned: None,
         };
         // The answer lists the result as of `through`: rows that arrived
         // after it (later in the same batch) are not its to judge.
@@ -15843,6 +15845,8 @@ impl Db {
                     binding_id: Binding([0; 16]),
                     request_claims: None,
                     schema: Some(schema),
+                    #[cfg(feature = "e2ee-client")]
+                    planned: None,
                 };
                 // A branch read is evaluated through its view (jazz#5806):
                 // the head's rows, or the base's it inherits. A snapshot (a
@@ -16523,7 +16527,7 @@ impl Db {
                 {
                     spec.position = Position::At(at);
                 }
-                let roots = inner.run(&prepared, identity, &spec)?;
+                let roots = inner.run_for_reader(&prepared, identity, &spec, false)?;
                 inner.nest_relations(&prepared, identity, &spec, roots)
             })
         };
