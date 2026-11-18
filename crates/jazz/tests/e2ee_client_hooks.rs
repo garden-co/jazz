@@ -1858,6 +1858,29 @@ fn reads_that_would_compare_or_return_sealed_cells_are_refused() {
     alice.prepare_query(&by_title).unwrap();
 }
 
+/// Contract: a plain branch of an app that also has an encrypting version
+/// (the current version leads from a plain one, and carries no system
+/// tables) opens as a plain app, with no hooks.
+#[test]
+fn a_plain_branch_after_an_encrypting_version_opens_without_hooks() {
+    use jazz::tools::AppId;
+    use jazz::tools::deployment::artifact::load_client_encrypted;
+    let file = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": { "notes": { "columns": { "done": "boolean", "extra": "boolean?" } } },
+        "history": {
+            "v1": { "tables": { "notes": { "columns": { "done": "boolean" } } } },
+            "v2": { "tables": { "notes": {
+                "columns": { "done": "boolean", "title": "bytes" },
+                "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } } } } },
+        "migrations": [
+            { "from": "v1", "migrate": { "notes": { "extra": { "add": "boolean?", "default": null } } } }] }"#;
+    let (schema, _, declarations) =
+        load_client_encrypted(file.as_bytes(), AppId::from_name("plain"), "test").unwrap();
+    assert!(declarations.is_none(), "the current version is plain");
+    let config = DbConfig::new(jazz::schema::JazzSchema::new(&schema).unwrap(), identity(1));
+    block_on(jazz::binding_host::open_memory(config)).unwrap();
+}
+
 /// Hooks that leave `built_from_encrypted_app` at its default: they count
 /// as built from an encrypted app when their declarations name a table.
 struct Bare(E2eeDeclarations);

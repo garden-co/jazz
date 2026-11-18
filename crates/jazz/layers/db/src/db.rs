@@ -1672,6 +1672,30 @@ pub trait AccountRegistryView {
     ) -> Result<bool, String> {
         Ok(false)
     }
+
+    /// [`Self::founded_local_first`], read on the store's own connection
+    /// `store`, which the check runs on inside the write's transaction. A
+    /// registry kept in the store's file reads its tables here: a second
+    /// connection to a shared in-memory database (no write-ahead log) is
+    /// locked out while the store's connection holds a write. By default,
+    /// the registry's own way of reading.
+    fn founded_local_first_on(
+        &self,
+        _store: &crate::storage::Storage,
+        account: jazz_types::account_registry::AccountId,
+    ) -> Result<Option<bool>, String> {
+        self.founded_local_first(account)
+    }
+
+    /// [`Self::founded_for_another_audience`], read on the store's own
+    /// connection (see [`Self::founded_local_first_on`]).
+    fn founded_for_another_audience_on(
+        &self,
+        _store: &crate::storage::Storage,
+        account: jazz_types::account_registry::AccountId,
+    ) -> Result<bool, String> {
+        self.founded_for_another_audience(account)
+    }
 }
 
 /// A write that would change or remove a row of a system table, which no
@@ -7559,7 +7583,7 @@ impl Inner {
         };
         if let Some(registry) = &self.account_registry
             && registry
-                .founded_for_another_audience(account)
+                .founded_for_another_audience_on(&self.conn, account)
                 .map_err(|error| Error::new(ErrorCode::Storage, error))?
         {
             return Ok(false);
@@ -7571,7 +7595,7 @@ impl Inner {
         let founded_local_first = || -> Result<bool, Error> {
             let known = match &self.account_registry {
                 Some(registry) => registry
-                    .founded_local_first(account)
+                    .founded_local_first_on(&self.conn, account)
                     .map_err(|error| Error::new(ErrorCode::Storage, error))?,
                 None => None,
             };

@@ -481,21 +481,21 @@ async fn a_deploy_whose_declarations_conflict_at_apply_leaves_nothing_live() {
         .column_type = ColumnType::Integer;
     let other = encode_stored(&other_entries).unwrap();
 
-    // Hold the store thread so the deploy passes its checks and then waits
-    // for it. The held job writes the other instance's declarations itself
-    // (store-thread work, so no race with its release), once told to.
+    // Hold the store thread (job H1). The deploy's read of the kept
+    // declarations is host work, which waits for it and then runs ahead of
+    // queued runtime work, so a second job H2 queued meanwhile, which keeps
+    // the other instance's declarations, runs after that read and before the
+    // deploy's own catalogue job: the declarations conflict only when the
+    // change applies.
     let (entered_tx, entered_rx) = mpsc::channel();
-    let (go_tx, go_rx) = mpsc::channel::<()>();
-    let held = {
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let h1 = {
         let runtime = runtime.clone();
-        let other = other.clone();
         tokio::spawn(async move {
             runtime
-                .with_db_for_test(move |db| {
+                .with_db_for_test(move |_| {
                     entered_tx.send(()).unwrap();
-                    let _ = go_rx.recv();
-                    db.host_put_if_absent(super::DECLARATIONS, &v2_hash.0, &other)
-                        .map_err(|error| error.to_string())?;
+                    let _ = release_rx.recv();
                     Ok(())
                 })
                 .await
@@ -509,13 +509,28 @@ async fn a_deploy_whose_declarations_conflict_at_apply_leaves_nothing_live() {
         let body = v2.deployment_body(false);
         tokio::spawn(async move { publish(&router, body).await })
     };
-    // No signal says the deploy has reached its apply, so wait for it. A slow
-    // machine can only make the other instance's declarations land before the
-    // deploy's check, which refuses it the same way (422, v2 not live): the
-    // test never fails for being slow, it only stops reaching the apply.
+    // No signal says the deploy's read is queued, so wait for it. A slow
+    // machine can only make H2 run before that read, which then refuses the
+    // deploy at its check (the same 422, v2 not live): the test never fails
+    // for being slow, it only stops reaching the apply.
     tokio::time::sleep(Duration::from_millis(500)).await;
-    go_tx.send(()).unwrap();
-    held.await.unwrap().unwrap();
+    let h2 = {
+        let runtime = runtime.clone();
+        let other = other.clone();
+        tokio::spawn(async move {
+            runtime
+                .with_db_for_test(move |db| {
+                    db.host_put_if_absent(super::DECLARATIONS, &v2_hash.0, &other)
+                        .map_err(|error| error.to_string())?;
+                    Ok(())
+                })
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    release_tx.send(()).unwrap();
+    h1.await.unwrap().unwrap();
+    h2.await.unwrap().unwrap();
     let (status, refusal) = deploying.await.unwrap();
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
     state.catalogue_store.refresh().unwrap();
@@ -601,6 +616,171 @@ async fn a_policy_may_read_a_column_that_the_target_keeps_in_plaintext() {
     body["confirmDecrypt"] = json!(["notes.title"]);
     let (status, deployed) = publish(&router, body).await;
     assert_eq!(status, StatusCode::OK, "{deployed}");
+}
+
+/// On a memory store, a second connection to the shared in-memory database
+/// is locked out while the store's connection holds a write, so the
+/// deployment reads the kept declarations on the store's own thread. A
+/// deploy that arrives while the store is inside a write waits for it and
+/// succeeds, instead of failing with a locked database.
+///
+/// ```text
+/// store thread: write in progress ─────────────┐
+/// deploy v2: reads kept declarations ─ waits ──┴─► ✓ deployed
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_memory_store_deploy_reads_kept_declarations_while_a_write_is_open() {
+    use jazz::host::HostTables;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let server = ServerBuilder::new(app_id())
+        .with_auth_config(AuthConfig {
+            admin_secret: Some("test-admin".into()),
+            ..Default::default()
+        })
+        .with_storage(StorageBackend::InMemory)
+        .build()
+        .await
+        .unwrap();
+    let state = server.state.clone();
+    let router = create_router(state.clone());
+    // An encrypted app deploys to a fresh memory store.
+    let v1 = loaded("ownerId = session.user");
+    let (status, body) = publish(&router, v1.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v2 = artifact::load(
+        APP_V2.as_bytes(),
+        permissions(MEMBERS_RULE, "ownerId = session.user").as_bytes(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let runtime = state.runtime().expect("a runtime after the first deploy");
+    let v2_hash = v2.current_hash();
+
+    // The store's connection is inside a write (a host write's savepoint).
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let held = {
+        let runtime = runtime.clone();
+        tokio::spawn(async move {
+            runtime
+                .with_db_for_test(move |db| {
+                    db.host_sql(&mut |conn| {
+                        conn.execute_batch(
+                            "CREATE TABLE IF NOT EXISTS _jazz_host_e2ee_declarations \
+                             (k BLOB PRIMARY KEY, v BLOB NOT NULL) WITHOUT ROWID; \
+                             INSERT OR REPLACE INTO _jazz_host_e2ee_declarations \
+                             VALUES (x'01', x'02')",
+                        )
+                        .map_err(|error| {
+                            jazz::db::Error::new(jazz::db::ErrorCode::Storage, error.to_string())
+                        })?;
+                        entered_tx.send(()).unwrap();
+                        let _ = release_rx.recv();
+                        Ok(())
+                    })
+                    .map_err(|error| error.to_string())
+                })
+                .await
+        })
+    };
+    tokio::task::spawn_blocking(move || entered_rx.recv().unwrap())
+        .await
+        .unwrap();
+    let deploying = {
+        let router = router.clone();
+        let body = v2.deployment_body(false);
+        tokio::spawn(async move { publish(&router, body).await })
+    };
+    // The write stays open longer than a second connection would wait for it
+    // (SQLite's busy timeout is 10 seconds): the deploy's read of the kept
+    // declarations, made on the store's own thread, waits for it and
+    // succeeds, where one made on another connection fails as locked.
+    let kept = state
+        .store
+        .as_ref()
+        .unwrap()
+        .kv(super::DECLARATIONS)
+        .unwrap();
+    let reading = tokio::task::spawn_blocking(move || kept.get_on_store(&v2_hash.0));
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    release_tx.send(()).unwrap();
+    held.await.unwrap().unwrap();
+    let during = reading.await.unwrap();
+    assert!(during.is_ok(), "{during:?}");
+    let (status, deployed) = deploying.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{deployed}");
+}
+
+/// The loader gives the system tables only to versions a migration leads to
+/// from one that has them, as the server follows the migrations: a plain
+/// version listed after the encrypting one stays plain, and a later plain
+/// version that hangs off it is refused by the server plainly (a stored
+/// version has the tables, and this one leads to none), not given the tables
+/// by the loader.
+///
+/// ```text
+/// v1 ──► v2 (encrypts) ──► current        have the tables
+/// v1 ──► v3 (plain, listed after v2)      stays plain
+/// v3 ──► v4 (new, plain)                  ✗ refused by the server
+/// ```
+#[tokio::test]
+async fn a_plain_branch_listed_after_an_encrypting_version_stays_plain() {
+    use jazz::tools::public_schema::TableName;
+    let router = router().await;
+    let permissions = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
+    let file = |extra: &str, extra_migration: &str| {
+        format!(
+            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": {{ "notes": {{ "columns": {{ "done": "boolean" }} }} }},
+        "history": {{
+            "v1": {{ "tables": {{ "notes": {{ "columns": {{ "done": "boolean" }} }} }} }},
+            "v2": {{ "tables": {{ "notes": {{
+                "columns": {{ "done": "boolean", "title": "bytes" }},
+                "encryption": {{ "space": "id", "scope": "notes",
+                    "columns": {{ "title": {{ "type": "string", "default": "" }} }} }} }} }} }},
+            "v3": {{ "tables": {{ "notes": {{ "columns": {{ "done": "boolean", "extra": "boolean?" }} }} }} }}{extra} }},
+        "migrations": [
+            {{ "from": "v1", "to": "v2", "migrate": {{ "notes": {{ "title": {{ "add": "bytes", "default": "" }} }} }} }},
+            {{ "from": "v2", "migrate": {{ "notes": {{ "title": {{ "drop": "bytes", "backwardsDefault": "" }} }} }} }},
+            {{ "from": "v1", "to": "v3", "migrate": {{ "notes": {{ "extra": {{ "add": "boolean?", "default": null }} }} }} }}{extra_migration}] }}"#
+        )
+    };
+    let members = TableName::from("__e2ee_members");
+    let first = artifact::load(file("", "").as_bytes(), permissions.as_bytes())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let carrying: Vec<bool> = first
+        .schemas()
+        .iter()
+        .map(|(_, schema)| schema.contains_key(&members))
+        .collect();
+    assert_eq!(
+        carrying.iter().filter(|carries| **carries).count(),
+        2,
+        "v2 and the current version, not the plain v3 listed after v2: {carrying:?}"
+    );
+    let (status, body) = publish(&router, first.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // A new plain version hanging off the plain one, leading to no version
+    // that has the tables.
+    let sibling = file(
+        r#",
+            "v4": { "tables": { "notes": { "columns": { "done": "boolean", "extra": "boolean?", "other": "string?" } } } }"#,
+        r#",
+            { "from": "v3", "to": "v4", "migrate": { "notes": { "other": { "add": "string?", "default": null } } } }"#,
+    );
+    let second = artifact::load(sibling.as_bytes(), permissions.as_bytes())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let (status, refusal) = publish(&router, second.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("a stored version has Jazz's system tables and this one lacks them"),
+        "{refusal}"
+    );
 }
 
 /// Decrypting a column puts its plaintext on the server, so the deploy
