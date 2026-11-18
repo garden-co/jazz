@@ -711,6 +711,78 @@ async fn a_memory_store_deploy_reads_kept_declarations_while_a_write_is_open() {
     assert_eq!(status, StatusCode::OK, "{deployed}");
 }
 
+/// The loader gives the system tables only to versions a migration leads to
+/// from one that has them, as the server follows the migrations: a plain
+/// version listed after the encrypting one stays plain, and a later plain
+/// version that hangs off it is refused by the server plainly (a stored
+/// version has the tables, and this one leads to none), not given the tables
+/// by the loader.
+///
+/// ```text
+/// v1 ──► v2 (encrypts) ──► current        have the tables
+/// v1 ──► v3 (plain, listed after v2)      stays plain
+/// v3 ──► v4 (new, plain)                  ✗ refused by the server
+/// ```
+#[tokio::test]
+async fn a_plain_branch_listed_after_an_encrypting_version_stays_plain() {
+    use jazz::tools::public_schema::TableName;
+    let router = router().await;
+    let permissions = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
+    let file = |extra: &str, extra_migration: &str| {
+        format!(
+            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": {{ "notes": {{ "columns": {{ "done": "boolean" }} }} }},
+        "history": {{
+            "v1": {{ "tables": {{ "notes": {{ "columns": {{ "done": "boolean" }} }} }} }},
+            "v2": {{ "tables": {{ "notes": {{
+                "columns": {{ "done": "boolean", "title": "bytes" }},
+                "encryption": {{ "space": "id", "scope": "notes",
+                    "columns": {{ "title": {{ "type": "string", "default": "" }} }} }} }} }} }},
+            "v3": {{ "tables": {{ "notes": {{ "columns": {{ "done": "boolean", "extra": "boolean?" }} }} }} }}{extra} }},
+        "migrations": [
+            {{ "from": "v1", "to": "v2", "migrate": {{ "notes": {{ "title": {{ "add": "bytes", "default": "" }} }} }} }},
+            {{ "from": "v2", "migrate": {{ "notes": {{ "title": {{ "drop": "bytes", "backwardsDefault": "" }} }} }} }},
+            {{ "from": "v1", "to": "v3", "migrate": {{ "notes": {{ "extra": {{ "add": "boolean?", "default": null }} }} }} }}{extra_migration}] }}"#
+        )
+    };
+    let members = TableName::from("__e2ee_members");
+    let first = artifact::load(file("", "").as_bytes(), permissions.as_bytes())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let carrying: Vec<bool> = first
+        .schemas()
+        .iter()
+        .map(|(_, schema)| schema.contains_key(&members))
+        .collect();
+    assert_eq!(
+        carrying.iter().filter(|carries| **carries).count(),
+        2,
+        "v2 and the current version, not the plain v3 listed after v2: {carrying:?}"
+    );
+    let (status, body) = publish(&router, first.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // A new plain version hanging off the plain one, leading to no version
+    // that has the tables.
+    let sibling = file(
+        r#",
+            "v4": { "tables": { "notes": { "columns": { "done": "boolean", "extra": "boolean?", "other": "string?" } } } }"#,
+        r#",
+            { "from": "v3", "to": "v4", "migrate": { "notes": { "other": { "add": "string?", "default": null } } } }"#,
+    );
+    let second = artifact::load(sibling.as_bytes(), permissions.as_bytes())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let (status, refusal) = publish(&router, second.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("a stored version has Jazz's system tables and this one lacks them"),
+        "{refusal}"
+    );
+}
+
 /// Decrypting a column puts its plaintext on the server, so the deploy
 /// asks for an explicit confirmation naming it (migrations §4.2).
 #[tokio::test]

@@ -1241,27 +1241,50 @@ impl History {
 /// migration its endpoints' hashes.
 fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
     // A version that declares encryption has Jazz's system tables, and so
-    // does every version after the first one that has them, even one that
-    // declares no encryption: once added they stay (an older version's
-    // system rows would be stranded otherwise), and every loader computes
-    // the same schema and hash from the same file.
-    let mut carrying = false;
-    let mut with_fragment = |schema: &Schema, entries: &app_file::Entries| {
-        carrying |= !entries.is_empty();
-        if carrying {
+    // does every version a migration leads to from one that has them, even
+    // one that declares no encryption: once added they stay (an earlier
+    // version's system rows would be stranded otherwise). Exactly the
+    // server's rule, which follows the migrations, not the order the file
+    // lists the versions in: a version no migration leads to from one that
+    // has them keeps what it declares, so a plain sibling gets no tables
+    // silently (a server holding the tables then refuses it, plainly). Every
+    // loader computes the same schema and hash from the same file.
+    const CURRENT: &str = "\u{0}current";
+    let mut has: BTreeMap<&str, bool> = file
+        .history
+        .iter()
+        .zip(&file.history_encryption)
+        .map(|((name, _), entries)| (name.as_str(), !entries.is_empty()))
+        .collect();
+    has.insert(CURRENT, !file.current_encryption.is_empty());
+    loop {
+        let mut changed = false;
+        for (from, to, _) in &file.migrations {
+            let to = to.as_deref().unwrap_or(CURRENT);
+            if has.get(from.as_str()).copied().unwrap_or(false)
+                && !has.get(to).copied().unwrap_or(false)
+            {
+                has.insert(to, true);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let with_fragment = |schema: &Schema, carries: bool| {
+        if carries {
             system_tables::with_e2ee_fragment(schema)
         } else {
             schema.clone()
         }
     };
-    // Versions in file order: the history, then the current version.
     let history_schemas: Vec<Schema> = file
         .history
         .iter()
-        .zip(&file.history_encryption)
-        .map(|((_, schema), entries)| with_fragment(schema, entries))
+        .map(|(name, schema)| with_fragment(schema, has[name.as_str()]))
         .collect();
-    let current_schema = with_fragment(&file.current, &file.current_encryption);
+    let current_schema = with_fragment(&file.current, has[CURRENT]);
     let current = SchemaHash::compute(&current_schema);
     let mut encryption = DeclaredEncryption {
         settings: file.settings.clone().unwrap_or_default(),
