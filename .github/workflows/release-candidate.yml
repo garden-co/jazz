@@ -597,9 +597,48 @@ jobs:
             *) echo "::error::Cloud RC probe: ${verdict}"; exit 1 ;;
           esac
 
-  # Slot: adopter-gate.yml (#adopter-evals) joins as `uses:
-  # ./.github/workflows/adopter-gate.yml` with rc_tag once it is on main
-  # (a `uses:` of a missing file fails the whole workflow).
+  # The adopter gate (adopter-gate.yml): example apps, bindings and a deployed
+  # app against the rc tarballs, from the artifacts (release-artifacts run:
+  # server binary, language libraries; this run: rc-npm). Its verdict.json
+  # status maps PASS -> green, NEEDS_REVIEW -> HOLD, FAIL -> NO-GO.
+  adopter-gate:
+    name: Adopter gate
+    needs: [resolve, artifacts, rc-tarballs]
+    if: "!cancelled() && needs.rc-tarballs.result == 'success'"
+    uses: ./.github/workflows/adopter-gate.yml
+    permissions:
+      contents: read
+      actions: read
+    secrets: inherit
+    with:
+      artifacts_run_id: ${{ needs.artifacts.outputs.run_id }}
+      rc_npm_run_id: ${{ github.run_id }}
+      jazz_sha: ${{ needs.resolve.outputs.sha }}
+
+  adopter-verdict:
+    name: Adopter gate verdict
+    needs: adopter-gate
+    if: "!cancelled() && (needs.adopter-gate.result == 'success' || needs.adopter-gate.result == 'failure')"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      status: ${{ steps.read.outputs.status }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with: { name: verdict, path: adopter }
+      - id: read
+        run: |
+          set -euo pipefail
+          status=$(jq -r .status adopter/verdict.json)
+          jq '{status, counts, attention}' adopter/verdict.json
+          echo "status=${status}" >> "$GITHUB_OUTPUT"
+          case "${status}" in
+            PASS) ;;
+            NEEDS_REVIEW) echo "::warning::Adopter gate: NEEDS_REVIEW (hold: a person reviews it)" ;;
+            *) echo "::error::Adopter gate: ${status}"; exit 1 ;;
+          esac
 
   smoke:
     name: Install jazz-tools from the rc tarballs (${{ matrix.os }})
@@ -668,6 +707,8 @@ jobs:
         attach-server,
         publish,
         cloud-rc-probe,
+        adopter-gate,
+        adopter-verdict,
       ]
     if: always()
     runs-on: ubuntu-latest
@@ -678,6 +719,7 @@ jobs:
           RESULTS: ${{ toJSON(needs) }}
           DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
           PROBE: ${{ needs.cloud-rc-probe.outputs.verdict }}
+          ADOPTER: ${{ needs.adopter-verdict.outputs.status }}
           PROBE_ONLY: ${{ inputs.probe-tag != '' }}
         run: |
           node -e '
@@ -695,11 +737,17 @@ jobs:
               const ok = result === "success" || (skippable.has(job) && result === "skipped");
               let note = result;
               if (job === "cloud-rc-probe" && process.env.PROBE) note += ` (${process.env.PROBE})`;
+              if (job === "adopter-verdict" && process.env.ADOPTER) note += ` (${process.env.ADOPTER})`;
               console.log(`${ok ? "✅" : "❌"} ${job}: ${note}`);
               go &&= ok;
             }
             if (process.env.PROBE === "needs-infra") hold = true;
-            const verdict = !go ? "NO-GO" : hold ? "HOLD (needs-infra: a person resolves it)" : "GO";
+            if (process.env.ADOPTER === "NEEDS_REVIEW") hold = true;
+            const holds = [
+              process.env.PROBE === "needs-infra" && "Cloud RC probe needs-infra",
+              process.env.ADOPTER === "NEEDS_REVIEW" && "adopter gate NEEDS_REVIEW",
+            ].filter(Boolean);
+            const verdict = !go ? "NO-GO" : hold ? `HOLD (${holds.join(", ")}: a person resolves it)` : "GO";
             console.log(verdict);
             require("fs").appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## Release candidate: ${verdict}\n`);
             if (verdict !== "GO") process.exit(1);'
