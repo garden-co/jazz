@@ -12,6 +12,7 @@ export default defineConfig({
     pool: "forks",
     fileParallelism: false,
     testTimeout: 60_000,
+    setupFiles: ["tests/setup/lazy-node-engine.ts"],
     include: ["tests/durable-objects/**/*.test.ts"],
   },
 });
