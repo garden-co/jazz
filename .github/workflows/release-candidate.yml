@@ -21,7 +21,8 @@ run-name: ${{ inputs.probe-tag != '' && format('Cloud RC probe only, {0}', input
 # receipts, the packaged jazz-rn Android and iOS consumer builds, the jazz-wasm
 # Durable Object smoke test, the packed tarball checks.
 #
-# Unless `dry-run`, it publishes the GitHub prerelease v<version>
+# Unless `dry-run`, and only once every gate above passed, it publishes the
+# GitHub prerelease v<version>
 # (2.0.0-alpha.N-rc.M), carrying what the release v2.0.0-alpha.N will carry so
 # Jazz Cloud and self-hosters can try it: the server binaries
 # jazz-tools-linux-{x64,arm64} with SHA256SUMS, and the npm tarballs (each
@@ -457,8 +458,17 @@ jobs:
 
   publish:
     name: Publish the prerelease
-    needs: [resolve, attach-server, rc-tarballs]
-    if: "!cancelled() && needs.attach-server.result == 'success' && needs.rc-tarballs.result == 'success'"
+    # Public only after every gate that doesn't need a public release passed:
+    # a NO-GO candidate is never published. Only the install-by-URL smoke and
+    # the Cloud RC probe (which installs the tarball by URL) run after it.
+    needs: [resolve, attach-server, rc-tarballs, examples-e2e, rn-device-acceptance, preview]
+    if: >-
+      !cancelled() &&
+      needs.attach-server.result == 'success' &&
+      needs.rc-tarballs.result == 'success' &&
+      needs.examples-e2e.result == 'success' &&
+      needs.rn-device-acceptance.result == 'success' &&
+      needs.preview.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
