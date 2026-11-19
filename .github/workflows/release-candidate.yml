@@ -362,8 +362,7 @@ jobs:
           gh release create "v${VERSION}" --draft --prerelease --latest=false \
             --target "${SHA}" --title "Jazz ${VERSION}" --notes-file "${RUNNER_TEMP}/notes.md"
 
-  # The server binaries go on the draft first: the Cloud RC probe tests them
-  # there while the other gates run.
+  # The server binaries go on the draft first.
   attach-server:
     name: Attach the server binaries
     needs: [resolve, artifacts, draft]
@@ -449,8 +448,9 @@ jobs:
   # the leg reports "skipped: token pending". A dry run has no draft to probe.
   cloud-rc-probe:
     name: Cloud RC probe
-    needs: [resolve, attach-server]
-    if: "!cancelled() && (needs.attach-server.result == 'success' || inputs.probe-tag != '')"
+    # After publish: the RC-client checks install the published tarball.
+    needs: [resolve, publish]
+    if: "!cancelled() && (needs.publish.result == 'success' || inputs.probe-tag != '')"
     runs-on: ubuntu-latest
     timeout-minutes: 25
     outputs:
@@ -481,9 +481,11 @@ jobs:
           since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           base="repos/${repo}/actions/workflows/cloud-rc-probe.yml"
           branch=$(gh api "repos/${repo}" --jq .default_branch)
-          # No rc_npm_version: candidates are release assets, never on npm.
-          jq -n --arg ref "${branch}" --arg tag "v${VERSION}" --arg sha "${SHA}" \
-            '{ref: $ref, inputs: {rc_tag: $tag, jazz_sha: $sha}}' |
+          # Candidates are release assets, never on npm: the RC-client checks
+          # install the published candidate's jazz-tools tarball by URL.
+          tarball="https://github.com/${GH_REPO}/releases/download/v${VERSION}/jazz-tools-${VERSION}.tgz"
+          jq -n --arg ref "${branch}" --arg tag "v${VERSION}" --arg sha "${SHA}" --arg tgz "${tarball}" \
+            '{ref: $ref, inputs: {rc_tag: $tag, jazz_sha: $sha, rc_tarball_url: $tgz}}' |
             gh api -X POST "${base}/dispatches" --input -
           run_id=""
           for _ in $(seq 1 30); do
