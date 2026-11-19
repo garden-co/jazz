@@ -541,12 +541,12 @@ jobs:
           echo "SCCACHE_S3_USE_SSL=true" >> "${GITHUB_ENV}"
           echo "SCCACHE_S3_KEY_PREFIX=jazz-ci/v1/production/blacksmith-v1" >> "${GITHUB_ENV}"
       - name: Export trusted Turbo cache signing key
-        if: inputs.trusted-cache
+        if: inputs.trusted-cache && inputs.sccache-write
         env:
           CACHE_SIGNATURE_KEY: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
         run: echo "TURBO_REMOTE_CACHE_SIGNATURE_KEY=${CACHE_SIGNATURE_KEY}" >> "${GITHUB_ENV}"
       - name: Set up signed Turbo Remote Cache
-        if: inputs.trusted-cache
+        if: inputs.trusted-cache && inputs.sccache-write
         uses: vercel/setup-turborepo-remote-cache-action@135046f5efcadb17337d9b29b8d5b4035ae64b10 # v1.0.0
         with:
           team: garden-co
@@ -714,12 +714,12 @@ jobs:
           echo "SCCACHE_S3_USE_SSL=true" >> "${GITHUB_ENV}"
           echo "SCCACHE_S3_KEY_PREFIX=jazz-ci/v1/production/blacksmith-v1" >> "${GITHUB_ENV}"
       - name: Export trusted Turbo cache signing key
-        if: inputs.trusted-cache
+        if: inputs.trusted-cache && inputs.sccache-write
         env:
           CACHE_SIGNATURE_KEY: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
         run: echo "TURBO_REMOTE_CACHE_SIGNATURE_KEY=${CACHE_SIGNATURE_KEY}" >> "${GITHUB_ENV}"
       - name: Set up signed Turbo Remote Cache
-        if: steps.decide.outputs.run == 'true' && inputs.trusted-cache
+        if: steps.decide.outputs.run == 'true' && inputs.trusted-cache && inputs.sccache-write
         uses: vercel/setup-turborepo-remote-cache-action@135046f5efcadb17337d9b29b8d5b4035ae64b10 # v1.0.0
         with:
           team: garden-co
@@ -775,12 +775,12 @@ jobs:
           echo "SCCACHE_S3_USE_SSL=true" >> "${GITHUB_ENV}"
           echo "SCCACHE_S3_KEY_PREFIX=jazz-ci/v1/production/blacksmith-v1" >> "${GITHUB_ENV}"
       - name: Export trusted Turbo cache signing key
-        if: inputs.trusted-cache
+        if: inputs.trusted-cache && inputs.sccache-write
         env:
           CACHE_SIGNATURE_KEY: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
         run: echo "TURBO_REMOTE_CACHE_SIGNATURE_KEY=${CACHE_SIGNATURE_KEY}" >> "${GITHUB_ENV}"
       - name: Set up signed Turbo Remote Cache
-        if: inputs.trusted-cache
+        if: inputs.trusted-cache && inputs.sccache-write
         uses: vercel/setup-turborepo-remote-cache-action@135046f5efcadb17337d9b29b8d5b4035ae64b10 # v1.0.0
         with:
           team: garden-co
