@@ -408,7 +408,10 @@ impl NativeRelay {
         let schema_version = config.schema.version_id();
         let migrations = config.migrations_key();
         let identity = config.identity;
-        let declared = declarations.clone();
+        #[cfg(feature = "e2ee-client")]
+        let worker_declarations = declarations.clone();
+        #[cfg(not(feature = "e2ee-client"))]
+        let worker_declarations = declarations;
         let alive = Arc::new(AtomicBool::new(true));
         let (commands, receiver) =
             mpsc::sync_channel::<RelayCommand>(NATIVE_RELAY_OWNER_COMMAND_MAX);
@@ -418,7 +421,7 @@ impl NativeRelay {
             .name("jazz-native-relay".to_owned())
             .spawn(move || {
                 let _alive = OwnerAlive(owner_alive);
-                let mut worker = match RelayWorker::open(config, declarations) {
+                let mut worker = match RelayWorker::open(config, worker_declarations) {
                     Ok(worker) => {
                         let _ = started_tx.send(Ok(()));
                         worker
@@ -443,7 +446,7 @@ impl NativeRelay {
                 schema_version,
                 migrations,
                 identity,
-                declarations: declared,
+                declarations,
             }),
         })
     }
