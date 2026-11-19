@@ -23,6 +23,8 @@ for (const f of files) {
     if (m) timings.push({ job: m[1], seconds: Number(m[2]), step: m[3] });
   }
 }
+for (const [name, ls] of Object.entries(jobs))
+  if (!ls.length) jobs[name] = ["FAIL ran no checks (no PASS/FAIL lines)"];
 for (const name of expected.split(",").filter(Boolean))
   if (!jobs[name])
     jobs[name] = ["FAIL no results (the job did not run or crashed before reporting)"];
