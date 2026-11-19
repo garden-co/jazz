@@ -2,9 +2,26 @@ name: React Native device acceptance
 
 on:
   workflow_dispatch:
+    inputs:
+      artifacts_run_id:
+        description: Run of this commit whose relay, NAPI and WASM artifacts to test instead of building them here.
+        required: false
+        type: string
+        default: ""
   # The release candidate gate (release-candidate.yml) runs the device
   # receipts as one of its parallel gates.
   workflow_call:
+    inputs:
+      artifacts_run_id:
+        description: Run of this commit whose relay, NAPI and WASM artifacts to test instead of building them here.
+        required: false
+        type: string
+        default: ""
+      manifest_checked_by_caller:
+        description: The caller already requires the artifacts run's release-manifest to name this commit (release-candidate.yml's artifacts-complete), so the device jobs skip that wait.
+        required: false
+        type: boolean
+        default: false
   pull_request:
     types: [opened, reopened, synchronize, labeled]
     paths:
@@ -26,6 +43,7 @@ on:
 
 permissions:
   contents: read
+  actions: read # download artifacts_run_id's artifacts
 
 concurrency:
   # Called, github.workflow is the caller's: one group per calling run, so a
@@ -73,6 +91,7 @@ jobs:
     if: >-
       ${{
         github.event_name == 'workflow_dispatch'
+        || inputs.artifacts_run_id != ''
         || (
           contains(github.event.pull_request.labels.*.name, 'rn-preview-release')
           && github.event.pull_request.head.repo.full_name == github.repository
@@ -82,6 +101,7 @@ jobs:
     timeout-minutes: 45
     env:
       COCOAPODS_DISABLE_STATS: "true"
+      ARTIFACTS_RUN_ID: ${{ inputs.artifacts_run_id }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Select task-local build paths
@@ -107,12 +127,18 @@ jobs:
           cache-on-failure: true
           prefix-key: rn-device-ios-macos-15
           key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-native-transport/**', 'crates/jazz-napi/**', 'crates/jazz-wasm/**', 'dev/artifacts/**') }}
+      # pod install's downloads: React Native's prebuilt tarballs (which
+      # pod-install-retrying.sh copies in and out) and CocoaPods' own caches.
+      # Its version is pinned by the lockfile; an older entry is harmless,
+      # since the tarballs are named by version.
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
-            dev/rn-device-acceptance/ios/Pods
             ~/Library/Caches/CocoaPods
-          key: rn-device-ios-pods-macos-15-v2-${{ hashFiles('pnpm-lock.yaml', 'dev/rn-device-acceptance/**', 'crates/jazz-rn/**') }}
+            ~/.cocoapods/repos
+            ${{ runner.temp }}/rn-pod-artifacts
+          key: rn-ios-pods-macos-15-v3-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: rn-ios-pods-macos-15-v3-
       - run: pnpm install --frozen-lockfile
       - name: Verify synthetic scope authorization and generated native fixture
         run: cargo test -p jazz-native-relay --example rn_server_session_harness --no-fail-fast
@@ -120,24 +146,67 @@ jobs:
       # objects. The build finds Homebrew's llvm-ar on its own; point cc-rs at
       # Homebrew's clang for the wasm32 target.
       - name: Install LLVM for the WASM build's SQLite
+        if: inputs.artifacts_run_id == ''
         run: |
           set -euo pipefail
-          brew list llvm >/dev/null 2>&1 || brew install llvm
+          if ! brew list llvm >/dev/null 2>&1; then
+            for attempt in 1 2 3; do
+              brew install llvm && break
+              [[ "${attempt}" == 3 ]] && exit 1
+              echo "::warning::brew install llvm attempt ${attempt} failed"
+              sleep $((attempt * 10))
+            done
+          fi
           echo "CC_wasm32_unknown_unknown=$(brew --prefix llvm)/bin/clang" >> "${GITHUB_ENV}"
+      - name: Download the prebuilt artifacts
+        if: inputs.artifacts_run_id != ''
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          run-id: ${{ inputs.artifacts_run_id }}
+          github-token: ${{ github.token }}
+          pattern: "{jazz-rn-relay-ios,jazz-napi-loader,jazz-napi-binding-linux-x64-gnu,jazz-napi-binding-darwin-arm64,jazz-wasm-pkg}"
+          path: ${{ runner.temp }}/prebuilt
+      # The relay manifest seals the source revision the receipts check, so the
+      # producer run must have built exactly this commit.
+      - name: Stage the prebuilt artifacts of this commit
+        if: inputs.artifacts_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          producer_sha="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${ARTIFACTS_RUN_ID}" --jq .head_sha)"
+          [[ "$producer_sha" == "$GITHUB_SHA" ]] || { echo "::error::run ${ARTIFACTS_RUN_ID} built ${producer_sha}, not ${GITHUB_SHA}"; exit 1; }
+          prebuilt="${RUNNER_TEMP}/prebuilt"
+          cp -R "$prebuilt/jazz-rn-relay-ios/." crates/jazz-rn/
+          cp -R "$prebuilt/jazz-napi-loader/." "$prebuilt/jazz-napi-binding-darwin-arm64/." crates/jazz-napi/
+          mkdir -p crates/jazz-napi/provenance crates/jazz-wasm/pkg
+          cp "$prebuilt/jazz-napi-binding-linux-x64-gnu/jazz-napi.linux-x64-gnu.manifest.json" crates/jazz-napi/provenance/
+          cp -R "$prebuilt/jazz-wasm-pkg/." crates/jazz-wasm/pkg/
       # The backend loads jazz-tools on Node, whose runtime checks the native
-      # fingerprints staged from release NAPI and fast WASM builds.
+      # fingerprints staged from release NAPI and fast (or prebuilt release) WASM builds.
       - uses: ./.github/actions/install-rust-tool
+        if: inputs.artifacts_run_id == ''
         with:
           tool: wasm-pack@0.13.1
       - name: Build the Node runtime of the device app's backend
-        run: pnpm --filter rn-device-acceptance build:device-backend
+        run: |
+          if [[ -n "${ARTIFACTS_RUN_ID}" ]]; then
+            node dev/artifacts/stage-native-fingerprints.mjs
+            pnpm --filter jazz-tools build:react-native
+          else
+            pnpm --filter rn-device-acceptance build:device-backend
+          fi
       # build:device-backend already builds jazz-tools' React Native entry after
       # staging the fingerprints, so only jazz-rn is left to build here.
       - name: Build the React Native JavaScript workspace entrypoints
         run: pnpm --filter jazz-rn build
       - name: Build and stage the relay XCFramework
         run: |
-          pnpm --filter jazz-rn build:relay:ios
+          if [[ -n "${ARTIFACTS_RUN_ID}" ]]; then
+            JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" node dev/artifacts/rn-packages.mjs stage ios
+          else
+            pnpm --filter jazz-rn build:relay:ios
+          fi
           JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" node crates/jazz-rn/scripts/verify-relay-artifacts.mjs ios
       - name: Generate the Expo development host
         run: pnpm --filter rn-device-acceptance exec expo prebuild --platform ios --clean --no-install --non-interactive
@@ -153,7 +222,7 @@ jobs:
           project.save
           RUBY
       - name: Install CocoaPods for the staged native package
-        run: pod install
+        run: ../../../dev/scripts/pod-install-retrying.sh "${RUNNER_TEMP}/rn-pod-artifacts"
         working-directory: dev/rn-device-acceptance/ios
       - name: Select and boot an available iOS simulator
         shell: bash
@@ -177,6 +246,25 @@ jobs:
         env:
           JAZZ_DEVICE_APP: ${{ env.JAZZ_DEVICE_DERIVED_DATA }}/Build/Products/Release-iphonesimulator/JazzRNdeviceacceptance.app
         run: pnpm --filter rn-device-acceptance device:ios
+      # release-artifacts uploads its manifest last, about when this job starts,
+      # so require it at the end rather than wait for it up front.
+      - name: Require the artifacts run's release manifest to name this commit
+        if: inputs.artifacts_run_id != '' && !inputs.manifest_checked_by_caller
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          manifest="${RUNNER_TEMP}/release-manifest"
+          until gh run download "${ARTIFACTS_RUN_ID}" -R "${GITHUB_REPOSITORY}" -n release-manifest -D "${manifest}" 2>/dev/null; do
+            if [[ "$(gh run view "${ARTIFACTS_RUN_ID}" -R "${GITHUB_REPOSITORY}" --json status --jq .status)" == completed ]]; then
+              gh run download "${ARTIFACTS_RUN_ID}" -R "${GITHUB_REPOSITORY}" -n release-manifest -D "${manifest}" && break
+              echo "::error::run ${ARTIFACTS_RUN_ID} finished without a release-manifest"
+              exit 1
+            fi
+            sleep 15
+          done
+          sha="$(node -p 'require(process.argv[1]).sha' "${manifest}/manifest.json")"
+          [[ "$sha" == "$GITHUB_SHA" ]] || { echo "::error::run ${ARTIFACTS_RUN_ID}'s release manifest is for ${sha}, not ${GITHUB_SHA}"; exit 1; }
 
   android-device-acceptance:
     # Keep the expensive installed-device receipt opt-in, but make its label
@@ -184,6 +272,7 @@ jobs:
     if: >-
       ${{
         github.event_name == 'workflow_dispatch'
+        || inputs.artifacts_run_id != ''
         || (
           contains(github.event.pull_request.labels.*.name, 'rn-preview-release')
           && github.event.pull_request.head.repo.full_name == github.repository
@@ -192,9 +281,12 @@ jobs:
     name: Android device acceptance
     # Keep Android and iOS installed-app receipts on the dedicated Blacksmith
     # fleet. They are deliberately label/manual only, never an ordinary PR
-    # gate; the runner is selected for x86_64 Android emulation support.
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # gate; the runner is selected for x86_64 Android emulation support, and
+    # 16 vCPUs halve the Gradle assemble (CMake for three ABIs).
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 45
+    env:
+      ARTIFACTS_RUN_ID: ${{ inputs.artifacts_run_id }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
@@ -212,20 +304,70 @@ jobs:
           cache-on-failure: true
           prefix-key: rn-device-android-ubuntu-2404
           key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-native-transport/**', 'crates/jazz-napi/**', 'crates/jazz-wasm/**', 'dev/artifacts/**') }}
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      # Sticky disks, not actions/cache: those are per branch, and this job
+      # never runs on main, so every RC on a fresh branch started cold and
+      # then spent ~50 s saving. A sticky disk is shared by every branch and
+      # commits a snapshot instead of uploading a tarball.
+      # Every run mounts them, but only a run of reviewed code on main or
+      # release commits them (this job never runs on push, so dispatches,
+      # including the RC's, count): a PR can never write state, such as a
+      # Gradle init script, that a later gate mounts.
+      # The pinned toolchain; bootstrap-android.sh re-verifies what it reuses.
+      # The AVD lives in RUNNER_TEMP, not here.
+      - uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1.7.2
         with:
-          path: .cache/android-device-acceptance
-          key: rn-device-android-ubuntu-2404-${{ hashFiles('pnpm-lock.yaml', 'dev/rn-device-acceptance/**', 'crates/jazz-rn/**') }}
+          key: rn-device-android-toolchain-${{ github.repository_id }}-v2
+          commit: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release') && 'true' || 'false' }}
+          path: ${{ github.workspace }}/.cache/android-device-acceptance
+      # Gradle's distribution, dependencies and local build cache.
+      - name: Point Gradle at its sticky disk
+        run: echo "GRADLE_USER_HOME=${RUNNER_TEMP}/gradle-home" >> "${GITHUB_ENV}"
+      - uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1.7.2
+        with:
+          key: rn-device-android-gradle-${{ github.repository_id }}-v2
+          commit: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release') && 'true' || 'false' }}
+          path: ${{ runner.temp }}/gradle-home
       - run: pnpm install --frozen-lockfile
       - name: Verify synthetic scope authorization and generated native fixture
         run: cargo test -p jazz-native-relay --example rn_server_session_harness --no-fail-fast
+      - name: Download the prebuilt artifacts
+        if: inputs.artifacts_run_id != ''
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          run-id: ${{ inputs.artifacts_run_id }}
+          github-token: ${{ github.token }}
+          pattern: "{jazz-rn-relay-android,jazz-napi-loader,jazz-napi-binding-linux-x64-gnu,jazz-wasm-pkg}"
+          path: ${{ runner.temp }}/prebuilt
+      # The relay manifest seals the source revision the receipts check, so the
+      # producer run must have built exactly this commit.
+      - name: Stage the prebuilt artifacts of this commit
+        if: inputs.artifacts_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          producer_sha="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${ARTIFACTS_RUN_ID}" --jq .head_sha)"
+          [[ "$producer_sha" == "$GITHUB_SHA" ]] || { echo "::error::run ${ARTIFACTS_RUN_ID} built ${producer_sha}, not ${GITHUB_SHA}"; exit 1; }
+          prebuilt="${RUNNER_TEMP}/prebuilt"
+          cp -R "$prebuilt/jazz-rn-relay-android/." crates/jazz-rn/
+          cp -R "$prebuilt/jazz-napi-loader/." "$prebuilt/jazz-napi-binding-linux-x64-gnu/." crates/jazz-napi/
+          mkdir -p crates/jazz-napi/provenance crates/jazz-wasm/pkg
+          cp "$prebuilt/jazz-napi-binding-linux-x64-gnu/jazz-napi.linux-x64-gnu.manifest.json" crates/jazz-napi/provenance/
+          cp -R "$prebuilt/jazz-wasm-pkg/." crates/jazz-wasm/pkg/
       # The backend loads jazz-tools on Node, whose runtime checks the native
-      # fingerprints staged from release NAPI and fast WASM builds.
+      # fingerprints staged from release NAPI and fast (or prebuilt release) WASM builds.
       - uses: ./.github/actions/install-rust-tool
+        if: inputs.artifacts_run_id == ''
         with:
           tool: wasm-pack@0.13.1
       - name: Build the Node runtime of the device app's backend
-        run: pnpm --filter rn-device-acceptance build:device-backend
+        run: |
+          if [[ -n "${ARTIFACTS_RUN_ID}" ]]; then
+            node dev/artifacts/stage-native-fingerprints.mjs
+            pnpm --filter jazz-tools build:react-native
+          else
+            pnpm --filter rn-device-acceptance build:device-backend
+          fi
       # build:device-backend already builds jazz-tools' React Native entry after
       # staging the fingerprints, so only jazz-rn is left to build here.
       - name: Build the React Native JavaScript workspace entrypoints
@@ -238,10 +380,14 @@ jobs:
           cache="$GITHUB_WORKSPACE/.cache/android-device-acceptance"
           export JAVA_HOME="$cache/jdk" ANDROID_SDK_ROOT="$cache/sdk"
           export PATH="$cache/cargo/bin:$PATH"
-          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
           export JAZZ_NATIVE_RELAY_SOURCE_REVISION="$GITHUB_SHA"
           export JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION=4.1.2
-          pnpm --filter jazz-rn build:relay:android
+          if [[ -n "${ARTIFACTS_RUN_ID}" ]]; then
+            node dev/artifacts/rn-packages.mjs stage android
+          else
+            rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+            pnpm --filter jazz-rn build:relay:android
+          fi
           node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android
       - name: Grant the runner user access to KVM
         shell: bash
@@ -255,7 +401,7 @@ jobs:
           cache="$GITHUB_WORKSPACE/.cache/android-device-acceptance"
           export JAVA_HOME="$cache/jdk" ANDROID_SDK_ROOT="$cache/sdk" ANDROID_HOME="$cache/sdk"
           export PATH="$cache/cargo/bin:$cache/sdk/cmdline-tools/latest/bin:$cache/sdk/platform-tools:$cache/sdk/emulator:$PATH"
-          export ANDROID_AVD_HOME="$cache/avd"
+          export ANDROID_AVD_HOME="$RUNNER_TEMP/jazz-android-avd"
           # The acceptance receipt's production cleanup contract is a real
           # Linux session, never the portable test double used by macOS tests.
           export JAZZ_ANDROID_SESSION_LAUNCHER=setsid
@@ -265,16 +411,19 @@ jobs:
           dev/rn-device-acceptance/scripts/create-android-avd.sh \
             jazz-device-acceptance-api35 \
             'system-images;android-35;google_apis;x86_64'
+          # Boot while Gradle builds; the receipt waits for both.
           dev/rn-device-acceptance/scripts/boot-android-emulator.sh \
             jazz-device-acceptance-api35 \
-            "$cache/emulator.log" \
-            "$ANDROID_AVD_HOME/jazz-device-acceptance-api35.avd/config.ini"
+            "$RUNNER_TEMP/jazz-android-emulator.log" \
+            "$ANDROID_AVD_HOME/jazz-device-acceptance-api35.avd/config.ini" &
+          boot_pid=$!
           (
             cd dev/rn-device-acceptance/android
             grep -Fx "reactNativeArchitectures=${relay_abis}" gradle.properties
             ./gradlew -q -PreactNativeArchitectures="${relay_abis}" :app:properties | grep -Fx "reactNativeArchitectures: ${relay_abis}"
-            NODE_ENV=production ./gradlew -PreactNativeArchitectures="${relay_abis}" :app:assembleRelease --console=plain
+            NODE_ENV=production ./gradlew -PreactNativeArchitectures="${relay_abis}" :app:assembleRelease --console=plain --build-cache
           )
+          wait "$boot_pid"
           # The Android build has already provisioned Gradle's Kotlin compiler;
           # make the packed JVM admission receipt mandatory on this JDK lane.
           export PATH="$JAVA_HOME/bin:$PATH"
@@ -284,6 +433,25 @@ jobs:
           export JAZZ_DEVICE_APK="$GITHUB_WORKSPACE/dev/rn-device-acceptance/android/app/build/outputs/apk/release/app-release.apk"
           export JAZZ_DEVICE_RELAY_SOURCE_REVISION="$GITHUB_SHA"
           pnpm --filter rn-device-acceptance device:android
+      # release-artifacts uploads its manifest last, about when this job starts,
+      # so require it at the end rather than wait for it up front.
+      - name: Require the artifacts run's release manifest to name this commit
+        if: inputs.artifacts_run_id != '' && !inputs.manifest_checked_by_caller
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          manifest="${RUNNER_TEMP}/release-manifest"
+          until gh run download "${ARTIFACTS_RUN_ID}" -R "${GITHUB_REPOSITORY}" -n release-manifest -D "${manifest}" 2>/dev/null; do
+            if [[ "$(gh run view "${ARTIFACTS_RUN_ID}" -R "${GITHUB_REPOSITORY}" --json status --jq .status)" == completed ]]; then
+              gh run download "${ARTIFACTS_RUN_ID}" -R "${GITHUB_REPOSITORY}" -n release-manifest -D "${manifest}" && break
+              echo "::error::run ${ARTIFACTS_RUN_ID} finished without a release-manifest"
+              exit 1
+            fi
+            sleep 15
+          done
+          sha="$(node -p 'require(process.argv[1]).sha' "${manifest}/manifest.json")"
+          [[ "$sha" == "$GITHUB_SHA" ]] || { echo "::error::run ${ARTIFACTS_RUN_ID}'s release manifest is for ${sha}, not ${GITHUB_SHA}"; exit 1; }
       - name: Retain matching Android crash-symbol artifacts
         if: failure()
         env:
@@ -296,3 +464,15 @@ jobs:
           name: rn-device-android-failure-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/jazz-rn-android-failure-artifact
           if-no-files-found: ignore
+      # The sticky disks unmount after this: nothing may still run from them.
+      - name: Stop Gradle, the emulator and adb
+        if: always()
+        run: |
+          pkill -f GradleDaemon || true
+          pkill -f KotlinCompileDaemon || true
+          pkill -x adb || true
+          sleep 2
+          for disk in "${GITHUB_WORKSPACE}/.cache/android-device-acceptance" "${GRADLE_USER_HOME}"; do
+            # -m targets the whole filesystem: only ever a mounted sticky disk.
+            if mountpoint -q "${disk}"; then fuser -km "${disk}" 2>/dev/null || true; fi
+          done

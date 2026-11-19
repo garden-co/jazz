@@ -12,9 +12,19 @@ on:
         description: JSON matrix for NAPI platform packages. Release callers use every platform; preview callers may omit expensive optional platforms.
         required: false
         type: string
-        default: '[{"os":"blacksmith-4vcpu-ubuntu-2404","target":"x86_64-unknown-linux-gnu","platform":"linux-x64-gnu","use_sccache":false},{"os":"blacksmith-4vcpu-ubuntu-2404-arm","target":"aarch64-unknown-linux-gnu","platform":"linux-arm64-gnu","use_sccache":false},{"os":"blacksmith-6vcpu-macos-15","target":"x86_64-apple-darwin","platform":"darwin-x64","use_sccache":false},{"os":"blacksmith-6vcpu-macos-15","target":"aarch64-apple-darwin","platform":"darwin-arm64","use_sccache":false},{"os":"blacksmith-16vcpu-windows-2025","target":"x86_64-pc-windows-msvc","platform":"win32-x64-msvc","use_sccache":false}]'
+        default: '[{"os":"blacksmith-16vcpu-ubuntu-2404","target":"x86_64-unknown-linux-gnu","platform":"linux-x64-gnu","use_sccache":false},{"os":"blacksmith-16vcpu-ubuntu-2404-arm","target":"aarch64-unknown-linux-gnu","platform":"linux-arm64-gnu","use_sccache":false},{"os":"blacksmith-6vcpu-macos-15","target":"x86_64-apple-darwin","platform":"darwin-x64","use_sccache":false},{"os":"blacksmith-6vcpu-macos-15","target":"aarch64-apple-darwin","platform":"darwin-arm64","use_sccache":false},{"os":"blacksmith-16vcpu-windows-2025","target":"x86_64-pc-windows-msvc","platform":"win32-x64-msvc","use_sccache":false}]'
       include_rn:
         description: Build and stage jazz-rn's Android and iOS relay artifacts. Keep false for ordinary package previews; releases opt in explicitly.
+        required: false
+        type: boolean
+        default: false
+      reproduce_ios_relay:
+        description: Also build the iOS relay's staticlibs without any cache and require them byte-identical to the cached build's. Release and publish callers set it; previews and RCs use the warm cache alone.
+        required: false
+        type: boolean
+        default: false
+      release_bundles:
+        description: Also bundle release-server (the server binaries + SHA256SUMS) and release-npm (every tarball, packed and checked as publish does), for release-artifacts.yml. Needs include_rn.
         required: false
         type: boolean
         default: false
@@ -157,7 +167,10 @@ jobs:
 
   build-wasm:
     name: Build jazz-wasm
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # 16 vCPUs: a release's version bump recompiles every jazz crate, and
+    # on 4 vCPUs that (with LTO and wasm-opt) took 5-10 min, the release
+    # build's critical path.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -168,11 +181,24 @@ jobs:
         with:
           rust-targets: wasm32-unknown-unknown
           sccache: "true"
-          sccache-key: release-wasm-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+          # Only main pushes write the cache: they are what warms it, and a
+          # release build's fresh-version objects are rarely reused. Elsewhere
+          # the post-step commit (up to 2 min) would hold up every consumer.
+          sccache-commit: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'true' || 'false' }}
+          sccache-key: release-wasm-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v2
 
       - uses: ./.github/actions/install-rust-tool
         with:
           tool: wasm-pack@0.13.1
+
+      # wasm-pack downloads wasm-bindgen and binaryen (wasm-opt) at build
+      # time, with no retry: keep them, so a flaky CDN can't fail a release.
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.cache/.wasm-pack
+          key: wasm-pack-0.13.1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            wasm-pack-0.13.1-${{ runner.os }}-
 
       - name: Build jazz-wasm npm package
         run: pnpm --filter jazz-wasm build
@@ -183,8 +209,54 @@ jobs:
           test -f crates/jazz-wasm/pkg/jazz_wasm.js
           test -f crates/jazz-wasm/pkg/jazz_wasm.d.ts
 
-      # `jazz-wasm/durable-object`: the core a Cloudflare Durable Object
-      # hosts. The whole script, not bare wasm-pack: it also patches the glue
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-wasm-pkg
+          path: crates/jazz-wasm/pkg
+          # The sealed provenance receipt is intentionally dot-prefixed. The
+          # upload action excludes hidden files unless this is explicit.
+          include-hidden-files: true
+          if-no-files-found: error
+
+  # `jazz-wasm/durable-object`, the core a Cloudflare Durable Object hosts,
+  # in its own job beside build-wasm: a separate wasm-pack build and wasm-opt
+  # pass that used to add about 2.5 min after the main one.
+  build-wasm-durable-object:
+    name: Build jazz-wasm Durable Object entry
+    # 16 vCPUs: a release's version bump recompiles every jazz crate, and
+    # on 4 vCPUs that (with LTO and wasm-opt) took 5-10 min, the release
+    # build's critical path.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: wasm32-unknown-unknown
+          sccache: "true"
+          # Only main pushes write the cache: they are what warms it, and a
+          # release build's fresh-version objects are rarely reused. Elsewhere
+          # the post-step commit (up to 2 min) would hold up every consumer.
+          sccache-commit: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'true' || 'false' }}
+          sccache-key: release-wasm-do-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v2
+
+      - uses: ./.github/actions/install-rust-tool
+        with:
+          tool: wasm-pack@0.13.1
+
+      # wasm-pack downloads wasm-bindgen and binaryen (wasm-opt) at build
+      # time, with no retry: keep them, so a flaky CDN can't fail a release.
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.cache/.wasm-pack
+          key: wasm-pack-0.13.1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            wasm-pack-0.13.1-${{ runner.os }}-
+
+      # The whole script, not bare wasm-pack: it also patches the glue
       # (reinstantiable.mjs) and deletes wasm-pack's `.gitignore` of `*`,
       # which would keep the build out of the tarball.
       - name: Build jazz-wasm Durable Object entry
@@ -204,21 +276,110 @@ jobs:
           path: crates/jazz-wasm/durable-object/pkg
           if-no-files-found: error
 
+  # `jazz-wasm/backend`, the build a backend's `createJazz` runs on in a
+  # Cloudflare Worker (jazz-tools' `workerd` entry): the browser build plus
+  # the `backend` feature, which the browser build leaves out. Its own job
+  # beside build-wasm and build-wasm-durable-object.
+  build-wasm-backend:
+    name: Build jazz-wasm backend entry
+    # 16 vCPUs, like the other jazz-wasm builds: a release's version bump
+    # recompiles every jazz crate.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: wasm32-unknown-unknown
+          sccache: "true"
+          # Only main pushes write the cache: they are what warms it, and a
+          # release build's fresh-version objects are rarely reused. Elsewhere
+          # the post-step commit (up to 2 min) would hold up every consumer.
+          sccache-commit: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'true' || 'false' }}
+          sccache-key: release-wasm-backend-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v2
+
+      - uses: ./.github/actions/install-rust-tool
+        with:
+          tool: wasm-pack@0.13.1
+
+      # The whole script, not bare wasm-pack: it also runs the size-tuned
+      # wasm-opt pass and deletes wasm-pack's `.gitignore` of `*`, which
+      # would keep the build out of the tarball.
+      - name: Build jazz-wasm backend entry
+        run: pnpm --filter jazz-wasm build:backend
+
+      - name: Verify built jazz-wasm backend artifacts
+        run: |
+          test -f crates/jazz-wasm/backend/pkg/jazz_wasm_backend_bg.wasm
+          test -f crates/jazz-wasm/backend/pkg/jazz_wasm_backend.js
+          test -f crates/jazz-wasm/backend/pkg/jazz_wasm_backend.d.ts
+          test ! -e crates/jazz-wasm/backend/pkg/.gitignore
+          grep --quiet serveThinTransaction crates/jazz-wasm/backend/pkg/jazz_wasm_backend.js
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: jazz-wasm-pkg
-          path: crates/jazz-wasm/pkg
-          # The sealed provenance receipt is intentionally dot-prefixed. The
-          # upload action excludes hidden files unless this is explicit.
-          include-hidden-files: true
+          name: jazz-wasm-backend-pkg
+          path: crates/jazz-wasm/backend/pkg
           if-no-files-found: error
 
-      # Merge groups run jazz-tools' Durable Object suite on a wasm-opt -O1
-      # host; this runs the full suite on the -Oz host built (and uploaded)
-      # above, so an -Oz-only break (a wasm-opt miscompile, or the glue or
-      # reinstantiation interacting with optimised code) fails the release
-      # build. Last, after both uploads: the correctness producer republishes
-      # crates/jazz-wasm/pkg as its fast build.
+  # Merge groups run jazz-tools' Durable Object suite on wasm-opt -O1 builds;
+  # this runs the full suite on the -Oz builds that ship (the uploaded
+  # jazz-wasm-durable-object-pkg and jazz-wasm-backend-pkg, unpacked where
+  # the builds leave them), so an
+  # -Oz-only break (a wasm-opt miscompile, or the glue or reinstantiation
+  # interacting with optimised code) fails the release build. Beside the
+  # package assembly, not before it.
+  test-wasm-durable-object:
+    name: Durable Object suite on the release host
+    needs: [build-wasm-durable-object, build-wasm-backend]
+    # 16 vCPUs: it builds the correctness artifacts, then runs the suite (5.4
+    # min on 4 vCPUs); the release build's last packages job.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: wasm32-unknown-unknown
+          sccache: "true"
+          # Only main pushes write the cache: they are what warms it, and a
+          # release build's fresh-version objects are rarely reused. Elsewhere
+          # the post-step commit (up to 2 min) would hold up every consumer.
+          sccache-commit: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'true' || 'false' }}
+          sccache-key: release-wasm-do-suite-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v2
+
+      - uses: ./.github/actions/install-rust-tool
+        with:
+          tool: wasm-pack@0.13.1
+
+      # wasm-pack downloads wasm-bindgen and binaryen (wasm-opt) at build
+      # time, with no retry: keep them, so a flaky CDN can't fail a release.
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.cache/.wasm-pack
+          key: wasm-pack-0.13.1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            wasm-pack-0.13.1-${{ runner.os }}-
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-wasm-durable-object-pkg
+          path: crates/jazz-wasm/durable-object/pkg
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-wasm-backend-pkg
+          path: crates/jazz-wasm/backend/pkg
+
+      - name: Check they are the -Oz builds
+        run: node --test --test-name-pattern='-Oz build' crates/jazz-wasm/tests/durable-objects/release.test.mjs
+
       - name: Build correctness artifacts for the Durable Object suite
         run: node dev/gates/ensure-correctness-artifacts.mjs
       - name: Run jazz-tools' Durable Object suite on the release host
@@ -242,8 +403,14 @@ jobs:
         with:
           rust-targets: ${{ matrix.target }}
           sccache: ${{ matrix.use_sccache && 'true' || 'false' }}
-          sccache-key: release-napi-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-${{ matrix.platform }}-v1
+          # Off for every platform today; if a matrix entry turns it on, only
+          # main pushes write the cache.
+          sccache-commit: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'true' || 'false' }}
+          sccache-key: release-napi-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-${{ matrix.platform }}-v2
 
+      # The second restore key: a Version Packages commit always changes
+      # Cargo.lock (the workspace version), so start from this platform's last
+      # build anyway, and only the workspace crates recompile.
       - name: Cache baseline-specific Linux Cargo products
         if: startsWith(matrix.platform, 'linux-')
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -252,6 +419,7 @@ jobs:
           key: linux-napi-${{ matrix.platform }}-${{ hashFiles('dev/artifacts/linux-napi/Dockerfile') }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
             linux-napi-${{ matrix.platform }}-${{ hashFiles('dev/artifacts/linux-napi/Dockerfile') }}-${{ hashFiles('Cargo.lock') }}-
+            linux-napi-${{ matrix.platform }}-${{ hashFiles('dev/artifacts/linux-napi/Dockerfile') }}-
 
       - name: Build Linux NAPI on pinned Bullseye userspace
         if: startsWith(matrix.platform, 'linux-')
@@ -284,39 +452,91 @@ jobs:
             crates/jazz-napi/native-loader.provenance.json
           if-no-files-found: error
 
+  # One job per ABI (each is a fat-LTO staticlib, ~2 min on 16 vCPU), sealed
+  # into one manifest by seal-jazz-rn-android.
   build-jazz-rn-android:
-    name: Build jazz-rn Android relay artifacts
+    name: Build jazz-rn Android relay (${{ matrix.abi }})
     if: inputs.include_rn
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    strategy:
+      matrix:
+        include:
+          - { abi: arm64-v8a, target: aarch64-linux-android }
+          - { abi: armeabi-v7a, target: armv7-linux-androideabi }
+          - { abi: x86_64, target: x86_64-linux-android }
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ inputs.ref }}
 
+      # No sccache: rust-cache restores the dependencies and the rest is the
+      # LTO link, so it never hit, and installing it cost ~2 minutes.
       - uses: ./.github/actions/setup-build
         with:
-          rust-targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
-          sccache: "true"
-          sccache-key: release-jazz-rn-android-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+          rust-targets: ${{ matrix.target }}
+          rust-cache-key: jazz-rn-android-${{ matrix.abi }}
+          setup-node: "false"
 
+      # Upstream's release binary, pinned by hash: no `cargo install`.
       - name: Install cargo-ndk
-        run: cargo install cargo-ndk@${{ env.JAZZ_RN_CARGO_NDK_VERSION }} --locked
+        run: |
+          archive="${RUNNER_TEMP}/cargo-ndk.tgz"
+          curl --fail --location --retry 3 --output "${archive}" \
+            "https://github.com/bbqsrc/cargo-ndk/releases/download/v${JAZZ_RN_CARGO_NDK_VERSION}/cargo-ndk-x86_64-unknown-linux-gnu-v${JAZZ_RN_CARGO_NDK_VERSION}.tgz"
+          echo "9451622c4567e8abb2c8005001855e32901c0b716ccdd3a173a4375fd03426e1  ${archive}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/cargo-ndk"
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}/cargo-ndk" --strip-components=1
+          echo "${RUNNER_TEMP}/cargo-ndk" >> "${GITHUB_PATH}"
 
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
         with:
           # The action already installs cmdline-tools; its default also asks for retired SDK "tools".
           packages: platform-tools
+      # sdkmanager has no retry of its own.
       - name: Install pinned Android NDK
-        run: sdkmanager --install "ndk;27.1.12297006"
-      - name: Build and verify Android relay archive slices
+        run: |
+          for attempt in 1 2 3; do
+            sdkmanager --install "ndk;27.1.12297006" && exit 0
+            echo "::warning::NDK install attempt ${attempt} failed"
+            sleep $((attempt * 10))
+          done
+          exit 1
+      - name: Build the Android relay archive slice
         run: |
           JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
             JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
             ANDROID_NDK_HOME="${ANDROID_SDK_ROOT}/ndk/27.1.12297006" \
-            pnpm --filter jazz-rn build:relay:android
-          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
-            JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
-            node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android
+            bash crates/jazz-rn/scripts/build-relay-artifacts.sh android-slice '${{ matrix.abi }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-rn-relay-android-${{ matrix.abi }}
+          path: crates/jazz-rn/android/src/main/jniLibs/${{ matrix.abi }}
+          if-no-files-found: error
+
+  seal-jazz-rn-android:
+    name: Seal jazz-rn Android relay artifacts
+    needs: build-jazz-rn-android
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-rn-relay-android-*
+          path: ${{ runner.temp }}/slices
+      - name: Seal and verify the Android relay archive slices
+        run: |
+          stage=crates/jazz-rn/android/src/main/jniLibs
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            mkdir -p "${stage}/${abi}"
+            cp "${RUNNER_TEMP}/slices/jazz-rn-relay-android-${abi}/libjazz_native_relay.a" "${stage}/${abi}/"
+          done
+          export JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)"
+          export JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}"
+          bash crates/jazz-rn/scripts/build-relay-artifacts.sh android-manifest
+          node dev/artifacts/rn-packages.mjs stage android
+          node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-rn-relay-android
@@ -326,10 +546,23 @@ jobs:
             crates/jazz-rn/native/include
           if-no-files-found: error
 
-  build-jazz-rn-ios:
-    name: Build jazz-rn iOS relay XCFramework
+  # The iOS relay's staticlib for each Rust target in parallel, built as
+  # crates/jazz-rn/scripts/build-relay-artifacts.sh builds it, with sccache
+  # (.github/actions/apple-sccache: the trusted S3 tier where this run may
+  # use it, else the Actions cache), keyed by the script's
+  # IPHONEOS_DEPLOYMENT_TARGET; "Check the minimum iOS" fails on any object
+  # built for a newer one. The S3 tier needs the caller to grant id-token:
+  # write; without it the jobs fall back to the Actions cache.
+  build-jazz-rn-ios-slices:
+    name: Build jazz-rn iOS relay (${{ matrix.target }})
     if: inputs.include_rn
     runs-on: blacksmith-6vcpu-macos-15
+    strategy:
+      fail-fast: true
+      matrix:
+        target: [aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios]
+    env:
+      TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -337,16 +570,189 @@ jobs:
 
       - uses: ./.github/actions/setup-build
         with:
-          rust-targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
-          sccache: "true"
-          sccache-key: release-jazz-rn-ios-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+          setup-node: "false"
+          rust-cache: "false"
+          rust-targets: ${{ matrix.target }}
+
+      # The build script's pinned deployment target, which the verifier
+      # also reads.
+      - name: Read the iOS deployment target
+        id: ios
+        run: |
+          min=$(sed -nE 's/^[[:space:]]*export IPHONEOS_DEPLOYMENT_TARGET=([0-9]+\.[0-9]+)$/\1/p' crates/jazz-rn/scripts/build-relay-artifacts.sh)
+          [[ -n "$min" ]] || { echo "::error::no IPHONEOS_DEPLOYMENT_TARGET in build-relay-artifacts.sh"; exit 1; }
+          echo "min=$min" >> "$GITHUB_OUTPUT"
+          echo "IPHONEOS_DEPLOYMENT_TARGET=$min" >> "$GITHUB_ENV"
+
+      - name: Set up sccache
+        id: sccache
+        uses: ./.github/actions/apple-sccache
+        with:
+          key: jazz-rn-${{ matrix.target }}
+          min-os: ios${{ steps.ios.outputs.min }}
+          writer-role: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
+          reader-role: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
+          bucket: ${{ vars.SCCACHE_BUCKET }}
+          region: ${{ vars.SCCACHE_REGION }}
+
+      - name: Build the relay staticlib
+        run: |
+          cargo rustc --manifest-path crates/jazz-native-relay/Cargo.toml --target "$TARGET" --crate-type staticlib --profile release-mobile
+          mkdir -p "slice/$TARGET"
+          cp "target/$TARGET/release-mobile/libjazz_native_relay.a" "slice/$TARGET/"
+          sccache --show-stats
+
+      # Rust's prebuilt std may need an older iOS; nothing may need a newer one.
+      - name: Check the minimum iOS
+        run: |
+          python3 - "slice/$TARGET/libjazz_native_relay.a" "$IPHONEOS_DEPLOYMENT_TARGET" <<'PY'
+          import collections, struct, sys
+          path, want = sys.argv[1], sys.argv[2]
+          data = open(path, "rb").read()
+          assert data[:8] == b"!<arch>\n", "not an ar archive"
+          off, seen = 8, collections.Counter()
+          while off + 60 <= len(data):
+              header = data[off:off + 60]
+              name, size = header[:16].decode().strip(), int(header[48:58])
+              body = data[off + 60:off + 60 + size]
+              if name.startswith("#1/"):
+                  body = body[int(name[3:]):]
+              if body[:4] == b"\xcf\xfa\xed\xfe":
+                  (ncmds,), p = struct.unpack("<I", body[16:20]), 32
+                  for _ in range(ncmds):
+                      cmd, cmdsize = struct.unpack("<II", body[p:p + 8])
+                      if cmd == 0x32:  # LC_BUILD_VERSION
+                          (minos,) = struct.unpack("<I", body[p + 12:p + 16])
+                          seen[f"{minos >> 16}.{(minos >> 8) & 255}"] += 1
+                      p += cmdsize
+              off += 60 + size + (size & 1)
+          print(dict(seen))
+          v = lambda s: tuple(int(n) for n in s.split("."))
+          newer = {k: n for k, n in seen.items() if v(k) > v(want)}
+          sys.exit(f"objects for {newer}, newer than {want}" if newer else 0)
+          PY
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-rn-relay-ios-slice-${{ matrix.target }}
+          path: slice
+          if-no-files-found: error
+
+      - name: Stop sccache
+        if: always()
+        run: sccache --stop-server || true
+
+      # Without the S3 tier, the disk cache goes to the Actions cache: from
+      # main, or when nothing was restored (branches read main's entries).
+      # Saved after a failed build too: the objects compiled before the
+      # failure still save the next run that work.
+      - name: Save sccache
+        if: >-
+          ${{
+            always() &&
+            steps.sccache.outputs.s3 != 'true' &&
+            steps.sccache.outputs.fallback-hit != 'true' &&
+            (github.ref == 'refs/heads/main' || steps.sccache.outputs.fallback-matched == '')
+          }}
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ runner.temp }}/sccache
+          key: ${{ steps.sccache.outputs.fallback-key }}
+
+  # Release and publish builds: the same staticlibs without any cache, which
+  # must be byte-identical to the cached build's (the join is deterministic,
+  # so the slices are all a cache could change). In parallel with the join;
+  # the workflow's callers wait for it.
+  build-jazz-rn-ios-clean:
+    name: Build jazz-rn iOS relay without cache (${{ matrix.target }})
+    if: inputs.include_rn && inputs.reproduce_ios_relay
+    runs-on: blacksmith-6vcpu-macos-15
+    strategy:
+      fail-fast: true
+      matrix:
+        target: [aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios]
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          setup-node: "false"
+          rust-cache: "false"
+          rust-targets: ${{ matrix.target }}
+
+      - name: Build the relay staticlib
+        run: |
+          export IPHONEOS_DEPLOYMENT_TARGET="$(sed -nE 's/^[[:space:]]*export IPHONEOS_DEPLOYMENT_TARGET=([0-9]+\.[0-9]+)$/\1/p' crates/jazz-rn/scripts/build-relay-artifacts.sh)"
+          [[ -n "$IPHONEOS_DEPLOYMENT_TARGET" ]] || { echo "::error::no IPHONEOS_DEPLOYMENT_TARGET in build-relay-artifacts.sh"; exit 1; }
+          cargo rustc --manifest-path crates/jazz-native-relay/Cargo.toml --target "$TARGET" --crate-type staticlib --profile release-mobile
+          mkdir -p "slice/$TARGET"
+          cp "target/$TARGET/release-mobile/libjazz_native_relay.a" "slice/$TARGET/"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-rn-relay-ios-clean-${{ matrix.target }}
+          path: slice
+          if-no-files-found: error
+
+  build-jazz-rn-ios-reproducible:
+    name: Check the cached iOS relay matches a clean build
+    if: inputs.include_rn && inputs.reproduce_ios_relay
+    needs: [build-jazz-rn-ios-slices, build-jazz-rn-ios-clean]
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-rn-relay-ios-slice-*
+          merge-multiple: true
+          path: cached
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-rn-relay-ios-clean-*
+          merge-multiple: true
+          path: clean
+      - name: Compare
+        run: |
+          for target in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
+            sha256sum "cached/$target/libjazz_native_relay.a" "clean/$target/libjazz_native_relay.a"
+            cmp "cached/$target/libjazz_native_relay.a" "clean/$target/libjazz_native_relay.a" ||
+              { echo "::error::the cached $target relay staticlib differs from a clean build's"; exit 1; }
+          done
+
+  # lipo, xcodebuild -create-xcframework and the manifest over the slices:
+  # `build:relay:ios` (crates/jazz-rn/package.json) with
+  # JAZZ_NATIVE_RELAY_SLICES, then the verifier.
+  build-jazz-rn-ios:
+    name: Build jazz-rn iOS relay XCFramework
+    if: inputs.include_rn
+    needs: build-jazz-rn-ios-slices
+    runs-on: blacksmith-6vcpu-macos-15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      # The scripts need only Node: no pnpm install.
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-rn-relay-ios-slice-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/relay-slices
 
       - name: Build and verify iOS relay XCFramework
+        working-directory: crates/jazz-rn
         run: |
-          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
-            pnpm --filter jazz-rn build:relay:ios
-          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
-            node crates/jazz-rn/scripts/verify-relay-artifacts.mjs ios
+          export JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)"
+          JAZZ_NATIVE_RELAY_SLICES="$RUNNER_TEMP/relay-slices" bash scripts/build-relay-artifacts.sh ios
+          node ../../dev/artifacts/rn-packages.mjs stage ios
+          node scripts/verify-relay-artifacts.mjs ios
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-rn-relay-ios
@@ -363,6 +769,8 @@ jobs:
       - build-linux
       - check-linux-heap-profile
       - build-wasm
+      - build-wasm-durable-object
+      - build-wasm-backend
       - build-napi
 
     steps:
@@ -384,10 +792,20 @@ jobs:
           name: jazz-wasm-durable-object-pkg
           path: crates/jazz-wasm/durable-object/pkg
 
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-wasm-backend-pkg
+          path: crates/jazz-wasm/backend/pkg
+
       # Fails unless `npm pack` puts durable-object/pkg/jazz_wasm_do_bg.wasm
       # (and the rest of the Durable Object entry) in the jazz-wasm tarball.
       - name: Verify the jazz-wasm tarball carries the Durable Object entry
         run: pnpm --filter jazz-wasm check:durable-object-pack
+
+      # Fails unless `npm pack` puts backend/pkg/jazz_wasm_backend_bg.wasm
+      # (and the rest of the backend entry) in the jazz-wasm tarball.
+      - name: Verify the jazz-wasm tarball carries the backend entry
+        run: pnpm --filter jazz-wasm check:backend-pack
 
       # The release build (wasm-opt, the patched glue) starts in workerd and
       # admits its backend, before anything is published.
@@ -546,7 +964,7 @@ jobs:
   assemble-jazz-rn:
     name: Assemble jazz-rn npm package
     needs:
-      - build-jazz-rn-android
+      - seal-jazz-rn-android
       - build-jazz-rn-ios
     # A skipped optional platform build must not make the normal package
     # assembly skip. Conversely, require both relay receipts whenever RN was
@@ -555,7 +973,7 @@ jobs:
       ${{
         always() &&
         inputs.include_rn &&
-        needs.build-jazz-rn-android.result == 'success' &&
+        needs.seal-jazz-rn-android.result == 'success' &&
         needs.build-jazz-rn-ios.result == 'success'
       }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -625,7 +1043,8 @@ jobs:
     name: Verify packaged jazz-rn Android consumer
     needs: assemble-jazz-rn
     if: inputs.include_rn && needs.assemble-jazz-rn.result == 'success'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # 16 vCPUs: the C++ build for every ABI is most of this job.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -634,6 +1053,30 @@ jobs:
       - uses: ./.github/actions/setup-build
         with:
           rust-toolchain: ""
+
+      # Gradle's distribution, dependencies and build cache on a sticky disk
+      # of this job's own (the device acceptance one is shared with PRs).
+      - name: Point Gradle at its sticky disk
+        run: echo "GRADLE_USER_HOME=${RUNNER_TEMP}/gradle-home" >> "${GITHUB_ENV}"
+      # Committed only by release-artifacts' pushes to main and release, never
+      # by a PR's run, which still mounts it.
+      - uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1.7.2
+        with:
+          key: rn-consumer-android-gradle-${{ github.repository_id }}-v2
+          commit: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release') && 'true' || 'false' }}
+          path: ${{ runner.temp }}/gradle-home
+
+      # Gradle would otherwise fetch these itself, once per run and without
+      # retry. sdkmanager has no retry of its own.
+      - name: Install the NDK and CMake the Android build uses
+        run: |
+          sdkmanager="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          for attempt in 1 2 3; do
+            "${sdkmanager}" --install "ndk;27.1.12297006" "cmake;3.22.1" && exit 0
+            echo "::warning::NDK/CMake install attempt ${attempt} failed"
+            sleep $((attempt * 10))
+          done
+          exit 1
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
@@ -663,8 +1106,18 @@ jobs:
         run: pnpm --dir "$JAZZ_RN_CONSUMER_FIXTURE" exec expo prebuild --platform android --clean --no-install
 
       - name: Link the packed relay through an Android application
-        run: ./gradlew :app:assembleDebug --no-daemon
+        run: ./gradlew :app:assembleDebug --no-daemon --build-cache
         working-directory: ${{ env.JAZZ_RN_CONSUMER_FIXTURE }}/android
+
+      # The sticky disk unmounts after this: nothing may still run from it.
+      - name: Stop Gradle and Kotlin
+        if: always()
+        run: |
+          pkill -f GradleDaemon || true
+          pkill -f KotlinCompileDaemon || true
+          sleep 2
+          # -m targets the whole filesystem: only ever a mounted sticky disk.
+          if mountpoint -q "${GRADLE_USER_HOME}"; then fuser -km "${GRADLE_USER_HOME}" 2>/dev/null || true; fi
 
   verify-jazz-rn-ios-consumer:
     name: Verify packaged jazz-rn iOS consumer
@@ -680,6 +1133,18 @@ jobs:
         with:
           rust-toolchain: ""
 
+      # pod install's downloads: React Native's prebuilt tarballs (which
+      # pod-install-retrying.sh copies in and out) and CocoaPods' own caches.
+      # Its version is pinned by the lockfile; an older entry is harmless,
+      # since the tarballs are named by version.
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/Library/Caches/CocoaPods
+            ~/.cocoapods/repos
+            ${{ runner.temp }}/rn-pod-artifacts
+          key: rn-ios-pods-macos-15-v3-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: rn-ios-pods-macos-15-v3-
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: pkg-jazz-rn-tarball
@@ -713,7 +1178,7 @@ jobs:
           JAZZ_RN_REQUIRE_RUBY: "1"
 
       - name: Install the packed native pod
-        run: pod install
+        run: '"${GITHUB_WORKSPACE}/dev/scripts/pod-install-retrying.sh" "${RUNNER_TEMP}/rn-pod-artifacts"'
         working-directory: ${{ env.JAZZ_RN_CONSUMER_FIXTURE }}/ios
 
       - name: Link the packed relay through an iOS simulator application
@@ -726,3 +1191,182 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             build
         working-directory: ${{ env.JAZZ_RN_CONSUMER_FIXTURE }}/ios
+
+  # The server binaries, as "Publish jazz-tools alpha" attaches them.
+  release-server:
+    name: Server binaries
+    if: inputs.release_bundles
+    needs: [build-linux, check-linux-heap-profile]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-tools-linux-*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          test -s jazz-tools-linux-x64
+          test -s jazz-tools-linux-arm64
+          sha256sum jazz-tools-linux-x64 jazz-tools-linux-arm64 > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-server
+          path: dist/*
+          if-no-files-found: error
+
+  # Every npm tarball, packed the way publish-jazz-tools-alpha.yml packs and
+  # checks them, so publish uploads these exact files.
+  release-npm:
+    name: Pack npm tarballs
+    if: inputs.release_bundles
+    needs: [assemble-packages, assemble-jazz-rn]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-toolchain: ""
+
+      - name: The version and source revision
+        run: |
+          {
+            echo "VERSION=$(node -p 'require("./packages/jazz-tools/package.json").version')"
+            echo "JAZZ_NATIVE_RELAY_SOURCE_REVISION=$(git rev-parse HEAD)"
+          } >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-tools
+          path: packages/jazz-tools
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-wasm
+          path: crates/jazz-wasm
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-napi
+          path: crates/jazz-napi
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-rn
+          path: crates/jazz-rn
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-create-jazz
+          path: packages/create-jazz
+
+      - name: Verify the built payloads
+        run: |
+          set -euo pipefail
+          test -f crates/jazz-wasm/pkg/jazz_wasm_bg.wasm
+          test -f crates/jazz-wasm/pkg/jazz_wasm.js
+          test -f crates/jazz-wasm/pkg/jazz_wasm.d.ts
+          for platform in linux-x64-gnu linux-arm64-gnu darwin-x64 darwin-arm64 win32-x64-msvc; do
+            test -f "crates/jazz-napi/npm/${platform}/jazz-napi.${platform}.node"
+          done
+          test -f packages/jazz-tools/dist/index.js
+          test -f packages/jazz-tools/dist/index.d.ts
+          test -f packages/jazz-tools/dist/backend/index.js
+          test -f packages/jazz-tools/dist/react/index.js
+          test -f packages/jazz-tools/dist/permissions/index.js
+          node dev/artifacts/rn-packages.mjs verify
+
+      # As publish does (assemble already did it; idempotent).
+      - name: Sync jazz-napi platform package versions and optional deps
+        run: |
+          cd crates/jazz-napi
+          pnpm exec napi version --npm-dir npm
+          node -e 'const fs=require("fs");const rootPath="package.json";const pkg=JSON.parse(fs.readFileSync(rootPath,"utf8"));const deps=[];for(const entry of fs.readdirSync("npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const child=JSON.parse(fs.readFileSync(`npm/${entry.name}/package.json`,"utf8"));deps.push([child.name,pkg.version]);}deps.sort((a,b)=>a[0].localeCompare(b[0]));pkg.optionalDependencies=Object.fromEntries(deps);fs.writeFileSync(rootPath,`${JSON.stringify(pkg,null,2)}\n`);'
+
+      - name: Stage inspector overlay assets into jazz-tools
+        run: |
+          pnpm --filter inspector run build:embedded
+          pnpm --filter jazz-tools run stage:inspector-overlay
+
+      - name: Check the lock-stepped versions
+        run: |
+          node -e '
+            const fs = require("fs");
+            const read = (p) => JSON.parse(fs.readFileSync(p, "utf8"));
+            const want = process.env.VERSION;
+            const paths = ["packages/jazz-tools", "packages/create-jazz", "crates/jazz-wasm", "crates/jazz-napi",
+              "crates/jazz-rn", "crates/jazz-rn/npm/android", "crates/jazz-rn/npm/ios",
+              ...fs.readdirSync("crates/jazz-napi/npm").map((d) => `crates/jazz-napi/npm/${d}`)];
+            for (const p of paths) {
+              const { name, version } = read(`${p}/package.json`);
+              if (version !== want) throw new Error(`${name} is ${version}, expected ${want}`);
+            }
+            for (const [name, v] of Object.entries(read("crates/jazz-napi/package.json").optionalDependencies || {}))
+              if (v !== want) throw new Error(`jazz-napi optional dep ${name} is ${v}`);
+            console.log(`all packages at ${want}`);'
+
+      - name: Pack
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/npm"
+          mkdir -p "${out}"
+          for pkg in jazz-wasm jazz-napi jazz-tools create-jazz; do
+            pnpm --filter "${pkg}" pack --pack-destination "${out}"
+          done
+          for dir in crates/jazz-napi/npm/*/; do
+            npm pack "${dir}" --pack-destination "${out}"
+          done
+          JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
+            node dev/artifacts/rn-packages.mjs pack "${out}"
+          ls -la "${out}"
+
+      # publish-jazz-tools-alpha.yml's packed checks, on the packed files.
+      - name: Check the tarballs
+        working-directory: ${{ runner.temp }}/npm
+        run: |
+          set -euo pipefail
+          wasm="jazz-wasm-${VERSION}.tgz"
+          tar -tf "${wasm}" > wasm.txt
+          for f in pkg/jazz_wasm_bg.wasm pkg/jazz_wasm.js pkg/jazz_wasm.d.ts \
+            durable-object/pkg/jazz_wasm_do_bg.wasm durable-object/pkg/jazz_wasm_do.js \
+            durable-object/index.js durable-object/host.js \
+            backend/index.js backend/pkg/jazz_wasm_backend.js backend/pkg/jazz_wasm_backend_bg.wasm; do
+            grep -qx "package/${f}" wasm.txt || { echo "::error::${wasm} lacks ${f}"; exit 1; }
+          done
+          node "${GITHUB_WORKSPACE}/dev/artifacts/verify-packed-napi.mjs" "jazz-napi-${VERSION}.tgz"
+          for tgz in "jazz-tools-${VERSION}.tgz" "create-jazz-${VERSION}.tgz" "jazz-napi-${VERSION}.tgz"; do
+            tar -xOf "${tgz}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);for(const field of ["dependencies","optionalDependencies","peerDependencies"]){for(const [name,version] of Object.entries(p[field]||{})){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`${p.name}: ${field}.${name} uses workspace protocol (${version})`);}}}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
+          done
+          tar -tf "jazz-tools-${VERSION}.tgz" > tools.txt
+          grep -qx "package/dist/dev/inspector-overlay/embedded/embedded.html" tools.txt
+          grep -qx "package/dist/dev/inspector-overlay/embedded/backend.html" tools.txt
+          # Not `tar | grep -q`: under pipefail, grep's early exit makes tar
+          # fail with SIGPIPE once the file outgrows the pipe buffer.
+          tar -xOf "jazz-tools-${VERSION}.tgz" package/dist/backend/inspector-ui-files.js > inspector-ui-files.js
+          grep -Fq '"backend.html":' inspector-ui-files.js
+          tar -tf "create-jazz-${VERSION}.tgz" > create.txt
+          grep -qx "package/bin/create-jazz.js" create.txt
+          grep -qx "package/dist/index.js" create.txt
+          rm -f wasm.txt tools.txt create.txt inspector-ui-files.js
+          # The RN receipt names tarballs by the absolute path they were packed
+          # to; consumers resolve them next to rn-packages.json.
+          node -e '
+            const fs = require("fs"), path = require("path");
+            const receipt = JSON.parse(fs.readFileSync("rn-packages.json", "utf8"));
+            for (const entry of receipt) entry.tarball = path.basename(entry.tarball);
+            fs.writeFileSync("rn-packages.json", JSON.stringify(receipt, null, 2) + "\n");'
+          sha256sum *.tgz > NPM-SHA256SUMS
+          cat NPM-SHA256SUMS
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-npm
+          path: ${{ runner.temp }}/npm/*
+          if-no-files-found: error

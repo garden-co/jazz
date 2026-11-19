@@ -153,12 +153,15 @@ export const jazz = createJazz({
 
 <include>../../../partials/main-backend-config.mdx</include>
 
+## Websocket hibernation
+
+Open WebSockets keep the object awake by default. If you want your Jazz core to hibernate when inactive (even when there are WebSockets connected), pass the `lifecycle: "hibernate"` option to the `durableObjects()` store. On wake, the core restores live query watches. Each subscription update will send its full current result on its first matching change.
+
 ## What a Durable Object core doesn't do yet
 
 - **Transactions run in your backend**, as with every core: the core never holds one open between
   calls.
 - **No HTTP-stream fallback** between your backend and the core: they talk over WebSockets.
-- **Sockets keep the object awake** while they are open (no WebSocket hibernation yet).
 - **In a Worker, only `durableObjects()` stores** run: `sqlite()` and `memory()` run their core in
   the backend's process, which a Worker can't. The Inspector's query explanations aren't available
   there yet.

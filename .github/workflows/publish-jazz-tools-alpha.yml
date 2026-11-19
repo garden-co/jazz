@@ -287,6 +287,17 @@ jobs:
               // The release candidate gate passes the release-artifacts run it
               // verified for this commit (the caller checked commit and status).
               if (!/^[0-9]+$/.test(artifactsRunId)) throw new Error(`artifacts_run_id must be a run ID, got ${artifactsRunId}`);
+              // Supply-chain rule: that run must have built this very commit.
+              const { data: artifactsRun } = await github.rest.actions.getWorkflowRun({
+                owner,
+                repo,
+                run_id: Number(artifactsRunId),
+              });
+              const producer = (artifactsRun.path || "").split("@")[0].split("/").pop();
+              if (!["release-artifacts.yml", "release-candidate.yml"].includes(producer))
+                throw new Error(`artifacts_run_id ${artifactsRunId} is a ${producer} run, not release-artifacts or release-candidate`);
+              if (artifactsRun.head_sha !== sha)
+                throw new Error(`artifacts_run_id ${artifactsRunId} built ${artifactsRun.head_sha}, not this commit ${sha}`);
               usePreviewArtifacts = "true";
               previewRunId = artifactsRunId;
               reason = `verifying release-artifacts run ${artifactsRunId}`;
@@ -329,62 +340,76 @@ jobs:
               }
 
               if (treeReuseSafe) {
-                const runsResponse = await github.rest.actions.listWorkflowRuns({
-                  owner,
-                  repo,
-                  workflow_id: "preview-jazz-tools-alpha-release.yml",
-                  branch: releasePrHeadRef,
-                  per_page: 100,
-                });
-                const runs = (runsResponse.data.workflow_runs || []).filter(Boolean);
-
-                const previewRun = runs
-                  .filter(
-                    (run) =>
-                      run.head_sha === releasePrHeadSha &&
-                      run.status === "completed" &&
-                      run.conclusion === "success",
-                  )
-                  .sort(
-                    (a, b) =>
-                      new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-                  )[0];
-
-                if (!previewRun) {
-                  reason = `no successful preview run found for ${releasePrHeadRef}@${releasePrHeadSha}`;
-                } else {
-                  const artifactsResponse = await github.rest.actions.listWorkflowRunArtifacts({
+                // Built once per commit by release-artifacts.yml, dispatched
+                // on the Version Packages head; the standalone preview run is
+                // the fallback for heads from before it.
+                const requiredArtifacts = [
+                  "pkg-jazz-tools",
+                  "pkg-jazz-wasm",
+                  "pkg-jazz-napi",
+                  "pkg-jazz-rn",
+                  "pkg-create-jazz",
+                  "inspector-prebuilt",
+                  "jazz-tools-linux-x64",
+                  "jazz-tools-linux-arm64",
+                ];
+                const misses = [];
+                for (const workflowId of [
+                  "release-artifacts.yml",
+                  "preview-jazz-tools-alpha-release.yml",
+                ]) {
+                  let runs = [];
+                  try {
+                    const runsResponse = await github.rest.actions.listWorkflowRuns({
+                      owner,
+                      repo,
+                      workflow_id: workflowId,
+                      branch: releasePrHeadRef,
+                      head_sha: releasePrHeadSha,
+                      per_page: 100,
+                    });
+                    runs = (runsResponse.data.workflow_runs || []).filter(Boolean);
+                  } catch (error) {
+                    if (error.status !== 404) throw error;
+                  }
+                  const sourceRun = runs
+                    .filter(
+                      (run) =>
+                        run.head_sha === releasePrHeadSha &&
+                        run.event === "workflow_dispatch" &&
+                        run.status === "completed" &&
+                        run.conclusion === "success",
+                    )
+                    .sort(
+                      (a, b) =>
+                        new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+                    )[0];
+                  if (!sourceRun) {
+                    misses.push(`no successful ${workflowId} run for ${releasePrHeadRef}@${releasePrHeadSha}`);
+                    continue;
+                  }
+                  const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
                     owner,
                     repo,
-                    run_id: previewRun.id,
+                    run_id: sourceRun.id,
                     per_page: 100,
                   });
-                  const artifacts = (artifactsResponse.data.artifacts || []).filter(Boolean);
-
-                  const requiredArtifacts = [
-                    "pkg-jazz-tools",
-                    "pkg-jazz-wasm",
-                    "pkg-jazz-napi",
-                    "pkg-jazz-rn",
-                    "pkg-create-jazz",
-                    "inspector-prebuilt",
-                  ];
-
                   const availableArtifacts = new Set(
                     artifacts.filter((artifact) => !artifact.expired).map((artifact) => artifact.name),
                   );
                   const missingArtifacts = requiredArtifacts.filter(
                     (artifactName) => !availableArtifacts.has(artifactName),
                   );
-
                   if (missingArtifacts.length > 0) {
-                    reason = `preview run ${previewRun.id} is missing artifacts: ${missingArtifacts.join(", ")}`;
-                  } else {
-                    usePreviewArtifacts = "true";
-                    previewRunId = String(previewRun.id);
-                    reason = `reusing preview artifacts from run ${previewRun.id} for PR #${releasePrNumber}`;
+                    misses.push(`${workflowId} run ${sourceRun.id} is missing artifacts: ${missingArtifacts.join(", ")}`);
+                    continue;
                   }
+                  usePreviewArtifacts = "true";
+                  previewRunId = String(sourceRun.id);
+                  reason = `reusing ${workflowId} artifacts from run ${sourceRun.id} for PR #${releasePrNumber}`;
+                  break;
                 }
+                if (usePreviewArtifacts !== "true") reason = misses.join("; ");
               }
             }
 
@@ -407,6 +432,8 @@ jobs:
     with:
       # Alpha releases publish jazz-rn, unlike an ordinary pkg.pr.new preview.
       include_rn: true
+      # What ships is also built without cache, and must match.
+      reproduce_ios_relay: true
 
   publish-npm:
     name: Publish npm alpha
@@ -688,6 +715,11 @@ jobs:
           tar -tf "${TARBALL}" | grep -q "package/durable-object/pkg/jazz_wasm_do.js"
           tar -tf "${TARBALL}" | grep -q "package/durable-object/index.js"
           tar -tf "${TARBALL}" | grep -q "package/durable-object/host.js"
+          # `jazz-wasm/backend`: what a backend's `createJazz` runs on in a Worker.
+          echo "backend files: $(tar -tf "${TARBALL}" | grep -c "package/backend/")"
+          tar -tf "${TARBALL}" | grep -q "package/backend/pkg/jazz_wasm_backend_bg.wasm"
+          tar -tf "${TARBALL}" | grep -q "package/backend/pkg/jazz_wasm_backend.js"
+          tar -tf "${TARBALL}" | grep -q "package/backend/index.js"
 
       - name: Verify packed jazz-napi payload
         run: |

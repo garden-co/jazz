@@ -207,6 +207,194 @@ fn ids(db: &Db, identity: Option<AuthorSubject>) -> Vec<RowUuid> {
     ids
 }
 
+/// Alice keeps the same upstream while the server loses its watches. Two rooms
+/// leave her filtered read during sleep. Only the room her other read holds stays.
+#[test]
+fn restored_reads_replace_holds_on_the_same_link() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let client = open(1, alice());
+    for n in 0..2 {
+        server
+            .seed_settled_mergeable_for_bootstrap(
+                "rooms",
+                id(1, n),
+                AuthorSubject::SYSTEM,
+                cells(&[("name", Value::String("open".into()))]),
+            )
+            .unwrap();
+    }
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let side = |out, inbound| {
+        Box::new(Pipe {
+            out,
+            inbound,
+            shipped: None,
+            resumes: None,
+        })
+    };
+    let _link = block_on(client.connect_upstream(side(up.clone(), down.clone())));
+    let accept = || {
+        server
+            .accept_subscriber(side(down.clone(), up.clone()), alice())
+            .unwrap()
+    };
+    let original = accept();
+    let saved = Rc::new(RefCell::new(Vec::new()));
+    let regs = saved.clone();
+    server.observe_subscriber_registrations(
+        original,
+        Rc::new(move |message| regs.borrow_mut().push(message.clone())),
+        false,
+    );
+    let rooms = client.prepare_query(&Query::from("rooms")).unwrap();
+    let local = || {
+        block_on(client.all(
+            &rooms,
+            ReadOpts {
+                tier: ReadTier::LocalOnly,
+                ..Default::default()
+            },
+        ))
+        .unwrap()
+        .iter()
+        .map(|r| r.row_uuid())
+        .collect::<Vec<_>>()
+    };
+    let subscribe = |column, value| {
+        let q = client
+            .prepare_query(&Query::from("rooms").filter(eq(col(column), lit(value))))
+            .unwrap();
+        block_on(client.subscribe(&q, Default::default())).unwrap()
+    };
+    let _by_name = subscribe("name", Value::String("open".into()));
+    let _by_id = subscribe("id", Value::Uuid(id(1, 0).0));
+    pump(&server, &client);
+    assert_eq!(local().len(), 2);
+    server.disconnect_subscriber(original);
+    for n in 0..2 {
+        block_on(server.update(
+            "rooms",
+            id(1, n),
+            cells(&[("name", Value::String("closed".into()))]),
+            Default::default(),
+        ))
+        .unwrap();
+    }
+    let restored = accept();
+    server.observe_subscriber_registrations(restored, Rc::new(|_| {}), true);
+    server.finish_subscriber_restore(restored);
+    up.borrow_mut().extend(saved.take());
+    pump(&server, &client);
+    assert_eq!(local(), [id(1, 0)]);
+}
+
+/// Alice's saved read stays silent on an unrelated write. Removing her membership
+/// opens it with an empty snapshot; restoring access then reaches her on the same link.
+#[test]
+fn dormant_read_opens_on_a_policy_change() {
+    let server = seeded(2);
+    let client = open(1, alice());
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let side = |out, inbound| {
+        Box::new(Pipe {
+            out,
+            inbound,
+            shipped: None,
+            resumes: None,
+        })
+    };
+    let _link = block_on(client.connect_upstream(side(up.clone(), down.clone())));
+    let accept = || {
+        server
+            .accept_subscriber(side(down.clone(), up.clone()), alice())
+            .unwrap()
+    };
+    let original = accept();
+    let saved = Rc::new(RefCell::new(Vec::new()));
+    let regs = saved.clone();
+    server.observe_subscriber_registrations(
+        original,
+        Rc::new(move |m| regs.borrow_mut().push(m.clone())),
+        false,
+    );
+    let query = client.prepare_query(&Query::from("messages")).unwrap();
+    let _stream = block_on(client.subscribe(&query, Default::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(ids(&client, None).len(), 2);
+    server.disconnect_subscriber(original);
+    let restored = accept();
+    server.observe_subscriber_registrations(restored, Rc::new(|_| {}), true);
+    let regs = saved.take();
+    let read_id = regs
+        .iter()
+        .find_map(|m| match m {
+            SyncMessage::Read { id, .. } => Some(*id),
+            _ => None,
+        })
+        .unwrap();
+    up.borrow_mut().extend(regs);
+    let tick = || {
+        for _ in 0..5 {
+            block_on(server.tick()).unwrap();
+        }
+    };
+    let openings = || {
+        down.borrow()
+            .iter()
+            .filter(|m| matches!(m, SyncMessage::ReplaceHolds { id, .. } if *id == read_id))
+            .count()
+    };
+    block_on(server.tick()).unwrap();
+    server.finish_subscriber_restore(restored);
+    tick();
+    assert_eq!(openings(), 0);
+    assert!(!down.borrow().iter().any(|m| matches!(
+        m,
+        SyncMessage::Rows { .. } | SyncMessage::Settled { .. } | SyncMessage::Holds { .. }
+    )));
+    // A fresh subscriber to the exact same query must still open immediately.
+    let other = open(2, alice());
+    let (client_side, server_side, _) = pipe();
+    let _other_link = block_on(other.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    let q = other.prepare_query(&Query::from("messages")).unwrap();
+    let _other_stream = block_on(other.subscribe(&q, Default::default())).unwrap();
+    pump(&server, &other);
+    assert_eq!(ids(&other, None).len(), 2);
+    assert_eq!(openings(), 0);
+    let before = server.fanout_stats().woken;
+    block_on(server.insert(
+        "stickers",
+        cells(&[("body", Value::String("star".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    tick();
+    assert_eq!(server.fanout_stats().woken, before);
+    assert_eq!(openings(), 0);
+    let membership = |member: String| {
+        block_on(server.update(
+            "memberships",
+            id(2, 0),
+            cells(&[("member", Value::String(member))]),
+            Default::default(),
+        ))
+        .unwrap()
+    };
+    membership("bob".into());
+    tick();
+    assert_eq!(openings(), 1);
+    pump(&server, &client);
+    assert!(ids(&client, None).is_empty());
+    membership(subject());
+    tick();
+    assert_eq!(openings(), 0);
+    pump(&server, &client);
+    assert_eq!(ids(&client, None).len(), 2);
+}
+
 #[test]
 fn a_resumed_subscription_ships_only_what_changed_and_converges() {
     let server = open(0, AuthorSubject::SYSTEM);

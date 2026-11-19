@@ -224,7 +224,8 @@ fn one_big_delta_to_a_reader_that_keeps_up_is_delivered_as_it_is() {
     );
     apply(&mut erin);
     let import = |from: usize| {
-        block_on(store.transaction(async |tx| {
+        block_on(async {
+            let tx = store.mergeable_tx().await?;
             for n in from..from + 40 {
                 tx.insert(
                     "notes",
@@ -240,8 +241,8 @@ fn one_big_delta_to_a_reader_that_keeps_up_is_delivered_as_it_is() {
                 )
                 .await?;
             }
-            Ok(())
-        }))
+            tx.commit().await
+        })
         .unwrap();
     };
     import(0);

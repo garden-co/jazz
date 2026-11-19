@@ -625,15 +625,33 @@ fn sqlite_rolling_back_an_append_keeps_the_committed_value() {
         block_on(db.append_value("docs", row(1), "body", more.clone().into_bytes())).unwrap();
         expected.push_str(&more);
     }
-    let failed: Result<((), _), _> = block_on(db.transaction(async |_| {
-        db.append_value("docs", row(1), "body", b"[lost]".to_vec())
+    let end = expected.len() as u64;
+    let batch = OpenTransactionId::new();
+    let failed: Result<(), jazz::db::Error> = block_on(async {
+        db.begin_mergeable(batch).await?;
+        db.tx_ref(batch)
+            .update_with_large_value_mutations(
+                "docs",
+                row(1),
+                BTreeMap::new(),
+                vec![LargeValueUpdate::Splice {
+                    column: "body".into(),
+                    within: LargeValueUpdatePage::TextUtf8 { from: end, to: end },
+                    splices: vec![LargeValueUpdateSplice {
+                        at: 0,
+                        delete: 0,
+                        insert: b"[lost]".to_vec(),
+                    }],
+                }],
+                Default::default(),
+            )
             .await?;
         db.rollback_sqlite_transaction_for_test();
         Err(jazz::db::Error::new(
             jazz::db::ErrorCode::Storage,
             "disk I/O error".to_owned(),
         ))
-    }));
+    });
     assert!(failed.is_err());
     assert_eq!(body(&db, 1), expected);
 }

@@ -1,0 +1,11 @@
+.rc/
+.reg/
+.results/
+.work/
+node_modules/
+data/
+*.log
+.expo/
+dist/
+.next/
+.build/

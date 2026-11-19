@@ -54,8 +54,8 @@ pub(crate) fn begin_savepoint(conn: &Storage, name: &str) -> Result<(), Error> {
 
 /// The typed refusal for what managed storage (a Durable Object's SQL)
 /// cannot do: keep savepoint `name` open past the call that opened it. A
-/// transaction handle's staged writes and a callback transaction's
-/// savepoint stay open between calls; on managed storage both are refused.
+/// transaction handle's staged writes stay open between calls; on managed
+/// storage they are refused.
 pub(crate) fn not_on_managed_storage(name: &str) -> Error {
     Error::new(
         ErrorCode::Query,

@@ -10,7 +10,11 @@
 //
 // -PcargoProfile=<profile> picks the Cargo profile (default release-mobile,
 // the size-oriented one jazz-rn ships); -PandroidAbis=arm64-v8a,… narrows the
-// ABIs.
+// ABIs. -PprebuiltJniLibs=<dir> packages <dir>/<abi>/libjazz_ffi.so, built
+// elsewhere by this same cargo-ndk command (attach-language-artifacts.yml
+// builds one ABI per job), instead of running cargo-ndk; -PuniffiBindings=<dir>
+// takes the Kotlin bindings generateUniffi made from such a build's
+// arm64-v8a library. With both, the build needs no Rust toolchain.
 
 plugins {
     id("com.android.library") version "8.13.0"
@@ -65,8 +69,16 @@ val abis = ((findProperty("androidAbis") as String?) ?: "arm64-v8a,armeabi-v7a,x
 val jniLibsOut = layout.buildDirectory.dir("jniLibs")
 val uniffiOut = layout.buildDirectory.dir("generated/uniffi")
 
+val prebuiltJniLibs = (findProperty("prebuiltJniLibs") as String?)?.let { file(it) }
+val uniffiBindings = (findProperty("uniffiBindings") as String?)?.let { file(it) }
+if (uniffiBindings != null) {
+    check(uniffiBindings.resolve("uniffi/jazz_ffi/jazz_ffi.kt").isFile) { "-PuniffiBindings=$uniffiBindings lacks uniffi/jazz_ffi/jazz_ffi.kt" }
+}
+
 val cargoNdkFfi by tasks.registering(Exec::class) {
     description = "Cross-compiles crates/jazz-ffi for the Android ABIs with cargo-ndk."
+    // Skipped (and replaced by copyPrebuiltJniLibs) with -PprebuiltJniLibs.
+    enabled = prebuiltJniLibs == null
     workingDir = repo
     outputs.dir(jniLibsOut)
     outputs.upToDateWhen { false } // cargo decides what to rebuild
@@ -79,11 +91,25 @@ val cargoNdkFfi by tasks.registering(Exec::class) {
     )
 }
 
+// -PprebuiltJniLibs: exactly <abi>/libjazz_ffi.so for each ABI, into the
+// same directory cargo-ndk writes, so the AAR packs the same layout.
+val copyPrebuiltJniLibs by tasks.registering(Sync::class) {
+    description = "Copies the prebuilt jazz-ffi libraries (-PprebuiltJniLibs) into jniLibs."
+    enabled = prebuiltJniLibs != null
+    if (prebuiltJniLibs != null) {
+        val missing = abis.filterNot { prebuiltJniLibs.resolve("$it/libjazz_ffi.so").isFile }
+        check(missing.isEmpty()) { "-PprebuiltJniLibs=$prebuiltJniLibs lacks libjazz_ffi.so for $missing" }
+        from(prebuiltJniLibs) { abis.forEach { include("$it/libjazz_ffi.so") } }
+    }
+    into(jniLibsOut)
+}
+
 // The bindings come from the very library the AAR ships (the first ABI's),
 // so they always match its UniFFI scaffolding.
 val generateUniffi by tasks.registering(Exec::class) {
     description = "Generates jazz-ffi's Kotlin bindings with uniffi-bindgen."
-    dependsOn(cargoNdkFfi)
+    dependsOn(cargoNdkFfi, copyPrebuiltJniLibs)
+    enabled = uniffiBindings == null
     workingDir = repo
     val lib = jniLibsOut.get().file("${abis.first()}/libjazz_ffi.so").asFile
     inputs.file(lib)
@@ -99,7 +125,7 @@ android.sourceSets.getByName("main") {
     kotlin.srcDirs(
         jvmLibrary.resolve("src/main/kotlin"),
         jvmLibrary.resolve("src/ffi/kotlin"),
-        uniffiOut,
+        uniffiBindings ?: uniffiOut,
     )
     jniLibs.srcDir(jniLibsOut)
 }

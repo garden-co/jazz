@@ -146,6 +146,19 @@ jobs:
           PREVIEW_RUN_ID: ${{ inputs.preview_run_id }}
         run: node dev/scripts/await-release-preview.mjs
 
+      # Supply-chain rule: a caller's artifacts run must have built this very
+      # commit. (A looked-up or pinned preview run is checked the same way by
+      # await-release-preview.mjs.)
+      - name: Require the given artifacts run to have built this commit
+        if: inputs.artifacts_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ inputs.artifacts_run_id }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          WORKFLOWS: release-artifacts.yml,release-candidate.yml
+        run: node dev/scripts/require-run-commit.mjs
+
       # Not actions/download-artifact: a GitHub artifact-service "Server Error"
       # failed a release gate here once (RC 44567203253), and it doesn't retry.
       - name: Download the release preview's packages
