@@ -46,7 +46,7 @@ body() {
   local ran; ran=$(sed -n '/^=== core and inventory after/,/^=== wrong-region/p' "$L" | grep -oE 'core running=[^ ]+' | cut -d= -f2)
   [ "$ran" = "$(ag_version)" ] && echo "PASS t4 production core runs $ran" || echo "REVIEW t4 couldn't confirm the core's version (read: '${ran:-nothing}')"
   # run-t4.sh stops at a failed required step (build, deploy, playwright) without always printing a FAIL line.
-  if [ $rc -ne 0 ]; then echo "FAIL t4 stopped at step: $(grep '^=== ' "$AG_RESULTS/t4-full.log" | tail -1 | sed 's/^=== //') (exit $rc)"; grep -E '^(deploy|next build|jazz-tools generate --check) exit code: [1-9]' "$AG_RESULTS/t4-full.log" | sed 's/^/FAIL t4 /'; fi
+  if [ $rc -ne 0 ]; then echo "FAIL t4 stopped at step: $(grep '^=== ' "$AG_RESULTS/t4-full.log" | grep -vE '^=== (teardown|end)' | tail -1 | sed 's/^=== //') (exit $rc)"; grep -E '^(deploy|next build|jazz-tools generate --check) exit code: [1-9]' "$AG_RESULTS/t4-full.log" | sed 's/^/FAIL t4 /'; fi
 }
 ag_job t4 body; rc=$?
 # On failure, show the step logs run-t4.sh keeps in $T4_WORK (they're also uploaded as the t4-logs artifact).

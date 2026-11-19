@@ -22,6 +22,11 @@ export const jazz = createJazz({
     namespace: ({ environment, branch }) =>
       process.env.T4_NAMESPACE ||
       (environment === "production" ? "production" : perBranch(branch) || "cli-previews"),
+    // T4_CORE_TARBALL: a dry run has no GitHub release to fetch the core from, so the gate's preview serves the RC's
+    // @garden-co/jazz-napi-linux-x64-gnu tarball from its own public/ dir.
+    coreTarballUrl: process.env.T4_CORE_TARBALL
+      ? `https://${process.env.VERCEL_URL}/${process.env.T4_CORE_TARBALL}`
+      : undefined,
   }),
   publicUrl: [
     process.env.VERCEL_PROJECT_PRODUCTION_URL,
