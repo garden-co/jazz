@@ -5,7 +5,8 @@
 //
 //   node dev/scripts/publish-crates.mjs --list       the crates, in order
 //   node dev/scripts/publish-crates.mjs --verify     cargo package, every crate together
-//   node dev/scripts/publish-crates.mjs --dry-run    cargo publish --dry-run, every crate together
+//   node dev/scripts/publish-crates.mjs --dry-run [--no-verify]
+//                                                    cargo publish --dry-run, every crate together
 //   node dev/scripts/publish-crates.mjs --plan       which auth each unpublished crate needs
 //   node dev/scripts/publish-crates.mjs --publish [--stop-before-oidc]
 //                                                    publish each crate not yet on crates.io
@@ -143,7 +144,14 @@ async function main() {
       cargo(["package", "--allow-dirty", ...packages]);
       return;
     case "--dry-run":
-      cargo(["publish", "--dry-run", "--allow-dirty", ...packages]);
+      // --no-verify: packaging only, when --verify already ran (release-publish.yml).
+      cargo([
+        "publish",
+        "--dry-run",
+        "--allow-dirty",
+        ...(process.argv.includes("--no-verify") ? ["--no-verify"] : []),
+        ...packages,
+      ]);
       return;
     case "--plan":
     case "--publish":
