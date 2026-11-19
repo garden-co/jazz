@@ -48,6 +48,10 @@ inputs:
     description: "Mount Blacksmith's sticky disk for sccache. Disable on persistent self-hosted runners."
     required: false
     default: "true"
+  sccache-commit:
+    description: "Commit the sccache sticky disk after the job ('true', 'false', 'on-change', 'if-missing'). 'false' keeps the job a read-only consumer, and its post step off the critical path."
+    required: false
+    default: "true"
   sccache-s3:
     description: "Chain the job-local sccache to the shared S3 tier (disk,s3). Only for callers that already authenticated and exported the trusted S3 configuration, as ci-suite.yml's trusted jobs do."
     required: false
@@ -147,10 +151,11 @@ runs:
 
     - name: Mount sccache sticky disk
       if: inputs.sccache == 'true' && inputs.sccache-sticky-disk == 'true' && runner.os == 'Linux' && steps.provisioned-tools.outputs.active != 'true'
-      uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
+      uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1.7.2
       with:
         key: ${{ inputs.sccache-key != '' && inputs.sccache-key || format('sccache-{0}-{1}-v1', env.CACHE_SCOPE_REPOSITORY_ID, runner.os) }}
         path: ${{ runner.temp }}/sccache
+        commit: ${{ inputs.sccache-commit }}
 
     - name: Export sccache environment
       if: inputs.sccache == 'true' && runner.os == 'Linux'
