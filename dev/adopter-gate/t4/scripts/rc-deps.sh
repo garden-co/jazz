@@ -6,8 +6,8 @@ source "$(dirname "$0")/env.sh"
 APP=$(cd "$1" && pwd); V=$2
 BASE=${T4_RELEASE_BASE:-https://github.com/garden-co/jazz/releases/download/v$V}
 DL="$T4_WORK/dl-$V"; rm -rf "$DL"; mkdir -p "$DL"
-for n in $T4_PACKAGES; do curl -sSfL -o "$DL/$n-$V.tgz" "$BASE/$n-$V.tgz" || { echo "FAIL download $n"; exit 1; }; done
-curl -sSfL -o "$DL/NPM-SHA256SUMS" "$BASE/NPM-SHA256SUMS" || { echo "FAIL download NPM-SHA256SUMS"; exit 1; }
+for n in $T4_PACKAGES; do curl -sSfL --retry 5 --retry-all-errors -o "$DL/$n-$V.tgz" "$BASE/$n-$V.tgz" || { echo "FAIL download $n"; exit 1; }; done
+curl -sSfL --retry 5 --retry-all-errors -o "$DL/NPM-SHA256SUMS" "$BASE/NPM-SHA256SUMS" || { echo "FAIL download NPM-SHA256SUMS"; exit 1; }
 (cd "$DL" && grep -E "^[0-9a-f]{64}  ($(echo $T4_PACKAGES | sed 's/ /|/g'))-$V\.tgz$" NPM-SHA256SUMS | sha256sum -c) || { echo "FAIL checksums"; exit 1; }
 echo "PASS checksums"
 mkdir -p "$DL/x" && tar -xzf "$DL/jazz-tools-$V.tgz" -C "$DL/x"
@@ -29,6 +29,6 @@ overrides:
 """
 open(f"{app}/pnpm-workspace.yaml", "w").write(w)
 PY
-(cd "$APP" && pnpm install --no-frozen-lockfile > "$T4_WORK/install.log" 2>&1) || { echo "FAIL pnpm install (see $T4_WORK/install.log)"; exit 1; }
+(cd "$APP" && for i in 1 2 3; do pnpm install --no-frozen-lockfile > "$T4_WORK/install.log" 2>&1 && exit 0; sleep $((i * 5)); done; exit 1) || { echo "FAIL pnpm install (see $T4_WORK/install.log)"; exit 1; }
 other=$(grep -E "^  '?(@garden-co/jazz-napi-linux-x64-gnu|jazz-(tools|wasm|napi))@" "$APP/pnpm-lock.yaml" | grep -c -v -- "-$V.tgz")
 [ "$other" = 0 ] && echo "PASS lockfile: every jazz package on $V" || { echo "FAIL lockfile: $other jazz entries not on $V"; exit 1; }

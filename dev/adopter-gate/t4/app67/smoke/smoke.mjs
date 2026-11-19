@@ -23,11 +23,23 @@ const step = (name, ok, detail = "") => {
 };
 
 async function browser() {
+  const bypass = process.env.T4_VERCEL_BYPASS_SECRET; // Vercel preview protection (Protection Bypass for Automation)
   const ctx = await chromium.launchPersistentContext(mkdtempSync(join(tmpdir(), "smoke-")), {
     headless: true,
+    ...(bypass
+      ? {
+          extraHTTPHeaders: {
+            "x-vercel-protection-bypass": bypass,
+            "x-vercel-set-bypass-cookie": "true",
+          },
+        }
+      : {}),
   });
   const page = ctx.pages()[0] ?? (await ctx.newPage());
-  page.on("pageerror", (e) => console.log("  pageerror:", String(e).slice(0, 300)));
+  page.on("pageerror", (e) => {
+    console.log("  pageerror:", String(e).slice(0, 300));
+    if (String(e).includes("invalid_link_challenge")) page.__linkErrs = (page.__linkErrs ?? 0) + 1;
+  });
   return { ctx, page };
 }
 async function me(page, want = () => true, timeout = 60000) {
@@ -70,13 +82,21 @@ async function write(page, kind, text) {
   const err = await page.textContent('[data-testid="err"]', { timeout: 2000 }).catch(() => "");
   return { ok, err };
 }
+// No retries: a sign-up or sign-in that fails is a FAIL (Anselm: flakes must fail until fixed). jazz#5553 (on
+// vercel() a guest-link challenge is signed per function instance) shows up as "pageerror: … invalid_link_challenge".
 async function signUp(page, email, password = PW) {
+  return signUpOnce(page, email, password);
+}
+async function signIn(page, email, password) {
+  return signInOnce(page, email, password);
+}
+async function signUpOnce(page, email, password) {
   await page.fill('[data-testid="email"]', email);
   await page.fill('[data-testid="password"]', password);
   await page.click('[data-testid="sign-up"]');
   return me(page, (j) => j.kind === "backend");
 }
-async function signIn(page, email, password) {
+async function signInOnce(page, email, password) {
   await page.waitForSelector('[data-testid="sign-in"]', { timeout: 60000 });
   await page.fill('[data-testid="email"]', email);
   await page.fill('[data-testid="password"]', password);
@@ -172,7 +192,9 @@ try {
       const s = await signUp(S.page, process.env.BASELINE_RED_EMAIL, BASELINE_PW);
       const t1 = await write(S.page, "team", "red-team-63");
       const t2 = await write(S.page, "private", "red-private-63");
-      console.log(`SEEDED baseline user ${process.env.BASELINE_RED_EMAIL}: ${s?.claims?.team === "red" && t1.ok && t2.ok ? "ok" : "FAILED"}`);
+      console.log(
+        `SEEDED baseline user ${process.env.BASELINE_RED_EMAIL}: ${s?.claims?.team === "red" && t1.ok && t2.ok ? "ok" : "FAILED"}`,
+      );
       await S.ctx.close();
       await R.page.goto(BASE);
       await me(R.page);

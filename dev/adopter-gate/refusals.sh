@@ -12,7 +12,7 @@ body() {
   local CLI=$W/cli/node_modules/jazz-tools/bin/jazz-tools.js
   for spec in "t7-enum-cases:tickets.kind" "t2-computed:computed columns and transforms"; do
     local d=${spec%%:*} pat=${spec#*:}
-    ( cd "$W/$d" && pnpm install > install.log 2>&1 || echo "FAIL $d install (alpha.65 deps)"
+    ( cd "$W/$d" && ag_retry 3 pnpm install > install.log 2>&1 || echo "FAIL $d install (alpha.65 deps)"
       local before; before=$(find . -path ./node_modules -prune -o -type f ! -name '*.log' -print0 | sort -z | xargs -0 sha256sum | sha256sum)
       node "$CLI" upgrade > upgrade.log 2>&1; local rc=$?
       local after; after=$(find . -path ./node_modules -prune -o -type f ! -name '*.log' -print0 | sort -z | xargs -0 sha256sum | sha256sum)

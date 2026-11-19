@@ -3,15 +3,16 @@
 # users 8791), then one client language against it. Usage: t9.sh ts|rust|go|kotlin|swift
 # StagePlan's app files and the client examples come from this checkout (the RC's commit in CI).
 . "$(dirname "$0")/lib.sh"
-REPO=$(cd "$AG/../.." && pwd); SP=$REPO/examples/stage-plan/apps
+REPO=${AG_REPO:-$(cd "$AG/../.." && pwd)}; SP=$REPO/examples/stage-plan/apps   # AG_REPO: a checkout of the RC commit (CI: rc-src/)
 APP_ID=d1e92c0e-2b64-5e3b-9684-a6fb3205dc2b   # what the TS client derives from http://127.0.0.1:8780/jazz
 backend() {
-  local W=$AG/.work/t9; rm -rf "$W"; cp -r "$AG/t9" "$W"; cd "$W" && use_rc_pnpm || return 1
+  local W=$AG/.work/t9; rm -rf "$W"; cp -r "$AG/t9" "$W" && cd "$W" || { echo "FAIL t9 setup: copy to $W"; return 1; }
+  use_rc_pnpm || return 1
   mkdir -p stageplan && cp "$SP"/react-localfirst/jazz.{app.json,permissions.json,generated.ts} stageplan/   # resolve jazz-tools from the RC install
   kill_port 8780 8790 8791
-  OIDC_PORT=8790 setsid npx tsx oidc.ts > oidc-w.log 2>&1 < /dev/null &
-  OIDC_PORT=8791 setsid npx tsx oidc.ts > oidc-u.log 2>&1 < /dev/null &
-  APP_DIR=$W/stageplan setsid npx tsx server.ts > server.log 2>&1 < /dev/null &
+  ag_bg oidc-w.log env OIDC_PORT=8790 npx tsx oidc.ts
+  ag_bg oidc-u.log env OIDC_PORT=8791 npx tsx oidc.ts
+  ag_bg server.log env APP_DIR="$W/stageplan" npx tsx server.ts
   wait_port 8790 && wait_port 8791 && wait_port 8780 && echo "PASS t9 backend up on the RC ($(node -p 'require("jazz-tools/package.json").version'))" \
     || { echo "FAIL t9 backend start"; tail -5 server.log; return 1; }
   for u in user-a user-b; do curl -sf -X POST "http://127.0.0.1:8780/account/$u" >/dev/null || echo "FAIL t9 createAccountFor $u"; done   # forUser needs accounts
@@ -62,7 +63,8 @@ s = s.replace('implementation("tools.jazz:jazz-kotlin")', f'''implementation(fil
 s = re.sub(r'tasks\.named<JavaExec>\("run"\).*\n', '', s); open(p, 'w').write(s)
 PY
         else echo "note: no release jar; building jazz-kotlin from source"; fi
-        ( cd "$K" && gradle installDist --no-daemon -q ) > kt-build.log 2>&1 || { echo "FAIL t9 kotlin build"; tail -8 kt-build.log; return; }
+        ( cd "$K" && gradle installDist --no-daemon -q ) > kt-build.log 2>&1 \
+          || { echo "FAIL t9 kotlin build"; sed -n '/What went wrong/,/^\* Try/p' kt-build.log | head -25; tail -4 kt-build.log; return; }
         KT_CLI=$K/build/install/stage-plan-kotlin-cli/bin/stage-plan-kotlin-cli APP_ID=$APP_ID ./run-lang-clients.sh 2>&1 | grep -E "^(PASS|FAIL)" ;;
     swift) [ -f "$AG_TGZ/libjazz_ffi-linux-x86_64.tar.gz" ] || { echo "FAIL t9 swift: no libjazz_ffi-linux-x86_64.tar.gz in the RC inputs"; return; }
         local L=$W/ffi; mkdir -p "$L" && tar xzf "$AG_TGZ/libjazz_ffi-linux-x86_64.tar.gz" -C "$L"
@@ -76,6 +78,6 @@ PY
         LD_LIBRARY_PATH=$L${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} SW_BIN=$SWD/.build/debug/stage-plan-swift APP_ID=$APP_ID ./run-lang-clients.sh 2>&1 | grep -E "^(PASS|FAIL)" ;;
     *) echo "FAIL unknown language $1" ;;
   esac
-  kill_port 8780 8790 8791
+  ag_kill_bg; kill_port 8780 8790 8791
 }
 ag_job "t9-$1" body "$1"
