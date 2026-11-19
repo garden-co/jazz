@@ -4,10 +4,11 @@
 #   SHA=<commit> VERSION=<version> MODE=<publish|dry-run> [ARTIFACTS_RUN_ID=<id>] [LEGACY_RUN_IDS="<id> <id> …"] \
 #     dev/release-publish/resolve-artifacts.sh
 #
-# Takes the newest successful release-artifacts.yml run that built <sha>
-# itself (head_sha), whose release-manifest names the same commit, tree and
-# version (dev/release-publish/producer-run.mjs). ARTIFACTS_RUN_ID names one
-# run instead of searching; it is held to the same rule.
+# Takes a successful release-artifacts.yml run on `release` or
+# `changeset-release/*` that built <sha>'s tree (a run of <sha> itself first),
+# whose release-manifest names the commit it built, the tree and the version
+# (dev/release-publish/producer-run.mjs). ARTIFACTS_RUN_ID names one run
+# instead of searching; it is held to the same rule.
 #
 # Dry runs only: LEGACY_RUN_IDS names the runs of the
 # existing workflows that hold the same files under their old names (a
@@ -26,34 +27,45 @@ tree="$(gh api "repos/${GH_REPO}/git/commits/${SHA}" --jq .tree.sha)"
 echo "tree=${tree}" >> "${out}"
 echo "release ${VERSION} at ${SHA}, tree ${tree}"
 
-# Supply-chain rule: only a successful release-artifacts.yml run of this
-# repository that built exactly ${SHA} (head_sha), with a release-manifest
-# naming the same commit, tree and version (dev/release-publish/producer-run.mjs).
+# Supply-chain rule (dev/release-publish/producer-run.mjs): a successful
+# release-artifacts.yml run of this repository, on `release` or
+# `changeset-release/*` (push or dispatch), that built a commit with this
+# tree, and whose release-manifest names that commit, tree and version. A run
+# of ${SHA} itself comes first.
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-producer_ok() { # <run id>
-  local dir
+producer_ok() { # <run id> -> prints the run's head_sha when it may be imported
+  local dir head head_tree
   dir="$(mktemp -d)"
   gh api "repos/${GH_REPO}/actions/runs/$1" > "${dir}/run.json" || return 1
+  head="$(jq -r .head_sha "${dir}/run.json")"
+  head_tree="$(gh api "repos/${GH_REPO}/git/commits/${head}" --jq .tree.sha 2>/dev/null || true)"
   gh run download "$1" -R "${GH_REPO}" -n release-manifest -D "${dir}" >/dev/null 2>&1 ||
-    { echo "run $1: no release-manifest"; return 1; }
-  SHA="${SHA}" TREE="${tree}" VERSION="${VERSION}" GH_REPO="${GH_REPO}" \
-    node "${here}/producer-run.mjs" "${dir}/run.json" "${dir}/manifest.json"
+    { echo "run $1: no release-manifest" >&2; return 1; }
+  SHA="${SHA}" TREE="${tree}" VERSION="${VERSION}" GH_REPO="${GH_REPO}" HEAD_TREE="${head_tree}" \
+    node "${here}/producer-run.mjs" "${dir}/run.json" "${dir}/manifest.json" >&2 || return 1
+  echo "${head}"
 }
 
 candidates=()
 if [ -n "${ARTIFACTS_RUN_ID:-}" ]; then
   candidates=("${ARTIFACTS_RUN_ID}")
-elif runs="$(gh api "repos/${GH_REPO}/actions/workflows/release-artifacts.yml/runs?head_sha=${SHA}&status=success&per_page=50" 2>/dev/null)"; then
-  mapfile -t candidates < <(jq -r --arg sha "${SHA}" '.workflow_runs | sort_by(.created_at) | reverse | .[]
-    | select(.head_sha == $sha) | .id' <<<"${runs}")
+else
+  # Runs of ${SHA} itself, newest first; then the release branches' runs.
+  for query in "head_sha=${SHA}&" "branch=release&" "branch=changeset-release%2Frelease&"; do
+    runs="$(gh api "repos/${GH_REPO}/actions/workflows/release-artifacts.yml/runs?${query}status=success&per_page=50" 2>/dev/null)" || continue
+    mapfile -t -O "${#candidates[@]}" candidates < <(jq -r '.workflow_runs | sort_by(.created_at) | reverse | .[] | .id' <<<"${runs}")
+  done
 fi
+seen=" "
 for run in "${candidates[@]}"; do
-  if producer_ok "${run}"; then
-    echo "release-artifacts run ${run} built ${SHA}: its artifacts, and its inspector-prebuilt"
+  case "${seen}" in *" ${run} "*) continue ;; esac
+  seen="${seen}${run} "
+  if source_sha="$(producer_ok "${run}")"; then
+    echo "release-artifacts run ${run} built ${source_sha} (tree ${tree}): its artifacts, and its inspector-prebuilt"
     {
       echo "mode=release-artifacts"
       echo "run_id=${run}"
-      echo "source_sha=${SHA}"
+      echo "source_sha=${source_sha}"
       echo "inspector_run_id=${run}"
       echo "legacy={}"
     } >> "${out}"
