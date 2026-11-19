@@ -70,6 +70,12 @@ const verdict = {
   jobs: summary,
   sizes,
   timings,
+  // Retries a known flaky bug needed (e.g. t4's smoke, jazz#5553): watch this number grow or shrink across RCs.
+  flaky: Object.entries(jobs).flatMap(([n, ls]) =>
+    ls
+      .filter((l) => /^NOTE .*flaky pass/.test(l))
+      .map((l) => ({ job: n, note: l.replace(/^NOTE /, "") })),
+  ),
   attention: Object.entries(jobs).flatMap(([n, ls]) =>
     ls.filter((l) => !l.startsWith("PASS ")).map((l) => `${n}: ${l}`),
   ),
