@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { enrolledAccountConfig } from "../runtime/testing/account-handle-fixtures.js";
-import { accountRegistryUrl, type AccountDbConfig } from "../accounts/context.js";
+import { accountRegistryUrl } from "../accounts/context.js";
 import { testApp } from "../testing/test-app.js";
 import { NATIVE_RELAY_ABI_V1 } from "jazz-rn";
 import {
@@ -48,7 +48,7 @@ const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
 
 const nativeRelayCapability = Uint8Array.from({ length: 32 }, (_, index) => index);
 
-let selectedConfig: AccountDbConfig;
+let selectedConfig: Awaited<ReturnType<typeof enrolledAccountConfig>>;
 
 async function accountConfig(appId: string, subject = "reader") {
   selectedConfig = await enrolledAccountConfig(appId, subject);
