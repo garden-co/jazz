@@ -984,7 +984,7 @@ fn server_with_history(bundle: &serde_json::Value) -> (jazz::binding_host::Bindi
         DbConfig::new(head.clone(), server_identity).with_migrations(schemas, lenses),
     ))
     .unwrap();
-    server_db.set_authority();
+    server_db.set_authority().unwrap();
     let server = jazz::binding_host::Binding::new(server_db, server_identity, true);
     server
         .insert(

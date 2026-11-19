@@ -105,7 +105,7 @@ fn open_at(schema: JazzSchema, path: &std::path::Path) -> Db {
         FileOptions::default(),
     ))
     .unwrap();
-    db.set_authority();
+    db.set_authority().unwrap();
     db
 }
 

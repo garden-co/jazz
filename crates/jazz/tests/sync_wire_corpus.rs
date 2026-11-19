@@ -1060,7 +1060,7 @@ fn hidden_in_a_view(recorded: &Recorded) {
         .with_clock(|| CORPUS_NOW_MS)
     };
     let server = block_on(Db::open(config(0x61, AuthorSubject::SYSTEM))).unwrap();
-    server.set_authority();
+    server.set_authority().unwrap();
     let selector = |byte: u8| {
         BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
     };

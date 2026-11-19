@@ -137,7 +137,7 @@ fn keep_variant(db: &Db, variant: &str) {
 
 fn store(role: &str) -> crate::fanout_correlation::Store {
     let db = open(schema(), 1);
-    db.set_authority();
+    db.set_authority().unwrap();
     db.set_identity_claims(user(0), claims(role));
     db
 }

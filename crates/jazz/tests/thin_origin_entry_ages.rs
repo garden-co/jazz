@@ -333,7 +333,7 @@ fn an_aged_out_thin_writer_leaves_no_rows_behind() {
     const PHONE: [u8; 16] = bounded(0x7e);
     let path = scratch("nodes");
     let core = block_on(Db::open_at(config(0), &path, FileOptions::default())).unwrap();
-    core.set_authority();
+    core.set_authority().unwrap();
     let t0 = start_clock(&core);
     let replica = open(1);
     let (up, down) = duplex();

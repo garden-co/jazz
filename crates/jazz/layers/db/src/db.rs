@@ -2511,7 +2511,7 @@ impl Db {
     /// global authority (see [`Db::set_authority`]).
     pub async fn open_history_complete(config: DbConfig) -> Result<Self, Error> {
         let db = Self::open(config).await?;
-        db.set_authority();
+        db.set_authority()?;
         Ok(db)
     }
 
@@ -2610,24 +2610,27 @@ impl Db {
     /// still follow it once it is restored. A store that cannot write it
     /// now mints it when it first serves its catalogue, as before.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// On a database opened with encryption hooks
-    /// ([`DbConfig::with_e2ee`]): only clients seal and open encrypted
+    /// Returns a protocol error if the database was opened with encryption
+    /// hooks (`DbConfig::with_e2ee`). Only clients seal and open encrypted
     /// cells, and an authority must store and serve them as they are.
-    pub fn set_authority(&self) {
+    pub fn set_authority(&self) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         #[cfg(feature = "e2ee-client")]
-        assert!(
-            inner.e2ee.is_none(),
-            "a database with encryption hooks cannot serve as the authority"
-        );
+        if inner.e2ee.is_some() {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "a database with encryption hooks cannot serve as the authority",
+            ));
+        }
         inner.authority = true;
         if inner.publishes_catalogue() {
             // A storage failure here surfaces again, with its error, from
             // the first catalogue it serves, which mints it then.
             let _ = inner.namespace();
         }
+        Ok(())
     }
 
     /// Read account founders from `registry` in the checks beside the

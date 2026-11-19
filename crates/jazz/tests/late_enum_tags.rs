@@ -170,7 +170,7 @@ fn a_filter_on_a_variant_tagged_after_it_subscribed_wakes_for_its_rows() {
 #[test]
 fn a_policy_pinned_to_a_variant_tagged_after_it_subscribed_wakes_for_its_rows() {
     let db = open(schema(Some(session_eq("status", &["claims", "role"]))), 1);
-    db.set_authority();
+    db.set_authority().unwrap();
     db.set_identity_claims(
         user(0),
         BTreeMap::from([("\0claims:role".to_owned(), Value::String("archived".into()))]),
@@ -193,7 +193,7 @@ fn results_keyed_by_a_variant_keep_waking_after_its_tag_is_renumbered() {
     let policy = || Some(session_eq("status", &["claims", "role"]));
     let v1 = schema_of(&["todo", "done"], policy());
     let db = open(v1.clone(), 1);
-    db.set_authority();
+    db.set_authority().unwrap();
     let claims = |db: &Db| {
         db.set_identity_claims(
             user(0),
@@ -247,7 +247,7 @@ fn results_keyed_by_a_variant_keep_waking_after_its_tag_is_renumbered() {
 #[test]
 fn an_exists_pinned_to_a_variant_tagged_after_it_subscribed_wakes_for_its_rows() {
     let db = open(flagged(), 1);
-    db.set_authority();
+    db.set_authority().unwrap();
     archived_role(&db);
     keep(&db, "flags", "kind", "archived");
     doc(&db, 0, "todo");
@@ -416,7 +416,7 @@ fn a_filter_on_a_name_that_is_no_variant_is_not_woken_by_other_rows() {
 #[test]
 fn a_policy_pinned_to_a_claim_outside_the_enum_is_not_woken_by_other_rows() {
     let db = open(schema(Some(session_eq("status", &["claims", "role"]))), 1);
-    db.set_authority();
+    db.set_authority().unwrap();
     db.set_identity_claims(
         user(0),
         BTreeMap::from([("\0claims:role".to_owned(), Value::String("admin".into()))]),
@@ -437,7 +437,7 @@ fn a_policy_pinned_to_a_claim_outside_the_enum_is_not_woken_by_other_rows() {
 #[test]
 fn an_exists_pinned_to_a_claim_outside_the_enum_is_not_woken_by_other_flags() {
     let db = open(flagged(), 1);
-    db.set_authority();
+    db.set_authority().unwrap();
     db.set_identity_claims(
         user(0),
         BTreeMap::from([("\0claims:role".to_owned(), Value::String("admin".into()))]),

@@ -728,7 +728,7 @@ fn plaintext_reaches_neither_storage_nor_the_wire() {
     let hooks = Fake::new();
     let alice = client_at(&hooks, &path);
     let server = block_on(Db::open(DbConfig::new(schema(), identity(0)))).unwrap();
-    server.set_authority();
+    server.set_authority().unwrap();
     let (_link, wire) = link(&alice, &server);
     let space = uuid::Uuid::new_v4();
     hooks.hold(space);
@@ -1147,21 +1147,32 @@ fn encrypted_columns_are_only_read_and_written_whole() {
     assert_eq!(bodies(&all(&alice, "notes")), [text(SECRET)]);
 }
 
-/// Contract: a database with encryption hooks never serves as the
-/// authority.
+/// Contract: Alice's database returns a protocol error when asked to
+/// serve as the authority with encryption hooks installed.
 #[test]
-#[should_panic(expected = "cannot serve as the authority")]
 fn a_database_with_hooks_cannot_become_the_authority() {
-    client(&Fake::new()).set_authority();
+    let alice = client(&Fake::new());
+    let error = alice.set_authority().unwrap_err();
+    assert_eq!(error.code, ErrorCode::Protocol);
+    assert_eq!(
+        error.message,
+        "a database with encryption hooks cannot serve as the authority"
+    );
 }
 
-/// Contract: a store opened as the authority never runs with encryption
-/// hooks.
+/// Contract: opening an authority store with encryption hooks returns a
+/// protocol error to the server.
 #[test]
-#[should_panic(expected = "cannot serve as the authority")]
 fn the_authority_cannot_open_with_hooks() {
     let config = DbConfig::new(schema(), identity(0)).with_e2ee(Fake::new());
-    let _ = block_on(Db::open_history_complete(config));
+    let error = block_on(Db::open_history_complete(config))
+        .err()
+        .expect("authority open should be refused");
+    assert_eq!(error.code, ErrorCode::Protocol);
+    assert_eq!(
+        error.message,
+        "a database with encryption hooks cannot serve as the authority"
+    );
 }
 
 fn root(space: uuid::Uuid) -> BTreeMap<String, Value> {
@@ -1170,7 +1181,7 @@ fn root(space: uuid::Uuid) -> BTreeMap<String, Value> {
 
 fn authority() -> Db {
     let server = block_on(Db::open(DbConfig::new(schema(), identity(0)))).unwrap();
-    server.set_authority();
+    server.set_authority().unwrap();
     server
 }
 

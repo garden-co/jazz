@@ -187,7 +187,7 @@ fn an_undecodable_version_decodes_as_unsupported_and_keeps_its_bytes() {
 #[test]
 fn a_store_skips_a_version_it_cannot_read_and_keeps_syncing() {
     let server = open(0);
-    server.set_authority();
+    server.set_authority().unwrap();
     // A version bob lacks and mirrors, beside the one he cannot read.
     block_on(server.admit_schema_with_lenses(with_note(), &[add_note()])).unwrap();
     let bob = open(1);
@@ -448,7 +448,7 @@ fn rows_written_under_a_skipped_version_reach_an_older_replica() {
         .with_migrations(vec![schema()], vec![add_where]),
     ))
     .unwrap();
-    server.set_authority();
+    server.set_authority().unwrap();
     let bob = open(1);
     let (up, down) = jazz::db::duplex();
     let link = block_on(bob.connect_upstream(Box::new(NewerType { inner: up })));
