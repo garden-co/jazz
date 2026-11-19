@@ -193,15 +193,20 @@ export class Encryption {
     const secret = await this.options.accountSecret?.();
     if (secret !== undefined) {
       const hex = toHex(parseSecret(secret));
-      if (status === "active") await this.call("recoveryRegister", { secret: hex });
+      // `automatic`: a retired root of the account secret is not an error
+      // here, so the device still starts.
+      if (status === "active")
+        await this.call("recoveryRegister", { secret: hex, automatic: true });
       else if (status === "awaiting-approval") {
         // A device with no other to approve it recovers with the account
-        // secret; without a registered root there is nothing to recover from.
-        try {
-          status = await this.call<AccountStatus>("recoveryRestore", { secret: hex });
-        } catch {
-          // Stays awaiting approval.
-        }
+        // secret. `null`: nothing to recover from yet (no registered root
+        // or delivery for it), so it stays awaiting approval. Any other
+        // failure (store, database, a refused recovery) is the caller's.
+        const restored = await this.call<AccountStatus | null>("recoveryRestore", {
+          secret: hex,
+          automatic: true,
+        });
+        if (restored !== null) status = restored;
       }
     }
     return status;

@@ -19,6 +19,7 @@ use jazz::e2ee::{
 use jazz::ids::RowUuid;
 use jazz::query::{Operand, Predicate, Query};
 use jazz::records::Value;
+use jazz::tools::deployment::artifact::encryption::equality_column;
 use jazz_e2ee::Zeroizing;
 use jazz_e2ee::agility::StreamWriter;
 use jazz_e2ee::primitives::hash::sha256;
@@ -507,7 +508,9 @@ impl E2eeHooks for Hooks {
                 // Whether a migration supplied this cell, judged on the cell
                 // as stored, before it is opened.
                 let lens_supplied = lens_supplied(site, name, &cell);
-                row.remove_cell(&format!("__e2ee_eq_{name}"));
+                if codec.equality.is_some() {
+                    row.remove_cell(&equality_column(name));
+                }
                 // A stored cell is bytes; a physical null reads like the
                 // empty value, "never written"; anything else no writer
                 // could have sealed.

@@ -2,8 +2,6 @@
 name = "jazz-e2ee"
 version.workspace = true
 edition = "2024"
-# Not published yet: nothing in the published crates depends on it.
-publish = false
 description = "Jazz end-to-end encryption formats and pure-Rust primitives, compatible with the libsodium-based wire formats."
 license.workspace = true
 repository.workspace = true

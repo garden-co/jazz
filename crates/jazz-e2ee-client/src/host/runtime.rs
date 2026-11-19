@@ -14,6 +14,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 use crate::state::{RETRY_FIRST, RETRY_LAST};
 use crate::{
@@ -21,8 +22,9 @@ use crate::{
     PrivateStore, Report,
 };
 use futures::future::LocalBoxFuture;
-use jazz::db::Db;
+use jazz::db::{Db, ErrorCode};
 use jazz::e2ee::SpaceAddress;
+use jazz::tools::public_schema::E2eeDeclarations;
 use jazz_e2ee::OsRandom;
 use jazz_e2ee::protocol::derive::RecoverySecret;
 use jazz_e2ee::protocol::device_account::DeviceAccountIdentity;
@@ -37,8 +39,9 @@ pub struct Options {
     pub app_file: Vec<u8>,
     pub from_bindings: bool,
     /// The device account's secret as 64 hexadecimal characters: the
-    /// runtime keeps only the signing key it derives, for founding the
-    /// account. `None` for an account the app signs in itself.
+    /// runtime derives a signing key to found the account. Native hosts
+    /// also use the secret to register or restore recovery at startup.
+    /// `None` for an account the app signs in itself.
     pub device_account_secret: Option<String>,
     pub app_id: String,
     pub environment: String,
@@ -51,6 +54,31 @@ pub struct Built {
     pub spaces: Value,
     pub client: Rc<E2eeClient>,
     pub reports: Rc<RefCell<VecDeque<String>>>,
+}
+
+/// A native device runtime and its account-secret recovery configuration.
+pub struct NativeBuilt {
+    built: Built,
+    recovery: Option<RecoverySecret>,
+}
+
+impl NativeBuilt {
+    pub fn client(&self) -> &E2eeClient {
+        &self.built.client
+    }
+}
+
+struct NativeReadiness {
+    recovery: RefCell<Option<RecoverySecret>>,
+    result: RefCell<Verification>,
+}
+
+enum Verification {
+    Pending,
+    AwaitingRecovery,
+    Retry(ClientError),
+    Complete,
+    Failed(ClientError),
 }
 
 /// The runtime and what the host keeps beside it.
@@ -73,11 +101,12 @@ pub struct Encryption {
     /// delivery pass again once caught up.
     reconnected: Cell<bool>,
     status: Cell<Option<AccountStatus>>,
+    native: Option<NativeReadiness>,
     last_error: RefCell<Option<String>>,
     /// What the loop is doing or waiting on, for a call that waits on it.
     stage: Cell<&'static str>,
-    /// A wake was asked for the batch that waits (see [`Encryption::wake_if_owed`]).
-    woken: Cell<bool>,
+    /// The send batch for which a wake was last requested.
+    woken_batch: Cell<Option<u64>>,
     gate: Gate,
     /// The loop, polled by the host.
     main: RefCell<Option<LocalBoxFuture<'static, ()>>>,
@@ -124,6 +153,38 @@ pub async fn build(
     account_id: String,
     store: Rc<JsStore>,
 ) -> Result<Built, String> {
+    let declarations = declarations(&options)?;
+    let recovery = options
+        .device_account_secret
+        .as_deref()
+        .map(secret)
+        .transpose()?;
+    build_client(declarations, account_id, store, recovery.as_ref()).await
+}
+
+/// Build a native device runtime that handles account-secret recovery at
+/// startup. When a keyless relay supplies its declarations, the device must
+/// use those same declarations, including the app and environment.
+pub async fn build_native(
+    options: Options,
+    account_id: String,
+    store: Rc<JsStore>,
+    relay_declarations: Option<&E2eeDeclarations>,
+) -> Result<NativeBuilt, String> {
+    let declarations = declarations(&options)?;
+    if relay_declarations.is_some_and(|expected| *expected != declarations) {
+        return Err("the device's encryption declarations do not match the relay".to_owned());
+    }
+    let recovery = options
+        .device_account_secret
+        .as_deref()
+        .map(secret)
+        .transpose()?;
+    let built = build_client(declarations, account_id, store, recovery.as_ref()).await?;
+    Ok(NativeBuilt { built, recovery })
+}
+
+fn declarations(options: &Options) -> Result<E2eeDeclarations, String> {
     let app_id = jazz::tools::AppId::from_string(&options.app_id)
         .unwrap_or_else(|_| jazz::tools::AppId::from_name(&options.app_id));
     let declarations = if options.from_bindings {
@@ -142,7 +203,15 @@ pub async fn build(
         .map_err(|error| error.to_string())?
         .2
     };
-    let declarations = declarations.ok_or("the app's files declare no encryption")?;
+    declarations.ok_or_else(|| "the app's files declare no encryption".to_owned())
+}
+
+async fn build_client(
+    declarations: E2eeDeclarations,
+    account_id: String,
+    store: Rc<JsStore>,
+    recovery: Option<&RecoverySecret>,
+) -> Result<Built, String> {
     let spaces = Value::Object(
         declarations
             .tables
@@ -155,12 +224,10 @@ pub async fn build(
             })
             .collect(),
     );
-    let device_account = match &options.device_account_secret {
-        Some(hex) => Some(
-            DeviceAccountIdentity::from_secret(&secret(hex)?).map_err(|error| error.to_string())?,
-        ),
-        None => None,
-    };
+    let device_account = recovery
+        .map(DeviceAccountIdentity::from_secret)
+        .transpose()
+        .map_err(|error| error.to_string())?;
     let store: Rc<dyn PrivateStore> = store;
     let client = E2eeClient::open(ClientConfig {
         store,
@@ -185,6 +252,23 @@ pub async fn build(
 
 impl Encryption {
     pub fn new(built: Built, store: Rc<JsStore>, db: Rc<Db>) -> Rc<Self> {
+        Self::start(built, store, db, None)
+    }
+
+    pub fn new_native(built: NativeBuilt, store: Rc<JsStore>, db: Rc<Db>) -> Rc<Self> {
+        let native = NativeReadiness {
+            recovery: RefCell::new(built.recovery),
+            result: RefCell::new(Verification::Pending),
+        };
+        Self::start(built.built, store, db, Some(native))
+    }
+
+    fn start(
+        built: Built,
+        store: Rc<JsStore>,
+        db: Rc<Db>,
+        native: Option<NativeReadiness>,
+    ) -> Rc<Self> {
         let Built {
             spaces,
             client,
@@ -201,9 +285,10 @@ impl Encryption {
             spaces,
             reconnected: Cell::new(false),
             status: Cell::new(None),
+            native,
             last_error: RefCell::default(),
             stage: Cell::new("starting"),
-            woken: Cell::new(false),
+            woken_batch: Cell::new(None),
             gate: Gate::default(),
             main: RefCell::default(),
         });
@@ -221,9 +306,8 @@ impl Encryption {
     /// otherwise make every drive ask again at once and spin the host. A new
     /// ask follows only once what waited has gone (a tick sent it).
     pub fn wake_if_owed(&self) {
-        if !self.db.owes_requests_sent() {
-            self.woken.set(false);
-        } else if !self.woken.replace(true) {
+        let batch = self.db.pending_upstream_send_batch();
+        if self.woken_batch.replace(batch) != batch && batch.is_some() {
             self.store.request_wake();
         }
     }
@@ -240,6 +324,16 @@ impl Encryption {
         }
         drop(main);
         self.wake_if_owed();
+    }
+
+    /// Ends the loop (the host is closing): it holds this runtime, so it
+    /// must be dropped for the runtime to be.
+    pub fn stop(&self) {
+        *self.main.borrow_mut() = None;
+        if let Some(native) = &self.native {
+            native.recovery.borrow_mut().take();
+            *native.result.borrow_mut() = Verification::Failed(ClientError::Closed);
+        }
     }
 
     /// The reports waiting, as JSON texts.
@@ -284,6 +378,107 @@ impl Encryption {
             "error": self.last_error.borrow().clone(),
             "stage": self.stage.get(),
         })
+    }
+
+    /// Wait for the native loop to verify the account and, for a device
+    /// account, register or restore recovery. The loop owns the recovery,
+    /// so a caller timing out cannot interrupt a spent-nonce publication.
+    pub async fn ready_native(&self, timeout: Duration) -> Result<&'static str, String> {
+        let started = web_time::Instant::now();
+        loop {
+            if let Some(result) = self.native_ready_outcome(started.elapsed() >= timeout) {
+                return result;
+            }
+            yield_now().await;
+        }
+    }
+
+    /// What a native readiness waiter would receive if its deadline expired
+    /// now. A host waiting on a different thread can retain this outcome
+    /// while its owner drives recovery.
+    pub fn native_ready_at_deadline(&self) -> Result<&'static str, String> {
+        self.native_ready_outcome(true)
+            .expect("an expired readiness call always has an outcome")
+    }
+
+    fn native_ready_outcome(&self, expired: bool) -> Option<Result<&'static str, String>> {
+        let Some(native) = &self.native else {
+            return Some(Err("the runtime is not native".to_owned()));
+        };
+        match &*native.result.borrow() {
+            Verification::Complete => Some(Ok(status_name(
+                self.status.get().expect("the account was verified"),
+            ))),
+            Verification::Failed(error) => Some(Err(describe_native(error))),
+            Verification::AwaitingRecovery if expired => Some(Ok("awaiting-approval")),
+            Verification::Retry(error) if expired => Some(Err(describe_native(error))),
+            _ if expired => Some(Err(format!(
+                "timeout: the account was not verified in time (waiting: {})",
+                self.stage.get()
+            ))),
+            _ => None,
+        }
+    }
+
+    /// Prepares a native write for which the device is still missing a key.
+    pub async fn prepare_native_space(&self, space: &SpaceAddress) -> Result<bool, String> {
+        let _turn = self.gate.enter().await;
+        match self.client.prepare_space(&self.db, space).await {
+            Err(ClientError::NoAccount) => match &self.native {
+                Some(native) => match &*native.result.borrow() {
+                    Verification::Pending
+                    | Verification::AwaitingRecovery
+                    | Verification::Retry(_) => Ok(false),
+                    Verification::Failed(error) => Err(describe_native(error)),
+                    Verification::Complete => Err(describe(ClientError::NoAccount)),
+                },
+                None => Err(describe(ClientError::NoAccount)),
+            },
+            outcome => outcome.map_err(|error| describe_native(&error)),
+        }
+    }
+
+    /// The startup recovery step for native hosts. `None` means the device
+    /// is awaiting approval and should try automatic recovery again.
+    async fn verify_native(
+        &self,
+        native: &NativeReadiness,
+        status: AccountStatus,
+    ) -> Result<Option<AccountStatus>, ClientError> {
+        let Some(secret) = native.recovery.borrow().clone() else {
+            return Ok(Some(status));
+        };
+        match status {
+            AccountStatus::Active => {
+                self.client
+                    .register_recovery_at_start(&self.db, &secret)
+                    .await?;
+                Ok(Some(status))
+            }
+            AccountStatus::AwaitingApproval => {
+                match self
+                    .client
+                    .recover_device_when_available(&self.db, &secret)
+                    .await
+                {
+                    Err(ClientError::ApprovalAnswered) => {
+                        self.client.ensure_account(&self.db).await.map(Some)
+                    }
+                    outcome => outcome,
+                }
+            }
+            AccountStatus::Reenrolled => Ok(Some(status)),
+        }
+    }
+
+    fn record_native_failure(&self, native: &NativeReadiness, error: ClientError) {
+        let text = describe_native(&error);
+        let (code, message) = text.split_once(": ").expect("a host error has a code");
+        self.reports.borrow_mut().push_back(
+            json!({ "type": "ready-failed", "code": code, "message": message }).to_string(),
+        );
+        native.recovery.borrow_mut().take();
+        *native.result.borrow_mut() = Verification::Failed(error);
     }
 
     /// One call from JS: the operation's name and its arguments, and its
@@ -387,20 +582,49 @@ impl Encryption {
                         .collect::<Vec<_>>()
                 )
             }
+            // A new recovery secret as its 24-word phrase, to keep; nothing is
+            // registered.
+            "recoveryCreate" => {
+                let mut bytes = [0u8; 32];
+                jazz_e2ee::RandomSource::fill(&mut OsRandom, &mut bytes)
+                    .map_err(|error| error.to_string())?;
+                json!({ "phrase": super::phrase::from_secret(&bytes) })
+            }
+            // `automatic`: the start-up registration of a device account's
+            // own secret, for which a retired root is not an error. Otherwise
+            // a retired root is refused (`recovery-root-mismatch`).
             "recoveryRegister" => {
-                client
-                    .register_recovery(db, &secret(&text("secret")?)?)
-                    .await
-                    .map_err(describe)?;
+                let secret = recovery_secret(args)?;
+                if args.get("automatic").and_then(Value::as_bool) == Some(true) {
+                    client.register_recovery_at_start(db, &secret).await
+                } else {
+                    client.register_recovery(db, &secret).await
+                }
+                .map_err(describe)?;
                 Value::Null
             }
+            // `automatic`: the device's own recovery with its account secret,
+            // as native readiness runs it. `null`: nothing to recover from
+            // (yet), so the device stays awaiting approval.
             "recoveryRestore" => {
-                let status = client
-                    .recover_device(db, &secret(&text("secret")?)?)
-                    .await
-                    .map_err(describe)?;
-                self.status.set(Some(status));
-                json!(status_name(status))
+                let secret = recovery_secret(args)?;
+                let restored = if args.get("automatic").and_then(Value::as_bool) == Some(true) {
+                    match client.recover_device_when_available(db, &secret).await {
+                        Err(ClientError::ApprovalAnswered) => {
+                            client.ensure_account(db).await.map(Some)
+                        }
+                        outcome => outcome,
+                    }
+                } else {
+                    client.recover_device(db, &secret).await.map(Some)
+                };
+                match restored.map_err(describe)? {
+                    Some(status) => {
+                        self.status.set(Some(status));
+                        json!(status_name(status))
+                    }
+                    None => Value::Null,
+                }
             }
             "recoveryRetire" => {
                 client
@@ -466,7 +690,21 @@ async fn main_loop(this: Rc<Encryption>) {
     // The runtime needs the catalogue identities, known after one sync.
     this.stage
         .set("waiting for the app's table identities from the server");
-    while !client.prepare(&db).unwrap_or(false) {
+    loop {
+        match client.prepare(&db) {
+            Ok(true) => break,
+            Err(error) => {
+                if let Some(native) = &this.native {
+                    if !native_may_retry(&error) {
+                        *this.last_error.borrow_mut() = Some(describe_native(&error));
+                        this.record_native_failure(native, error);
+                        return;
+                    }
+                    *native.result.borrow_mut() = Verification::Retry(error);
+                }
+            }
+            _ => {}
+        }
         yield_now().await;
     }
     let mut account = None;
@@ -510,11 +748,35 @@ async fn main_loop(this: Rc<Encryption>) {
         if verify {
             verify = false;
             this.stage.set("verifying the account");
-            match client.ensure_account(&db).await {
-                Ok(status) => {
+            let recovering = this.native.as_ref().filter(|native| {
+                !matches!(
+                    *native.result.borrow(),
+                    Verification::Complete | Verification::Failed(_)
+                )
+            });
+            if let Some(native) = recovering {
+                *native.result.borrow_mut() = Verification::Pending;
+            }
+            let mut verified = client.ensure_account(&db).await.map(Some);
+            if let (Ok(Some(status)), Some(native)) = (&verified, recovering) {
+                this.status.set(Some(*status));
+                this.stage.set("preparing account-secret recovery");
+                verified = this.verify_native(native, *status).await;
+            }
+            match verified {
+                Ok(Some(status)) => {
                     backoff = RETRY_FIRST;
+                    if this.native.is_some() {
+                        retry_at = None;
+                    }
                     this.status.set(Some(status));
                     *this.last_error.borrow_mut() = None;
+                    if let Some(native) = &this.native
+                        && !matches!(*native.result.borrow(), Verification::Failed(_))
+                    {
+                        native.recovery.borrow_mut().take();
+                        *native.result.borrow_mut() = Verification::Complete;
+                    }
                     if status == AccountStatus::Active {
                         match client.complete_removal_requests(&db).await {
                             Ok(_) => {}
@@ -522,12 +784,35 @@ async fn main_loop(this: Rc<Encryption>) {
                         }
                     }
                 }
+                Ok(None) => {
+                    let native = this.native.as_ref().expect("only native recovery can wait");
+                    *native.result.borrow_mut() = Verification::AwaitingRecovery;
+                    retry_at = Some(web_time::Instant::now() + backoff);
+                    backoff = (backoff * 2).min(RETRY_LAST);
+                }
                 Err(error) => {
-                    if may_pass_later(&error) {
+                    let retry = if let Some(native) = &this.native {
+                        if native_may_retry(&error) {
+                            *native.result.borrow_mut() = Verification::Retry(error.clone());
+                            true
+                        } else {
+                            this.record_native_failure(native, error.clone());
+                            false
+                        }
+                    } else {
+                        may_pass_later(&error)
+                    };
+                    if retry {
                         retry_at = Some(web_time::Instant::now() + backoff);
                         backoff = (backoff * 2).min(RETRY_LAST);
+                    } else if this.native.is_some() {
+                        retry_at = None;
                     }
-                    *this.last_error.borrow_mut() = Some(describe(error));
+                    *this.last_error.borrow_mut() = Some(if this.native.is_some() {
+                        describe_native(&error)
+                    } else {
+                        describe(error)
+                    });
                 }
             }
         }
@@ -654,6 +939,24 @@ fn may_pass_later(error: &ClientError) -> bool {
     matches!(error, ClientError::Database(_) | ClientError::Store(_))
 }
 
+/// Only unavailable observations, transport backpressure and serializable
+/// conflicts can be retried by the native readiness loop. Store errors
+/// and server refusals require the caller to see the cause.
+fn native_may_retry(error: &ClientError) -> bool {
+    matches!(error, ClientError::Database(error) if
+        matches!(error.code, ErrorCode::Backpressure | ErrorCode::NotObserved)
+            || crate::account::conflict(error))
+}
+
+fn describe_native(error: &ClientError) -> String {
+    if let ClientError::Protocol(error) = error
+        && let Some(code) = error.code()
+    {
+        return format!("{code}: {error}");
+    }
+    describe(error.clone())
+}
+
 /// Pending once, so the host polls the loop again after its next tick.
 async fn yield_now() {
     let mut yielded = false;
@@ -692,6 +995,21 @@ fn describe(error: ClientError) -> String {
         _ => "error",
     };
     format!("{code}: {error}")
+}
+
+/// The recovery secret an operation names: its 24-word `phrase`, or its
+/// `secret` as 64 hexadecimal characters.
+fn recovery_secret(args: &Value) -> Result<RecoverySecret, String> {
+    if let Some(phrase) = args.get("phrase").and_then(Value::as_str) {
+        return super::phrase::to_secret(phrase)
+            .map(RecoverySecret::from_bytes)
+            .map_err(|error| format!("{}: the recovery phrase is not valid", error.code()));
+    }
+    let hex = args
+        .get("secret")
+        .and_then(Value::as_str)
+        .ok_or("`phrase` is missing")?;
+    secret(hex)
 }
 
 /// A recovery secret from its hexadecimal text.

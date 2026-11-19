@@ -2703,6 +2703,8 @@ pub(crate) struct Client {
     outbox: Vec<SyncMessage>,
     pending: PendingQueue,
     unsent: Vec<SyncMessage>,
+    /// Advances when a send drains both queues.
+    send_batch: u64,
     /// Commits sent but not settled, for resending after a reconnect.
     sent: SentCommits,
     node: [u8; 16],
@@ -8812,6 +8814,7 @@ impl Client {
             outbox: Vec::new(),
             pending: PendingQueue::default(),
             unsent: Vec::new(),
+            send_batch: 0,
             fates: HashMap::new(),
             unreported_rejections: BTreeMap::new(),
             settled_upstream: 0,
@@ -10284,9 +10287,17 @@ impl Db {
     /// caller that did not ask the host to tick. A host that ticks when asked
     /// should tick.
     pub fn owes_requests_sent(&self) -> bool {
-        self.inner.borrow().client.as_ref().is_some_and(|client| {
-            client.transport.is_some() && (!client.outbox.is_empty() || !client.unsent.is_empty())
-        })
+        self.pending_upstream_send_batch().is_some()
+    }
+
+    /// The current upstream send batch, if requests or commits wait to go out.
+    /// A host can ask for one tick per batch even if a continuation queues
+    /// more work before the host sees the drained queues.
+    pub fn pending_upstream_send_batch(&self) -> Option<u64> {
+        let inner = self.inner.borrow();
+        let client = inner.client.as_ref()?;
+        (client.transport.is_some() && (!client.outbox.is_empty() || !client.unsent.is_empty()))
+            .then_some(client.send_batch)
     }
 
     /// Whether a read recorded chunk requests that only the next send
@@ -10697,8 +10708,14 @@ impl Db {
                                     let client = inner.client.as_mut().expect("client");
                                     client.pending.forget_expected();
                                 }
+                                let has_sessions = !inner.sessions.is_empty();
                                 let client = inner.client.as_mut().expect("client");
                                 client.catalogued = true;
+                                // A foreground may wait for the authority's
+                                // identities before asking its first query.
+                                // Give its owed catalogue a downstream turn
+                                // even if the upstream sent no row traffic.
+                                client.relay_ready |= has_sessions;
                                 // Mirrored at last: the reads attached under
                                 // the last link's refusal are no longer
                                 // refused, before their answers come.
@@ -11214,6 +11231,7 @@ impl Db {
         if client.transport.is_none() {
             return Ok(());
         }
+        let had_batch = !client.outbox.is_empty() || !client.unsent.is_empty();
         let mut out = std::mem::take(&mut client.outbox);
         // Commits staged since the last send go ahead of the reads asked
         // since (and what was queued after them, in order). The server
@@ -11431,9 +11449,13 @@ impl Db {
         // With nothing new to send, the rest of a split message still goes
         // out as the queue drains.
         match transport.flush() {
-            Ok(()) | Err(TransportError::Backpressure) => Ok(()),
-            Err(e) => Err(Error::new(ErrorCode::Storage, format!("{e:?}"))),
+            Ok(()) | Err(TransportError::Backpressure) => {}
+            Err(e) => return Err(Error::new(ErrorCode::Storage, format!("{e:?}"))),
         }
+        if had_batch && client.outbox.is_empty() && client.unsent.is_empty() {
+            client.send_batch = client.send_batch.wrapping_add(1);
+        }
+        Ok(())
     }
 
     /// Push a settled marker to subscriptions whose remote answered without

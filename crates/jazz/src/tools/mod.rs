@@ -43,7 +43,8 @@ pub use transaction::OpenTransactionId;
 
 #[cfg(feature = "runtime")]
 pub use client::{
-    JazzClient, JazzTransaction, MutationError, PermissionAdviceRequest, StreamingUpload,
+    ClientEncryption, EncryptionRuntime, JazzClient, JazzTransaction, MutationError,
+    PermissionAdviceRequest, StartEncryption, StreamingUpload,
 };
 
 pub use crate::object::{BranchName, ObjectId, ResultKey};

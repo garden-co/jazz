@@ -96,6 +96,11 @@ pub(crate) struct Info {
     pub(crate) backend_client: Option<crate::backend_client::BackendClientLink>,
     /// The store keeps nothing past the process.
     pub(crate) memory: bool,
+    /// How this client takes part in end-to-end encryption.
+    pub(crate) encryption: crate::encryption::Participation,
+    /// The app's encryption declarations, for a device's plain view of the
+    /// schema ([`Jazz::plain_schema`]).
+    pub(crate) declarations: Option<Arc<jazz::tools::public_schema::E2eeDeclarations>>,
     /// Its [`crate::JazzSession`] replaced it: calls fail with
     /// [`Error::Replaced`], not [`Error::Stopped`].
     pub(crate) replaced: std::sync::atomic::AtomicBool,
@@ -256,6 +261,8 @@ impl Jazz {
             backend,
             backend_client,
             memory,
+            encryption,
+            declarations,
         } = opened.await.map_err(|_| Error::Stopped)??;
         Ok(Self {
             commands,
@@ -272,6 +279,8 @@ impl Jazz {
                 opened_with,
                 backend_client,
                 memory,
+                encryption,
+                declarations,
                 replaced: std::sync::atomic::AtomicBool::new(false),
             }),
             scope: None,
@@ -427,7 +436,7 @@ impl Jazz {
         let implementations = self.info.implementations.clone();
         let settle = self.settler()?;
         self.with_client(move |client| async move {
-            let (row, written) = insert(&client, new, &implementations)?;
+            let (row, written) = insert_waiting(&client, new, &implementations).await?;
             settle.settle(&client, written).await?;
             Ok(row)
         })
@@ -440,7 +449,10 @@ impl Jazz {
         let settle = self.settler()?;
         self.with_client(move |client| async move {
             let cells = update.into_cells(&implementations)?;
-            let written = client.update(<U::Row as Table>::NAME, id, cells)?;
+            let written = crate::encryption::with_key_wait(|| {
+                client.update(<U::Row as Table>::NAME, id, cells.clone())
+            })
+            .await?;
             settle.settle(&client, written).await
         })
         .await
@@ -450,7 +462,7 @@ impl Jazz {
     pub async fn delete<T: Table>(&self, id: ObjectId) -> Result<()> {
         let settle = self.settler()?;
         self.with_client(move |client| async move {
-            let written = client.delete(T::NAME, id)?;
+            let written = crate::encryption::with_key_wait(|| client.delete(T::NAME, id)).await?;
             settle.settle(&client, written).await
         })
         .await
@@ -589,6 +601,31 @@ pub(crate) fn insert<N: Insert>(
 ) -> Result<(N::Row, Option<TransactionId>)> {
     let name = <N::Row as Table>::NAME;
     let (id, values, written) = client.insert(name, new.into_cells(implementations)?)?;
+    inserted::<N>(client, id, values, written, implementations)
+}
+
+/// [`insert`], waiting for the key of an encrypted space this device does not
+/// hold yet (see [`crate::encryption::with_key_wait`]).
+pub(crate) async fn insert_waiting<N: Insert>(
+    client: &JazzClient,
+    new: N,
+    implementations: &Implementations,
+) -> Result<(N::Row, Option<TransactionId>)> {
+    let name = <N::Row as Table>::NAME;
+    let cells = new.into_cells(implementations)?;
+    let (id, values, written) =
+        crate::encryption::with_key_wait(|| client.insert(name, cells.clone())).await?;
+    inserted::<N>(client, id, values, written, implementations)
+}
+
+fn inserted<N: Insert>(
+    client: &JazzClient,
+    id: ObjectId,
+    values: Vec<jazz::tools::Value>,
+    written: Option<TransactionId>,
+    implementations: &Implementations,
+) -> Result<(N::Row, Option<TransactionId>)> {
+    let name = <N::Row as Table>::NAME;
     let schema = client.schema()?;
     let table = schema
         .get(&TableName::new(name))
@@ -672,6 +709,10 @@ fn run(
                 return None;
             }
         };
+        #[cfg(feature = "e2ee-client")]
+        if opened.encryption == crate::encryption::Participation::Device {
+            crate::encryption::spawn_start();
+        }
         if ready.send(Ok(opened)).is_err() {
             let _ = client.shutdown().await;
             endpoint_connector.settle(STREAM_SESSION_END).await;
@@ -780,6 +821,8 @@ struct Opened {
     backend: Option<BackendLink>,
     backend_client: Option<crate::backend_client::BackendClientLink>,
     memory: bool,
+    encryption: crate::encryption::Participation,
+    declarations: Option<Arc<jazz::tools::public_schema::E2eeDeclarations>>,
 }
 
 async fn connect(
@@ -791,7 +834,26 @@ async fn connect(
     // hosted: its clients fall back to its HTTP stream, as TS clients do.
     endpoint_connector: Arc<jazz_native_transport::HttpStreamFallbackConnector>,
 ) -> Result<(JazzClient, Opened)> {
-    let mut loaded = files.load()?;
+    // A client with encryption hooks reads the app's declarations too.
+    #[cfg(feature = "e2ee-client")]
+    let environment = config
+        .encryption
+        .as_ref()
+        .map_or("dev".to_owned(), |encryption| {
+            encryption.environment.clone()
+        });
+    #[cfg(feature = "e2ee-client")]
+    let mut loaded = files.load(Some((config.app_id, &environment)))?;
+    #[cfg(not(feature = "e2ee-client"))]
+    let mut loaded = files.load(None)?;
+    let plan = crate::encryption::Plan::new(loaded.declarations.take(), &config, &files);
+    let backend_side = config.backend.is_some() || matches!(config.user, Some(Auth::Credential(_)));
+    let participation = plan.participation(backend_side);
+    // Only an end user's device holds keys; a client with no user (local
+    // only) has no account to hold them for.
+    if participation == crate::encryption::Participation::Device && config.user.is_none() {
+        return Err(Error::App(crate::encryption::NEEDS_DEVICE.to_owned()));
+    }
     // The endpoint's client evaluates the sessions it acts for locally too:
     // its schema carries the permissions the backend publishes, as
     // `createJazz`'s backend session compiles them. Policies are not part
@@ -866,6 +928,7 @@ async fn connect(
                 credential,
                 endpoint,
                 own_bundle,
+                &plan,
             )
             .await?;
             if !user.account.is_system() {
@@ -876,13 +939,16 @@ async fn connect(
         }
         (Some(auth), Some(endpoint)) => {
             let (client, user, credential) =
-                connect_user(context, endpoint_connector, auth, endpoint).await?;
+                connect_user(context, endpoint_connector, auth, endpoint, &plan).await?;
             admitted = Some(user.account);
             (client, Some((user, credential)))
         }
-        _ if context.server_url.is_empty() => (JazzClient::connect(context).await?, None),
+        _ if context.server_url.is_empty() => (
+            JazzClient::connect_with(context, None, None, plan.keyless()).await?,
+            None,
+        ),
         _ => (
-            JazzClient::connect_with_native_transport(context, connector).await?,
+            JazzClient::connect_with(context, Some(connector), None, plan.keyless()).await?,
             None,
         ),
     };
@@ -913,6 +979,8 @@ async fn connect(
             backend: link,
             backend_client,
             memory,
+            encryption: participation,
+            declarations: plan.declarations(),
         },
     ))
 }
@@ -926,6 +994,7 @@ async fn connect_user(
     connector: Arc<jazz_native_transport::HttpStreamFallbackConnector>,
     auth: Auth,
     endpoint: &str,
+    plan: &crate::encryption::Plan,
 ) -> Result<(JazzClient, User, Credential)> {
     let app = context.app_id;
     match auth {
@@ -933,7 +1002,9 @@ async fn connect_user(
             let account = key.account(app);
             context.jwt_token = Some(key.mint(app, DEVICE_TOKEN_TTL_SECS)?);
             context.account_id = Some(account);
-            let client = JazzClient::connect_with_native_transport(context, connector).await?;
+            let encryption = plan.device(account, Some(key.to_bytes())).await?;
+            let client =
+                JazzClient::connect_with(context, Some(connector), None, encryption).await?;
             let user = User {
                 account,
                 issuer: jazz::tools::identity::DEVICE_ACCOUNT_ISSUER.to_owned(),
@@ -957,8 +1028,9 @@ async fn connect_user(
             session.account_id = Some(signed_in.account);
             context.account_id = Some(signed_in.account);
             context.backend_session = Some(session);
+            let encryption = plan.device(signed_in.account, None).await?;
             let client =
-                JazzClient::connect_with_native_transport_bearer(context, connector, token.clone())
+                JazzClient::connect_with(context, Some(connector), Some(token.clone()), encryption)
                     .await?;
             let user = User {
                 account: signed_in.account,

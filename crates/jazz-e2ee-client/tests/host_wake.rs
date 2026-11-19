@@ -7,8 +7,12 @@ mod common;
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::task::{Context, Poll, Waker};
 
 use common::*;
+use jazz::db::block_on;
+use jazz::query::Query;
+use jazz::tools::OpenTransactionId;
 use jazz_e2ee_client::MemoryStore;
 use jazz_e2ee_client::host::bridge::JsStore;
 use jazz_e2ee_client::host::runtime::{Built, Encryption};
@@ -73,4 +77,40 @@ fn a_transport_that_cannot_drain_is_asked_for_once_per_batch() {
     project(&db, "more");
     encryption.wake_if_owed();
     assert_eq!(asked.get(), 2);
+}
+
+/// Contract: when Alice's first ledger read is answered, the next read in
+/// the same transaction schedules its own tick, even if the host observes
+/// the queues only after polling the continuation, as the WASM host does.
+///
+/// Alice ──read projects──► authority ──reply──► Alice ──read notes──► authority
+#[test]
+fn a_continuation_wakes_for_the_next_ledger_read_after_a_drain() {
+    let (encryption, db, server, asked) = runtime();
+    let id = OpenTransactionId::new();
+    block_on(db.begin_serializable(id)).unwrap();
+    let tx = db.tx_ref(id);
+    let projects = db.prepare_query(&Query::from("projects")).unwrap();
+    let notes = db.prepare_query(&Query::from("notes")).unwrap();
+    let mut reads = std::pin::pin!(async {
+        tx.ledger_read(&projects).await.unwrap();
+        tx.ledger_read(&notes).await.unwrap();
+    });
+    let context = &mut Context::from_waker(Waker::noop());
+
+    assert!(reads.as_mut().poll(context).is_pending());
+    encryption.wake_if_owed();
+    assert_eq!(asked.get(), 1, "the first read needs a tick");
+    pump(&server, &db);
+    assert!(!db.owes_requests_sent(), "the first batch was drained");
+
+    // Poll the continuation before the latch can see the empty queues.
+    assert!(reads.as_mut().poll(context).is_pending());
+    assert!(db.owes_requests_sent(), "the second read is queued");
+    for _ in 0..50 {
+        encryption.wake_if_owed();
+    }
+    assert_eq!(asked.get(), 2, "the second read wakes once for its batch");
+    pump(&server, &db);
+    assert_eq!(reads.as_mut().poll(context), Poll::Ready(()));
 }

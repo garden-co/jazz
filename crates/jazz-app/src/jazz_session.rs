@@ -104,6 +104,7 @@ impl From<&Error> for SessionError {
             Error::Replaced => "replaced",
             Error::Unsynced { .. } => "unsynced",
             Error::Unsupported(_) => "unsupported",
+            Error::Encryption { .. } => "encryption",
             Error::Upload(_) => "upload",
             Error::Panicked(_) => "panicked",
             Error::StoreHeld(_) => "storeHeld",

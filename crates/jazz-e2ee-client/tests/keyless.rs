@@ -30,8 +30,9 @@ const SECRET: &str = "PLAINTEXT-ONLY-ALICE-KNOWS";
 /// plain columns but never its encrypted ones (no ciphertext either); it
 /// reads and writes plain tables and plain columns as usual; a write naming
 /// an encrypted column, and a filter, ordering or selection of one, are
-/// refused, and nothing plaintext reaches its store; what it wrote to a
-/// plain column reaches alice.
+/// refused. Alice's secret never reaches the backend's store as plaintext.
+/// Alice sees what the backend writes to plain columns, including one whose
+/// name resembles an equality token for an unindexed field.
 ///
 /// ```text
 /// alice ──sealed row──► server ──► backend (keyless hooks)
@@ -41,6 +42,8 @@ const SECRET: &str = "PLAINTEXT-ONLY-ALICE-KNOWS";
 /// ```
 #[test]
 fn a_keyless_backend_relays_ciphertext_and_works_on_plain_columns() {
+    const PLAIN_COLUMN: &str = "__e2ee_eq_note";
+    let plain_bytes = |bytes: &[u8]| Value::Nullable(Some(Box::new(Value::Bytes(bytes.to_vec()))));
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("backend.sqlite");
     let server = authority();
@@ -50,6 +53,7 @@ fn a_keyless_backend_relays_ciphertext_and_works_on_plain_columns() {
     hold_new_space(&alice_client, &alice, space);
     let mut cells = note(space, SECRET);
     cells.insert("plainNote".to_owned(), text("hello"));
+    cells.insert(PLAIN_COLUMN.to_owned(), plain_bytes(b"hello"));
     let row = block_on(alice.insert("notes", cells, Default::default()))
         .unwrap()
         .row_uuid();
@@ -76,6 +80,7 @@ fn a_keyless_backend_relays_ciphertext_and_works_on_plain_columns() {
         rows[0].cell("plainNote"),
         Some(Value::Nullable(Some(Box::new(text("hello")))))
     );
+    assert_eq!(rows[0].cell(PLAIN_COLUMN), Some(plain_bytes(b"hello")));
     for sealed in ["body", "note", "attachment", "rank", "__e2ee_eq_body"] {
         assert_eq!(rows[0].cell(sealed), None, "{sealed} is not answered");
     }
@@ -90,7 +95,10 @@ fn a_keyless_backend_relays_ciphertext_and_works_on_plain_columns() {
     block_on(backend.update(
         "notes",
         row,
-        BTreeMap::from([("plainNote".to_owned(), text("from the backend"))]),
+        BTreeMap::from([
+            ("plainNote".to_owned(), text("from the backend")),
+            (PLAIN_COLUMN.to_owned(), plain_bytes(b"from the backend")),
+        ]),
         Default::default(),
     ))
     .unwrap();
@@ -100,6 +108,10 @@ fn a_keyless_backend_relays_ciphertext_and_works_on_plain_columns() {
     assert_eq!(
         seen[0].cell("plainNote"),
         Some(Value::Nullable(Some(Box::new(text("from the backend")))))
+    );
+    assert_eq!(
+        seen[0].cell(PLAIN_COLUMN),
+        Some(plain_bytes(b"from the backend"))
     );
     assert_eq!(
         seen[0].cell("body"),
@@ -140,6 +152,16 @@ fn a_keyless_backend_relays_ciphertext_and_works_on_plain_columns() {
         let error = fetch(&server, &backend, query.clone());
         assert!(error.is_err(), "refused: {query:?}");
     }
+    let error = fetch(
+        &server,
+        &backend,
+        Query::from("notes").select([PLAIN_COLUMN]),
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("Reading reserved column"),
+        "{error}"
+    );
     pump(&server, &backend);
     let stored = stored_bytes(&path);
     assert!(
