@@ -19,18 +19,19 @@ body() {
     *) echo "FAIL t4 unknown t4_mode '$T4_MODE'"; return;;
   esac
   export T4_MODE
-  if [ -z "${VERCEL_TOKEN:-}" ]; then echo "SKIP t4 vercel: secrets pending (VERCEL_TOKEN, BASELINE_RED_PASSWORD; see t4/README.md)"; return; fi
+  # t4 that should run but can't is FAIL (Anselm, 2026-11-19); only an explicit t4_mode skip is NOT_RUN.
+  if [ -z "${VERCEL_TOKEN:-}" ]; then echo "FAIL t4 vercel: can't run, VERCEL_TOKEN is missing (environment adopter-gate-t4; see t4/README.md)"; return; fi
   export T4_RELEASE_BASE=${T4_RELEASE_BASE:-file://$AG_TGZ}
   # The eval core only moves to newer versions (newerVersion). A version that sorts below what it runs (an RC dry run's
   # rc.0, an old RC) would deploy a backend onto a newer core: not an upgrade test, and it leaves the eval app skewed.
   local cur; cur=$("$AG/t4/scripts/core-state.sh" 2>/dev/null | grep -oE 'core running=[^ ]+' | head -1 | cut -d= -f2)
   newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "${1//-/\~}" "${2//-/\~}" | sort -V | tail -1)" = "${1//-/\~}" ]; }
   if [ -n "$cur" ] && newer "$cur" "$(ag_version)"; then
-    echo "SKIP t4 vercel: $(ag_version) sorts below the eval core's $cur (a dry-run or older version); t4 deploys only versions that move the core"; return; fi
+    echo "FAIL t4 vercel: can't run, $(ag_version) sorts below the eval core's $cur (a dry-run or older version; use t4_mode preview); not deploying"; return; fi
   "$AG/t4/scripts/run-t4.sh" "$(ag_version)" > "$AG_RESULTS/t4-full.log" 2>&1; local rc=$?
   cat "$AG_RESULTS/t4-full.log" \
     | grep -E "^(PASS|FAIL|REVIEW|NOTE|FINDING|SEEDED)" \
-    | sed 's/^FINDING:\{0,1\} */NOTE t4 known finding (jazz#5615, wrong-region fall-through): /; s/^SEEDED/REVIEW t4 first run: seeded/'
+    | sed 's/^FINDING:\{0,1\} */FAIL t4 known bug jazz#5615 (wrong-region fall-through, fails until fixed): /; s/^SEEDED/REVIEW t4 first run: seeded/'
   local links; links=$(grep -c "invalid_link_challenge" "$AG_RESULTS/t4-full.log")
   [ "$links" -gt 0 ] && echo "FAIL t4 smoke hit invalid_link_challenge $links× (jazz#5553: vercel() signs guest-link challenges per function instance)"
   # Per-step wall time (run-t4.sh stamps each "=== step @epoch"), for the release-gate budget.
