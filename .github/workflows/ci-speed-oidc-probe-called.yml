@@ -1,0 +1,48 @@
+name: ci-speed oidc probe (called)
+on:
+  workflow_call:
+    inputs:
+      os:
+        type: string
+        required: true
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  probe:
+    runs-on: ${{ inputs.os }}
+    steps:
+      - name: OIDC claims
+        run: |
+          token=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | python3 -c 'import json,sys;print(json.load(sys.stdin)["value"])')
+          python3 - "$token" <<'PY'
+          import base64, json, sys
+          p = sys.argv[1].split(".")[1]; p += "=" * (-len(p) % 4)
+          c = json.loads(base64.urlsafe_b64decode(p))
+          for k in ("sub", "ref", "event_name", "job_workflow_ref", "workflow_ref", "runner_environment", "repository_owner"):
+              print(f"{k}: {c.get(k)}")
+          PY
+      - name: Assume reader
+        id: reader
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Read the bucket
+        if: steps.reader.outcome == 'success'
+        continue-on-error: true
+        env:
+          BUCKET: ${{ vars.SCCACHE_BUCKET }}
+        run: |
+          aws sts get-caller-identity --query Arn --output text
+          aws s3api list-objects-v2 --bucket "$BUCKET" --prefix jazz-ci/v1/production/blacksmith-v1/ --max-keys 3 --query 'KeyCount' || true
+      - name: Assume writer
+        id: writer
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Result
+        run: echo "reader=${{ steps.reader.outcome }} writer=${{ steps.writer.outcome }} os=${{ inputs.os }}"

@@ -1,0 +1,16 @@
+name: ci-speed oidc probe
+on:
+  push:
+    branches: ["ci-speed/apple-oidc"]
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  macos:
+    uses: ./.github/workflows/ci-speed-oidc-probe-called.yml
+    with:
+      os: blacksmith-6vcpu-macos-15
+  linux:
+    uses: ./.github/workflows/ci-speed-oidc-probe-called.yml
+    with:
+      os: blacksmith-2vcpu-ubuntu-2404
