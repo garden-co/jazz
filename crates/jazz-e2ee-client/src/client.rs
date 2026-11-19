@@ -230,6 +230,9 @@ impl E2eeClient {
             published: Default::default(),
             creations: Default::default(),
             missing: Default::default(),
+            member_changes: Default::default(),
+            member_change_wait: std::cell::Cell::new(crate::state::MEMBER_CHANGE_WAIT),
+            collectors: Default::default(),
         });
         let client = Self {
             hooks: Rc::new(Hooks {
@@ -482,6 +485,18 @@ impl E2eeClient {
     /// tokens and match every row of the space instead (protocol §4.5).
     pub fn set_online(&self, online: bool) {
         self.shared.keys.borrow_mut().online = online;
+    }
+
+    /// How many staged member rows are still waited for, and how long to wait
+    /// for one. Only for tests of that queue.
+    #[doc(hidden)]
+    pub fn pending_member_changes(&self) -> usize {
+        self.shared.member_changes.borrow().len()
+    }
+
+    #[doc(hidden)]
+    pub fn set_member_change_wait(&self, wait: std::time::Duration) {
+        self.shared.member_change_wait.set(wait);
     }
 
     /// This device: its ID and key pairs.

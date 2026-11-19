@@ -24,6 +24,11 @@ use crate::values::ColumnCodec;
 /// first (protocol §4.3 keeps a bounded set of the same size).
 pub const MAX_REPORTS: usize = 10_000;
 
+/// How long a staged member row is waited for before the write is taken as
+/// rejected or abandoned: a space such a row would have changed is served at
+/// the next natural moment anyway.
+pub(crate) const MEMBER_CHANGE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Something a read or a load left for the runtime to act on or pass on.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -43,6 +48,33 @@ pub enum Report {
     /// A record of the private store that failed its load checks and was
     /// skipped (protocol §6.2, §6.3a).
     SkippedRecord { document: String, reason: String },
+    /// A delivery to this account that provably failed to open or
+    /// authenticate (protocol §3.4): nothing is written; the member stays
+    /// `key-pending` until an updater rotates.
+    InvalidDelivery {
+        space: SpaceAddress,
+        sender: String,
+        recipient: String,
+        key_epoch_id: String,
+    },
+    /// A key that opened and passed its own version's marker, but whose
+    /// history fails further back (protocol §3.4): the fault is the named
+    /// successor's author's; the remedy is a recovery rotation.
+    BrokenHistory {
+        space: SpaceAddress,
+        key_epoch_id: String,
+        author: String,
+    },
+    /// A member account whose current generation is above 0: its encryption
+    /// was reset (protocol §2.11), once per space, account and generation.
+    AccountReset {
+        account: String,
+        space: SpaceAddress,
+        generation: u64,
+    },
+    /// A space with more member accounts than the design limit
+    /// (protocol §3.8), once per space.
+    SpaceOverMemberLimit { space: SpaceAddress, members: usize },
     /// A report ([`Report::Unreadable`], per space or per row) that no
     /// longer holds: the key was obtained, or the space now has a valid
     /// root, or the account is now a member (protocol §4.3). `id` and
@@ -66,6 +98,12 @@ pub(crate) struct Missing {
     pub(crate) space: SpaceAddress,
     pub(crate) epoch_id: String,
 }
+
+/// Cells to repair: by table and row, the row's space and its columns.
+pub(crate) type Repairable = BTreeMap<(String, RowUuid), (SpaceAddress, BTreeSet<String>)>;
+
+/// Where one repair read's notes of cells under a refused creation's key go.
+pub(crate) type Collector = std::rc::Rc<RefCell<Repairable>>;
 
 /// What identifies a report for deduplication (protocol §4.3).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -302,6 +340,20 @@ pub(crate) struct KeyState {
     /// Spaces whose creation by this device was refused while the client
     /// runs (protocol §3.2).
     pub(crate) creation_refused: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
+    /// Spaces the last pass found to need rotation (protocol §3.5): the
+    /// next encrypted write rotates them first.
+    pub(crate) rotation_pending: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
+    /// Spaces whose repair the authority refused (this device may not update
+    /// the rows it wrote): the natural moments stop repairing them while the
+    /// client runs; an explicit call always attempts (protocol §3.2).
+    pub(crate) repair_refused: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
+    /// Spaces whose rotation the current write already tried: it seals under
+    /// the current version whatever came of it, and the mark stays unless
+    /// the rotation succeeded or was refused (protocol §3.5).
+    pub(crate) rotation_tried: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
+    /// Spaces whose rotation by this device was refused while the client
+    /// runs: no automatic rotation, and no evaluation of the mark.
+    pub(crate) rotation_refused: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
     /// Set once the store is wiped: nothing more is sealed or opened.
     pub(crate) closed: bool,
 }
@@ -340,6 +392,16 @@ pub(crate) struct Shared {
     /// Versions reads needed and did not hold, since the runtime last
     /// looked.
     pub(crate) missing: RefCell<VecDeque<Missing>>,
+    /// Member rows this client's writes staged, with their spaces and when,
+    /// until the next pass after they commit serves the space (protocol
+    /// §3.4), or until [`MEMBER_CHANGE_WAIT`] passes without the row: a write
+    /// that was rejected or abandoned leaves no row to wait for.
+    pub(crate) member_changes: RefCell<VecDeque<(RowUuid, SpaceAddress, web_time::Instant)>>,
+    /// How long a staged member row is waited for (tests shorten it).
+    pub(crate) member_change_wait: std::cell::Cell<std::time::Duration>,
+    /// The collectors of the repair reads in flight, each registered for the
+    /// duration of its read (protocol §3.2).
+    pub(crate) collectors: RefCell<BTreeMap<uuid::Uuid, Collector>>,
 }
 
 impl Shared {
@@ -356,6 +418,30 @@ impl Shared {
             reports.pop_front();
         }
         reports.push_back(report);
+    }
+
+    /// Notes that `column` of the row opened under a refused creation's key
+    /// in every repair read now open (none open: nothing is noted). A
+    /// repair takes from its own collector only what concerns the table,
+    /// space and rows it reads, so another read's notes change nothing.
+    pub(crate) fn note_repairable(
+        &self,
+        table: &str,
+        row: RowUuid,
+        space: &SpaceAddress,
+        column: &str,
+    ) {
+        for collector in self.collectors.borrow().values() {
+            let mut found = collector.borrow_mut();
+            if found.len() >= MAX_REPORTS && !found.contains_key(&(table.to_owned(), row)) {
+                continue;
+            }
+            found
+                .entry((table.to_owned(), row))
+                .or_insert_with(|| (space.clone(), BTreeSet::new()))
+                .1
+                .insert(column.to_owned());
+        }
     }
 
     pub(crate) fn missing(&self, missing: Missing) {
@@ -422,6 +508,21 @@ impl Shared {
     pub(crate) fn withdraw(&self, space: &SpaceAddress, codes: &[UnreadableCode]) {
         let withdrawn = self.published.borrow_mut().withdraw(space, codes);
         self.flush(withdrawn);
+    }
+
+    /// Delivers `report` once for `key` (an event is told once per
+    /// delivery, version or space, protocol §3.4, §3.8).
+    pub(crate) fn event(&self, key: String, report: Report) {
+        {
+            let mut published = self.published.borrow_mut();
+            if published.events.len() >= MAX_REPORTS {
+                published.events.clear();
+            }
+            if !published.events.insert(key) {
+                return;
+            }
+        }
+        self.flush(vec![report]);
     }
 
     pub(crate) fn listen(&self, listener: Listener) {

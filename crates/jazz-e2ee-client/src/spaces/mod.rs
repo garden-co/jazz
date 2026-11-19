@@ -7,6 +7,8 @@
 //! The creation of spaces is in [`creation`], the watches in [`watch`].
 
 mod creation;
+mod delivery;
+mod repair;
 mod watch;
 
 use std::cell::Cell;
@@ -30,7 +32,8 @@ use crate::hooks::code;
 use crate::state::{Missing, Report};
 
 pub use creation::SpaceCreation;
-pub use watch::SpaceWatch;
+pub use delivery::MEMBER_LIMIT;
+pub use watch::{SpaceWatch, account_watch_queries, watch_queries};
 
 /// Reads that keep meeting concurrent writes give up after this many
 /// attempts.
@@ -66,6 +69,7 @@ pub(crate) struct Replayed {
     pub(crate) chain: Option<SpaceChain>,
     pub(crate) held: Option<HeldSpace>,
     pub(crate) member: bool,
+    pub(crate) acquisition: Option<jazz_e2ee::protocol::space::Acquisition>,
 }
 
 /// What one acquisition found.
@@ -112,6 +116,22 @@ impl E2eeClient {
         tx: OpenTransactionId,
         address: &ProtocolAddress,
     ) -> Result<SpaceRead, ClientError> {
+        self.read_space_of(db, tx, address, false).await
+    }
+
+    /// [`E2eeClient::read_space`], or with `whole` the whole space: every
+    /// member row and every delivery of the address (protocol §3.4), and
+    /// the public history of every account they name. Deliveries are
+    /// readable to every member (R14), so a delivery another holder writes
+    /// meanwhile is a phantom of this read and makes a transaction that
+    /// read it conflict.
+    pub(crate) async fn read_space_of(
+        &self,
+        db: &Db,
+        tx: OpenTransactionId,
+        address: &ProtocolAddress,
+        whole: bool,
+    ) -> Result<SpaceRead, ClientError> {
         let skipped = Cell::new(0);
         let own = self.shared.account_id.clone();
         let scope = uuid_cell(&address.scope_id).ok_or(ProtocolError::InvalidRecord(
@@ -133,25 +153,20 @@ impl E2eeClient {
         let (successors, _) = self
             .read_rows(db, tx, &skipped, of_space(rows::SPACE_SUCCESSORS))
             .await?;
-        let (members, _) = self
-            .read_rows(
-                db,
-                tx,
-                &skipped,
-                of_space(rows::SPACE_MEMBERS).filter(eq(col("accountId"), lit(account.clone()))),
-            )
-            .await?;
-        let (deliveries, _) = self
-            .read_rows(
-                db,
-                tx,
-                &skipped,
-                of_space(rows::SPACE_DELIVERIES)
-                    .filter(eq(col("recipientAccountId"), lit(account))),
-            )
-            .await?;
+        let mut members_query = of_space(rows::SPACE_MEMBERS);
+        let mut deliveries_query = of_space(rows::SPACE_DELIVERIES);
+        if !whole {
+            members_query = members_query.filter(eq(col("accountId"), lit(account.clone())));
+            deliveries_query = deliveries_query.filter(eq(col("recipientAccountId"), lit(account)));
+        }
+        let (members, _) = self.read_rows(db, tx, &skipped, members_query).await?;
+        let (deliveries, _) = self.read_rows(db, tx, &skipped, deliveries_query).await?;
         let space_skipped = skipped.get();
-        let mut ledger = SpaceLedger::one_account(address.clone(), Position(through), &own);
+        let mut ledger = if whole {
+            SpaceLedger::whole_space(address.clone(), Position(through))
+        } else {
+            SpaceLedger::one_account(address.clone(), Position(through), &own)
+        };
         ledger.roots = roots;
         ledger.successors = successors;
         ledger.members = members;
@@ -169,6 +184,13 @@ impl E2eeClient {
                 .iter()
                 .map(|successor| successor.row.author_account_id.clone()),
         );
+        if whole {
+            named.extend(ledger.members.iter().map(|m| m.row.account_id.clone()));
+            for delivery in &ledger.deliveries {
+                named.insert(delivery.row.recipient_account_id.clone());
+                named.insert(delivery.row.sender_account_id.clone());
+            }
+        }
         let named: Vec<String> = named.into_iter().collect();
         let accounts = self
             .read_public_many(db, tx, &skipped, &named, BTreeSet::new())
@@ -209,6 +231,7 @@ impl E2eeClient {
                 chain: None,
                 held: None,
                 member,
+                acquisition: None,
             });
         };
         let acquisition = acquire(&chain, &read.ledger, &directory, &account.epoch_keys)?;
@@ -217,6 +240,7 @@ impl E2eeClient {
             chain: Some(chain),
             held,
             member,
+            acquisition: Some(acquisition),
         })
     }
 
@@ -273,10 +297,34 @@ impl E2eeClient {
             chain,
             held,
             member,
+            acquisition,
         } = match self.replay_space(read).await {
             Ok(replayed) => replayed,
             Err(error) => return Err(self.forget_account_on(error)),
         };
+        if let Some(acquisition) = &acquisition {
+            for bad in &acquisition.invalid_deliveries {
+                self.shared.event(
+                    format!("delivery:{}", bad.delivery_id),
+                    Report::InvalidDelivery {
+                        space: space.clone(),
+                        sender: bad.sender_account_id.clone(),
+                        recipient: bad.recipient_account_id.clone(),
+                        key_epoch_id: bad.key_epoch_id.clone(),
+                    },
+                );
+            }
+            for broken in &acquisition.broken_history {
+                self.shared.event(
+                    format!("history:{}", broken.successor_id),
+                    Report::BrokenHistory {
+                        space: space.clone(),
+                        key_epoch_id: broken.key_epoch_id.clone(),
+                        author: broken.author_account_id.clone(),
+                    },
+                );
+            }
+        }
         let incomplete = read.skipped > 0;
         let Some(chain) = chain else {
             self.settle_creations(db, address, None).await?;
@@ -564,6 +612,9 @@ impl E2eeClient {
             // A creation the authority refused since the last write stops
             // the automatic paths before this one stages anything.
             self.settle_pending(db).await?;
+            if round == 0 {
+                self.shared.keys.borrow_mut().rotation_tried.clear();
+            }
             self.shared.creations.borrow_mut().attempt.clear();
             let outcome = op().await;
             let staged = std::mem::take(&mut self.shared.creations.borrow_mut().attempt);
@@ -604,6 +655,25 @@ impl E2eeClient {
     async fn make_ready(&self, db: &Db, space: &SpaceAddress) -> Result<bool, ClientError> {
         let address = protocol_address(space)?;
         let online = self.shared.keys.borrow().online;
+        // A space that needs rotation is rotated before the write; refused,
+        // offline or undecided, the write seals under the current version
+        // (protocol §3.5).
+        let pending = {
+            let mut keys = self.shared.keys.borrow_mut();
+            let pending = keys.rotation_pending.contains(&address);
+            if pending {
+                keys.rotation_tried.insert(address.clone());
+            }
+            pending
+        };
+        if pending {
+            // A rotation that succeeded or was refused clears the mark; one
+            // that failed for another reason leaves it for the next write.
+            if online {
+                let _ = self.rotate(db, space).await;
+            }
+            return Ok(true);
+        }
         if online {
             let acquired = self.acquire_full(db, space).await?;
             match acquired.state {
