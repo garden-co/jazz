@@ -384,6 +384,33 @@ pub const DECLARATIONS: jazz::host::HostTable = jazz::host::HostTable::new("e2ee
 pub const REGISTRY_REQUIRED: &str = "this app encrypts columns, which needs the account registry of an app's store; \
      the server's runtime has none";
 
+/// Keep the declarations of each version a deployment that changes no
+/// catalogue row names for the first time (`first`, as
+/// [`Deployment::first_declared`]), each written unless its version keeps
+/// some already. A deployment that changes the catalogue keeps them in the
+/// transaction that commits it instead. A version whose kept declarations
+/// differ from the ones named (written since the deployment read them) is
+/// refused rather than ignored, as that transaction refuses it: its cells
+/// are sealed under the ones kept.
+/// `put_if_absent` writes a value at a version's key in the host's
+/// [`DECLARATIONS`] unless one is there, and returns the one there if so.
+pub fn keep_first_declared(
+    first: &[(SchemaHash, Vec<u8>)],
+    mut put_if_absent: impl FnMut(&[u8], &[u8]) -> Result<Option<Vec<u8>>, String>,
+) -> Result<(), DeployError> {
+    for (version, stored) in first {
+        if let Some(existing) = put_if_absent(&version.0, stored).map_err(DeployError::internal)?
+            && existing != *stored
+        {
+            return Err(DeployError::invalid(format!(
+                "schema version {version} was deployed with other encryption declarations, \
+                 which its cells are sealed under; the deployment names different ones"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Parse a deploy body (a [`DeployRequest`] and its encryption
 /// declarations).
 pub fn read_body(body: &[u8]) -> Result<DeployBody, DeployError> {
@@ -457,14 +484,14 @@ fn apply_with_kept(
     };
     if !deployment.staged.response.changed {
         core.reload_catalogue().map_err(DeployError::internal)?;
-        // `first` holds only versions whose kept value `prepare_encrypted`
-        // just read as absent, in this same call, and a host that runs one
-        // call at a time (a Durable Object) cannot have another deploy
-        // write one in between: nothing here can meet a different value.
-        for (table, key, value) in &first {
-            core.db()
-                .host_put_if_absent(*table, key, value)
-                .map_err(DeployError::internal)?;
+        if !probe {
+            // On the core's own connection, as the kept declarations were
+            // read: a different value written since is refused, not kept.
+            keep_first_declared(&deployment.first_declared, |key, value| {
+                core.db()
+                    .host_put_if_absent(DECLARATIONS, key, value)
+                    .map_err(|error| error.to_string())
+            })?;
         }
         return Ok(deployment.staged.response);
     }
@@ -523,11 +550,11 @@ pub fn deploy(
         if !deployment.staged.response.changed {
             // Nothing to commit; the declarations of a version deployed
             // with them for the first time are kept as when it commits.
-            for (version, stored) in &deployment.first_declared {
+            keep_first_declared(&deployment.first_declared, |key, value| {
                 store
-                    .host_put_if_absent(DECLARATIONS, &version.0, stored)
-                    .map_err(DeployError::internal)?;
-            }
+                    .host_put_if_absent(DECLARATIONS, key, value)
+                    .map_err(|error| error.to_string())
+            })?;
             return Ok(deployment.staged.response);
         }
         let genesis = deployment.genesis()?;

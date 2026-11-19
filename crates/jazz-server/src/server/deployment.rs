@@ -165,32 +165,19 @@ pub(crate) async fn deploy_body(
 }
 
 /// Keep the declarations of each version deployed with them for the first
-/// time when the deployment changes no catalogue row. A deployment that does
-/// change the catalogue keeps them in the transaction that commits it
-/// (`deploy_body`), so a conflicting kept value refuses it before anything is
-/// live. A version whose declarations are kept already keeps them, and a
-/// deployment that names different ones for it is refused rather than
-/// ignored.
+/// time when the deployment changes no catalogue row
+/// ([`portable::keep_first_declared`]): one that names different ones for a
+/// version that keeps some is refused rather than ignored.
 fn keep_declarations(
     kept: Option<&crate::kv::HostKv>,
     first: &[(jazz::tools::public_schema::SchemaHash, Vec<u8>)],
 ) -> Result<(), DeployError> {
-    let Some(kept) = kept else {
-        return Ok(());
-    };
-    for (version, stored) in first {
-        if let Some(existing) = kept
-            .put_if_absent(&version.0, stored)
-            .map_err(DeployError::internal)?
-            && existing != *stored
-        {
-            return Err(DeployError::invalid(format!(
-                "schema version {version} was deployed with other encryption declarations, \
-                 which its cells are sealed under; the deployment names different ones"
-            )));
+    match kept {
+        Some(kept) => {
+            portable::keep_first_declared(first, |key, value| kept.put_if_absent(key, value))
         }
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Publish `source` (a schema carrying its permissions as table policies)

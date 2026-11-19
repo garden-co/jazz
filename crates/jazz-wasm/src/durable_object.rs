@@ -1017,7 +1017,7 @@ mod core_host {
         WebSocketCredential, WebSocketPrelude,
     };
     use jazz_server::portable::catalogue::{CatalogueIndex, DeploymentResponse};
-    use jazz_server::portable::deployment::{self, CoreHost as _, DeployBody, DeployError};
+    use jazz_server::portable::deployment::{self, DeployBody, DeployError};
     use jazz_server::portable::handshake::{link, negotiate_hello};
     use jazz_server::portable::websocket_codec::{
         decode_ws_encoded_frame_batch, encode_ws_frame_batches, ws_foreign_version_refusal,
@@ -2207,7 +2207,10 @@ mod core_host {
                 storage: self.storage.clone(),
             };
             let now = js_sys::Date::now() as u64;
-            deployment::deploy(&mut self.core, &host, &self.app_id, body, now)
+            let deployed = deployment::deploy(&mut self.core, &host, &self.app_id, body, now);
+            // A core it opened has the registry installed, its tables made.
+            self.accounts_open |= self.core.is_some();
+            deployed
         }
 
         /// Keep `core` as the open core, with the account registry its
@@ -2219,6 +2222,8 @@ mod core_host {
                 },
                 &mut core,
             )?;
+            // Installing it made the registry's tables (`registry`).
+            self.accounts_open = true;
             self.core = Some(core);
             Ok(())
         }

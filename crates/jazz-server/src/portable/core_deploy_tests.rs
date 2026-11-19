@@ -22,7 +22,7 @@ use jazz::tools::deployment::artifact::{self, LoadedApp, system_tables};
 use serde_json::{Value as Json, json};
 
 use super::accounts;
-use super::deployment::{CoreHost, DECLARATIONS, apply_to_core, deploy};
+use super::deployment::{CoreHost, DECLARATIONS, apply_to_core, deploy, keep_first_declared};
 use crate::runtime::ServerCore;
 
 const APP_NAME: &str = "core-deploy-tests";
@@ -686,5 +686,130 @@ fn an_unreadable_registry_refuses_the_account_checks() {
             error.contains("the account registry cannot be read"),
             "{error}"
         );
+    }
+}
+
+/// A deployment that changes no catalogue row still keeps the declarations
+/// of a version it names for the first time (one in the catalogue whose
+/// declarations the store does not keep, as a store from before they were
+/// kept), both on the open core and on a host that opens none for it.
+#[test]
+fn a_deploy_that_changes_nothing_keeps_first_time_declarations() {
+    for (name, backing) in hosts() {
+        let mut host = Host::new(backing);
+        let app = loaded(APP);
+        host.deploy(&app.deployment_body(false)).unwrap();
+        let kept = host.kept(&app.current_hash()).expect("kept on deploy");
+
+        let forget = |host: &Host| {
+            host.host
+                .store()
+                .unwrap()
+                .host_delete(DECLARATIONS, &app.current_hash().0)
+                .unwrap();
+            assert_eq!(host.kept(&app.current_hash()), None);
+        };
+
+        // The open core.
+        forget(&host);
+        let again = host.deploy(&app.deployment_body(false)).unwrap();
+        assert_eq!(again["changed"], false, "{name}");
+        assert_eq!(host.kept(&app.current_hash()), Some(kept.clone()), "{name}");
+
+        // No core open: the store is read and kept on directly.
+        forget(&host);
+        host.core.take().unwrap().close();
+        let again = host.deploy(&app.deployment_body(false)).unwrap();
+        assert_eq!(again["changed"], false, "{name}");
+        assert!(host.core.is_none(), "{name}: nothing to open a core for");
+        assert_eq!(host.kept(&app.current_hash()), Some(kept.clone()), "{name}");
+    }
+}
+
+/// A deployment that changes no catalogue row refuses declarations that
+/// differ from the ones its version keeps (written since the deployment
+/// read them), as the transaction of one that does change it refuses
+/// them; the kept ones stay. The same ones, or none kept yet, are kept.
+#[test]
+fn keeping_first_time_declarations_refuses_different_kept_ones() {
+    for (name, backing) in hosts() {
+        let store = backing.store().unwrap();
+        let version = loaded(APP).current_hash();
+        let put = |key: &[u8], value: &[u8]| {
+            store
+                .host_put_if_absent(DECLARATIONS, key, value)
+                .map_err(|error| error.to_string())
+        };
+        let first = vec![(version, b"first".to_vec())];
+
+        keep_first_declared(&first, put).unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        keep_first_declared(&first, put).unwrap_or_else(|error| panic!("{name}: {error:?}"));
+
+        let other = vec![(version, b"other".to_vec())];
+        let refusal = keep_first_declared(&other, put).unwrap_err();
+        assert_eq!(refusal.status.as_u16(), 422, "{name}: {:?}", refusal.body);
+        assert!(
+            refusal.body["error"]
+                .as_str()
+                .unwrap()
+                .contains("deployed with other encryption declarations"),
+            "{name}: {:?}",
+            refusal.body
+        );
+        assert_eq!(
+            store.host_get(DECLARATIONS, &version.0).unwrap(),
+            Some(b"first".to_vec()),
+            "{name}: the kept ones stay"
+        );
+    }
+}
+
+/// Decrypting a column puts its plaintext on the server, so a deploy to a
+/// core beside its store (a Durable Object's) asks for the deployer's
+/// confirmation naming it, as native does: refused without it (and nothing
+/// opened or kept), deployed with it.
+#[test]
+fn a_decrypt_needs_the_deployers_confirmation_on_a_core_host() {
+    let decrypting = APP
+        .replace(
+            r#""__e2ee_eq_title": "bytes" }"#,
+            r#""__e2ee_eq_title": "bytes", "notes": "bytes", "notesText": "string?" }"#,
+        )
+        .replace(
+            r#""columns": { "title": "string" }"#,
+            r#""columns": { "title": "string", "notes": { "type": "string", "to": "notesText" } }"#,
+        );
+    assert_ne!(decrypting, APP);
+    for (name, backing) in hosts() {
+        let mut host = Host::new(backing);
+        let app = loaded(&decrypting);
+
+        for confirmed in [json!([]), json!(["tasks.title"])] {
+            let mut body = app.deployment_body(false);
+            body["confirmDecrypt"] = confirmed.clone();
+            let (status, refusal) = host.deploy(&body).unwrap_err();
+            assert_eq!(status, 422, "{name} {confirmed}: {refusal}");
+            assert!(
+                refusal["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("confirmDecrypt: [\"tasks.notes\"]"),
+                "{name}: {refusal}"
+            );
+            assert!(host.core.is_none(), "{name}: nothing opened");
+            assert_eq!(host.kept(&app.current_hash()), None, "{name}");
+        }
+
+        let mut body = app.deployment_body(false);
+        body["confirmDecrypt"] = json!(["tasks.title", "tasks.notes"]);
+        let response = host
+            .deploy(&body)
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        assert_eq!(response["bundle"], app.bundle().to_hex(), "{name}");
+        assert!(host.kept(&app.current_hash()).is_some(), "{name}");
+
+        // Confirmed once, the version's decrypt is known.
+        let again = host.deploy(&app.deployment_body(false)).unwrap();
+        assert_eq!(again["changed"], false, "{name}");
     }
 }
