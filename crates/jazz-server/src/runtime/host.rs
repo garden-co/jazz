@@ -33,6 +33,9 @@ pub(super) enum Work {
 pub(super) struct Runtime {
     pub(super) schema: JazzSchema,
     pub(super) any_stored_catalogue: bool,
+    /// Whether an encrypted app needs the account registry here. Only the
+    /// deploy's scratch runtime, which serves nobody, is exempt.
+    pub(super) registry_required: bool,
 }
 
 /// Open the runtime on the store.
@@ -577,7 +580,7 @@ impl AppStore {
         role: NodeRole,
         any_stored_catalogue: bool,
     ) -> Result<ServerRuntimeHandle, String> {
-        self.start(schema, role, any_stored_catalogue, false)
+        self.start(schema, role, any_stored_catalogue, false, false)
     }
 
     pub(super) fn start(
@@ -586,6 +589,7 @@ impl AppStore {
         role: NodeRole,
         any_stored_catalogue: bool,
         owns_store: bool,
+        registry_exempt: bool,
     ) -> Result<ServerRuntimeHandle, String> {
         if role == NodeRole::Relay {
             return Err("relay nodes are not supported yet on SQLite".to_owned());
@@ -595,6 +599,7 @@ impl AppStore {
             runtime: Runtime {
                 schema,
                 any_stored_catalogue,
+                registry_required: !registry_exempt,
             },
             reply,
         }))?;
@@ -893,6 +898,8 @@ impl StoreLoop {
                     self.wake.clone(),
                     runtime.any_stored_catalogue,
                     self.app.lock().ok().and_then(|app| app.clone()),
+                    self.source.reader().ok(),
+                    runtime.registry_required,
                 )
             }))
             .unwrap_or_else(|panic| {
@@ -1132,7 +1139,14 @@ impl ServerRuntimeHandle {
         storage: StorageConfig,
         role: NodeRole,
     ) -> Result<Self, String> {
-        Self::start(schema, storage, role, false)
+        Self::start(schema, storage, role, false, false)
+    }
+
+    /// The deploy's scratch runtime, on which a deployment is tried before
+    /// the real store sees it: it serves nobody, so it alone may hold an
+    /// encrypted schema without the account registry.
+    pub(crate) fn start_scratch(schema: JazzSchema) -> Result<Self, String> {
+        Self::start(schema, StorageConfig::InMemory, NodeRole::Core, false, true)
     }
 
     pub(super) fn start(
@@ -1140,11 +1154,12 @@ impl ServerRuntimeHandle {
         storage: StorageConfig,
         role: NodeRole,
         any_stored_catalogue: bool,
+        registry_exempt: bool,
     ) -> Result<Self, String> {
         if role == NodeRole::Relay {
             return Err("relay nodes are not supported yet on SQLite".to_owned());
         }
-        AppStore::open(&storage)?.start(schema, role, any_stored_catalogue, true)
+        AppStore::open(&storage)?.start(schema, role, any_stored_catalogue, true, registry_exempt)
     }
 
     /// Start a runtime whose schema comes from the administrative catalogue.
@@ -1155,7 +1170,7 @@ impl ServerRuntimeHandle {
         storage: StorageConfig,
         role: NodeRole,
     ) -> Result<Self, String> {
-        Self::start(schema, storage, role, true)
+        Self::start(schema, storage, role, true, false)
     }
 
     /// Subscribe to activity notices.
@@ -1612,6 +1627,17 @@ impl ServerRuntimeHandle {
     /// which a change that committed and then failed may have left behind.
     pub async fn reload_catalogue(&self) -> Result<(), String> {
         self.run(|owner| owner.reload_catalogue()).await
+    }
+
+    /// Whether the app the runtime serves has Jazz's E2EE system tables.
+    pub async fn encrypts(&self) -> Result<bool, String> {
+        self.run(|owner| owner.encrypts()).await
+    }
+
+    /// Whether the runtime has the account registry its checks read, which
+    /// an app that encrypts columns needs.
+    pub async fn has_account_registry(&self) -> Result<bool, String> {
+        self.run(|owner| Ok(owner.registry_installed)).await
     }
 
     /// Tests: how many sessions (sync and thin) the runtime serves now.

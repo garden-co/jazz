@@ -218,16 +218,206 @@ fn structural(mut schema: Schema) -> Schema {
     schema
 }
 
+/// No lens reshapes a system table: it may not be renamed, nor have a
+/// column added, removed or renamed. Core finds a system table by the name
+/// the admitted versions give it and reads its columns by name across
+/// versions, so a system table is carried between versions unchanged (a
+/// lens may still introduce or remove one whole, as the fragment's own
+/// versions do): a rename, or columns swapped through a temporary name,
+/// would make an older version's uploads read under another layout.
+fn check_system_table_lenses(migrations: &[Lens]) -> Result<(), DeploymentError> {
+    for lens in migrations {
+        for op in &lens.forward.ops {
+            let touched: Vec<&String> = match op {
+                LensOp::RenameTable { old_name, new_name } => vec![old_name, new_name],
+                LensOp::AddColumn { table, .. }
+                | LensOp::RemoveColumn { table, .. }
+                | LensOp::RenameColumn { table, .. } => vec![table],
+                LensOp::AddTable { .. } | LensOp::RemoveTable { .. } => Vec::new(),
+            };
+            if let Some(name) = touched
+                .into_iter()
+                .find(|name| artifact::system_tables::is_system_table(name))
+            {
+                return Err(DeploymentError::InvalidMigration {
+                    from: lens.source_hash,
+                    to: lens.target_hash,
+                    reason: format!(
+                        "{name} is one of Jazz's system tables, which a migration may not change: \
+                         it keeps its name and columns in every version"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Once any version of an app carries Jazz's system tables, every later
+/// version carries them too: a version without them that follows one with
+/// them would strand the system rows written under the earlier version (a
+/// version that brings them back stores them as new tables), so a migration
+/// from a version that has them to one that lacks them is refused. Returns
+/// the versions that follow one with them, which keep them even when they
+/// declare no encryption, each with the versions it follows directly.
+fn check_system_tables_carried<'a>(
+    schemas: &BTreeMap<Hash, Schema>,
+    migrations: impl Iterator<Item = &'a Lens>,
+) -> Result<BTreeMap<Hash, Vec<Hash>>, DeploymentError> {
+    let has = |hash: &SchemaHash| {
+        schemas.get(&hash.0).map(|schema| {
+            schema
+                .keys()
+                .any(|name| artifact::system_tables::is_system_table(name.as_str()))
+        })
+    };
+    let mut follows: BTreeMap<Hash, Vec<Hash>> = BTreeMap::new();
+    for lens in migrations {
+        if has(&lens.source_hash) != Some(true) {
+            continue;
+        }
+        if has(&lens.target_hash) == Some(false) {
+            return Err(DeploymentError::InvalidMigration {
+                from: lens.source_hash,
+                to: lens.target_hash,
+                reason:
+                    "the source version has Jazz's system tables and the target lacks them: once a \
+                         version carries them, every later version does, so that the system rows \
+                         written under earlier versions stay readable"
+                        .to_owned(),
+            });
+        }
+        follows
+            .entry(lens.target_hash.0)
+            .or_default()
+            .push(lens.source_hash.0);
+    }
+    Ok(follows)
+}
+
+/// A version new to the catalogue that lacks the system tables is refused
+/// when a stored version has them, whatever lens it hangs on and whatever
+/// the deploy says about dropping history: it comes after the stored one in
+/// time, so it would strand the system rows written under it.
+///
+/// A version without them may still come before one that has them, but
+/// only the stored catalogue can say so: a lens the deploy brings proves
+/// nothing (it could lead a later version back to a stored one that has
+/// them), and the stored lenses join stored versions only, never one new to
+/// the catalogue. So every new version must have them. The target also
+/// needs them: rolling back to a version without them would put application
+/// code from before encryption in front of encrypted data.
+fn check_deployment_keeps_system_tables(
+    stored: &DeploymentCatalogue,
+    submitted: &[SchemaHash],
+    schemas: &BTreeMap<Hash, Schema>,
+    target: SchemaHash,
+) -> Result<(), DeploymentError> {
+    let has = |schema: &Schema| {
+        schema
+            .keys()
+            .any(|name| artifact::system_tables::is_system_table(name.as_str()))
+    };
+    if !stored.schemas.iter().any(has) {
+        return Ok(());
+    }
+    let stored_hashes: BTreeSet<Hash> = stored
+        .schemas
+        .iter()
+        .map(|schema| SchemaHash::compute(schema).0)
+        .collect();
+    for hash in submitted {
+        if stored_hashes.contains(&hash.0) || schemas.get(&hash.0).is_none_or(has) {
+            continue;
+        }
+        return Err(DeploymentError::InvalidSchema {
+            schema: *hash,
+            reason: "a stored version has Jazz's system tables and this one lacks them: once a \
+                     version carries them, every later version does, so that the system rows \
+                     written under earlier versions stay readable"
+                .to_owned(),
+        });
+    }
+    if !has(&schemas[&target.0]) {
+        return Err(DeploymentError::InvalidSchema {
+            schema: target,
+            reason: "cannot roll back to a version without Jazz's E2EE system tables: \
+                     a stored version has them, and application code from before encryption \
+                     cannot serve encrypted data"
+                .to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// The deploy's rules for Jazz's system tables, which a server checks
+/// before [`prepare_deployment`]: each submitted schema has all of them,
+/// exactly as Jazz defines them, or none, and no app table references
+/// one; and the app's permissions name none of them, since Jazz derives
+/// their policies.
+pub fn check_system_tables(request: &DeploymentRequest) -> Result<(), DeploymentError> {
+    for (hash, schema) in &request.schemas {
+        artifact::system_tables::check_e2ee_fragment(schema).map_err(|reason| {
+            DeploymentError::InvalidSchema {
+                schema: *hash,
+                reason,
+            }
+        })?;
+    }
+    if let Some(table) = request
+        .permissions
+        .keys()
+        .find(|table| artifact::system_tables::is_system_table(table.as_str()))
+    {
+        return Err(DeploymentError::InvalidPermissions {
+            schema: request.target_schema_hash,
+            reason: format!(
+                "{table} is one of Jazz's system tables, whose policies Jazz derives; the app's \
+                 permissions may not name it"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Validate stored + submitted history without performing any I/O or mutation.
 pub fn prepare_deployment(
     stored: &DeploymentCatalogue,
     request: DeploymentRequest,
 ) -> Result<PreparedDeployment, DeploymentError> {
+    prepare(stored, request, None).map(|(prepared, _)| prepared)
+}
+
+/// [`prepare_deployment`] of an app with encryption declarations (every
+/// schema version's entries and the settings, E2EE protocol §1.5): each
+/// version that declares encryption has exactly Jazz's system tables, and
+/// each version that has them declares encryption. No app policy reaches a
+/// system table but by testing the members table. The target's
+/// permissions gain the policies Jazz derives for its system tables, and
+/// the deploy's warnings come back beside the prepared deployment.
+pub fn prepare_encrypted_deployment(
+    stored: &DeploymentCatalogue,
+    request: DeploymentRequest,
+    encryption: &artifact::DeclaredEncryption,
+) -> Result<(PreparedDeployment, Vec<String>), DeploymentError> {
+    check_system_tables(&request)?;
+    prepare(stored, request, Some(encryption))
+}
+
+/// [`prepare_deployment`], with the encryption checks when `encryption`
+/// is given.
+fn prepare(
+    stored: &DeploymentCatalogue,
+    mut request: DeploymentRequest,
+    encryption: Option<&artifact::DeclaredEncryption>,
+) -> Result<(PreparedDeployment, Vec<String>), DeploymentError> {
+    check_system_table_lenses(&request.migrations)?;
     let mut schemas = BTreeMap::new();
     for schema in &stored.schemas {
         schemas.insert(SchemaHash::compute(schema).0, structural(schema.clone()));
     }
-    for (claimed, schema) in request.schemas {
+    let submitted: Vec<SchemaHash> = request.schemas.iter().map(|(hash, _)| *hash).collect();
+    for (claimed, schema) in std::mem::take(&mut request.schemas) {
         let actual = SchemaHash::compute(&schema);
         if actual != claimed {
             return Err(DeploymentError::SchemaHashMismatch { claimed, actual });
@@ -239,6 +429,17 @@ pub fn prepare_deployment(
             schema: request.target_schema_hash,
         });
     }
+    let follows = check_system_tables_carried(
+        &schemas,
+        stored.migrations.iter().chain(&request.migrations),
+    )?;
+    check_deployment_keeps_system_tables(stored, &submitted, &schemas, request.target_schema_hash)?;
+    let warnings = match encryption {
+        Some(encryption) => {
+            check_encryption(&schemas, &submitted, &mut request, encryption, &follows)?
+        }
+        None => Vec::new(),
+    };
     if !request.allow_dropping_history {
         let deployed: Vec<&Schema> = stored
             .admitted_schema_hashes
@@ -336,14 +537,173 @@ pub fn prepare_deployment(
         .collect::<BTreeMap<_, _>>();
     let mut migrations = migrations.into_values().collect::<Vec<_>>();
     migrations.sort_by_key(|lens| (rank[&lens.target_hash.0], rank[&lens.source_hash.0]));
-    Ok(PreparedDeployment {
-        schemas: order
-            .into_iter()
-            .map(|hash| schemas.remove(&hash).unwrap())
-            .collect(),
-        migrations,
-        active_schema,
-    })
+    Ok((
+        PreparedDeployment {
+            schemas: order
+                .into_iter()
+                .map(|hash| schemas.remove(&hash).unwrap())
+                .collect(),
+            migrations,
+            active_schema,
+        },
+        warnings,
+    ))
+}
+
+/// The encryption checks of [`prepare_encrypted_deployment`], on the
+/// stored and submitted schemas, merging the system tables' derived
+/// policies into the request's permissions. The warnings it can give.
+fn check_encryption(
+    schemas: &BTreeMap<Hash, Schema>,
+    submitted: &[SchemaHash],
+    request: &mut DeploymentRequest,
+    encryption: &artifact::DeclaredEncryption,
+    follows: &BTreeMap<Hash, Vec<Hash>>,
+) -> Result<Vec<String>, DeploymentError> {
+    use artifact::{encryption as declared, system_tables};
+    let target = request.target_schema_hash;
+    let invalid = |schema: SchemaHash, reason: String| DeploymentError::InvalidSchema {
+        schema,
+        reason: format!("encryption: {reason}"),
+    };
+    let mut versions = Vec::new();
+    for hex in encryption.versions.keys() {
+        match SchemaHash::from_hex(hex).filter(|hash| schemas.contains_key(&hash.0)) {
+            Some(hash) => versions.push(hash),
+            None => {
+                return Err(invalid(
+                    target,
+                    format!("the declarations name schema {hex}, which the deployment lacks"),
+                ));
+            }
+        }
+    }
+    // Every version the deployment touches: what it submits or declares,
+    // its target, and both ends of each migration, so a stored version
+    // left out of the body is judged too.
+    let ends: Vec<SchemaHash> = request
+        .migrations
+        .iter()
+        .flat_map(|lens| [lens.source_hash, lens.target_hash])
+        .collect();
+    for hash in submitted
+        .iter()
+        .chain(&versions)
+        .chain([&target])
+        .chain(&ends)
+    {
+        let schema = schemas
+            .get(&hash.0)
+            .ok_or(DeploymentError::MissingSchema { schema: *hash })?;
+        let entries = encryption.entries(&hash.to_string());
+        let fragment =
+            system_tables::check_e2ee_fragment(schema).map_err(|reason| invalid(*hash, reason))?;
+        // A version that follows one with the system tables keeps them
+        // whether or not it declares encryption (an app that stops
+        // encrypting keeps them, harmlessly).
+        let required = entries.is_some() || follows.contains_key(&hash.0);
+        if fragment != required {
+            return Err(invalid(
+                *hash,
+                if fragment {
+                    "the schema has Jazz's system tables but declares no encryption".to_owned()
+                } else {
+                    "the schema declares encryption but lacks Jazz's system tables".to_owned()
+                },
+            ));
+        }
+    }
+    let permissions: crate::catalogue::Permissions = request
+        .permissions
+        .iter()
+        .map(|(table, policies)| (*table, policies.clone()))
+        .collect();
+    let refused = |reason: String| DeploymentError::InvalidPermissions {
+        schema: target,
+        reason,
+    };
+    for (table, policies) in &permissions {
+        for clause in [
+            &policies.select,
+            &policies.insert,
+            &policies.update,
+            &policies.delete,
+        ] {
+            if let Some(system) = [&clause.using, &clause.with_check]
+                .into_iter()
+                .flatten()
+                .find_map(declared::reaches_system_table)
+            {
+                return Err(refused(format!(
+                    "a policy of {table} reaches {system}, one of Jazz's system tables; an app \
+                     policy may only test the members table with `exists`"
+                )));
+            }
+        }
+    }
+    // A target that keeps the system tables without declaring encryption
+    // still gets their derived policies, from the declarations of the
+    // nearest version before it that has them: its spaces are still there.
+    let entries = match encryption.entries(&target.to_string()) {
+        Some(entries) => Some(entries),
+        None => {
+            // Breadth first, nearest versions first. Versions at the same
+            // distance that declare differently leave no nearest: refused.
+            let mut level = vec![target.0];
+            let mut seen = BTreeSet::from([target.0]);
+            let mut found = None;
+            while found.is_none() && !level.is_empty() {
+                let declared: Vec<(Hash, _)> = level
+                    .iter()
+                    .filter_map(|hash| {
+                        encryption
+                            .entries(&SchemaHash(*hash).to_string())
+                            .map(|entries| (*hash, entries))
+                    })
+                    .collect();
+                if let Some((_, first)) = declared.first() {
+                    if let Some((other, _)) = declared.iter().find(|(_, entries)| entries != first)
+                    {
+                        return Err(invalid(
+                            target,
+                            format!(
+                                "the schema keeps Jazz's system tables without declaring \
+                                 encryption, and the versions it follows nearest declare \
+                                 differently ({} and {}): declare encryption in it",
+                                SchemaHash(declared[0].0),
+                                SchemaHash(*other)
+                            ),
+                        ));
+                    }
+                    found = Some(*first);
+                    break;
+                }
+                level = level
+                    .iter()
+                    .flat_map(|hash| follows.get(hash).into_iter().flatten().copied())
+                    .filter(|hash| seen.insert(*hash))
+                    .collect();
+            }
+            found
+        }
+    };
+    let Some(entries) = entries else {
+        if follows.contains_key(&target.0) {
+            return Err(invalid(
+                target,
+                "the schema keeps Jazz's system tables, but no ancestor has declarations in \
+                 this deployment; send the ancestor's encryption declarations so Jazz can \
+                 derive the system-table policies"
+                    .to_owned(),
+            ));
+        }
+        return Ok(Vec::new());
+    };
+    let derived =
+        system_tables::derive_e2ee_policies(&schemas[&target.0], entries, &encryption.settings)
+            .map_err(|reason| invalid(target, reason))?;
+    request.permissions.extend(derived);
+    Ok(Vec::new())
 }
 
 /// Each migration's own checks, apart from where it sits in the history:

@@ -105,6 +105,137 @@ fn unix_now_ms() -> u64 {
         })
 }
 
+/// The registry as core's checks beside the account tables' policies read
+/// it (E2EE protocol R5, R6). Core reads it on the store's own connection,
+/// inside the write's transaction: a second connection to a shared
+/// in-memory database, which has no write-ahead log, is locked out while
+/// the store's connection holds a write. The reader kept beside it serves
+/// callers that hold no connection.
+pub(crate) struct RegistryFounders {
+    reader: jazz::host::HostReader,
+    app: Uuid,
+}
+
+/// The identities of `account` in the registry's tables on `conn`, or none
+/// for a store whose registry never opened.
+fn identities_of(
+    conn: &jazz::storage::Storage,
+    account: AccountId,
+) -> Result<Vec<(String, String)>, jazz::db::Error> {
+    let mut statement = conn
+        .prepare_cached(
+            "SELECT issuer, subject FROM _jazz_host_account_identities WHERE account = ?1",
+        )
+        .map_err(registry::storage_error)?;
+    let rows = statement
+        .query_map([account.0.as_bytes()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(registry::storage_error)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(registry::storage_error)
+}
+
+/// How many identities of `account` are not device-account identities.
+fn external_identities_of(
+    conn: &jazz::storage::Storage,
+    account: AccountId,
+) -> Result<i64, jazz::db::Error> {
+    let mut statement = conn
+        .prepare_cached(
+            "SELECT COUNT(*) FROM _jazz_host_account_identities \
+             WHERE account = ?1 AND issuer <> ?2",
+        )
+        .map_err(registry::storage_error)?;
+    statement
+        .query_row(
+            rusqlite::params![account.0.as_bytes(), jazz::identity::DEVICE_ACCOUNT_ISSUER],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(registry::storage_error)
+}
+
+impl RegistryFounders {
+    pub(crate) fn new(reader: jazz::host::HostReader, app: Uuid) -> Self {
+        Self { reader, app }
+    }
+
+    /// An account was founded by a device-account identity when one of its
+    /// device-account identities derives its id: linking a device-account
+    /// identity into another account keeps that account's id.
+    fn founded(
+        &self,
+        account: AccountId,
+        identities: Result<Vec<(String, String)>, jazz::db::Error>,
+    ) -> Result<Option<bool>, String> {
+        // A registry that cannot be read, a missing table included, is an
+        // error that refuses the write: never "an account nobody founded",
+        // which would let the session's issuer decide.
+        let identities =
+            identities.map_err(|error| format!("the account registry cannot be read: {error}"))?;
+        if identities.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(identities.iter().any(|(issuer, subject)| {
+            issuer == jazz::identity::DEVICE_ACCOUNT_ISSUER
+                && jazz::account_registry::device_account_id(self.app, subject) == account
+        })))
+    }
+}
+
+impl jazz::db::AccountRegistryView for RegistryFounders {
+    fn founded_by_device_account(&self, account: AccountId) -> Result<Option<bool>, String> {
+        self.founded(
+            account,
+            self.reader.sql(|conn| identities_of(conn, account)),
+        )
+    }
+
+    fn founded_by_device_account_on(
+        &self,
+        store: &jazz::storage::Storage,
+        account: AccountId,
+    ) -> Result<Option<bool>, String> {
+        self.founded(account, identities_of(store, account))
+    }
+
+    /// An account whose identities are all device-account identities and
+    /// none of which derives its id in this app's namespace was founded for
+    /// another audience (`found-local-first` and a guest's first admission
+    /// may name one). An encrypting app does not serve such accounts: this rule is
+    /// the documented one (E2EE protocol R5, R6), and the founding routes
+    /// refuse to create them. An account with an external identity is not
+    /// told apart from one the app founded, so it reads as the app's.
+    fn founded_for_another_audience(&self, account: AccountId) -> Result<bool, String> {
+        let Some(founded) = self.founded_by_device_account(account)? else {
+            return Ok(false);
+        };
+        if founded {
+            return Ok(false);
+        }
+        self.reader
+            .sql(|conn| external_identities_of(conn, account))
+            .map(|external| external == 0)
+            .map_err(|error| error.to_string())
+    }
+
+    fn founded_for_another_audience_on(
+        &self,
+        store: &jazz::storage::Storage,
+        account: AccountId,
+    ) -> Result<bool, String> {
+        let Some(founded) = self.founded_by_device_account_on(store, account)? else {
+            return Ok(false);
+        };
+        if founded {
+            return Ok(false);
+        }
+        external_identities_of(store, account)
+            .map(|external| external == 0)
+            .map_err(|error| error.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +299,111 @@ mod tests {
         );
         let bob = second.login_or_register(&principal("bob")).unwrap();
         assert_eq!(first.login(&principal("bob")).unwrap(), bob.assignment);
+    }
+
+    // Core's account-record checks read who founded an account through
+    // the registry's own read connection (E2EE protocol R5, R6). Internal:
+    // the view has no public reader of its own to observe it through.
+    #[test]
+    fn the_founders_view_tells_device_account_founded_accounts() {
+        use jazz::db::AccountRegistryView;
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::runtime::StorageConfig::data_dir(dir.path());
+        let store = crate::runtime::AppStore::open(&storage).unwrap();
+        let mut registry = StoredAccountRegistry::open(store.sql().unwrap()).unwrap();
+        let app = Uuid::from_bytes([7; 16]);
+        let external = registry
+            .login_or_register(&principal("alice"))
+            .unwrap()
+            .assignment
+            .account;
+        let founder = Principal {
+            issuer: jazz::identity::DEVICE_ACCOUNT_ISSUER.into(),
+            subject: Uuid::from_bytes([9; 16]).to_string(),
+        };
+        let AccountCommandResult::Assignment(founded) = registry
+            .execute(&AccountCommand::FoundDeviceAccount {
+                principal: founder,
+                app,
+            })
+            .unwrap()
+        else {
+            panic!("an assignment");
+        };
+        let view = RegistryFounders::new(
+            jazz::host::HostReader::open(
+                &dir.path().join(crate::server::identity::STORE_FILE),
+                None,
+            )
+            .unwrap(),
+            app,
+        );
+        assert_eq!(
+            view.founded_by_device_account(founded.account),
+            Ok(Some(true))
+        );
+        assert_eq!(view.founded_by_device_account(external), Ok(Some(false)));
+        assert_eq!(
+            view.founded_by_device_account(AccountId(Uuid::from_bytes([3; 16]))),
+            Ok(None)
+        );
+    }
+
+    /// An account whose identities are all device-account identities and
+    /// none of which derives its id in the app's namespace was founded for
+    /// another audience; the app's own founders, external accounts and unknown
+    /// accounts are not.
+    #[test]
+    fn an_account_founded_for_another_audience_is_told_apart() {
+        use jazz::db::AccountRegistryView;
+        let dir = tempfile::tempdir().unwrap();
+        let app = Uuid::from_bytes([7; 16]);
+        let store =
+            crate::runtime::AppStore::open(&crate::runtime::StorageConfig::data_dir(dir.path()))
+                .unwrap();
+        let mut registry = StoredAccountRegistry::open(store.sql().unwrap()).unwrap();
+        let device = |subject: &str| Principal {
+            issuer: jazz::identity::DEVICE_ACCOUNT_ISSUER.into(),
+            subject: subject.into(),
+        };
+        let found = |registry: &mut StoredAccountRegistry, subject: &str, app: Uuid| {
+            let AccountCommandResult::Assignment(assignment) = registry
+                .execute(&AccountCommand::FoundDeviceAccount {
+                    principal: device(subject),
+                    app,
+                })
+                .unwrap()
+            else {
+                panic!("an assignment");
+            };
+            assignment.account
+        };
+        let own = found(&mut registry, &Uuid::from_bytes([1; 16]).to_string(), app);
+        let other = found(
+            &mut registry,
+            &Uuid::from_bytes([2; 16]).to_string(),
+            Uuid::from_bytes([8; 16]),
+        );
+        let external = registry
+            .login_or_register(&principal("alice"))
+            .unwrap()
+            .assignment
+            .account;
+        let view = RegistryFounders::new(
+            jazz::host::HostReader::open(
+                &dir.path().join(crate::server::identity::STORE_FILE),
+                None,
+            )
+            .unwrap(),
+            app,
+        );
+        assert_eq!(view.founded_for_another_audience(own), Ok(false));
+        assert_eq!(view.founded_for_another_audience(other), Ok(true));
+        assert_eq!(view.founded_for_another_audience(external), Ok(false));
+        assert_eq!(
+            view.founded_for_another_audience(AccountId(Uuid::from_bytes([3; 16]))),
+            Ok(false)
+        );
     }
 
     #[test]

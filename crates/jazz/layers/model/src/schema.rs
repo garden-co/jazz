@@ -72,7 +72,7 @@ pub const SUPERSEDED_WRITES_STORE: &str = "jazz_superseded_writes_v1";
 /// The reserved name prefix of system tables: catalogue tables whose
 /// definitions and policies come from Jazz, not from the application.
 /// Only Jazz's own schema fragment is meant to define a table with it: the
-/// app-file reader refuses an application table (in the current version) or
+/// app-file reader refuses an application table (in any version) or
 /// a permissions entry with this prefix. A schema built in code, as Jazz's
 /// own and its tests' are, may define one, and schema validation then
 /// relaxes its address correlations.
@@ -82,6 +82,18 @@ pub const SYSTEM_TABLE_PREFIX: &str = "__e2ee_";
 pub fn is_system_table(name: &str) -> bool {
     name.starts_with(SYSTEM_TABLE_PREFIX)
 }
+
+/// The system table of space members: the only one whose rows are ever
+/// deleted (rows of every system table are never updated).
+pub const MEMBERS_TABLE: &str = "__e2ee_members";
+
+/// The system table of private account identities, whose inserts core
+/// also checks beside their policy (E2EE protocol R5).
+pub const ACCOUNT_IDENTITIES_TABLE: &str = "__e2ee_account_identities";
+
+/// The system table of public account roots, whose inserts core also
+/// checks beside their policy (E2EE protocol R6).
+pub const ACCOUNT_ROOTS_TABLE: &str = "__e2ee_account_roots";
 /// Source-backed Jazz schema accepted by public database APIs.
 ///
 /// The developer-authored source is retained for durable catalogue

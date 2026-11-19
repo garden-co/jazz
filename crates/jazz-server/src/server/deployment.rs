@@ -1,11 +1,10 @@
 //! Validate a complete deployment before publishing its artifacts and activating it.
 use super::{ServerRuntimeHandle, ServerState};
 pub(crate) use crate::portable::catalogue::DeploymentResponse;
-#[cfg(any(test, feature = "embedded-server"))]
-pub(crate) use crate::portable::deployment::DeploySchema;
 use crate::portable::deployment::{self as portable, Deployment};
-pub(crate) use crate::portable::deployment::{DeployError, DeployRequest};
-use crate::runtime::StorageConfig;
+pub(crate) use crate::portable::deployment::{DeployBody, DeployError};
+#[cfg(any(test, feature = "embedded-server"))]
+pub(crate) use crate::portable::deployment::{DeployRequest, DeploySchema};
 #[cfg(any(test, feature = "embedded-server"))]
 use jazz::tools::public_schema::{Schema, TablePolicies};
 use std::sync::Arc;
@@ -19,9 +18,11 @@ use jazz::tools::public_schema::{SchemaHash, TableName};
 #[cfg(test)]
 use std::collections::HashMap;
 
-pub(crate) async fn deploy(
+/// Validate and apply a deployment, with the app's encryption declarations
+/// when it has them (see [`portable::prepare_encrypted`]).
+pub(crate) async fn deploy_body(
     state: Arc<ServerState>,
-    request: DeployRequest,
+    body: DeployBody,
 ) -> Result<DeploymentResponse, DeployError> {
     // This guard belongs to the detached task, so shutdown also waits when
     // the HTTP client disconnects while deployment is still committing.
@@ -42,8 +43,27 @@ pub(crate) async fn deploy(
         .catalogue_store
         .index()
         .map_err(DeployError::internal)?;
-    let deployment = portable::prepare(&index, request, super::catalogue::unix_timestamp_millis())?;
+    let deployment =
+        portable::prepare_encrypted(&index, body, super::catalogue::unix_timestamp_millis())?;
     let staged = &deployment.staged;
+    // An encrypted app needs the account registry its checks read, as when
+    // a runtime opens (`Owner::open`): a deployment that brings one to a
+    // runtime without it is refused before anything is applied.
+    if let Some(runtime) = state.runtime()
+        && deployment.prepared.schemas().iter().any(|schema| {
+            jazz::tools::deployment::artifact::system_tables::check_e2ee_fragment(schema)
+                .unwrap_or(false)
+        })
+        && !runtime
+            .has_account_registry()
+            .await
+            .map_err(DeployError::internal)?
+    {
+        return Err(DeployError::invalid(
+            "this app encrypts columns, which needs the account registry of an app's store; \
+             the server's runtime has none",
+        ));
+    }
     if !staged.response.changed {
         // Nothing to commit, but the runtime's view of the catalogue may be
         // behind the store's: a deployment that committed and then failed
@@ -67,9 +87,8 @@ pub(crate) async fn deploy(
             // starts as empty as the scratch one, so the same change
             // applies there; only a storage failure can still fail it, and
             // then leaves an empty store that the next deployment reuses.
-            let probe =
-                ServerRuntimeHandle::start_with_storage(genesis.clone(), StorageConfig::InMemory)
-                    .map_err(DeployError::internal)?;
+            let probe = ServerRuntimeHandle::start_scratch(genesis.clone())
+                .map_err(DeployError::internal)?;
             let applied = match change(&probe, &deployment).await {
                 Ok(change) => probe
                     .apply_catalogue(change, None)
@@ -122,7 +141,7 @@ pub(crate) async fn publish_source_bundle(
         .iter()
         .map(|(name, table)| (*name, table.policies.clone()))
         .collect();
-    let response = deploy(
+    let response = deploy_body(
         state,
         DeployRequest {
             target_schema_hash: hash.clone(),
@@ -133,7 +152,8 @@ pub(crate) async fn publish_source_bundle(
             migrations: Vec::new(),
             permissions,
             allow_dropping_history: false,
-        },
+        }
+        .into(),
     )
     .await
     .map_err(|error| error.body.to_string())?;
@@ -150,5 +170,7 @@ async fn change(
     deployment.catalogue_change(&stored)
 }
 
+#[cfg(test)]
+mod encryption_tests;
 #[cfg(test)]
 mod tests;

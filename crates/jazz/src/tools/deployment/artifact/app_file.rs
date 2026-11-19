@@ -316,8 +316,8 @@ fn read_tables(
         let path = format!("{path}.{name}");
         identifier(name, &path)?;
         let current = codegen.is_some();
-        // Earlier versions keep whatever names they deployed with.
-        if current && crate::schema::is_system_table(name) {
+        // Every version: no app was deployed with such a table.
+        if crate::schema::is_system_table(name) {
             return Err(refuse(&path, reserved_table_name(name)));
         }
         let fields = object(table, &path)?;

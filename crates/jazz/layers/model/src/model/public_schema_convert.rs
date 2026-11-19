@@ -78,6 +78,9 @@ pub enum UnsupportedPolicy {
     /// An `InheritsFrom` in a read (`select`) policy, or in a policy one
     /// inherits: no read rule needs it and no sync support ships for it.
     InheritsFromInReadPolicy,
+    /// `InheritsFrom` or `InsertedByThisTransaction` in an app table's
+    /// policy: Jazz derives them for its system tables only.
+    SystemOnlyPolicyNode,
     /// An `InsertedByThisTransaction` outside an `Exists` of an insert or
     /// update `WITH CHECK`, or under a `NOT` outside its `Exists`:
     /// everywhere else it is false, so a `NOT` of it holds for every row.
@@ -233,6 +236,27 @@ pub fn check_deployable_json_schemas(schema: &Schema) -> Result<(), SchemaConver
 /// `jazz-tools validate`, the dev server and a deployment all run.
 pub fn check_deployable_policies(schema: &Schema) -> Result<(), SchemaConversionError> {
     for (name, table) in schema {
+        if !crate::schema::is_system_table(name.as_str()) {
+            let slots = [
+                ("select.using", table.policies.select.using.as_ref()),
+                (
+                    "insert.with_check",
+                    table.policies.insert.with_check.as_ref(),
+                ),
+                ("update.using", table.policies.update.using.as_ref()),
+                (
+                    "update.with_check",
+                    table.policies.update.with_check.as_ref(),
+                ),
+                ("delete.using", table.policies.delete.using.as_ref()),
+            ];
+            for (slot, expr) in slots {
+                if let Some(expr) = expr {
+                    let path = format!("$.{}.policies.{slot}", name.as_str());
+                    refuse_system_only_nodes(expr, &path)?;
+                }
+            }
+        }
         if let Some(read) = table.policies.select.using.as_ref() {
             let path = format!("$.{}.policies.select.using", name.as_str());
             refuse_inherits_from_in_read(schema, table, read, &path)?;
@@ -269,6 +293,45 @@ pub fn check_deployable_policies(schema: &Schema) -> Result<(), SchemaConversion
         }
     }
     Ok(())
+}
+
+/// Refuse `InheritsFrom` and `InsertedByThisTransaction` anywhere in an
+/// app table's policy `expr`: Jazz derives them for its system tables, and
+/// an app policy reaches other rows through references and `exists`.
+fn refuse_system_only_nodes(expr: &PolicyExpr, path: &str) -> Result<(), SchemaConversionError> {
+    match expr {
+        PolicyExpr::InheritsFrom { .. } | PolicyExpr::InsertedByThisTransaction => {
+            let node = if matches!(expr, PolicyExpr::InheritsFrom { .. }) {
+                "InheritsFrom"
+            } else {
+                "InsertedByThisTransaction"
+            };
+            Err(SchemaConversionError::unsupported(
+                path,
+                format!(
+                    "`{node}` is for Jazz's system tables only; an app table's policy reaches \
+                     other rows through references (`allowedTo`) and `exists`"
+                ),
+                UnsupportedPolicy::SystemOnlyPolicyNode,
+            ))
+        }
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => {
+            let kind = if matches!(expr, PolicyExpr::And(_)) {
+                "And"
+            } else {
+                "Or"
+            };
+            for (index, part) in parts.iter().enumerate() {
+                refuse_system_only_nodes(part, &format!("{path}.{kind}[{index}]"))?;
+            }
+            Ok(())
+        }
+        PolicyExpr::Not(inner) => refuse_system_only_nodes(inner, &format!("{path}.Not")),
+        PolicyExpr::Exists { condition, .. } => {
+            refuse_system_only_nodes(condition, &format!("{path}.Exists"))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Refuse an `InheritsFrom` in `expr` whose candidate's policy reaches

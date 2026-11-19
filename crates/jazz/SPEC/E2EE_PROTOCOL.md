@@ -520,6 +520,27 @@ Account and device tables (fixed policies):
   is `device-account` exactly when the account was founded by a device-account
   identity (Jazz's account registry); an account founded otherwise writes
   `app` roots.
+  An encrypting app serves device accounts founded for its own app id
+  only. A device-account identity's account ID derives from the audience its
+  proof names (§2.3), which may be another than the app's, and the registry
+  keeps no record of which one founded an account, so such an account could
+  not be told from the app's own. The server therefore refuses to found one
+  for an app that encrypts (`found-local-first`, and a guest's first
+  admission), and accepts no identity or root (R5, R6) for an account whose
+  identities are all device-account identities and none of which derives its ID in the
+  app's namespace: neither a `device-account` nor an `app` root, so neither a
+  bootstrap nor a reset. An account with an external identity is not told
+  apart from one the app founded: a device account of another audience
+  that was linked to an external login before the app encrypted counts as
+  the app's, so that login can reset it (§2.11), like any account's own
+  login.
+  The rule also covers accounts founded before the app turned encryption
+  on: a device account founded for another audience by then is locked
+  out of encryption for good, and can neither bootstrap nor reset. There is
+  no migration, and the registry records no namespace to move it by. This
+  is intended. The deploy that first turns encryption on does not list
+  such accounts: finding them reads every device-account identity in the
+  registry, work that grows with the app's accounts, not with the deploy.
 - R7. Challenges, proofs, approvals, device deliveries: insert by `$createdBy`
   only, referencing a request or challenge of the same account; read by
   creator.
@@ -529,10 +550,17 @@ Account and device tables (fixed policies):
   request and the approved device's request belong to that account; a
   recovery approval's `recoveryRootId` names a recovery root of that account.
   Both successor tables: `accountId = session account`; the signer request
-  and the target (removed device's request or retired recovery root) belong
-  to that account; the target columns match `action` (§1.2); the
-  private and public rows share their ID and are inserted in one
-  transaction. Removal requests: `accountId = session account`, and the
+  and the removed device's request belong to that account; the target
+  columns match `action` (§1.2). The server does not check that a retired
+  recovery root belongs to the account: the target is an ID in a list column,
+  which no policy reads. Clients check it on replay (§2.4 step 3: the target
+  must be a valid, earlier, unretired recovery root of the account's own
+  ledger), so a successor retiring another account's root is not accepted. A
+  public successor requires the private one with its ID, inserted in the same
+  transaction. The reverse is not enforced: two rows cannot each require the
+  other of one transaction, and a private approval or successor without its
+  public half is inert (replay reads only public rows, and private
+  verification drops a private row no public one pairs with). Removal requests: `accountId = session account`, and the
   request of `deviceId` belongs to that account.
 - R9. Recovery roots: `accountId = session account`, signer request of the
   same account. Recovery deliveries: the root's `accountId` is the session
@@ -735,6 +763,35 @@ added by an updater.
 "string"`) or, during a schema conversion, an object with `type` and the
   conversion fields of [migrations](E2EE_MIGRATIONS.md) §3.2 (`from`, `to`,
   `convert`, `sealedType`); the string is shorthand for `{ "type": … }`.
+- **The system tables stay once added.** Once any version of an app carries
+  the system tables (§1.2, §1.3), every later version carries them too, even
+  one that declares no encryption (an app that stops encrypting keeps them,
+  harmlessly: they hold the space keys and member rows its earlier versions
+  wrote). A version without them that follows one with them is refused at
+  deploy, in particular by a migration that removes a system table: bringing
+  them back in a later version would store them as new tables, stranding the
+  system rows of the earlier version (honest users would lose their keys,
+  and a member removed under the later version could still be read as one by
+  the earlier). The loaders append the fragment to every version after the
+  first one that carries it, so both sides compute the same schema and hash;
+  a later version without declarations gets the system tables' policies
+  derived from the declarations of the nearest version before it that has
+  them (the nearest wins, however far apart earlier declaring versions sit,
+  and without a warning; two nearest versions that declare differently are
+  refused). A deploy targeting a version that inherits the system tables
+  must supply the declarations needed to derive their policies.
+  The stored catalogue decides what came earlier: a new version
+  without the system tables is refused when any stored version has them,
+  whatever lens it hangs on and whether or not the deploy allows dropping
+  history. Only a stored lens could show it to be earlier than a version
+  that has them, and stored lenses join stored versions only; a lens the
+  deploy brings (say, from the new version back to a stored one with the
+  system tables) does not count. Once any stored version has the system
+  tables, a deploy also refuses to target an older stored version without
+  them, even when the deploy allows dropping history. Such a rollback would
+  put application code from before encryption in front of encrypted data.
+  Turning encryption off is a schema conversion of the columns (a decrypt,
+  [migrations](E2EE_MIGRATIONS.md) §3), never a removal of the system tables.
 - **Encrypted columns are last-writer-wins.** The server cannot merge
   ciphertext, so the deploy and code generation refuse a merge strategy
   (`counter`, `g-set`, `text`, `markdown`, `html`) on an encrypted column.

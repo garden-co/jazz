@@ -2333,3 +2333,77 @@ fn approve_refuses_a_request_other_than_the_challenged_one() {
     )
     .unwrap();
 }
+
+/// A successor that retires a recovery root retires one of its own account:
+/// the server does not check it (the target is in an ID list no policy
+/// reads), so replay does. A root of another account is not accepted as the
+/// target, whether the ledger lacks it or the server supplied it among the
+/// account's roots.
+#[test]
+fn a_successor_retiring_another_accounts_recovery_root_is_rejected() {
+    const BOB: &str = "b0b00000-0000-5000-8000-00000000b0b0";
+    let mut rng = TestRandom(23);
+    let env = Env::new(ALICE);
+    let laptop = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    let own =
+        RecoveryKeys::derive(&RecoverySecret::from_bytes([3; 32]), &env.application(), 0).unwrap();
+    ledger.register_recovery(&env, &laptop, &own, &mut rng);
+
+    // Bob's recovery root, registered in his own ledger.
+    let bobs_env = Env::new(BOB);
+    let bobs_laptop = bobs_env.device(&mut rng);
+    let mut bobs_ledger = Ledger::new(BOB);
+    bobs_ledger.request(&bobs_laptop, &mut rng);
+    bobs_ledger.root(&bobs_env, &bobs_laptop, 0, &mut rng);
+    let bobs = RecoveryKeys::derive(
+        &RecoverySecret::from_bytes([4; 32]),
+        &bobs_env.application(),
+        0,
+    )
+    .unwrap();
+    let bobs_root = bobs_ledger.register_recovery(&bobs_env, &bobs_laptop, &bobs, &mut rng);
+
+    // The successor as laptop builds it, retiring its own root; the
+    // same successor with the target swapped for bob's root.
+    let key = ledger.acquire(&env, &laptop).unwrap();
+    let state = ledger.state(&env);
+    let epoch = state.epoch_id().to_owned();
+    let legitimate = build::rotate(
+        &env.writer(),
+        &state,
+        &laptop,
+        &key,
+        &RotationTarget::RetireRecoveryRoot(own.root_id.clone()),
+        &mut rng,
+    )
+    .unwrap()
+    .public;
+    let mut foreign = legitimate.clone();
+    foreign.retired_recovery_root_ids =
+        jazz_e2ee::protocol::json::encode_root_id_list([bobs.root_id.as_str()]).unwrap();
+    re_sign(&env, &mut foreign, &laptop);
+
+    assert_ne!(
+        with_successor(&env, &ledger, legitimate).epoch_id(),
+        epoch,
+        "the account's own root is retired"
+    );
+    assert_eq!(
+        with_successor(&env, &ledger, foreign.clone()).epoch_id(),
+        epoch,
+        "a root the account's ledger lacks"
+    );
+
+    let mut supplied = ledger.clone();
+    let at = supplied.next();
+    supplied
+        .public
+        .recovery_roots
+        .push(Accepted::new(at, bobs_root));
+    let state = with_successor(&env, &supplied, foreign);
+    assert_eq!(state.epoch_id(), epoch, "a root of another account");
+    assert!(state.retired_recovery_roots.is_empty());
+}

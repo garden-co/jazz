@@ -577,6 +577,27 @@ impl Names {
             .map(|(version, _)| *version)
     }
 
+    /// The name the most recently admitted version that stores the table
+    /// `stored` gives it.
+    pub(crate) fn logical_table(&self, stored: &str) -> Option<&str> {
+        self.in_order().into_iter().rev().find_map(|(_, names)| {
+            names
+                .tables
+                .iter()
+                .find(|(_, (table, _))| table == stored)
+                .map(|(logical, _)| logical.as_str())
+        })
+    }
+
+    /// The stored table the most recently admitted version that names
+    /// `logical` stores it as.
+    pub(crate) fn stored_table_of(&self, logical: &str) -> Option<&str> {
+        self.in_order()
+            .into_iter()
+            .rev()
+            .find_map(|(_, names)| names.tables.get(logical).map(|(stored, _)| stored.as_str()))
+    }
+
     /// How many versions are named.
     pub(crate) fn len(&self) -> usize {
         self.versions.len()
@@ -1104,6 +1125,23 @@ impl Names {
         // version this store admitted, as every store picks it (see
         // `migration_path`); else the base.
         into.sort_by_key(|lens| lens.source);
+        // A system table is carried between versions unchanged: core finds
+        // it by the name the admitted versions give it and reads its columns
+        // by name, so a lens that renamed it or changed its columns would
+        // give an older version's uploads another layout.
+        for lens in &into {
+            if let Some(table) = lens.table_lenses().iter().find(|table| {
+                (table.source_table != table.target_table || !table.ops.is_empty())
+                    && [&table.source_table, &table.target_table]
+                        .into_iter()
+                        .any(|name| jazz_model::schema::is_system_table(name))
+            }) {
+                return Err(schema_error(format!(
+                    "a lens changes `{}` (to `{}`), but Jazz's system tables are carried between versions unchanged",
+                    table.source_table, table.target_table
+                )));
+            }
+        }
         self.lenses_agree(schema, &into)?;
         let lens = into
             .iter()

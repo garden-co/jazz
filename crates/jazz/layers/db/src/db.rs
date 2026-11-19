@@ -907,6 +907,9 @@ struct Inner {
     /// Every session but SYSTEM's must be pinned to a published bundle
     /// (see [`Db::require_session_pins`]).
     pub(crate) pins_required: bool,
+    /// Jazz's account registry, as the account-record checks beside the
+    /// system tables' policies read it (see [`Db::set_account_registry`]).
+    account_registry: Option<Rc<dyn AccountRegistryView>>,
     /// Uploads the authority refused, by commit seq, kept for a host that
     /// reports them (see [`Db::track_upstream_rejections`]).
     upstream_rejections: Option<Vec<UpstreamRejection>>,
@@ -1631,6 +1634,62 @@ fn rejected_for(reason: Reason, message: impl Into<String>) -> Error {
     Error::with_reason(ErrorCode::WriteRejected, reason, message)
 }
 
+/// What Jazz's account registry tells of an account: the checks beside the
+/// account tables' policies need its founder (E2EE protocol R5, R6), which
+/// no policy can read.
+pub trait AccountRegistryView {
+    /// Whether `account` was founded by a device-account identity; `None`
+    /// when the registry holds no identity of it.
+    fn founded_by_device_account(
+        &self,
+        account: jazz_types::account_registry::AccountId,
+    ) -> Result<Option<bool>, String>;
+
+    /// Whether `account` was founded by a device-account identity for another
+    /// audience than the app's own, whose accounts an encrypting app does
+    /// not serve: with no record of which namespace founded it, such an
+    /// account's kind (E2EE protocol R6) and reset rights (R5) cannot be
+    /// told, so no account record is accepted for it. False by default.
+    fn founded_for_another_audience(
+        &self,
+        _account: jazz_types::account_registry::AccountId,
+    ) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    /// [`Self::founded_by_device_account`], read on the store's own connection
+    /// `store`, which the check runs on inside the write's transaction. A
+    /// registry kept in the store's file reads its tables here: a second
+    /// connection to a shared in-memory database (no write-ahead log) is
+    /// locked out while the store's connection holds a write. By default,
+    /// the registry's own way of reading.
+    fn founded_by_device_account_on(
+        &self,
+        _store: &crate::storage::Storage,
+        account: jazz_types::account_registry::AccountId,
+    ) -> Result<Option<bool>, String> {
+        self.founded_by_device_account(account)
+    }
+
+    /// [`Self::founded_for_another_audience`], read on the store's own
+    /// connection (see [`Self::founded_by_device_account_on`]).
+    fn founded_for_another_audience_on(
+        &self,
+        _store: &crate::storage::Storage,
+        account: jazz_types::account_registry::AccountId,
+    ) -> Result<bool, String> {
+        self.founded_for_another_audience(account)
+    }
+}
+
+/// A write that would change or remove a row of a system table, which no
+/// writer may do (`verb` is "updated" or "deleted").
+fn system_row_immutable(table: &str, verb: &str) -> Error {
+    rejected(format!(
+        "rows of `{table}` are never {verb}: it is one of Jazz's system tables"
+    ))
+}
+
 /// A new row (or restored content) without a value for a required column.
 fn missing_required(table: &str, column: &str) -> Error {
     rejected_for(
@@ -2348,6 +2407,7 @@ impl Db {
                 echo_probes: 0,
                 authority: false,
                 pins_required: false,
+                account_registry: None,
                 upstream_rejections: None,
                 refusals: sync::Refusals::default(),
                 sessions: Vec::new(),
@@ -2513,6 +2573,14 @@ impl Db {
             // the first catalogue it serves, which mints it then.
             let _ = inner.namespace();
         }
+    }
+
+    /// Read account founders from `registry` in the checks beside the
+    /// account tables' policies (E2EE protocol R5, R6). Without one, a
+    /// store has no account links, so a session's own login tells how its
+    /// account was founded.
+    pub fn set_account_registry(&self, registry: Rc<dyn AccountRegistryView>) {
+        self.inner.borrow_mut().account_registry = Some(registry);
     }
 
     /// Refuse every session but SYSTEM's that is not pinned to a published
@@ -3182,6 +3250,25 @@ impl Db {
             .table(table)
             .expect("a table of the current schema");
         (table.stored.clone(), table.stored_name(column).to_owned())
+    }
+
+    /// Whether any admitted version has a table named `logical`: the
+    /// admitted versions, not the owner's schema, which a running server
+    /// keeps at its first while deployments admit later versions.
+    pub fn admits_table(&self, logical: &str) -> bool {
+        self.inner().names.stored_table_of(logical).is_some()
+    }
+
+    /// Whether the store holds a live row `row` of the table the admitted
+    /// versions name `logical`, wherever the owner's schema stands.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn holds_row_for_test(&self, logical: &str, row: RowUuid) -> bool {
+        let inner = self.inner();
+        let Some(stored) = inner.names.stored_table_of(logical) else {
+            return false;
+        };
+        matches!(inner.existing(stored, row, &[]), Ok(Some((_, false))))
     }
 
     /// Diagnostics: stored large-value nodes, and roots referenced by cells.
@@ -7294,7 +7381,7 @@ impl Inner {
         let table = schema.table(&check.table)?;
         let session = self.session(check.author);
         let (holds, read) =
-            self.holds_counting(table, check.row, &check.key, Some(cut), |ctx| {
+            self.holds_counting(table, check.row, &check.key, Some(cut.clone()), |ctx| {
                 match check.check {
                     WriteCheck::Insert => {
                         ctx.operation_policy(table, Operation::Insert, "a", &session)
@@ -7312,7 +7399,146 @@ impl Inner {
                 }
             })?;
         evidence.charge(read.rows)?;
+        let holds = holds
+            && match check.check {
+                WriteCheck::Insert => self.account_record_holds(table, check, cut)?,
+                _ => true,
+            };
         Ok((holds, read.tables))
+    }
+
+    /// The checks beside the account tables' insert policies that read
+    /// Jazz's account registry and an identity's generation (E2EE protocol
+    /// R5, R6): a reset identity (generation above 0) only for an account
+    /// not founded by a device-account identity, by a session that isn't a
+    /// device-account session, with the account's identity of the
+    /// generation before;
+    /// a root whose `kind` names how its account was founded. The policies
+    /// check the rest, `allowAccountReset` included. True for any other
+    /// table.
+    fn account_record_holds(
+        &self,
+        table: &Table,
+        check: &DeferredCheck,
+        cut: Cut,
+    ) -> Result<bool, Error> {
+        use jazz_model::schema::{ACCOUNT_IDENTITIES_TABLE, ACCOUNT_ROOTS_TABLE};
+        let logical = self.logical_table_name(table);
+        let identities = logical == ACCOUNT_IDENTITIES_TABLE;
+        if !identities && logical != ACCOUNT_ROOTS_TABLE {
+            return Ok(true);
+        }
+        let Some(account) = check.author.account_id() else {
+            return Ok(false);
+        };
+        if let Some(registry) = &self.account_registry
+            && registry
+                .founded_for_another_audience_on(&self.conn, account)
+                .map_err(|error| Error::new(ErrorCode::Storage, error))?
+        {
+            return Ok(false);
+        }
+        let device_account_session =
+            check.author.principal_parts().0 == jazz_types::identity::DEVICE_ACCOUNT_ISSUER;
+        // A store without the account, or without a registry, has no
+        // links: the session's own login founded its account.
+        let founded_by_device_account = || -> Result<bool, Error> {
+            let known = match &self.account_registry {
+                Some(registry) => registry
+                    .founded_by_device_account_on(&self.conn, account)
+                    .map_err(|error| Error::new(ErrorCode::Storage, error))?,
+                None => None,
+            };
+            Ok(known.unwrap_or(device_account_session))
+        };
+        if !identities {
+            let kind = match self.account_cell(table, check, "kind")? {
+                Some(Value::String(kind)) => kind,
+                _ => return Ok(false),
+            };
+            let founded = if founded_by_device_account()? {
+                "device-account"
+            } else {
+                "app"
+            };
+            return Ok(kind == founded);
+        }
+        let generation = match self.account_cell(table, check, "generation")? {
+            Some(Value::I64(generation)) => generation,
+            _ => return Ok(false),
+        };
+        if generation == 0 {
+            return Ok(true);
+        }
+        if generation < 0 || device_account_session || founded_by_device_account()? {
+            return Ok(false);
+        }
+        // The account's own identity of the generation before.
+        let previous = PolicyExpr::Exists {
+            table: ACCOUNT_IDENTITIES_TABLE.to_owned(),
+            condition: Box::new(PolicyExpr::And(vec![
+                PolicyExpr::Cmp {
+                    column: "$createdBy.account".to_owned(),
+                    op: CmpOp::Eq,
+                    value: crate::tools::PolicyValue::SessionRef(vec!["user".to_owned()]),
+                },
+                PolicyExpr::Cmp {
+                    column: "generation".to_owned(),
+                    op: CmpOp::Eq,
+                    value: crate::tools::PolicyValue::Literal(crate::tools::Value::BigInt(
+                        generation - 1,
+                    )),
+                },
+            ])),
+        };
+        let session = self.session(check.author);
+        self.holds_at(table, check.row, &check.key, Some(cut), |ctx| {
+            ctx.policy_clause(Some(&previous), table, "a", &session)
+        })
+    }
+
+    /// The name the admitted versions give `table`. A write uploaded from a
+    /// client is staged under the stored view, whose tables are named by
+    /// their stored names: a table a later migration introduced is
+    /// `name~hash`, which Jazz's fixed names do not match. The owner's
+    /// schema is not the source: a running server keeps its first schema
+    /// as owner while deployments admit later versions, so the admitted
+    /// versions' stored-name map is read.
+    fn logical_table_name<'a>(&'a self, table: &'a Table) -> &'a str {
+        self.names
+            .logical_table(&table.stored)
+            .unwrap_or(table.name.as_str())
+    }
+
+    /// Cell `column` of the account table row that `check` writes. A write
+    /// uploaded from a client is checked through the stored view, whose
+    /// columns are named by their stored names (`name~hash`, the name they
+    /// were introduced under). The account tables are Jazz's fixed
+    /// fragment, never renamed, so a column's stored name starts with its
+    /// name.
+    fn account_cell(
+        &self,
+        table: &Table,
+        check: &DeferredCheck,
+        column: &str,
+    ) -> Result<Option<Value>, Error> {
+        let introduced_as = |stored: &str| stored.split('~').next() == Some(column);
+        let Some(column) = table
+            .column(column)
+            .or_else(|| table.stored().find(|c| introduced_as(&c.stored)))
+        else {
+            return Ok(None);
+        };
+        let value = match self.stored_cell(table, check.row, &check.key, column)? {
+            Some(cell) => column_from_sql(column, cell.as_ref(), &self.chunks)?,
+            None => None,
+        };
+        // A column a later version introduced is stored nullable (older
+        // rows lack it): the cell of a row that has it is its value.
+        Ok(match value {
+            Some(Value::Nullable(Some(inner))) => Some(*inner),
+            other => other,
+        })
     }
 
     /// The unit is accepted only if every write's policy also holds on the
@@ -9067,6 +9293,13 @@ impl Inner {
         let table = schema.table(table_name)?;
         self.validate_cells(table, &cells)?;
         let located = self.locate(table, row, target)?;
+        // A system table's rows are never updated, by any writer: the
+        // system, trusted backends and sessions alike, before any policy.
+        if jazz_model::schema::is_system_table(table_name)
+            && !(upsert && matches!(located, Located::Absent { .. }))
+        {
+            return Err(system_row_immutable(table_name, "updated"));
+        }
         // A row's branch columns are its branch key: a write cannot move it
         // to another branch.
         if let Located::Row { key, .. } | Located::Inherited { to: key, .. } = &located
@@ -9269,6 +9502,14 @@ impl Inner {
     ) -> Result<WriteHandle, Error> {
         let schema = self.schema.clone();
         let table = schema.table(table_name)?;
+        // A system table's rows are never deleted by any writer, except
+        // member rows, which policies govern. The table may be named by its
+        // stored name (a client's upload), so compare the owner's name.
+        if jazz_model::schema::is_system_table(table_name)
+            && self.logical_table_name(table) != jazz_model::schema::MEMBERS_TABLE
+        {
+            return Err(system_row_immutable(table_name, "deleted"));
+        }
         // A delete by row id reads no user data (SPEC 7): its DELETE policy
         // alone decides, so a write-only principal may delete.
         let check = |inner: &Self, key: &[u8]| -> Result<(), Error> {
@@ -9361,6 +9602,11 @@ impl Inner {
         who: Who,
         seq: u64,
     ) -> Result<WriteHandle, Error> {
+        // A system row is never updated, so a deleted one is not restored
+        // either, with content or without: a restore writes the row back.
+        if jazz_model::schema::is_system_table(table_name) {
+            return Err(system_row_immutable(table_name, "restored"));
+        }
         let schema = self.schema.clone();
         let table = schema.table(table_name)?;
         let key = match self.locate(table, row, target)? {
