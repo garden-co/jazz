@@ -2,9 +2,21 @@ name: React Native device acceptance
 
 on:
   workflow_dispatch:
+    inputs:
+      artifacts_run_id:
+        description: Run of this commit whose relay, NAPI and WASM artifacts to test instead of building them here.
+        required: false
+        type: string
+        default: ""
   # The release candidate gate (release-candidate.yml) runs the device
   # receipts as one of its parallel gates.
   workflow_call:
+    inputs:
+      artifacts_run_id:
+        description: Run of this commit whose relay, NAPI and WASM artifacts to test instead of building them here.
+        required: false
+        type: string
+        default: ""
   pull_request:
     types: [opened, reopened, synchronize, labeled]
     paths:
@@ -26,6 +38,7 @@ on:
 
 permissions:
   contents: read
+  actions: read # download artifacts_run_id's artifacts
 
 concurrency:
   # Called, github.workflow is the caller's: one group per calling run, so a
@@ -73,6 +86,7 @@ jobs:
     if: >-
       ${{
         github.event_name == 'workflow_dispatch'
+        || inputs.artifacts_run_id != ''
         || (
           contains(github.event.pull_request.labels.*.name, 'rn-preview-release')
           && github.event.pull_request.head.repo.full_name == github.repository
@@ -82,6 +96,7 @@ jobs:
     timeout-minutes: 45
     env:
       COCOAPODS_DISABLE_STATS: "true"
+      ARTIFACTS_RUN_ID: ${{ inputs.artifacts_run_id }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Select task-local build paths
@@ -120,24 +135,60 @@ jobs:
       # objects. The build finds Homebrew's llvm-ar on its own; point cc-rs at
       # Homebrew's clang for the wasm32 target.
       - name: Install LLVM for the WASM build's SQLite
+        if: inputs.artifacts_run_id == ''
         run: |
           set -euo pipefail
           brew list llvm >/dev/null 2>&1 || brew install llvm
           echo "CC_wasm32_unknown_unknown=$(brew --prefix llvm)/bin/clang" >> "${GITHUB_ENV}"
+      - name: Download the prebuilt artifacts
+        if: inputs.artifacts_run_id != ''
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          run-id: ${{ inputs.artifacts_run_id }}
+          github-token: ${{ github.token }}
+          pattern: "{jazz-rn-relay-ios,jazz-napi-loader,jazz-napi-binding-linux-x64-gnu,jazz-napi-binding-darwin-arm64,jazz-wasm-pkg}"
+          path: ${{ runner.temp }}/prebuilt
+      # The relay manifest seals the source revision the receipts check, so the
+      # producer run must have built exactly this commit.
+      - name: Stage the prebuilt artifacts of this commit
+        if: inputs.artifacts_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          producer_sha="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${ARTIFACTS_RUN_ID}" --jq .head_sha)"
+          [[ "$producer_sha" == "$GITHUB_SHA" ]] || { echo "::error::run ${ARTIFACTS_RUN_ID} built ${producer_sha}, not ${GITHUB_SHA}"; exit 1; }
+          prebuilt="${RUNNER_TEMP}/prebuilt"
+          cp -R "$prebuilt/jazz-rn-relay-ios/." crates/jazz-rn/
+          cp -R "$prebuilt/jazz-napi-loader/." "$prebuilt/jazz-napi-binding-darwin-arm64/." crates/jazz-napi/
+          mkdir -p crates/jazz-napi/provenance crates/jazz-wasm/pkg
+          cp "$prebuilt/jazz-napi-binding-linux-x64-gnu/jazz-napi.linux-x64-gnu.manifest.json" crates/jazz-napi/provenance/
+          cp -R "$prebuilt/jazz-wasm-pkg/." crates/jazz-wasm/pkg/
       # The backend loads jazz-tools on Node, whose runtime checks the native
-      # fingerprints staged from release NAPI and fast WASM builds.
+      # fingerprints staged from release NAPI and fast (or prebuilt release) WASM builds.
       - uses: ./.github/actions/install-rust-tool
+        if: inputs.artifacts_run_id == ''
         with:
           tool: wasm-pack@0.13.1
       - name: Build the Node runtime of the device app's backend
-        run: pnpm --filter rn-device-acceptance build:device-backend
+        run: |
+          if [[ -n "${ARTIFACTS_RUN_ID}" ]]; then
+            node dev/artifacts/stage-native-fingerprints.mjs
+            pnpm --filter jazz-tools build:react-native
+          else
+            pnpm --filter rn-device-acceptance build:device-backend
+          fi
       # build:device-backend already builds jazz-tools' React Native entry after
       # staging the fingerprints, so only jazz-rn is left to build here.
       - name: Build the React Native JavaScript workspace entrypoints
         run: pnpm --filter jazz-rn build
       - name: Build and stage the relay XCFramework
         run: |
-          pnpm --filter jazz-rn build:relay:ios
+          if [[ -n "${ARTIFACTS_RUN_ID}" ]]; then
+            JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" node dev/artifacts/rn-packages.mjs stage ios
+          else
+            pnpm --filter jazz-rn build:relay:ios
+          fi
           JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" node crates/jazz-rn/scripts/verify-relay-artifacts.mjs ios
       - name: Generate the Expo development host
         run: pnpm --filter rn-device-acceptance exec expo prebuild --platform ios --clean --no-install --non-interactive
@@ -184,6 +235,7 @@ jobs:
     if: >-
       ${{
         github.event_name == 'workflow_dispatch'
+        || inputs.artifacts_run_id != ''
         || (
           contains(github.event.pull_request.labels.*.name, 'rn-preview-release')
           && github.event.pull_request.head.repo.full_name == github.repository
@@ -192,9 +244,12 @@ jobs:
     name: Android device acceptance
     # Keep Android and iOS installed-app receipts on the dedicated Blacksmith
     # fleet. They are deliberately label/manual only, never an ordinary PR
-    # gate; the runner is selected for x86_64 Android emulation support.
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # gate; the runner is selected for x86_64 Android emulation support, and
+    # 16 vCPUs halve the Gradle assemble (CMake for three ABIs).
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 45
+    env:
+      ARTIFACTS_RUN_ID: ${{ inputs.artifacts_run_id }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
@@ -214,18 +269,63 @@ jobs:
           key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-native-transport/**', 'crates/jazz-napi/**', 'crates/jazz-wasm/**', 'dev/artifacts/**') }}
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
-          path: .cache/android-device-acceptance
+          # The emulator still writes its AVD at post-job save time, which made
+          # tar (and so every save of this cache) fail.
+          path: |
+            .cache/android-device-acceptance
+            !.cache/android-device-acceptance/avd
           key: rn-device-android-ubuntu-2404-${{ hashFiles('pnpm-lock.yaml', 'dev/rn-device-acceptance/**', 'crates/jazz-rn/**') }}
+          # bootstrap-android.sh re-verifies every pinned archive it reuses.
+          restore-keys: rn-device-android-ubuntu-2404-
+      # Gradle's distribution, dependencies and local build cache.
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: rn-device-gradle-ubuntu-2404-${{ hashFiles('pnpm-lock.yaml', 'dev/rn-device-acceptance/android/**/*.gradle', 'dev/rn-device-acceptance/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: rn-device-gradle-ubuntu-2404-
       - run: pnpm install --frozen-lockfile
       - name: Verify synthetic scope authorization and generated native fixture
         run: cargo test -p jazz-native-relay --example rn_server_session_harness --no-fail-fast
+      - name: Download the prebuilt artifacts
+        if: inputs.artifacts_run_id != ''
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          run-id: ${{ inputs.artifacts_run_id }}
+          github-token: ${{ github.token }}
+          pattern: "{jazz-rn-relay-android,jazz-napi-loader,jazz-napi-binding-linux-x64-gnu,jazz-wasm-pkg}"
+          path: ${{ runner.temp }}/prebuilt
+      # The relay manifest seals the source revision the receipts check, so the
+      # producer run must have built exactly this commit.
+      - name: Stage the prebuilt artifacts of this commit
+        if: inputs.artifacts_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          producer_sha="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${ARTIFACTS_RUN_ID}" --jq .head_sha)"
+          [[ "$producer_sha" == "$GITHUB_SHA" ]] || { echo "::error::run ${ARTIFACTS_RUN_ID} built ${producer_sha}, not ${GITHUB_SHA}"; exit 1; }
+          prebuilt="${RUNNER_TEMP}/prebuilt"
+          cp -R "$prebuilt/jazz-rn-relay-android/." crates/jazz-rn/
+          cp -R "$prebuilt/jazz-napi-loader/." "$prebuilt/jazz-napi-binding-linux-x64-gnu/." crates/jazz-napi/
+          mkdir -p crates/jazz-napi/provenance crates/jazz-wasm/pkg
+          cp "$prebuilt/jazz-napi-binding-linux-x64-gnu/jazz-napi.linux-x64-gnu.manifest.json" crates/jazz-napi/provenance/
+          cp -R "$prebuilt/jazz-wasm-pkg/." crates/jazz-wasm/pkg/
       # The backend loads jazz-tools on Node, whose runtime checks the native
-      # fingerprints staged from release NAPI and fast WASM builds.
+      # fingerprints staged from release NAPI and fast (or prebuilt release) WASM builds.
       - uses: ./.github/actions/install-rust-tool
+        if: inputs.artifacts_run_id == ''
         with:
           tool: wasm-pack@0.13.1
       - name: Build the Node runtime of the device app's backend
-        run: pnpm --filter rn-device-acceptance build:device-backend
+        run: |
+          if [[ -n "${ARTIFACTS_RUN_ID}" ]]; then
+            node dev/artifacts/stage-native-fingerprints.mjs
+            pnpm --filter jazz-tools build:react-native
+          else
+            pnpm --filter rn-device-acceptance build:device-backend
+          fi
       # build:device-backend already builds jazz-tools' React Native entry after
       # staging the fingerprints, so only jazz-rn is left to build here.
       - name: Build the React Native JavaScript workspace entrypoints
@@ -238,10 +338,14 @@ jobs:
           cache="$GITHUB_WORKSPACE/.cache/android-device-acceptance"
           export JAVA_HOME="$cache/jdk" ANDROID_SDK_ROOT="$cache/sdk"
           export PATH="$cache/cargo/bin:$PATH"
-          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
           export JAZZ_NATIVE_RELAY_SOURCE_REVISION="$GITHUB_SHA"
           export JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION=4.1.2
-          pnpm --filter jazz-rn build:relay:android
+          if [[ -n "${ARTIFACTS_RUN_ID}" ]]; then
+            node dev/artifacts/rn-packages.mjs stage android
+          else
+            rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+            pnpm --filter jazz-rn build:relay:android
+          fi
           node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android
       - name: Grant the runner user access to KVM
         shell: bash
@@ -273,7 +377,7 @@ jobs:
             cd dev/rn-device-acceptance/android
             grep -Fx "reactNativeArchitectures=${relay_abis}" gradle.properties
             ./gradlew -q -PreactNativeArchitectures="${relay_abis}" :app:properties | grep -Fx "reactNativeArchitectures: ${relay_abis}"
-            NODE_ENV=production ./gradlew -PreactNativeArchitectures="${relay_abis}" :app:assembleRelease --console=plain
+            NODE_ENV=production ./gradlew -PreactNativeArchitectures="${relay_abis}" :app:assembleRelease --console=plain --build-cache
           )
           # The Android build has already provisioned Gradle's Kotlin compiler;
           # make the packed JVM admission receipt mandatory on this JDK lane.

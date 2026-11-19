@@ -213,6 +213,11 @@ jobs:
     needs: artifacts
     if: "!cancelled() && needs.artifacts.result == 'success'"
     uses: ./.github/workflows/rn-device-acceptance.yml
+    permissions:
+      actions: read
+      contents: read
+    with:
+      artifacts_run_id: ${{ needs.artifacts.outputs.run_id }}
 
   preview:
     name: Release preview

@@ -273,23 +273,41 @@ jobs:
             crates/jazz-napi/native-loader.provenance.json
           if-no-files-found: error
 
+  # One job per ABI (each is a fat-LTO staticlib, ~2 min on 16 vCPU), sealed
+  # into one manifest by seal-jazz-rn-android.
   build-jazz-rn-android:
-    name: Build jazz-rn Android relay artifacts
+    name: Build jazz-rn Android relay (${{ matrix.abi }})
     if: inputs.include_rn
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    strategy:
+      matrix:
+        include:
+          - { abi: arm64-v8a, target: aarch64-linux-android }
+          - { abi: armeabi-v7a, target: armv7-linux-androideabi }
+          - { abi: x86_64, target: x86_64-linux-android }
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ inputs.ref }}
 
+      # No sccache: rust-cache restores the dependencies and the rest is the
+      # LTO link, so it never hit, and installing it cost ~2 minutes.
       - uses: ./.github/actions/setup-build
         with:
-          rust-targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
-          sccache: "true"
-          sccache-key: release-jazz-rn-android-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+          rust-targets: ${{ matrix.target }}
+          rust-cache-key: jazz-rn-android-${{ matrix.abi }}
+          setup-node: "false"
 
+      # Upstream's release binary, pinned by hash: no `cargo install`.
       - name: Install cargo-ndk
-        run: cargo install cargo-ndk@${{ env.JAZZ_RN_CARGO_NDK_VERSION }} --locked
+        run: |
+          archive="${RUNNER_TEMP}/cargo-ndk.tgz"
+          curl --fail --location --retry 3 --output "${archive}" \
+            "https://github.com/bbqsrc/cargo-ndk/releases/download/v${JAZZ_RN_CARGO_NDK_VERSION}/cargo-ndk-x86_64-unknown-linux-gnu-v${JAZZ_RN_CARGO_NDK_VERSION}.tgz"
+          echo "9451622c4567e8abb2c8005001855e32901c0b716ccdd3a173a4375fd03426e1  ${archive}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/cargo-ndk"
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}/cargo-ndk" --strip-components=1
+          echo "${RUNNER_TEMP}/cargo-ndk" >> "${GITHUB_PATH}"
 
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
         with:
@@ -297,15 +315,42 @@ jobs:
           packages: platform-tools
       - name: Install pinned Android NDK
         run: sdkmanager --install "ndk;27.1.12297006"
-      - name: Build and verify Android relay archive slices
+      - name: Build the Android relay archive slice
         run: |
           JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
             JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
             ANDROID_NDK_HOME="${ANDROID_SDK_ROOT}/ndk/27.1.12297006" \
-            pnpm --filter jazz-rn build:relay:android
-          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
-            JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
-            node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android
+            bash crates/jazz-rn/scripts/build-relay-artifacts.sh android-slice '${{ matrix.abi }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-rn-relay-android-${{ matrix.abi }}
+          path: crates/jazz-rn/android/src/main/jniLibs/${{ matrix.abi }}
+          if-no-files-found: error
+
+  seal-jazz-rn-android:
+    name: Seal jazz-rn Android relay artifacts
+    needs: build-jazz-rn-android
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-rn-relay-android-*
+          path: ${{ runner.temp }}/slices
+      - name: Seal and verify the Android relay archive slices
+        run: |
+          stage=crates/jazz-rn/android/src/main/jniLibs
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            mkdir -p "${stage}/${abi}"
+            cp "${RUNNER_TEMP}/slices/jazz-rn-relay-android-${abi}/libjazz_native_relay.a" "${stage}/${abi}/"
+          done
+          export JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)"
+          export JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}"
+          bash crates/jazz-rn/scripts/build-relay-artifacts.sh android-manifest
+          node dev/artifacts/rn-packages.mjs stage android
+          node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-rn-relay-android
@@ -535,7 +580,7 @@ jobs:
   assemble-jazz-rn:
     name: Assemble jazz-rn npm package
     needs:
-      - build-jazz-rn-android
+      - seal-jazz-rn-android
       - build-jazz-rn-ios
     # A skipped optional platform build must not make the normal package
     # assembly skip. Conversely, require both relay receipts whenever RN was
@@ -544,7 +589,7 @@ jobs:
       ${{
         always() &&
         inputs.include_rn &&
-        needs.build-jazz-rn-android.result == 'success' &&
+        needs.seal-jazz-rn-android.result == 'success' &&
         needs.build-jazz-rn-ios.result == 'success'
       }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
