@@ -142,6 +142,63 @@ impl ServerCore {
         self.settle(session, opened)
     }
 
+    /// Observe accepted query registrations on a sync session whose host can hibernate.
+    pub fn observe_registrations(
+        &self,
+        session: ServerSession,
+        observer: Rc<dyn Fn(&SyncMessage)>,
+        restored: bool,
+    ) {
+        if let Some(state) = self.owner.sessions.get(&session) {
+            self.owner
+                .db
+                .observe_subscriber_registrations(state.subscriber, observer, restored);
+        }
+    }
+
+    /// End the window for registering saved reads without opening them.
+    pub fn finish_session_restore(&self, session: ServerSession) {
+        if let Some(state) = self.owner.sessions.get(&session) {
+            self.owner.db.finish_subscriber_restore(state.subscriber);
+        }
+    }
+
+    pub fn has_partial_frame(&self, session: ServerSession) -> bool {
+        self.owner
+            .sessions
+            .get(&session)
+            .is_some_and(|state| state.joiner.is_partial())
+    }
+
+    /// Notify a hibernating host when the schema or accepted live reads change.
+    pub fn observe_thin_registrations(
+        &mut self,
+        session: ServerSession,
+        observe: super::ThinRegistrationObserver,
+    ) {
+        if let Some(thin) = self.owner.thin.get_mut(&session) {
+            thin.observer = Some(observe);
+        }
+    }
+
+    /// Reinstall saved thin watches under the newly admitted session.
+    pub fn restore_thin(
+        &mut self,
+        session: ServerSession,
+        version: Option<jazz::ids::SchemaVersionId>,
+        reads: Vec<jazz::thin::ThinRequest>,
+    ) -> Result<(), String> {
+        self.owner.restore_thin(session, version, reads)
+    }
+
+    /// Whether sleeping now would discard an operation the peer still expects to finish.
+    pub fn unfinished_thin_work(&self, session: ServerSession) -> bool {
+        self.owner
+            .thin
+            .get(&session)
+            .is_some_and(|thin| thin.has_unfinished_work())
+    }
+
     /// Open a thin-client session for an admitted connection.
     pub fn open_thin_session(
         &mut self,

@@ -1011,7 +1011,11 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         }
     };
 
-    let hello = match crate::portable::handshake::negotiate_hello(&first, bootstrap_catalogue) {
+    let hello = match crate::portable::handshake::negotiate_hello(
+        &first,
+        bootstrap_catalogue,
+        jazz::wire::FEATURE_HEARTBEAT,
+    ) {
         Ok(hello) => hello,
         Err(error) => {
             send_ws_error(&mut socket, client_features, error).await;

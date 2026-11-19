@@ -792,7 +792,9 @@ mod smoke {
         batch(&[jazz::wire::WireFrame::Hello(
             jazz::wire::WireHello::current(
                 jazz::wire::WirePeerRole::Client,
-                jazz::wire::current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS,
+                jazz::wire::current_wire_features()
+                    | jazz::wire::FEATURE_THIN_RESULTS
+                    | jazz::wire::FEATURE_HEARTBEAT,
             ),
         )])
     }
@@ -859,7 +861,9 @@ mod smoke {
         let mut out = Vec::new();
         for frame in frames {
             out.push(match jazz::wire::decode_frame(&frame).map_err(js)? {
-                jazz::wire::WireFrame::Hello(_) => serde_json::json!({ "hello": true }),
+                jazz::wire::WireFrame::Hello(hello) => serde_json::json!({
+                    "hello": true, "heartbeat": hello.features & jazz::wire::FEATURE_HEARTBEAT != 0
+                }),
                 jazz::wire::WireFrame::Error(error) => {
                     serde_json::json!({ "error": error.message })
                 }
@@ -974,6 +978,7 @@ mod smoke {
 /// send what `output` returns.
 mod core_host {
     use super::{durable_object_storage, ObjectStorage};
+    use crate::socket_attachment::{SavedReads, SocketAttachment};
     use jazz_server::portable::accounts::{
         self, AccountRoute, RouteAuthority, RouteBody, RouteContext,
     };
@@ -989,6 +994,7 @@ mod core_host {
     };
     use jazz_server::runtime::{ServerCore, ServerSession};
     use std::collections::{HashMap, VecDeque};
+    use std::{cell::RefCell, rc::Rc};
     use wasm_bindgen::prelude::*;
 
     fn js(error: impl std::fmt::Display) -> JsValue {
@@ -1004,6 +1010,7 @@ mod core_host {
 
     /// What a connection's socket is.
     struct Socket {
+        attachment: Option<Rc<RefCell<SocketAttachment>>>,
         session: ServerSession,
         thin: bool,
         /// Split thin requests being joined.
@@ -1202,7 +1209,120 @@ mod core_host {
             credential: Option<String>,
             access: Option<String>,
         ) -> JsValue {
-            self.admit(prelude, first, credential, access).into_js()
+            self.admit(prelude, first, credential, access, false)
+                .into_js()
+        }
+
+        /// Accept a socket whose host preserves its live sync registrations.
+        #[wasm_bindgen(js_name = acceptHibernating)]
+        pub fn accept_hibernating(
+            &mut self,
+            prelude: &str,
+            first: &[u8],
+            credential: Option<String>,
+            access: Option<String>,
+        ) -> JsValue {
+            self.admit(prelude, first, credential, access, true)
+                .into_js()
+        }
+
+        /// Reopen an admitted socket. The only caller reads bytes from
+        /// workerd's server-owned attachment, never from a peer's request.
+        #[wasm_bindgen(js_name = restoreSocket)]
+        pub fn restore_socket(&mut self, bytes: &[u8]) -> Result<u32, JsValue> {
+            let (state, admission, frames) = SocketAttachment::restore(bytes).map_err(js)?;
+            if let Some(check) = &admission.revocation {
+                let mark = self.revocation_mark(&check.principal).map_err(js)?;
+                if accounts::session_revoked(mark, check.authenticated_at_ms) {
+                    return Err(js("session revoked"));
+                }
+            }
+            let guest = admission.guest.then_some(admission.identity);
+            if let Some(identity) = guest {
+                let (issuer, subject) = identity.principal_parts();
+                let principal = jazz::account_registry::Principal { issuer, subject };
+                let storage = self.registry().map_err(js)?;
+                let assignment = accounts::login(&storage, &principal)
+                    .map_err(|_| js("guest admission unavailable"))?;
+                if Some(assignment.account) != identity.account_id() {
+                    return Err(js("guest assignment changed"));
+                }
+            }
+            let core = self.core.as_mut().ok_or_else(|| js("no admitted schema"))?;
+            let thin = matches!(frames, SavedReads::Thin { .. });
+            let open = if thin {
+                ServerCore::open_thin_session
+            } else {
+                ServerCore::open_session
+            };
+            let session = open(
+                core,
+                admission.identity,
+                admission.claims,
+                admission.bundle,
+                admission.trust,
+            )
+            .map_err(js)?;
+            let replay = match frames {
+                SavedReads::Thin { version, requests } => {
+                    core.restore_thin(session, version, requests)
+                }
+                SavedReads::Sync(frames) => {
+                    let size = frames.iter().map(Vec::len).sum();
+                    core.receive_frames(session, frames, size)
+                        .and_then(|queued| {
+                            queued
+                                .then_some(())
+                                .ok_or_else(|| "cannot queue saved registrations".to_owned())
+                        })
+                }
+            };
+            if let Err(error) = replay {
+                core.close_session(session);
+                return Err(js(error));
+            }
+            Ok(self.install_socket(
+                session,
+                thin,
+                Some(Rc::new(RefCell::new(state))),
+                admission.client_features,
+                admission.revocation,
+                guest,
+                true,
+            ))
+        }
+
+        /// Any replay held past the first tick must open eagerly. A write could
+        /// arrive before that read has installed its watches.
+        #[wasm_bindgen(js_name = finishSocketRestore)]
+        pub fn finish_socket_restore(&self) {
+            if let Some(core) = &self.core {
+                for socket in self.sockets.values() {
+                    core.finish_session_restore(socket.session);
+                }
+            }
+        }
+
+        /// Changed bytes only. An unfinished operation temporarily disables restoration.
+        #[wasm_bindgen(js_name = changedAttachment)]
+        pub fn changed_attachment(&mut self, socket: u32) -> Result<Option<Vec<u8>>, JsValue> {
+            let Some(state) = self.sockets.get(&socket) else {
+                return Ok(None);
+            };
+            let Some(attachment) = &state.attachment else {
+                return Ok(None);
+            };
+            let partial = !state.held.is_empty()
+                || self.core.as_ref().is_some_and(|core| {
+                    if state.thin {
+                        state.assembler.is_partial() || core.unfinished_thin_work(state.session)
+                    } else {
+                        core.has_partial_frame(state.session)
+                    }
+                });
+            let mut attachment = attachment.borrow_mut();
+            attachment.set_partial(partial);
+            Ok(attachment.take_changed())
         }
 
         fn admit(
@@ -1211,6 +1331,7 @@ mod core_host {
             first: &[u8],
             credential: Option<String>,
             access: Option<String>,
+            hibernate: bool,
         ) -> Accepted {
             // A client on another wire version is refused in its own layout.
             if let Some(refusal) = ws_foreign_version_refusal(first) {
@@ -1268,10 +1389,12 @@ mod core_host {
                 Ok(admission) => admission,
                 Err(refusal) => return refused(error_frame(&refusal.into_wire(), client_features)),
             };
-            let hello = match negotiate_hello(first, prelude.bootstrap_catalogue) {
-                Ok(hello) => hello,
-                Err(error) => return refused(error_frame(&error, client_features)),
-            };
+            let hello =
+                match negotiate_hello(first, prelude.bootstrap_catalogue, jazz::wire::FEATURE_NONE)
+                {
+                    Ok(hello) => hello,
+                    Err(error) => return refused(error_frame(&error, client_features)),
+                };
             let link = match link(&admission, &hello) {
                 Ok(link) => link,
                 Err(error) => return refused(error_frame(&error, client_features)),
@@ -1309,42 +1432,41 @@ mod core_host {
                     client_features,
                 ));
             };
-            let opened = if link.thin {
-                core.open_thin_session(
-                    admission.identity,
-                    admission.claims,
-                    admission.bundle,
-                    admission.trust,
-                )
+            let attachment = if hibernate
+                && (link.thin || hello.features & jazz::wire::FEATURE_REPLACE_HOLDS != 0)
+            {
+                match SocketAttachment::new(&admission, client_features, link.thin) {
+                    Ok(state) => Some(Rc::new(RefCell::new(state))),
+                    Err(error) => return fail(jazz::wire::WireErrorCode::Backpressure, error),
+                }
             } else {
-                core.open_session(
-                    admission.identity,
-                    admission.claims,
-                    admission.bundle,
-                    admission.trust,
-                )
+                None
             };
-            let session = match opened {
+            let open = if link.thin {
+                ServerCore::open_thin_session
+            } else {
+                ServerCore::open_session
+            };
+            let session = match open(
+                core,
+                admission.identity,
+                admission.claims,
+                admission.bundle,
+                admission.trust,
+            ) {
                 Ok(session) => session,
                 Err(error) => {
                     return fail(jazz::wire::WireErrorCode::NotReady, error.to_string());
                 }
             };
-            let socket = self.next_socket;
-            self.next_socket += 1;
-            self.sockets.insert(
-                socket,
-                Socket {
-                    session,
-                    thin: link.thin,
-                    assembler: jazz::thin::ThinAssembler::default(),
-                    held: VecDeque::new(),
-                    held_bytes: 0,
-                    failed: None,
-                    client_features,
-                    revocation,
-                    guest,
-                },
+            let socket = self.install_socket(
+                session,
+                link.thin,
+                attachment,
+                client_features,
+                revocation,
+                guest,
+                false,
             );
             let hello = encode_ws_frame_batches(&[link.server_hello])
                 .ok()
@@ -1398,6 +1520,11 @@ mod core_host {
             !self.paused && self.core.as_ref().is_some_and(ServerCore::wants_tick)
         }
 
+        #[wasm_bindgen(js_name = nextChunkPullTickMs)]
+        pub fn next_chunk_pull_tick_ms(&self) -> Option<u32> {
+            self.core.as_ref()?.db().next_chunk_pull_tick_ms()
+        }
+
         /// How often to tick while sockets are open, in milliseconds.
         #[wasm_bindgen(js_name = idleTickMs)]
         pub fn idle_tick_ms() -> u32 {
@@ -1429,7 +1556,11 @@ mod core_host {
             for out in taken {
                 match out {
                     Ok(frames) => {
-                        for batch in encode_ws_frame_batches(&frames).unwrap_or_default() {
+                        let Ok(encoded) = encode_ws_frame_batches(&frames) else {
+                            ended = true;
+                            break;
+                        };
+                        for batch in encoded {
                             batches.push(js_sys::Uint8Array::from(batch.as_slice()));
                         }
                     }
@@ -1469,6 +1600,51 @@ mod core_host {
     }
 
     impl DurableObjectCore {
+        fn install_socket(
+            &mut self,
+            session: ServerSession,
+            thin: bool,
+            attachment: Option<Rc<RefCell<SocketAttachment>>>,
+            client_features: u64,
+            revocation: Option<SessionRevocation>,
+            guest: Option<jazz::ids::AuthorSubject>,
+            restored: bool,
+        ) -> u32 {
+            if let Some(attachment) = attachment.clone() {
+                let core = self.core.as_mut().expect("opened session");
+                if thin {
+                    core.observe_thin_registrations(
+                        session,
+                        Rc::new(move |event| attachment.borrow_mut().record_thin(event)),
+                    );
+                } else {
+                    core.observe_registrations(
+                        session,
+                        Rc::new(move |message| attachment.borrow_mut().record(message)),
+                        restored,
+                    );
+                }
+            }
+            let socket = self.next_socket;
+            self.next_socket += 1;
+            self.sockets.insert(
+                socket,
+                Socket {
+                    attachment,
+                    client_features,
+                    session,
+                    thin,
+                    assembler: jazz::thin::ThinAssembler::default(),
+                    held: VecDeque::new(),
+                    held_bytes: 0,
+                    failed: None,
+                    revocation,
+                    guest,
+                },
+            );
+            socket
+        }
+
         /// Decode `message` into the socket's held input.
         fn read(state: &mut Socket, message: &[u8], limit: usize) -> Result<(), String> {
             let frames = decode_ws_encoded_frame_batch(message).map_err(|e| e.to_string())?;
