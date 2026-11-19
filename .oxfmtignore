@@ -23,3 +23,9 @@ crates/jazz-codegen/tests/apps/**
 # Pristine upstream copy; jazz.patch must record every change to it.
 vendor/sqlite-wasm-rs/**
 !vendor/sqlite-wasm-rs/JAZZ_PATCH.md
+
+# Adopter-gate test apps: copies of adopter projects as each release generated them; they must stay byte for byte.
+dev/adopter-gate/bed/**
+dev/adopter-gate/refusals/**
+dev/adopter-gate/t10/**
+dev/adopter-gate/t4/app*/**

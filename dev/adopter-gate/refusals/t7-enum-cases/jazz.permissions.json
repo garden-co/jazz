@@ -1,0 +1,12 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "tickets": {
+      "read": "owner_id = session.user",
+      "insert": "owner_id = session.user",
+      "update": "false",
+      "delete": "false"
+    }
+  }
+}
