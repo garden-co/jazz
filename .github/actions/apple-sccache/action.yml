@@ -61,7 +61,24 @@ outputs:
 runs:
   using: composite
   steps:
-    - uses: ./.github/actions/install-rust-tool
+    # The pinned release binary, checked against its published SHA-256:
+    # seconds, where building it (install-rust-tool) takes 2.5 min whenever
+    # Blacksmith has evicted that cache.
+    - name: Install sccache 0.15.0
+      if: runner.arch == 'ARM64'
+      shell: bash
+      run: |
+        set -euo pipefail
+        name=sccache-v0.15.0-aarch64-apple-darwin
+        dir="$RUNNER_TEMP/sccache-bin"
+        mkdir -p "$dir"
+        curl -sSfL --retry 3 -o "$dir/$name.tar.gz" "https://github.com/mozilla/sccache/releases/download/v0.15.0/$name.tar.gz"
+        echo "430ef7b5f54256d3ed5bfe77e8b0afc51aa209aeebe4f95b69c3a52ce3acc6e9  $dir/$name.tar.gz" | shasum -a 256 -c -
+        tar -xzf "$dir/$name.tar.gz" -C "$dir" --strip-components 1 "$name/sccache"
+        "$dir/sccache" --version | grep -Fx "sccache 0.15.0"
+        echo "$dir" >> "$GITHUB_PATH"
+    - if: runner.arch != 'ARM64'
+      uses: ./.github/actions/install-rust-tool
       with:
         tool: sccache@0.15.0
 
@@ -84,7 +101,11 @@ runs:
             [[ "${TRUSTED_PR}" != true ]] || role="${READER}" ;;
         esac
         echo "role=${role}" >> "$GITHUB_OUTPUT"
-        echo "sccache tier for ${EVENT} on ${REF}: ${role:+S3 via ${role##*/}}${role:-Actions cache only}"
+        if [[ -n "${role}" ]]; then
+          echo "sccache tier for ${EVENT} on ${REF}: S3 via ${role##*/}"
+        else
+          echo "sccache tier for ${EVENT} on ${REF}: Actions cache only"
+        fi
 
     # Fails (and falls back) where the role's trust doesn't cover this run:
     # fork pull requests, which get no OIDC token, and refs not yet trusted.
