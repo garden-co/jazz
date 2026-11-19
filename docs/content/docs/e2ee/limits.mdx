@@ -16,16 +16,27 @@ languageTabs: backend
 - **A stale held key may seal.** A device that has not yet seen a removal keeps sealing under the key it
   holds until it updates.
 - **No default store.** The app supplies the private store and its protection.
-- **Node and the browser.** These are the Node client (`createJazzClient` from `jazz-tools/backend`) and
-  the web client (`createJazzClient` from `jazz-tools/client`, also the client for Deno, Bun and
-  command-line apps with a bearer). The native clients follow.
-- **Browser storage with encryption waits for a Jazz fix.** An encrypted app works in a browser page that
-  keeps its data in memory (`driver: { type: "memory" }`) and in Node, Deno and Bun. With the default
-  persistent browser storage, where each tab syncs through a shared worker, a tab's transaction that
-  reads several tables one after another stalls on versions of Jazz that lack a fix to how a tab asks its
-  worker for its next read (the fix is a separate pull request that is still to land), so
-  `db.encryption.ready()` times out. Until you are on a version with the fix, run an encrypted app with
-  in-page storage in the browser.
+- **Node, the browser and the native clients.** Node (`createJazzClient` from `jazz-tools/backend`), the
+  web client (`createJazzClient` from `jazz-tools/client`, also the client for Deno, Bun and
+  command-line apps with a bearer), and the Rust, Swift, Kotlin and Go clients (see
+  [Encryption in Rust, Swift, Kotlin and Go](/docs/e2ee/native)).
+- **What the native clients do not do yet.**
+  - A subscription holds no key watch. Keys reach a device through the pass that runs at start and on
+    reconnect, through reads that left rows out for want of a key, and when the app calls
+    `keysDeliver`; a member added while another member's device is running may wait for that device's
+    next pass.
+  - Only the usual writes (insert, update, delete, upsert, restore) wait for a key. Transactions, partial
+    edits and branch writes fail `key-pending` at once: call `ready` or `keysDeliver`, then write again.
+  - The runtime is not told when the connection drops, so an equality query offline matches as it does
+    online.
+  - The Swift, Kotlin and Go `Session` (account switching) takes no private store yet: open an encrypted
+    app with a client instead.
+  - React Native: the relay opens an encrypted app in Rust; the JavaScript calls and the store are not
+    wired.
+- **Persistent browser storage on older Jazz versions.** On versions without the shared-worker read
+  fix from [Jazz #6152](https://github.com/garden-co/jazz/pull/6152), a transaction can stall between
+  reads and `db.encryption.ready()` can time out. Use in-page storage (`driver: { type: "memory" }`)
+  until you upgrade to a version that includes the fix.
 - **A script on your page can use the device's keys.** The browser keeps the device's keys protected by a
   key that scripts can use but never read out, and each tab holds the space keys it uses in memory. Any
   script that runs on your page's origin (an injected one, for example through a cross-site scripting

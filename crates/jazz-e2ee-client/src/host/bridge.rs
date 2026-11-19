@@ -6,9 +6,15 @@
 //! against the app's store, and answers (`replyStore`); the runtime's future
 //! is polled again by the host and finds its answer. Bytes travel as base64,
 //! numbers that may exceed 2^53 as decimal text.
+//!
+//! A host that can answer on the spot (a native app, a foreign-language
+//! callback) gives the store a [`Handler`] instead ([`JsStore::served_by`]):
+//! the same request texts and answers, with no queue to drain. [`serve`]
+//! makes a handler of a Rust [`PrivateStore`].
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::rc::Rc;
 use std::task::Poll;
 use std::time::Duration;
 use web_time::Instant;
@@ -22,6 +28,10 @@ use serde_json::{Value, json};
 
 /// How long a store call may wait for JavaScript's answer.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Answers a request text on the spot: `ok` and the JSON payload, or the
+/// error text, as [`JsStore::reply`] takes them.
+pub type Handler = Rc<dyn Fn(String) -> LocalBoxFuture<'static, (bool, String)>>;
 
 /// A store call waiting for JavaScript.
 pub struct Request {
@@ -41,9 +51,20 @@ pub struct JsStore {
     timeout: Cell<Option<Duration>>,
     /// Called when a request is queued, so the host polls the queue soon.
     wake: RefCell<Option<Box<dyn Fn()>>>,
+    /// Answers requests instead of the queue (see [`JsStore::served_by`]).
+    handler: Option<Handler>,
 }
 
 impl JsStore {
+    /// A store whose requests `handler` answers where they are made: nothing
+    /// is queued and nothing waits for a host turn.
+    pub fn served_by(handler: Handler) -> Self {
+        Self {
+            handler: Some(handler),
+            ..Self::default()
+        }
+    }
+
     pub fn set_wake(&self, wake: Box<dyn Fn()>) {
         *self.wake.borrow_mut() = Some(wake);
     }
@@ -73,16 +94,7 @@ impl JsStore {
         if !self.outstanding.borrow().contains(&id) {
             return false;
         }
-        let result = if ok {
-            serde_json::from_str(payload).map_err(|error| StoreError::Failed(error.to_string()))
-        } else {
-            Err(match payload {
-                "conflict" => StoreError::Conflict,
-                "wiped" => StoreError::Wiped,
-                other => StoreError::Failed(other.to_owned()),
-            })
-        };
-        self.replies.borrow_mut().insert(id, result);
+        self.replies.borrow_mut().insert(id, decode(ok, payload));
         true
     }
 
@@ -108,6 +120,11 @@ impl JsStore {
                 self.0.replies.borrow_mut().remove(&self.1);
             }
         }
+        if let Some(handler) = &self.handler {
+            args["op"] = json!(op);
+            let (ok, payload) = handler(args.to_string()).await;
+            return decode(ok, &payload);
+        }
         let id = self.next.get() + 1;
         self.next.set(id);
         args["id"] = json!(id.to_string());
@@ -130,6 +147,20 @@ impl JsStore {
             None => Poll::Pending,
         })
         .await
+    }
+}
+
+/// A host's answer as the store call's result: `ok` with a JSON payload, or
+/// an error text (`conflict`, `wiped`, or a message).
+fn decode(ok: bool, payload: &str) -> Result<Value, StoreError> {
+    if ok {
+        serde_json::from_str(payload).map_err(|error| StoreError::Failed(error.to_string()))
+    } else {
+        Err(match payload {
+            "conflict" => StoreError::Conflict,
+            "wiped" => StoreError::Wiped,
+            other => StoreError::Failed(other.to_owned()),
+        })
     }
 }
 
@@ -242,6 +273,68 @@ impl PrivateStore for JsStore {
     }
 }
 
+/// A [`Handler`] that runs each request against a Rust store, for a host
+/// whose app supplies a [`PrivateStore`] directly.
+pub fn serve(store: Rc<dyn PrivateStore>) -> Handler {
+    Rc::new(move |text| {
+        let store = Rc::clone(&store);
+        Box::pin(async move {
+            match run(&*store, &text).await {
+                Ok(value) => (true, value.to_string()),
+                Err(StoreError::Conflict) => (false, "conflict".to_owned()),
+                Err(StoreError::Wiped) => (false, "wiped".to_owned()),
+                Err(error) => (false, error.to_string()),
+            }
+        })
+    })
+}
+
+async fn run(store: &dyn PrivateStore, text: &str) -> Result<Value, StoreError> {
+    let bad = |what: &str| StoreError::Failed(format!("a store request {what}"));
+    let request: Value = serde_json::from_str(text).map_err(|_| bad("is not JSON"))?;
+    let text_of = |name: &str| -> Result<&str, StoreError> {
+        request[name].as_str().ok_or_else(|| bad("lacks a field"))
+    };
+    let number = |name: &str| -> Result<u64, StoreError> { number_of(&request[name]) };
+    let bytes = |name: &str| -> Result<Vec<u8>, StoreError> { bytes_of(&request[name]) };
+    Ok(match request["op"].as_str() {
+        Some("openScope") => json!(store.open_scope(text_of("scope")?).await?.to_string()),
+        Some("load") => match store.load(text_of("scope")?, text_of("doc")?).await? {
+            None => Value::Null,
+            Some(found) => json!({
+                "bytes": STANDARD.encode(found.bytes),
+                "revision": found.revision.to_string(),
+            }),
+        },
+        Some("save") => {
+            let expected = match request["expected"].as_str() {
+                None => None,
+                Some(_) => Some(number("expected")?),
+            };
+            let revision = store
+                .save(
+                    text_of("scope")?,
+                    number("incarnation")?,
+                    text_of("doc")?,
+                    &bytes("bytes")?,
+                    expected,
+                )
+                .await?;
+            json!(revision.to_string())
+        }
+        Some("list") => json!(store.list(text_of("scope")?).await?),
+        Some("delete") => {
+            store.delete(text_of("scope")?).await?;
+            Value::Null
+        }
+        Some("protect") => json!(STANDARD.encode(store.protect(&bytes("secret")?).await?)),
+        Some("unprotect") => {
+            json!(STANDARD.encode(&*store.unprotect(&bytes("blob")?).await?))
+        }
+        _ => return Err(bad("names an unknown operation")),
+    })
+}
+
 // Lower-level than the usual black-box tests, because the bridge's queue and
 // its refusal of stray answers are only observable by playing JavaScript's
 // side by hand; the TypeScript suite runs the same bridge end to end.
@@ -334,5 +427,31 @@ mod tests {
         let taken = store.take_requests();
         drop(sent);
         assert!(!store.reply(id_of(&taken[0]), true, "null"));
+    }
+
+    /// Contract: a store served on the spot behaves as the store it wraps:
+    /// what one call saves the next loads, a stale save conflicts, and a
+    /// request that is not one is refused, not answered with a guess.
+    #[test]
+    fn a_served_store_is_the_store_it_wraps() {
+        fn block<T>(future: impl Future<Output = T>) -> T {
+            jazz::db::block_on(future)
+        }
+        let store = JsStore::served_by(serve(Rc::new(crate::MemoryStore::new())));
+        let scope = block(store.open_scope("device")).unwrap();
+        assert_eq!(block(store.load("device", "doc")).unwrap(), None);
+        let first = block(store.save("device", scope, "doc", b"one", None)).unwrap();
+        let found = block(store.load("device", "doc")).unwrap().unwrap();
+        assert_eq!((found.bytes, found.revision), (b"one".to_vec(), first));
+        assert!(matches!(
+            block(store.save("device", scope, "doc", b"two", None)),
+            Err(StoreError::Conflict)
+        ));
+        assert_eq!(block(store.list("device")).unwrap(), vec!["doc".to_owned()]);
+        let handler = serve(Rc::new(crate::MemoryStore::new()));
+        let (ok, _) = block(handler("{\"op\":\"nothing\"}".to_owned()));
+        assert!(!ok);
+        let (ok, _) = block(handler("not json".to_owned()));
+        assert!(!ok);
     }
 }

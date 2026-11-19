@@ -24,7 +24,7 @@ required-features = ["bindgen"]
 bindgen = ["uniffi/cli"]
 
 [dependencies]
-jazz-app-support.workspace = true
+jazz-app-support = { workspace = true, features = ["e2ee-client"] }
 base64 = "0.22"
 futures-executor = "0.3"
 futures-util = "0.3"

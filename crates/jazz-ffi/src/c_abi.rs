@@ -366,6 +366,19 @@ pub unsafe extern "C" fn jazz_call(
                 core.tx_rollback(parse_tx(&string("tx")?)?)?;
                 "null".into()
             }
+            "encryptionCall" => core.encryption_call(
+                &string("op")?,
+                &args.get("args").map(Json::to_string).unwrap_or_default(),
+            )?,
+            "encryptionReady" => {
+                let timeout = args
+                    .get("timeoutMs")
+                    .and_then(Json::as_u64)
+                    .unwrap_or(30_000);
+                Json::from(core.encryption_ready(timeout)?).to_string()
+            }
+            "encryptionState" => core.encryption_state()?,
+            "encryptionReports" => Json::from(core.encryption_reports()?).to_string(),
             "account" => Json::from(core.account()?).to_string(),
             "backendClient" => Json::from(core.backend_client()?).to_string(),
             other => return Err(refused(format!("unknown method {other:?}"))),
@@ -713,6 +726,18 @@ pub type JazzTokenCallback = Option<
     unsafe extern "C" fn(ctx: *mut c_void, reason: *const c_char, token: *mut *mut c_char) -> i32,
 >;
 
+/// A private store's callback (see the header): `request` is JSON text;
+/// returns 0 with `*payload` the result as JSON text, or non-zero with
+/// `*payload` the error (`conflict`, `wiped` or a message); `*payload` is a
+/// `malloc`ed string jazz frees.
+pub type JazzStoreCallback = Option<
+    unsafe extern "C" fn(
+        ctx: *mut c_void,
+        request: *const c_char,
+        payload: *mut *mut c_char,
+    ) -> i32,
+>;
+
 unsafe extern "C" {
     fn free(pointer: *mut c_void);
 }
@@ -800,6 +825,101 @@ fn host_tokens(
             .unwrap_or_else(|| Err("the app is closed".into()))
     }));
     (host, gate)
+}
+
+/// A C host's private store (see `JazzStoreCallback` in the header) as the
+/// calls the encryption runtime makes, behind a gate its handle's close
+/// shuts.
+#[derive(Clone, Copy)]
+struct StoreRef(*mut c_void);
+// SAFETY: `jazz_open_encrypted`'s contract: the store callback and its
+// `ctx` may be used from the client's thread until `jazz_close` returns.
+unsafe impl Send for StoreRef {}
+unsafe impl Sync for StoreRef {}
+
+type StoreGate = crate::gate::Gate<(
+    unsafe extern "C" fn(*mut c_void, *const c_char, *mut *mut c_char) -> i32,
+    StoreRef,
+)>;
+
+fn host_store(
+    cb: unsafe extern "C" fn(*mut c_void, *const c_char, *mut *mut c_char) -> i32,
+    ctx: *mut c_void,
+) -> (crate::core::StoreCalls, std::sync::Arc<StoreGate>) {
+    let gate: std::sync::Arc<StoreGate> =
+        std::sync::Arc::new(crate::gate::Gate::new((cb, StoreRef(ctx))));
+    let calling = gate.clone();
+    let calls: crate::core::StoreCalls = std::sync::Arc::new(move |request: String| {
+        calling
+            .call(|&(cb, ctx)| {
+                let request = CString::new(request.clone()).unwrap_or_default();
+                let mut payload: *mut c_char = ptr::null_mut();
+                // SAFETY: per `jazz_open_encrypted`'s contract, while the
+                // handle (this gate) is open.
+                let failed = unsafe { cb(ctx.0, request.as_ptr(), &mut payload) };
+                let text = if payload.is_null() {
+                    String::new()
+                } else {
+                    // SAFETY: the callback sets a NUL-terminated `malloc`ed
+                    // string.
+                    let text = unsafe { CStr::from_ptr(payload) }
+                        .to_string_lossy()
+                        .into_owned();
+                    unsafe { free(payload.cast()) };
+                    text
+                };
+                (failed == 0, text)
+            })
+            .unwrap_or_else(|| (false, "the app is closed".to_owned()))
+    });
+    (calls, gate)
+}
+
+/// Opens an app that declares end-to-end encryption as an end user (see the
+/// header). `token_cb` is NULL unless `"auth": {"bearer": true}`.
+///
+/// # Safety
+/// `config_json` is NUL-terminated; both callbacks and their contexts stay
+/// valid, from any thread, until `jazz_close` returns; `err` is NULL or
+/// writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_open_encrypted(
+    config_json: *const c_char,
+    token_cb: JazzTokenCallback,
+    token_ctx: *mut c_void,
+    store_cb: JazzStoreCallback,
+    store_ctx: *mut c_void,
+    err: *mut *mut c_char,
+) -> *mut JazzHandle {
+    guarded(err, ptr::null_mut(), |contract| {
+        // SAFETY: per the function's contract.
+        let config = unsafe { text(config_json, "config_json") }?;
+        if let Some(version) = serde_json::from_str::<Json>(config)
+            .ok()
+            .and_then(|c| c.get("contract").and_then(Json::as_u64))
+        {
+            contract.set(version);
+        }
+        let store_cb = store_cb.ok_or_else(|| refused("the store callback is NULL"))?;
+        let (calls, store_gate) = host_store(store_cb, store_ctx);
+        let (tokens, token_gate) = match token_cb {
+            Some(cb) => {
+                let (host, gate) = host_tokens(cb, token_ctx);
+                let tokens: std::sync::Arc<dyn jazz_app_support::TokenProvider> =
+                    std::sync::Arc::new(host);
+                (Some(tokens), Some(gate))
+            }
+            None => (None, None),
+        };
+        let core = Core::open_with(config, tokens, Some(calls))?;
+        core.on_close(Box::new(move || {
+            if let Some(gate) = token_gate {
+                gate.close();
+            }
+            store_gate.close();
+        }));
+        Ok(Box::into_raw(Box::new(JazzHandle(core))))
+    })
 }
 
 /// A watch of session or sync states (opaque to C).

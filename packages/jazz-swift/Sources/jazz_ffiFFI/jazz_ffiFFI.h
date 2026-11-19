@@ -243,6 +243,13 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureRes
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_PRIVATE_STORE_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_PRIVATE_STORE_METHOD0
+typedef void (*UniffiCallbackInterfacePrivateStoreMethod0)(uint64_t, RustBuffer, RustBuffer* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_STATE_LISTENER_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_STATE_LISTENER_METHOD0
 typedef void (*UniffiCallbackInterfaceStateListenerMethod0)(uint64_t, RustBuffer, void* _Nonnull, 
@@ -269,6 +276,15 @@ typedef void (*UniffiCallbackInterfaceSubscriptionListenerMethod1)(uint64_t, Rus
 typedef void (*UniffiCallbackInterfaceTokenProviderMethod0)(uint64_t, RustBuffer, RustBuffer* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_PRIVATE_STORE
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_PRIVATE_STORE
+typedef struct UniffiVTableCallbackInterfacePrivateStore {
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
+    UniffiCallbackInterfacePrivateStoreMethod0 _Nonnull call;
+} UniffiVTableCallbackInterfacePrivateStore;
 
 #endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_STATE_LISTENER
@@ -312,6 +328,11 @@ void uniffi_jazz_ffi_fn_free_jazzhandle(uint64_t handle, RustCallStatus *_Nonnul
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_CONSTRUCTOR_JAZZHANDLE_OPEN
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_CONSTRUCTOR_JAZZHANDLE_OPEN
 uint64_t uniffi_jazz_ffi_fn_constructor_jazzhandle_open(RustBuffer config_json, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_CONSTRUCTOR_JAZZHANDLE_OPEN_WITH_STORE
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_CONSTRUCTOR_JAZZHANDLE_OPEN_WITH_STORE
+uint64_t uniffi_jazz_ffi_fn_constructor_jazzhandle_open_with_store(RustBuffer config_json, uint64_t store, RustBuffer tokens, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_CONSTRUCTOR_JAZZHANDLE_OPEN_WITH_TOKENS
@@ -394,6 +415,26 @@ void uniffi_jazz_ffi_fn_method_jazzhandle_edit(uint64_t ptr, RustBuffer table, R
 void uniffi_jazz_ffi_fn_method_jazzhandle_edit_text(uint64_t ptr, RustBuffer table, RustBuffer id, RustBuffer column, RustBuffer edited_from, RustBuffer text, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_ENCRYPTION_CALL
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_ENCRYPTION_CALL
+RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_encryption_call(uint64_t ptr, RustBuffer op, RustBuffer args_json, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_ENCRYPTION_READY
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_ENCRYPTION_READY
+RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_encryption_ready(uint64_t ptr, uint64_t timeout_ms, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_ENCRYPTION_REPORTS
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_ENCRYPTION_REPORTS
+RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_encryption_reports(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_ENCRYPTION_STATE
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_ENCRYPTION_STATE
+RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_encryption_state(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_FOR_USER
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_FOR_USER
 uint64_t uniffi_jazz_ffi_fn_method_jazzhandle_for_user(uint64_t ptr, RustBuffer user_id, RustBuffer claims_json, RustCallStatus *_Nonnull out_status
@@ -474,6 +515,11 @@ uint64_t uniffi_jazz_ffi_fn_method_jazzhandle_subscribe_at(uint64_t ptr, RustBuf
 RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_sync_status(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_TABLE_IDENTITY
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_TABLE_IDENTITY
+RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_table_identity(uint64_t ptr, RustBuffer table, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_UPDATE
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_UPDATE
 void uniffi_jazz_ffi_fn_method_jazzhandle_update(uint64_t ptr, RustBuffer table, RustBuffer id, RustBuffer patch_json, RustCallStatus *_Nonnull out_status
@@ -507,6 +553,26 @@ uint64_t uniffi_jazz_ffi_fn_method_jazzhandle_watch_session(uint64_t ptr, uint64
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_WATCH_SYNC
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_WATCH_SYNC
 uint64_t uniffi_jazz_ffi_fn_method_jazzhandle_watch_sync(uint64_t ptr, uint64_t listener, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_CLONE_PRIVATESTORE
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_CLONE_PRIVATESTORE
+uint64_t uniffi_jazz_ffi_fn_clone_privatestore(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_FREE_PRIVATESTORE
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_FREE_PRIVATESTORE
+void uniffi_jazz_ffi_fn_free_privatestore(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_INIT_CALLBACK_VTABLE_PRIVATESTORE
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_INIT_CALLBACK_VTABLE_PRIVATESTORE
+void uniffi_jazz_ffi_fn_init_callback_vtable_privatestore(const UniffiVTableCallbackInterfacePrivateStore* _Nonnull vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_PRIVATESTORE_CALL
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_PRIVATESTORE_CALL
+RustBuffer uniffi_jazz_ffi_fn_method_privatestore_call(uint64_t ptr, RustBuffer request, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_CLONE_SESSION
@@ -1131,6 +1197,30 @@ uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_edit_text(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_ENCRYPTION_CALL
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_ENCRYPTION_CALL
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_encryption_call(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_ENCRYPTION_READY
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_ENCRYPTION_READY
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_encryption_ready(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_ENCRYPTION_REPORTS
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_ENCRYPTION_REPORTS
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_encryption_reports(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_ENCRYPTION_STATE
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_ENCRYPTION_STATE
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_encryption_state(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_FOR_USER
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_FOR_USER
 uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_for_user(void
@@ -1227,6 +1317,12 @@ uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_sync_status(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_TABLE_IDENTITY
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_TABLE_IDENTITY
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_table_identity(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_UPDATE
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_UPDATE
 uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_update(void
@@ -1266,6 +1362,12 @@ uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_watch_session(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_WATCH_SYNC
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_WATCH_SYNC
 uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_watch_sync(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_PRIVATESTORE_CALL
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_PRIVATESTORE_CALL
+uint16_t uniffi_jazz_ffi_checksum_method_privatestore_call(void
     
 );
 #endif
@@ -1464,6 +1566,12 @@ uint16_t uniffi_jazz_ffi_checksum_method_watch_cancel(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_CONSTRUCTOR_JAZZHANDLE_OPEN
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_CONSTRUCTOR_JAZZHANDLE_OPEN
 uint16_t uniffi_jazz_ffi_checksum_constructor_jazzhandle_open(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_CONSTRUCTOR_JAZZHANDLE_OPEN_WITH_STORE
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_CONSTRUCTOR_JAZZHANDLE_OPEN_WITH_STORE
+uint16_t uniffi_jazz_ffi_checksum_constructor_jazzhandle_open_with_store(void
     
 );
 #endif

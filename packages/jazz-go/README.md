@@ -26,3 +26,7 @@ and build as usual. Its versions are Jazz's, in lockstep (each release tags
 Inside this repository, jazz-go uses the core `cargo build -p jazz-ffi`
 builds. `include/jazz_ffi.h` is a copy of `crates/jazz-ffi/include/jazz_ffi.h`;
 a test and the `go` CI partition check that it stays the same.
+
+## Encryption
+
+An app that declares end-to-end encryption opens with a private store your app supplies; see [Encryption in Rust, Swift, Kotlin and Go](../../docs/content/docs/e2ee/native.mdx).
