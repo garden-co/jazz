@@ -2,6 +2,7 @@
 //! opens the private store, keeps the device, held keys and floors in step
 //! with it, and gives the database its hooks.
 
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
@@ -21,9 +22,11 @@ use jazz_e2ee::protocol::content::store::{
     HeldKeyRecord, Rejected, RejectedRecord, StoreOwner, decode_document,
 };
 use jazz_e2ee::protocol::derive;
+use jazz_e2ee::protocol::device_account::DeviceAccountIdentity;
 use jazz_e2ee::protocol::domain::AppDomain;
 use jazz_e2ee::registry::Registry;
 
+use crate::account::OwnAccount;
 use crate::error::ClientError;
 use crate::hooks::{Hooks, plans};
 use crate::mechanisms;
@@ -49,6 +52,11 @@ pub struct ClientConfig {
     pub registry: Registry,
     /// The operating system's random source outside tests.
     pub random: Box<dyn RandomSource>,
+    /// For a device-account account, the identity its account secret derives:
+    /// it signs the account's roots, and the device checks the account's
+    /// root against it (§2.3, §2.4). `None` for an account of the
+    /// application's own sign-in.
+    pub device_account: Option<DeviceAccountIdentity>,
 }
 
 /// One held-key document as last read or written.
@@ -74,16 +82,30 @@ struct Documents {
 
 /// The encryption runtime of one account on this device.
 pub struct E2eeClient {
-    shared: Rc<Shared>,
+    pub(crate) shared: Rc<Shared>,
     hooks: Rc<Hooks>,
     store: Rc<dyn PrivateStore>,
     scope: String,
-    /// The scope's incarnation when this runtime opened it: a save after
-    /// the scope was wiped fails, and closes the runtime.
-    incarnation: u64,
+    /// The scope's incarnation this runtime writes into: a save after the
+    /// scope was wiped elsewhere fails, and closes the runtime. Re-enrolment
+    /// moves it to a new incarnation.
+    incarnation: Cell<u64>,
+    pub(crate) device_account: Option<DeviceAccountIdentity>,
+    /// The account as this device last verified it.
+    pub(crate) account: RefCell<Option<OwnAccount>>,
     /// Every store write and the wipe run under this lock, so a wipe waits
     /// for writes in flight and no write follows it (§6.4).
     documents: Mutex<Documents>,
+}
+
+/// The runtime's random source, borrowed only for each fill, so that it
+/// is never held across an await.
+pub(crate) struct SharedRandom<'a>(pub(crate) &'a RefCell<Box<dyn RandomSource>>);
+
+impl RandomSource for SharedRandom<'_> {
+    fn fill(&mut self, dest: &mut [u8]) -> jazz_e2ee::Result<()> {
+        self.0.borrow_mut().fill(dest)
+    }
 }
 
 /// The `format` a stored record names, if it is a JSON object with one.
@@ -147,7 +169,8 @@ impl E2eeClient {
             declarations,
             account_id,
             registry: host,
-            mut random,
+            random,
+            device_account,
         } = config;
         let plans = plans(&declarations)?;
         let (registry, selected) =
@@ -162,6 +185,7 @@ impl E2eeClient {
         // A wipe that lands while the scope opens deletes it under this
         // runtime: open the new scope and load again.
         let mut opened = None;
+        let random = RefCell::new(random);
         for _ in 0..SAVE_ATTEMPTS {
             let incarnation = store.open_scope(&scope).await?;
             match Self::load_device(
@@ -172,7 +196,7 @@ impl E2eeClient {
                 &domain,
                 &account_id,
                 &scope,
-                &mut *random,
+                &mut SharedRandom(&random),
             )
             .await
             {
@@ -198,7 +222,7 @@ impl E2eeClient {
                 ..KeyState::default()
             }
             .into(),
-            random: random.into(),
+            random,
             reports: Default::default(),
         });
         let client = Self {
@@ -209,7 +233,9 @@ impl E2eeClient {
             shared,
             store,
             scope,
-            incarnation,
+            incarnation: Cell::new(incarnation),
+            device_account,
+            account: RefCell::new(None),
             documents: Mutex::new(Documents::default()),
         };
         client.load_documents().await?;
@@ -418,6 +444,12 @@ impl E2eeClient {
         Ok(())
     }
 
+    /// Whether the application allows account resets (its encryption
+    /// settings).
+    pub(crate) fn allow_account_reset(&self) -> bool {
+        self.hooks.declarations.settings.allow_account_reset
+    }
+
     /// The hooks to open the account's database with
     /// (`DbConfig::with_e2ee`).
     pub fn hooks(&self) -> Rc<dyn E2eeHooks> {
@@ -473,7 +505,7 @@ impl E2eeClient {
         ClientError::Closed
     }
 
-    fn ensure_open(&self) -> Result<(), ClientError> {
+    pub(crate) fn ensure_open(&self) -> Result<(), ClientError> {
         if self.shared.keys.borrow().closed {
             Err(ClientError::Closed)
         } else {
@@ -531,7 +563,13 @@ impl E2eeClient {
             };
             match self
                 .store
-                .save(&self.scope, self.incarnation, &name, &bytes, state.revision)
+                .save(
+                    &self.scope,
+                    self.incarnation.get(),
+                    &name,
+                    &bytes,
+                    state.revision,
+                )
                 .await
             {
                 Ok(revision) => {
@@ -608,7 +646,7 @@ impl E2eeClient {
             };
             match self
                 .store
-                .save(&self.scope, self.incarnation, &name, &bytes, revision)
+                .save(&self.scope, self.incarnation.get(), &name, &bytes, revision)
                 .await
             {
                 Ok(revision) => {
@@ -626,6 +664,37 @@ impl E2eeClient {
             }
         }
         Err(StoreError::Conflict.into())
+    }
+
+    /// Wipes this account's private state (held keys, floors, the device)
+    /// and enrolls a new local device in a new incarnation of the scope,
+    /// keeping the runtime open (§2.4, "Floors"): what a device the account
+    /// no longer has does before it requests approval again.
+    pub(crate) async fn reenrol(&self) -> Result<(), ClientError> {
+        let mut documents = self.documents.lock().await;
+        self.ensure_open()?;
+        {
+            let mut keys = self.shared.keys.borrow_mut();
+            keys.held = Default::default();
+        }
+        *self.account.borrow_mut() = None;
+        *documents = Documents::default();
+        self.store.delete(&self.scope).await?;
+        let incarnation = self.store.open_scope(&self.scope).await?;
+        let device = Self::load_device(
+            &*self.store,
+            incarnation,
+            &self.shared.registry,
+            &self.shared.selected,
+            &self.shared.domain,
+            &self.shared.account_id,
+            &self.scope,
+            &mut SharedRandom(&self.shared.random),
+        )
+        .await?;
+        self.incarnation.set(incarnation);
+        *self.shared.device.borrow_mut() = device;
+        Ok(())
     }
 
     /// Wipes this account's private state from the store: the device, every
