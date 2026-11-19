@@ -5,6 +5,12 @@
 body() {
   if [ -z "${VERCEL_TOKEN:-}" ]; then echo "SKIP t4 vercel: secrets pending (VERCEL_TOKEN, BASELINE_RED_PASSWORD; see t4/README.md)"; return; fi
   export T4_RELEASE_BASE=${T4_RELEASE_BASE:-file://$AG_TGZ}
+  # The eval core only moves to newer versions (newerVersion). A version that sorts below what it runs (an RC dry run's
+  # rc.0, an old RC) would deploy a backend onto a newer core: not an upgrade test, and it leaves the eval app skewed.
+  local cur; cur=$("$AG/t4/scripts/core-state.sh" 2>/dev/null | grep -oE 'core running=[^ ]+' | head -1 | cut -d= -f2)
+  newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "${1//-/\~}" "${2//-/\~}" | sort -V | tail -1)" = "${1//-/\~}" ]; }
+  if [ -n "$cur" ] && newer "$cur" "$(ag_version)"; then
+    echo "SKIP t4 vercel: $(ag_version) sorts below the eval core's $cur (a dry-run or older version); t4 deploys only versions that move the core"; return; fi
   "$AG/t4/scripts/run-t4.sh" "$(ag_version)" > "$AG_RESULTS/t4-full.log" 2>&1; local rc=$?
   grep -E "^(PASS|FAIL|FINDING|SEEDED|smoke run 1 failed)" "$AG_RESULTS/t4-full.log" \
     | sed 's/^FINDING/REVIEW t4 finding:/; s/^SEEDED/REVIEW t4 first run: seeded/; s/^smoke run 1 failed; retrying once/REVIEW t4 smoke run 1 failed, retried once (known flake jazz#5553; remove the retry once it is fixed)/'

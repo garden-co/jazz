@@ -10,9 +10,9 @@ backend() {
   use_rc_pnpm || return 1
   mkdir -p stageplan && cp "$SP"/react-localfirst/jazz.{app.json,permissions.json,generated.ts} stageplan/   # resolve jazz-tools from the RC install
   kill_port 8780 8790 8791
-  OIDC_PORT=8790 setsid npx tsx oidc.ts > oidc-w.log 2>&1 < /dev/null &
-  OIDC_PORT=8791 setsid npx tsx oidc.ts > oidc-u.log 2>&1 < /dev/null &
-  APP_DIR=$W/stageplan setsid npx tsx server.ts > server.log 2>&1 < /dev/null &
+  ag_bg oidc-w.log env OIDC_PORT=8790 npx tsx oidc.ts
+  ag_bg oidc-u.log env OIDC_PORT=8791 npx tsx oidc.ts
+  ag_bg server.log env APP_DIR="$W/stageplan" npx tsx server.ts
   wait_port 8790 && wait_port 8791 && wait_port 8780 && echo "PASS t9 backend up on the RC ($(node -p 'require("jazz-tools/package.json").version'))" \
     || { echo "FAIL t9 backend start"; tail -5 server.log; return 1; }
   for u in user-a user-b; do curl -sf -X POST "http://127.0.0.1:8780/account/$u" >/dev/null || echo "FAIL t9 createAccountFor $u"; done   # forUser needs accounts
@@ -77,6 +77,6 @@ PY
         LD_LIBRARY_PATH=$L${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} SW_BIN=$SWD/.build/debug/stage-plan-swift APP_ID=$APP_ID ./run-lang-clients.sh 2>&1 | grep -E "^(PASS|FAIL)" ;;
     *) echo "FAIL unknown language $1" ;;
   esac
-  kill_port 8780 8790 8791
+  ag_kill_bg; kill_port 8780 8790 8791
 }
 ag_job "t9-$1" body "$1"
