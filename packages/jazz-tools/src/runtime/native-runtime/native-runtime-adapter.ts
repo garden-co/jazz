@@ -1,5 +1,9 @@
 import type { ClientMigrations } from "../client-migrations.js";
-import { Encryption, type EncryptionNative } from "../../encryption/index.js";
+import {
+  Encryption,
+  type EncryptionNative,
+  type EncryptionOptions,
+} from "../../encryption/index.js";
 import { servePrivateStore, type PrivateStore } from "../../encryption/private-store.js";
 import { retryAfterKey } from "../../encryption/key-retry.js";
 import { plainSchema, type PlainEntries } from "../../encryption/plain-schema.js";
@@ -1148,7 +1152,7 @@ export class NativeRuntimeAdapter implements Runtime {
   /** The installed encryption runtime's side, on the runtime that owns the database. */
   private encryptionState?: {
     native: NativeEncryptionDb;
-    options: NativeEncryptionOptions;
+    options: EncryptionOptions;
     serving: { stop(): void };
     uses: SpaceUse;
     handle?: Encryption;
@@ -1178,14 +1182,33 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private serveEncryption(options: NativeEncryptionOptions): void {
     const native = this.db as unknown as NativeEncryptionDb;
-    this.encryptionState = {
-      native,
-      options,
-      serving: servePrivateStore(native, options.store),
-      uses: new SpaceUse(native),
-    };
-    // Verify the account in the background; the app may await `ready()` too.
-    this.encryptionHandle()?.start();
+    const serving = servePrivateStore(native, options.store);
+    try {
+      this.bindEncryption(native, { accountSecret: options.accountSecret }, serving);
+      // Verify the account in the background; the app may await `ready()` too.
+      this.encryptionHandle()?.start();
+    } catch (error) {
+      serving.stop();
+      throw error;
+    }
+  }
+
+  /** Adopt the private store bridge of the React Native foreground. */
+  attachEncryption(
+    native: NativeEncryptionDb,
+    serving: { stop(): void },
+    deviceAccount: boolean,
+  ): void {
+    this.bindEncryption(native, { nativeReadiness: true, deviceAccount }, serving);
+    this.signalEncryptionOnline();
+  }
+
+  private bindEncryption(
+    native: NativeEncryptionDb,
+    options: EncryptionOptions,
+    serving: { stop(): void },
+  ): void {
+    this.encryptionState = { native, options, serving, uses: new SpaceUse(native) };
   }
 
   /** Runs a write, and again once the space's key is ready if it failed `key-pending`. */
@@ -1206,9 +1229,7 @@ export class NativeRuntimeAdapter implements Runtime {
   encryptionHandle(): Encryption | undefined {
     const state = this.ownerRuntime.encryptionState;
     if (!state) return undefined;
-    state.handle ??= new Encryption(state.native, {
-      accountSecret: state.options.accountSecret,
-    });
+    state.handle ??= new Encryption(state.native, state.options);
     return state.handle;
   }
 

@@ -4,9 +4,17 @@
 use super::*;
 use jazz::ids::AuthorSubject;
 
+#[cfg(all(test, feature = "e2ee-client"))]
+#[path = "tests/encrypted_foreground.rs"]
+mod encrypted_foreground;
+
 pub(super) struct AccountSessionOwner {
     pub runtime_token: u64,
     pub app_id: String,
+    #[cfg(feature = "e2ee-client")]
+    pub environment: String,
+    #[cfg(feature = "e2ee-client")]
+    pub device_account_secret: Option<String>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -22,6 +30,9 @@ struct AccountSessionRequest {
     /// its socket presents.
     #[serde(default)]
     jwt: Option<String>,
+    /// Optional self-recovery secret, sent only with a matching device proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    device_account_secret: Option<String>,
     /// For a user signed in through the app's backend: the app's own bearer,
     /// which that backend authenticates the socket by. Opaque here.
     #[serde(default)]
@@ -221,9 +232,29 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_begin_account_session_json
             Ok(root) if !root.contains('\0') => std::path::Path::new(root),
             _ => return Err(JazzNativeRelayStatus::InvalidArgument),
         };
-        let request = serde_json::from_slice::<AccountSessionRequest>(request)
+        let mut request = serde_json::from_slice::<AccountSessionRequest>(request)
             .map_err(|_| JazzNativeRelayStatus::InvalidCommand)?;
-        let app_id = request.app_id.clone();
+        let device_account_secret = request.device_account_secret.take();
+        // A recovery secret is accepted only if it is the account's own
+        // signing root. The normal admission below still verifies its JWT.
+        if let Some(secret) = &device_account_secret {
+            let seed = jazz::tools::public_schema::SchemaHash::from_hex(secret)
+                .ok_or(JazzNativeRelayStatus::InvalidCommand)?;
+            if request.issuer != jazz::tools::identity::DEVICE_ACCOUNT_ISSUER
+                || jazz::tools::identity::derive_user_id(seed.as_bytes()).to_string()
+                    != request.subject
+            {
+                return Err(JazzNativeRelayStatus::LifecycleFailure);
+            }
+        }
+        let owner = AccountSessionOwner {
+            runtime_token: lease.runtime_token,
+            app_id: request.app_id.clone(),
+            #[cfg(feature = "e2ee-client")]
+            environment: request.env.clone(),
+            #[cfg(feature = "e2ee-client")]
+            device_account_secret,
+        };
         let pending = request.prepare(root)?;
         let mut host = lease.lock()?;
         if host
@@ -234,13 +265,7 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_begin_account_session_json
         }
         let capability = host.allocate_admission_capability().map_err(relay_status)?;
         host.pending_private_sessions.insert(capability, pending);
-        host.account_session_owners.insert(
-            capability,
-            AccountSessionOwner {
-                runtime_token: lease.runtime_token,
-                app_id,
-            },
-        );
+        host.account_session_owners.insert(capability, owner);
         unsafe { write_capability_out(out, capability) };
         Ok(())
     })
@@ -406,10 +431,7 @@ impl NativeRelayHost {
             .find(|relay| relay.scope == scope)
             .map(|relay| relay.relay.clone());
         if live_relay.is_none() && self.private_scope_workers.contains_key(&scope) {
-            live_relay = match self.registry.open_admitted(config) {
-                Ok(relay) => Some(relay),
-                Err(error) => return Err(relay_status(error)),
-            };
+            live_relay = Some(self.open_admitted_relay(capability, config)?);
         }
         let replacement = if !self.explicitly_offline_scopes.contains(&scope) {
             match (
@@ -484,6 +506,7 @@ mod tests {
             issuer: "https://issuer.example".into(),
             subject: subject.into(),
             jwt: None,
+            device_account_secret: None,
             // The app's own bearer for its backend: opaque to the relay.
             bearer: Some(format!("x.app-session-{subject}")),
             server_url: None,

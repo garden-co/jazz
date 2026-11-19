@@ -137,7 +137,7 @@ import { isThinDb, upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-
 import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 import { RuntimeClosedError } from "./runtime-closed-error.js";
 import { notDeclaredEncryption, type Encryption } from "../encryption/index.js";
-import { plainSchema } from "../encryption/plain-schema.js";
+import { declaredEntries, plainSchema } from "../encryption/plain-schema.js";
 import type { BrowserEncryptionConfig } from "../encryption/browser-host.js";
 
 /** `getDeviceAccountProof` hands out a session's sync proof only with this long left. */
@@ -3236,8 +3236,15 @@ export class Db {
     );
     const context = this.getAccessContext();
     const deferred = !!getOwnerPreparation(client)?.pending;
-    if (deferred && !id) id = reserveRowId();
+    const encrypted = declaredEntries(table._schema);
+    // The row ID can also name its encryption space. Keep it across the first
+    // attempt and any retries, including one that starts key preparation.
+    if (!id && (deferred || (encrypted && Object.hasOwn(encrypted, table._table)))) {
+      id = reserveRowId();
+    }
     const value = deferred ? immediateWriteRow(table, id!, values) : undefined;
+    const output = (row: WasmRow) =>
+      transformOutputRow<T>(table, transformRow(row, table._schema, table._table));
     const inserted = runAfterPreparation(client, () =>
       client.insert(
         table._table,
@@ -3250,15 +3257,11 @@ export class Db {
     return this.wrapWriteWait(
       inserted instanceof Promise
         ? new WriteResult(
-            value as T,
+            value ?? output(client.previewInsertInternal(table._table, values, id)),
             inserted.then((result) => result.txId),
             client,
           )
-        : inserted.mapValue((row) =>
-            value !== undefined
-              ? (value as T)
-              : transformOutputRow<T>(table, transformRow(row, table._schema, table._table)),
-          ),
+        : inserted.mapValue(output),
     );
   }
 
@@ -3402,6 +3405,8 @@ export class Db {
     const context = this.getAccessContext();
     const deferred = !!getOwnerPreparation(client)?.pending;
     const value = deferred ? immediateWriteRow(table, id, values) : undefined;
+    const output = (row: WasmRow) =>
+      transformOutputRow<T>(table, transformRow(row, table._schema, table._table));
     const restored = runAfterPreparation(client, () =>
       client.restore(
         table._table,
@@ -3415,13 +3420,11 @@ export class Db {
     return this.wrapWriteWait(
       restored instanceof Promise
         ? new WriteResult(
-            value as T,
+            value ?? output(client.previewInsertInternal(table._table, values, id)),
             restored.then((result) => result.txId),
             client,
           )
-        : restored.mapValue((row) =>
-            transformOutputRow<T>(table, transformRow(row, table._schema, table._table)),
-          ),
+        : restored.mapValue(output),
     );
   }
 

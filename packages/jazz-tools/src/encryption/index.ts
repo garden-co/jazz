@@ -7,6 +7,7 @@
  * not be read. Ordinary reads and writes of encrypted columns need nothing
  * from it.
  */
+import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
 import { RecoveryPhrase } from "../local-first-auth/recovery-phrase.js";
 import { formatSecret, parseSecret } from "../local-first-auth/secret.js";
 import { BrowserPasskeyBackup, PasskeyBackupError } from "../local-first-auth/passkey.js";
@@ -91,6 +92,10 @@ export interface EncryptionOptions {
    * stored by encryption.
    */
   accountSecret?: () => string | undefined | Promise<string | undefined>;
+  /** The native host verifies the account and performs device-account recovery. */
+  nativeReadiness?: boolean;
+  /** The native host's account uses its own secret for encryption recovery. */
+  deviceAccount?: boolean;
   /** How often to look for reports to deliver, in milliseconds. */
   reportIntervalMs?: number;
 }
@@ -148,7 +153,9 @@ export class Encryption {
    * Later calls verify again at once.
    */
   async ready(options: { timeoutMs?: number } = {}): Promise<AccountStatus> {
-    return this.verify(Date.now() + (options.timeoutMs ?? 30_000));
+    const timeoutMs = options.timeoutMs ?? 30_000;
+    if (this.options.nativeReadiness) return this.call("ready", { timeoutMs });
+    return this.verify(Date.now() + timeoutMs);
   }
 
   /** The loop's verification, once it has one (see {@link ready}). */
@@ -359,7 +366,7 @@ export class Recovery {
    */
   create(): string {
     this.refuseForDeviceAccount();
-    return RecoveryPhrase.fromBytes(crypto.getRandomValues(new Uint8Array(32)));
+    return RecoveryPhrase.fromBytes(runtimeRandomBytes(32));
   }
 
   /**
@@ -381,7 +388,7 @@ export class Recovery {
     appHostname?: string;
   }): Promise<{ method: "passkey" } | { method: "phrase"; phrase: string }> {
     this.refuseForDeviceAccount();
-    const secret = crypto.getRandomValues(new Uint8Array(32));
+    const secret = runtimeRandomBytes(32);
     const phrase = RecoveryPhrase.fromBytes(secret);
     let method: "passkey" | "phrase" = "phrase";
     // First, while the user's click still counts as a gesture.
@@ -438,7 +445,7 @@ export class Recovery {
   }
 
   private refuseForDeviceAccount() {
-    if (this.options.accountSecret) {
+    if (this.options.accountSecret || this.options.deviceAccount) {
       throw new EncryptionError(
         "device-account",
         "A device account's recovery is its account secret: restore the account and encryption follows.",
