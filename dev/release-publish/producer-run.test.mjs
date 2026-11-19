@@ -40,6 +40,17 @@ test("the published commit's own run on release is accepted", () => {
   );
 });
 
+test("a tree-equal run on changeset-release (dispatch or push) is accepted", () => {
+  for (const event of ["workflow_dispatch", "push"]) {
+    const vp = run({ event, head_branch: "changeset-release/release", head_sha: vpHead });
+    assert.deepEqual(ok(vp), []);
+  }
+  assert.deepEqual(
+    manifestProblems(manifest({ sha: vpHead }), { headSha: vpHead, tree, version }),
+    [],
+  );
+});
+
 test("a tree-equal earlier run on release is accepted", () => {
   const earlier = run({ head_sha: vpHead });
   assert.deepEqual(ok(earlier), []);
@@ -51,15 +62,6 @@ test("a tree-equal earlier run on release is accepted", () => {
 
 for (const [name, changes, headTree] of [
   ["a tree-equal run on main", { head_branch: "main", head_sha: vpHead }],
-  // Until its ruleset is live (#supply-chain, 2026-11-19): cache scope seeding.
-  [
-    "a tree-equal run on changeset-release",
-    { event: "workflow_dispatch", head_branch: "changeset-release/release", head_sha: vpHead },
-  ],
-  [
-    "a tree-equal push run on changeset-release",
-    { head_branch: "changeset-release/release", head_sha: vpHead },
-  ],
   [
     "a tree-equal pull_request run",
     { event: "pull_request", head_branch: "release", head_sha: vpHead },
@@ -141,7 +143,8 @@ test("resolve-artifacts.sh holds every input to the rule", () => {
     /for run in "\$\{candidates\[@\]\}"; do\n(?:  [^\n]*\n){2}  if source_sha="\$\(producer_ok "\$\{run\}"\)"; then/,
   );
   assert.match(script, /candidates=\("\$\{ARTIFACTS_RUN_ID\}"\)/);
-  // The published commit's own runs are tried first.
+  // The published commit's own runs are tried first, then release, then the VP branch.
+  assert.match(script, /"branch=release&" "branch=changeset-release%2Frelease&"; do/);
   assert.match(script, /for query in "head_sha=\$\{SHA\}&" "branch=release&"/);
   // The inspector comes from that same run.
   assert.match(script, /echo "inspector_run_id=\$\{run\}"/);
@@ -181,4 +184,12 @@ test("unusable expected values fail closed", () => {
       }),
     (error) => error.status === 1 && /refusing/.test(error.stdout),
   );
+});
+
+test("changeset-release reuse rests on the trusted-cache control", () => {
+  const source = readFileSync(
+    fileURLToPath(new URL("./producer-run.mjs", import.meta.url)),
+    "utf8",
+  );
+  assert.match(source, /dev\/gates\/test\/release-artifacts-trusted-caches\.test\.mjs/);
 });
