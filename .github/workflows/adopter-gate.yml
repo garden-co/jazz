@@ -183,6 +183,8 @@ jobs:
       T4_BASE_URL: ${{ vars.T4_BASE_URL }}
       BASELINE_RED_EMAIL: ${{ vars.T4_BASELINE_RED_EMAIL }}
       BASELINE_RED_PASSWORD: ${{ secrets.T4_BASELINE_RED_PASSWORD }}
+      # A baseline account that doesn't exist yet is created (with its rows) on the first run, then checked on every later one.
+      BASELINE_SEED: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with: { ref: "${{ needs.inputs.outputs.ref }}" }

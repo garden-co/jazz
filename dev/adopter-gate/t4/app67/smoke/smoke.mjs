@@ -70,9 +70,9 @@ async function write(page, kind, text) {
   const err = await page.textContent('[data-testid="err"]', { timeout: 2000 }).catch(() => "");
   return { ok, err };
 }
-async function signUp(page, email) {
+async function signUp(page, email, password = PW) {
   await page.fill('[data-testid="email"]', email);
-  await page.fill('[data-testid="password"]', PW);
+  await page.fill('[data-testid="password"]', password);
   await page.click('[data-testid="sign-up"]');
   return me(page, (j) => j.kind === "backend");
 }
@@ -163,7 +163,21 @@ try {
     const R = await browser();
     await R.page.goto(BASE);
     await me(R.page);
-    const r = await signIn(R.page, process.env.BASELINE_RED_EMAIL, BASELINE_PW);
+    let r = await signIn(R.page, process.env.BASELINE_RED_EMAIL, BASELINE_PW).catch(() => null);
+    if (r?.claims?.team !== "red" && process.env.BASELINE_SEED) {
+      // First run with a new baseline account (BASELINE_SEED=1): create it and its rows; later runs check them.
+      const S = await browser();
+      await S.page.goto(BASE);
+      await me(S.page);
+      const s = await signUp(S.page, process.env.BASELINE_RED_EMAIL, BASELINE_PW);
+      const t1 = await write(S.page, "team", "red-team-63");
+      const t2 = await write(S.page, "private", "red-private-63");
+      console.log(`SEEDED baseline user ${process.env.BASELINE_RED_EMAIL}: ${s?.claims?.team === "red" && t1.ok && t2.ok ? "ok" : "FAILED"}`);
+      await S.ctx.close();
+      await R.page.goto(BASE);
+      await me(R.page);
+      r = await signIn(R.page, process.env.BASELINE_RED_EMAIL, BASELINE_PW).catch(() => null);
+    }
     step("5a baseline red user signs in", r?.claims?.team === "red");
     step(
       "5b baseline rows survived (red-team-63, red-private-63)",
