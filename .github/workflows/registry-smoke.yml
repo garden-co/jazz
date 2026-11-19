@@ -1,0 +1,90 @@
+# Post-publish smoke from the real registries (dev/adopter-gate/registry-smoke.sh): each target installs the
+# published version into a clean project and runs the StagePlan privacy checks against a stock TS createJazz backend.
+name: Registry smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        { description: "Published version, e.g. 2.0.0-alpha.68", required: true, type: string }
+      wait_minutes:
+        {
+          description: "Poll each registry this long for the version to appear",
+          required: false,
+          type: string,
+          default: "20",
+        }
+  workflow_call:
+    inputs:
+      version: { required: true, type: string }
+      wait_minutes: { required: false, type: string, default: "20" }
+
+permissions:
+  contents: read
+
+env:
+  AG: dev/adopter-gate
+  PNPM_VERSION: 11.28.10
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [npm, create-jazz, crates, go, kotlin]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with: { ref: "v${{ inputs.version }}" }
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with: { node-version-file: .nvmrc }
+      # The gate's apps are their own pnpm projects (pnpm 11), not the repo workspace (packageManager pnpm@10).
+      - run: npm install --global "pnpm@$PNPM_VERSION" > /dev/null
+      - name: Gradle 8.14.3
+        if: matrix.target == 'kotlin'
+        run: |
+          curl -sSfL -o /tmp/gradle.zip https://services.gradle.org/distributions/gradle-8.14.3-bin.zip
+          echo "bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531  /tmp/gradle.zip" | sha256sum -c
+          unzip -q /tmp/gradle.zip -d /opt && echo /opt/gradle-8.14.3/bin >> "$GITHUB_PATH" && echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+      - run: $AG/registry-smoke.sh "${{ inputs.version }}" "${{ matrix.target }}"
+        env: { AG_WAIT_MIN: "${{ inputs.wait_minutes }}", GH_TOKEN: "${{ github.token }}" }
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          {
+            name: "registry-${{ matrix.target }}",
+            path: dev/adopter-gate/.results,
+            retention-days: 14,
+            include-hidden-files: true,
+          }
+
+  swift:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    container: swift:6.0-noble
+    steps:
+      - run: apt-get update -qq && apt-get install -y -qq curl git iproute2 python3 sqlite3 unzip xz-utils gh >/dev/null
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with: { ref: "v${{ inputs.version }}" }
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with: { node-version-file: .nvmrc }
+      # The gate's apps are their own pnpm projects (pnpm 11), not the repo workspace (packageManager pnpm@10).
+      - run: npm install --global "pnpm@$PNPM_VERSION" > /dev/null
+      - run: $AG/registry-smoke.sh "${{ inputs.version }}" swift
+        env: { AG_WAIT_MIN: "${{ inputs.wait_minutes }}", GH_TOKEN: "${{ github.token }}" }
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: registry-swift, path: dev/adopter-gate/.results, retention-days: 14, include-hidden-files: true }
+
+  verdict:
+    needs: [smoke, swift]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with: { sparse-checkout: dev/adopter-gate }
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with: { pattern: "registry-*", path: results }
+      - run: node $AG/verdict.mjs results registry-npm,registry-create-jazz,registry-crates,registry-go,registry-kotlin,registry-swift
