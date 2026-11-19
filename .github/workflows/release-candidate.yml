@@ -148,7 +148,7 @@ jobs:
   artifacts:
     name: Artifacts ready
     needs: [find-artifacts, build]
-    if: always() && needs.find-artifacts.result == 'success' && needs.build.result != 'failure' && needs.build.result != 'cancelled'
+    if: "!cancelled() && needs.find-artifacts.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped')"
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -167,6 +167,7 @@ jobs:
   artifacts-complete:
     name: Every release artifact built
     needs: artifacts
+    if: "!cancelled() && needs.artifacts.result == 'success'"
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -192,6 +193,7 @@ jobs:
   examples-e2e:
     name: Examples E2E
     needs: artifacts
+    if: "!cancelled() && needs.artifacts.result == 'success'"
     uses: ./.github/workflows/examples-e2e.yml
     permissions:
       actions: read
@@ -202,11 +204,13 @@ jobs:
   rn-device-acceptance:
     name: RN device acceptance
     needs: artifacts
+    if: "!cancelled() && needs.artifacts.result == 'success'"
     uses: ./.github/workflows/rn-device-acceptance.yml
 
   preview:
     name: Release preview
     needs: artifacts
+    if: "!cancelled() && needs.artifacts.result == 'success'"
     uses: ./.github/workflows/preview-jazz-tools-alpha-release.yml
     # The preview's (publish's) permission ceiling; its dry run never uses
     # the write scopes.
@@ -226,6 +230,7 @@ jobs:
   rc-tarballs:
     name: Pack the rc tarballs
     needs: [resolve, artifacts]
+    if: "!cancelled() && needs.artifacts.result == 'success'"
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     permissions:
@@ -355,6 +360,7 @@ jobs:
   attach-server:
     name: Attach the server binaries
     needs: [resolve, artifacts, draft]
+    if: "!cancelled() && needs.artifacts.result == 'success' && needs.draft.result == 'success'"
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -377,6 +383,7 @@ jobs:
   publish:
     name: Publish the prerelease
     needs: [resolve, attach-server, rc-tarballs]
+    if: "!cancelled() && needs.attach-server.result == 'success' && needs.rc-tarballs.result == 'success'"
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -432,6 +439,7 @@ jobs:
   cloud-rc-probe:
     name: Cloud RC probe
     needs: [resolve, attach-server]
+    if: "!cancelled() && needs.attach-server.result == 'success'"
     runs-on: ubuntu-latest
     timeout-minutes: 25
     outputs:
@@ -481,7 +489,7 @@ jobs:
   smoke:
     name: Install jazz-tools from the rc tarballs (${{ matrix.os }})
     needs: [resolve, rc-tarballs, publish]
-    if: always() && needs.rc-tarballs.result == 'success' && (needs.publish.result == 'success' || (needs.resolve.outputs.dry_run == 'true' && needs.publish.result == 'skipped'))
+    if: "!cancelled() && needs.rc-tarballs.result == 'success' && (needs.publish.result == 'success' || (needs.resolve.outputs.dry_run == 'true' && needs.publish.result == 'skipped'))"
     strategy:
       fail-fast: false
       matrix:
