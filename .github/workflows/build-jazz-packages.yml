@@ -157,7 +157,10 @@ jobs:
 
   build-wasm:
     name: Build jazz-wasm
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # 16 vCPUs: a release's version bump recompiles every jazz crate, and
+    # on 4 vCPUs that (with LTO and wasm-opt) took 5-10 min, the release
+    # build's critical path.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -197,7 +200,10 @@ jobs:
   # pass that used to add about 2.5 min after the main one.
   build-wasm-durable-object:
     name: Build jazz-wasm Durable Object entry
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # 16 vCPUs: a release's version bump recompiles every jazz crate, and
+    # on 4 vCPUs that (with LTO and wasm-opt) took 5-10 min, the release
+    # build's critical path.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
