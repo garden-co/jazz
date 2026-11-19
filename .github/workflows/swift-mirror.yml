@@ -33,6 +33,20 @@ on:
       - "examples/stage-plan/apps/swift-cli/**"
       - "crates/jazz-codegen/src/swift.rs"
       - ".github/workflows/swift-mirror.yml"
+  # release-artifacts.yml builds and verifies the XCFramework and the mirror
+  # once per commit (never publishing).
+  workflow_call:
+    inputs:
+      ref:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      publish:
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       ref:
@@ -50,12 +64,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.inputs.version || github.head_ref || github.ref }}
+  # Called from release-artifacts.yml, github.workflow is the caller's: one
+  # group per calling run.
+  group: ${{ github.workflow }}-${{ inputs.version || github.head_ref || github.ref }}${{ github.workflow != 'Swift mirror' && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  REF: ${{ github.event.inputs.ref || github.sha }}
-  VERSION: ${{ github.event.inputs.version || format('0.0.0-dry-run.{0}', github.run_number) }}
+  REF: ${{ inputs.ref || github.sha }}
+  VERSION: ${{ inputs.version || format('0.0.0-dry-run.{0}', github.run_number) }}
 
 jobs:
   resolve:
@@ -69,7 +85,7 @@ jobs:
       - name: Validate the inputs and resolve the ref to a commit
         id: resolve
         env:
-          PUBLISH: ${{ github.event.inputs.publish == 'true' }}
+          PUBLISH: ${{ inputs.publish }}
         run: |
           # Plain semver (SwiftPM reads only those tags).
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::version '$VERSION' isn't semver"; exit 1; }
@@ -109,7 +125,7 @@ jobs:
           targets: aarch64-apple-darwin,x86_64-apple-darwin,aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
       # No cache when publishing: a release's core builds from scratch.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        if: github.event.inputs.publish != 'true'
+        if: ${{ !inputs.publish }}
         with:
           key: swift-xcframework
       - name: Build JazzFFI.xcframework
@@ -209,7 +225,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true'
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
     needs: [resolve, mirror]
     runs-on: ubuntu-latest
     timeout-minutes: 15
