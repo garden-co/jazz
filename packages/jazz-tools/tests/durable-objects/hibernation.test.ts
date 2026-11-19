@@ -57,7 +57,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("WebSocket hibernation on a Durab
       await vi.waitFor(async () => {
         expect(Buffer.from((await inspect(core.url)).attachments[readerId]!)).toEqual(snapshot);
       });
-      await new Promise((resolve) => setTimeout(resolve, 20_000));
+      await core.evict();
       const after = await inspect(core.url);
       expect(after.generation).not.toBe(before.generation);
       expect(after.admitted).toContain(readerId);
@@ -102,6 +102,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("WebSocket hibernation on a Durab
         return reply.text();
       };
       const before = await generation();
+      // Exercise natural idle hibernation once so an accidental keepalive fails this test.
       await new Promise((resolve) => setTimeout(resolve, 20_000));
       await update("completed");
       const after = await generation();
@@ -136,7 +137,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("WebSocket hibernation on a Durab
           const rows = await alice.db.all(app.todos.where({ id: seed.id }), { tier: "remote" });
           expect(rows.map((row) => row.title)).toEqual(["seed"]);
         }
-        await waitForIdleEviction();
+        await core.evict();
         const after = await inspect(core.url);
         expect(after.generation).not.toBe(before.generation);
         expect(after.admitted).toContain(before.id);
@@ -162,7 +163,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("WebSocket hibernation on a Durab
     const stop = alice.db.subscribe(app.todos, () => {});
     try {
       const { id, generation } = await registeredReader(core.url, false);
-      await waitForIdleEviction();
+      await core.evict();
       const path = `/apps/${jazz.appId}/admin/accounts/revoke-sessions`;
       const reply = await fetch(core.url + path, {
         method: "POST",
@@ -222,7 +223,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("WebSocket hibernation on a Durab
           boundApp(next.wasmSchema)!,
           JSON.stringify(policies),
         );
-        await waitForIdleEviction();
+        await core.evict();
         const published = await publishDeployment(
           core.url,
           { appId: jazz.appId, adminSecret: core.secret },
@@ -250,7 +251,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("WebSocket hibernation on a Durab
     const stopOther = other.db.subscribe(app.todos, () => {});
     try {
       const { id: otherId } = await registeredReader(core.url, true, 1, before.id);
-      await waitForIdleEviction();
+      await core.evict();
       const path = `/apps/${jazz.appId}/admin/accounts/revoke`;
       const identity = guest.session!.identity;
       const reply = await fetch(core.url + path, {
@@ -350,7 +351,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("WebSocket hibernation on a Durab
           await send(0xfe, 0);
           expect((await inspect(core.url)).attachments[id]).toEqual(saved);
         }
-        await waitForIdleEviction();
+        await core.evict();
         const after = await inspect(core.url);
         expect(after.generation).not.toBe(generation);
         expect(after.admitted.includes(id)).toBe(complete);
@@ -384,7 +385,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("WebSocket hibernation on a Durab
       );
       await writer.db.insert(app.todos, { title: value, owner }).wait({ tier: "global" });
       await vi.waitFor(() => expect(title === value).toBe(true), { timeout: 15_000 });
-      await waitForIdleEviction();
+      await core.evict();
       const after = await inspect(core.url);
       expect(after.generation).not.toBe(before.generation);
       expect(after.admitted).toEqual(expect.arrayContaining([before.id, other.id]));
@@ -411,7 +412,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("WebSocket hibernation on a Durab
         },
         { timeout: 10_000 },
       );
-      await waitForIdleEviction();
+      await core.evict();
       const after = await inspect(core.url);
       expect(after.generation).not.toBe(before.generation);
       expect(after.admitted).toContain(before.id);
@@ -456,7 +457,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("WebSocket hibernation on a Durab
         },
         { timeout: 10_000 },
       );
-      await waitForIdleEviction();
+      await core.evict();
       const after = await inspect(core.url);
       expect(after.generation).not.toBe(before.generation);
       expect(after.admitted).toContain(before.id);
@@ -514,7 +515,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("WebSocket hibernation on a Durab
       });
       expect(ids).toHaveLength(1);
       const count = views.length;
-      await waitForIdleEviction();
+      await core.evict();
       const after = await inspect(core.url);
       expect(after.generation).not.toBe(before.generation);
       expect(after.admitted).toContain(ids[0]);
@@ -541,7 +542,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("WebSocket hibernation on a Durab
       const { id, generation, reads } = await registeredReader(core.url, true, 2);
       const kept = reads.find((read) => read.includes(Buffer.from("keep")));
       expect(kept).toBeDefined();
-      await waitForIdleEviction();
+      await core.evict();
       cancel();
       // Give the socket event a head start over the HTTP inspection. The recorded
       // first event proves which request actually woke the object.
@@ -585,7 +586,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("WebSocket hibernation on a Durab
       } finally {
         first();
       }
-      await waitForIdleEviction();
+      await core.evict();
       const wake = await inspect(core.url);
       expect(wake.generation).not.toBe(generation);
       expect(wake.admitted).not.toContain(id);
@@ -681,10 +682,6 @@ function pauseAfterFirstChunkFrame(coreUrl: string, tag: number) {
       for (const frame of held) socket!.send(encodeWebSocketFrameBatch([frame]));
     },
   };
-}
-
-function waitForIdleEviction() {
-  return new Promise<void>((resolve) => setTimeout(resolve, 20_000));
 }
 
 /** Decode the length-prefixed sections of the v1 attachment; reads include their wire IDs. */
