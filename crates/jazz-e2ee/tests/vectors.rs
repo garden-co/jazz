@@ -767,6 +767,7 @@ fn spec_wrapper_examples() {
 #[test]
 fn equality_values() {
     use records::{EqualityValue as E, equality_value};
+    let hex = |value: &E<'_>| to_hex(&equality_value(value).unwrap());
     let cases: [(E<'_>, &str); 12] = [
         (E::Null, "00"),
         (E::Bool(false), "0100"),
@@ -785,20 +786,20 @@ fn equality_values() {
         (E::Text("é"), "01c3a9"),
     ];
     for (value, encoded) in cases {
-        assert_eq!(to_hex(&equality_value(&value)), encoded, "{value:?}");
+        assert_eq!(hex(&value), encoded, "{value:?}");
     }
-    assert_eq!(to_hex(&equality_value(&E::Text("e\u{301}"))), "0165cc81");
-    assert_eq!(to_hex(&equality_value(&E::Bytes(&[0, 1]))), "010001");
+    assert_eq!(hex(&E::Text("e\u{301}")), "0165cc81");
+    assert_eq!(hex(&E::Bytes(&[0, 1])), "010001");
     assert_eq!(
-        to_hex(&equality_value(&E::Uuid([0xab; 16]))),
+        hex(&E::Uuid([0xab; 16])),
         "01abababababababababababababababab"
     );
     // An enum value is encoded by its variant name's exact UTF-8 bytes, like
     // text; the column's type bytes (which list the variants) keep it apart
     // from a text column.
-    assert_eq!(to_hex(&equality_value(&E::Enum("open"))), "016f70656e");
-    assert_eq!(to_hex(&equality_value(&E::Enum("done"))), "01646f6e65");
-    assert_eq!(to_hex(&equality_value(&E::Enum("é"))), "01c3a9");
+    assert_eq!(hex(&E::Enum("open")), "016f70656e");
+    assert_eq!(hex(&E::Enum("done")), "01646f6e65");
+    assert_eq!(hex(&E::Enum("é")), "01c3a9");
 
     let identity = records::EqualityIdentity {
         application: IDENTITY.application,
@@ -924,7 +925,7 @@ fn equality_values() {
 #[test]
 fn equality_values_of_json_and_arrays() {
     use records::{EqualityItems as Items, EqualityValue as E, equality_value};
-    let hex = |value: &E<'_>| to_hex(&equality_value(value));
+    let hex = |value: &E<'_>| to_hex(&equality_value(value).unwrap());
     // JSON: `01` and the text's bytes; differently written JSON differs.
     assert_eq!(hex(&E::Json(r#"{"a":1}"#)), "017b2261223a317d");
     assert_eq!(hex(&E::Json(r#"{"a": 1}"#)), "017b2261223a20317d");

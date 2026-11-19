@@ -176,10 +176,9 @@ fn hash(text: &str) -> Result<SchemaHash, DeployError> {
 pub struct Deployment {
     pub prepared: PreparedDeployment,
     pub staged: StagedDeployment,
-    /// The encryption declarations of each version deployed with them for
-    /// the first time, in [`encryption::STORED_DECLARATIONS_V1`] form: a
-    /// host keeps them once the deployment committed, and keeps the ones
-    /// it kept already.
+    /// Initial encryption declarations to persist when the deployment
+    /// commits, in [`encryption::STORED_DECLARATIONS_V1`] form. An empty set
+    /// records a version with system tables that declared no encryption.
     pub first_declared: Vec<(SchemaHash, Vec<u8>)>,
 }
 
@@ -247,6 +246,7 @@ pub fn prepare_encrypted(
     touched.sort_by_key(|hash| hash.0);
     touched.dedup();
     let mut first_declared = Vec::new();
+    let empty = encryption::Entries::new();
     for version in touched {
         let hex = version.to_string();
         let given = declared.entries(&hex);
@@ -261,8 +261,20 @@ pub fn prepare_encrypted(
                 reason,
             })
         };
-        match (&stored, given) {
-            (Some(_), None) => {
+        let has_system_tables = all_schemas.get(&version).is_some_and(|schema| {
+            schema
+                .keys()
+                .any(|name| system_tables::is_system_table(name.as_str()))
+        });
+        // Older hosts left no record when a deployed version declared nothing.
+        // A published schema identifies those deployments. An unpublished
+        // genesis schema can also be known to the catalogue, including on a
+        // Durable Object's scratch store before it commits its first deploy.
+        let previous = stored.as_ref().or_else(|| {
+            (has_system_tables && index.schema_published_at(&version).is_some()).then_some(&empty)
+        });
+        match (previous, given) {
+            (Some(stored), None) if !stored.is_empty() => {
                 return Err(refused(
                     "this schema version was deployed with encryption declarations, which the \
                      deployment leaves out; send them (`encryption`) as the app's files have them"
@@ -275,14 +287,17 @@ pub fn prepare_encrypted(
                     .ok_or(DeploymentError::MissingSchema { schema: version })?;
                 encryption::check_redeclaration(schema, stored, given).map_err(refused)?;
             }
-            (None, Some(given)) => first_declared.push((
+            _ => {}
+        }
+        if stored.is_none() && (has_system_tables || given.is_some()) {
+            let initial = previous.or(given).unwrap_or(&empty);
+            first_declared.push((
                 version,
-                encryption::encode_stored(given).map_err(DeployError::internal)?,
-            )),
-            (None, None) => {}
+                encryption::encode_stored(initial).map_err(DeployError::internal)?,
+            ));
         }
         if let Some(given) = given
-            && let Some(unconfirmed) = encryption::new_decrypts(stored.as_ref(), given)
+            && let Some(unconfirmed) = encryption::new_decrypts(previous, given)
                 .into_iter()
                 .find(|column| !confirm_decrypt.contains(column))
         {

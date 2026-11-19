@@ -304,11 +304,14 @@ fn check_system_tables_carried<'a>(
 /// only the stored catalogue can say so: a lens the deploy brings proves
 /// nothing (it could lead a later version back to a stored one that has
 /// them), and the stored lenses join stored versions only, never one new to
-/// the catalogue. So every new version must have them.
-fn check_new_versions_keep_system_tables(
+/// the catalogue. So every new version must have them. The target also
+/// needs them: rolling back to a version without them would put application
+/// code from before encryption in front of encrypted data.
+fn check_deployment_keeps_system_tables(
     stored: &DeploymentCatalogue,
     submitted: &[SchemaHash],
     schemas: &BTreeMap<Hash, Schema>,
+    target: SchemaHash,
 ) -> Result<(), DeploymentError> {
     let has = |schema: &Schema| {
         schema
@@ -332,6 +335,15 @@ fn check_new_versions_keep_system_tables(
             reason: "a stored version has Jazz's system tables and this one lacks them: once a \
                      version carries them, every later version does, so that the system rows \
                      written under earlier versions stay readable"
+                .to_owned(),
+        });
+    }
+    if !has(&schemas[&target.0]) {
+        return Err(DeploymentError::InvalidSchema {
+            schema: target,
+            reason: "cannot roll back to a version without Jazz's E2EE system tables: \
+                     a stored version has them, and application code from before encryption \
+                     cannot serve encrypted data"
                 .to_owned(),
         });
     }
@@ -423,7 +435,7 @@ fn prepare(
         &schemas,
         stored.migrations.iter().chain(&request.migrations),
     )?;
-    check_new_versions_keep_system_tables(stored, &submitted, &schemas)?;
+    check_deployment_keeps_system_tables(stored, &submitted, &schemas, request.target_schema_hash)?;
     let warnings = match encryption {
         Some(encryption) => {
             check_encryption(&schemas, &submitted, &mut request, encryption, &follows)?
@@ -683,6 +695,15 @@ fn check_encryption(
         }
     };
     let Some(entries) = entries else {
+        if follows.contains_key(&target.0) {
+            return Err(invalid(
+                target,
+                "the schema keeps Jazz's system tables, but no ancestor has declarations in \
+                 this deployment; send the ancestor's encryption declarations so Jazz can \
+                 derive the system-table policies"
+                    .to_owned(),
+            ));
+        }
         return Ok(Vec::new());
     };
     declared::check_space_read_rules(&permissions, entries).map_err(refused)?;
