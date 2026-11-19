@@ -16,6 +16,10 @@
 set -u
 
 ts_shards="all tools-node-1 tools-node-2 tools-other browser-1 browser-2 packages examples"
+# Not a merge-group partition: build-jazz-packages.yml and nightly-tests.yml
+# run jazz-tools' Durable Object suite alone, on the -Oz host that ships.
+# Merge groups run the same suite inside tools-other.
+release_ts_shards="durable-objects"
 all_node_tests_command="pnpm test --filter=!@jazz/rust --filter=!auth-simple-chat --filter=!auth-workos-chat --filter=!auth-betterauth-chat --filter=!chat-react --filter=!jazz-rn --concurrency=3"
 all_browser_tests_command="pnpm --parallel --filter jazz-tools --filter inspector --filter band-chat-nextjs-betterauth --filter record-player-next-betterauth --filter auth-workos-chat test:browser"
 
@@ -54,8 +58,11 @@ shard_lanes() {
     examples)
       shard_node_command=":"
       shard_browser_command=":" ;;
+    durable-objects)
+      shard_node_command="pnpm --filter jazz-tools run test:durable-objects"
+      shard_browser_command=":" ;;
     *)
-      echo "run-ts-tests: unknown shard '$1' (expected one of: ${ts_shards})" >&2
+      echo "run-ts-tests: unknown shard '$1' (expected one of: ${ts_shards} ${release_ts_shards})" >&2
       return 1 ;;
   esac
 }
