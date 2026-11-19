@@ -27,6 +27,20 @@ pub enum ClientError {
     /// The database refused a call the runtime made.
     #[error(transparent)]
     Database(#[from] jazz::db::Error),
+    /// This device already answered a challenge (its approval nonce is
+    /// spent), or the server shows a proof of its own that it did not make
+    /// in this run: it answers no other challenge (protocol §2.5). It
+    /// enrols again as a new device.
+    #[error("this device has already answered a challenge: it answers no other")]
+    ApprovalAnswered,
+    /// No challenge for this device is waiting.
+    #[error("no challenge for this device")]
+    NoChallenge,
+    /// The approval code the user confirmed is not the one the proof
+    /// gives: someone between the devices may have substituted keys, and
+    /// nothing was approved (protocol §2.5).
+    #[error("the approval codes do not match: nothing was approved")]
+    ApprovalCodeMismatch,
     /// This device has not verified its account in this run
     /// ([`E2eeClient::ensure_account`](crate::E2eeClient::ensure_account)):
     /// its keys for spaces cannot be acquired or made without it.

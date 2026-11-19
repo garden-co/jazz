@@ -705,6 +705,19 @@ pub fn respond(
     prove(writer, device, challenge, &nonce, rng)
 }
 
+/// A failure to read an envelope of the approval exchange (the challenge's
+/// sealed secret, the proof's wrap): an envelope of a mechanism this reader
+/// does not route is an unsupported capability, never an invalid one
+/// (§7); anything else stays what it was.
+fn envelope_error(error: Error) -> ProtocolError {
+    match error {
+        Error::UnsupportedFormat => ProtocolError::Unsupported(
+            super::super::error::UnsupportedCapability::AccountKeyEnvelope,
+        ),
+        other => other.into(),
+    }
+}
+
 /// Opens the challenge's secret and proves possession of both keys. The
 /// caller has checked the challenge: [`respond`], or a recovery, where the
 /// device wrote its own challenge in this process.
@@ -718,11 +731,14 @@ fn prove(
     let application = writer.application()?;
     let coordinates = challenge.coordinates();
     let context = approval_context(&application, writer.account_id, coordinates, "challenge")?;
-    let secret = writer.registry.open_sealed(
-        core::slice::from_ref(&device.sealing),
-        &context,
-        &challenge.envelope,
-    )?;
+    let secret = writer
+        .registry
+        .open_sealed(
+            core::slice::from_ref(&device.sealing),
+            &context,
+            &challenge.envelope,
+        )
+        .map_err(envelope_error)?;
     let proof_context = approval_context(&application, writer.account_id, coordinates, "proof")?;
     let proof = writer.wrap(&secret, &proof_context, &Z32, rng)?;
     let nonce = nonce.0.to_vec();
@@ -769,7 +785,7 @@ pub fn verify_possession(
         Ok(_) | Err(Error::InvalidCiphertext) => {
             return refuse(RefusalCode::InvalidPossessionProof);
         }
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(envelope_error(error)),
     }
     let bytes = proof_signed_bytes(
         &application,
