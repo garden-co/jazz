@@ -1,3 +1,4 @@
+import "../backend/node-native.js";
 import { Context, Effect, Layer } from "effect";
 import { HttpServerRequest } from "effect/http";
 import {

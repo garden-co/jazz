@@ -12,6 +12,7 @@ export default defineConfig({
     pool: "forks",
     fileParallelism: false,
     testTimeout: 60_000,
+    setupFiles: ["src/backend/node-native.ts"],
     include: ["tests/durable-objects/**/*.test.ts"],
   },
 });

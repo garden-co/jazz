@@ -1,3 +1,4 @@
+import "../backend/node-native.js";
 import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
