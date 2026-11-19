@@ -215,8 +215,10 @@ struct Fake {
     /// Plan as offline: no tokens, the space filter alone, the residual
     /// doing all the filtering (protocol §4.5).
     offline: Cell<bool>,
-    /// Leave pagination on the physical query despite post-decryption filtering.
+    /// Leave pagination on the physical query as well as the residual.
     keep_physical_window: Cell<bool>,
+    /// Rely on the physical token filter alone.
+    omit_residual_predicates: Cell<bool>,
     /// Return a query that still filters the encrypted column: 1 keeps the
     /// filter in a rewritten query, 2 plans nothing at all.
     leak: Cell<u8>,
@@ -513,10 +515,14 @@ impl E2eeHooks for Fake {
         Ok(QueryPlan::Rewritten {
             physical: Box::new(physical),
             residual: Residual {
-                preds: vec![ResidualPred {
-                    column: "body".to_owned(),
-                    any_of: vec![Value::String(plain.clone())],
-                }],
+                preds: if self.omit_residual_predicates.get() {
+                    Vec::new()
+                } else {
+                    vec![ResidualPred {
+                        column: "body".to_owned(),
+                        any_of: vec![Value::String(plain.clone())],
+                    }]
+                },
                 limit: query.limit,
                 offset: query.offset,
             },
@@ -2130,6 +2136,33 @@ fn a_hook_cannot_window_rows_before_residual_filtering() {
 
     alice.prepare_query(&query).unwrap();
     for windowed in [query.clone().limit(1), query.offset(1)] {
+        let error = alice.prepare_query(&windowed).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Query);
+        assert_eq!(
+            error.message,
+            "Applying LIMIT or OFFSET before post-decryption filtering on `notes` is not supported yet"
+        );
+    }
+}
+
+/// Contract: Alice's client refuses a hook that applies LIMIT or OFFSET to
+/// both the physical query and the residual, even with no residual predicates.
+#[test]
+fn a_hook_cannot_window_rows_twice_without_residual_predicates() {
+    let hooks = Fake::new();
+    let alice = client(&hooks);
+    let space = uuid::Uuid::new_v4();
+    hooks.hold(space);
+    hooks.omit_residual_predicates.set(true);
+    let query = Query::from("notes")
+        .filter(eq(col("projectId"), lit(Value::Uuid(space))))
+        .filter(eq(col("body"), lit(text("x"))));
+
+    for windowed in [query.clone().limit(1), query.offset(1)] {
+        hooks.keep_physical_window.set(false);
+        alice.prepare_query(&windowed).unwrap();
+
+        hooks.keep_physical_window.set(true);
         let error = alice.prepare_query(&windowed).unwrap_err();
         assert_eq!(error.code, ErrorCode::Query);
         assert_eq!(

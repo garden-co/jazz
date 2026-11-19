@@ -96,8 +96,9 @@ impl Inner {
             } => {
                 refuse_changed_beyond_conditions(query, physical)?;
                 self.refuse_reads(tables, physical, false)?;
-                if !residual.preds.is_empty() && (physical.limit.is_some() || physical.offset != 0)
-                {
+                let physical_has_window = physical.limit.is_some() || physical.offset != 0;
+                let residual_has_window = residual.limit.is_some() || residual.offset != 0;
+                if physical_has_window && (!residual.preds.is_empty() || residual_has_window) {
                     return Err(unsupported(format!(
                         "Applying LIMIT or OFFSET before post-decryption filtering on `{}`",
                         query.table
