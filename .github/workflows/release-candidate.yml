@@ -191,6 +191,9 @@ jobs:
     if: "!cancelled() && needs.find-artifacts.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped')"
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
     outputs:
       run_id: ${{ steps.pick.outputs.run_id }}
     steps:
@@ -201,6 +204,22 @@ jobs:
           run_id="${FOUND:-${GITHUB_RUN_ID}}"
           echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
           echo "Verifying the artifacts of https://github.com/${GH_REPO}/actions/runs/${run_id}"
+
+      # Supply-chain rule: the run whose artifacts every gate reads must have
+      # built this very commit (head_sha). artifacts-complete checks its
+      # release manifest too, before any GO.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          sparse-checkout: dev/scripts
+          persist-credentials: false
+      - name: Require the artifacts run to have built this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ steps.pick.outputs.run_id }}
+          EXPECTED_SHA: ${{ github.sha }}
+          WORKFLOWS: release-artifacts.yml,release-candidate.yml
+        run: node dev/scripts/require-run-commit.mjs
 
   # The gates start once the artifacts they read exist; a candidate is still
   # only good if every release artifact of its commit built.
