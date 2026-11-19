@@ -30,7 +30,7 @@ function makeQuery(): QueryBuilder<Todo> {
 /** A client whose subscriptions deliver their first result in a microtask. */
 function makeMicrotaskClient(appId: string) {
   const db = {
-    getAuthState: () => ({ authMode: "local-first" as const, session: null }),
+    getAuthState: () => ({ authMode: "device-account" as const, session: null }),
     onAuthChanged: () => () => {},
     updateAuthToken: () => {},
     getSyncStatus: () => ({

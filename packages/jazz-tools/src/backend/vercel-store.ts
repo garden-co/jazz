@@ -138,7 +138,10 @@ export interface SandboxSdk {
     get(params: Record<string, unknown>): Promise<SandboxHandle>;
     create(params: Record<string, unknown>): Promise<SandboxHandle>;
   };
-  Drive: { getOrCreate(params: Record<string, unknown>): Promise<{ readonly region: string }> };
+  Drive: {
+    get(params: Record<string, unknown>): Promise<{ readonly region: string }>;
+    getOrCreate(params: Record<string, unknown>): Promise<{ readonly region: string }>;
+  };
 }
 
 export interface SandboxHandle {
@@ -232,6 +235,23 @@ const START_FAILURE_HOLD_MS = 30_000;
 class CoreStartError extends Error {}
 
 const isWakeConflict = (error: unknown) => /\b409\b|already attached|conflict/i.test(String(error));
+
+/**
+ * Whether a lookup (`Sandbox.get`, `Drive.get`) failed because nothing has
+ * that name: `@vercel/sandbox`'s `APIError` with a 404 response. Any other
+ * failure (a 5xx, the network) says nothing about whether it exists.
+ */
+export const isNotFound = (error: unknown): boolean => {
+  const status = (error as { response?: { status?: unknown } })?.response?.status;
+  if (typeof status === "number") return status === 404;
+  return /\b404\b/.test(String((error as { message?: unknown })?.message ?? error));
+};
+
+/**
+ * A lookup that failed for another reason than "not found": retried until
+ * the wake's deadline, never read as a missing core (which would create one).
+ */
+class LookupError extends Error {}
 
 /**
  * Whether `Sandbox.create` failed because a Sandbox of that name exists:
@@ -1096,13 +1116,36 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   };
 
   /**
+   * The core's Sandbox, or `null` only when Vercel says there is none (a
+   * 404). Any other failure is a `LookupError`: read as "no Sandbox", it
+   * would provision a core, in the configured region, next to one that
+   * exists.
+   */
+  const findSandbox = async (): Promise<SandboxHandle | null> => {
+    try {
+      return await sdk.Sandbox.get({ name, resume: false, ...creds });
+    } catch (error) {
+      if (isNotFound(error)) return null;
+      throw new LookupError(`vercel(): could not look up core ${name}: ${String(error)}`);
+    }
+  };
+
+  /**
    * Create the Sandbox and start its core, or `null` when another instance
    * created it first (concurrent first requests on a cold deploy): the
    * caller then waits for that one, like any other wake.
    */
   const provision = async (): Promise<SandboxHandle | null> => {
     // An existing Drive (say, of a deleted Sandbox) keeps its region, which
-    // can't change: a core there is refused like an existing Sandbox.
+    // can't change: a core there is refused like an existing Sandbox, before
+    // `getOrCreate` is asked for one in the configured region.
+    const existing = await sdk.Drive.get({ name: drive, ...creds }).catch((error: unknown) => {
+      if (isNotFound(error)) return null;
+      throw new LookupError(
+        `vercel(): could not look up core ${name}'s Drive ${drive}: ${String(error)}`,
+      );
+    });
+    if (existing) refuseRegionMove(`core ${name}'s Drive ${drive}`, existing.region, region);
     const created = await sdk.Drive.getOrCreate({
       name: drive,
       region,
@@ -1167,11 +1210,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     for (;;) {
       while (!sbx) {
         try {
-          const existing = await sdk.Sandbox.get({
-            name,
-            resume: false,
-            ...creds,
-          }).catch(() => null);
+          const existing = await findSandbox();
           // Before resuming, which starts its server: a core elsewhere is
           // never woken.
           if (existing) refuseRegionMove(`core ${name}`, existing.region, region);
@@ -1195,7 +1234,8 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
             sbx = await getRunning();
           }
         } catch (error) {
-          if (!isWakeConflict(error) || performance.now() > deadline) throw error;
+          const retry = isWakeConflict(error) || error instanceof LookupError;
+          if (!retry || performance.now() > deadline) throw error;
           await sleep(500);
           sbx = await getRunning();
         }

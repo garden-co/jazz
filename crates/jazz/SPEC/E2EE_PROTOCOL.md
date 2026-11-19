@@ -174,8 +174,8 @@ use an ID's canonical lowercase hyphenated text and check it against
 `^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`
 (versions 4 or 7); recovery root IDs accept versions 4, 7 and 8. Account IDs
 are the authenticated Jazz account ID, which is always a UUID (a version 5
-UUID from Jazz's account registry; a local-first account's ID is derived
-from its local-first public key, §2.3); account IDs are checked as UUIDs of
+UUID from Jazz's account registry; a device account's ID is derived
+from its device-account public key, §2.3); account IDs are checked as UUIDs of
 any version. The internal tables store every ID and account ID as `uuid`
 (§1.2), so that policies compare them with the session account, itself a
 UUID, without conversion.
@@ -299,7 +299,7 @@ replay. "Before `p`" always means strictly earlier position.
   it, so every device holding the account's key opens them.
 - **Recovery root (recovery credential).** A key-free public record naming a
   recovery keypair (envelope + signing). The private half is derived from a
-  **recovery secret** (§2.9): for a local-first account, the account secret
+  **recovery secret** (§2.9): for a device account, the account secret
   itself; for an externally authenticated account, a separate secret backed up
   in a passkey. Exported **recovery material** holding the keypair directly is
   the fallback. A recovery root can receive the account epoch key and
@@ -347,7 +347,7 @@ replay. "Before `p`" always means strictly earlier position.
 All E2EE tables (this section and §1.3) are internal Jazz tables, like Jazz's
 own account tables: they never appear as entries of the application's
 `jazz.app.json` or `jazz.permissions.json`, and the application cannot define
-or override their policies. The tables in this section have fixed policies (§1.4). "Public" means readable by any session in `local-first` or
+or override their policies. The tables in this section have fixed policies (§1.4). "Public" means readable by any session in `device-account` or
 `external` auth mode; "private" means readable only by the row's
 `$createdBy.account`. Every row is immutable.
 
@@ -368,7 +368,7 @@ wherever it enters JSON. Optional columns
 | `__e2ee_device_requests`           | `publicKey`, `mechanism`, `version`, `signingPublicKey`, `signingMechanism`, `signingVersion`, `nonceCommitment`                                                                          | device ID       | private    | A device's identity, written by that device.                                                            |
 | `__e2ee_device_keys`               | `deviceId` and the six key columns of the request                                                                                                                                         | random          | public     | Public projection of the request's keys; must equal it. Written by the device.                          |
 | `__e2ee_account_identities`        | `ledgerVersion` (1), `generation`, `deviceId`, `epochId`, `envelope`, `verification`                                                                                                      | identity ID     | private    | Private account root: root epoch key sealed to the first device, plus its marker. Written at bootstrap. |
-| `__e2ee_account_roots`             | `ledgerVersion` (1), `generation`, `accountId`, `deviceId`, `epochId`, `kind`, `localFirstPublicKey?`, `localFirstSignature?`                                                             | random          | public     | Public account root. Written at bootstrap in the same transaction as the identity.                      |
+| `__e2ee_account_roots`             | `ledgerVersion` (1), `generation`, `accountId`, `deviceId`, `epochId`, `kind`, `deviceAccountPublicKey?`, `deviceAccountSignature?`                                                       | random          | public     | Public account root. Written at bootstrap in the same transaction as the identity.                      |
 | `__e2ee_device_challenges`         | `deviceId`, `epochId`, `envelope`, `nonce`, `signerId`, `signature`                                                                                                                       | challenge ID    | private    | An approval challenge to a requesting device. Written by the approving device.                          |
 | `__e2ee_device_proofs`             | `challengeId`, `proof`, `nonce`, `signature`                                                                                                                                              | challenge ID    | private    | The requesting device's possession proof.                                                               |
 | `__e2ee_device_approvals`          | `challengeId`, `signerId`, `verification`, `signature`                                                                                                                                    | challenge ID    | private    | Private approval with its account-key marker.                                                           |
@@ -389,10 +389,10 @@ IDs, versions 4, 7 or 8. A `retire-recovery-root` successor leaves
 active root the removed device held the key pair of (§2.8), possibly none
 (`[]`).
 
-A root's `kind` is `local-first` (an account founded by a local-first
+A root's `kind` is `device-account` (an account founded by a device-account
 identity, §2.3) or `app` (an account of the application's own sign-in). A
-`local-first` root sets both `localFirstPublicKey` (the raw 32-byte Ed25519
-public key) and `localFirstSignature`; an `app` root sets neither. Any other
+`device-account` root sets both `deviceAccountPublicKey` (the raw 32-byte Ed25519
+public key) and `deviceAccountSignature`; an `app` root sets neither. Any other
 combination is malformed.
 
 The identity ID is the account ID for generation 0 (the first bootstrap). For
@@ -510,14 +510,14 @@ Account and device tables (fixed policies):
   (§1.2) and a request for `deviceId` created by the same account;
   generation 0 only with the session account as the row ID and when the
   account has no identity, a later generation only when the account has an
-  identity of the generation before it, the session is not `local-first`,
-  the account was not founded by a local-first identity, and the deployed
+  identity of the generation before it, the session is not `device-account`,
+  the account was not founded by a device-account identity, and the deployed
   encryption configuration sets `allowAccountReset` (§2.11); read by that
   account.
 - R6. `__e2ee_account_roots`: insert only with `accountId = session account`
   and a matching identity (same device, epoch, generation and ledger
   version) by the same account, in the same transaction. The root's `kind`
-  is `local-first` exactly when the account was founded by a local-first
+  is `device-account` exactly when the account was founded by a device-account
   identity (Jazz's account registry); an account founded otherwise writes
   `app` roots.
 - R7. Challenges, proofs, approvals, device deliveries: insert by `$createdBy`
@@ -538,7 +538,7 @@ Account and device tables (fixed policies):
   same account. Recovery deliveries: the root's `accountId` is the session
   account; read by creator.
 - R10. Public tables (roots, device keys, public approvals, public successors,
-  recovery roots, account keys, removal requests) readable by every `local-first` or `external`
+  recovery roots, account keys, removal requests) readable by every `device-account` or `external`
   session, so other accounts can replay an account's history.
 - R11. `__e2ee_account_keys`: insert only with `accountId = session account`
   and a signer request of the same account; readable like the other public
@@ -546,7 +546,7 @@ Account and device tables (fixed policies):
 
 The founder, kind and `allowAccountReset` conditions of R5 and R6 are
 account-registry and configuration checks beside the policies, as Jazz's
-local-first registry already is; they decide who may reset or bootstrap,
+account registry already is; they decide who may reset or bootstrap,
 not whether a record is authentic.
 
 Space tables (policies derived at deploy). Each internal space row names a
@@ -829,7 +829,7 @@ Then generate `epochId` and a 32-byte key `K`, and insert atomically:
 envelope: seal(device.pub, A(deviceId, "envelope"), K),
 verification: wrap(K, A("", "verification"), Z32)}`,
 - public root `{accountId, generation: 0, deviceId, epochId, ledgerVersion: 1,
-kind, localFirstPublicKey?, localFirstSignature?}`,
+kind, deviceAccountPublicKey?, deviceAccountSignature?}`,
 - the account sealing key record of `epochId` (§2.12),
 
 where `A(recipient, column) = ctx{application: D, policy:
@@ -840,19 +840,19 @@ bootstrap is accepted (§0 item 5).
 
 **How a root is authenticated depends on how the account signs in.**
 
-- **Local-first accounts** (`packages/jazz-tools/src/local-first-auth`). The
+- **Device accounts** (`packages/jazz-tools/src/local-first-auth`). The
   account secret derives an Ed25519 key (`SHA-512(UTF8("jazz-auth-sign-v1")
   ‖ secret)[0..32]` as the seed), whose public key `pk` derives the
   **subject** `UUIDv5(namespace = UTF8("jazz-auth-key-v1"), name = pk)` (the
   16 ASCII bytes are the namespace), which Jazz's account registry turns into
   the account ID `UUIDv5(namespace = appId, name =
 UTF8("jazz-account-founder-v1") ‖ 0x00 ‖ UTF8(subject))`. The root has
-  `kind: "local-first"`, `localFirstPublicKey: pk`, and `localFirstSignature`,
+  `kind: "device-account"`, `deviceAccountPublicKey: pk`, and `deviceAccountSignature`,
   a `jazz.sodium.sign` v1 signature by that key over
 
-  `ctx{application: D, policy: "jazz.e2ee.local-first-account-root.v1",
+  `ctx{application: D, policy: "jazz.e2ee.device-account-root.v1",
 scope: "account", identifier: account, table: "__e2ee_account_roots", row:
-rootId, column: "local-first-signature", epoch: epochId, recipient:
+rootId, column: "device-account-signature", epoch: epochId, recipient:
 deviceId} ‖ frame[decimal generation, decimal ledgerVersion, pk,
 env(signingMechanism, signingPublicKey), env(mechanism, publicKey)]`
 
@@ -860,7 +860,7 @@ env(signingMechanism, signingPublicKey), env(mechanism, publicKey)]`
   everything the root introduces (account, generation, epoch, device and its
   keys). Writing it needs the account secret; the SDK holds the derived key
   pair only in memory, never prints it, and refuses
-  (`local-first-identity-mismatch`) an identity whose key does not derive
+  (`device-account-identity-mismatch`) an identity whose key does not derive
   the account ID. Nobody without the secret, the server included, can write
   or substitute such a root that clients accept: the server stores any root
   the account's sessions write (R6), and replay rejects one whose key or
@@ -888,18 +888,18 @@ Replay of an account (`replayOrderedAccount`) is over public rows at one cut:
    and does not count, and is reported with its code, if:
    - it is malformed (`root-malformed`) or names another account
      (`root-foreign-account`);
-   - it is `local-first` and its public key does not derive the account ID
+   - it is `device-account` and its public key does not derive the account ID
      (`root-key-mismatch`), its device has no published keys accepted at or
      before the root (`root-device-keys-missing`), or its signature over the
      bytes of §2.3, with those keys, does not verify
      (`root-signature-invalid`). Anyone can copy an account's public key into
      a row naming a device without keys; such a row is rejected like any
      other forgery and never stops replay;
-   - it is `app` and the read has a valid `local-first` root of the account
-     (`root-kind-mismatch`): a local-first account's roots of every
+   - it is `app` and the read has a valid `device-account` root of the account
+     (`root-kind-mismatch`): a device account's roots of every
      generation are signed by its identity, so its kind cannot be
      downgraded, and replay accepts a later generation of it only if the
-     account's local-first key signed it (§2.11).
+     account's device-account key signed it (§2.11).
 
    Every per-row check is decided before any contradiction: only a valid
    root can be one.
@@ -992,8 +992,8 @@ not match its own knowledge of the account as the loud contradiction
 `root-not-mine`, surfaced to the user as a security alert, never as an
 ordinary failure:
 
-- a device holding the local-first identity: the canonical root is not a
-  `local-first` root of its key;
+- a device holding the device-account identity: the canonical root is not a
+  `device-account` root of its key;
 - private verification (below): no identity of the account of the canonical
   generation matches the canonical root (same device and epoch, at its
   position);
@@ -1234,7 +1234,7 @@ exactly those roots in `retiredRecoveryRootIds`, the new key gets no
 recovery delivery for them, and replay accepts a removal only if its list
 is exactly that set (empty for a device that held none). The SDK then asks
 the user to back up a new recovery secret, registered as in §2.9
-("Retiring a derived root"). A local-first account's removals list none
+("Retiring a derived root"). A device account's removals list none
 (§2.9: its root derives from the account secret every device holds).
 Otherwise removal does not retire recovery roots, and retiring a root does
 not remove devices. Only one rotation from a given predecessor can win.
@@ -1260,16 +1260,16 @@ no longer obtain new keys: it is not active, receives no delivery of the new
 account key and cannot approve itself. Recovery keys and the recovery secret
 are never persisted on a device (§2.9), and a device that used them had its
 root retired by its removal (above), so whatever it kept does not open the
-new key. For a **local-first account**, whoever holds
+new key. For a **device account**, whoever holds
 the account secret is the account: every device of the account stores the
 secret in order to sign in, and the recovery root is derived from it (§2.9).
-A removed local-first device therefore still signs in to Jazz as the account
+A removed device of a device account therefore still signs in to Jazz as the account
 (and keeps receiving the account's rows), derives the recovery key pair,
 opens the recovery delivery of the new account key and approves a fresh
 device ID with it. Removing a device does not protect against a device that
-holds the account secret; the remedy for a lost or stolen local-first device
+holds the account secret; the remedy for a lost or stolen device of a device account
 is to move to a new account. The SDK says so when removing a device of a
-local-first account. Removal still serves its other purposes there (retiring
+device account. Removal still serves its other purposes there (retiring
 an unused install, rotating away a device whose secret was never stored, such
 as a device that only held a link).
 
@@ -1311,8 +1311,8 @@ pending, and does not stop a valid request from being pending.
 
 ### 2.9 Recovery
 
-Recovery builds on the account backup that local-first accounts already have.
-Local-first accounts (`packages/jazz-tools/src/local-first-auth`) keep a
+Recovery builds on the account backup that device accounts already have.
+Device accounts (`packages/jazz-tools/src/local-first-auth`) keep a
 32-byte **account secret**, `jazz-auth-v1:` followed by 43 unpadded base64url
 characters (`secret.ts`, `formatSecret`/`parseSecret`). It derives the
 account's signing key and subject, so whoever holds it is the account
@@ -1323,7 +1323,7 @@ the 32 secret bytes, created and read with user verification required
 
 - **Recovery secret.** 32 bytes `s` from which the account's recovery root is
   derived:
-  - **Local-first accounts:** `s` is the account secret's 32 bytes. Restoring
+  - **Device accounts:** `s` is the account secret's 32 bytes. Restoring
     the account secret (by passkey or recovery phrase) restores E2EE access;
     there is no separate recovery material.
   - **Externally authenticated accounts** (the application's own sign-in):
@@ -1406,15 +1406,15 @@ signingPublicKey, signingPrivateKey})` with keys as byte arrays, handed to
   `epochId` was the account epoch at its position, its signer was active then
   with a supported signing mechanism, and its signature verifies. In an app
   account, removing the registering device retires it (§2.8), since that
-  device held its key pair; a local-first account's removals retire nothing.
+  device held its key pair; a device account's removals retire nothing.
 - **Never persisted.** A device MUST NOT persist the recovery secret, the
   recovery seed, the recovery key pairs or exported material: they exist in
   memory for one registration or restore and are erased when it ends (a
-  local-first account's secret is stored for sign-in by local-first auth, not
+  device account's secret is stored for sign-in by local-first auth, not
   by E2EE). Removing a device that registered a recovery root, or restored
   with one (with any of its recovery approvals), retires that root (§2.8).
 - **Restore.** The device first obtains the recovery key pair: for a
-  local-first account, by restoring the account secret (passkey or recovery
+  device account, by restoring the account secret (passkey or recovery
   phrase) and deriving; for an external account, by signing in with the
   application and restoring the recovery secret from its passkey (or phrase);
   or from exported material. The new device must have a request and not be
@@ -1442,17 +1442,17 @@ signingPublicKey, signingPrivateKey})` with keys as byte arrays, handed to
     replaced. The SDK generates a new recovery secret, registers its root,
     offers a new passkey backup, and then retires the old root in one account
     rotation; the old passkey becomes useless for E2EE.
-  - **Local-first accounts:** the account secret is the account, and it cannot
+  - **Device accounts:** the account secret is the account, and it cannot
     be rotated without becoming a different account. Retiring its derived root
     therefore only turns off recovery by account secret for this account (the
     account may still register exported material); it does not protect against
     a leaked account secret, because whoever holds the secret signs in as the
-    account. A leaked local-first account secret loses the account, E2EE
-    included, and so does a lost or stolen device of a local-first account,
+    account. A leaked device-account secret loses the account, E2EE
+    included, and so does a lost or stolen device of a device account,
     which holds the secret (§2.8). Recovery stays derived from the account
     secret: there is no separate recovery secret and no device check on
-    writes for local-first accounts. The SDK asks for confirmation before
-    retiring a derived root of a local-first account.
+    writes for device accounts. The SDK asks for confirmation before
+    retiring a derived root of a device account.
 
 ### 2.10 Sign-out, account change and device linking
 
@@ -1481,16 +1481,16 @@ bootstrap (§2.3) refuses an account with history.
 application's own sign-in (for example WorkOS or Better Auth), and only when
 the application opts in with `"allowAccountReset": true` in the top-level
 `encryption` object of `jazz.app.json` (§1.5; off by default; carried in the
-deploy request). A local-first account has no reset without its secret:
+deploy request). A device account has no reset without its secret:
 there the account secret is the account, and losing it is losing the
 account. The SDK never offers a reset for one; a holder of the secret
 restores access by recovery (§2.9) instead, which needs no new generation.
 The server enforces both: R5 refuses an identity of generation above 0 from
-a local-first session, for an account founded by a local-first identity
+a device-account session, for an account founded by a device-account identity
 (also when it signs in through a linked identity of the application), or
 when the deployed configuration does not allow reset. Clients enforce the
-local-first part themselves: replay accepts a later generation of a
-local-first account only if the account's local-first key signed its root
+device-account part themselves: replay accepts a later generation of a
+device account only if the account's device-account key signed its root
 (§2.4 step 1), so nobody without the secret can reset it.
 
 Stage `account-reset`. Preconditions, read at one cut: the account has a
@@ -2622,7 +2622,7 @@ before it, the device has nothing to compare with (§8).
 - Normal sign-out retains device and held-key records, so a later offline
   sign-in can read.
 - With `clearOnSignOut`, the **last tab out** removes the account's device
-  record and every held key bound to it (for a local-first store, together with
+  record and every held key bound to it (for a device-account store, together with
   the store's deletion). A tab that signs out while another holds the store
   keeps them. The wipe deletes the client's core storage first and the
   private E2EE records second; if the second step fails, sign-out reports an
@@ -2711,28 +2711,28 @@ reconciled by its transaction identity.
 
 Refusal codes:
 
-| Code                            | Refusal                                                                                                                                                                   |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `account-has-history`           | Bootstrap found existing account evidence (§2.3).                                                                                                                         |
-| `device-identity-conflict`      | A device request or key row exists with different keys (§2.2).                                                                                                            |
-| `device-keys-mismatch`          | The device's keys do not match its accepted request.                                                                                                                      |
-| `no-device-request`             | Bootstrap or reset found no request (or more than one) for this device (§2.3, §2.11).                                                                                     |
-| `reset-device-active`           | An account reset by a device that is still active in the current generation (§2.11).                                                                                      |
-| `device-not-active`             | The acting device is not an active device of the account.                                                                                                                 |
-| `device-removed`                | The device was removed and needs a new device ID.                                                                                                                         |
-| `stale-challenge`               | The challenge is unknown, for another device, or not of the current account epoch (§2.5).                                                                                 |
-| `approval-closed`               | The approval handle was closed or belongs to another operation.                                                                                                           |
-| `invalid-possession-proof`      | The requesting device's possession proof failed (§2.5).                                                                                                                   |
-| `invalid-challenge`             | A challenge not signed, over the requesting device's own keys, by an active device of the account (§2.5).                                                                 |
-| `target-not-active`             | The device or recovery root to remove or retire is not active (§2.8).                                                                                                     |
-| `self-removal`                  | A device tried to remove itself; another active device must remove it (§2.8).                                                                                             |
-| `no-other-device`               | A removal request with no other active device to complete it (§2.8).                                                                                                      |
-| `unsupported-recipient`         | A recipient device, recovery root or account has no key of the selected mechanism (§0, §2.12).                                                                            |
-| `account-reset-not-allowed`     | An account reset by a local-first session, or where the application has not enabled `allowAccountReset` (§2.11).                                                          |
-| `space-pending`                 | A write to a space with no valid root after this device's creation was refused in this run (§3.2), or offline with competing roots before a chain read (§5.2).            |
-| `space-create-refused`          | The authority refused the root itself, staged with a write or by `createSpace` (§3.2); only that transaction fails, and the device stops automatic creation of the space. |
-| `rotation-needs-key`            | A rotation by a device that holds no authenticated key of the current version (§3.5), or a recovery rotation by one that holds no version at all.                         |
-| `local-first-identity-mismatch` | A local-first root written with an identity whose key does not derive the account ID (§2.3).                                                                              |
+| Code                               | Refusal                                                                                                                                                                   |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `account-has-history`              | Bootstrap found existing account evidence (§2.3).                                                                                                                         |
+| `device-identity-conflict`         | A device request or key row exists with different keys (§2.2).                                                                                                            |
+| `device-keys-mismatch`             | The device's keys do not match its accepted request.                                                                                                                      |
+| `no-device-request`                | Bootstrap or reset found no request (or more than one) for this device (§2.3, §2.11).                                                                                     |
+| `reset-device-active`              | An account reset by a device that is still active in the current generation (§2.11).                                                                                      |
+| `device-not-active`                | The acting device is not an active device of the account.                                                                                                                 |
+| `device-removed`                   | The device was removed and needs a new device ID.                                                                                                                         |
+| `stale-challenge`                  | The challenge is unknown, for another device, or not of the current account epoch (§2.5).                                                                                 |
+| `approval-closed`                  | The approval handle was closed or belongs to another operation.                                                                                                           |
+| `invalid-possession-proof`         | The requesting device's possession proof failed (§2.5).                                                                                                                   |
+| `invalid-challenge`                | A challenge not signed, over the requesting device's own keys, by an active device of the account (§2.5).                                                                 |
+| `target-not-active`                | The device or recovery root to remove or retire is not active (§2.8).                                                                                                     |
+| `self-removal`                     | A device tried to remove itself; another active device must remove it (§2.8).                                                                                             |
+| `no-other-device`                  | A removal request with no other active device to complete it (§2.8).                                                                                                      |
+| `unsupported-recipient`            | A recipient device, recovery root or account has no key of the selected mechanism (§0, §2.12).                                                                            |
+| `account-reset-not-allowed`        | An account reset by a device-account session, or where the application has not enabled `allowAccountReset` (§2.11).                                                       |
+| `space-pending`                    | A write to a space with no valid root after this device's creation was refused in this run (§3.2), or offline with competing roots before a chain read (§5.2).            |
+| `space-create-refused`             | The authority refused the root itself, staged with a write or by `createSpace` (§3.2); only that transaction fails, and the device stops automatic creation of the space. |
+| `rotation-needs-key`               | A rotation by a device that holds no authenticated key of the current version (§3.5), or a recovery rotation by one that holds no version at all.                         |
+| `device-account-identity-mismatch` | A device-account root written with an identity whose key does not derive the account ID (§2.3).                                                                           |
 
 ## 8. Security properties and limits
 
@@ -2758,7 +2758,7 @@ Properties:
   coordinates except the row, by design: equal values of one column and
   version match across rows ([equality format](E2EE_EQUALITY_FORMAT.md),
   Context).
-- Signed records (local-first account roots, public device approvals,
+- Signed records (device-account roots, public device approvals,
   account successors, recovery roots, account sealing keys, private
   approvals and device proofs, space roots and successors) are signed by
   their author device and replayed in accepted order; forged or reordered
@@ -2923,12 +2923,12 @@ Limits:
   except by a one in a million chance. An approval made without comparing
   them lets a dishonest server approve its own keys under the requesting
   device's ID and receive the account key.
-- **App account roots are trusted on first use.** A local-first account's
+- **App account roots are trusted on first use.** A device account's
   root is signed by the key its account ID derives from, so no one without
   the secret can forge or replace it, or reset the account (§2.3, §2.4),
   once a client has seen that signed root. A client meeting the account for
   the first time cannot tell from the account ID alone that it is
-  local-first, so a server can show it an app-kind root instead; from the
+  a device account, so a server can show it an app-kind root instead; from the
   first signed root a client verifies, its floor and the no-downgrade rule
   protect it. An app account has nothing a client can check its root
   against: whoever can write as the account, the server included, can write
@@ -2960,16 +2960,17 @@ Limits:
   clients do not check it, so a dishonest server can reset an account the
   application has not allowed to reset, as it can add a member row. The account's
   own devices raise `device-no-longer-active` and must be approved again.
-  Local-first accounts cannot reset: every generation's root must be signed
+  Device accounts cannot reset: every generation's root must be signed
   by their identity (§2.4 step 1).
 - **A second root of one generation ends the account's E2EE.** Only the
   account's own sessions or the server can write one; clients fail closed
   with `conflicting-roots` for good (§2.4 step 1), so whoever can write as
   an app account (or the server) can deny it E2EE service this way, which
   gains it no content.
-- **Removing a device of a local-first account does not exclude it.** A
+- **Removing a device of a device account does not exclude it.** A
   device that still holds the account secret is the account (§2.8); the
-  remedy for a lost or stolen local-first device is a new account.
+  remedy for a lost or stolen device of a device account is a new
+  account.
 - **A stolen active device can remove the owner's other devices.** Any
   active device may remove any other, so whoever holds one can remove the
   owner's devices first and keep the account's new keys. A device cannot
@@ -2977,9 +2978,9 @@ Limits:
   removal request it writes only gets it removed by the owner's next
   device, without its ever holding the new key. For an
   app account the remedy is to revoke the stolen device's sign-in and then
-  remove it; for a local-first account, a new account.
-- **Local-first recovery is as strong as the account secret.** The E2EE
-  recovery key of a local-first account is derived from its account secret
+  remove it; for a device account, a new account.
+- **Device-account recovery is as strong as the account secret.** The E2EE
+  recovery key of a device account is derived from its account secret
   (§2.9), so whoever holds that secret (any device that stores it, a script
   on an origin that keeps it in `localStorage`, or anyone with its phrase or
   passkey) can restore the account's E2EE keys, and with them every space key

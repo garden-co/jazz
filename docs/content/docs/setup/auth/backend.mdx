@@ -554,7 +554,8 @@ completes. Changing accounts does.
 reached your backend and the same account can still read it. It keeps device account keys and doesn't
 sign anyone out. The [browser console helper](/docs/how-jazz-works#reset-browser-storage) does the
 same. If another tab holds the account's storage under another sign-in (a guest who just signed up
-in this tab), it waits for that tab to follow or close; after 30 seconds it fails with a
+in this tab), or with another build's schema (a tab of the app's previous deploy), it waits for
+that tab to follow, reload or close; after 30 seconds it fails with a
 `StoreHeldByAnotherTabError`, and you can call it again once that tab is gone.
 
 ### Owning the session yourself
