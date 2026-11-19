@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { checkManifest, publishLevels } from "./npm-publish.mjs";
 import { isPayload, requiredFiles } from "./maven-central.mjs";
+import { summarize } from "./rc-verdict.mjs";
 
 const pkg = (name, deps = []) => ({ name, deps });
 
@@ -47,4 +48,44 @@ test("the Maven bundle signs payloads only", () => {
   assert.equal(isPayload("jazz-kotlin-1.pom.sha1"), false);
   assert.equal(isPayload("maven-metadata-local.xml"), false);
   assert.deepEqual(requiredFiles("jazz-kotlin-android", "1")[0], "jazz-kotlin-android-1.aar");
+});
+
+const run = { id: 1, html_url: "https://example.invalid/run/1", conclusion: "success" };
+
+test("RC holds are listed with their owners, and don't refuse", () => {
+  const { lines, annotations, refuse } = summarize(
+    {
+      verdict: "HOLD",
+      holds: [
+        { name: "Cloud RC probe: needs-infra", owner: "#infra", detail: "probe" },
+        { name: "Adopter gate: NEEDS_REVIEW", owner: "Anselm", detail: "sizes: jazz-wasm +3.2%" },
+      ],
+      jobs: [{ job: "examples-e2e", result: "success", ok: true }],
+    },
+    run,
+  );
+  assert.equal(refuse, false);
+  assert.match(lines[0], /HOLD/);
+  assert.ok(
+    lines.includes("- **Adopter gate: NEEDS_REVIEW** (owner: Anselm): sizes: jazz-wasm +3.2%"),
+  );
+  assert.equal(annotations.length, 2);
+});
+
+test("NO-GO refuses; GO doesn't", () => {
+  assert.equal(
+    summarize(
+      { verdict: "NO-GO", holds: [], jobs: [{ job: "x", result: "failure", ok: false }] },
+      run,
+    ).refuse,
+    true,
+  );
+  assert.equal(summarize({ verdict: "GO", holds: [], jobs: [] }, run).refuse, false);
+});
+
+test("a gate run without rc-verdict is reported, and refused only if it failed", () => {
+  assert.match(summarize(null, run).lines.join("\n"), /predates/);
+  assert.equal(summarize(null, run).refuse, false);
+  assert.equal(summarize(null, { ...run, conclusion: "failure" }).refuse, true);
+  assert.equal(summarize(null, null).refuse, false);
 });
