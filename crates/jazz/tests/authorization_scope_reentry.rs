@@ -342,26 +342,32 @@ fn write_only_updates_and_upserts_are_denied_without_disclosing_the_target() {
     );
     assert_eq!(ordered_page(&db, reader(), &prepared), vec![winner, second]);
 
-    block_on(db.transaction_for_identity(writer(), async |tx| {
+    block_on(async {
+        let tx = db.mergeable_tx_for_identity(writer()).await?;
+
         tx.update(
             DOCUMENTS,
             winner,
             BTreeMap::from([("rank".to_owned(), Value::U64(5))]),
             Default::default(),
         )
-        .await
-    }))
+        .await?;
+        tx.commit().await
+    })
     .expect("mergeable transaction stages its write for authority admission");
 
-    block_on(db.transaction_for_identity(writer(), async |tx| {
+    block_on(async {
+        let tx = db.mergeable_tx_for_identity(writer()).await?;
+
         tx.upsert(
             DOCUMENTS,
             winner,
             BTreeMap::from([("rank".to_owned(), Value::U64(5))]),
             Default::default(),
         )
-        .await
-    }))
+        .await?;
+        tx.commit().await
+    })
     .expect("mergeable transaction stages its upsert for authority admission");
 
     let upsert_error = match block_on(db.upsert(
@@ -511,7 +517,8 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
         "WRITER must still not read documents after the move out of scope"
     );
 
-    block_on(db.transaction_for_identity(maintainer(), async |tx| {
+    block_on(async {
+        let tx = db.mergeable_tx_for_identity(maintainer()).await?;
         tx.update(
             DOCUMENTS,
             winner,
@@ -529,8 +536,8 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
             Default::default(),
         )
         .await?;
-        Ok(())
-    }))
+        tx.commit().await
+    })
     .expect("commit mixed scope re-entry and retained-row update");
     assert_eq!(reader_page(), vec![winner, second]);
     let move_back_delta = exact_mixed_reentry_delta(&mut stream);

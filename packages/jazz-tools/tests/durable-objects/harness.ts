@@ -15,6 +15,7 @@ export interface DurableObjectCore {
   readonly miniflare: Miniflare;
   /** The app id the Worker's object keeps (`GET /app`). */
   appId(): Promise<string>;
+  evict(): Promise<void>;
   dispose(): Promise<void>;
 }
 
@@ -62,6 +63,9 @@ export async function startDurableObjectCore(
       if (!response.ok) throw new Error(`GET /app: ${response.status}`);
       return ((await response.json()) as { appId: string }).appId;
     },
+    // The unnamed Worker routes core traffic to JAZZ.idFromName("jazz").
+    evict: () =>
+      miniflare.unsafeEvictDurableObject("", "JazzCore", { name: "jazz", webSockets: "hibernate" }),
     dispose: () => miniflare.dispose(),
   };
 }

@@ -19,6 +19,12 @@ test("the release Durable Object entry is the -Oz build", () => {
   assert.deepEqual(build, { wasmOptLevel: "Oz" });
 });
 
+test("the release backend entry is the -Oz build", () => {
+  // The same for the backend build a backend's `createJazz` runs on.
+  const build = JSON.parse(readFileSync(join(here, "../../backend/pkg/build.json"), "utf8"));
+  assert.deepEqual(build, { wasmOptLevel: "Oz" });
+});
+
 test("the release Durable Object entry starts and admits its backend", async () => {
   const mf = new Miniflare({
     modules: true,

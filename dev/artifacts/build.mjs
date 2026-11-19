@@ -25,8 +25,13 @@ import {
   artifactLockPath,
   verifyArtifactBuildLease,
 } from "../gates/build-test-artifacts.mjs";
-import { assertNoOmittedSqliteExtensions, stripSymbolHashesInFile } from "./wasm-names.mjs";
+import {
+  assertNoBackendExports,
+  assertNoOmittedSqliteExtensions,
+  stripSymbolHashesInFile,
+} from "./wasm-names.mjs";
 import { wasmBuildEnvironment } from "./wasm-toolchain.mjs";
+import { nativeBuildCache } from "./native-build-cache.mjs";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
 const commands = {
@@ -541,6 +546,10 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
   const napiStage =
     kind === "napi" ? mkdtempSync(join(root, "crates", "jazz-napi", ".napi-stage-")) : undefined;
   const napiPath = expectedNapiBinding && join(napiStage, expectedNapiBinding);
+  let cache;
+  let restored = false;
+  let captured;
+  let published = false;
   const args = [
     ...selectedArgs,
     ...(artifactFeatures(kind) === "default,rn-test-bridge"
@@ -555,20 +564,36 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
   try {
     if (kind === "napi" && process.env.JAZZ_NAPI_BUILD_FAULT === "producer")
       throw new Error("planted NAPI producer failure before staging");
-    const result = spawnSync(command, args, {
-      cwd: root,
-      stdio: "inherit",
-      shell: process.platform === "win32",
-      env: { ...buildEnv, JAZZ_NATIVE_ARTIFACT_FINGERPRINT: fingerprint },
+    // Under the correctness producer, raw compiler output for these exact
+    // inputs, tools and arguments may already exist (native-build-cache.mjs).
+    // A restored entry fills the same fresh stage and goes through every
+    // check below exactly as a build's output does.
+    const stagePath = wasmStage?.path ?? napiStage;
+    cache = nativeBuildCache(root, {
+      kind,
+      profile,
+      target: kind === "napi" ? resolvedNapiTarget : undefined,
+      // Stage paths are fresh temporary names, not inputs.
+      args: [command, ...args.filter((arg) => arg !== wasmStage?.outDir && arg !== napiStage)],
     });
-    if (result.error) throw result.error;
-    if (result.status !== 0) {
-      if (wasmStage)
-        throw new Error(
-          `WASM ${profile} build failed before publishing staged package ${basename(wasmStage.path)}; the prior package remains intact`,
-        );
-      process.exitCode = result.status ?? 1;
-      return;
+    restored = Boolean(cache?.restore(stagePath));
+    if (!restored) {
+      const result = spawnSync(command, args, {
+        cwd: root,
+        stdio: "inherit",
+        shell: process.platform === "win32",
+        env: { ...buildEnv, JAZZ_NATIVE_ARTIFACT_FINGERPRINT: fingerprint },
+      });
+      if (result.error) throw result.error;
+      if (result.status !== 0) {
+        if (wasmStage)
+          throw new Error(
+            `WASM ${profile} build failed before publishing staged package ${basename(wasmStage.path)}; the prior package remains intact`,
+          );
+        process.exitCode = result.status ?? 1;
+        return;
+      }
+      captured = cache?.capture(stagePath);
     }
     if (wasmStage) {
       if (profile === "release") {
@@ -576,6 +601,7 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
         stripSymbolHashesInFile(wasm);
         assertNoOmittedSqliteExtensions(readFileSync(wasm));
       }
+      assertNoBackendExports(readFileSync(join(wasmStage.path, "jazz_wasm_bg.wasm")));
       writeWasmStageManifest(wasmStage.path, profile);
       publishWasmPackage(wasmStage.path, join(root, "crates", "jazz-wasm", "pkg"), {
         profile,
@@ -584,6 +610,7 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
       publishExpectedFingerprint(kind, fingerprint);
       const problem = verifyManifest(root, kind, profile);
       if (problem) throw new Error(`published WASM manifest verification failed: ${problem}`);
+      published = true;
     } else {
       if (process.env.JAZZ_NAPI_BUILD_FAULT === "missing") rmSync(napiPath, { force: true });
       if (process.env.JAZZ_NAPI_BUILD_FAULT === "unloadable")
@@ -603,8 +630,15 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
         lease: artifactLock.lease,
         afterPointerCommit: () => publishExpectedFingerprint(kind, fingerprint),
       });
+      published = true;
     }
   } finally {
+    // Only output that passed every check above becomes (or stays) an entry.
+    if (published) captured?.commit();
+    else {
+      captured?.discard();
+      if (restored) cache.evict();
+    }
     if (wasmStage && existsSync(wasmStage.path))
       rmSync(wasmStage.path, { recursive: true, force: true });
     if (napiStage && existsSync(napiStage)) rmSync(napiStage, { recursive: true, force: true });

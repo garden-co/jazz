@@ -2,6 +2,9 @@ name: React Native device acceptance
 
 on:
   workflow_dispatch:
+  # The release candidate gate (release-candidate.yml) runs the device
+  # receipts as one of its parallel gates.
+  workflow_call:
   pull_request:
     types: [opened, reopened, synchronize, labeled]
     paths:
@@ -25,7 +28,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: rn-device-acceptance-${{ github.event.pull_request.number || github.ref }}
+  # Called, github.workflow is the caller's: one group per calling run, so a
+  # gate never cancels (or is cancelled by) a direct dispatch on the same ref.
+  group: rn-device-acceptance-${{ github.event.pull_request.number || github.ref }}${{ github.workflow != 'React Native device acceptance' && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
