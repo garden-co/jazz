@@ -1,0 +1,20 @@
+{
+  "notes": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "title",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "owner",
+        "nullable": false
+      }
+    ]
+  }
+}

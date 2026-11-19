@@ -13,8 +13,17 @@ case "${JAZZ_RUST_TOOL:?JAZZ_RUST_TOOL must name a pinned tool}" in
     # The same pinned release and SHA-256 the CI toolchain image installs
     # (dev/ci/toolchain/Dockerfile): building it from source took ~2 minutes
     # whenever the tool cache missed, which is every merge-group branch.
-    release_url=https://github.com/mozilla/sccache/releases/download/v0.15.0/sccache-v0.15.0-x86_64-unknown-linux-musl.tar.gz
-    release_sha256=782d2b5dd7ae0a55ebe368ab258114d0928d019ac2d949ab85d5d02f3926709e
+    # Per Linux architecture: x86_64 as the image, aarch64 for the arm runners.
+    case "$(uname -m)" in
+      x86_64)
+        release_url=https://github.com/mozilla/sccache/releases/download/v0.15.0/sccache-v0.15.0-x86_64-unknown-linux-musl.tar.gz
+        release_sha256=782d2b5dd7ae0a55ebe368ab258114d0928d019ac2d949ab85d5d02f3926709e
+        ;;
+      aarch64)
+        release_url=https://github.com/mozilla/sccache/releases/download/v0.15.0/sccache-v0.15.0-aarch64-unknown-linux-musl.tar.gz
+        release_sha256=3a6a3712b49da3d263bf2d30d702de4302793016019e800bfb81c0c69401d8f8
+        ;;
+    esac
     ;;
   cargo-nextest@0.9.143)
     crate=cargo-nextest
@@ -55,7 +64,7 @@ if [[ "${JAZZ_RUST_TOOL_CACHE_HIT:-}" == "true" ]]; then
 fi
 
 mkdir -p "${install_root}"
-if [[ -n "${release_url:-}" && "$(uname -s)-$(uname -m)" == "Linux-x86_64" ]]; then
+if [[ -n "${release_url:-}" && "$(uname -s)" == Linux ]]; then
   release_dir="$(mktemp -d)"
   curl -sSfL --retry 3 -o "${release_dir}/release.tar.gz" "${release_url}"
   echo "${release_sha256}  ${release_dir}/release.tar.gz" | sha256sum --check --strict

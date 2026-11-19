@@ -1,0 +1,51 @@
+# Adopter gate
+
+Scripted adopter checks for a release candidate, run in parallel by `.github/workflows/adopter-gate.yml`, plus a post-publish smoke from the real registries (`.github/workflows/registry-smoke.yml`). They replace the manual gate #adopter-evals ran per release. A person or agent only looks at failures and at items marked REVIEW.
+
+Every check prints `PASS`, `FAIL`, `REVIEW` or `SKIP` lines into `.results/<job>.txt`. `verdict.mjs` turns those into the step summary and `verdict.json`:
+
+- `FAIL`: a regression.
+- `REVIEW`: a judgement call, such as a size over its threshold or a known finding.
+- `SKIP`: a check that couldn't run, such as t4 without secrets.
+
+The verdict is FAIL, NEEDS_REVIEW or PASS.
+
+## Checks
+
+| Job                                         | Script                   | What it proves                                                                                                                                                                                                                       | Needs                                                                                                                                                                                         |
+| ------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bed-t1`, `bed-t3`, `bed-t5`, `bed-t6`      | `bed.sh <app>`           | Apps on the previous release (`bed/`) move to the RC: lockfile only RC, `generate`, `generate --check`, unedited smoke. t1: migrations, enums, `renameFrom`. t3: rich permissions. t5: Expo web export. t6: modules, aliases, slices | RC tarballs                                                                                                                                                                                   |
+| `fixtures`                                  | `fixtures.sh`            | t1 stores written by older releases (`bed/t1-migrations/fixture-data*`) open on the RC. Their identity (`store_id`, `app_id`) is in `jazz.sqlite` and equals the old files, which stay unchanged (jazz#5570)                         | RC tarballs, sqlite3                                                                                                                                                                          |
+| `t10`                                       | `t10.sh`                 | `revokeUser` on one backend instance ends a user's sessions on another, both on one core (jazz#5634). Db lifecycle: a failed offline drain leaves the Db usable, and use after teardown fails explicitly (jazz#5592)                 | RC tarballs, RC `jazz-tools-linux-x64`                                                                                                                                                        |
+| `t9-ts`                                     | `t9.sh ts`               | A stock TS `createJazz` StagePlan backend on the RC. Backend clients: trusted, `forUser`, scoped, unlisted workload refused. End-user privacy                                                                                        | RC tarballs                                                                                                                                                                                   |
+| `t9-rust`, `t9-go`, `t9-kotlin`, `t9-swift` | `t9.sh <lang>`           | Each language client against that backend. B can't read or write A's private show. Scoped clients can't either                                                                                                                       | Rust: cargo. Go: `libjazz_ffi-linux-x86_64` (embedded, local GOPROXY, `go get`, no cgo). Kotlin: the RC jar or a source build. Swift: the `swift` image plus `libjazz_ffi` through pkg-config |
+| `refusals`                                  | `refusals.sh`            | Only when `packages/jazz-tools/src/upgrade` changed: `upgrade` refuses alpha.65 apps it can't convert (payload enums, computed/transforms), with a clear message, and writes nothing                                                 | RC tarballs                                                                                                                                                                                   |
+| `sizes`                                     | `sizes.sh [prev]`        | wasm and jazz-tools JS gzip size vs the previous release. Over `AG_SIZE_REVIEW_PCT` (3%) is REVIEW                                                                                                                                   | npm                                                                                                                                                                                           |
+| `t4`                                        | `t4.sh` (`t4/README.md`) | Next.js + Better Auth on `vercel()` in the long-lived eval project: missing-region error, deploy, same core and data, smoke, wrong-region probe. One smoke retry for jazz#5553. Serialised                                           | `VERCEL_TOKEN` and the t4 vars. Without them: SKIP                                                                                                                                            |
+
+Post-publish: `registry-smoke.sh <version> npm|create-jazz|crates|go|swift|kotlin` installs from npm, crates.io, the Go proxy, the jazz-swift mirror and Maven Central into clean projects, and runs the t9 checks. `AG_WAIT_MIN` polls for registry lag.
+
+## Running locally
+
+```sh
+dev/adopter-gate/fetch-rc.sh v2.0.0-alpha.68-rc.1 [attach-language-artifacts run id]   # or: --run <RC dry-run id>
+dev/adopter-gate/bed.sh t1 && dev/adopter-gate/fixtures.sh && dev/adopter-gate/t9.sh go   # etc.
+node dev/adopter-gate/verdict.mjs dev/adopter-gate/.results
+```
+
+Needs Node, pnpm 11, sqlite3 and `ss`, plus cargo, Go, JDK 17 with Gradle, or Swift 6 for the matching t9 job. Ports: bed 8601–8606, fixtures 8611, t10 8630–8632, t9 8780/8790/8791.
+
+## Per release
+
+1. **Before the cut**, an agent reads the release's upgrade notes and adds checks for what's new: a new job or lines in an existing one, as t10 was for .68. It dry-runs them on main and on the previous release. A check meant to catch a fix must FAIL on the previous release, or it proves nothing.
+2. **On the RC**, `adopter-gate.yml` runs. The `rc_tag` or `artifacts_run_id` input says where the RC's files come from.
+3. **After publish**, `rebase-bed.sh <version>` moves the bed to the new release, so the next RC is checked as an upgrade from it. Commit the result, including `bed/t1-migrations/fixture-data-<minor>`.
+
+## Harness rules
+
+- Kill processes by port or PID, never with `pkill -f`. A pattern can match the shell running it.
+- The TS client derives its app id from `serverUrl`. The t9 backend serves the id derived from `http://127.0.0.1:8780/jazz`.
+- User tokens and `backendClients` workload tokens come from different issuers (8791 and 8790). A user token from a workload issuer never reaches `authenticate`, so that user is silently signed out.
+- Synthetic data only. No keys or tokens in this directory.
+
+The refusal apps keep `jazz.app.json` and `jazz.permissions.json` as `*.fixture`: they are invalid under the current JSON schema on purpose, and `every_committed_app_file_fits_its_json_schema` scans every committed file of those names. `refusals.sh` restores the names in its scratch copy.
