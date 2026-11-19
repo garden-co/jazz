@@ -17,14 +17,30 @@ whose members share one key), the table of those spaces, and the columns to seal
 ```json
 {
   "tables": {
-    "projects": { "columns": { "name": "string", "ownerId": "uuid" } },
+    "projects": {
+      "columns": {
+        "name": "string",
+        "ownerId": "uuid"
+      }
+    },
     "tasks": {
-      "columns": { "projectId": "uuid", "title": "bytes", "__e2ee_eq_title": "bytes" },
-      "relations": { "project": { "rel": "projects", "column": "projectId" } },
+      "columns": {
+        "projectId": "uuid",
+        "title": "bytes",
+        "__e2ee_eq_title": "bytes"
+      },
+      "relations": {
+        "project": {
+          "rel": "projects",
+          "column": "projectId"
+        }
+      },
       "encryption": {
         "space": "projectId",
         "scope": "projects",
-        "columns": { "title": "string" },
+        "columns": {
+          "title": "string"
+        },
         "equality": ["title"]
       }
     }
