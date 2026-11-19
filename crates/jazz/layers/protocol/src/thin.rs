@@ -675,6 +675,11 @@ pub struct ThinAssembler {
 }
 
 impl ThinAssembler {
+    /// Whether this connection is waiting for the rest of a split frame.
+    pub fn is_partial(&self) -> bool {
+        self.total != 0
+    }
+
     /// The next part of a split frame: the whole frame once it has all its
     /// bytes, `None` before. `Err`, dropping what was joined, for a part
     /// whose frame is not one a part may carry ([`ThinPart::total`]), one

@@ -50,11 +50,12 @@ pub struct NegotiatedHello {
 pub fn negotiate_hello(
     first: &[u8],
     bootstrap_catalogue: bool,
+    host_features: WireFeatures,
 ) -> Result<NegotiatedHello, WireError> {
     let remote = decode_ws_hello(first)?;
     let negotiated = negotiate_wire(
         &remote,
-        current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS | jazz::wire::FEATURE_HEARTBEAT,
+        current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS | host_features,
     )?;
     // A downstream browser may be authority-unbound while still accepting the
     // server's authenticated authority in its response Hello.  The server
@@ -189,6 +190,7 @@ mod tests {
         let negotiated = negotiate_hello(
             &hello(current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS),
             false,
+            jazz::wire::FEATURE_NONE,
         )
         .unwrap();
         assert_ne!(negotiated.features & jazz::wire::FEATURE_THIN_RESULTS, 0);
@@ -211,7 +213,12 @@ mod tests {
     /// A one-shot catalogue bootstrap is refused, whatever the Hello.
     #[test]
     fn a_catalogue_bootstrap_is_refused() {
-        let refused = negotiate_hello(&hello(current_wire_features()), true).unwrap_err();
+        let refused = negotiate_hello(
+            &hello(current_wire_features()),
+            true,
+            jazz::wire::FEATURE_NONE,
+        )
+        .unwrap_err();
         assert_eq!(refused.code, WireErrorCode::UnsupportedFeature);
     }
 
@@ -226,6 +233,7 @@ mod tests {
                     | jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY,
             ),
             false,
+            jazz::wire::FEATURE_NONE,
         )
         .unwrap();
         let refused = link(

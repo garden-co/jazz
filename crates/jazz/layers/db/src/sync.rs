@@ -447,6 +447,11 @@ impl FrameJoiner {
         }
     }
 
+    /// Whether the next frame must continue a partially received message.
+    pub fn is_partial(&self) -> bool {
+        self.parts.is_some()
+    }
+
     /// The message `frame` completes, if any. A frame over the frame
     /// limit or that does not decode, a whole message between a split
     /// message's parts, a last part with no leading ones, and parts beyond
@@ -1739,6 +1744,11 @@ pub enum SyncMessage {
         added: Vec<(String, [u8; 16])>,
         removed: Vec<(String, [u8; 16])>,
     },
+    /// Complete held set when reopening a live read on its surviving socket.
+    ReplaceHolds {
+        id: u64,
+        rows: Vec<(String, [u8; 16])>,
+    },
 }
 
 /// The catalogue entries a [`SyncMessage::Catalogue`] or
@@ -1931,6 +1941,7 @@ impl SyncMessage {
             Self::AccessLost { .. } => "AccessLost",
             Self::Settled { .. } => "Settled",
             Self::Holds { .. } => "Holds",
+            Self::ReplaceHolds { .. } => "ReplaceHolds",
             Self::Refused { .. } => "Refused",
             Self::Fate { .. } => "Fate",
             Self::CheckAllowed { .. } => "CheckAllowed",
@@ -3067,7 +3078,12 @@ impl SettledBy {
 /// An upstream subscription's identity: query, binding, include_deleted.
 type RemoteRead = (Query, BTreeMap<String, Value>, bool, ReadViewSourceSpec);
 
+/// A host preserving a live socket can observe its accepted query registrations.
+pub type RegistrationObserver = Rc<dyn Fn(&SyncMessage)>;
+
 pub(crate) struct Session {
+    registrations: Option<RegistrationObserver>,
+    restoring: bool,
     transport: Box<dyn Transport>,
     identity: AuthorSubject,
     /// This connection's own claims. Two sessions of one identity may hold
@@ -3225,6 +3241,8 @@ impl Session {
             transport,
             identity,
             claims: None,
+            registrations: None,
+            restoring: false,
             subs: BTreeMap::new(),
             outbox: Vec::new(),
             touched: BTreeSet::new(),
@@ -3333,6 +3351,7 @@ impl CompositeTables {
 /// watched that no other one covers.
 #[derive(Default)]
 struct Watches {
+    replace_openings: bool,
     holders: HashMap<u64, u32>,
     by_owner: HashMap<u64, HashSet<u64>>,
     /// The row each row watch names (stored table and id): what a
@@ -3435,10 +3454,17 @@ impl Watches {
                 .filter_map(|key| self.names.get(key).map(wire))
                 .collect();
             added.sort_unstable();
-            out.push(SyncMessage::Holds {
-                id: owner,
-                added,
-                removed: Vec::new(),
+            out.push(if self.replace_openings {
+                SyncMessage::ReplaceHolds {
+                    id: owner,
+                    rows: added,
+                }
+            } else {
+                SyncMessage::Holds {
+                    id: owner,
+                    added,
+                    removed: Vec::new(),
+                }
             });
         }
         let mut changed: Vec<(u64, HashMap<u64, (bool, RowName)>)> = self.changes.drain().collect();
@@ -10968,7 +10994,14 @@ impl Db {
                             }
                         }
                     }
-                    SyncMessage::Holds { id, added, removed } => {
+                    message @ (SyncMessage::Holds { .. } | SyncMessage::ReplaceHolds { .. }) => {
+                        let (id, added, removed, replace) = match message {
+                            SyncMessage::Holds { id, added, removed } => {
+                                (id, added, removed, false)
+                            }
+                            SyncMessage::ReplaceHolds { id, rows } => (id, rows, Vec::new(), true),
+                            _ => unreachable!(),
+                        };
                         let client = inner.client.as_mut().expect("client");
                         if let Some(live) =
                             client
@@ -10988,7 +11021,7 @@ impl Db {
                             // all it holds: what it held on the last one
                             // and no longer does is judged again once this
                             // batch applied (see `Db::client_apply`).
-                            let before = if first {
+                            let before = if first || replace {
                                 let before = std::mem::take(&mut live.holds);
                                 for (table, rows) in &before {
                                     live.released
@@ -12496,6 +12529,65 @@ impl Db {
         Ok(SubscriberId { slot, generation })
     }
 
+    /// Observe successful joins, live reads and unsubscribes for this exact connection.
+    pub fn observe_subscriber_registrations(
+        &self,
+        subscriber: SubscriberId,
+        observer: RegistrationObserver,
+        restored: bool,
+    ) {
+        if let Some(session) = self
+            .inner
+            .borrow_mut()
+            .sessions
+            .get_mut(subscriber.slot)
+            .filter(|s| s.open && s.generation == subscriber.generation)
+        {
+            session.registrations = Some(observer);
+            session.watch.replace_openings = restored;
+            session.restoring = restored;
+        }
+    }
+
+    /// Reads processed after the restore tick must open eagerly.
+    pub fn finish_subscriber_restore(&self, subscriber: SubscriberId) {
+        if let Some(session) = self
+            .inner
+            .borrow_mut()
+            .sessions
+            .get_mut(subscriber.slot)
+            .filter(|s| s.open && s.generation == subscriber.generation)
+        {
+            session.restoring = false;
+        }
+    }
+
+    /// When a host without periodic idle ticks should continue answering chunk pulls.
+    pub fn next_chunk_pull_tick_ms(&self) -> Option<u32> {
+        let inner = self.inner.borrow();
+        if inner
+            .sessions
+            .iter()
+            .any(|s| s.open && !s.deferred_pulls.is_empty())
+        {
+            return Some(0);
+        }
+        let at = inner.store_retry.not_before?;
+        if !inner
+            .sessions
+            .iter()
+            .any(|s| s.open && !s.store_failed_pulls.is_empty())
+        {
+            return None;
+        }
+        let delay = at.saturating_sub(inner.now_ms());
+        Some(if delay > STORE_RETRY_MS.1 {
+            0
+        } else {
+            delay.max(0) as u32
+        })
+    }
+
     /// The handle of the session in `slot`.
     fn subscriber_at(&self, slot: usize) -> SubscriberId {
         SubscriberId {
@@ -12788,8 +12880,24 @@ impl Db {
             // needs is served again once they arrive.
             let again = (fetch.is_none() && self.inner.borrow().chunks.store().is_some())
                 .then(|| message.clone());
+            let registration = match &message {
+                SyncMessage::Join { .. }
+                | SyncMessage::Read {
+                    span: ReadSpan::Live,
+                    ..
+                }
+                | SyncMessage::Unsubscribe { .. } => self.inner.borrow().sessions[index]
+                    .registrations
+                    .as_ref()
+                    .map(|observer| (observer.clone(), message.clone())),
+                _ => None,
+            };
             match (self.serve(index, message), read) {
-                (Ok(()), _) => {}
+                (Ok(()), _) => {
+                    if let Some((observe, message)) = registration {
+                        observe(&message);
+                    }
+                }
                 (Err(error), _)
                     if crate::large::is_missing(&error)
                         && again.is_some()
@@ -14262,6 +14370,7 @@ impl Db {
                 wait.read,
                 SettledBy::Always(authority),
                 fanout::Backlog::Replica,
+                false,
             )?;
             let session = &mut inner.sessions[index];
             if let Some((_, _, windowed, _)) = session.subs.remove(&id) {
@@ -14440,6 +14549,8 @@ impl Db {
                 let mut inner = db.inner();
                 let support = Rc::new(inner.support_of(&query)?);
                 let authority = inner.authority;
+                let dormant =
+                    inner.sessions[index].restoring && upstream.is_none() && since.is_none();
                 let subscribed = inner.subscribe_member(
                     &prepared,
                     policy,
@@ -14455,6 +14566,7 @@ impl Db {
                         None => SettledBy::Always(authority),
                     },
                     fanout::Backlog::Replica,
+                    dormant,
                 );
                 if attached.is_some() {
                     match &subscribed {

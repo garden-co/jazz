@@ -3579,7 +3579,7 @@ impl Db {
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<SubscriptionStream, Error> {
-        self.open_subscription(prepared, None, opts)
+        self.open_subscription(prepared, None, opts, false)
     }
 
     pub async fn subscribe_for_identity(
@@ -3588,7 +3588,17 @@ impl Db {
         opts: ReadOpts,
         identity: AuthorSubject,
     ) -> Result<SubscriptionStream, Error> {
-        self.open_subscription(prepared, Some(identity), opts)
+        self.open_subscription(prepared, Some(identity), opts, false)
+    }
+
+    /// Restore a reader's watches; its first matching change emits a full opening.
+    pub fn restore_subscription_for_identity(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        identity: AuthorSubject,
+    ) -> Result<SubscriptionStream, Error> {
+        self.open_subscription(prepared, Some(identity), opts, true)
     }
 
     /// On a client a subscription also attaches remotely (unless
@@ -3601,6 +3611,7 @@ impl Db {
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
         opts: ReadOpts,
+        dormant: bool,
     ) -> Result<SubscriptionStream, Error> {
         let read = ReadSpec::of(&opts, &self.inner())?;
         let client = self.is_client();
@@ -3649,7 +3660,7 @@ impl Db {
         let mut inner = self.inner();
         let backlog = fanout::Backlog::Reader(opts.backlog_rows);
         let (queue, group) =
-            match inner.subscribe_member(prepared, identity, read, settled, backlog) {
+            match inner.subscribe_member(prepared, identity, read, settled, backlog, dormant) {
                 Ok(member) => member,
                 Err(error) => {
                     drop(inner);

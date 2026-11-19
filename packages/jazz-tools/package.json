@@ -274,7 +274,7 @@
     "jsdom": "^26.0.0",
     "libsodium": "0.8.3",
     "libsodium-wrappers": "0.8.3",
-    "miniflare": "4.20260401.0",
+    "miniflare": "4.20260730.0",
     "prettier": "^3.9.5",
     "prosemirror-markdown": "^1.13.9",
     "prosemirror-model": "^1.25.4",
