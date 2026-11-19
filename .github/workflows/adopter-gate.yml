@@ -191,7 +191,12 @@ jobs:
       - name: Tools the gate scripts use
         # Only if the image lacks them: an apt mirror once took 6 min here. The scripts need no ss (bash /dev/tcp, PIDs).
         run: |
-          command -v curl >/dev/null && command -v git >/dev/null || { apt-get update -qq -o Acquire::Retries=3 && apt-get install -y -qq -o Acquire::Retries=3 curl git >/dev/null; }
+          # The swift image has git but no curl CLI (the t9 scripts need it). Its apt sources point at archive.ubuntu.com,
+          # which took 3+ min from Actions; GitHub's runners sit next to Azure's Ubuntu mirror, so use that one.
+          if ! command -v curl >/dev/null || ! command -v git >/dev/null; then
+            sed -i 's#http://archive.ubuntu.com/ubuntu#http://azure.archive.ubuntu.com/ubuntu#g; s#http://security.ubuntu.com/ubuntu#http://azure.archive.ubuntu.com/ubuntu#g' /etc/apt/sources.list.d/*.sources /etc/apt/sources.list 2>/dev/null || true
+            apt-get update -qq -o Acquire::Retries=3 && apt-get install -y -qq --no-install-recommends -o Acquire::Retries=3 curl git ca-certificates >/dev/null
+          fi
           # gh (fetch-rc.sh) isn't in the swift image: a pinned release binary, checked against its published sum.
           curl -sSfL --retry 5 --retry-all-errors -o /tmp/gh.tgz https://github.com/cli/cli/releases/download/v2.103.3/gh_2.103.3_linux_amd64.tar.gz
           echo "4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d  /tmp/gh.tgz" | sha256sum -c
