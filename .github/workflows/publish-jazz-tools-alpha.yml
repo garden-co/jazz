@@ -287,6 +287,17 @@ jobs:
               // The release candidate gate passes the release-artifacts run it
               // verified for this commit (the caller checked commit and status).
               if (!/^[0-9]+$/.test(artifactsRunId)) throw new Error(`artifacts_run_id must be a run ID, got ${artifactsRunId}`);
+              // Supply-chain rule: that run must have built this very commit.
+              const { data: artifactsRun } = await github.rest.actions.getWorkflowRun({
+                owner,
+                repo,
+                run_id: Number(artifactsRunId),
+              });
+              const producer = (artifactsRun.path || "").split("@")[0].split("/").pop();
+              if (!["release-artifacts.yml", "release-candidate.yml"].includes(producer))
+                throw new Error(`artifacts_run_id ${artifactsRunId} is a ${producer} run, not release-artifacts or release-candidate`);
+              if (artifactsRun.head_sha !== sha)
+                throw new Error(`artifacts_run_id ${artifactsRunId} built ${artifactsRun.head_sha}, not this commit ${sha}`);
               usePreviewArtifacts = "true";
               previewRunId = artifactsRunId;
               reason = `verifying release-artifacts run ${artifactsRunId}`;
