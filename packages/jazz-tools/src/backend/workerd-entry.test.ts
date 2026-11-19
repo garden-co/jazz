@@ -25,6 +25,7 @@ describe("jazz-tools/backend under the workerd condition", () => {
 
   it("reaches neither jazz-napi nor an optional Node peer", async () => {
     const reached = new Set<string>();
+    const staticImports = new Set<string>();
     await build({
       entryPoints: [new URL("./workerd.ts", import.meta.url).pathname],
       bundle: true,
@@ -41,6 +42,7 @@ describe("jazz-tools/backend under the workerd condition", () => {
             // Everything outside jazz-tools' own sources is recorded, not bundled.
             b.onResolve({ filter: /^[^./]/ }, (args) => {
               reached.add(args.path);
+              if (args.kind === "import-statement") staticImports.add(args.path);
               return { path: args.path, external: true };
             });
           },
@@ -56,6 +58,11 @@ describe("jazz-tools/backend under the workerd condition", () => {
     ]) {
       expect([...reached], forbidden).not.toContain(forbidden);
     }
-    expect(reached).toContain("jazz-wasm");
+    // The engine is the backend build, never the browser build, which
+    // leaves the backend out. (The client runtime's loader still names the
+    // browser build in a dynamic import a backend never takes.)
+    expect(staticImports).toContain("jazz-wasm/backend");
+    expect([...staticImports].filter((path) => /^jazz-wasm(\/pkg|$)/.test(path))).toEqual([]);
+    expect([...reached].filter((path) => path.startsWith("jazz-wasm/pkg"))).toEqual([]);
   });
 });

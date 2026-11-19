@@ -13,6 +13,11 @@ on:
         required: false
         type: string
         default: publish
+      artifacts_run_id:
+        description: "dry-run only: verify the packages of this release-artifacts.yml run (or the calling run) instead of building them."
+        required: false
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       mode:
@@ -244,6 +249,7 @@ jobs:
           RELEASE_PR_NUMBER: ${{ needs.release-push-gate.outputs.release_pr_number }}
           RELEASE_PR_HEAD_REF: ${{ needs.release-push-gate.outputs.release_pr_head_ref }}
           RELEASE_PR_HEAD_SHA: ${{ needs.release-push-gate.outputs.release_pr_head_sha }}
+          ARTIFACTS_RUN_ID: ${{ inputs.artifacts_run_id }}
         with:
           script: |
             const eventName = process.env.EVENT_NAME;
@@ -276,7 +282,17 @@ jobs:
               ).version;
             }
 
-            if (releaseMode !== "publish") {
+            const artifactsRunId = process.env.ARTIFACTS_RUN_ID;
+            if (artifactsRunId && releaseMode === "dry-run") {
+              // The release candidate gate passes the release-artifacts run it
+              // verified for this commit (the caller checked commit and status).
+              if (!/^[0-9]+$/.test(artifactsRunId)) throw new Error(`artifacts_run_id must be a run ID, got ${artifactsRunId}`);
+              usePreviewArtifacts = "true";
+              previewRunId = artifactsRunId;
+              reason = `verifying release-artifacts run ${artifactsRunId}`;
+            } else if (artifactsRunId) {
+              reason = "artifacts_run_id is honoured in dry-run only";
+            } else if (releaseMode !== "publish") {
               reason = `preview artifact reuse disabled for mode=${releaseMode}`;
             } else if (ref !== "refs/heads/release") {
               reason = `preview artifact reuse disabled for ${eventName} on ${ref}`;
@@ -313,62 +329,76 @@ jobs:
               }
 
               if (treeReuseSafe) {
-                const runsResponse = await github.rest.actions.listWorkflowRuns({
-                  owner,
-                  repo,
-                  workflow_id: "preview-jazz-tools-alpha-release.yml",
-                  branch: releasePrHeadRef,
-                  per_page: 100,
-                });
-                const runs = (runsResponse.data.workflow_runs || []).filter(Boolean);
-
-                const previewRun = runs
-                  .filter(
-                    (run) =>
-                      run.head_sha === releasePrHeadSha &&
-                      run.status === "completed" &&
-                      run.conclusion === "success",
-                  )
-                  .sort(
-                    (a, b) =>
-                      new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-                  )[0];
-
-                if (!previewRun) {
-                  reason = `no successful preview run found for ${releasePrHeadRef}@${releasePrHeadSha}`;
-                } else {
-                  const artifactsResponse = await github.rest.actions.listWorkflowRunArtifacts({
+                // Built once per commit by release-artifacts.yml, dispatched
+                // on the Version Packages head; the standalone preview run is
+                // the fallback for heads from before it.
+                const requiredArtifacts = [
+                  "pkg-jazz-tools",
+                  "pkg-jazz-wasm",
+                  "pkg-jazz-napi",
+                  "pkg-jazz-rn",
+                  "pkg-create-jazz",
+                  "inspector-prebuilt",
+                  "jazz-tools-linux-x64",
+                  "jazz-tools-linux-arm64",
+                ];
+                const misses = [];
+                for (const workflowId of [
+                  "release-artifacts.yml",
+                  "preview-jazz-tools-alpha-release.yml",
+                ]) {
+                  let runs = [];
+                  try {
+                    const runsResponse = await github.rest.actions.listWorkflowRuns({
+                      owner,
+                      repo,
+                      workflow_id: workflowId,
+                      branch: releasePrHeadRef,
+                      head_sha: releasePrHeadSha,
+                      per_page: 100,
+                    });
+                    runs = (runsResponse.data.workflow_runs || []).filter(Boolean);
+                  } catch (error) {
+                    if (error.status !== 404) throw error;
+                  }
+                  const sourceRun = runs
+                    .filter(
+                      (run) =>
+                        run.head_sha === releasePrHeadSha &&
+                        run.event === "workflow_dispatch" &&
+                        run.status === "completed" &&
+                        run.conclusion === "success",
+                    )
+                    .sort(
+                      (a, b) =>
+                        new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+                    )[0];
+                  if (!sourceRun) {
+                    misses.push(`no successful ${workflowId} run for ${releasePrHeadRef}@${releasePrHeadSha}`);
+                    continue;
+                  }
+                  const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
                     owner,
                     repo,
-                    run_id: previewRun.id,
+                    run_id: sourceRun.id,
                     per_page: 100,
                   });
-                  const artifacts = (artifactsResponse.data.artifacts || []).filter(Boolean);
-
-                  const requiredArtifacts = [
-                    "pkg-jazz-tools",
-                    "pkg-jazz-wasm",
-                    "pkg-jazz-napi",
-                    "pkg-jazz-rn",
-                    "pkg-create-jazz",
-                    "inspector-prebuilt",
-                  ];
-
                   const availableArtifacts = new Set(
                     artifacts.filter((artifact) => !artifact.expired).map((artifact) => artifact.name),
                   );
                   const missingArtifacts = requiredArtifacts.filter(
                     (artifactName) => !availableArtifacts.has(artifactName),
                   );
-
                   if (missingArtifacts.length > 0) {
-                    reason = `preview run ${previewRun.id} is missing artifacts: ${missingArtifacts.join(", ")}`;
-                  } else {
-                    usePreviewArtifacts = "true";
-                    previewRunId = String(previewRun.id);
-                    reason = `reusing preview artifacts from run ${previewRun.id} for PR #${releasePrNumber}`;
+                    misses.push(`${workflowId} run ${sourceRun.id} is missing artifacts: ${missingArtifacts.join(", ")}`);
+                    continue;
                   }
+                  usePreviewArtifacts = "true";
+                  previewRunId = String(sourceRun.id);
+                  reason = `reusing ${workflowId} artifacts from run ${sourceRun.id} for PR #${releasePrNumber}`;
+                  break;
                 }
+                if (usePreviewArtifacts !== "true") reason = misses.join("; ");
               }
             }
 
@@ -578,7 +608,9 @@ jobs:
           # the latter's commit SHA here: it is the value sealed into its
           # relay-artifact manifests, whereas release's merge commit has a
           # different SHA despite the same source tree.
-          JAZZ_REUSE_PREVIEW_ARTIFACTS: ${{ needs.resolve-preview-artifacts.outputs.use_preview_artifacts }}
+          # A release-artifacts run (artifacts_run_id) was built at this very
+          # commit: it sealed GITHUB_SHA, like a build in this run.
+          JAZZ_REUSE_PREVIEW_ARTIFACTS: ${{ needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true' && inputs.artifacts_run_id == '' }}
           JAZZ_RELEASE_PR_HEAD_SHA: ${{ needs.release-push-gate.outputs.release_pr_head_sha }}
         run: |
           JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(node dev/artifacts/release-artifact-source-revision.mjs)" \
@@ -587,7 +619,7 @@ jobs:
       - name: Resolve lock-stepped npm package versions
         run: |
           VERSION=$(git show "${GITHUB_SHA}:packages/jazz-tools/package.json" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>console.log(JSON.parse(s).version))')
-          EXPECTED_VERSION="${{ github.event.inputs.version || '' }}"
+          EXPECTED_VERSION="${{ inputs.artifacts_run_id == '' && github.event.inputs.version || '' }}"
           if [ -n "${EXPECTED_VERSION}" ] && [ "${EXPECTED_VERSION}" != "${VERSION}" ]; then
             echo "Manual version ${EXPECTED_VERSION} does not match checked-out source version ${VERSION}."
             echo "Publish a committed release snapshot first; release workflows never rewrite versions in place."
@@ -613,7 +645,7 @@ jobs:
 
       - name: Guard alpha-only lock-stepped publish versions
         run: |
-          EXPECTED_VERSION="${{ github.event.inputs.version || '' }}" node -e 'const fs=require("fs");const path=require("path");const expected=process.env.EXPECTED_VERSION;const alphaVersion=/^2\.0\.0-alpha\.[0-9A-Za-z.-]+$/;const tools=JSON.parse(fs.readFileSync("packages/jazz-tools/package.json","utf8"));const wasm=JSON.parse(fs.readFileSync("crates/jazz-wasm/package.json","utf8"));const napi=JSON.parse(fs.readFileSync("crates/jazz-napi/package.json","utf8"));const rn=JSON.parse(fs.readFileSync("crates/jazz-rn/package.json","utf8"));const createJazz=JSON.parse(fs.readFileSync("packages/create-jazz/package.json","utf8"));if(expected){if(!alphaVersion.test(expected)){throw new Error(`Version override must match 2.0.0-alpha.*, got ${expected}`);}if(tools.version!==expected){throw new Error(`Version override mismatch: expected ${expected}, got ${tools.version}`);}}for(const pkg of [tools,wasm,napi,rn,createJazz]){if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.*, got ${pkg.version}`);}const tag=pkg.publishConfig&&pkg.publishConfig.tag;if(tag&&tag!=="latest"){throw new Error(`${pkg.name} publishConfig.tag must be latest, got ${tag}`);}}if(!(tools.version===wasm.version&&tools.version===napi.version&&tools.version===rn.version&&napi.version===createJazz.version)){throw new Error(`Versions diverged: tools=${tools.version} wasm=${wasm.version} napi=${napi.version} rn=${rn.version} create-jazz=${createJazz.version}`);}for(const [name,version] of Object.entries(napi.optionalDependencies||{})){if(version!==napi.version){throw new Error(`napi optional dep ${name} is ${version}, expected ${napi.version}`);}}for(const entry of fs.readdirSync("crates/jazz-napi/npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const pkgPath=path.join("crates/jazz-napi/npm",entry.name,"package.json");const pkg=JSON.parse(fs.readFileSync(pkgPath,"utf8"));if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.*, got ${pkg.version}`);}if(pkg.version!==napi.version){throw new Error(`${pkg.name} version ${pkg.version} must match jazz-napi ${napi.version}`);}}console.log(`Alpha-only publish guard passed at ${tools.version}`);'
+          EXPECTED_VERSION="${{ inputs.artifacts_run_id == '' && github.event.inputs.version || '' }}" node -e 'const fs=require("fs");const path=require("path");const expected=process.env.EXPECTED_VERSION;const alphaVersion=/^2\.0\.0-alpha\.[0-9A-Za-z.-]+$/;const tools=JSON.parse(fs.readFileSync("packages/jazz-tools/package.json","utf8"));const wasm=JSON.parse(fs.readFileSync("crates/jazz-wasm/package.json","utf8"));const napi=JSON.parse(fs.readFileSync("crates/jazz-napi/package.json","utf8"));const rn=JSON.parse(fs.readFileSync("crates/jazz-rn/package.json","utf8"));const createJazz=JSON.parse(fs.readFileSync("packages/create-jazz/package.json","utf8"));if(expected){if(!alphaVersion.test(expected)){throw new Error(`Version override must match 2.0.0-alpha.*, got ${expected}`);}if(tools.version!==expected){throw new Error(`Version override mismatch: expected ${expected}, got ${tools.version}`);}}for(const pkg of [tools,wasm,napi,rn,createJazz]){if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.*, got ${pkg.version}`);}const tag=pkg.publishConfig&&pkg.publishConfig.tag;if(tag&&tag!=="latest"){throw new Error(`${pkg.name} publishConfig.tag must be latest, got ${tag}`);}}if(!(tools.version===wasm.version&&tools.version===napi.version&&tools.version===rn.version&&napi.version===createJazz.version)){throw new Error(`Versions diverged: tools=${tools.version} wasm=${wasm.version} napi=${napi.version} rn=${rn.version} create-jazz=${createJazz.version}`);}for(const [name,version] of Object.entries(napi.optionalDependencies||{})){if(version!==napi.version){throw new Error(`napi optional dep ${name} is ${version}, expected ${napi.version}`);}}for(const entry of fs.readdirSync("crates/jazz-napi/npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const pkgPath=path.join("crates/jazz-napi/npm",entry.name,"package.json");const pkg=JSON.parse(fs.readFileSync(pkgPath,"utf8"));if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.*, got ${pkg.version}`);}if(pkg.version!==napi.version){throw new Error(`${pkg.name} version ${pkg.version} must match jazz-napi ${napi.version}`);}}console.log(`Alpha-only publish guard passed at ${tools.version}`);'
 
       - name: Verify immutable release source snapshot
         run: |
@@ -672,6 +704,11 @@ jobs:
           tar -tf "${TARBALL}" | grep -q "package/durable-object/pkg/jazz_wasm_do.js"
           tar -tf "${TARBALL}" | grep -q "package/durable-object/index.js"
           tar -tf "${TARBALL}" | grep -q "package/durable-object/host.js"
+          # `jazz-wasm/backend`: what a backend's `createJazz` runs on in a Worker.
+          echo "backend files: $(tar -tf "${TARBALL}" | grep -c "package/backend/")"
+          tar -tf "${TARBALL}" | grep -q "package/backend/pkg/jazz_wasm_backend_bg.wasm"
+          tar -tf "${TARBALL}" | grep -q "package/backend/pkg/jazz_wasm_backend.js"
+          tar -tf "${TARBALL}" | grep -q "package/backend/index.js"
 
       - name: Verify packed jazz-napi payload
         run: |

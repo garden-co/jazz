@@ -12,7 +12,7 @@ on:
         description: JSON matrix for NAPI platform packages. Release callers use every platform; preview callers may omit expensive optional platforms.
         required: false
         type: string
-        default: '[{"os":"blacksmith-4vcpu-ubuntu-2404","target":"x86_64-unknown-linux-gnu","platform":"linux-x64-gnu","use_sccache":false},{"os":"blacksmith-4vcpu-ubuntu-2404-arm","target":"aarch64-unknown-linux-gnu","platform":"linux-arm64-gnu","use_sccache":false},{"os":"blacksmith-6vcpu-macos-15","target":"x86_64-apple-darwin","platform":"darwin-x64","use_sccache":false},{"os":"blacksmith-6vcpu-macos-15","target":"aarch64-apple-darwin","platform":"darwin-arm64","use_sccache":false},{"os":"blacksmith-16vcpu-windows-2025","target":"x86_64-pc-windows-msvc","platform":"win32-x64-msvc","use_sccache":false}]'
+        default: '[{"os":"blacksmith-16vcpu-ubuntu-2404","target":"x86_64-unknown-linux-gnu","platform":"linux-x64-gnu","use_sccache":false},{"os":"blacksmith-16vcpu-ubuntu-2404-arm","target":"aarch64-unknown-linux-gnu","platform":"linux-arm64-gnu","use_sccache":false},{"os":"blacksmith-6vcpu-macos-15","target":"x86_64-apple-darwin","platform":"darwin-x64","use_sccache":false},{"os":"blacksmith-6vcpu-macos-15","target":"aarch64-apple-darwin","platform":"darwin-arm64","use_sccache":false},{"os":"blacksmith-16vcpu-windows-2025","target":"x86_64-pc-windows-msvc","platform":"win32-x64-msvc","use_sccache":false}]'
       include_rn:
         description: Build and stage jazz-rn's Android and iOS relay artifacts. Keep false for ordinary package previews; releases opt in explicitly.
         required: false
@@ -20,6 +20,11 @@ on:
         default: false
       reproduce_ios_relay:
         description: Also build the iOS relay's staticlibs without any cache and require them byte-identical to the cached build's. Release and publish callers set it; previews and RCs use the warm cache alone.
+        required: false
+        type: boolean
+        default: false
+      release_bundles:
+        description: Also bundle release-server (the server binaries + SHA256SUMS) and release-npm (every tarball, packed and checked as publish does), for release-artifacts.yml. Needs include_rn.
         required: false
         type: boolean
         default: false
@@ -162,7 +167,10 @@ jobs:
 
   build-wasm:
     name: Build jazz-wasm
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # 16 vCPUs: a release's version bump recompiles every jazz crate, and
+    # on 4 vCPUs that (with LTO and wasm-opt) took 5-10 min, the release
+    # build's critical path.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -178,6 +186,15 @@ jobs:
       - uses: ./.github/actions/install-rust-tool
         with:
           tool: wasm-pack@0.13.1
+
+      # wasm-pack downloads wasm-bindgen and binaryen (wasm-opt) at build
+      # time, with no retry: keep them, so a flaky CDN can't fail a release.
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.cache/.wasm-pack
+          key: wasm-pack-0.13.1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            wasm-pack-0.13.1-${{ runner.os }}-
 
       - name: Build jazz-wasm npm package
         run: pnpm --filter jazz-wasm build
@@ -202,7 +219,10 @@ jobs:
   # pass that used to add about 2.5 min after the main one.
   build-wasm-durable-object:
     name: Build jazz-wasm Durable Object entry
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # 16 vCPUs: a release's version bump recompiles every jazz crate, and
+    # on 4 vCPUs that (with LTO and wasm-opt) took 5-10 min, the release
+    # build's critical path.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -218,6 +238,15 @@ jobs:
       - uses: ./.github/actions/install-rust-tool
         with:
           tool: wasm-pack@0.13.1
+
+      # wasm-pack downloads wasm-bindgen and binaryen (wasm-opt) at build
+      # time, with no retry: keep them, so a flaky CDN can't fail a release.
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.cache/.wasm-pack
+          key: wasm-pack-0.13.1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            wasm-pack-0.13.1-${{ runner.os }}-
 
       # The whole script, not bare wasm-pack: it also patches the glue
       # (reinstantiable.mjs) and deletes wasm-pack's `.gitignore` of `*`,
@@ -239,16 +268,64 @@ jobs:
           path: crates/jazz-wasm/durable-object/pkg
           if-no-files-found: error
 
-  # Merge groups run jazz-tools' Durable Object suite on a wasm-opt -O1 host;
-  # this runs the full suite on the -Oz host that ships (the uploaded
-  # jazz-wasm-durable-object-pkg, unpacked where the build leaves it), so an
+  # `jazz-wasm/backend`, the build a backend's `createJazz` runs on in a
+  # Cloudflare Worker (jazz-tools' `workerd` entry): the browser build plus
+  # the `backend` feature, which the browser build leaves out. Its own job
+  # beside build-wasm and build-wasm-durable-object.
+  build-wasm-backend:
+    name: Build jazz-wasm backend entry
+    # 16 vCPUs, like the other jazz-wasm builds: a release's version bump
+    # recompiles every jazz crate.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: wasm32-unknown-unknown
+          sccache: "true"
+          sccache-key: release-wasm-backend-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+
+      - uses: ./.github/actions/install-rust-tool
+        with:
+          tool: wasm-pack@0.13.1
+
+      # The whole script, not bare wasm-pack: it also runs the size-tuned
+      # wasm-opt pass and deletes wasm-pack's `.gitignore` of `*`, which
+      # would keep the build out of the tarball.
+      - name: Build jazz-wasm backend entry
+        run: pnpm --filter jazz-wasm build:backend
+
+      - name: Verify built jazz-wasm backend artifacts
+        run: |
+          test -f crates/jazz-wasm/backend/pkg/jazz_wasm_backend_bg.wasm
+          test -f crates/jazz-wasm/backend/pkg/jazz_wasm_backend.js
+          test -f crates/jazz-wasm/backend/pkg/jazz_wasm_backend.d.ts
+          test ! -e crates/jazz-wasm/backend/pkg/.gitignore
+          grep --quiet serveThinTransaction crates/jazz-wasm/backend/pkg/jazz_wasm_backend.js
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-wasm-backend-pkg
+          path: crates/jazz-wasm/backend/pkg
+          if-no-files-found: error
+
+  # Merge groups run jazz-tools' Durable Object suite on wasm-opt -O1 builds;
+  # this runs the full suite on the -Oz builds that ship (the uploaded
+  # jazz-wasm-durable-object-pkg and jazz-wasm-backend-pkg, unpacked where
+  # the builds leave them), so an
   # -Oz-only break (a wasm-opt miscompile, or the glue or reinstantiation
   # interacting with optimised code) fails the release build. Beside the
   # package assembly, not before it.
   test-wasm-durable-object:
     name: Durable Object suite on the release host
-    needs: build-wasm-durable-object
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [build-wasm-durable-object, build-wasm-backend]
+    # 16 vCPUs: it builds the correctness artifacts, then runs the suite (5.4
+    # min on 4 vCPUs); the release build's last packages job.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -265,12 +342,26 @@ jobs:
         with:
           tool: wasm-pack@0.13.1
 
+      # wasm-pack downloads wasm-bindgen and binaryen (wasm-opt) at build
+      # time, with no retry: keep them, so a flaky CDN can't fail a release.
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.cache/.wasm-pack
+          key: wasm-pack-0.13.1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            wasm-pack-0.13.1-${{ runner.os }}-
+
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: jazz-wasm-durable-object-pkg
           path: crates/jazz-wasm/durable-object/pkg
 
-      - name: Check it is the -Oz host
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-wasm-backend-pkg
+          path: crates/jazz-wasm/backend/pkg
+
+      - name: Check they are the -Oz builds
         run: node --test --test-name-pattern='-Oz build' crates/jazz-wasm/tests/durable-objects/release.test.mjs
 
       - name: Build correctness artifacts for the Durable Object suite
@@ -298,6 +389,9 @@ jobs:
           sccache: ${{ matrix.use_sccache && 'true' || 'false' }}
           sccache-key: release-napi-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-${{ matrix.platform }}-v1
 
+      # The second restore key: a Version Packages commit always changes
+      # Cargo.lock (the workspace version), so start from this platform's last
+      # build anyway, and only the workspace crates recompile.
       - name: Cache baseline-specific Linux Cargo products
         if: startsWith(matrix.platform, 'linux-')
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -306,6 +400,7 @@ jobs:
           key: linux-napi-${{ matrix.platform }}-${{ hashFiles('dev/artifacts/linux-napi/Dockerfile') }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
             linux-napi-${{ matrix.platform }}-${{ hashFiles('dev/artifacts/linux-napi/Dockerfile') }}-${{ hashFiles('Cargo.lock') }}-
+            linux-napi-${{ matrix.platform }}-${{ hashFiles('dev/artifacts/linux-napi/Dockerfile') }}-
 
       - name: Build Linux NAPI on pinned Bullseye userspace
         if: startsWith(matrix.platform, 'linux-')
@@ -604,6 +699,7 @@ jobs:
       - check-linux-heap-profile
       - build-wasm
       - build-wasm-durable-object
+      - build-wasm-backend
       - build-napi
 
     steps:
@@ -625,10 +721,20 @@ jobs:
           name: jazz-wasm-durable-object-pkg
           path: crates/jazz-wasm/durable-object/pkg
 
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-wasm-backend-pkg
+          path: crates/jazz-wasm/backend/pkg
+
       # Fails unless `npm pack` puts durable-object/pkg/jazz_wasm_do_bg.wasm
       # (and the rest of the Durable Object entry) in the jazz-wasm tarball.
       - name: Verify the jazz-wasm tarball carries the Durable Object entry
         run: pnpm --filter jazz-wasm check:durable-object-pack
+
+      # Fails unless `npm pack` puts backend/pkg/jazz_wasm_backend_bg.wasm
+      # (and the rest of the backend entry) in the jazz-wasm tarball.
+      - name: Verify the jazz-wasm tarball carries the backend entry
+        run: pnpm --filter jazz-wasm check:backend-pack
 
       # The release build (wasm-opt, the patched glue) starts in workerd and
       # admits its backend, before anything is published.
@@ -967,3 +1073,182 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             build
         working-directory: ${{ env.JAZZ_RN_CONSUMER_FIXTURE }}/ios
+
+  # The server binaries, as "Publish jazz-tools alpha" attaches them.
+  release-server:
+    name: Server binaries
+    if: inputs.release_bundles
+    needs: [build-linux, check-linux-heap-profile]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-tools-linux-*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          test -s jazz-tools-linux-x64
+          test -s jazz-tools-linux-arm64
+          sha256sum jazz-tools-linux-x64 jazz-tools-linux-arm64 > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-server
+          path: dist/*
+          if-no-files-found: error
+
+  # Every npm tarball, packed the way publish-jazz-tools-alpha.yml packs and
+  # checks them, so publish uploads these exact files.
+  release-npm:
+    name: Pack npm tarballs
+    if: inputs.release_bundles
+    needs: [assemble-packages, assemble-jazz-rn]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-toolchain: ""
+
+      - name: The version and source revision
+        run: |
+          {
+            echo "VERSION=$(node -p 'require("./packages/jazz-tools/package.json").version')"
+            echo "JAZZ_NATIVE_RELAY_SOURCE_REVISION=$(git rev-parse HEAD)"
+          } >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-tools
+          path: packages/jazz-tools
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-wasm
+          path: crates/jazz-wasm
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-napi
+          path: crates/jazz-napi
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-rn
+          path: crates/jazz-rn
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-create-jazz
+          path: packages/create-jazz
+
+      - name: Verify the built payloads
+        run: |
+          set -euo pipefail
+          test -f crates/jazz-wasm/pkg/jazz_wasm_bg.wasm
+          test -f crates/jazz-wasm/pkg/jazz_wasm.js
+          test -f crates/jazz-wasm/pkg/jazz_wasm.d.ts
+          for platform in linux-x64-gnu linux-arm64-gnu darwin-x64 darwin-arm64 win32-x64-msvc; do
+            test -f "crates/jazz-napi/npm/${platform}/jazz-napi.${platform}.node"
+          done
+          test -f packages/jazz-tools/dist/index.js
+          test -f packages/jazz-tools/dist/index.d.ts
+          test -f packages/jazz-tools/dist/backend/index.js
+          test -f packages/jazz-tools/dist/react/index.js
+          test -f packages/jazz-tools/dist/permissions/index.js
+          node dev/artifacts/rn-packages.mjs verify
+
+      # As publish does (assemble already did it; idempotent).
+      - name: Sync jazz-napi platform package versions and optional deps
+        run: |
+          cd crates/jazz-napi
+          pnpm exec napi version --npm-dir npm
+          node -e 'const fs=require("fs");const rootPath="package.json";const pkg=JSON.parse(fs.readFileSync(rootPath,"utf8"));const deps=[];for(const entry of fs.readdirSync("npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const child=JSON.parse(fs.readFileSync(`npm/${entry.name}/package.json`,"utf8"));deps.push([child.name,pkg.version]);}deps.sort((a,b)=>a[0].localeCompare(b[0]));pkg.optionalDependencies=Object.fromEntries(deps);fs.writeFileSync(rootPath,`${JSON.stringify(pkg,null,2)}\n`);'
+
+      - name: Stage inspector overlay assets into jazz-tools
+        run: |
+          pnpm --filter inspector run build:embedded
+          pnpm --filter jazz-tools run stage:inspector-overlay
+
+      - name: Check the lock-stepped versions
+        run: |
+          node -e '
+            const fs = require("fs");
+            const read = (p) => JSON.parse(fs.readFileSync(p, "utf8"));
+            const want = process.env.VERSION;
+            const paths = ["packages/jazz-tools", "packages/create-jazz", "crates/jazz-wasm", "crates/jazz-napi",
+              "crates/jazz-rn", "crates/jazz-rn/npm/android", "crates/jazz-rn/npm/ios",
+              ...fs.readdirSync("crates/jazz-napi/npm").map((d) => `crates/jazz-napi/npm/${d}`)];
+            for (const p of paths) {
+              const { name, version } = read(`${p}/package.json`);
+              if (version !== want) throw new Error(`${name} is ${version}, expected ${want}`);
+            }
+            for (const [name, v] of Object.entries(read("crates/jazz-napi/package.json").optionalDependencies || {}))
+              if (v !== want) throw new Error(`jazz-napi optional dep ${name} is ${v}`);
+            console.log(`all packages at ${want}`);'
+
+      - name: Pack
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/npm"
+          mkdir -p "${out}"
+          for pkg in jazz-wasm jazz-napi jazz-tools create-jazz; do
+            pnpm --filter "${pkg}" pack --pack-destination "${out}"
+          done
+          for dir in crates/jazz-napi/npm/*/; do
+            npm pack "${dir}" --pack-destination "${out}"
+          done
+          JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
+            node dev/artifacts/rn-packages.mjs pack "${out}"
+          ls -la "${out}"
+
+      # publish-jazz-tools-alpha.yml's packed checks, on the packed files.
+      - name: Check the tarballs
+        working-directory: ${{ runner.temp }}/npm
+        run: |
+          set -euo pipefail
+          wasm="jazz-wasm-${VERSION}.tgz"
+          tar -tf "${wasm}" > wasm.txt
+          for f in pkg/jazz_wasm_bg.wasm pkg/jazz_wasm.js pkg/jazz_wasm.d.ts \
+            durable-object/pkg/jazz_wasm_do_bg.wasm durable-object/pkg/jazz_wasm_do.js \
+            durable-object/index.js durable-object/host.js \
+            backend/index.js backend/pkg/jazz_wasm_backend.js backend/pkg/jazz_wasm_backend_bg.wasm; do
+            grep -qx "package/${f}" wasm.txt || { echo "::error::${wasm} lacks ${f}"; exit 1; }
+          done
+          node "${GITHUB_WORKSPACE}/dev/artifacts/verify-packed-napi.mjs" "jazz-napi-${VERSION}.tgz"
+          for tgz in "jazz-tools-${VERSION}.tgz" "create-jazz-${VERSION}.tgz" "jazz-napi-${VERSION}.tgz"; do
+            tar -xOf "${tgz}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);for(const field of ["dependencies","optionalDependencies","peerDependencies"]){for(const [name,version] of Object.entries(p[field]||{})){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`${p.name}: ${field}.${name} uses workspace protocol (${version})`);}}}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
+          done
+          tar -tf "jazz-tools-${VERSION}.tgz" > tools.txt
+          grep -qx "package/dist/dev/inspector-overlay/embedded/embedded.html" tools.txt
+          grep -qx "package/dist/dev/inspector-overlay/embedded/backend.html" tools.txt
+          # Not `tar | grep -q`: under pipefail, grep's early exit makes tar
+          # fail with SIGPIPE once the file outgrows the pipe buffer.
+          tar -xOf "jazz-tools-${VERSION}.tgz" package/dist/backend/inspector-ui-files.js > inspector-ui-files.js
+          grep -Fq '"backend.html":' inspector-ui-files.js
+          tar -tf "create-jazz-${VERSION}.tgz" > create.txt
+          grep -qx "package/bin/create-jazz.js" create.txt
+          grep -qx "package/dist/index.js" create.txt
+          rm -f wasm.txt tools.txt create.txt inspector-ui-files.js
+          # The RN receipt names tarballs by the absolute path they were packed
+          # to; consumers resolve them next to rn-packages.json.
+          node -e '
+            const fs = require("fs"), path = require("path");
+            const receipt = JSON.parse(fs.readFileSync("rn-packages.json", "utf8"));
+            for (const entry of receipt) entry.tarball = path.basename(entry.tarball);
+            fs.writeFileSync("rn-packages.json", JSON.stringify(receipt, null, 2) + "\n");'
+          sha256sum *.tgz > NPM-SHA256SUMS
+          cat NPM-SHA256SUMS
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-npm
+          path: ${{ runner.temp }}/npm/*
+          if-no-files-found: error

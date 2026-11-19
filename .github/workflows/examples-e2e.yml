@@ -27,6 +27,14 @@ name: Examples E2E
 on:
   pull_request:
     branches: [release]
+  # The release candidate gate (release-candidate.yml) tests the packages of
+  # the release-artifacts run it verified: no wait, no build.
+  workflow_call:
+    inputs:
+      artifacts_run_id:
+        description: "A release-artifacts.yml run (or the calling run) holding pkg-jazz-tools, pkg-jazz-wasm and pkg-jazz-napi for this commit."
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       variant:
@@ -39,7 +47,8 @@ on:
         type: string
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  # Called, github.workflow is the caller's: one group per calling run.
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}${{ inputs.artifacts_run_id && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 env:
@@ -51,16 +60,16 @@ jobs:
   prepare:
     # On PR events, only fire on the changesets release PR. Manual dispatch is
     # always allowed (handy for testing a variant in isolation).
-    if: ${{ github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/release' }}
+    if: ${{ inputs.artifacts_run_id != '' || github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/release' }}
     # Reusing the preview only waits and downloads, so it needs no build runner;
     # its timeout covers waiting for a preview that has just been dispatched.
-    runs-on: ${{ (github.ref == 'refs/heads/changeset-release/release' || github.head_ref == 'changeset-release/release' || (github.event_name == 'workflow_dispatch' && inputs.preview_run_id != '')) && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-16vcpu-ubuntu-2404' }}
-    timeout-minutes: ${{ (github.ref == 'refs/heads/changeset-release/release' || github.head_ref == 'changeset-release/release' || (github.event_name == 'workflow_dispatch' && inputs.preview_run_id != '')) && 70 || 30 }}
+    runs-on: ${{ (inputs.artifacts_run_id != '' || github.ref == 'refs/heads/changeset-release/release' || github.head_ref == 'changeset-release/release' || (github.event_name == 'workflow_dispatch' && inputs.preview_run_id != '')) && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-16vcpu-ubuntu-2404' }}
+    timeout-minutes: ${{ (inputs.artifacts_run_id != '' || github.ref == 'refs/heads/changeset-release/release' || github.head_ref == 'changeset-release/release' || (github.event_name == 'workflow_dispatch' && inputs.preview_run_id != '')) && 70 || 30 }}
     permissions:
       actions: read
       contents: read
     env:
-      REUSE_PREVIEW: ${{ github.ref == 'refs/heads/changeset-release/release' || github.head_ref == 'changeset-release/release' || (github.event_name == 'workflow_dispatch' && inputs.preview_run_id != '') }}
+      REUSE_PREVIEW: ${{ inputs.artifacts_run_id != '' || github.ref == 'refs/heads/changeset-release/release' || github.head_ref == 'changeset-release/release' || (github.event_name == 'workflow_dispatch' && inputs.preview_run_id != '') }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -128,7 +137,7 @@ jobs:
 
       - name: Wait for the release preview of this commit
         id: preview
-        if: env.REUSE_PREVIEW == 'true'
+        if: env.REUSE_PREVIEW == 'true' && inputs.artifacts_run_id == ''
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -137,30 +146,33 @@ jobs:
           PREVIEW_RUN_ID: ${{ inputs.preview_run_id }}
         run: node dev/scripts/await-release-preview.mjs
 
+      # Not actions/download-artifact: a GitHub artifact-service "Server Error"
+      # failed a release gate here once (RC 44567203253), and it doesn't retry.
       - name: Download the release preview's packages
         if: env.REUSE_PREVIEW == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: pkg-jazz-tools
-          path: packages/jazz-tools
-          run-id: ${{ steps.preview.outputs.run_id }}
-          github-token: ${{ github.token }}
-
-      - if: env.REUSE_PREVIEW == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: pkg-jazz-wasm
-          path: crates/jazz-wasm
-          run-id: ${{ steps.preview.outputs.run_id }}
-          github-token: ${{ github.token }}
-
-      - if: env.REUSE_PREVIEW == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: pkg-jazz-napi
-          path: crates/jazz-napi
-          run-id: ${{ steps.preview.outputs.run_id }}
-          github-token: ${{ github.token }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.artifacts_run_id || steps.preview.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          fetch() {
+            local name=$1 dest=$2 tmp
+            for attempt in 1 2 3 4 5; do
+              tmp=$(mktemp -d)
+              if gh run download "${RUN_ID}" -R "${GITHUB_REPOSITORY}" -n "${name}" -D "${tmp}"; then
+                cp -a "${tmp}/." "${dest}/"
+                return 0
+              fi
+              echo "::warning::download of ${name} failed (attempt ${attempt}); retrying"
+              sleep $((attempt * 5))
+            done
+            echo "::error::could not download ${name} from run ${RUN_ID}"
+            return 1
+          }
+          fetch pkg-jazz-tools packages/jazz-tools &
+          fetch pkg-jazz-wasm crates/jazz-wasm &
+          fetch pkg-jazz-napi crates/jazz-napi &
+          for job in $(jobs -p); do wait "${job}"; done
 
       - name: Pack workspace tarballs
         # Mirrors PACKAGES_TO_PACK in dev/examples-e2e/run.mjs. The harness picks
@@ -191,17 +203,19 @@ jobs:
         with:
           name: examples-e2e-build-state
           # Tarballs feed `--tarball-dir`; the NAPI binary is copied into each
-          # installed jazz-napi after its fingerprint is checked.
+          # installed jazz-napi after its fingerprint is checked. Only the
+          # runners' linux-x64 binary: a release's packages carry every
+          # platform's (about 195 MB), which every variant job downloaded.
           path: |
             _e2e-state/tarballs/**
-            crates/jazz-napi/*.node
+            crates/jazz-napi/jazz-napi.linux-x64-gnu.node
           if-no-files-found: error
           retention-days: 1
 
   e2e:
     needs: prepare
     name: E2E ${{ matrix.variant }}
-    if: ${{ github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/release' }}
+    if: ${{ inputs.artifacts_run_id != '' || github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/release' }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     strategy:
@@ -300,7 +314,7 @@ jobs:
   all-variants:
     name: Every variant ran
     needs: [prepare, e2e]
-    if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/release') }}
+    if: ${{ always() && (inputs.artifacts_run_id != '' || github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/release') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

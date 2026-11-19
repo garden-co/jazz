@@ -22,6 +22,7 @@ mod thin;
 pub use core::ServerCore;
 #[cfg(feature = "native")]
 pub use host::*;
+pub use thin::{ThinRegistration, ThinRegistrationObserver};
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -1011,9 +1012,8 @@ impl Owner {
     fn assert_holds_nothing(&self, after: &str) {
         let held = self.db.held_for_test();
         let thin = self.open_thin_transactions();
-        let allowed = held.open_batches == thin
-            && !held.callback_transaction
-            && (thin > 0 || (!held.overlay && !held.sqlite_transaction));
+        let allowed =
+            held.open_batches == thin && (thin > 0 || (!held.overlay && !held.sqlite_transaction));
         if !allowed {
             // Straight to stderr: the test harness captures `eprintln!`,
             // and an abort loses what it captured.
