@@ -432,9 +432,11 @@ jobs:
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         if: needs.resolve.outputs.release == 'true'
         with:
+          # Every file of the shipped artifacts, as release-publish.yml verifies
+          # them (release-maven is re-signed at publish, the mirror is pushed).
           subject-path: |
             out/release-server/*
-            out/release-npm/*.tgz
+            out/release-npm/*
             out/release-languages/*
-            out/release-swift/JazzFFI.xcframework.zip
+            out/release-swift/*
             out/manifest.json
