@@ -133,6 +133,7 @@ function assertCiSuiteUsesOnlySharedCorrectnessPartitions(model) {
     [
       'test "${WORKSPACE_RESULT}" = success\n' +
         'test "${STORAGE_COMPAT_RESULT}" = success\n' +
+        'test "${DURABLE_OBJECT_LIMITS_RESULT}" = success\n' +
         'test "${JAZZ_FFI_BINDINGS_RESULT}" = success\n' +
         'test "${CRATES_PACKAGE_RESULT}" = success\n' +
         'test "${KOTLIN_RESULT}" = success\n' +

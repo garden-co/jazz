@@ -100,6 +100,7 @@ const assertUsesBlacksmithRunner = (jobName, jobSource) => {
     "lint",
     "test-rust-workspace",
     "test-storage-compat",
+    "test-durable-object-limits",
     "test-ts",
     "test-react-native",
     "test-go",
@@ -189,6 +190,7 @@ const assertSuiteS3ConfigurationBoundary = (source) => {
     "lint",
     "test-rust-workspace",
     "test-storage-compat",
+    "test-durable-object-limits",
     "test-ts",
     "test-go",
     "test-go-ts-backend",
@@ -790,10 +792,11 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
   assert.match(aggregate, /if: always\(\)/);
   assert.match(
     aggregate,
-    /needs:\s*\[\s*test-rust-workspace,\s*test-storage-compat,\s*test-jazz-ffi-bindings,\s*test-crates-package,\s*test-kotlin,\s*test-kotlin-android,?\s*\]/,
+    /needs:\s*\[\s*test-rust-workspace,\s*test-storage-compat,\s*test-durable-object-limits,\s*test-jazz-ffi-bindings,\s*test-crates-package,\s*test-kotlin,\s*test-kotlin-android,?\s*\]/,
   );
   assert.match(aggregate, /test "\$\{WORKSPACE_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{STORAGE_COMPAT_RESULT\}" = success/);
+  assert.match(aggregate, /test "\$\{DURABLE_OBJECT_LIMITS_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{JAZZ_FFI_BINDINGS_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{CRATES_PACKAGE_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{KOTLIN_RESULT\}" = success/);
@@ -892,6 +895,7 @@ test("shared Rust cache writes are main and merge-group only while trusted PRs r
     "lint",
     "test-rust-workspace",
     "test-storage-compat",
+    "test-durable-object-limits",
     "test-ts",
     "test-go",
     "test-go-ts-backend",
@@ -2115,6 +2119,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
   for (const name of [
     "test-rust-workspace",
     "test-storage-compat",
+    "test-durable-object-limits",
     "test-ts",
     "test-react-native",
     "test-jazz-ffi-bindings",
@@ -2139,6 +2144,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     [
       "lint",
       "test-crates-package",
+      "test-durable-object-limits",
       "test-go",
       "test-go-ts-backend",
       "test-jazz-ffi-bindings",
