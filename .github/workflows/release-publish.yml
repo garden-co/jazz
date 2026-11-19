@@ -647,9 +647,16 @@ jobs:
           node-version-file: .nvmrc
       - run: node dev/scripts/check-lockstep-versions.mjs
 
+      # The release commit can predate --no-verify: take the script from the
+      # workflow's commit (it only drives cargo on the checked-out crates).
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: inputs.mode != 'publish'
+        with:
+          path: .release-tools
+          sparse-checkout: dev/scripts
       - name: Dry run (packaging only; crates-verify built them)
         if: inputs.mode != 'publish'
-        run: node dev/scripts/publish-crates.mjs --dry-run --no-verify
+        run: node .release-tools/dev/scripts/publish-crates.mjs --dry-run --no-verify
 
       - name: Plan auth per crate
         id: plan
