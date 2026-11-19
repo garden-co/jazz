@@ -33,10 +33,6 @@ name: Release publish
 # dev/RELEASE_RUNBOOK.md.
 
 on:
-  # TEMPORARY: registers the workflow so it can be dispatched on this branch. Removed before merge.
-  push:
-    branches: [ae/release-publish]
-    paths: [.github/workflows/release-publish.yml]
   workflow_dispatch:
     inputs:
       version:
