@@ -41,7 +41,7 @@ axum = { version = "0.8.9", optional = true, default-features = false, features 
   "ws",
 ] }
 jazz = { workspace = true, features = ["runtime"] }
-jazz-e2ee-client = { path = "../jazz-e2ee-client", optional = true }
+jazz-e2ee-client = { workspace = true, optional = true }
 jazz-native-transport.workspace = true
 base64 = "0.22"
 jazz-text.workspace = true
