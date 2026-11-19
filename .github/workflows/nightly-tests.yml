@@ -109,10 +109,39 @@ jobs:
       - name: Compile maintained benchmark APIs
         run: dev/gates/benchmark-smoke.sh --compile-ci
 
+  # Merge groups run jazz-tools' Durable Object suite on a wasm-opt -O1 host
+  # (same Rust, same fat LTO). This runs it on the -Oz host that ships, so an
+  # -Oz-only break (a wasm-opt miscompile, or the glue or reinstantiation
+  # interacting with optimised code) shows by the next morning, and
+  # build-jazz-packages.yml runs it again before every release.
+  durable-object-release-host:
+    name: Durable Object suite on the release (-Oz) host
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 45
+    container:
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-blacksmith
+        with:
+          sccache-s3: false
+      - name: Build correctness artifacts
+        run: node dev/gates/ensure-correctness-artifacts.mjs
+      - name: Build the release (-Oz) Durable Object host
+        run: pnpm --filter jazz-wasm build:durable-object
+      - name: Run jazz-tools' Durable Object suite on it
+        run: node dev/gates/run-ts-consumers.mjs --shard durable-objects
+
   report:
     name: Report nightly failures
     if: ${{ always() && github.event_name == 'schedule' }}
-    needs: [oracle-300, browser-soak, benchmark-api]
+    needs: [oracle-300, browser-soak, benchmark-api, durable-object-release-host]
     runs-on: ubuntu-latest
     permissions:
       contents: read

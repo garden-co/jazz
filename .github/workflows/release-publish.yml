@@ -1,0 +1,1011 @@
+name: Release publish
+
+# Publishes a Jazz release everywhere from prebuilt artifacts, behind one
+# approval of the `publish` environment. Nothing is built after the approval.
+#
+#   prepare (no approval, nothing public): resolve the release commit and the
+#     artifacts built for its tree; check every artifact; `cargo package`
+#     every crate; embed libjazz_ffi into the Go module and test it; attach
+#     every asset to the draft GitHub release.
+#   publish (one approval: every leg waits on `publish` at the same moment,
+#     so one review approves them all), in parallel:
+#     npm             the prebuilt tarballs, dependencies first
+#     crates.io       cargo publish in dependency order (already verified)
+#     Maven Central   the prebuilt jar/aar, signed, through the Portal API
+#     Go              push packages/jazz-go/v<version>
+#     Swift           push and tag garden-co/jazz-swift
+#     Inspector       stage and promote the prebuilt deployment (after npm)
+#   finalize: tag v<version> and publish the draft release, as Latest, last.
+#
+# Every leg skips what is already published, so "Re-run failed jobs" resumes
+# a partial publish. mode=dry-run (the default) does everything but publish:
+# `npm publish --dry-run`, `cargo publish --dry-run`, the Maven bundle signed
+# with a throwaway key (or, with maven-portal-dry-run, uploaded USER_MANAGED,
+# validated and dropped), the Go and Swift commits built but not pushed, and
+# the draft left alone. A timing table for every job ends each run.
+#
+# The artifacts come from release-artifacts.yml (a run whose release-manifest
+# has this commit's tree). Until that workflow lands, legacy-run-ids names
+# runs of the existing workflows that hold the same files, which are
+# repacked under the new names here; see dev/release-publish/resolve-artifacts.sh.
+#
+# It runs beside the existing publish workflows until it is proven; see
+# dev/RELEASE_RUNBOOK.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, e.g. 2.0.0-alpha.68 (tag v<version>)."
+        required: true
+        type: string
+      sha:
+        description: "Commit to publish: the release merge commit of the Version Packages PR. A dry run takes any commit at <version>."
+        required: true
+        type: string
+      mode:
+        description: "dry-run publishes nothing; publish waits for the publish environment's approval."
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - publish
+      maven-publishing-type:
+        description: "Central Portal publishingType: AUTOMATIC publishes once validated (waits for PUBLISHED); USER_MANAGED leaves it validated for Publish in the Portal."
+        required: true
+        default: AUTOMATIC
+        type: choice
+        options:
+          - AUTOMATIC
+          - USER_MANAGED
+      maven-portal-dry-run:
+        description: "Dry run only: upload the Maven bundle USER_MANAGED, wait for VALIDATED, then drop it. Needs the publish environment's approval (its Maven secrets)."
+        required: false
+        default: false
+        type: boolean
+      artifacts-run-id:
+        description: "A release-artifacts.yml run to take the artifacts from. Empty: the newest whose manifest matches the commit's tree."
+        required: false
+        type: string
+      legacy-run-ids:
+        description: "Until release-artifacts.yml exists: space-separated runs of the existing workflows holding the artifacts (preview release, attach-language-artifacts, swift-mirror, publish-jazz-kotlin dry runs)."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-publish-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  GH_REPO: ${{ github.repository }}
+  VERSION: ${{ inputs.version }}
+  SHA: ${{ inputs.sha }}
+  MODE: ${{ inputs.mode }}
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.repository_id }}
+  JAZZ_RN_CARGO_NDK_VERSION: 4.1.2
+  GO_VERSION: "1.23.4"
+  GO_SHA256: 6924efde5de86fe277676e929dc9917d466efa02fb934197bc2eba35d5680971
+  GO_MODULE: github.com/garden-co/jazz/packages/jazz-go/v2
+
+jobs:
+  # ---------------------------------------------------------------- prepare
+  resolve:
+    name: Resolve the release and its artifacts
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      mode: ${{ steps.artifacts.outputs.mode }}
+      run_id: ${{ steps.artifacts.outputs.run_id || github.run_id }}
+      source_sha: ${{ steps.artifacts.outputs.source_sha }}
+      tree: ${{ steps.artifacts.outputs.tree }}
+      inspector_run_id: ${{ steps.artifacts.outputs.inspector_run_id }}
+      legacy: ${{ steps.artifacts.outputs.legacy }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          sparse-checkout: |
+            dev/release-publish
+            dev/scripts
+
+      - name: Validate the inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${MODE}" = publish ]; then
+            pattern='^2\.0\.0-alpha\.[0-9]+$'
+          else
+            pattern='^2\.0\.0-alpha\.[0-9]+((\.[0-9]+)?-rc\.[0-9]+)?$'
+          fi
+          [[ "${VERSION}" =~ ${pattern} ]] || { echo "::error::version '${VERSION}' doesn't match ${pattern}"; exit 1; }
+          [[ "${SHA}" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a full commit SHA"; exit 1; }
+          at_sha=$(gh api "repos/${GH_REPO}/contents/packages/jazz-tools/package.json?ref=${SHA}" --jq .content | base64 -d | jq -r .version)
+          [ "${at_sha}" = "${VERSION}" ] || { echo "::error::${SHA} is jazz-tools ${at_sha}, not ${VERSION}"; exit 1; }
+          echo "Publishing ${VERSION} from ${SHA} (${MODE})"
+
+      # As "Publish jazz-tools alpha": only a merged Version Packages PR's
+      # release commit publishes, and only once the release tests passed on
+      # the PR head.
+      - name: Require a tested release commit
+        if: inputs.mode == 'publish'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const sha = process.env.SHA;
+            const branch = await github.rest.repos.getBranch({ owner, repo, branch: "release" });
+            if (branch.data.commit.sha !== sha)
+              return core.setFailed(`release is at ${branch.data.commit.sha}, not ${sha}`);
+            const pulls = await github.request("GET /repos/{owner}/{repo}/commits/{commit_sha}/pulls", { owner, repo, commit_sha: sha });
+            let pr = pulls.data.find((p) => p.merged_at && p.base.ref === "release" && p.merge_commit_sha === sha && p.head.ref === "changeset-release/release");
+            if (!pr) {
+              const closed = await github.paginate(github.rest.pulls.list, { owner, repo, state: "closed", base: "release", sort: "updated", direction: "desc", per_page: 100 });
+              pr = closed.find((p) => p.merged_at && p.merge_commit_sha === sha && p.head.ref === "changeset-release/release");
+            }
+            if (!pr) return core.setFailed(`${sha} is not the merge of a changeset-release/release PR`);
+            const { evaluateReleaseTestGate } = await import(`${process.env.GITHUB_WORKSPACE}/dev/scripts/release-test-gate.mjs`);
+            const { ok, lines } = await evaluateReleaseTestGate({ github, owner, repo, sha, headSha: pr.head.sha, headRef: pr.head.ref });
+            for (const line of lines) core.info(line);
+            if (!ok) core.setFailed(`Release tests have not passed on PR #${pr.number}'s head ${pr.head.sha}`);
+
+      - name: Find the artifacts
+        id: artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACTS_RUN_ID: ${{ inputs.artifacts-run-id }}
+          LEGACY_RUN_IDS: ${{ inputs.legacy-run-ids }}
+        run: bash dev/release-publish/resolve-artifacts.sh
+
+  # Legacy only: the existing workflows' artifacts, repacked under the
+  # release-artifacts.yml names (and the npm tarballs packed, exactly as
+  # "Publish jazz-tools alpha" packs them) into this run.
+  repack:
+    name: Repack legacy artifacts
+    needs: resolve
+    if: needs.resolve.outputs.mode == 'legacy'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      LEGACY: ${{ needs.resolve.outputs.legacy }}
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.resolve.outputs.source_sha }}
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.14.0
+          run_install: false
+
+      - name: Write cache scope
+        run: echo "${CACHE_SCOPE_REPOSITORY_ID}" > .github-cache-scope
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .github-cache-scope
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Download the legacy artifacts
+        run: |
+          set -euo pipefail
+          get() { # <name> <dest>: extracted over <dest> (gh refuses to overwrite)
+            local tmp="${RUNNER_TEMP}/dl/$1"
+            gh run download "$(jq -r --arg k "$1" '.[$k]' <<<"${LEGACY}")" -n "$1" -D "${tmp}"
+            mkdir -p "$2" && cp -a "${tmp}/." "$2/"
+          }
+          get pkg-jazz-tools packages/jazz-tools
+          get pkg-jazz-wasm crates/jazz-wasm
+          get pkg-jazz-napi crates/jazz-napi
+          get pkg-jazz-rn crates/jazz-rn
+          get pkg-create-jazz packages/create-jazz
+          mkdir -p out/server out/languages out/maven out/swift out/swift-mirror out/npm
+          get jazz-tools-linux-x64 out/server
+          get jazz-tools-linux-arm64 out/server
+          (cd out/server && sha256sum jazz-tools-linux-x64 jazz-tools-linux-arm64 > SHA256SUMS)
+          get language-artifacts out/languages
+          get jazz-kotlin-maven-dry-run out/maven
+          get JazzFFI.xcframework out/swift
+          get jazz-swift-mirror out/swift-mirror
+
+      - name: Pack the npm tarballs
+        run: |
+          set -euo pipefail
+          (cd crates/jazz-napi && pnpm exec napi version --npm-dir npm)
+          node -e 'const fs=require("fs");const p="crates/jazz-napi/package.json";const pkg=JSON.parse(fs.readFileSync(p,"utf8"));const deps=[];for(const e of fs.readdirSync("crates/jazz-napi/npm",{withFileTypes:true})){if(!e.isDirectory())continue;deps.push([JSON.parse(fs.readFileSync(`crates/jazz-napi/npm/${e.name}/package.json`,"utf8")).name,pkg.version]);}deps.sort((a,b)=>a[0].localeCompare(b[0]));pkg.optionalDependencies=Object.fromEntries(deps);fs.writeFileSync(p,`${JSON.stringify(pkg,null,2)}\n`);'
+          pnpm --filter inspector run build:embedded
+          pnpm --filter jazz-tools run stage:inspector-overlay
+          export JAZZ_NATIVE_RELAY_SOURCE_REVISION="${SOURCE_SHA}"
+          export JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}"
+          node dev/artifacts/rn-packages.mjs verify
+          out="${PWD}/out/npm"
+          for pkg in jazz-wasm jazz-napi jazz-tools create-jazz; do
+            pnpm --filter "${pkg}" pack --pack-destination "${out}"
+          done
+          for dir in crates/jazz-napi/npm/*/; do
+            npm pack "${dir}" --pack-destination "${out}"
+          done
+          node dev/artifacts/rn-packages.mjs pack "${out}"
+          rm -f "${out}/rn-packages.json"
+          node dev/artifacts/verify-packed-napi.mjs "${out}/jazz-napi-${VERSION}.tgz"
+          tar -tzf "${out}/jazz-tools-${VERSION}.tgz" > "${RUNNER_TEMP}/tools-files.txt"
+          grep -qx "package/dist/dev/inspector-overlay/embedded/embedded.html" "${RUNNER_TEMP}/tools-files.txt"
+          grep -qx "package/dist/dev/inspector-overlay/embedded/backend.html" "${RUNNER_TEMP}/tools-files.txt"
+          (cd "${out}" && sha256sum *.tgz > NPM-SHA256SUMS && cat NPM-SHA256SUMS)
+
+      - name: Manifest
+        env:
+          TREE: ${{ needs.resolve.outputs.tree }}
+        run: |
+          mkdir -p out/manifest
+          jq -n --arg sha "${SOURCE_SHA}" --arg tree "${TREE}" --arg version "${VERSION}" \
+            --arg run "${GITHUB_RUN_ID}" --argjson legacy "${LEGACY}" \
+            '{sha: $sha, source_sha: $sha, tree: $tree, version: $version, run_id: $run, legacy: $legacy}' \
+            > out/manifest/manifest.json
+          cat out/manifest/manifest.json
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: release-npm, path: out/npm, if-no-files-found: error }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: release-server, path: out/server, if-no-files-found: error }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: release-languages, path: out/languages, if-no-files-found: error }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: release-maven, path: out/maven, if-no-files-found: error }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: release-swift, path: out/swift, if-no-files-found: error }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          {
+            name: release-swift-mirror,
+            path: out/swift-mirror,
+            if-no-files-found: error,
+            include-hidden-files: true,
+          }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: release-manifest, path: out/manifest, if-no-files-found: error }
+
+  # Every artifact, checked before anything can be approved.
+  checks:
+    name: Check the artifacts
+    needs: [resolve, repack]
+    if: ${{ !cancelled() && needs.resolve.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.repack.result) }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+      attestations: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN: ${{ needs.resolve.outputs.run_id }}
+      TREE: ${{ needs.resolve.outputs.tree }}
+      SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          sparse-checkout: |
+            dev/release-publish
+            dev/artifacts
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+
+      - name: Download
+        run: |
+          set -euo pipefail
+          for name in release-npm release-server release-languages release-maven release-swift release-swift-mirror; do
+            gh run download "${RUN}" -n "${name}" -D "art/${name}"
+          done
+
+      - name: npm tarballs
+        run: node dev/release-publish/npm-publish.mjs art/release-npm "${VERSION}" --check
+
+      - name: Server binaries
+        working-directory: art/release-server
+        run: |
+          set -euo pipefail
+          sha256sum --strict -c SHA256SUMS
+          for f in jazz-tools-linux-x64 jazz-tools-linux-arm64; do grep -q " ${f}\$" SHA256SUMS; done
+
+      - name: Language artifacts
+        working-directory: art/release-languages
+        run: |
+          set -euo pipefail
+          sha256sum --strict -c SHA256SUMS-languages
+          for platform in linux-x86_64 linux-aarch64 darwin-aarch64 darwin-x86_64 windows-x86_64; do
+            grep -q " libjazz_ffi-${platform}.tar.gz\$" SHA256SUMS-languages
+          done
+          for f in jazz-ffi-bindings.tar.gz libjazz_ffi-source.txt "jazz-kotlin-${VERSION}.jar" "jazz-kotlin-android-${VERSION}.aar"; do
+            grep -q " ${f}\$" SHA256SUMS-languages || { echo "::error::no ${f}"; exit 1; }
+          done
+          built=$(tr -d '[:space:]' < libjazz_ffi-source.txt)
+          built_tree=$(gh api "repos/${GH_REPO}/git/commits/${built}" --jq .tree.sha)
+          [ "${built_tree}" = "${TREE}" ] || [ "${built}" = "${SOURCE_SHA}" ] ||
+            { echo "::error::libjazz_ffi was built from ${built} (tree ${built_tree}), not tree ${TREE}"; exit 1; }
+
+      - name: Maven tree (bundled with a throwaway key)
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$(mktemp -d)"
+          gpg --batch --pinentry-mode loopback --passphrase check --quick-gen-key "check <check@example.invalid>" rsa2048 sign 1d
+          MAVEN_SIGNING_KEY="$(gpg --batch --pinentry-mode loopback --passphrase check --armor --export-secret-keys)" \
+          MAVEN_SIGNING_KEY_PASSWORD=check \
+            node dev/release-publish/maven-central.mjs bundle art/release-maven "${VERSION}" "${RUNNER_TEMP}/bundle.zip"
+          unzip -l "${RUNNER_TEMP}/bundle.zip"
+
+      - name: Swift
+        run: |
+          set -euo pipefail
+          checksum=$(cat art/release-swift/JazzFFI.xcframework.zip.checksum)
+          [ "$(sha256sum art/release-swift/JazzFFI.xcframework.zip | cut -d' ' -f1)" = "${checksum}" ] ||
+            { echo "::error::JazzFFI.xcframework.zip doesn't match its checksum"; exit 1; }
+          url="https://github.com/${GH_REPO}/releases/download/v${VERSION}/JazzFFI.xcframework.zip"
+          grep -qF "${url}" art/release-swift-mirror/Package.swift || { echo "::error::the mirror doesn't point at ${url}"; exit 1; }
+          grep -qF "${checksum}" art/release-swift-mirror/Package.swift || { echo "::error::the mirror doesn't pin ${checksum}"; exit 1; }
+
+      # release-artifacts.yml attests every file it builds for a release.
+      - name: Build provenance
+        if: needs.resolve.outputs.mode == 'release-artifacts'
+        run: |
+          set -euo pipefail
+          find art -type f ! -path '*/release-swift-mirror/*' ! -path '*/release-maven/*' -print0 |
+            while IFS= read -r -d '' f; do
+              gh attestation verify "${f}" -R "${GH_REPO}" \
+                --signer-workflow "${GH_REPO}/.github/workflows/release-artifacts.yml" >/dev/null ||
+                { echo "::error::${f} has no attestation from release-artifacts.yml"; exit 1; }
+            done
+
+  # `cargo package` every crate together, before any token exists (the
+  # slow part of today's crates.io publish).
+  crates-verify:
+    name: Verify the crates
+    needs: resolve
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.sha }}
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+      - run: node dev/scripts/check-lockstep-versions.mjs
+      - run: node dev/scripts/publish-crates.mjs --verify
+      - run: node dev/scripts/publish-crates.mjs --list
+
+  # The Go module's tag commit: v<version>'s commit plus the embedded
+  # libraries, tested as the Go proxy would serve it (go-module-tag.yml's
+  # checks), and handed to the go job as a git bundle.
+  go-prepare:
+    name: Embed the core in the Go module
+    needs: [resolve, repack]
+    if: ${{ !cancelled() && needs.resolve.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.repack.result) }}
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      commit: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+
+      - name: Take the embed script from the workflow's commit
+        run: |
+          git fetch -q --depth=1 origin "${GITHUB_SHA}"
+          git show "${GITHUB_SHA}:dev/scripts/go-embed-ffi-libraries.sh" > dev/scripts/go-embed-ffi-libraries.sh
+
+      - name: Install Go
+        run: |
+          curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o "${RUNNER_TEMP}/go.tgz"
+          echo "${GO_SHA256}  ${RUNNER_TEMP}/go.tgz" | sha256sum -c -
+          tar -C "${RUNNER_TEMP}" -xzf "${RUNNER_TEMP}/go.tgz"
+          echo "${RUNNER_TEMP}/go/bin" >> "${GITHUB_PATH}"
+
+      - name: Download the libjazz_ffi archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ needs.resolve.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          gh run download "${RUN}" -n release-languages -D "${RUNNER_TEMP}/languages"
+          (cd "${RUNNER_TEMP}/languages" && sha256sum --strict -c SHA256SUMS-languages)
+          mkdir -p "${RUNNER_TEMP}/art"
+          cp "${RUNNER_TEMP}"/languages/libjazz_ffi-*.tar.gz "${RUNNER_TEMP}/art/"
+
+      # Fixed author and dates: a re-run makes the same commit.
+      - name: Embed and commit
+        id: commit
+        run: |
+          set -euo pipefail
+          dev/scripts/go-embed-ffi-libraries.sh "${RUNNER_TEMP}/art"
+          git add -f packages/jazz-go/lib packages/jazz-go/embed_*.go
+          date="$(git show -s --format=%cI HEAD)"
+          GIT_AUTHOR_DATE="${date}" GIT_COMMITTER_DATE="${date}" \
+            git -c user.name="jazz-release" -c user.email="release@jazz.tools" \
+            commit -q -m "jazz-go ${VERSION}: embed libjazz_ffi for the module tag" \
+            -m "Release-only child of v${VERSION} (${SHA}); main carries no binaries."
+          echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+          git bundle create "${RUNNER_TEMP}/jazz-go.bundle" "${SHA}..HEAD"
+
+      - name: Verify the module
+        run: |
+          set -euo pipefail
+          proxy="${RUNNER_TEMP}/proxy"
+          python3 - "${proxy}" "v${VERSION}" <<'PY'
+          import json, os, sys, zipfile
+          proxy, ver = sys.argv[1], sys.argv[2]
+          mod = os.environ["GO_MODULE"]
+          src = "packages/jazz-go"
+          d = os.path.join(proxy, mod, "@v")
+          os.makedirs(d)
+          open(os.path.join(d, "list"), "w").write(ver + "\n")
+          open(os.path.join(d, ver + ".info"), "w").write(json.dumps({"Version": ver}))
+          open(os.path.join(d, ver + ".mod"), "w").write(open(os.path.join(src, "go.mod")).read())
+          path = os.path.join(d, ver + ".zip")
+          with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+              for root, _, files in os.walk(src):
+                  for f in files:
+                      full = os.path.join(root, f)
+                      z.write(full, f"{mod}@{ver}/" + os.path.relpath(full, src))
+          size = os.path.getsize(path)
+          unpacked = sum(i.file_size for i in zipfile.ZipFile(path).infolist())
+          print(f"module zip: {size / 2**20:.1f} MiB ({unpacked / 2**20:.1f} MiB unpacked)")
+          if size > 500 * 2**20 or unpacked > 500 * 2**20:
+              sys.exit("the module exceeds Go's 500 MiB limit")
+          PY
+          app="${RUNNER_TEMP}/app"
+          mkdir -p "${app}/jazzapp"
+          cp examples/stage-plan/apps/go-cli/jazzapp/jazz_app.go "${app}/jazzapp/"
+          cat > "${app}/main.go" <<'GO'
+          package main
+
+          import (
+          	"context"
+          	"fmt"
+          	"log"
+
+          	jazz "github.com/garden-co/jazz/packages/jazz-go/v2"
+
+          	"example.com/app/jazzapp"
+          )
+
+          func main() {
+          	ctx := context.Background()
+          	db, err := jazzapp.Open(ctx, jazz.Config{Storage: jazz.StorageMemory})
+          	if err != nil {
+          		log.Fatal(err)
+          	}
+          	defer db.Close()
+          	if _, err := jazzapp.Shows.Insert(ctx, db, jazzapp.NewShow{Name: "Tag check", Venue: "-", Date: "-", Doors: "-", ChiefAccount: "00000000-0000-0000-0000-000000000000"}); err != nil {
+          		log.Fatal(err)
+          	}
+          	shows, err := jazzapp.Shows.Query().All(ctx, db)
+          	if err != nil || len(shows) != 1 {
+          		log.Fatalf("read back: %v %v", shows, err)
+          	}
+          	fmt.Println("module works")
+          }
+          GO
+          printf 'module example.com/app\n\ngo 1.22\n' > "${app}/go.mod"
+          cd "${app}"
+          export GOPROXY="file://${proxy},https://proxy.golang.org" GOFLAGS=-mod=mod GONOSUMDB=github.com/garden-co GOSUMDB=off
+          go get "${GO_MODULE}@v${VERSION}"
+          CGO_ENABLED=0 go build -o app .
+          cd / && env -u JAZZ_FFI_LIBRARY "${app}/app"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-go-bundle
+          path: ${{ runner.temp }}/jazz-go.bundle
+          if-no-files-found: error
+
+  # Every release asset on the draft before the approval: invisible until
+  # finalize publishes it. Only a draft's assets are ever replaced.
+  draft:
+    name: Attach the assets to the draft release
+    needs: [resolve, checks]
+    if: ${{ !cancelled() && needs.checks.result == 'success' }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN: ${{ needs.resolve.outputs.run_id }}
+    steps:
+      - name: Download
+        run: |
+          set -euo pipefail
+          for name in release-server release-languages release-swift; do
+            gh run download "${RUN}" -n "${name}" -D "art/${name}"
+          done
+          mkdir -p assets
+          cp art/release-server/jazz-tools-linux-x64 art/release-server/jazz-tools-linux-arm64 art/release-server/SHA256SUMS assets/
+          cp art/release-languages/* assets/
+          cp art/release-swift/JazzFFI.xcframework.zip assets/
+          ls -la assets
+
+      - name: Attach
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          if ! state=$(gh release view "${TAG}" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "${MODE}" = publish ]; then
+              echo "::error::No draft for ${TAG}. Create it with the notes: gh workflow run github-release.yml -f version=${VERSION} -F notes=@notes.md"
+              exit 1
+            fi
+            echo "::notice::Dry run: no draft for ${TAG}; would attach: $(ls assets | tr '\n' ' ')"
+            exit 0
+          fi
+          if [ "${state}" != true ]; then
+            # A re-run after finalize: the published release must hold exactly these files.
+            gh release download "${TAG}" -D published -p '*'
+            for f in assets/*; do cmp "${f}" "published/$(basename "${f}")"; done
+            echo "${TAG} is published with these assets already."
+            exit 0
+          fi
+          if [ "${MODE}" != publish ]; then
+            echo "::notice::Dry run: ${TAG}'s draft exists; would attach: $(ls assets | tr '\n' ' ')"
+            exit 0
+          fi
+          gh release upload "${TAG}" assets/* --clobber
+          gh release view "${TAG}" --json assets --jq '.assets[].name'
+
+  # The single point every leg waits on: they all reach the `publish`
+  # environment at the same moment, so one review approves them all.
+  ready:
+    name: Ready to publish
+    needs: [resolve, checks, crates-verify, go-prepare, draft]
+    if: ${{ !cancelled() && needs.checks.result == 'success' && needs.crates-verify.result == 'success' && needs.go-prepare.result == 'success' && needs.draft.result == 'success' }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 2
+    steps:
+      - run: echo "Ready to publish ${VERSION} from ${SHA} (${MODE})"
+
+  # ---------------------------------------------------------------- publish
+  npm:
+    name: npm
+    needs: [resolve, ready]
+    if: ${{ !cancelled() && needs.ready.result == 'success' }}
+    # npm trusted publishing accepts only GitHub-hosted runners.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: ${{ inputs.mode == 'publish' && 'publish' || '' }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          sparse-checkout: |
+            dev/release-publish
+            dev/artifacts
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.resolve.outputs.run_id }}
+          name: release-npm
+          path: npm
+      - name: Require npm with trusted publishing
+        run: |
+          node -e 'const [a,b,c]=process.argv[1].split(".").map(Number);if(a<11||(a===11&&(b<5||(b===5&&c<1)))){console.error(`npm ${process.argv[1]} cannot use trusted publishing`);process.exit(1);}' "$(npm --version)"
+      # npm's OIDC credentials can't move dist-tags: never publish an older version as latest.
+      - name: Refuse to move latest back
+        run: node --input-type=module -e 'const { checkLatest } = await import("./dev/artifacts/latest-guard.mjs"); checkLatest(process.env.VERSION);'
+      - name: Publish
+        run: node dev/release-publish/npm-publish.mjs npm "${VERSION}" ${{ inputs.mode == 'publish' && ' ' || '--dry-run' }}
+
+  crates:
+    name: crates.io
+    needs: [resolve, ready]
+    if: ${{ !cancelled() && needs.ready.result == 'success' }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 60
+    environment: ${{ inputs.mode == 'publish' && 'publish' || '' }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.sha }}
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+      - run: node dev/scripts/check-lockstep-versions.mjs
+
+      # The release commit can predate --no-verify: take the script from the
+      # workflow's commit (it only drives cargo on the checked-out crates).
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: inputs.mode != 'publish'
+        with:
+          path: .release-tools
+          sparse-checkout: dev/scripts
+      - name: Dry run (packaging only; crates-verify built them)
+        if: inputs.mode != 'publish'
+        run: node .release-tools/dev/scripts/publish-crates.mjs --dry-run --no-verify
+
+      - name: Plan auth per crate
+        id: plan
+        if: inputs.mode == 'publish'
+        env:
+          CRATES_IO_BOOTSTRAP_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
+        run: node dev/scripts/publish-crates.mjs --plan
+      - name: Publish new crates, up to the first that needs OIDC
+        if: inputs.mode == 'publish'
+        env:
+          CRATES_IO_BOOTSTRAP_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
+        run: node dev/scripts/publish-crates.mjs --publish --stop-before-oidc
+      - name: Get a crates.io token (trusted publishing)
+        id: crates-io-auth
+        if: inputs.mode == 'publish' && steps.plan.outputs.needs_oidc == 'true'
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+      - name: Publish the rest in dependency order
+        if: inputs.mode == 'publish'
+        env:
+          CRATES_IO_OIDC_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+          CRATES_IO_BOOTSTRAP_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
+        run: node dev/scripts/publish-crates.mjs --publish
+
+  maven:
+    name: Maven Central
+    needs: [resolve, ready]
+    if: ${{ !cancelled() && needs.ready.result == 'success' }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 75
+    environment: ${{ (inputs.mode == 'publish' || inputs.maven-portal-dry-run) && 'publish' || '' }}
+    permissions:
+      actions: read
+      contents: read
+    env:
+      PORTAL: ${{ inputs.mode == 'publish' || inputs.maven-portal-dry-run }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          sparse-checkout: dev/release-publish
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.resolve.outputs.run_id }}
+          name: release-maven
+          path: maven
+
+      - name: Throwaway signing key (dry run)
+        if: env.PORTAL != 'true'
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$(mktemp -d)"
+          gpg --batch --pinentry-mode loopback --passphrase dry-run --quick-gen-key "Jazz dry run <dry-run@example.invalid>" rsa4096 sign 1d
+          {
+            echo "MAVEN_SIGNING_KEY<<EOF_KEY"
+            gpg --batch --pinentry-mode loopback --passphrase dry-run --armor --export-secret-keys
+            echo "EOF_KEY"
+            echo "MAVEN_SIGNING_KEY_PASSWORD=dry-run"
+          } >> "${GITHUB_ENV}"
+
+      - name: Sign and bundle
+        env:
+          REAL_KEY: ${{ env.PORTAL == 'true' && secrets.MAVEN_SIGNING_KEY || '' }}
+          REAL_PASSWORD: ${{ env.PORTAL == 'true' && secrets.MAVEN_SIGNING_KEY_PASSWORD || '' }}
+        run: |
+          set -euo pipefail
+          if [ "${PORTAL}" = true ]; then
+            export MAVEN_SIGNING_KEY="${REAL_KEY}" MAVEN_SIGNING_KEY_PASSWORD="${REAL_PASSWORD}"
+          fi
+          node dev/release-publish/maven-central.mjs bundle maven "${VERSION}" "${RUNNER_TEMP}/bundle.zip"
+          ls -l "${RUNNER_TEMP}/bundle.zip"
+
+      - name: Upload to the Central Portal
+        if: env.PORTAL == 'true'
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          TYPE: ${{ inputs.mode == 'publish' && inputs.maven-publishing-type || 'USER_MANAGED' }}
+          DROP: ${{ inputs.mode != 'publish' && '--drop' || '' }}
+        run: node dev/release-publish/maven-central.mjs upload "${RUNNER_TEMP}/bundle.zip" "${VERSION}" "${TYPE}" ${DROP}
+
+  go:
+    name: Go module tag
+    needs: [resolve, ready, go-prepare]
+    if: ${{ !cancelled() && needs.ready.result == 'success' }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    environment: ${{ inputs.mode == 'publish' && 'publish' || '' }}
+    permissions:
+      contents: write
+    env:
+      COMMIT: ${{ needs.go-prepare.outputs.commit }}
+      GO_TAG: packages/jazz-go/v${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 1
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-go-bundle
+          path: ${{ runner.temp }}
+      - name: Push the tag
+        run: |
+          set -euo pipefail
+          git fetch -q "${RUNNER_TEMP}/jazz-go.bundle" "${COMMIT}"
+          test "$(git rev-parse "${COMMIT}^")" = "${SHA}" || { echo "::error::${COMMIT} isn't a child of ${SHA}"; exit 1; }
+          if git diff --name-only "${COMMIT}^" "${COMMIT}" | grep -Ev '^packages/jazz-go/(lib/.+|embed_[a-z0-9]+_[a-z0-9]+\.go)$'; then
+            echo "::error::the commit touches more than packages/jazz-go/lib/ and embed_*.go"
+            exit 1
+          fi
+          existing=$(git ls-remote --tags origin "refs/tags/${GO_TAG}" | cut -f1)
+          if [ -n "${existing}" ]; then
+            git fetch -q --depth=2 origin "refs/tags/${GO_TAG}"
+            if [ "$(git rev-parse FETCH_HEAD^{tree})" = "$(git rev-parse "${COMMIT}^{tree}")" ] &&
+               [ "$(git rev-parse FETCH_HEAD^)" = "${SHA}" ]; then
+              echo "${GO_TAG} already points at this content; nothing to do."
+              exit 0
+            fi
+            echo "::error::${GO_TAG} already exists at ${existing}, with other content: tags are never moved"
+            exit 1
+          fi
+          if [ "${MODE}" != publish ]; then
+            echo "Dry run: would push ${GO_TAG} -> ${COMMIT}"
+            exit 0
+          fi
+          git push origin "${COMMIT}:refs/tags/${GO_TAG}"
+          echo "Pushed ${GO_TAG} -> ${COMMIT}"
+
+  swift:
+    name: Swift mirror
+    needs: [resolve, ready]
+    if: ${{ !cancelled() && needs.ready.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: ${{ inputs.mode == 'publish' && 'publish' || '' }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      # A token for garden-co/jazz-swift alone (contents: write), minted per
+      # run by the jazz-swift-mirror GitHub App.
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        if: inputs.mode == 'publish'
+        id: mirror-token
+        with:
+          client-id: ${{ secrets.JAZZ_SWIFT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.JAZZ_SWIFT_APP_PRIVATE_KEY }}
+          owner: garden-co
+          repositories: jazz-swift
+          permission-contents: write
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.resolve.outputs.run_id }}
+          name: release-swift-mirror
+          path: jazz-swift
+      - name: Push and tag the mirror
+        env:
+          MIRROR_TOKEN: ${{ steps.mirror-token.outputs.token }}
+          SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${MIRROR_TOKEN}" ]; then
+            git config --global credential.helper '!f() { echo username=x-access-token; echo "password=$MIRROR_TOKEN"; }; f'
+          fi
+          git clone -q https://github.com/garden-co/jazz-swift.git mirror
+          cd mirror
+          git rm -rq --ignore-unmatch . && cp -R ../jazz-swift/. .
+          git add -A
+          tree=$(git write-tree)
+          if git rev-parse -q --verify "refs/tags/${VERSION}" >/dev/null; then
+            if [ "$(git rev-parse "refs/tags/${VERSION}^{tree}")" = "${tree}" ]; then
+              echo "jazz-swift ${VERSION} is already this tree; nothing to do."
+              exit 0
+            fi
+            echo "::error::garden-co/jazz-swift has tag ${VERSION} with other content: SwiftPM pins it, never move it"
+            exit 1
+          fi
+          git -c user.name="jazz-release-bot" -c user.email="jazz-release-bot@users.noreply.github.com" \
+            commit -qm "Jazz for Swift ${VERSION} (garden-co/jazz@${SHA}, v${VERSION})"
+          git tag "${VERSION}"
+          git show --stat --oneline HEAD | head -20
+          if [ "${MODE}" != publish ]; then
+            echo "Dry run: would push main and tag ${VERSION} to garden-co/jazz-swift"
+            exit 0
+          fi
+          git push origin HEAD:main "refs/tags/${VERSION}"
+
+  inspector-preflight:
+    name: Check Inspector Vercel access
+    needs: [resolve, ready]
+    if: ${{ !cancelled() && needs.ready.result == 'success' }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_INSPECTOR_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_INSPECTOR_PROJECT_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_INSPECTOR_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          sparse-checkout: dev/scripts
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+      - run: node dev/scripts/promote-inspector-deployment.mjs preflight
+
+  # After npm, as today: the Inspector deploys the exact prebuilt bytes.
+  inspector-stage:
+    name: Stage Inspector production
+    needs: [resolve, npm, inspector-preflight]
+    if: ${{ !cancelled() && inputs.mode == 'publish' && needs.npm.result == 'success' && needs.inspector-preflight.result == 'success' }}
+    uses: ./.github/workflows/stage-inspector-production.yml
+    permissions:
+      actions: read
+      contents: read
+    with:
+      artifact-run-id: ${{ needs.resolve.outputs.inspector_run_id }}
+      source-sha: ${{ inputs.sha }}
+      source-branch: release
+    secrets: inherit
+
+  inspector-promote:
+    name: Promote Inspector production
+    needs: [inspector-stage]
+    if: ${{ !cancelled() && needs.inspector-stage.result == 'success' }}
+    uses: ./.github/workflows/promote-inspector-production.yml
+    with:
+      deploy-sha: ${{ inputs.sha }}
+      deployment-url: ${{ needs.inspector-stage.outputs.deployment-url }}
+    secrets: inherit
+
+  # --------------------------------------------------------------- finalize
+  finalize:
+    name: Publish the GitHub release
+    needs: [resolve, npm, crates, maven, go, swift, inspector-preflight, inspector-promote]
+    if: >-
+      ${{ !cancelled() &&
+          needs.npm.result == 'success' && needs.crates.result == 'success' &&
+          needs.maven.result == 'success' && needs.go.result == 'success' &&
+          needs.swift.result == 'success' && needs.inspector-preflight.result == 'success' &&
+          (needs.inspector-promote.result == 'success' || inputs.mode != 'publish') }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: v${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 1
+
+      - name: Tag v${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          existing=$(git ls-remote --tags origin "refs/tags/${TAG}" "refs/tags/${TAG}^{}" | awk -v t="${TAG}" '$2=="refs/tags/" t "^{}"{p=$1} $2=="refs/tags/" t{d=$1} END{print p?p:d}')
+          if [ -n "${existing}" ]; then
+            [ "${existing}" = "${SHA}" ] || { echo "::error::${TAG} points at ${existing}, not ${SHA}"; exit 1; }
+            echo "${TAG} already points at ${SHA}."
+          elif [ "${MODE}" = publish ]; then
+            git push origin "${SHA}:refs/tags/${TAG}"
+          else
+            echo "Dry run: would push ${TAG} -> ${SHA}"
+          fi
+
+      - name: Publish the draft as Latest
+        run: |
+          set -euo pipefail
+          required=(jazz-tools-linux-x64 jazz-tools-linux-arm64 SHA256SUMS SHA256SUMS-languages libjazz_ffi-source.txt
+            jazz-ffi-bindings.tar.gz "jazz-kotlin-${VERSION}.jar" "jazz-kotlin-android-${VERSION}.aar" JazzFFI.xcframework.zip
+            libjazz_ffi-linux-x86_64.tar.gz libjazz_ffi-linux-aarch64.tar.gz libjazz_ffi-darwin-aarch64.tar.gz
+            libjazz_ffi-darwin-x86_64.tar.gz libjazz_ffi-windows-x86_64.tar.gz)
+          if ! release=$(gh release view "${TAG}" --json isDraft,assets 2>/dev/null); then
+            [ "${MODE}" != publish ] && { echo "Dry run: no draft ${TAG}; would publish it with ${required[*]}"; exit 0; }
+            echo "::error::No release ${TAG}"; exit 1
+          fi
+          assets=$(jq -r '.assets[].name' <<<"${release}")
+          for asset in "${required[@]}"; do
+            grep -qx "${asset}" <<<"${assets}" || { [ "${MODE}" != publish ] && echo "Dry run: ${TAG} lacks ${asset}" && continue; echo "::error::${TAG} lacks ${asset}"; exit 1; }
+          done
+          if [ "$(jq -r .isDraft <<<"${release}")" != true ]; then
+            echo "${TAG} is already published."
+          elif [ "${MODE}" = publish ]; then
+            gh release edit "${TAG}" --draft=false --prerelease=false --latest
+          else
+            echo "Dry run: would publish the draft ${TAG} as Latest"
+            exit 0
+          fi
+          # SwiftPM downloads the XCFramework by URL and pins its checksum.
+          curl -sSfL -o xcf.zip "https://github.com/${GH_REPO}/releases/download/${TAG}/JazzFFI.xcframework.zip"
+          gh release view "${TAG}" --json url --jq '"Published: " + .url'
+
+  # How long each leg took: the run's summary.
+  timings:
+    name: Timings
+    needs:
+      [
+        resolve,
+        repack,
+        checks,
+        crates-verify,
+        go-prepare,
+        draft,
+        ready,
+        npm,
+        crates,
+        maven,
+        go,
+        swift,
+        inspector-preflight,
+        inspector-stage,
+        inspector-promote,
+        finalize,
+      ]
+    if: always()
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Job timings
+        run: |
+          set -euo pipefail
+          gh api "repos/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100" > jobs.json
+          ready=$(jq -r '[.jobs[] | select(.name == "Ready to publish") | .completed_at][0] // empty' jobs.json)
+          {
+            echo "### Release publish ${VERSION} (${MODE}): job timings"
+            echo
+            echo "| job | result | queued→start (s) | ran (s) | ready→done (s) |"
+            echo "|---|---|---|---|---|"
+            jq -r --arg ready "${ready}" '
+              def t: if . then fromdateiso8601 else null end;
+              .jobs[] | select(.name != "Timings" and .started_at != null and .completed_at != null) |
+              [ .name, (.conclusion // "-"),
+                ((.started_at|t) - (.created_at|t)),
+                ((.completed_at|t) - (.started_at|t)),
+                (if $ready != "" and ((.completed_at|t) >= ($ready|t)) then (.completed_at|t) - ($ready|t) else "" end)
+              ] | "| " + (map(tostring) | join(" | ")) + " |"' jobs.json
+            echo
+            echo "queued→start of the publish legs includes the wait for the publish environment's approval."
+          } >> "${GITHUB_STEP_SUMMARY}"
+          cat "${GITHUB_STEP_SUMMARY}"

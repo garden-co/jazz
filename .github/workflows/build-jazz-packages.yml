@@ -234,6 +234,45 @@ jobs:
           path: crates/jazz-wasm/durable-object/pkg
           if-no-files-found: error
 
+  # Merge groups run jazz-tools' Durable Object suite on a wasm-opt -O1 host;
+  # this runs the full suite on the -Oz host that ships (the uploaded
+  # jazz-wasm-durable-object-pkg, unpacked where the build leaves it), so an
+  # -Oz-only break (a wasm-opt miscompile, or the glue or reinstantiation
+  # interacting with optimised code) fails the release build. Beside the
+  # package assembly, not before it.
+  test-wasm-durable-object:
+    name: Durable Object suite on the release host
+    needs: build-wasm-durable-object
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: wasm32-unknown-unknown
+          sccache: "true"
+          sccache-key: release-wasm-do-suite-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+
+      - uses: ./.github/actions/install-rust-tool
+        with:
+          tool: wasm-pack@0.13.1
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-wasm-durable-object-pkg
+          path: crates/jazz-wasm/durable-object/pkg
+
+      - name: Check it is the -Oz host
+        run: node --test --test-name-pattern='-Oz build' crates/jazz-wasm/tests/durable-objects/release.test.mjs
+
+      - name: Build correctness artifacts for the Durable Object suite
+        run: node dev/gates/ensure-correctness-artifacts.mjs
+      - name: Run jazz-tools' Durable Object suite on the release host
+        run: node dev/gates/run-ts-consumers.mjs --shard durable-objects
+
   build-napi:
     name: Build jazz-napi (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}

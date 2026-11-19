@@ -192,11 +192,51 @@ jobs:
       - name: Run CI-equivalent differential oracle partition
         if: ${{ !cancelled() }}
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition rust-differential
-      # jazz-db's SQL must also run on Durable Object SQLite; this runs the
-      # suite under its limits. Like the oracle, it reports even when an
-      # earlier step fails.
+      - name: Report sccache statistics
+        if: always()
+        run: sccache --show-stats
+
+  # jazz-db's SQL must also run on Durable Object SQLite: the whole workspace
+  # suite under its limits. Its own job: on test-storage-compat's runner it ran
+  # after the corpus and oracle and was most of that job's wall time.
+  test-durable-object-limits:
+    if: inputs.scope == 'full'
+    # A full workspace test build and run, like test-rust-workspace.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 20
+    container:
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Authenticate trusted sccache writer
+        if: inputs.trusted-cache && inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Authenticate trusted sccache reader
+        if: inputs.trusted-cache && !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Export trusted sccache configuration
+        if: inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '')
+        env:
+          CACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
+          CACHE_REGION: ${{ vars.SCCACHE_REGION }}
+        run: |
+          echo "SCCACHE_BUCKET=${CACHE_BUCKET}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_REGION=${CACHE_REGION}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_USE_SSL=true" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_KEY_PREFIX=jazz-ci/v1/production/blacksmith-v1" >> "${GITHUB_ENV}"
+      - uses: ./.github/actions/setup-blacksmith
+        with:
+          sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
       - name: Run CI-equivalent Durable Object SQLite limits partition
-        if: ${{ !cancelled() }}
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition durable-object-limits
       - name: Report sccache statistics
         if: always()
@@ -206,14 +246,48 @@ jobs:
   # runs on the runner image (JDK, kotlinc, swiftc), not the Rust container.
   test-jazz-ffi-bindings:
     if: inputs.scope == 'full'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Five cargo builds (jazz-ffi, uniffi-bindgen, jazz-codegen's tests and
+    # the jazz-tools and relay binaries) took over half the job on four cores
+    # without a compile cache: 16 vCPUs and the trusted shared compile cache,
+    # through setup-build's job-local sccache since this is not the container.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 45
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Authenticate trusted sccache writer
+        if: inputs.trusted-cache && inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Authenticate trusted sccache reader
+        if: inputs.trusted-cache && !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Export trusted sccache configuration
+        if: inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '')
+        env:
+          CACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
+          CACHE_REGION: ${{ vars.SCCACHE_REGION }}
+        run: |
+          echo "SCCACHE_BUCKET=${CACHE_BUCKET}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_REGION=${CACHE_REGION}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_USE_SSL=true" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_KEY_PREFIX=jazz-ci/v1/production/blacksmith-v1" >> "${GITHUB_ENV}"
+      - uses: ./.github/actions/setup-build
+        with:
+          setup-node: "false"
+          rust-cache: "false"
+          sccache: "true"
+          sccache-sticky-disk: "false"
+          sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
       - name: Generate, compile and run jazz-ffi's Kotlin and Swift bindings, the Jazz Swift package and its example
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition jazz-ffi-bindings
+      - name: Report sccache statistics
+        if: always()
+        run: sccache --show-stats
 
   test-crates-package:
     if: inputs.scope == 'full'
@@ -263,12 +337,14 @@ jobs:
   # Branch protection requires this stable check name. It aggregates the Rust
   # correctness jobs and stays red whenever any dependency fails or is cancelled.
   # test-storage-compat also runs the bounded differential oracle partition.
+  # test-durable-object-limits runs the workspace under DO SQLite's limits.
   test-rust:
     if: always() && inputs.scope == 'full'
     needs:
       [
         test-rust-workspace,
         test-storage-compat,
+        test-durable-object-limits,
         test-jazz-ffi-bindings,
         test-crates-package,
         test-kotlin,
@@ -283,6 +359,7 @@ jobs:
         env:
           WORKSPACE_RESULT: ${{ needs.test-rust-workspace.result }}
           STORAGE_COMPAT_RESULT: ${{ needs.test-storage-compat.result }}
+          DURABLE_OBJECT_LIMITS_RESULT: ${{ needs.test-durable-object-limits.result }}
           JAZZ_FFI_BINDINGS_RESULT: ${{ needs.test-jazz-ffi-bindings.result }}
           CRATES_PACKAGE_RESULT: ${{ needs.test-crates-package.result }}
           KOTLIN_RESULT: ${{ needs.test-kotlin.result }}
@@ -290,6 +367,7 @@ jobs:
         run: |
           test "${WORKSPACE_RESULT}" = success
           test "${STORAGE_COMPAT_RESULT}" = success
+          test "${DURABLE_OBJECT_LIMITS_RESULT}" = success
           test "${JAZZ_FFI_BINDINGS_RESULT}" = success
           test "${CRATES_PACKAGE_RESULT}" = success
           test "${KOTLIN_RESULT}" = success
@@ -299,9 +377,60 @@ jobs:
   # the StagePlan Go example, on Linux: see dev/gates/go-bindings.sh.
   test-go:
     if: inputs.scope == 'full'
-    # Compile-bound: the release NAPI/WASM pair, then four jazz-ffi/Go cargo
-    # builds before ~40s of Go tests. 16 vCPUs and the trusted shared compile
-    # cache (test-ts builds the same release NAPI), like the other Rust jobs.
+    # Three jazz-ffi/jazz-tools cargo builds, then go vet and the Go suites
+    # against jazz-tools' Rust server: 16 vCPUs and the trusted shared compile
+    # cache, like the other Rust jobs.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 45
+    container:
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Authenticate trusted sccache writer
+        if: inputs.trusted-cache && inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Authenticate trusted sccache reader
+        if: inputs.trusted-cache && !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Export trusted sccache configuration
+        if: inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '')
+        env:
+          CACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
+          CACHE_REGION: ${{ vars.SCCACHE_REGION }}
+        run: |
+          echo "SCCACHE_BUCKET=${CACHE_BUCKET}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_REGION=${CACHE_REGION}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_USE_SSL=true" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_KEY_PREFIX=jazz-ci/v1/production/blacksmith-v1" >> "${GITHUB_ENV}"
+      - uses: ./.github/actions/setup-blacksmith
+        with:
+          sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
+      - name: Build and test the Go bindings and the StagePlan Go example
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition go
+      - name: Report sccache statistics
+        if: always()
+        run: sccache --show-stats
+
+  # One job per TypeScript partition (dev/gates/local-ci-equivalent.mjs), so
+  # the longest shard rather than the sum sets this job's wall time. Each
+  # shard produces or reuses the sealed native pair itself and admits it the
+  # same way; together they run every TypeScript suite.
+  # The StagePlan Go example's suite against its main backend in TypeScript
+  # (createJazz). Beside test-go rather than in it: the release NAPI/WASM
+  # pair and jazz-tools build it needs took ~2 of test-go's ~4 minutes, and
+  # the jazz-napi cdylib's optimized build can't come from sccache.
+  test-go-ts-backend:
+    if: inputs.scope == 'full'
+    # Compile-bound, like the test-ts shards that build the same pair.
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 45
     container:
@@ -334,12 +463,12 @@ jobs:
           echo "SCCACHE_S3_USE_SSL=true" >> "${GITHUB_ENV}"
           echo "SCCACHE_S3_KEY_PREFIX=jazz-ci/v1/production/blacksmith-v1" >> "${GITHUB_ENV}"
       # The artifact lock path, safe.directory and pnpm install, as test-ts:
-      # the go partition builds jazz-tools for its TS main-backend e2e.
+      # this partition builds jazz-tools for its TS main-backend e2e.
       - uses: ./.github/actions/setup-blacksmith
         with:
           sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
-      - name: Build and test the Go bindings and the StagePlan Go example
-        run: node dev/gates/local-ci-equivalent.mjs --ci-partition go
+      - name: Test the StagePlan Go example against its TypeScript main backend
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition go-ts-backend
       - name: Report sccache statistics
         if: always()
         run: sccache --show-stats
