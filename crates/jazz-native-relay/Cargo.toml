@@ -7,7 +7,13 @@ publish = false
 [lib]
 crate-type = ["rlib", "staticlib"]
 
+[features]
+# End-to-end encryption on the relay (`encryption`): keyless hooks for its
+# store and the runtime for device UI peers. Off, an encrypted app is refused.
+e2ee-client = ["dep:jazz-e2ee-client", "jazz/e2ee-client"]
+
 [dependencies]
+jazz-e2ee-client = { path = "../jazz-e2ee-client", optional = true }
 jazz = { workspace = true, features = ["runtime"] }
 jazz-native-transport.workspace = true
 jazz-text = { workspace = true, features = ["serde"] }

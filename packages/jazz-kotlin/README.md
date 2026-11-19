@@ -34,3 +34,7 @@ gradle -p packages/jazz-kotlin-android assembleRelease   # -PcargoProfile=dev fo
 The AAR is `packages/jazz-kotlin-android/build/outputs/aar/jazz-kotlin-android-release.aar`.
 CI only checks that it builds (the `kotlin-android` partition); there are no emulator or
 device tests yet.
+
+## Encryption
+
+An app that declares end-to-end encryption opens with a private store your app supplies; see [Encryption in Rust, Swift, Kotlin and Go](../../docs/content/docs/e2ee/native.mdx).

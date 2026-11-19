@@ -81,6 +81,8 @@ jazz-protocol = { version = "=2.0.0-alpha.67", path = "crates/jazz/layers/protoc
 jazz-types = { version = "=2.0.0-alpha.67", path = "crates/jazz/layers/types", default-features = false }
 jazz-compression = { version = "=2.0.0-alpha.67", path = "crates/jazz-compression", default-features = false }
 jazz-text = { version = "=2.0.0-alpha.67", path = "crates/jazz-text" }
+jazz-e2ee = { version = "=2.0.0-alpha.67", path = "crates/jazz-e2ee" }
+jazz-e2ee-client = { version = "=2.0.0-alpha.67", path = "crates/jazz-e2ee-client" }
 jazz-codegen = { version = "=2.0.0-alpha.67", path = "crates/jazz-codegen" }
 jazz-otel = { version = "=2.0.0-alpha.67", path = "crates/jazz-otel" }
 jazz-native-transport = { version = "=2.0.0-alpha.67", path = "crates/jazz-native-transport" }

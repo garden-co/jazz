@@ -352,3 +352,35 @@ reads and writes the stored values.
 
 Writes are local-first, as in jazz-app-support. A write that the server's permissions
 refuse is not refused by the call. It just never syncs.
+
+## End-to-end encryption
+
+An app that declares encrypted columns opens with a private store the host supplies: `JazzHandle.open_with_store`
+(UniFFI) or `jazz_open_encrypted` (C ABI) take a callback that answers the store's requests. The config's
+`"environment"` names the deployment's environment (default `dev`). Opening such an app any other way is
+refused, naming the option. A device's schema has the plaintext types of its encrypted columns, so rows go
+in and out as ordinary JSON; writes of a space whose key the device does not hold yet wait for it
+(ten seconds at most). The store is called on the client's thread, one request at a time.
+
+A request is JSON text `{ "op": ..., ... }`; bytes are base64 and numbers that may exceed 2^53 are decimal text:
+
+| `op`        | Fields                                                    | Answer (JSON)                        |
+| ----------- | --------------------------------------------------------- | ------------------------------------ |
+| `openScope` | `scope`                                                   | the incarnation, as text             |
+| `load`      | `scope`, `doc`                                            | `{ "bytes", "revision" }`, or `null` |
+| `save`      | `scope`, `incarnation`, `doc`, `bytes`, `expected`/`null` | the new revision, as text            |
+| `list`      | `scope`                                                   | the document names                   |
+| `delete`    | `scope`                                                   | `null`                               |
+| `protect`   | `secret`                                                  | the protected blob, base64           |
+| `unprotect` | `blob`                                                    | the secret, base64                   |
+
+An answer is ok with its JSON, or not ok with `conflict` (the document's revision is not `expected`), `wiped`
+(the scope is not of that incarnation) or a message.
+
+The runtime's operations cross as `encryption_call(op, args_json)` (C ABI: `jazz_call` method `encryptionCall`
+with `{ "op", "args" }`), with `encryption_ready(timeout_ms)`, `encryption_state()` and `encryption_reports()`.
+Operations: `deviceId`, `devices`, `challenge`, `answer`, `approvalCode`, `approve`, `remove`, `requestRemoval`,
+`completeRemovals`, `recoveryCreate`, `recoveryRegister`, `recoveryRestore`, `recoveryRetire`, `recoveryList`,
+`keysDeliver`, `keysRotate`. `recoveryRegister` and `recoveryRestore` take a 24-word `phrase` (or a 64-character
+hexadecimal `secret`). A failure is a refusal whose message starts `encryption (<code>):`. A session
+(`jazz_session_open`) takes no store yet.

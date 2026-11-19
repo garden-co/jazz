@@ -85,6 +85,9 @@ public struct Config: Sendable {
     public var dataDir: String?
     /// An end user signing in through the app's Jazz endpoint (`serverUrl`).
     public var auth: Auth?
+    /// Where this device keeps its encryption keys, for an app that declares
+    /// end-to-end encryption (an app that does is refused without it).
+    public var encryption: EncryptionConfig?
 
     /// Swift apps are clients (`.client`, `.local`); the app's backend runs
     /// in TypeScript (`createJazz`).
@@ -150,6 +153,9 @@ public struct Config: Sendable {
         case .bearer?: object["auth"] = .object(["bearer": .bool(true)])
         case nil: break
         }
+        if let encryption {
+            object["environment"] = .string(encryption.environment)
+        }
         return try Coding.json(JSONValue.object(object))
     }
 }
@@ -198,7 +204,15 @@ public final class Client: Sendable {
     {
         let json = try config.json(app: app)
         let handle: JazzHandle
-        if case .bearer(let tokens)? = config.auth {
+        if let encryption = config.encryption {
+            let store = StoreBridge(encryption.store)
+            var provider: Tokens?
+            if case .bearer(let tokens)? = config.auth { provider = Tokens(tokens) }
+            let tokens = provider
+            handle = try await run {
+                try JazzHandle.openWithStore(configJson: json, store: store, tokens: tokens)
+            }
+        } else if case .bearer(let tokens)? = config.auth {
             let provider = Tokens(tokens)
             handle = try await run { try JazzHandle.openWithTokens(configJson: json, tokens: provider) }
         } else {

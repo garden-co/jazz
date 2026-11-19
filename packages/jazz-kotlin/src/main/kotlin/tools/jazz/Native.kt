@@ -103,6 +103,22 @@ public interface Native : AutoCloseable {
     /** Signs the end user out, and closes the app. */
     public fun signOut(): Unit = close()
 
+    /** One end-to-end encryption operation by name (see the README), its arguments and result as JSON. */
+    public fun encryptionCall(op: String, argsJson: String): String =
+        throw JazzException.NotSupported("end-to-end encryption through this native core")
+
+    /** Verifies the account and enrols or recovers this device, waiting up to [timeoutMs]. */
+    public fun encryptionReady(timeoutMs: Long): String =
+        throw JazzException.NotSupported("end-to-end encryption through this native core")
+
+    /** What the encryption runtime's loop is doing, as JSON. */
+    public fun encryptionState(): String =
+        throw JazzException.NotSupported("end-to-end encryption through this native core")
+
+    /** The encryption reports waiting, each as a JSON text. */
+    public fun encryptionReports(): List<String> =
+        throw JazzException.NotSupported("end-to-end encryption through this native core")
+
     /** Opens native handles from a config JSON (the contract's open config). */
     public fun interface Opener {
         public fun open(configJson: String): Native
@@ -110,6 +126,13 @@ public interface Native : AutoCloseable {
         /** Opens as an end user signing in with a bearer [tokens] gives (reason → token or `null`). */
         public fun openWithTokens(configJson: String, tokens: (String) -> String?): Native =
             throw JazzException.NotSupported("bearer sign-in through this opener")
+
+        /**
+         * Opens an app that declares end-to-end encryption, with [store] answering the device's
+         * private store requests (JSON, see [PrivateStoreBridge]); [tokens] for a bearer sign-in.
+         */
+        public fun openWithStore(configJson: String, store: (String) -> StoreReply, tokens: ((String) -> String?)?): Native =
+            throw JazzException.NotSupported("end-to-end encryption through this opener")
     }
 }
 

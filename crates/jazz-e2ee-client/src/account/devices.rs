@@ -38,7 +38,7 @@ use jazz_e2ee::protocol::account::{
     AccountKey, AccountKeyEvidence, AccountReplay, AccountState, verify_private,
 };
 use jazz_e2ee::protocol::derive::{RecoveryKeys, RecoverySecret};
-use jazz_e2ee::protocol::error::RefusalCode;
+use jazz_e2ee::protocol::error::{RecoveryFailure, RefusalCode};
 use jazz_e2ee::protocol::records::account::{DeviceProof, DeviceRequest, approval_code};
 use jazz_e2ee::protocol::{Accepted, ProtocolError};
 
@@ -649,6 +649,29 @@ impl E2eeClient {
         db: &Db,
         secret: &RecoverySecret,
     ) -> Result<AccountStatus, ClientError> {
+        self.restore_device(db, secret, false)
+            .await
+            .map(|status| status.expect("explicit recovery requires evidence"))
+    }
+
+    /// Automatic account-secret recovery can wait while the authority does
+    /// not yet show a root or delivery, or while a newly enrolled device
+    /// still needs to recover. Evidence that is present but refused still
+    /// fails the operation.
+    pub(crate) async fn recover_device_when_available(
+        &self,
+        db: &Db,
+        secret: &RecoverySecret,
+    ) -> Result<Option<AccountStatus>, ClientError> {
+        self.restore_device(db, secret, true).await
+    }
+
+    async fn restore_device(
+        &self,
+        db: &Db,
+        secret: &RecoverySecret,
+        automatic: bool,
+    ) -> Result<Option<AccountStatus>, ClientError> {
         let attempt = self
             .serializable(db, async |tx| {
                 let read = self.read_account(db, tx).await?;
@@ -674,7 +697,7 @@ impl E2eeClient {
                     return if published || state.is_active(&device.id) {
                         Err(ClientError::ApprovalAnswered)
                     } else {
-                        Ok(Attempt::Stranded)
+                        Ok(Some(Attempt::Stranded))
                     };
                 }
                 let keys = RecoveryKeys::derive(
@@ -684,8 +707,31 @@ impl E2eeClient {
                 )?;
                 let evidence = verify_private(&replay, &state, &read.private)?;
                 let account_keys = AccountKeyEvidence::new(&replay, &state, &evidence)?;
-                let key =
-                    account_keys.acquire_with_recovery(&keys, &read.private.recovery_deliveries)?;
+                let key = match account_keys
+                    .acquire_with_recovery(&keys, &read.private.recovery_deliveries)
+                {
+                    Err(ProtocolError::Recovery(RecoveryFailure::RootMismatch))
+                        if automatic
+                            && !state.retired_recovery_roots.contains_key(&keys.root_id)
+                            && !read
+                                .public
+                                .recovery_roots
+                                .iter()
+                                .any(|root| root.row.id == keys.root_id) =>
+                    {
+                        return Ok(None);
+                    }
+                    Err(ProtocolError::Recovery(RecoveryFailure::DeliveryMissing))
+                        if automatic
+                            && !read.private.recovery_deliveries.iter().any(|delivery| {
+                                delivery.row.root_id == keys.root_id
+                                    && delivery.row.epoch_id == state.epoch_id()
+                            }) =>
+                    {
+                        return Ok(None);
+                    }
+                    result => result?,
+                };
                 recovery_approve(
                     &self.writer()?,
                     &state,
@@ -694,22 +740,30 @@ impl E2eeClient {
                     &key,
                     &mut SharedRandom(&self.shared.random),
                 )
-                .map(Attempt::Ready)
+                .map(|records| Some(Attempt::Ready(records)))
                 .map_err(ClientError::from)
             })
             .await?;
-        let records = match attempt {
-            Attempt::Stranded => {
+        match attempt {
+            None => return Ok(None),
+            Some(Attempt::Stranded) => {
                 self.reenrol().await?;
-                return self.ensure_account(db).await;
+                let status = self.ensure_account(db).await?;
+                // Retain the account secret for a new automatic attempt
+                // with this device's fresh approval nonce.
+                if automatic && status == AccountStatus::AwaitingApproval {
+                    return Ok(None);
+                }
+                return Ok(Some(status));
             }
-            Attempt::Ready(None) => return self.ensure_account(db).await,
-            Attempt::Ready(Some(records)) => records,
-        };
-        self.mark_nonce_spent().await?;
-        self.shared.device.borrow_mut().approval_nonce.take();
-        self.publish_recovery(db, &records).await?;
-        self.ensure_account(db).await
+            Some(Attempt::Ready(None)) => {}
+            Some(Attempt::Ready(Some(records))) => {
+                self.mark_nonce_spent().await?;
+                self.shared.device.borrow_mut().approval_nonce.take();
+                self.publish_recovery(db, &records).await?;
+            }
+        }
+        self.ensure_account(db).await.map(Some)
     }
 
     /// Publishes the records of a recovery in one transaction.

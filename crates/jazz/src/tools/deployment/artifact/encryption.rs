@@ -74,6 +74,18 @@ pub fn equality_column(column: &str) -> String {
     format!("{EQUALITY_PREFIX}{column}")
 }
 
+/// Whether `name` is an equality token column declared for this table.
+pub fn is_equality_token_column(entry: Option<&EncryptionEntry>, name: &str) -> bool {
+    entry
+        .zip(name.strip_prefix(EQUALITY_PREFIX))
+        .is_some_and(|(entry, column)| {
+            entry
+                .equality
+                .iter()
+                .any(|indexed| indexed.as_str() == column)
+        })
+}
+
 /// Whether `column` is a stored ciphertext column: non-null `bytes`.
 fn is_cipher(column: &ColumnDescriptor) -> bool {
     column.column_type == ColumnType::Bytea && !column.nullable

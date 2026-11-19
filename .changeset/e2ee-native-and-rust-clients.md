@@ -1,0 +1,5 @@
+---
+"jazz-tools": patch
+---
+
+Rust, Swift, Kotlin and Go apps can now open an app that declares end-to-end encryption. An end user's device supplies its private store (where it keeps its keys; Jazz ships none): `Config::encryption` in `jazz-app-support` (feature `e2ee-client`), `Config.encryption` in Swift, `JazzConfig.encryption` in Kotlin and `Config.Encryption` in Go, each with an `encryption` handle for the account, its devices, recovery and keys. An account the app signs in itself recovers a new device with a 24-word phrase (`recoveryCreate`, `recoveryRegister`, `recoveryRestore`); a device account recovers from its own account key. A Rust backend (or backend client) opens an encrypted app too, holding no keys and writing no encrypted column. `jazz-ffi` takes the store as a callback (`JazzHandle.open_with_store`, `jazz_open_encrypted`); the native relay behind React Native opens an encrypted app in Rust (the JavaScript side is not wired yet). A client with no private store is still refused, naming the option.

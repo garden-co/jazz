@@ -93,6 +93,14 @@ pub enum Error {
     )]
     BundleMismatch { own: String, served: String },
 
+    /// An end-to-end encryption call failed. `code` is the runtime's
+    /// (`approval-answered`, `no-challenge`, `approval-code-mismatch`,
+    /// `device-no-longer-active`, `unsupported`, `store`, `closed`,
+    /// `database`, ...), or `keyless` / `not-declared` for an app or
+    /// backend that has no keys to use.
+    #[error("encryption ({code}): {message}")]
+    Encryption { code: String, message: String },
+
     /// Something this crate does not support yet.
     #[error("not supported yet: {0}")]
     Unsupported(String),

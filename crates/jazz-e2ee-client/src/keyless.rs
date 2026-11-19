@@ -19,6 +19,7 @@ use jazz::e2ee::{
     StreamTarget, WriteCells, WriteKind,
 };
 use jazz::query::Query;
+use jazz::tools::deployment::artifact::encryption::equality_column;
 
 use crate::hooks::unsupported_query;
 
@@ -41,7 +42,8 @@ impl KeylessHooks {
         entry
             .columns
             .keys()
-            .flat_map(|name| [name.clone(), format!("__e2ee_eq_{name}")])
+            .cloned()
+            .chain(entry.equality.iter().map(|name| equality_column(name)))
             .collect()
     }
 }
