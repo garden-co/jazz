@@ -166,6 +166,10 @@ jobs:
         with:
           key: swift-${{ matrix.target }}
           min-os: ${{ matrix.min }}
+          writer-role: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
+          reader-role: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
+          bucket: ${{ vars.SCCACHE_BUCKET }}
+          region: ${{ vars.SCCACHE_REGION }}
       - name: Build
         run: |
           cargo rustc -p jazz-ffi --release --lib --target "$TARGET" --crate-type staticlib -- --print native-static-libs 2>&1 \
