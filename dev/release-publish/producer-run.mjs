@@ -9,7 +9,8 @@
 //      (never pull_request), on `release` or `changeset-release/*` (see
 //      isReleaseBranch); on changeset-release/* only when the published
 //      tree's release-artifacts.yml carries the trusted-cache guard
-//      (RELEASE_ARTIFACTS_WORKFLOW: that file at <sha>);
+//      (RELEASE_ARTIFACTS_WORKFLOW: that file at <sha>) and has its contract
+//      test (TRUSTED_CACHE_TEST_PRESENT=true: TRUSTED_CACHE_TEST exists at <sha>);
 //   4. its release-manifest names head_sha, the published tree and version;
 //   5. it succeeded.
 // resolve-artifacts.sh prefers a run of <sha> itself when there is one.
@@ -53,6 +54,9 @@ export function isReleaseBranch(branch) {
  * commit with tree `tree`; empty when it may. `headTree` is tree(run.head_sha)
  * from the git API (null when the commit couldn't be read).
  */
+/** The contract test that proves the tree honours the guard (jazz#6168): it must exist at the published commit too. */
+export const TRUSTED_CACHE_TEST = "dev/gates/test/release-artifacts-trusted-caches.test.mjs";
+
 /** The no-restore guard jazz#6168 put in release-artifacts.yml's top-level env. */
 export const TRUSTED_CACHE_GUARD =
   "JAZZ_TRUSTED_CACHE: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/heads/merge-group/')) && 'true' || 'false' }}";
@@ -84,7 +88,7 @@ export function producerRunProblems(run, { tree, repo, headTree, guarded = false
     problems.push(`run is on ${run?.head_branch}, not release or changeset-release/*`);
   else if (run.head_branch !== "release" && !guarded)
     problems.push(
-      `run is on ${run.head_branch}, but the published tree's release-artifacts.yml lacks the trusted-cache guard (jazz#6168)`,
+      `run is on ${run.head_branch}, but the published tree lacks the trusted-cache guard or its contract test (jazz#6168)`,
     );
   if (run?.status !== "completed" || run?.conclusion !== "success")
     problems.push(`run is ${run?.status}/${run?.conclusion}`);
@@ -116,6 +120,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     GH_REPO: repo,
     HEAD_TREE: headTree,
     RELEASE_ARTIFACTS_WORKFLOW: workflowFile,
+    TRUSTED_CACHE_TEST_PRESENT: testPresent,
   } = process.env;
   const inputProblems = expectedProblems({ sha, tree, version, repo });
   if (inputProblems.length > 0) {
@@ -129,7 +134,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       tree,
       repo,
       headTree: headTree || null,
-      guarded: workflowFile ? hasTrustedCacheGuard(readFileSync(workflowFile, "utf8")) : false,
+      guarded:
+        testPresent === "true" &&
+        Boolean(workflowFile) &&
+        hasTrustedCacheGuard(readFileSync(workflowFile, "utf8")),
     }),
     ...manifestProblems(manifest, { headSha: run.head_sha, tree, version }),
   ];

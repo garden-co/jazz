@@ -217,9 +217,21 @@ test("a changeset-release release-artifacts run needs the guard in the deployed 
   const guardedWorkflow = `name: x\nenv:\n  ${TRUSTED_CACHE_GUARD}\njobs: {}\n`;
   assert.equal(
     verifyInspectorHandoff(
-      handoff({ run: vpRun, deploymentReleaseArtifactsWorkflow: guardedWorkflow }),
+      handoff({
+        run: vpRun,
+        deploymentReleaseArtifactsWorkflow: guardedWorkflow,
+        deploymentHasTrustedCacheTest: true,
+      }),
     ),
     artifactSha,
+  );
+  // The guard without its contract test in the deployed tree: refused.
+  assert.throws(
+    () =>
+      verifyInspectorHandoff(
+        handoff({ run: vpRun, deploymentReleaseArtifactsWorkflow: guardedWorkflow }),
+      ),
+    /contract test/,
   );
   assert.throws(
     () =>
@@ -245,6 +257,7 @@ test("GitHub orchestration reads release-artifacts.yml at the deployed commit fo
       handoff().deploymentCommit,
       handoff().branchRef,
       { content: Buffer.from(workflow).toString("base64"), encoding: "base64" },
+      { content: "", encoding: "base64" },
     ];
     const verify = () =>
       verifyInspectorRunFromGitHub(
@@ -264,6 +277,10 @@ test("GitHub orchestration reads release-artifacts.yml at the deployed commit fo
     assert.equal(
       paths[4],
       `repos/${repository}/contents/.github/workflows/release-artifacts.yml?ref=${deploySha}`,
+    );
+    assert.equal(
+      paths[5],
+      `repos/${repository}/contents/dev/gates/test/release-artifacts-trusted-caches.test.mjs?ref=${deploySha}`,
     );
   }
 });

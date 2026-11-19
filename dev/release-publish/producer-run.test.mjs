@@ -247,12 +247,21 @@ test("the CLI takes the guard from RELEASE_ARTIFACTS_WORKFLOW", () => {
     GH_REPO: repo,
     HEAD_TREE: tree,
   };
-  const cli = (workflow) =>
+  const cli = (workflow, testPresent = "true") =>
     execFileSync("node", [script, join(dir, "run.json"), join(dir, "manifest.json")], {
-      env: { ...env, RELEASE_ARTIFACTS_WORKFLOW: join(dir, workflow) },
+      env: {
+        ...env,
+        RELEASE_ARTIFACTS_WORKFLOW: join(dir, workflow),
+        TRUSTED_CACHE_TEST_PRESENT: testPresent,
+      },
       encoding: "utf8",
     });
   cli("guarded.yml");
+  // The guard without its contract test in the published tree: refused.
+  assert.throws(
+    () => cli("guarded.yml", "false"),
+    (error) => error.status === 1 && /contract test/.test(error.stdout),
+  );
   assert.throws(
     () => cli("old.yml"),
     (error) => error.status === 1 && /trusted-cache guard/.test(error.stdout),
@@ -269,5 +278,12 @@ test("the guard constant is jazz#6168's expression, as resolve-artifacts.sh chec
     "utf8",
   );
   assert.match(script, /contents\/\.github\/workflows\/release-artifacts\.yml\?ref=\$\{SHA\}/);
-  assert.match(script, /RELEASE_ARTIFACTS_WORKFLOW="\$\{workflow_at_sha\}"/);
+  assert.match(
+    script,
+    /RELEASE_ARTIFACTS_WORKFLOW="\$\{workflow_at_sha\}" TRUSTED_CACHE_TEST_PRESENT="\$\{trusted_cache_test\}"/,
+  );
+  assert.match(
+    script,
+    /contents\/dev\/gates\/test\/release-artifacts-trusted-caches\.test\.mjs\?ref=\$\{SHA\}/,
+  );
 });

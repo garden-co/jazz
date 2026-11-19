@@ -2,7 +2,7 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { hasTrustedCacheGuard } from "../release-publish/producer-run.mjs";
+import { TRUSTED_CACHE_TEST, hasTrustedCacheGuard } from "../release-publish/producer-run.mjs";
 
 const shaPattern = /^[a-f0-9]{40}$/;
 // Production staging takes only `release`-branch producers, built from
@@ -64,6 +64,7 @@ export function verifyInspectorHandoff({
   deploymentCommit,
   branchRef,
   deploymentReleaseArtifactsWorkflow = "",
+  deploymentHasTrustedCacheTest = false,
 }) {
   const artifactSha = inspectorRunSource(run, repository);
   // A changeset-release/* release-artifacts run restored no cache only if the
@@ -71,10 +72,10 @@ export function verifyInspectorHandoff({
   if (
     run.path === releaseArtifactsPath &&
     run.head_branch !== "release" &&
-    !hasTrustedCacheGuard(deploymentReleaseArtifactsWorkflow)
+    !(deploymentHasTrustedCacheTest && hasTrustedCacheGuard(deploymentReleaseArtifactsWorkflow))
   ) {
     throw new Error(
-      "Inspector artifact run is on changeset-release/*, but the deployed tree's release-artifacts.yml lacks the trusted-cache guard (jazz#6168)",
+      "Inspector artifact run is on changeset-release/*, but the deployed tree lacks the trusted-cache guard or its contract test (jazz#6168)",
     );
   }
   inspectorBranchRefPath(repository, branch);
@@ -121,21 +122,28 @@ export function verifyInspectorRunFromGitHub(
     artifactCommit: api(`repos/${repository}/git/commits/${artifactSha}`),
     deploymentCommit: api(`repos/${repository}/git/commits/${env.SOURCE_SHA}`),
     branchRef: api(branchPath),
-    deploymentReleaseArtifactsWorkflow:
-      run.path === releaseArtifactsPath && run.head_branch !== "release"
-        ? releaseArtifactsWorkflowAt(api, repository, env.SOURCE_SHA)
-        : "",
+    ...(run.path === releaseArtifactsPath && run.head_branch !== "release"
+      ? {
+          deploymentReleaseArtifactsWorkflow: fileAt(
+            api,
+            repository,
+            ".github/workflows/release-artifacts.yml",
+            env.SOURCE_SHA,
+          ),
+          deploymentHasTrustedCacheTest:
+            fileAt(api, repository, TRUSTED_CACHE_TEST, env.SOURCE_SHA) !== null,
+        }
+      : {}),
   });
 }
 
-function releaseArtifactsWorkflowAt(api, repository, sha) {
+/** A file's text at `sha`, or null when it doesn't exist there. */
+function fileAt(api, repository, path, sha) {
   try {
-    const file = api(
-      `repos/${repository}/contents/.github/workflows/release-artifacts.yml?ref=${sha}`,
-    );
+    const file = api(`repos/${repository}/contents/${path}?ref=${sha}`);
     return Buffer.from(file.content ?? "", file.encoding ?? "base64").toString("utf8");
   } catch {
-    return "";
+    return null;
   }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
