@@ -102,6 +102,8 @@ const assertUsesBlacksmithRunner = (jobName, jobSource) => {
     "test-storage-compat",
     "test-ts",
     "test-react-native",
+    "test-go",
+    "test-crates-package",
   ].includes(jobName)
     ? 16
     : 4;
@@ -181,7 +183,14 @@ const assertSuiteS3ConfigurationBoundary = (source) => {
       `untrusted suite callers must not inherit ${name}`,
     );
 
-  for (const name of ["lint", "test-rust-workspace", "test-storage-compat", "test-ts"]) {
+  for (const name of [
+    "lint",
+    "test-rust-workspace",
+    "test-storage-compat",
+    "test-ts",
+    "test-go",
+    "test-crates-package",
+  ]) {
     const parsedJob = document.jobs[name];
     assert.equal(parsedJob.env, undefined, `${name} must not configure S3 at job scope`);
     const exportIndex = parsedJob.steps.findIndex(
@@ -243,6 +252,7 @@ const assertEntryCacheTrustBoundary = (source) => {
   assert.deepEqual(
     Object.keys(entryJobs).sort(),
     [
+      "land-group",
       "main-coverage",
       "report-dispatched-test-rust",
       "report-full-suite",
@@ -259,7 +269,27 @@ const assertEntryCacheTrustBoundary = (source) => {
     "report-dispatched-test-rust": dispatchedStatus,
     "report-full-suite": fullSuiteStatus,
     "main-coverage": mainCoverage,
+    "land-group": landGroup,
   } = entryJobs;
+  // Landing a green merge group is the only job holding a merge-capable
+  // credential: the Review Loop's App key, minted only for merge-group pushes
+  // after full-suite was posted, behind an explicit opt-in variable.
+  assert.equal(
+    landGroup.if,
+    "always() && vars.LAND_MERGE_GROUPS == 'true' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/merge-group/') && needs.report-full-suite.result == 'success'",
+  );
+  assert.deepEqual(landGroup.needs, ["report-full-suite"]);
+  assert.deepEqual(landGroup.permissions, { contents: "read" });
+  assert.deepEqual(landGroup.concurrency, {
+    group: "land-${{ github.ref }}",
+    "cancel-in-progress": false,
+  });
+  assert.equal(landGroup.steps[0].with["persist-credentials"], false);
+  assert.deepEqual(
+    [...JSON.stringify(landGroup).matchAll(/secrets\.([A-Z_]+)/g)].map((m) => m[1]),
+    ["LAND_MERGE_GROUPS_APP_PRIVATE_KEY"],
+  );
+  assert.match(landGroup.steps.at(-1).run, /^dev\/ci\/land-group\.sh /);
   assert.deepEqual(
     Object.keys(untrusted).sort(),
     ["if", "permissions", "uses", "with"],
@@ -852,7 +882,14 @@ test("Turbo cache uses its pinned OIDC policy only inside the trusted suite invo
 });
 
 test("shared Rust cache writes are main and merge-group only while trusted PRs receive read access", () => {
-  for (const name of ["lint", "test-rust-workspace", "test-storage-compat", "test-ts"]) {
+  for (const name of [
+    "lint",
+    "test-rust-workspace",
+    "test-storage-compat",
+    "test-ts",
+    "test-go",
+    "test-crates-package",
+  ]) {
     const source = job(name);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN \}\}/);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_PR_READER_AWS_ROLE_ARN \}\}/);
