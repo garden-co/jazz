@@ -1,0 +1,20 @@
+minimumReleaseAgeExclude:
+  - '@better-auth/core@1.7.25'
+  - '@better-auth/drizzle-adapter@1.7.25'
+  - '@better-auth/kysely-adapter@1.7.25'
+  - '@better-auth/memory-adapter@1.7.25'
+  - '@better-auth/mongo-adapter@1.7.25'
+  - '@better-auth/prisma-adapter@1.7.25'
+  - '@better-auth/telemetry@1.7.25'
+  - '@garden-co/jazz-napi-darwin-arm64@2.0.0-alpha.63 || 2.0.0-alpha.64 || 2.0.0-alpha.67'
+  - '@garden-co/jazz-napi-darwin-x64@2.0.0-alpha.63 || 2.0.0-alpha.64 || 2.0.0-alpha.67'
+  - '@garden-co/jazz-napi-linux-arm64-gnu@2.0.0-alpha.63 || 2.0.0-alpha.64 || 2.0.0-alpha.67'
+  - '@garden-co/jazz-napi-linux-x64-gnu@2.0.0-alpha.63 || 2.0.0-alpha.64 || 2.0.0-alpha.67'
+  - '@garden-co/jazz-napi-win32-x64-msvc@2.0.0-alpha.63 || 2.0.0-alpha.64 || 2.0.0-alpha.67'
+  - better-auth@1.7.25
+  - jazz-napi@2.0.0-alpha.63 || 2.0.0-alpha.64 || 2.0.0-alpha.67
+  - jazz-tools@2.0.0-alpha.63 || 2.0.0-alpha.64 || 2.0.0-alpha.67
+  - jazz-wasm@2.0.0-alpha.63 || 2.0.0-alpha.64 || 2.0.0-alpha.67
+strictDepBuilds: false
+allowBuilds:
+  esbuild: true

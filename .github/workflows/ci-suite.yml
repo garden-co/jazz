@@ -14,8 +14,9 @@ on:
       scope:
         # full: every partition (main, release and merge-group/** pushes,
         # dispatches and release PRs). fast: lint and
-        # typecheck only (ready PRs). none: nothing (draft PRs).
-        description: Which partitions to run, full, fast or none.
+        # typecheck only (ready PRs). none: nothing (draft PRs). warm: only
+        # warm-native-builds (main pushes a green merge group already tested).
+        description: Which partitions to run, full, fast, warm or none.
         required: false
         type: string
         default: full
@@ -30,7 +31,7 @@ env:
 
 jobs:
   lint:
-    if: inputs.scope != 'none'
+    if: inputs.scope == 'full' || inputs.scope == 'fast'
     # Full workspace compilation and checks exceed the four-core job budget.
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 15
@@ -462,6 +463,19 @@ jobs:
           echo "SCCACHE_REGION=${CACHE_REGION}" >> "${GITHUB_ENV}"
           echo "SCCACHE_S3_USE_SSL=true" >> "${GITHUB_ENV}"
           echo "SCCACHE_S3_KEY_PREFIX=jazz-ci/v1/production/blacksmith-v1" >> "${GITHUB_ENV}"
+      # Before setup-blacksmith: hashFiles cannot walk the node_modules and
+      # target trees the container creates (it fails the whole step), and
+      # pnpm install keeps node_modules/.cache.
+      # The same native build cache the test-ts shards restore
+      # (dev/artifacts/native-build-cache.mjs): this partition's producer
+      # builds the same sealed pair.
+      - name: Restore native correctness builds
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: node_modules/.cache/jazz-native-builds
+          key: jazz-native-builds-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', 'crates/**/*.rs', 'vendor/**', 'dev/artifacts/*.mjs') }}
+          restore-keys: |
+            jazz-native-builds-v1-${{ runner.os }}-${{ runner.arch }}-
       # The artifact lock path, safe.directory and pnpm install, as test-ts:
       # this partition builds jazz-tools for its TS main-backend e2e.
       - uses: ./.github/actions/setup-blacksmith
@@ -538,6 +552,21 @@ jobs:
           team: garden-co
           policy: pol_0b019736-e95d-4f60-a5dd-e9415148834c
           audience: https://github.com/garden-co
+      # Before setup-blacksmith: hashFiles cannot walk the node_modules and
+      # target trees the container creates (it fails the whole step), and
+      # pnpm install keeps node_modules/.cache.
+      # Raw jazz-napi / jazz-wasm compiler output from earlier runs, keyed in
+      # dev/artifacts/native-build-cache.mjs by the exact native inputs, tools
+      # and build arguments. The producer reuses an entry only on a key match
+      # and then validates, seals and verifies it for this checkout exactly as
+      # it would a fresh build. This key only picks which entries to restore.
+      - name: Restore native correctness builds
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: node_modules/.cache/jazz-native-builds
+          key: jazz-native-builds-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', 'crates/**/*.rs', 'vendor/**', 'dev/artifacts/*.mjs') }}
+          restore-keys: |
+            jazz-native-builds-v1-${{ runner.os }}-${{ runner.arch }}-
       - uses: ./.github/actions/setup-blacksmith
         with:
           sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
@@ -568,6 +597,73 @@ jobs:
           path: examples/band-chat/apps/nextjs-betterauth/tests/browser/__screenshots__/band-chat.test.tsx/*.png
           if-no-files-found: ignore
           retention-days: 7
+      - name: Report sccache statistics
+        if: always()
+        run: sccache --show-stats
+
+  # Main pushes that a green merge group already tested skip the suite, so
+  # nothing would save main's native build cache. This builds the sealed
+  # napi/wasm pair and the Durable Object host for main's tree into it, off
+  # the queue's critical path, for merge groups and PRs to restore (they can
+  # read main's cache scope, never write it).
+  warm-native-builds:
+    if: inputs.scope == 'warm'
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 20
+    container:
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Authenticate trusted sccache writer
+        if: inputs.trusted-cache && inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Authenticate trusted sccache reader
+        if: inputs.trusted-cache && !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Export trusted sccache configuration
+        if: inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '')
+        env:
+          CACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
+          CACHE_REGION: ${{ vars.SCCACHE_REGION }}
+        run: |
+          echo "SCCACHE_BUCKET=${CACHE_BUCKET}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_REGION=${CACHE_REGION}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_USE_SSL=true" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_KEY_PREFIX=jazz-ci/v1/production/blacksmith-v1" >> "${GITHUB_ENV}"
+      # Before setup-blacksmith: hashFiles cannot walk the node_modules and
+      # target trees the container creates (it fails the whole step), and
+      # pnpm install keeps node_modules/.cache.
+      - name: Restore native correctness builds
+        id: native-builds
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: node_modules/.cache/jazz-native-builds
+          key: jazz-native-builds-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', 'crates/**/*.rs', 'vendor/**', 'dev/artifacts/*.mjs') }}
+          restore-keys: |
+            jazz-native-builds-v1-${{ runner.os }}-${{ runner.arch }}-
+      - uses: ./.github/actions/setup-blacksmith
+        with:
+          sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
+      - name: Build the native correctness builds for main's tree
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition warm-native-builds
+      # Saved with the key the restore step computed before setup: hashFiles
+      # cannot walk the trees the build leaves behind (a post-job save of
+      # actions/cache re-evaluates it and fails).
+      - name: Save native correctness builds
+        if: steps.native-builds.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: node_modules/.cache/jazz-native-builds
+          key: ${{ steps.native-builds.outputs.cache-primary-key }}
       - name: Report sccache statistics
         if: always()
         run: sccache --show-stats
@@ -748,7 +844,10 @@ jobs:
   # for arm64-v8a, armeabi-v7a and x86_64 (no emulator or device tests).
   test-kotlin-android:
     if: inputs.scope == 'full'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Three cargo-ndk builds of jazz-ffi (arm64-v8a, armeabi-v7a, x86_64) and
+    # Gradle: with the S3 tier already hitting ~100 %, the rest is cdylib
+    # links, build scripts and proc macros, which want cores.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 20
     container:
       image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
