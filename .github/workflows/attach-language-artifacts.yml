@@ -303,6 +303,17 @@ jobs:
           rust-cache: "false"
           rust-targets: ${{ matrix.target }}
 
+      # The pinned JDK and Gradle (dev/scripts/kotlin-toolchain.sh; the
+      # directories are named by version), not refetched every run. Only
+      # those: the SDK and NDK stay out of the cache. A pull_request run's
+      # cache is scoped to its PR, never read by a release run.
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cache/jazz-kotlin/jdk-*
+            ~/.cache/jazz-kotlin/gradle-*
+          key: kotlin-toolchain-${{ runner.os }}-${{ hashFiles('dev/scripts/kotlin-toolchain.sh') }}
+
       - name: Build
         env:
           ABI: ${{ matrix.abi }}
@@ -336,6 +347,17 @@ jobs:
         with:
           ref: ${{ github.event_name == 'pull_request' && github.sha || inputs.ref || format('v{0}', inputs.version) }}
           persist-credentials: false
+
+      # The pinned JDK and Gradle (dev/scripts/kotlin-toolchain.sh; the
+      # directories are named by version), not refetched every run. Only
+      # those: the SDK and NDK stay out of the cache. A pull_request run's
+      # cache is scoped to its PR, never read by a release run.
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cache/jazz-kotlin/jdk-*
+            ~/.cache/jazz-kotlin/gradle-*
+          key: kotlin-toolchain-${{ runner.os }}-${{ hashFiles('dev/scripts/kotlin-toolchain.sh') }}
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
@@ -418,6 +440,17 @@ jobs:
         with:
           ref: ${{ github.event_name == 'pull_request' && github.sha || inputs.ref || format('v{0}', inputs.version) }}
           persist-credentials: false
+
+      # The pinned JDK and Gradle (dev/scripts/kotlin-toolchain.sh; the
+      # directories are named by version), not refetched every run. Only
+      # those: the SDK and NDK stay out of the cache. A pull_request run's
+      # cache is scoped to its PR, never read by a release run.
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cache/jazz-kotlin/jdk-*
+            ~/.cache/jazz-kotlin/gradle-*
+          key: kotlin-toolchain-${{ runner.os }}-${{ hashFiles('dev/scripts/kotlin-toolchain.sh') }}
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
