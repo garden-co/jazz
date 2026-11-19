@@ -324,8 +324,15 @@ jobs:
         with:
           # The action already installs cmdline-tools; its default also asks for retired SDK "tools".
           packages: platform-tools
+      # sdkmanager has no retry of its own.
       - name: Install pinned Android NDK
-        run: sdkmanager --install "ndk;27.1.12297006"
+        run: |
+          for attempt in 1 2 3; do
+            sdkmanager --install "ndk;27.1.12297006" && exit 0
+            echo "::warning::NDK install attempt ${attempt} failed"
+            sleep $((attempt * 10))
+          done
+          exit 1
       - name: Build the Android relay archive slice
         run: |
           JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
