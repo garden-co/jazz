@@ -174,7 +174,8 @@ jobs:
     container: swift:6.0-noble
     steps:
       - name: Tools the gate scripts use
-        run: apt-get update -qq && apt-get install -y -qq curl git iproute2 python3 sqlite3 unzip xz-utils >/dev/null
+        # Only if the image lacks them: an apt mirror once took 6 min here. The scripts need no ss (bash /dev/tcp, PIDs).
+        run: command -v curl >/dev/null && command -v git >/dev/null || { apt-get update -qq && apt-get install -y -qq curl git >/dev/null; }
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with: { ref: "${{ needs.inputs.outputs.rc_ref }}", path: rc-src }

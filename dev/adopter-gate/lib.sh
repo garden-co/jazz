@@ -8,8 +8,12 @@ AG_RESULTS=${AG_RESULTS:-$AG/.results}; mkdir -p "$AG_RESULTS" "$AG/.work"
 AG_TGZ=${AG_TGZ:-$AG/.rc}
 ag_version() { cat "$AG_TGZ/VERSION"; }
 
-kill_port() { local p; for p in "$@"; do for pid in $(ss -ltnpH "sport = :$p" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u); do kill "$pid" 2>/dev/null; done; done; }
-wait_port() { local i; for i in $(seq "${2:-60}"); do ss -ltn | grep -q ":$1 " && return 0; sleep 1; done; return 1; }
+kill_port() { command -v ss >/dev/null || return 0; local p; for p in "$@"; do for pid in $(ss -ltnpH "sport = :$p" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u); do kill "$pid" 2>/dev/null; done; done; }
+# Listening check without ss (the swift image has none): a TCP connect via bash's /dev/tcp.
+wait_port() { local i; for i in $(seq "${2:-60}"); do (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && return 0; sleep 1; done; return 1; }
+# Background servers started with ag_bg are stopped by PID (their process group), never by name.
+ag_bg() { local log=$1; shift; setsid "$@" > "$log" 2>&1 < /dev/null & echo $! >> "$AG/.work/bg.pids"; }
+ag_kill_bg() { [ -f "$AG/.work/bg.pids" ] || return 0; local pid; for pid in $(cat "$AG/.work/bg.pids"); do kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null; done; rm -f "$AG/.work/bg.pids"; }
 
 # Point the jazz deps of the package in the current dir at the RC tarballs (adds them if absent), pnpm-install,
 # and print how many jazz lockfile entries are not the RC.
