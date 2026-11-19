@@ -10,7 +10,7 @@
 // settings make it, 2.46 MB this way.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,6 +25,23 @@ const env = {
   CARGO_PROFILE_RELEASE_PANIC: "abort",
 };
 const run = (cmd, args) => execFileSync(cmd, args, { cwd: root, env, stdio: "inherit" });
+
+/**
+ * `--wasm-opt-level O1` swaps only the final wasm-opt level, for merge-group
+ * CI's Durable Object tests: -Oz is two serial whole-module passes and ~3.5
+ * minutes there (-O1: ~16 s). Same Rust, same fat LTO. Everything that ships
+ * or gates a release is the default -Oz build: build-jazz-packages.yml and
+ * nightly run the full Durable Object suite on it. The level is recorded in
+ * pkg/build.json (not in the npm tarball), which the release smoke test
+ * checks.
+ */
+const WASM_OPT_LEVELS = ["Oz", "O1"];
+const levelFlag = process.argv.indexOf("--wasm-opt-level");
+const wasmOptLevel = levelFlag === -1 ? "Oz" : process.argv[levelFlag + 1];
+if (!WASM_OPT_LEVELS.includes(wasmOptLevel) || process.argv.length !== (levelFlag === -1 ? 2 : 4)) {
+  console.error(`usage: build.mjs [--wasm-opt-level ${WASM_OPT_LEVELS.join("|")}]`);
+  process.exit(2);
+}
 
 run("wasm-pack", [
   "build",
@@ -132,7 +149,7 @@ function wasmOpt() {
 
 const wasm = join(out, "jazz_wasm_do_bg.wasm");
 run(wasmOpt(), [
-  "-Oz",
+  `-${wasmOptLevel}`,
   "--strip-debug",
   "--strip-producers",
   "--low-memory-unused",
@@ -147,3 +164,4 @@ run(process.execPath, [
 ]);
 // wasm-pack's `.gitignore` of `*` would keep the build out of the tarball.
 rmSync(join(out, ".gitignore"), { force: true });
+writeFileSync(join(out, "build.json"), `${JSON.stringify({ wasmOptLevel })}\n`);
