@@ -27,11 +27,19 @@ async function browser() {
   const ctx = await chromium.launchPersistentContext(mkdtempSync(join(tmpdir(), "smoke-")), {
     headless: true,
     ...(bypass
-      ? { extraHTTPHeaders: { "x-vercel-protection-bypass": bypass, "x-vercel-set-bypass-cookie": "true" } }
+      ? {
+          extraHTTPHeaders: {
+            "x-vercel-protection-bypass": bypass,
+            "x-vercel-set-bypass-cookie": "true",
+          },
+        }
       : {}),
   });
   const page = ctx.pages()[0] ?? (await ctx.newPage());
-  page.on("pageerror", (e) => console.log("  pageerror:", String(e).slice(0, 300)));
+  page.on("pageerror", (e) => {
+    console.log("  pageerror:", String(e).slice(0, 300));
+    if (String(e).includes("invalid_link_challenge")) page.__linkErrs = (page.__linkErrs ?? 0) + 1;
+  });
   return { ctx, page };
 }
 async function me(page, want = () => true, timeout = 60000) {
@@ -74,13 +82,55 @@ async function write(page, kind, text) {
   const err = await page.textContent('[data-testid="err"]', { timeout: 2000 }).catch(() => "");
   return { ok, err };
 }
+// jazz#5553 workaround (remove once its fix lands): on vercel() each function instance signs guest-link challenges with
+// its own key, so a sign-up or sign-in whose link calls hit two instances fails with exactly invalid_link_challenge.
+// Retry only that operation (reload, sign in again), up to 3 attempts in all; any other failure is not retried. Each
+// retried success prints a NOTE "flaky pass: jazz#5553" line, which the gate counts in verdict.json's flaky[].
+async function retryLink(page, label, attemptOnce, again) {
+  const before = page.__linkErrs ?? 0;
+  let r = await attemptOnce();
+  let attempt = 1;
+  while (r?.kind !== "backend" && (page.__linkErrs ?? 0) > before && attempt < 3) {
+    attempt++;
+    await page.reload();
+    await me(page, () => true, 30000);
+    r = await again();
+  }
+  if (attempt > 1)
+    console.log(
+      `${r?.kind === "backend" ? "NOTE" : "FAIL"} t4 flaky pass: jazz#5553 invalid_link_challenge at ${label}, ${attempt} attempts${r?.kind === "backend" ? "" : " (still failing)"}`,
+    );
+  return r;
+}
 async function signUp(page, email, password = PW) {
+  return retryLink(
+    page,
+    `sign-up of ${email}`,
+    () => signUpOnce(page, email, password),
+    async () =>
+      (await page.$('[data-testid="sign-in"]'))
+        ? signInOnce(page, email, password)
+        : me(page, (j) => j.kind === "backend", 30000),
+  );
+}
+async function signIn(page, email, password) {
+  return retryLink(
+    page,
+    `sign-in of ${email}`,
+    () => signInOnce(page, email, password),
+    async () =>
+      (await page.$('[data-testid="sign-in"]'))
+        ? signInOnce(page, email, password)
+        : me(page, (j) => j.kind === "backend", 30000),
+  );
+}
+async function signUpOnce(page, email, password) {
   await page.fill('[data-testid="email"]', email);
   await page.fill('[data-testid="password"]', password);
   await page.click('[data-testid="sign-up"]');
   return me(page, (j) => j.kind === "backend");
 }
-async function signIn(page, email, password) {
+async function signInOnce(page, email, password) {
   await page.waitForSelector('[data-testid="sign-in"]', { timeout: 60000 });
   await page.fill('[data-testid="email"]', email);
   await page.fill('[data-testid="password"]', password);
@@ -176,7 +226,9 @@ try {
       const s = await signUp(S.page, process.env.BASELINE_RED_EMAIL, BASELINE_PW);
       const t1 = await write(S.page, "team", "red-team-63");
       const t2 = await write(S.page, "private", "red-private-63");
-      console.log(`SEEDED baseline user ${process.env.BASELINE_RED_EMAIL}: ${s?.claims?.team === "red" && t1.ok && t2.ok ? "ok" : "FAILED"}`);
+      console.log(
+        `SEEDED baseline user ${process.env.BASELINE_RED_EMAIL}: ${s?.claims?.team === "red" && t1.ok && t2.ok ? "ok" : "FAILED"}`,
+      );
       await S.ctx.close();
       await R.page.goto(BASE);
       await me(R.page);
