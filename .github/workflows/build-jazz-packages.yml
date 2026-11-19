@@ -183,8 +183,38 @@ jobs:
           test -f crates/jazz-wasm/pkg/jazz_wasm.js
           test -f crates/jazz-wasm/pkg/jazz_wasm.d.ts
 
-      # `jazz-wasm/durable-object`: the core a Cloudflare Durable Object
-      # hosts. The whole script, not bare wasm-pack: it also patches the glue
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-wasm-pkg
+          path: crates/jazz-wasm/pkg
+          # The sealed provenance receipt is intentionally dot-prefixed. The
+          # upload action excludes hidden files unless this is explicit.
+          include-hidden-files: true
+          if-no-files-found: error
+
+  # `jazz-wasm/durable-object`, the core a Cloudflare Durable Object hosts,
+  # in its own job beside build-wasm: a separate wasm-pack build and wasm-opt
+  # pass that used to add about 2.5 min after the main one.
+  build-wasm-durable-object:
+    name: Build jazz-wasm Durable Object entry
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: wasm32-unknown-unknown
+          sccache: "true"
+          sccache-key: release-wasm-do-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+
+      - uses: ./.github/actions/install-rust-tool
+        with:
+          tool: wasm-pack@0.13.1
+
+      # The whole script, not bare wasm-pack: it also patches the glue
       # (reinstantiable.mjs) and deletes wasm-pack's `.gitignore` of `*`,
       # which would keep the build out of the tarball.
       - name: Build jazz-wasm Durable Object entry
@@ -204,21 +234,40 @@ jobs:
           path: crates/jazz-wasm/durable-object/pkg
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: jazz-wasm-pkg
-          path: crates/jazz-wasm/pkg
-          # The sealed provenance receipt is intentionally dot-prefixed. The
-          # upload action excludes hidden files unless this is explicit.
-          include-hidden-files: true
-          if-no-files-found: error
+  # Merge groups run jazz-tools' Durable Object suite on a wasm-opt -O1 host;
+  # this runs the full suite on the -Oz host that ships (the uploaded
+  # jazz-wasm-durable-object-pkg, unpacked where the build leaves it), so an
+  # -Oz-only break (a wasm-opt miscompile, or the glue or reinstantiation
+  # interacting with optimised code) fails the release build. Beside the
+  # package assembly, not before it.
+  test-wasm-durable-object:
+    name: Durable Object suite on the release host
+    needs: build-wasm-durable-object
+    runs-on: blacksmith-4vcpu-ubuntu-2404
 
-      # Merge groups run jazz-tools' Durable Object suite on a wasm-opt -O1
-      # host; this runs the full suite on the -Oz host built (and uploaded)
-      # above, so an -Oz-only break (a wasm-opt miscompile, or the glue or
-      # reinstantiation interacting with optimised code) fails the release
-      # build. Last, after both uploads: the correctness producer republishes
-      # crates/jazz-wasm/pkg as its fast build.
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: wasm32-unknown-unknown
+          sccache: "true"
+          sccache-key: release-wasm-do-suite-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+
+      - uses: ./.github/actions/install-rust-tool
+        with:
+          tool: wasm-pack@0.13.1
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-wasm-durable-object-pkg
+          path: crates/jazz-wasm/durable-object/pkg
+
+      - name: Check it is the -Oz host
+        run: node --test --test-name-pattern='-Oz build' crates/jazz-wasm/tests/durable-objects/release.test.mjs
+
       - name: Build correctness artifacts for the Durable Object suite
         run: node dev/gates/ensure-correctness-artifacts.mjs
       - name: Run jazz-tools' Durable Object suite on the release host
@@ -408,6 +457,7 @@ jobs:
       - build-linux
       - check-linux-heap-profile
       - build-wasm
+      - build-wasm-durable-object
       - build-napi
 
     steps:
