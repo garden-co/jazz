@@ -10,10 +10,19 @@
  *   RUN_ID, EXPECTED_SHA, WORKFLOWS, REPO (owner/name), GH_TOKEN, [MANIFEST]
  */
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /** Why `run` (a GitHub workflow run) can't stand for `expectedSha`, or undefined. */
-export function runCommitMismatch(run, { expectedSha, workflows }) {
+export function runCommitMismatch(run, { expectedSha, workflows, repo }) {
   if (!run || typeof run !== "object") return "no such run";
+  // A pull_request run's head_sha is the PR head, but it builds the merge with
+  // its base, so the equality below would prove nothing; and a fork's run
+  // isn't this repository's build at all.
+  if (String(run.event ?? "").startsWith("pull_request"))
+    return `run ${run.id} is a ${run.event} run`;
+  if (repo && run.head_repository?.full_name !== repo)
+    return `run ${run.id} built ${run.head_repository?.full_name ?? "an unknown repository"}, not ${repo}`;
   const file = (run.path ?? "").split("@")[0].split("/").pop();
   if (!workflows.includes(file))
     return `run ${run.id} is a ${file || "unknown"} run, not one of ${workflows.join(", ")}`;
@@ -30,7 +39,7 @@ export function manifestMismatch(manifest, { expectedSha, runId }) {
   return undefined;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   const { RUN_ID, EXPECTED_SHA, WORKFLOWS, REPO, GH_TOKEN, MANIFEST } = process.env;
   if (!/^[0-9]+$/.test(RUN_ID ?? "")) throw new Error(`RUN_ID must be a run ID, got '${RUN_ID}'`);
   if (!/^[0-9a-f]{40}$/.test(EXPECTED_SHA ?? ""))
@@ -41,6 +50,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     .filter(Boolean);
   if (workflows.length === 0) throw new Error("WORKFLOWS must name the allowed producer workflows");
   const response = await fetch(`https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}`, {
+    signal: AbortSignal.timeout(30_000),
     headers: {
       accept: "application/vnd.github+json",
       authorization: `Bearer ${GH_TOKEN}`,
@@ -50,7 +60,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   if (!response.ok) throw new Error(`GET run ${RUN_ID} failed: ${response.status}`);
   const run = await response.json();
   const problem =
-    runCommitMismatch(run, { expectedSha: EXPECTED_SHA, workflows }) ??
+    runCommitMismatch(run, { expectedSha: EXPECTED_SHA, workflows, repo: REPO }) ??
     (MANIFEST
       ? manifestMismatch(JSON.parse(readFileSync(MANIFEST, "utf8")), {
           expectedSha: EXPECTED_SHA,

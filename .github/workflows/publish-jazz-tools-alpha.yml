@@ -296,6 +296,10 @@ jobs:
               const producer = (artifactsRun.path || "").split("@")[0].split("/").pop();
               if (!["release-artifacts.yml", "release-candidate.yml"].includes(producer))
                 throw new Error(`artifacts_run_id ${artifactsRunId} is a ${producer} run, not release-artifacts or release-candidate`);
+              if (String(artifactsRun.event || "").startsWith("pull_request"))
+                throw new Error(`artifacts_run_id ${artifactsRunId} is a ${artifactsRun.event} run`);
+              if (artifactsRun.head_repository?.full_name !== `${owner}/${repo}`)
+                throw new Error(`artifacts_run_id ${artifactsRunId} built ${artifactsRun.head_repository?.full_name}, not ${owner}/${repo}`);
               if (artifactsRun.head_sha !== sha)
                 throw new Error(`artifacts_run_id ${artifactsRunId} built ${artifactsRun.head_sha}, not this commit ${sha}`);
               usePreviewArtifacts = "true";
