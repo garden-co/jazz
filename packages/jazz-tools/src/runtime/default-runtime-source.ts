@@ -300,6 +300,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     onFailure,
     onStorageReset,
     onStorageInvalidated,
+    onNewerBuild,
   }: BrowserWorkerConnectionContext<DbConfig>): BrowserWorkerConnection {
     const runtime = client.getRuntime();
     if (!(runtime instanceof NativeRuntimeAdapter)) {
@@ -367,6 +368,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         onFailure,
         onStorageReset,
         onStorageInvalidated,
+        onNewerBuild,
       },
     );
   }
