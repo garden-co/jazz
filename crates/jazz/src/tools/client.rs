@@ -1009,7 +1009,7 @@ impl JazzClient {
             None => None,
         };
         #[cfg(not(feature = "e2ee-client"))]
-        drop(encryption);
+        let _ = encryption;
         #[cfg(feature = "e2ee-client")]
         let encryption_declarations = encryption
             .as_ref()
