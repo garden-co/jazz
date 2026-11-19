@@ -14,7 +14,7 @@ use jazz::tx::DurabilityTier;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 
-use crate::{durability_tier_from_str, host_error, WasmDb};
+use crate::{durability_tier_from_str, host_error, wasm_read_or_pending, WasmDb};
 
 /// A thin session's transactions: idle between requests, taken while one
 /// is served.
@@ -50,19 +50,16 @@ impl WasmDb {
     /// is the request's wire frame, the answer the response's. A commit
     /// answers once the core accepted it. One request at a time. (napi:
     /// `serveThinTransaction`.)
+    ///
+    /// Answers the response frame, or (as napi) a `PendingNativeRead` the
+    /// caller polls while it pumps the database: a commit settles when the
+    /// core's acknowledgement is taken in, which only polling observes.
     #[wasm_bindgen(js_name = serveThinTransaction)]
-    pub fn serve_thin_transaction(&self, request: Vec<u8>) -> js_sys::Promise {
-        let inner = match self.open_inner() {
-            Ok(inner) => inner,
-            Err(error) => return js_sys::Promise::reject(&error),
-        };
+    pub fn serve_thin_transaction(&self, request: Vec<u8>) -> Result<JsValue, JsValue> {
+        let inner = self.open_inner()?;
         let request = match jazz::wire::decode_postcard_frame(&request) {
             Ok(jazz::wire::WireFrame::ThinRequest(request)) => request,
-            _ => {
-                return js_sys::Promise::reject(&error(
-                    "serveThinTransaction takes a thin request frame",
-                ));
-            }
+            _ => return Err(error("serveThinTransaction takes a thin request frame")),
         };
         let binding = inner.binding.clone();
         let thin = Rc::clone(&inner.host.thin);
@@ -82,24 +79,20 @@ impl WasmDb {
                     Ok(transactions) => transactions,
                     Err(failure) => {
                         *thin.borrow_mut() = None;
-                        return js_sys::Promise::reject(&host_error(
-                            jazz::binding_host::HostError::Engine(failure),
-                        ));
+                        return Err(host_error(jazz::binding_host::HostError::Engine(failure)));
                     }
                 }
             }
             Some(ThinState::Serving) => {
                 *thin.borrow_mut() = Some(ThinState::Serving);
-                return js_sys::Promise::reject(&error(
-                    "serveThinTransaction serves one request at a time",
-                ));
+                return Err(error("serveThinTransaction serves one request at a time"));
             }
         };
         let mut serving = Serving {
             cell: thin,
             transactions: Some(transactions),
         };
-        future_to_promise(async move {
+        wasm_read_or_pending(Box::pin(async move {
             let body = serving
                 .transactions
                 .as_mut()
@@ -114,26 +107,24 @@ impl WasmDb {
                 },
             ))
             .map_err(|failure| error(format!("encode thin answer: {failure}")))?;
-            Ok(js_sys::Uint8Array::from(frame.as_slice()).into())
-        })
+            Ok(frame)
+        }))
     }
 
     /// End the thin session's open transactions and uploads: nothing of
     /// them reached the core. (napi: `releaseThinTransactions`.)
+    /// (Answers as `serveThinTransaction`: empty bytes, or a pending read.)
     #[wasm_bindgen(js_name = releaseThinTransactions)]
-    pub fn release_thin_transactions(&self) -> js_sys::Promise {
-        let inner = match self.open_inner() {
-            Ok(inner) => inner,
-            Err(error) => return js_sys::Promise::reject(&error),
-        };
+    pub fn release_thin_transactions(&self) -> Result<JsValue, JsValue> {
+        let inner = self.open_inner()?;
         let binding = inner.binding.clone();
         let state = inner.host.thin.borrow_mut().take();
-        future_to_promise(async move {
+        wasm_read_or_pending(Box::pin(async move {
             if let Some(ThinState::Idle(transactions)) = state {
                 transactions.release(&binding.db).await;
             }
-            Ok(JsValue::UNDEFINED)
-        })
+            Ok(Vec::new())
+        }))
     }
 
     /// Admit a verified device account for this backend runtime only.
@@ -153,25 +144,45 @@ impl WasmDb {
     /// TS `waitForSync`: resolve once `writer`'s writes so far (a trusted
     /// session's author bytes; none for this database's own) reached
     /// `tier`, failing with a rejection of theirs, including one that
-    /// settled before and no wait reported. (napi: `waitForSync`.)
+    /// settled before and no wait reported. Settling `cancelled` stops a
+    /// wait that is still pending and rejects it, so a caller that gives up
+    /// (a browser offline past its timeout) leaves no core waiter parked,
+    /// as `waitForPendingWrites` does. (napi: `waitForSync`.)
     #[wasm_bindgen(js_name = waitForSync)]
-    pub fn wait_for_sync(&self, tier: String, writer: Option<Vec<u8>>) -> js_sys::Promise {
+    pub fn wait_for_sync(
+        &self,
+        tier: String,
+        writer: Option<Vec<u8>>,
+        cancelled: Option<js_sys::Promise>,
+    ) -> js_sys::Promise {
         let inner = match self.open_inner() {
             Ok(inner) => inner,
             Err(error) => return js_sys::Promise::reject(&error),
         };
         future_to_promise(async move {
-            match durability_tier_from_str(&tier)? {
-                DurabilityTier::None => {}
-                DurabilityTier::Local => inner.flush().await?,
-                DurabilityTier::Global => inner
-                    .binding
-                    .wait_for_sync_global(writer.as_deref())
-                    .map_err(host_error)?
-                    .await
-                    .map_err(host_error)?,
+            let wait = async move {
+                match durability_tier_from_str(&tier)? {
+                    DurabilityTier::None => {}
+                    DurabilityTier::Local => inner.flush().await?,
+                    DurabilityTier::Global => inner
+                        .binding
+                        .wait_for_sync_global(writer.as_deref())
+                        .map_err(host_error)?
+                        .await
+                        .map_err(host_error)?,
+                }
+                Ok(JsValue::UNDEFINED)
+            };
+            let Some(cancelled) = cancelled else {
+                return wait.await;
+            };
+            let cancelled = wasm_bindgen_futures::JsFuture::from(cancelled);
+            match futures_util::future::select(Box::pin(wait), cancelled).await {
+                futures_util::future::Either::Left((settled, _)) => settled,
+                futures_util::future::Either::Right(_) => {
+                    Err(JsValue::from_str("waitForSync was cancelled"))
+                }
             }
-            Ok(JsValue::UNDEFINED)
         })
     }
 }
