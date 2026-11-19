@@ -16,6 +16,8 @@
 //! - [`store`]: the held-key and lineage records of the private store, their
 //!   canonical encoding, sealing and signing, and their load-time checks
 //!   (§6.2).
+//! - [`local`]: the device document, with its approval nonce state, and
+//!   the signed floor records of the private store (§6.1, §6.3a).
 //! - [`repair`]: the plan that rewrites a refused or lost creation's cells
 //!   under the space's real key (§3.2).
 //! - [`convert`]: schema conversion helpers (migrations §3, §4).
@@ -25,6 +27,7 @@ pub mod cells;
 pub mod convert;
 pub mod equality;
 pub mod held;
+pub mod local;
 pub mod repair;
 pub mod store;
 mod stored;

@@ -132,31 +132,31 @@ pub(crate) fn successor_value(successor: &SpaceSuccessor) -> Value {
 
 /// Reads object fields of a decoded value; a missing field or one of
 /// another type is an invalid record.
-struct Fields<'v>(&'v Value);
+pub(super) struct Fields<'v>(&'v Value);
 
 impl<'v> Fields<'v> {
-    fn new(value: &'v Value) -> ProtocolResult<Self> {
+    pub(super) fn new(value: &'v Value) -> ProtocolResult<Self> {
         match value {
             Value::Object(_) => Ok(Self(value)),
             _ => invalid("expected an object"),
         }
     }
 
-    fn get(&self, name: &str) -> ProtocolResult<&'v Value> {
+    pub(super) fn get(&self, name: &str) -> ProtocolResult<&'v Value> {
         self.0
             .field(name)
             .ok_or(ProtocolError::InvalidRecord("missing field"))
     }
 
-    fn string(&self, name: &str) -> ProtocolResult<String> {
+    pub(super) fn string(&self, name: &str) -> ProtocolResult<String> {
         Ok(self.get(name)?.as_str()?.to_owned())
     }
 
-    fn bytes(&self, name: &str) -> ProtocolResult<Vec<u8>> {
+    pub(super) fn bytes(&self, name: &str) -> ProtocolResult<Vec<u8>> {
         self.get(name)?.as_bytes()
     }
 
-    fn format(&self, expected: &str) -> ProtocolResult<()> {
+    pub(super) fn format(&self, expected: &str) -> ProtocolResult<()> {
         if self.get("format")?.as_str()? == expected {
             Ok(())
         } else {
@@ -167,7 +167,7 @@ impl<'v> Fields<'v> {
 
 /// Fails unless `value` is exactly the canonical value of what was decoded
 /// from it: no field more, none of another form.
-fn ensure_canonical(value: &Value, rebuilt: &Value) -> ProtocolResult<()> {
+pub(super) fn ensure_canonical(value: &Value, rebuilt: &Value) -> ProtocolResult<()> {
     if value == rebuilt {
         Ok(())
     } else {
@@ -241,7 +241,7 @@ pub struct Binding {
 }
 
 impl Binding {
-    fn value(&self) -> Value {
+    pub(super) fn value(&self) -> Value {
         Value::object(vec![
             ("application", Some(Value::string(&self.application))),
             ("device", Some(Value::string(&self.device))),
@@ -249,7 +249,7 @@ impl Binding {
         ])
     }
 
-    fn from_value(value: &Value) -> ProtocolResult<Self> {
+    pub(super) fn from_value(value: &Value) -> ProtocolResult<Self> {
         let fields = Fields::new(value)?;
         Ok(Self {
             application: fields.string("application")?,
@@ -414,7 +414,7 @@ impl HeldKeyRecord {
 }
 
 /// Parses text that must be the canonical encoding of what it parses to.
-fn parse_canonical(bytes: &[u8]) -> ProtocolResult<Value> {
+pub(super) fn parse_canonical(bytes: &[u8]) -> ProtocolResult<Value> {
     fn sorted(value: &Value) -> bool {
         match value {
             Value::Array(items) => items.iter().all(sorted),

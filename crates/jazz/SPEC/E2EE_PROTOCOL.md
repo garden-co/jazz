@@ -2548,10 +2548,15 @@ document:
 
 ```text
 device document:
-{ "format": "jazz-e2ee-local-devices-v2",
+{ "format": "jazz-e2ee-local-devices-v3",
   "devices": [ { scope, id, mechanism, version, publicKey, privateKey,
                  signingMechanism, signingVersion,
-                 signingPublicKey, signingPrivateKey } … ] }
+                 signingPublicKey, signingPrivateKey, approval } … ] }
+
+approval (the device's approval nonce, §2.2):
+{ "format": "jazz-e2ee-approval-nonce-v1", commitment, nonce }
+  until the device answers a challenge, then
+{ "format": "jazz-e2ee-approval-nonce-v1", commitment, "spent": true }
 
 held-key document (one per space root):
 { "format": "jazz-e2ee-held-space-v1", "revision": n,
@@ -2560,7 +2565,15 @@ held-key document (one per space root):
 ```
 
 `devices` holds at most one device, the one of the document's scope. An
-unknown format is refused and never overwritten.
+unknown format is refused and never overwritten. The document is canonical
+JSON (§6.2), bytes as arrays. `commitment` is the request's
+`nonceCommitment`; `nonce`, like the private keys, is stored only as the
+platform's protected blob (below). Before a device reveals its nonce in a
+proof (§2.5, §2.9), the runtime rewrites the document with `spent` and no
+nonce, and waits for the store to confirm it; a device whose document says
+`spent` refuses every challenge. A copy of the store made before that is
+bound to the platform's protection like the private keys: where the
+protection does not travel with a copy (below), neither does the nonce.
 
 Device private keys are never stored in the clear:
 
@@ -2672,7 +2685,20 @@ space's state comes from the server, which E2EE does not protect against
 
 Each floor is signed by the device like a lineage record (`B(format, …)`,
 format `jazz-e2ee-floor-v1`) and advances only forward, after a verification
-at a newer cut. Every later read is checked against the floor before its
+at a newer cut:
+
+```text
+{ format: "jazz-e2ee-floor-v1",
+  binding: { application: Dₐ(self), device: deviceId, keys: <device hash> },
+  account, through: "<decimal>", generation: "<decimal>", rootId,
+  rootKeys: { publicKey, mechanism, version,
+              signingPublicKey, signingMechanism, signingVersion },
+  epochId, epochPosition: "<decimal>", activeDevice?, signature: [..] }
+```
+
+A floor record is accepted on load only if its binding is the current
+device's, `account` is the account it is stored for, and its signature
+verifies; one that fails is skipped and reported, like a held-key record. Every later read is checked against the floor before its
 state is used: older evidence (an earlier cut, a lower generation, a chain
 that no longer reaches the floor's epoch) is refused with `stale-state`, and
 the runtime reads again; it never decrypts, writes or delivers with the older
