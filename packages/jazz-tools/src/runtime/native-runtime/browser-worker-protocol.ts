@@ -46,6 +46,15 @@ export interface BrowserRelayError {
 export const BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN =
   "this account's store is open under another sign-in in another tab";
 
+/**
+ * Why a worker refuses a tab whose configuration differs from the open
+ * store's only in its schema: another tab runs another build of the app
+ * (deployed before or after this one) and opened the store with its schema.
+ * The tab tries again on its own until that tab reloads or closes.
+ */
+export const BROWSER_STORE_HELD_BY_ANOTHER_BUILD =
+  "this account's store is open with another build's schema in another tab";
+
 /** The relay error envelope is deliberately small enough for a MessagePort. */
 export const BROWSER_RELAY_ERROR_MAX_CAUSE_DEPTH = 32;
 export const BROWSER_RELAY_ERROR_MAX_TOTAL_CHARS = 64 * 1024;
