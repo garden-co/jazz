@@ -245,6 +245,8 @@ jobs:
       contents: read
     with:
       artifacts_run_id: ${{ needs.artifacts.outputs.run_id }}
+      # artifacts-complete requires the manifest to name this commit.
+      manifest_checked_by_caller: true
 
   preview:
     name: Release preview

@@ -17,6 +17,11 @@ on:
         required: false
         type: string
         default: ""
+      manifest_checked_by_caller:
+        description: The caller already requires the artifacts run's release-manifest to name this commit (release-candidate.yml's artifacts-complete), so the device jobs skip that wait.
+        required: false
+        type: boolean
+        default: false
   pull_request:
     types: [opened, reopened, synchronize, labeled]
     paths:
@@ -231,7 +236,7 @@ jobs:
       # release-artifacts uploads its manifest last, about when this job starts,
       # so require it at the end rather than wait for it up front.
       - name: Require the artifacts run's release manifest to name this commit
-        if: inputs.artifacts_run_id != ''
+        if: inputs.artifacts_run_id != '' && !inputs.manifest_checked_by_caller
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -286,24 +291,23 @@ jobs:
           cache-on-failure: true
           prefix-key: rn-device-android-ubuntu-2404
           key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-native-transport/**', 'crates/jazz-napi/**', 'crates/jazz-wasm/**', 'dev/artifacts/**') }}
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      # Sticky disks, not actions/cache: those are per branch, and this job
+      # never runs on main, so every RC on a fresh branch started cold and
+      # then spent ~50 s saving. A sticky disk is shared by every branch and
+      # commits a snapshot instead of uploading a tarball.
+      # The pinned toolchain; bootstrap-android.sh re-verifies what it reuses.
+      # The AVD lives in RUNNER_TEMP, not here.
+      - uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
         with:
-          # The emulator still writes its AVD at post-job save time, which made
-          # tar (and so every save of this cache) fail.
-          path: |
-            .cache/android-device-acceptance
-            !.cache/android-device-acceptance/avd
-          key: rn-device-android-ubuntu-2404-${{ hashFiles('pnpm-lock.yaml', 'dev/rn-device-acceptance/**', 'crates/jazz-rn/**') }}
-          # bootstrap-android.sh re-verifies every pinned archive it reuses.
-          restore-keys: rn-device-android-ubuntu-2404-
+          key: rn-device-android-toolchain-${{ github.repository_id }}-v1
+          path: ${{ github.workspace }}/.cache/android-device-acceptance
       # Gradle's distribution, dependencies and local build cache.
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      - name: Point Gradle at its sticky disk
+        run: echo "GRADLE_USER_HOME=${RUNNER_TEMP}/gradle-home" >> "${GITHUB_ENV}"
+      - uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
         with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: rn-device-gradle-ubuntu-2404-${{ hashFiles('pnpm-lock.yaml', 'dev/rn-device-acceptance/android/**/*.gradle', 'dev/rn-device-acceptance/android/gradle/wrapper/gradle-wrapper.properties') }}
-          restore-keys: rn-device-gradle-ubuntu-2404-
+          key: rn-device-android-gradle-${{ github.repository_id }}-v1
+          path: ${{ runner.temp }}/gradle-home
       - run: pnpm install --frozen-lockfile
       - name: Verify synthetic scope authorization and generated native fixture
         run: cargo test -p jazz-native-relay --example rn_server_session_harness --no-fail-fast
@@ -378,7 +382,7 @@ jobs:
           cache="$GITHUB_WORKSPACE/.cache/android-device-acceptance"
           export JAVA_HOME="$cache/jdk" ANDROID_SDK_ROOT="$cache/sdk" ANDROID_HOME="$cache/sdk"
           export PATH="$cache/cargo/bin:$cache/sdk/cmdline-tools/latest/bin:$cache/sdk/platform-tools:$cache/sdk/emulator:$PATH"
-          export ANDROID_AVD_HOME="$cache/avd"
+          export ANDROID_AVD_HOME="$RUNNER_TEMP/jazz-android-avd"
           # The acceptance receipt's production cleanup contract is a real
           # Linux session, never the portable test double used by macOS tests.
           export JAZZ_ANDROID_SESSION_LAUNCHER=setsid
@@ -388,16 +392,19 @@ jobs:
           dev/rn-device-acceptance/scripts/create-android-avd.sh \
             jazz-device-acceptance-api35 \
             'system-images;android-35;google_apis;x86_64'
+          # Boot while Gradle builds; the receipt waits for both.
           dev/rn-device-acceptance/scripts/boot-android-emulator.sh \
             jazz-device-acceptance-api35 \
-            "$cache/emulator.log" \
-            "$ANDROID_AVD_HOME/jazz-device-acceptance-api35.avd/config.ini"
+            "$RUNNER_TEMP/jazz-android-emulator.log" \
+            "$ANDROID_AVD_HOME/jazz-device-acceptance-api35.avd/config.ini" &
+          boot_pid=$!
           (
             cd dev/rn-device-acceptance/android
             grep -Fx "reactNativeArchitectures=${relay_abis}" gradle.properties
             ./gradlew -q -PreactNativeArchitectures="${relay_abis}" :app:properties | grep -Fx "reactNativeArchitectures: ${relay_abis}"
             NODE_ENV=production ./gradlew -PreactNativeArchitectures="${relay_abis}" :app:assembleRelease --console=plain --build-cache
           )
+          wait "$boot_pid"
           # The Android build has already provisioned Gradle's Kotlin compiler;
           # make the packed JVM admission receipt mandatory on this JDK lane.
           export PATH="$JAVA_HOME/bin:$PATH"
@@ -410,7 +417,7 @@ jobs:
       # release-artifacts uploads its manifest last, about when this job starts,
       # so require it at the end rather than wait for it up front.
       - name: Require the artifacts run's release manifest to name this commit
-        if: inputs.artifacts_run_id != ''
+        if: inputs.artifacts_run_id != '' && !inputs.manifest_checked_by_caller
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -438,3 +445,15 @@ jobs:
           name: rn-device-android-failure-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/jazz-rn-android-failure-artifact
           if-no-files-found: ignore
+      # The sticky disks unmount after this: nothing may still run from them.
+      - name: Stop Gradle, the emulator and adb
+        if: always()
+        run: |
+          pkill -f GradleDaemon || true
+          pkill -f KotlinCompileDaemon || true
+          pkill -x adb || true
+          sleep 2
+          for disk in "${GITHUB_WORKSPACE}/.cache/android-device-acceptance" "${GRADLE_USER_HOME}"; do
+            # -m targets the whole filesystem: only ever a mounted sticky disk.
+            if mountpoint -q "${disk}"; then fuser -km "${disk}" 2>/dev/null || true; fi
+          done
