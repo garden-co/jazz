@@ -280,7 +280,9 @@ jobs:
   test-wasm-durable-object:
     name: Durable Object suite on the release host
     needs: build-wasm-durable-object
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # 16 vCPUs: it builds the correctness artifacts, then runs the suite (5.4
+    # min on 4 vCPUs); the release build's last packages job.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
