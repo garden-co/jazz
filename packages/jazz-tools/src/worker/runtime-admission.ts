@@ -1,4 +1,5 @@
 import type { WasmSchema } from "../drivers/types.js";
+import type { ClientMigrations } from "../runtime/client-migrations.js";
 
 /**
  * How a tab's worker fingerprint (`createBrowserWorkerFingerprint`) relates to
@@ -45,4 +46,28 @@ export function compareRuntimeAdmission(
   } catch {
     return "incompatible";
   }
+}
+
+/**
+ * Which of two builds of the app is newer, by the schema history each ships
+ * (`ClientMigrations`, every version it knows): a build whose history
+ * strictly contains the other's came later. Two that ship the same history,
+ * or histories neither contains (unrelated builds, a rollback), or a build
+ * that ships none, can't be ordered: `"unknown"`, and the tab of the other
+ * build waits, as before.
+ */
+export function compareBuildLineage(
+  open: ClientMigrations | undefined,
+  requested: ClientMigrations | undefined,
+): "newer" | "older" | "unknown" {
+  const versions = (lineage: ClientMigrations | undefined) =>
+    new Set((lineage?.schemas ?? []).map((version) => version.hash));
+  const openVersions = versions(open);
+  const requestedVersions = versions(requested);
+  if (openVersions.size === 0 || requestedVersions.size === 0) return "unknown";
+  const contains = (outer: Set<string>, inner: Set<string>) =>
+    outer.size > inner.size && [...inner].every((hash) => outer.has(hash));
+  if (contains(requestedVersions, openVersions)) return "newer";
+  if (contains(openVersions, requestedVersions)) return "older";
+  return "unknown";
 }
