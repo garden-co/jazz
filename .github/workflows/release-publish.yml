@@ -56,13 +56,13 @@ on:
           - dry-run
           - publish
       maven-publishing-type:
-        description: "Central Portal publishingType: USER_MANAGED leaves the deployment validated for Publish in the Portal; AUTOMATIC publishes it."
+        description: "Central Portal publishingType: AUTOMATIC publishes once validated (waits for PUBLISHED); USER_MANAGED leaves it validated for Publish in the Portal."
         required: true
-        default: USER_MANAGED
+        default: AUTOMATIC
         type: choice
         options:
-          - USER_MANAGED
           - AUTOMATIC
+          - USER_MANAGED
       maven-portal-dry-run:
         description: "Dry run only: upload the Maven bundle USER_MANAGED, wait for VALIDATED, then drop it. Needs the publish environment's approval (its Maven secrets)."
         required: false

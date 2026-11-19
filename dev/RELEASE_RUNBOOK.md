@@ -166,8 +166,9 @@ gh workflow run release-publish.yml --ref main \
   stages and promotes after npm; the draft is published as Latest last.
 - Each leg skips what is already published: after a partial failure, use
   "Re-run failed jobs" (the re-run waits for approval again).
-- `maven-publishing-type` picks the Central Portal's `USER_MANAGED` (Publish
-  in the Portal, as today) or `AUTOMATIC`. `maven-portal-dry-run` (dry run
+- `maven-publishing-type` is `AUTOMATIC` (the Maven leg waits until Central
+  reports PUBLISHED); `USER_MANAGED` leaves it validated for Publish in the
+  Portal, as before. `maven-portal-dry-run` (dry run
   only) uploads `USER_MANAGED`, waits for VALIDATED and drops it.
 - The run summary has a timing table for every job.
 
