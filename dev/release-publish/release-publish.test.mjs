@@ -7,7 +7,7 @@ const pkg = (name, deps = []) => ({ name, deps });
 
 test("npm packages publish after the packages they depend on", () => {
   const levels = publishLevels([
-    pkg("create-jazz", ["jazz-tools"]),
+    pkg("create-jazz"),
     pkg("jazz-tools", ["jazz-wasm", "jazz-napi", "jazz-rn", "react"]),
     pkg("jazz-napi", ["@garden-co/jazz-napi-linux-x64-gnu"]),
     pkg("@garden-co/jazz-napi-linux-x64-gnu"),

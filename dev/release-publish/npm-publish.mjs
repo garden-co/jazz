@@ -31,6 +31,7 @@ export const REQUIRED = [
   "create-jazz",
 ];
 export const NAPI_PLATFORMS = 5;
+export const LAST = ["create-jazz"];
 
 /** Levels of `packages` ({ name, deps }) such that each depends only on earlier levels. */
 export function publishLevels(packages) {
@@ -48,8 +49,12 @@ export function publishLevels(packages) {
     level.set(name, value);
     return value;
   };
+  // create-jazz scaffolds apps on the jazz-tools it names without depending
+  // on it: it goes last, so it never offers a version that isn't out yet.
+  const last = packages.filter((p) => LAST.includes(p.name));
   const levels = [];
-  for (const p of packages) (levels[place(p.name)] ??= []).push(p);
+  for (const p of packages) if (!LAST.includes(p.name)) (levels[place(p.name)] ??= []).push(p);
+  if (last.length > 0) levels.push(last);
   return levels.map((l) => l.sort((a, b) => a.name.localeCompare(b.name)));
 }
 
