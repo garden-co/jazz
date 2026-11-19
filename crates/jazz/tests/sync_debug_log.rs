@@ -43,6 +43,15 @@ impl Visit for Fields<'_> {
 }
 
 impl Subscriber for Capture {
+    /// Never let a callsite cache "off" from this capture: the module's
+    /// tests run in parallel with others in one binary, each under its own
+    /// thread-local capture (at different levels), and a callsite whose
+    /// interest is rebuilt while only another capture (or none) is live
+    /// would otherwise be cached as never enabled, so `tracing::enabled!`
+    /// in the sync layer would skip this capture's thread too.
+    fn register_callsite(&self, _: &'static Metadata<'static>) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::sometimes()
+    }
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
         metadata.target() == "jazz::sync" && *metadata.level() <= self.level
     }
@@ -58,6 +67,51 @@ impl Subscriber for Capture {
     }
     fn enter(&self, _: &Id) {}
     fn exit(&self, _: &Id) {}
+}
+
+/// The binary's global default subscriber while this module runs: it is
+/// interested in every callsite (`sometimes`) and enables nothing, so the
+/// thread-local captures alone decide what is kept.
+///
+/// Why: a callsite's interest is cached. Every other test in this binary
+/// runs sync code on threads with no subscriber, and the sync layer gates
+/// its message logs on one `tracing::enabled!` callsite (`log_enabled`). A
+/// callsite that registers, or whose interest is computed, while no
+/// interested dispatcher exists is cached as never; if that races with the
+/// rebuild a capture triggers when it is installed, it stays never, and the
+/// DEBUG capture misses every message (the client's Read first) while plain
+/// `debug!` events still arrive. With this subscriber always registered,
+/// no interest is ever computed as never.
+struct Interested;
+
+impl Subscriber for Interested {
+    fn register_callsite(&self, _: &'static Metadata<'static>) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::sometimes()
+    }
+    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+        Some(tracing::level_filters::LevelFilter::TRACE)
+    }
+    fn enabled(&self, _: &Metadata<'_>) -> bool {
+        false
+    }
+    fn new_span(&self, _: &Attributes<'_>) -> Id {
+        Id::from_u64(1)
+    }
+    fn record(&self, _: &Id, _: &Record<'_>) {}
+    fn record_follows_from(&self, _: &Id, _: &Id) {}
+    fn event(&self, _: &Event<'_>) {}
+    fn enter(&self, _: &Id) {}
+    fn exit(&self, _: &Id) {}
+}
+
+/// Install [`Interested`] as the global default, once per binary. (The
+/// binary installs no other global subscriber; were one already set, the
+/// rebuild in [`logged_subscription`] is what remains.)
+fn interested_global_default() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = tracing::subscriber::set_global_default(Interested);
+    });
 }
 
 fn config(node: u8, author: AuthorSubject) -> DbConfig {
@@ -84,13 +138,32 @@ const SEEDED: &str = "seeded-label-7f3a";
 
 /// Subscribe a fresh client to a one-row server under `level`, and return
 /// what was logged.
+/// Held while a capture is installed: this module's tests run their
+/// captures (one at DEBUG, one at INFO) in parallel in one binary, and
+/// tracing rebuilds the global max level whenever a dispatcher is created or
+/// dropped. A rebuild while only the INFO capture is live caps the max level
+/// at INFO, and the DEBUG capture then misses the client's Read. One capture
+/// at a time leaves no such rebuild.
+static CAPTURE: Mutex<()> = Mutex::new(());
+
 fn logged_subscription(level: Level) -> Vec<BTreeMap<String, String>> {
+    interested_global_default();
+    // A test that failed while holding it leaves it poisoned; the capture
+    // it guarded has ended either way.
+    let _one_capture = CAPTURE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let events = Arc::new(Mutex::new(Vec::new()));
     let capture = Capture {
         level,
         events: events.clone(),
     };
     tracing::subscriber::with_default(capture, || {
+        // Other tests in this binary install and drop their own
+        // subscribers concurrently; one rebuilt while this capture was not
+        // yet live can leave callsite interest, or the global max level,
+        // cached as off. Rebuild both now that it is.
+        tracing::callsite::rebuild_interest_cache();
         let server = block_on(Db::open_history_complete(config(
             0x61,
             AuthorSubject::SYSTEM,

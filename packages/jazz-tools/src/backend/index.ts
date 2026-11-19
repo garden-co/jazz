@@ -1,59 +1,29 @@
-export {
-  createJazzClient,
-  type BackendClientCloseOptions,
+// `jazz-tools/backend` under Node, on jazz-napi (see node-native.ts). A
+// Cloudflare Worker loads ./workerd.js instead, on jazz-wasm.
+import {
+  createJazz as createJazzOnEngine,
+  createJazzClient as createJazzClientOnEngine,
   type BackendClientSession,
-  type JazzClientConfig,
-  type JazzClient,
-} from "./create-jazz-session.js";
-export {
-  type BackendQuerySchemaSource,
-  type BackendSchemaInput,
-  type BackendSchemaSource,
-} from "./create-jazz-context.js";
-export { isRequestAuthenticationError, RequestAuthenticationError } from "./request-auth.js";
-export { isNoJazzAccountError, NoJazzAccountError } from "./no-account-error.js";
-export type { WasmSchema } from "../drivers/types.js";
-export type { PublicSession } from "../runtime/context.js";
-export { Db, type QueryBuilder, type QueryOptions, type TableProxy } from "../runtime/db.js";
-export {
-  type SnapshotRef,
-  parseSnapshotRef,
-  serializeSnapshotRef,
-  SnapshotRefFormatError,
-  UnsupportedSnapshotError,
-} from "../runtime/snapshot-ref.js";
-export { trustWorkload, type BackendClientTrust } from "./backend-clients.js";
-export { fromJWT, type FromJWTOptions } from "./from-jwt.js";
-export {
-  createJazz,
-  files,
-  memory,
-  remote,
-  s3,
-  sqlite,
-  vercel,
-  vercelBlob,
-  type BlobStore,
-  type S3BlobStore,
-  type VercelBlobStore,
   type CreateJazzOptions,
   type Jazz,
-  type JazzStore,
-  type BackendCredential,
-  type JazzUser,
-  type LocalFirstGuest,
-  type DeviceAccountsOption,
-  acceptDeviceAccounts,
-  perBranch,
-  type VercelNamespace,
-  type VercelNamespaceContext,
-  type VercelStoreOptions,
-  type WsLikeSocket,
-  type InspectEvent,
-  type InspectGrant,
-  type InspectHook,
-  type InspectorOptions,
-} from "./create-jazz.js";
+  type JazzClientConfig,
+} from "./api.js";
+import { installNodeEngine } from "./node-native.js";
 
-// Removed in alpha.61: stubs that throw, naming the replacement (one release).
-export { acceptLocalFirstAuth } from "../removed-api.js";
+export * from "./api.js";
+
+// Defined here, not re-exported, and calling `installNodeEngine` by name:
+// bundlers that resolve a barrel's re-exports themselves (Turbopack) never
+// evaluate this module otherwise, and a deployed function would have no engine.
+
+/** {@inheritDoc createJazzOnEngine} */
+export function createJazz(options: CreateJazzOptions): Jazz {
+  installNodeEngine();
+  return createJazzOnEngine(options);
+}
+
+/** {@inheritDoc createJazzClientOnEngine} */
+export function createJazzClient(input: JazzClientConfig): Promise<BackendClientSession> {
+  installNodeEngine();
+  return createJazzClientOnEngine(input);
+}

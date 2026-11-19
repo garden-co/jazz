@@ -1,0 +1,96 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "423278e7e5222957466a7cda481dc133e6414701a8ec37935c0cdc64d108200c"
+  },
+  "tables": {
+    "projectMembers": {
+      "columns": { "projectId": "uuid", "user_id": "uuid" },
+      "relations": { "project": { "rel": "projects", "column": "projectId" } }
+    },
+    "projects": {
+      "columns": { "name": "string", "owner_id": "uuid" },
+      "relations": {
+        "members": { "reverse": "projectMembers", "relation": "project" },
+        "tasks": { "reverse": "tasks", "relation": "project" }
+      }
+    },
+    "tasks": {
+      "columns": {
+        "projectId": "uuid",
+        "title": "string",
+        "details": "string?",
+        "status": { "enum": ["todo", "doing", "done"] }
+      },
+      "relations": { "project": { "rel": "projects", "column": "projectId" } }
+    }
+  },
+  "history": {
+    "2bbf4f7546b9": {
+      "tables": {
+        "projectMembers": {
+          "columns": {
+            "projectId": { "type": "uuid", "references": "projects" },
+            "user_id": "uuid"
+          }
+        },
+        "projects": { "columns": { "name": "string", "owner_id": "uuid" } },
+        "tasks": {
+          "columns": {
+            "projectId": { "type": "uuid", "references": "projects" },
+            "title": "string",
+            "status": { "enum": ["todo", "doing"] }
+          }
+        }
+      }
+    },
+    "8744a9e92b14": {
+      "tables": {
+        "projectMembers": {
+          "columns": {
+            "projectId": { "type": "uuid", "references": "projects" },
+            "user_id": "uuid"
+          }
+        },
+        "projects": { "columns": { "name": "string", "owner_id": "uuid" } },
+        "tasks": {
+          "columns": {
+            "projectId": { "type": "uuid", "references": "projects" },
+            "title": "string",
+            "notes": "string?",
+            "status": { "enum": ["todo", "doing"] }
+          }
+        }
+      }
+    },
+    "23b3cde5819a": {
+      "tables": {
+        "projectMembers": {
+          "columns": {
+            "projectId": { "type": "uuid", "references": "projects" },
+            "user_id": "uuid"
+          }
+        },
+        "projects": { "columns": { "name": "string", "owner_id": "uuid" } },
+        "tasks": {
+          "columns": {
+            "projectId": { "type": "uuid", "references": "projects" },
+            "title": "string",
+            "notes": "string?",
+            "status": { "enum": ["todo", "doing", "done"] }
+          }
+        }
+      }
+    }
+  },
+  "migrations": [
+    {
+      "from": "2bbf4f7546b9",
+      "to": "8744a9e92b14",
+      "migrate": { "tasks": { "notes": { "add": "string", "default": null } } }
+    },
+    { "from": "8744a9e92b14", "to": "23b3cde5819a" },
+    { "from": "23b3cde5819a", "migrate": { "tasks": { "details": { "renameFrom": "notes" } } } }
+  ]
+}

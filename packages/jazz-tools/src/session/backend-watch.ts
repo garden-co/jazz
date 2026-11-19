@@ -192,15 +192,24 @@ export function watchBackendUser<Client>(
   const firstRetryMs = options.retryMs ?? 2_000;
   let retryMs = firstRetryMs;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  // The retry pending is of refused checks only: it is asked as one, so a
+  // background tab still waits for focus. A plain check failing too makes
+  // it a plain one.
+  let retryRefused = false;
   let retries = 0;
-  const retryLater = (cause: unknown) => {
-    if (stopped || !passes(cause) || retryTimer) return;
+  const retryLater = (cause: unknown, refused = false) => {
+    if (stopped || !passes(cause)) return;
+    if (retryTimer) {
+      if (!refused) retryRefused = false;
+      return;
+    }
     retries++;
+    retryRefused = refused;
     const wait = retryMs;
     retryMs = Math.min(retryMs * 2, 60_000);
     retryTimer = setTimeout(() => {
       retryTimer = undefined;
-      check();
+      check(retryRefused);
     }, wait);
   };
   const clearRetry = () => {
@@ -332,7 +341,7 @@ export function watchBackendUser<Client>(
       if (!asked) {
         // A 404 has its own retry (see `notFoundAnswer`).
         if (!(signedIn.failed instanceof AccountAuthError && signedIn.failed.status === 404))
-          retryLater(signedIn.failed);
+          retryLater(signedIn.failed, refused);
         return;
       }
       throw new Error("Jazz could not ask your backend who is signed in", {
@@ -468,6 +477,11 @@ export function watchBackendUser<Client>(
       if (quiet()) return;
       signedIn = await ask();
       if (quiet()) return;
+      if (signedIn !== null && "failed" in signedIn) {
+        // The second answer couldn't be had: ask again later, as this check.
+        retryLater(signedIn.failed, refused);
+        return;
+      }
       if (signedIn !== null) {
         // Someone is signed in after all (the app refreshed its session):
         // a refused link follows that answer as a plain check would, so it
@@ -650,7 +664,7 @@ function linkRefused(cause: unknown): boolean {
   return (
     cause.code === "link_refused" ||
     cause.code === "invalid_local_first_proof" ||
-    cause.code === "local_first_account_required" ||
+    cause.code === "device_account_required" ||
     cause.code === "linked_account_mismatch"
   );
 }

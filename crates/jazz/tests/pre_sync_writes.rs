@@ -81,6 +81,16 @@ fn open_at(schema: JazzSchema, node: u8, path: &Path) -> Db {
     .unwrap()
 }
 
+fn config(schema: JazzSchema, node: u8) -> DbConfig {
+    DbConfig::new(
+        schema,
+        DbIdentity {
+            node: NodeUuid::from_bytes([node; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )
+}
+
 fn authority_at(schema: JazzSchema, path: &Path) -> Db {
     let db = open_at(schema, 0, path);
     db.set_authority();
@@ -283,7 +293,8 @@ fn an_empty_store_connects_whenever_it_becomes_a_replica() {
 #[test]
 fn an_offline_view_write_uploads_once_the_server_has_its_version() {
     let dir = tempfile::tempdir().unwrap();
-    let server = authority_at(v1(), &dir.path().join("server.sqlite"));
+    let server_path = dir.path().join("server.sqlite");
+    let server = authority_at(v1(), &server_path);
     insert(&server, 1, &[("title", "on the server")]);
     let client = open_at(v1(), 1, &dir.path().join("client.sqlite"));
     client.become_replica();
@@ -292,7 +303,7 @@ fn an_offline_view_write_uploads_once_the_server_has_its_version() {
     insert(&ahead, 2, &[("title", "ahead"), ("tag", "new")]);
     assert_eq!(tag(&ahead, 2), some("new"));
 
-    block_on(server.activate_schema_with_lenses(v2(), &[lens()])).unwrap();
+    let server = common::reinstall(server, &server_path, config(v2(), 0), vec![lens()]);
     let _link = link(&client, &server);
     let q = client.prepare_query(&Query::from("notes")).unwrap();
     let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
@@ -366,7 +377,8 @@ fn a_write_from_a_client_opened_ahead_of_its_server_is_refused() {
 #[test]
 fn a_client_opened_ahead_uploads_once_its_server_has_the_version() {
     let dir = tempfile::tempdir().unwrap();
-    let server = authority_at(v1(), &dir.path().join("server.sqlite"));
+    let server_path = dir.path().join("server.sqlite");
+    let server = authority_at(v1(), &server_path);
     insert(&server, 1, &[("title", "on the server")]);
     // The app ships its versions and lenses, so the client names v2's
     // columns as its server will (SPEC 10.7).
@@ -385,7 +397,7 @@ fn a_client_opened_ahead_uploads_once_its_server_has_the_version() {
     .unwrap();
     client.become_replica();
     insert(&client, 2, &[("title", "ahead"), ("tag", "new")]);
-    block_on(server.activate_schema_with_lenses(v2(), &[lens()])).unwrap();
+    let server = common::reinstall(server, &server_path, config(v2(), 0), vec![lens()]);
     let _link = link(&client, &server);
     let q = client.prepare_query(&Query::from("notes")).unwrap();
     let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
@@ -402,7 +414,8 @@ fn a_client_opened_ahead_uploads_once_its_server_has_the_version() {
 #[test]
 fn a_replica_uploads_a_transaction_through_views_of_different_versions() {
     let dir = tempfile::tempdir().unwrap();
-    let server = authority_at(v1(), &dir.path().join("server.sqlite"));
+    let server_path = dir.path().join("server.sqlite");
+    let server = authority_at(v1(), &server_path);
     let client = open_at(v1(), 1, &dir.path().join("client.sqlite"));
     let _link = link(&client, &server);
     pump(&server, &[&client]);
@@ -435,7 +448,9 @@ fn a_replica_uploads_a_transaction_through_views_of_different_versions() {
     .unwrap();
     let tx = block_on(client.commit_mergeable_handle(mixed)).unwrap().0;
     assert_eq!(ids(&client), vec![4, 5]);
-    block_on(server.activate_schema_with_lenses(v2(), &[lens()])).unwrap();
+    // The server is redeployed at v2; a new transport replaces the old one.
+    let server = common::reinstall(server, &server_path, config(v2(), 0), vec![lens()]);
+    let _link = link(&client, &server);
     fate(&server, &client, tx).expect("the mixed transaction lands whole");
     assert_eq!(ids(&server), vec![4, 5]);
     assert_eq!(tag(&server, 5), some("new"));
@@ -506,7 +521,8 @@ fn fate_by(client: &Db, tx: u64, mut pump: impl FnMut()) -> Result<(), Error> {
 #[test]
 fn a_transaction_uploads_under_the_version_its_writes_name() {
     let dir = tempfile::tempdir().unwrap();
-    let server = authority_at(v1(), &dir.path().join("server.sqlite"));
+    let server_path = dir.path().join("server.sqlite");
+    let server = authority_at(v1(), &server_path);
     let client = open_at(v1(), 1, &dir.path().join("client.sqlite"));
     let _link = link(&client, &server);
     pump(&server, &[&client]);
@@ -539,7 +555,9 @@ fn a_transaction_uploads_under_the_version_its_writes_name() {
     ))
     .unwrap();
     block_on(client.commit_mergeable_handle(view_only)).unwrap();
-    block_on(server.activate_schema_with_lenses(v2(), &[lens()])).unwrap();
+    // The server is redeployed at v2; a new transport replaces the old one.
+    let server = common::reinstall(server, &server_path, config(v2(), 0), vec![lens()]);
+    let _link = link(&client, &server);
     pump(&server, &[&client]);
     assert_eq!(ids(&client), vec![4, 5, 6]);
     assert_eq!(ids(&server), vec![4, 5, 6]);
@@ -588,12 +606,14 @@ fn a_reopened_stranded_store_reads_all_its_rows() {
 #[test]
 fn schema_work_before_becoming_a_replica_does_not_strand_a_store() {
     let dir = tempfile::tempdir().unwrap();
-    let server = authority_at(v1(), &dir.path().join("server.sqlite"));
+    let server_path = dir.path().join("server.sqlite");
+    let server = authority_at(v1(), &server_path);
     insert(&server, 1, &[("title", "on the server")]);
-    let client = open_at(v1(), 1, &dir.path().join("client.sqlite"));
+    let client_path = dir.path().join("client.sqlite");
+    let client = open_at(v1(), 1, &client_path);
     block_on(client.admit_schema_with_lenses(v2(), &[lens()])).unwrap();
-    block_on(client.activate_schema_with_lenses(v2(), &[lens()])).unwrap();
-    block_on(server.activate_schema_with_lenses(v2(), &[lens()])).unwrap();
+    let client = common::reinstall(client, &client_path, config(v2(), 1), vec![lens()]);
+    let server = common::reinstall(server, &server_path, config(v2(), 0), vec![lens()]);
     let _link = link(&client, &server);
     let q = client.prepare_query(&Query::from("notes")).unwrap();
     let mut stream = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
@@ -607,7 +627,8 @@ fn schema_work_before_becoming_a_replica_does_not_strand_a_store() {
 #[test]
 fn a_pending_view_write_survives_a_reopen() {
     let dir = tempfile::tempdir().unwrap();
-    let server = authority_at(v1(), &dir.path().join("server.sqlite"));
+    let server_path = dir.path().join("server.sqlite");
+    let server = authority_at(v1(), &server_path);
     insert(&server, 1, &[("title", "on the server")]);
     let path = dir.path().join("client.sqlite");
     {
@@ -618,7 +639,7 @@ fn a_pending_view_write_survives_a_reopen() {
         insert(&ahead, 2, &[("title", "ahead"), ("tag", "new")]);
     }
     let client = open_at(v1(), 1, &path);
-    block_on(server.activate_schema_with_lenses(v2(), &[lens()])).unwrap();
+    let server = common::reinstall(server, &server_path, config(v2(), 0), vec![lens()]);
     let _link = link(&client, &server);
     let q = client.prepare_query(&Query::from("notes")).unwrap();
     let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
@@ -633,7 +654,8 @@ fn a_pending_view_write_survives_a_reopen() {
 #[test]
 fn interleaved_versions_upload_in_order() {
     let dir = tempfile::tempdir().unwrap();
-    let server = authority_at(v1(), &dir.path().join("server.sqlite"));
+    let server_path = dir.path().join("server.sqlite");
+    let server = authority_at(v1(), &server_path);
     let client = open_at(v1(), 1, &dir.path().join("client.sqlite"));
     client.become_replica();
     block_on(client.admit_schema_with_lenses(v2(), &[lens()])).unwrap();
@@ -642,7 +664,7 @@ fn interleaved_versions_upload_in_order() {
     insert(&ahead, 2, &[("title", "b"), ("tag", "t2")]);
     insert(&client, 3, &[("title", "c")]);
     insert(&ahead, 4, &[("title", "d"), ("tag", "t4")]);
-    block_on(server.activate_schema_with_lenses(v2(), &[lens()])).unwrap();
+    let server = common::reinstall(server, &server_path, config(v2(), 0), vec![lens()]);
     let _link = link(&client, &server);
     let q = client.prepare_query(&Query::from("notes")).unwrap();
     let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
@@ -670,8 +692,8 @@ fn a_stranded_store_fails_durable_waits() {
     );
 }
 
-/// A v1 write still pending when the client makes v2 (renaming `title`)
-/// current uploads under v1, the version it was written under.
+/// A v1 write still pending when the client reopens under v2 (renaming
+/// `title`) uploads under v1, the version it was written under.
 #[test]
 fn a_pending_write_uploads_under_its_version_after_an_upgrade() {
     use jazz::protocol::LensOp;
@@ -702,10 +724,11 @@ fn a_pending_write_uploads_under_its_version_after_an_upgrade() {
     let dir = tempfile::tempdir().unwrap();
     let server = authority_at(v1(), &dir.path().join("server.sqlite"));
     block_on(server.admit_schema_with_lenses(renamed(), std::slice::from_ref(&rename))).unwrap();
-    let client = open_at(v1(), 1, &dir.path().join("client.sqlite"));
+    let client_path = dir.path().join("client.sqlite");
+    let client = open_at(v1(), 1, &client_path);
     client.become_replica();
     let tx = insert(&client, 7, &[("title", "offline v1 write")]);
-    block_on(client.activate_schema_with_lenses(renamed(), &[rename])).unwrap();
+    let client = common::reinstall(client, &client_path, config(renamed(), 1), vec![rename]);
     let _link = link(&client, &server);
     fate(&server, &client, tx).expect("uploads under v1");
     assert_eq!(ids(&server), vec![7]);
@@ -818,7 +841,8 @@ fn a_relayed_view_write_its_core_lacks_is_refused() {
 #[test]
 fn an_offline_worker_keeps_a_view_write_pending() {
     let dir = tempfile::tempdir().unwrap();
-    let core = authority_at(v1(), &dir.path().join("core.sqlite"));
+    let core_path = dir.path().join("core.sqlite");
+    let core = authority_at(v1(), &core_path);
     let worker = open_at(v1(), 0xa0, &dir.path().join("worker.sqlite"));
     worker.become_replica();
     let up = link(&worker, &core);
@@ -828,7 +852,8 @@ fn an_offline_worker_keeps_a_view_write_pending() {
     let _sub = block_on(tab.subscribe(&q, ReadOpts::default())).unwrap();
     pump3(&core, &worker, &tab);
     assert!(worker.detach_connection(&up));
-    block_on(core.activate_schema_with_lenses(v2(), &[lens()])).unwrap();
+    // While the worker is offline, the core is redeployed at v2.
+    let core = common::reinstall(core, &core_path, config(v2(), 0), vec![lens()]);
     let tx = insert(&ahead, 2, &[("title", "a"), ("tag", "t")]);
     {
         let mut wait = pin!(tab.wait_for_transaction(tx, DurabilityTier::Global));

@@ -11,15 +11,15 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ExactWriteTarget, InsertOptions, ReadOpts, ReadTier,
+    Db, DbConfig, DbIdentity, ExactWriteTarget, InsertOptions, ReadOpts, ReadTier, RemoteLinkHint,
     SubscriptionEvent, SyncMessage, Transport, TransportError,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::protocol::{BranchSelector, BranchViewBase};
+use jazz::protocol::{BranchSelector, BranchViewBase, ReadViewSourceSpec};
 use jazz::query::{OrderDirection, Query};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
 
 use crate::common::{allow_all_policies, compile_schema};
 
@@ -2211,4 +2211,119 @@ fn an_offline_serializable_branch_read_commits_when_the_link_returns() {
         titles(&server, &Query::from("todos"), draft_only),
         ["Summary"]
     );
+}
+
+/// Alice's worker synced main (x, y, then z) and the draft (d, and a
+/// tombstone for main's x) from the server, captured main between y and z,
+/// and lost its server. Alice's cold tab, which holds nothing, opens a
+/// mergeable transaction over it. Returns the tab, its worker and the views:
+/// the draft alone, over live main, and over main frozen before z.
+fn cold_tab_over_an_offline_worker(
+    bytes: (u8, u8),
+) -> (Db, Db, [ReadViewSourceSpec; 3], OpenTransactionId) {
+    let server = open(0x01, AuthorSubject::SYSTEM);
+    server.set_authority();
+    let worker = open(0x02, alice());
+    std::mem::forget(connect(&server, &worker).0);
+    let (main, draft) = (branch(bytes.0), branch(bytes.1));
+    put(&server, &main, 0x45, "x", 1);
+    put(&server, &main, 0x46, "y", 1);
+    put(&server, &draft, 0x48, "d", 1);
+    del(&server, 0x45, &draft, Some(&main));
+    let all = worker.prepare_query(&Query::from("todos")).unwrap();
+    let warm = |view: ReadOpts| {
+        let mut opts = view;
+        opts.tier = ReadTier::Remote;
+        let stream = block_on(worker.subscribe(&all, opts)).unwrap();
+        pump(&server, &worker);
+        drop(stream);
+        pump(&server, &worker);
+    };
+    warm(ReadOpts::default().branch_view(main.clone(), None));
+    let frozen = block_on(worker.capture_snapshot()).unwrap();
+    put(&server, &main, 0x47, "z", 1);
+    warm(ReadOpts::default().branch_view(main.clone(), None));
+    warm(
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone()))),
+    );
+    // The server is gone from here on: nothing ticks it again.
+    worker.set_remote_link_hint(RemoteLinkHint::Failed);
+    let tab = open(0x03, alice());
+    tab.set_non_durable_client();
+    std::mem::forget(connect(&worker, &tab).0);
+    tab.set_remote_link_hint(RemoteLinkHint::Failed);
+    let id = OpenTransactionId::new();
+    block_on(tab.begin_mergeable(id)).unwrap();
+    let views = [
+        ReadViewSourceSpec::BranchView {
+            head: draft.clone(),
+            base: None,
+        },
+        ReadViewSourceSpec::BranchView {
+            head: draft.clone(),
+            base: Some(BranchViewBase::Current(main.clone())),
+        },
+        ReadViewSourceSpec::BranchView {
+            head: draft,
+            base: Some(BranchViewBase::Snapshot {
+                branch: main,
+                snapshot: frozen,
+            }),
+        },
+    ];
+    (tab, worker, views, id)
+}
+
+/// A LocalFirst read in the tab's mergeable transaction, through `source`,
+/// with the tab and its worker taking turns (never the server).
+fn cold_view_titles(
+    tab: &Db,
+    worker: &Db,
+    id: OpenTransactionId,
+    source: &ReadViewSourceSpec,
+) -> Vec<String> {
+    let query = Query::from("todos").order_by("title", OrderDirection::Asc);
+    let prepared = tab.prepare_query(&query).unwrap();
+    let transaction = tab.tx_ref(id);
+    let mut read =
+        pin!(transaction.all_prepared_in(&prepared, false, None, ReadTier::LocalFirst, source));
+    let mut cx = Context::from_waker(Waker::noop());
+    for _ in 0..50 {
+        if let Poll::Ready(rows) = read.as_mut().poll(&mut cx) {
+            return rows
+                .unwrap()
+                .iter()
+                .map(|row| match row.cell("title") {
+                    Some(Value::String(title)) => title,
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+        }
+        block_on(tab.tick()).unwrap();
+        block_on(worker.tick()).unwrap();
+        block_on(tab.tick()).unwrap();
+    }
+    panic!("the cold view read did not finish");
+}
+
+/// The draft alone: its own row, not main's.
+#[test]
+fn a_cold_mergeable_read_of_a_head_only_view_loads_from_the_offline_worker() {
+    let (tab, worker, [head_only, _, _], id) = cold_tab_over_an_offline_worker((0xe1, 0xe2));
+    assert_eq!(cold_view_titles(&tab, &worker, id, &head_only), ["d"]);
+}
+
+/// The draft over live main: main's y and z, x masked by the draft.
+#[test]
+fn a_cold_mergeable_read_of_a_live_base_view_loads_from_the_offline_worker() {
+    let (tab, worker, [_, live, _], id) = cold_tab_over_an_offline_worker((0xe3, 0xe4));
+    assert_eq!(cold_view_titles(&tab, &worker, id, &live), ["d", "y", "z"]);
+}
+
+/// The draft over main frozen before z: the tab learns the captured state
+/// from its worker's answer, so it resolves the snapshot it did not know.
+#[test]
+fn a_cold_mergeable_read_of_a_frozen_base_view_loads_from_the_offline_worker() {
+    let (tab, worker, [_, _, frozen], id) = cold_tab_over_an_offline_worker((0xe5, 0xe6));
+    assert_eq!(cold_view_titles(&tab, &worker, id, &frozen), ["d", "y"]);
 }

@@ -76,7 +76,7 @@ export function trustAttachedBrowserWorkerSession(config: DbConfig): void {
   const payload = parseJwtPayload(config.jwtToken ?? "");
   const authMode =
     payload?.iss === LOCAL_FIRST_JWT_ISSUER
-      ? "local-first"
+      ? "device-account"
       : payload?.iss === ANONYMOUS_JWT_ISSUER
         ? "anonymous"
         : null;
@@ -221,6 +221,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       },
       migrations,
       bearer && config.serverUrl ? bearerWebSocket(config.serverUrl, bearer) : undefined,
+      config.subscriptionBacklogRows,
     );
     if (foregroundNodeLease) {
       mainThreadPeerRuntime.seedForegroundTxTimeHighWater(foregroundNodeLease.confirmedTxTime);
@@ -299,6 +300,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     onFailure,
     onStorageReset,
     onStorageInvalidated,
+    onNewerBuild,
   }: BrowserWorkerConnectionContext<DbConfig>): BrowserWorkerConnection {
     const runtime = client.getRuntime();
     if (!(runtime instanceof NativeRuntimeAdapter)) {
@@ -344,6 +346,9 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         migrations: runtime.migrations,
         appId: clientScope(config),
         slowQueryThresholdMs: config.slowQueryThresholdMs,
+        ...(config.subscriptionBacklogRows === undefined
+          ? {}
+          : { subscriptionBacklogRows: config.subscriptionBacklogRows }),
         storageOwner: createBrowserStorageOwner(config),
         authSessionKey: createBrowserAuthSessionKey(config),
         serverUrl: config.serverUrl
@@ -363,6 +368,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         onFailure,
         onStorageReset,
         onStorageInvalidated,
+        onNewerBuild,
       },
     );
   }
@@ -410,6 +416,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     slowQueryLog?: SlowQueryLogOptions,
     migrations?: ClientMigrations,
     webSocket?: WebSocketConstructor,
+    subscriptionBacklogRows?: number,
   ): NativeRuntimeAdapter {
     if (!this.ownerRuntime || this.ownerRuntime.isClosed()) {
       this.ownerRuntime = new NativeRuntimeAdapter(
@@ -424,6 +431,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
           selfSignedClientProof,
           backendMode,
           slowQueryLog,
+          subscriptionBacklogRows,
           migrations,
           webSocket,
         },

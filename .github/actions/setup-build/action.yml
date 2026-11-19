@@ -48,6 +48,10 @@ inputs:
     description: "Mount Blacksmith's sticky disk for sccache. Disable on persistent self-hosted runners."
     required: false
     default: "true"
+  sccache-s3:
+    description: "Chain the job-local sccache to the shared S3 tier (disk,s3). Only for callers that already authenticated and exported the trusted S3 configuration, as ci-suite.yml's trusted jobs do."
+    required: false
+    default: "false"
 
 runs:
   using: "composite"
@@ -151,6 +155,8 @@ runs:
     - name: Export sccache environment
       if: inputs.sccache == 'true' && runner.os == 'Linux'
       shell: bash
+      env:
+        ENABLE_S3: ${{ inputs.sccache-s3 }}
       run: |
         if [[ '${{ steps.provisioned-tools.outputs.active }}' == 'true' ]]; then
           # The host owns the shared localhost daemon. Jobs are clients only:
@@ -165,9 +171,26 @@ runs:
           sccache_dir="${RUNNER_TEMP}/sccache"
           sccache_socket="${sccache_dir}/server.sock"
           mkdir -p "${sccache_dir}"
+          if [[ "${ENABLE_S3}" == "true" ]]; then
+            # The local disk first, then the shared S3 tier the caller
+            # authenticated; an S3 write error must not fail a compile.
+            export SCCACHE_MULTILEVEL_CHAIN=disk,s3
+            export SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0
+            export SCCACHE_BASEDIRS="${GITHUB_WORKSPACE}"
+            echo "SCCACHE_MULTILEVEL_CHAIN=disk,s3" >> "${GITHUB_ENV}"
+            echo "SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0" >> "${GITHUB_ENV}"
+            echo "SCCACHE_BASEDIRS=${GITHUB_WORKSPACE}" >> "${GITHUB_ENV}"
+          fi
           SCCACHE_DIR="${sccache_dir}" SCCACHE_SERVER_UDS="${sccache_socket}" sccache --start-server
           echo "RUSTC_WRAPPER=sccache" >> "${GITHUB_ENV}"
           echo "SCCACHE_DIR=${sccache_dir}" >> "${GITHUB_ENV}"
           echo "SCCACHE_SERVER_UDS=${sccache_socket}" >> "${GITHUB_ENV}"
           echo "SCCACHE_CACHE_SIZE=${SCCACHE_CACHE_SIZE:-8G}" >> "${GITHUB_ENV}"
         fi
+
+    # After the sticky disk mount, so its post step (which stops the daemon)
+    # runs before the sticky disk's post step unmounts and commits the cache.
+    # Provisioned runners share a host-owned daemon: never stop it.
+    - name: Stop sccache at job end
+      if: inputs.sccache == 'true' && inputs.sccache-sticky-disk == 'true' && runner.os == 'Linux' && steps.provisioned-tools.outputs.active != 'true'
+      uses: ./.github/actions/stop-sccache

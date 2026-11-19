@@ -181,6 +181,10 @@ async function deployedVercel(): Promise<JazzStore> {
       },
     },
     Drive: {
+      async get() {
+        if (!state.drive) throw new Error("404 drive not found");
+        return { region: "iad1" };
+      },
       async getOrCreate() {
         state.drive = true;
         return { region: "iad1" };
@@ -268,7 +272,7 @@ describe.each(stores)("on a %s store", (_kind, store) => {
     await vi.waitFor(
       () =>
         expect(
-          warn.mock.calls.some((call) => /refused a local-first guest/.test(call.join(" "))),
+          warn.mock.calls.some((call) => /refused a device account/.test(call.join(" "))),
         ).toBe(true),
       { timeout: 20_000 },
     );

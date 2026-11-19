@@ -100,8 +100,15 @@ const assertUsesBlacksmithRunner = (jobName, jobSource) => {
     "lint",
     "test-rust-workspace",
     "test-storage-compat",
+    "test-durable-object-limits",
     "test-ts",
     "test-react-native",
+    "test-go",
+    "test-go-ts-backend",
+    "test-crates-package",
+    "test-jazz-ffi-bindings",
+    "test-kotlin-android",
+    "warm-native-builds",
   ].includes(jobName)
     ? 16
     : 4;
@@ -181,14 +188,27 @@ const assertSuiteS3ConfigurationBoundary = (source) => {
       `untrusted suite callers must not inherit ${name}`,
     );
 
-  for (const name of ["lint", "test-rust-workspace", "test-storage-compat", "test-ts"]) {
+  for (const name of [
+    "lint",
+    "test-rust-workspace",
+    "test-storage-compat",
+    "test-durable-object-limits",
+    "test-ts",
+    "test-go",
+    "test-go-ts-backend",
+    "test-crates-package",
+    "test-jazz-ffi-bindings",
+    "test-kotlin-android",
+  ]) {
     const parsedJob = document.jobs[name];
     assert.equal(parsedJob.env, undefined, `${name} must not configure S3 at job scope`);
     const exportIndex = parsedJob.steps.findIndex(
       (step) => step.name === "Export trusted sccache configuration",
     );
-    const setupIndex = parsedJob.steps.findIndex(
-      (step) => step.uses === "./.github/actions/setup-blacksmith",
+    // test-jazz-ffi-bindings runs on the runner image (swiftc, JDK), where
+    // setup-build starts its job-local sccache instead.
+    const setupIndex = parsedJob.steps.findIndex((step) =>
+      ["./.github/actions/setup-blacksmith", "./.github/actions/setup-build"].includes(step.uses),
     );
     assert.notEqual(exportIndex, -1, `${name} is missing trusted S3 configuration export`);
     assert.ok(exportIndex < setupIndex, `${name} must export S3 configuration before setup`);
@@ -243,15 +263,34 @@ const assertEntryCacheTrustBoundary = (source) => {
   assert.deepEqual(
     Object.keys(entryJobs).sort(),
     [
+      "land-group",
       "main-coverage",
       "report-dispatched-test-rust",
       "report-full-suite",
       "test-rust",
       "trusted",
       "untrusted",
+      "warm",
     ],
     "the credential boundary must account for every entry-workflow job",
   );
+  // A covered main push (the only push that skips the suite) still warms
+  // main's native build cache: main's own trusted credentials, warm scope only.
+  const warm = entryJobs.warm;
+  assert.deepEqual(
+    Object.keys(warm).sort(),
+    ["if", "needs", "permissions", "secrets", "uses", "with"],
+    "warm caller credential surface must stay explicit",
+  );
+  assert.equal(
+    warm.if,
+    "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-coverage.outputs.covered == 'true'",
+  );
+  assert.deepEqual(warm.needs, ["main-coverage"]);
+  assert.deepEqual(warm.permissions, { contents: "read", "id-token": "write", packages: "read" });
+  assert.equal(warm.uses, "./.github/workflows/ci-suite.yml");
+  assert.deepEqual(warm.with, { "trusted-cache": true, "sccache-write": true, scope: "warm" });
+  assert.equal(warm.secrets, "inherit");
   const {
     untrusted,
     trusted,
@@ -259,7 +298,27 @@ const assertEntryCacheTrustBoundary = (source) => {
     "report-dispatched-test-rust": dispatchedStatus,
     "report-full-suite": fullSuiteStatus,
     "main-coverage": mainCoverage,
+    "land-group": landGroup,
   } = entryJobs;
+  // Landing a green merge group is the only job holding a merge-capable
+  // credential: the Review Loop's App key, minted only for merge-group pushes
+  // after full-suite was posted, behind an explicit opt-in variable.
+  assert.equal(
+    landGroup.if,
+    "always() && vars.LAND_MERGE_GROUPS == 'true' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/merge-group/') && needs.report-full-suite.result == 'success'",
+  );
+  assert.deepEqual(landGroup.needs, ["report-full-suite"]);
+  assert.deepEqual(landGroup.permissions, { contents: "read" });
+  assert.deepEqual(landGroup.concurrency, {
+    group: "land-${{ github.ref }}",
+    "cancel-in-progress": false,
+  });
+  assert.equal(landGroup.steps[0].with["persist-credentials"], false);
+  assert.deepEqual(
+    [...JSON.stringify(landGroup).matchAll(/secrets\.([A-Z_]+)/g)].map((m) => m[1]),
+    ["LAND_MERGE_GROUPS_APP_PRIVATE_KEY"],
+  );
+  assert.match(landGroup.steps.at(-1).run, /^dev\/ci\/land-group\.sh /);
   assert.deepEqual(
     Object.keys(untrusted).sort(),
     ["if", "permissions", "uses", "with"],
@@ -615,6 +674,12 @@ test("Rust tool installation is pinned, allowlisted, and action-download indepen
     /cargo install "\$\{crate\}" --version "\$\{version\}" --locked --root "\$\{install_root\}"/,
   );
   assert.match(installRustToolScript, /if \[\[ "\$\{JAZZ_RUST_TOOL_CACHE_HIT:-\}" == "true" \]\]/);
+  // sccache on Linux x86_64 and aarch64: the pinned upstream musl binaries.
+  for (const sha of [
+    "782d2b5dd7ae0a55ebe368ab258114d0928d019ac2d949ab85d5d02f3926709e",
+    "3a6a3712b49da3d263bf2d30d702de4302793016019e800bfb81c0c69401d8f8",
+  ])
+    assert.match(installRustToolScript, new RegExp(`release_sha256=${sha}`));
   assert.match(installRustToolScript, /"\$\{install_root\}\/bin\/\$\{binary\}" --version/);
   assert.match(
     installRustToolScript,
@@ -754,10 +819,11 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
   assert.match(aggregate, /if: always\(\)/);
   assert.match(
     aggregate,
-    /needs:\s*\[\s*test-rust-workspace,\s*test-storage-compat,\s*test-jazz-ffi-bindings,\s*test-crates-package,\s*test-kotlin,\s*test-kotlin-android,?\s*\]/,
+    /needs:\s*\[\s*test-rust-workspace,\s*test-storage-compat,\s*test-durable-object-limits,\s*test-jazz-ffi-bindings,\s*test-crates-package,\s*test-kotlin,\s*test-kotlin-android,?\s*\]/,
   );
   assert.match(aggregate, /test "\$\{WORKSPACE_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{STORAGE_COMPAT_RESULT\}" = success/);
+  assert.match(aggregate, /test "\$\{DURABLE_OBJECT_LIMITS_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{JAZZ_FFI_BINDINGS_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{CRATES_PACKAGE_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{KOTLIN_RESULT\}" = success/);
@@ -815,7 +881,7 @@ test("the lint job checks the integration workspace and TypeScript runs its own 
   assert.doesNotMatch(workflowSuite, /^  build-integration:/m);
   assert.match(
     typescript,
-    /name: Run CI-equivalent TypeScript partition\s+run: node dev\/gates\/local-ci-equivalent\.mjs --ci-partition typescript/,
+    /name: Run CI-equivalent TypeScript partition\s+run: node dev\/gates\/local-ci-equivalent\.mjs --ci-partition \$\{\{ matrix\.partition \}\}/,
   );
   assert.match(
     lint,
@@ -852,7 +918,18 @@ test("Turbo cache uses its pinned OIDC policy only inside the trusted suite invo
 });
 
 test("shared Rust cache writes are main and merge-group only while trusted PRs receive read access", () => {
-  for (const name of ["lint", "test-rust-workspace", "test-storage-compat", "test-ts"]) {
+  for (const name of [
+    "lint",
+    "test-rust-workspace",
+    "test-storage-compat",
+    "test-durable-object-limits",
+    "test-ts",
+    "test-go",
+    "test-go-ts-backend",
+    "test-crates-package",
+    "test-jazz-ffi-bindings",
+    "test-kotlin-android",
+  ]) {
     const source = job(name);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN \}\}/);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_PR_READER_AWS_ROLE_ARN \}\}/);
@@ -866,6 +943,13 @@ test("shared Rust cache writes are main and merge-group only while trusted PRs r
   );
   assert.match(setupBlacksmithAction, /SCCACHE_MULTILEVEL_CHAIN=disk,s3/);
   assert.match(setupBlacksmithAction, /SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0/);
+  // setup-build chains S3 only when its caller passes the trusted condition.
+  assert.match(setupBuildAction, /sccache-s3:[\s\S]*default: "false"/);
+  assert.match(setupBuildAction, /ENABLE_S3: \$\{\{ inputs\.sccache-s3 \}\}/);
+  assert.match(
+    setupBuildAction,
+    /if \[\[ "\$\{ENABLE_S3\}" == "true" \]\]; then[\s\S]*SCCACHE_MULTILEVEL_CHAIN=disk,s3[\s\S]*SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0/,
+  );
 });
 
 test("entry workflow grants credentialed cross-ref caches only to main, merge groups and trusted stacked PRs", () => {
@@ -1530,7 +1614,7 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   const typescript = job("test-ts");
   const runner = fs.readFileSync(path.join(root, "dev/gates/run-ts-tests.sh"), "utf8");
   const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
-  assert.match(typescript, /local-ci-equivalent\.mjs --ci-partition typescript/);
+  assert.match(typescript, /local-ci-equivalent\.mjs --ci-partition \$\{\{ matrix\.partition \}\}/);
   assert.match(
     localCi,
     /native correctness-artifact producer[\s\S]*ensure-correctness-artifacts\.mjs/,
@@ -2054,20 +2138,24 @@ test("CI rejects inherited live-log timing overrides", () => {
 test("ready PRs run only the lint partition and drafts run nothing", () => {
   const suite = parse(workflowSuite);
   assert.deepEqual(suite.on.workflow_call.inputs.scope, {
-    description: "Which partitions to run, full, fast or none.",
+    description: "Which partitions to run, full, fast, warm or none.",
     required: false,
     type: "string",
     default: "full",
   });
-  assert.equal(suite.jobs.lint.if, "inputs.scope != 'none'");
+  assert.equal(suite.jobs.lint.if, "inputs.scope == 'full' || inputs.scope == 'fast'");
+  // The warm scope (covered main pushes) runs nothing but the cache warm-up.
+  assert.equal(suite.jobs["warm-native-builds"].if, "inputs.scope == 'warm'");
   for (const name of [
     "test-rust-workspace",
     "test-storage-compat",
+    "test-durable-object-limits",
     "test-ts",
     "test-react-native",
     "test-jazz-ffi-bindings",
     "test-crates-package",
     "test-go",
+    "test-go-ts-backend",
     "test-kotlin",
     "test-kotlin-android",
   ])
@@ -2086,7 +2174,9 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     [
       "lint",
       "test-crates-package",
+      "test-durable-object-limits",
       "test-go",
+      "test-go-ts-backend",
       "test-jazz-ffi-bindings",
       "test-kotlin",
       "test-kotlin-android",
@@ -2096,6 +2186,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
       "test-rust-workspace",
       "test-storage-compat",
       "test-ts",
+      "warm-native-builds",
     ],
     "a new suite job must declare which scope runs it",
   );
@@ -2246,4 +2337,58 @@ test("main pushes skip the full suite only for trees a green merge group tested"
     fs.rmSync(repo, { recursive: true, force: true });
     fs.rmSync(bin, { recursive: true, force: true });
   }
+});
+
+test("the native build cache is restored before setup-blacksmith installs dependencies", () => {
+  // Its key hashes Rust sources with recursive globs. After pnpm install (and
+  // rust-cache's target restore) the container-created trees make the
+  // runner's hashFiles fail, which fails the step and the job.
+  const suite = parse(workflowSuite);
+  const jobs = Object.entries(suite.jobs).filter(([, job]) =>
+    (job.steps ?? []).some(
+      ({ with: inputs }) => inputs?.path === "node_modules/.cache/jazz-native-builds",
+    ),
+  );
+  assert.deepEqual(jobs.map(([name]) => name).sort(), [
+    "test-go-ts-backend",
+    "test-ts",
+    "warm-native-builds",
+  ]);
+  for (const [name, job] of jobs) {
+    const cache = job.steps.findIndex(
+      ({ with: inputs }) => inputs?.path === "node_modules/.cache/jazz-native-builds",
+    );
+    const setup = job.steps.findIndex(({ uses }) => uses === "./.github/actions/setup-blacksmith");
+    assert.ok(
+      cache !== -1 && setup !== -1 && cache < setup,
+      `${name} restores the cache after setup`,
+    );
+  }
+});
+
+test("the native build cache key's hashFiles is evaluated only before setup", () => {
+  // actions/cache re-evaluates its key in a post-job save; by then hashFiles
+  // fails on the trees the build left (dispatch 44468637996). Every job only
+  // restores, and main's warm job saves explicitly with the key its restore
+  // step computed before setup.
+  const suite = parse(workflowSuite);
+  const steps = Object.entries(suite.jobs).flatMap(([name, job]) =>
+    (job.steps ?? [])
+      .filter(({ with: inputs }) => inputs?.path === "node_modules/.cache/jazz-native-builds")
+      .map((step) => ({ job: name, uses: step.uses.split("@")[0], step })),
+  );
+  assert.deepEqual(steps.map(({ job, uses }) => `${job} ${uses}`).sort(), [
+    "test-go-ts-backend actions/cache/restore",
+    "test-ts actions/cache/restore",
+    "warm-native-builds actions/cache/restore",
+    "warm-native-builds actions/cache/save",
+  ]);
+  const save = steps.find(({ uses }) => uses === "actions/cache/save").step;
+  assert.equal(save.with.key, "${{ steps.native-builds.outputs.cache-primary-key }}");
+  assert.equal(save.if, "steps.native-builds.outputs.cache-hit != 'true'");
+  const warmRestore = steps.find(
+    ({ job, uses }) => job === "warm-native-builds" && uses === "actions/cache/restore",
+  ).step;
+  assert.equal(warmRestore.id, "native-builds");
+  assert.doesNotMatch(save.with.key, /hashFiles/);
 });

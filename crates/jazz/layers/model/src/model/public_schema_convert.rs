@@ -160,6 +160,11 @@ pub fn check_deployable_json_schemas(schema: &Schema) -> Result<(), SchemaConver
 /// and sync the row under check), so the form is not supported until that
 /// is settled.
 ///
+/// A policy comparing `session.authMode` with `"local-first"` is refused:
+/// device accounts are `"device-account"` since the rename, and such a
+/// policy would quietly never match. One already published fails closed when
+/// it is compiled (see `jazz_db::compile`).
+///
 /// A relation policy's unsupported shapes (output steps, query parameters,
 /// malformed union labels) are the schema compile's to refuse, which
 /// `jazz-tools validate`, the dev server and a deployment all run.
@@ -180,6 +185,10 @@ pub fn check_deployable_policies(schema: &Schema) -> Result<(), SchemaConversion
         ];
         for (slot, expr) in slots {
             if let Some(expr) = expr {
+                let at = format!("$.{}.policies.{slot}", name.as_str());
+                if let Some(message) = expr.removed_auth_mode_error() {
+                    return Err(err(at, message));
+                }
                 refuse_nested_outer_rows(
                     expr,
                     &format!("$.{}.policies.{slot}", name.as_str()),

@@ -1,6 +1,6 @@
 {
   "name": "jazz-wasm",
-  "version": "2.0.0-alpha.66",
+  "version": "2.0.0-alpha.67",
   "description": "WebAssembly bindings for the Jazz database engine",
   "keywords": [
     "crdt",
@@ -18,11 +18,29 @@
     "wasm-url.d.ts",
     "pkg/jazz_wasm_bg.wasm",
     "pkg/jazz_wasm.js",
-    "pkg/jazz_wasm.d.ts"
+    "pkg/jazz_wasm.d.ts",
+    "durable-object/index.js",
+    "durable-object/index.d.ts",
+    "durable-object/host.js",
+    "durable-object/pkg/jazz_wasm_do.js",
+    "durable-object/pkg/jazz_wasm_do_bg.wasm",
+    "durable-object/pkg/snippets/"
   ],
   "type": "module",
   "main": "pkg/jazz_wasm.js",
   "types": "pkg/jazz_wasm.d.ts",
+  "exports": {
+    ".": {
+      "types": "./pkg/jazz_wasm.d.ts",
+      "default": "./pkg/jazz_wasm.js"
+    },
+    "./durable-object": {
+      "types": "./durable-object/index.d.ts",
+      "workerd": "./durable-object/index.js"
+    },
+    "./package.json": "./package.json",
+    "./*": "./*"
+  },
   "publishConfig": {
     "access": "public",
     "tag": "latest"
@@ -30,6 +48,13 @@
   "scripts": {
     "build": "node ../../dev/artifacts/build.mjs wasm release",
     "build:fast": "node ../../dev/artifacts/build.mjs wasm fast",
-    "build:profiling": "node ../../dev/artifacts/build.mjs wasm profiling"
+    "build:profiling": "node ../../dev/artifacts/build.mjs wasm profiling",
+    "test:durable-objects": "tests/durable-objects/run.sh",
+    "build:durable-object": "node durable-object/build.mjs",
+    "check:durable-object-pack": "node durable-object/check-pack.mjs",
+    "test:durable-object-release": "node --test tests/durable-objects/release.test.mjs"
+  },
+  "devDependencies": {
+    "miniflare": "4.20260401.0"
   }
 }

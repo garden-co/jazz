@@ -595,6 +595,8 @@ export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> 
   openTransactionId?: OpenTransactionId;
   /** Columns whose updates a subscription also delivers as splices. */
   splices?: readonly string[];
+  /** A subscription's backlog limit, in changed rows (see `QueryOptions.backlogRows`). */
+  backlogRows?: number;
 };
 
 export interface ResolvedQueryExecutionOptions {
@@ -604,6 +606,7 @@ export interface ResolvedQueryExecutionOptions {
   visibility: QueryVisibility;
   branch?: BranchView;
   splices?: readonly string[];
+  backlogRows?: number;
 }
 
 type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
@@ -757,6 +760,7 @@ export function resolveEffectiveQueryExecutionOptions(
     visibility: options?.visibility ?? "public",
     branch: options?.branch,
     ...(options?.splices?.length ? { splices: options.splices } : {}),
+    ...(options?.backlogRows !== undefined ? { backlogRows: options.backlogRows } : {}),
   };
 }
 
@@ -789,6 +793,7 @@ function encodeQueryExecutionOptions(
     first_load_remote_wait_ms?: number;
     transaction_id?: string;
     splices?: readonly string[];
+    backlog_rows?: number;
     read_view?: {
       source: {
         BranchView: {
@@ -819,12 +824,14 @@ function encodeQueryExecutionOptions(
   }
 
   if (options.splices?.length) payload.splices = options.splices;
+  if (options.backlogRows !== undefined) payload.backlog_rows = options.backlogRows;
 
   if (
     !payload.transaction_id &&
     !payload.first_load_remote_wait_ms &&
     !payload.read_view &&
-    !payload.splices
+    !payload.splices &&
+    payload.backlog_rows === undefined
   ) {
     return undefined;
   }
@@ -1195,6 +1202,7 @@ export class JazzClient {
   private resolvedSession: Session | null;
   private shutdownPromise: Promise<void> | null = null;
   private discarded = false;
+  private writesRefused: Error | null = null;
   /** Facade-owned subscription releases, fenced against terminal reentrancy. */
   private activeSubscriptionReleases = new Map<number, () => void>();
 
@@ -1508,6 +1516,7 @@ export class JazzClient {
   }
 
   commitTransaction(id: OpenTransactionId): WriteHandle {
+    if (this.writesRefused) throw this.writesRefused;
     const state = this.transactionPreparations.get(id);
     if (state?.committing) throw new Error("Transaction is already committing");
     const runtime = this.runtime;
@@ -2542,6 +2551,15 @@ export class JazzClient {
   discard(): void {
     this.discarded = true;
     this.runtime.discard?.();
+  }
+
+  /**
+   * @internal Refuse every later commit with `error`: this tab yielded its
+   * store to a newer build of the app and reloads, which would lose them.
+   * A transaction opened before commits through here, not through the Db.
+   */
+  refuseWrites(error: Error): void {
+    this.writesRefused = error;
   }
 
   /** Whether this client's runtime can delete its local store. */

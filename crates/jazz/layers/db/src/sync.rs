@@ -44,6 +44,8 @@
 //!   non-serializable commit.
 
 use crate::schema::history::{history_source_table, is_history_table};
+use crate::storage::Scoped;
+use crate::storage::Storage;
 use crate::values::CachedRow;
 use crate::values::query_error;
 use crate::values::{STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT};
@@ -3297,6 +3299,34 @@ impl Session {
     }
 }
 
+/// Per stored table, how many composite support column sets the server's
+/// sessions hold, summed over sessions: shared by every session's
+/// [`Watches`], so a tick can tell at once whether a written row of a
+/// table may match a composite watch at all.
+#[derive(Clone, Default)]
+pub(crate) struct CompositeTables(Rc<RefCell<HashMap<String, usize>>>);
+
+impl CompositeTables {
+    fn add(&self, table: &str) {
+        *self.0.borrow_mut().entry(table.to_owned()).or_default() += 1;
+    }
+
+    fn remove(&self, table: &str, sets: usize) {
+        let mut tables = self.0.borrow_mut();
+        if let Some(count) = tables.get_mut(table) {
+            *count -= sets.min(*count);
+            if *count == 0 {
+                tables.remove(table);
+            }
+        }
+    }
+
+    /// Whether any session holds a composite watch on `table`.
+    fn any(&self, table: &str) -> bool {
+        self.0.borrow().contains_key(table)
+    }
+}
+
 /// A session's coherence watches, each held by the subscriptions that
 /// rely on it (or by the fetch being served, for its duration): a key stays
 /// watched while one holds it, so an ended subscription leaves nothing
@@ -3318,6 +3348,28 @@ struct Watches {
     /// Each told subscription's row watches held (true) or released
     /// (false) since it was last told, as they happen.
     changes: HashMap<u64, HashMap<u64, (bool, RowName)>>,
+    /// The stored table and column set each held composite watch names
+    /// (see [`composite`]).
+    composites: HashMap<u64, (String, Vec<String>)>,
+    /// Per stored table, the column sets of the held composite watches,
+    /// each with how many it names: a written row of the table is matched
+    /// against each set (see [`composite_keys`]). A set goes with the last
+    /// watch naming it, so a write pays only for the keys still followed.
+    composite_sets: HashMap<String, HashMap<Vec<String>, u32>>,
+    /// The server-wide count of composite column sets by table, which
+    /// these sets are counted in; `None` for a placeholder.
+    composite_tables: Option<CompositeTables>,
+}
+
+impl Drop for Watches {
+    /// An ended session's composite sets leave the server-wide count.
+    fn drop(&mut self) {
+        if let Some(tables) = &self.composite_tables {
+            for (table, sets) in &self.composite_sets {
+                tables.remove(table, sets.len());
+            }
+        }
+    }
 }
 
 /// A row by stored table and id.
@@ -3411,9 +3463,34 @@ impl Watches {
         out
     }
 
-    /// `key` is held no more: its row name goes too.
+    /// `key` is held no more: its row name goes too, and a composite
+    /// watch's column set once no held watch names it.
     fn unwatched(&mut self, key: u64) {
         self.names.remove(&key);
+        if let Some((table, set)) = self.composites.remove(&key)
+            && let Some(sets) = self.composite_sets.get_mut(&table)
+        {
+            if let Some(count) = sets.get_mut(&set) {
+                *count -= 1;
+                if *count == 0 {
+                    sets.remove(&set);
+                    if let Some(tables) = &self.composite_tables {
+                        tables.remove(&table, 1);
+                    }
+                }
+            }
+            if sets.is_empty() {
+                self.composite_sets.remove(&table);
+            }
+        }
+    }
+
+    /// The column sets of the composite watches held on stored `table`.
+    fn composite_sets(&self, table: &str) -> impl Iterator<Item = &Vec<String>> {
+        self.composite_sets
+            .get(table)
+            .into_iter()
+            .flat_map(|sets| sets.keys())
     }
 
     fn contains(&self, key: &u64) -> bool {
@@ -3427,6 +3504,34 @@ impl Watches {
             .get(&owner)
             .is_some_and(|keys| keys.contains(&key));
         self.holders.get(&key).copied().unwrap_or(0) > u32::from(mine)
+    }
+
+    /// [`Watches::hold`] for a composite watch over `set`, the columns of
+    /// stored `table` it names in name order: while it is held, a written
+    /// row of `table` is matched against `set` too.
+    fn hold_composite(
+        &mut self,
+        owner: u64,
+        key: u64,
+        table: &str,
+        set: Vec<String>,
+    ) -> (bool, bool) {
+        if !self.composites.contains_key(&key) {
+            let count = self
+                .composite_sets
+                .entry(table.to_owned())
+                .or_default()
+                .entry(set.clone())
+                .or_default();
+            if *count == 0
+                && let Some(tables) = &self.composite_tables
+            {
+                tables.add(table);
+            }
+            *count += 1;
+            self.composites.insert(key, (table.to_owned(), set));
+        }
+        self.hold(owner, key)
     }
 
     /// Hold `key` for `owner`: (whether the session did not watch it yet,
@@ -3666,6 +3771,12 @@ pub(crate) enum Support {
     /// [`SupportMemo`]). `policy_depth` is the remaining depth when `nested`
     /// is the table's own policy support, so the walk can tell a key was
     /// followed deeper already.
+    ///
+    /// `composite`, when not empty, is every equality a child meets (a
+    /// correlated `EXISTS` on several scalar columns), `inner = outer`
+    /// first: the children are then those equal to the parent on all of
+    /// them at once, read and watched as one composite key (see
+    /// [`composite`]), and the fields above are not followed alone.
     Array {
         table: String,
         inner: String,
@@ -3674,6 +3785,7 @@ pub(crate) enum Support {
         inner_array: bool,
         nested: Rc<Vec<Support>>,
         policy_depth: Option<usize>,
+        composite: Vec<Also>,
     },
     /// The edges of a gather from the row's `frontier` value: edge rows
     /// whose `member` holds it, then transitively from each edge's
@@ -3684,6 +3796,61 @@ pub(crate) enum Support {
         member: String,
         parent: String,
     },
+}
+
+/// One equality of a composite [`Support::Array`]: the child's `inner`
+/// column holds the parent's `outer` cell.
+#[derive(Debug)]
+pub(crate) struct Also {
+    inner: String,
+    outer: String,
+}
+
+/// Whether support can follow `consulted.inner = table.outer` by value:
+/// the two columns store equal values as equal image cells (one type,
+/// neither an enum column), or an enum column meets an enum or a text
+/// column, which images carry by variant name and the follow lookup binds
+/// to the consulted column's tag ([`Inner::followed_images`]). Not an
+/// array, a real (watch keys compare reals by their bits, so `0.0` would
+/// miss `-0.0`), or a column a written row's cells do not name
+/// (provenance).
+fn followable_by_value(
+    table: &crate::values::Table,
+    outer: &str,
+    consulted: &crate::values::Table,
+    inner: &str,
+) -> bool {
+    use crate::records::ValueType;
+    /// A column's type, nullability aside (`id` is a `uuid`), and whether
+    /// it is an enum column; `None` for an array, a real, or a column
+    /// outside the stored application columns.
+    fn storage(table: &crate::values::Table, column: &str) -> Option<(ValueType, bool)> {
+        if column == "id" {
+            return Some((ValueType::Uuid, false));
+        }
+        if crate::compile::is_array(table, column) {
+            return None;
+        }
+        let column = table.columns.iter().find(|c| c.name == column)?;
+        let mut ty = &column.ty;
+        while let ValueType::Nullable(inner) = ty {
+            ty = inner;
+        }
+        if matches!(ty, ValueType::F64) {
+            return None;
+        }
+        Some((ty.clone(), column.tags.is_some()))
+    }
+    let (Some((outer_ty, outer_enum)), Some((inner_ty, inner_enum))) =
+        (storage(table, outer), storage(consulted, inner))
+    else {
+        return false;
+    };
+    if !outer_enum && !inner_enum {
+        return outer_ty == inner_ty;
+    }
+    let by_name = |ty: &ValueType, is_enum: bool| is_enum || matches!(ty, ValueType::String);
+    by_name(&outer_ty, outer_enum) && by_name(&inner_ty, inner_enum)
 }
 
 /// The nested policy support built for one [`Support`] tree, by (stored table,
@@ -3745,8 +3912,14 @@ pub(crate) struct FollowMemo {
 struct FollowAt(u64, u64);
 
 impl FollowAt {
-    fn of(conn: &rusqlite::Connection) -> Self {
-        Self(conn.total_changes(), crate::values::rollbacks(conn))
+    fn of(conn: &Storage) -> Self {
+        // A store that can't say how many rows changed gets a position no
+        // other matches, so nothing is reused across it.
+        static UNKNOWN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+        let changes = conn
+            .total_changes()
+            .unwrap_or_else(|_| UNKNOWN.fetch_sub(1, std::sync::atomic::Ordering::Relaxed));
+        Self(changes, crate::values::rollbacks(conn))
     }
 }
 
@@ -3863,9 +4036,9 @@ pub fn set_follow_read_hook_for_test(hook: Option<FollowReadHook>) {
 }
 
 #[cfg(any(test, feature = "testing"))]
-fn follow_read_hook(conn: &rusqlite::Connection, table: &str, column: &str) {
+fn follow_read_hook(conn: &Storage, table: &str, column: &str) {
     FOLLOW_READ_HOOK.with(|cell| {
-        if let Some(hook) = cell.borrow_mut().as_mut() {
+        if let (Some(hook), Some(conn)) = (cell.borrow_mut().as_mut(), conn.native_conn()) {
             hook(conn, table, column);
         }
     });
@@ -3972,6 +4145,52 @@ fn wk(key: (String, String, String)) -> u64 {
 
 fn watch_key(cell: &Sql) -> String {
     cell.key()
+}
+
+/// A composite key over `column = value` pairs: the columns in name order
+/// joined by NUL (no stored column name holds one), and their values'
+/// watch keys in the same order, each prefixed by its length.
+fn composite<'p>(parts: impl IntoIterator<Item = (&'p str, &'p Sql)>) -> (String, String) {
+    let mut pairs: Vec<(&str, &Sql)> = parts.into_iter().collect();
+    pairs.sort_by(|a, b| a.0.cmp(b.0));
+    let columns = pairs
+        .iter()
+        .map(|(column, _)| *column)
+        .collect::<Vec<_>>()
+        .join("\0");
+    let mut values = String::new();
+    for (_, value) in pairs {
+        let key = watch_key(value);
+        values.push_str(&format!("{}:{key}", key.len()));
+    }
+    (columns, values)
+}
+
+/// The composite watches (see [`composite`]) a written row of `table` with
+/// `cells` matches: one per column set `sets` names whose cells the row
+/// holds, none of them NULL. A row NULL in a set's column (or holding a
+/// chunked value there, which an image's cell shows as NULL) matches no
+/// key over that set: a key is followed only over the parts whose parent
+/// cell is not NULL ([`Inner::follow_support`]), and the parts left out
+/// make a smaller set (or the single key of one column) that it matches.
+fn composite_keys<'s>(
+    table: &str,
+    sets: impl IntoIterator<Item = &'s Vec<String>>,
+    cells: &[(String, Sql)],
+) -> Vec<u64> {
+    let mut keys = Vec::new();
+    'sets: for set in sets {
+        let mut pairs = Vec::with_capacity(set.len());
+        for column in set {
+            match cells.iter().find(|(name, _)| name == column) {
+                Some((_, Sql::Null)) | None => continue 'sets,
+                Some((name, cell)) => pairs.push((name.as_str(), cell)),
+            }
+        }
+        let (columns, values) = composite(pairs);
+        keys.push(wk((table.to_owned(), columns, values)));
+    }
+    keys
 }
 
 fn image_cell(image: &Image, column: &str) -> Option<Sql> {
@@ -4295,6 +4514,7 @@ impl Inner {
                     inner_array: crate::compile::is_array(seeds, &seed.team_column),
                     nested: Rc::default(),
                     policy_depth: None,
+                    composite: Vec::new(),
                 });
             }
             let edges = self.schema.table(&via.edge_table)?;
@@ -4326,6 +4546,7 @@ impl Inner {
                 inner_array: crate::compile::is_array(child, &array.inner_column),
                 nested: Rc::new(self.array_support(child, &array.nested_arrays)?),
                 policy_depth: None,
+                composite: Vec::new(),
             });
         }
         Ok(support)
@@ -4373,19 +4594,23 @@ impl Inner {
         memo: &mut SupportMemo,
     ) -> Result<Vec<Support>, Error> {
         use crate::tools::{CmpOp, Operation, PolicyExpr, PolicyValue};
-        /// The `(inner, outer)` columns an `EXISTS` condition correlates.
-        fn correlation(condition: &PolicyExpr) -> Option<(&str, &str)> {
+        /// The `(inner, outer)` columns each outer-row equality among an
+        /// `EXISTS` condition's conjuncts correlates, in order.
+        fn correlation<'p>(condition: &'p PolicyExpr, out: &mut Vec<(&'p str, &'p str)>) {
             match condition {
                 PolicyExpr::Cmp {
                     column,
                     op: CmpOp::Eq,
                     value: PolicyValue::SessionRef(path),
-                } => match path.as_slice() {
-                    [outer_row, outer] if outer_row == "__jazz_outer_row" => Some((column, outer)),
-                    _ => None,
-                },
-                PolicyExpr::And(parts) => parts.iter().find_map(correlation),
-                _ => None,
+                } => {
+                    if let [outer_row, outer] = path.as_slice()
+                        && outer_row == "__jazz_outer_row"
+                    {
+                        out.push((column, outer));
+                    }
+                }
+                PolicyExpr::And(parts) => parts.iter().for_each(|part| correlation(part, out)),
+                _ => {}
             }
         }
         fn clauses<'p>(policy: &'p PolicyExpr, out: &mut Vec<(&'p str, &'p PolicyExpr)>) {
@@ -4407,10 +4632,36 @@ impl Inner {
             clauses(policy, &mut exists);
         }
         for (consulted, condition) in exists {
-            let Some((inner, outer)) = correlation(condition) else {
+            let mut equalities = Vec::new();
+            correlation(condition, &mut equalities);
+            // The first outer-row equality leads, as it always has.
+            let Some((&(inner, outer), further)) = equalities.split_first() else {
                 continue;
             };
             let consulted = self.schema.table(consulted)?;
+            // Every further equality narrows the children to one composite
+            // key, each followed by value as the lead is. One that cannot
+            // be (a different type, an array, a real, a provenance column)
+            // is left out, which only widens the support: the session's
+            // policies filter what it finds. A lead that cannot be keeps
+            // its single key.
+            let part = |inner: &str, outer: &str| {
+                followable_by_value(table, outer, consulted, inner).then(|| Also {
+                    inner: consulted.stored_name(inner).to_owned(),
+                    outer: table.stored_name(outer).to_owned(),
+                })
+            };
+            let mut composite = Vec::new();
+            if let Some(lead) = part(inner, outer) {
+                composite.extend(
+                    further
+                        .iter()
+                        .filter_map(|&(inner, outer)| part(inner, outer)),
+                );
+                if !composite.is_empty() {
+                    composite.insert(0, lead);
+                }
+            }
             support.push(Support::Array {
                 table: consulted.stored.clone(),
                 inner: consulted.stored_name(inner).to_owned(),
@@ -4419,6 +4670,7 @@ impl Inner {
                 inner_array: crate::compile::is_array(consulted, inner),
                 nested: self.shared_support(consulted, depth - 1, memo)?,
                 policy_depth: Some(depth - 1),
+                composite,
             });
         }
         Ok(support)
@@ -4475,6 +4727,7 @@ impl Inner {
                 // parents in turn.
                 nested: self.shared_support(parent, depth - 1, memo)?,
                 policy_depth: Some(depth - 1),
+                composite: Vec::new(),
             });
         }
         Ok(support)
@@ -4500,6 +4753,7 @@ impl Inner {
                 inner_array: crate::compile::is_array(target, &join.on_column),
                 nested: Rc::new(self.join_support(target, &join.nested_joins)?),
                 policy_depth: None,
+                composite: Vec::new(),
             });
         }
         Ok(support)
@@ -4701,12 +4955,57 @@ impl Inner {
                 },
                 Support::Array {
                     table,
+                    nested,
+                    policy_depth,
+                    composite,
+                    ..
+                } if !composite.is_empty() => {
+                    // One composite key: the children equal to the row on
+                    // every equality at once, each by the parent's cell as
+                    // its image carries it. A policy `=` is the null-safe
+                    // `IS`, so a part whose parent cell is NULL (or a
+                    // chunked value, which an image's cell does not show)
+                    // is left out: that only widens the support, and a
+                    // written child with a NULL there still matches the
+                    // key of the parts left. So no composite key holds a
+                    // NULL, as no written row's does ([`composite_keys`]).
+                    let parts: Vec<(String, Sql)> = composite
+                        .iter()
+                        .filter_map(|also| match image_cell(image, &also.outer) {
+                            Some(Sql::Null) | None => None,
+                            Some(value) => Some((also.inner.clone(), value)),
+                        })
+                        .collect();
+                    // One part left is the single key of its column, as a
+                    // correlation on that column alone follows it; none
+                    // left, nothing, as a NULL leading equality alone.
+                    let (column, composite) = match &parts[..] {
+                        [] => continue,
+                        [(column, _)] => (column, &[][..]),
+                        [(column, _), ..] => (column, &parts[..]),
+                    };
+                    self.follow_value(
+                        table,
+                        column,
+                        parts[0].1.clone(),
+                        false,
+                        composite,
+                        nested,
+                        *policy_depth,
+                        floor,
+                        follow,
+                    )?;
+                    continue;
+                }
+                Support::Array {
+                    table,
                     inner,
                     outer,
                     outer_array,
                     inner_array,
                     nested,
                     policy_depth,
+                    ..
                 } => match image_cell(image, outer) {
                     Some(Sql::Null) | None => continue,
                     Some(value) if *outer_array => {
@@ -4736,6 +5035,7 @@ impl Inner {
                     column,
                     value,
                     contains,
+                    &[],
                     nested,
                     policy_depth,
                     floor,
@@ -4777,49 +5077,63 @@ impl Inner {
         )?)
     }
 
+    /// `value` as the lookup of `table.column` binds it. Values followed
+    /// are portable, as images carry them (see [`Inner::portable_enums`]):
+    /// an enum variant by its name, whatever column it came from. An enum
+    /// column's cells hold this store's tags for it, so the lookup binds the
+    /// tag (`Some`); watch keys stay on the name, as written rows' keys are.
+    /// A name the column has no tag for stays a name (`None`), which no
+    /// cell holds.
+    fn tag_for_lookup(&self, table: &str, column: &str, value: &Sql) -> Option<Sql> {
+        let Sql::Text(name) = value else {
+            return None;
+        };
+        if column == "id"
+            || !self
+                .names
+                .stored_type(table, column)
+                .is_some_and(crate::values::is_enum_type)
+        {
+            return None;
+        }
+        let name = std::str::from_utf8(name).ok()?;
+        let tag = self.names.tags().column(table, column).borrow().tag(name)?;
+        Some(Sql::Integer(tag))
+    }
+
     /// The current rows of `table` whose `column` is `value` (or,
     /// `contains`, whose array `column` holds it), for every reader: a
-    /// session's policies are applied to them afterwards. While a server
-    /// tick fans out ([`FollowMemo`]), one read serves every session that
-    /// follows the same key.
+    /// session's policies are applied to them afterwards. With `composite`
+    /// (every part of a composite key, `column = value` first), the rows
+    /// equal to each of its parts. Each value is bound as the column stores
+    /// it ([`Inner::tag_for_lookup`]). While a server tick fans out
+    /// ([`FollowMemo`]), one read serves every session that follows the
+    /// same key.
     fn followed_images(
         &self,
         table: &str,
         column: &str,
         contains: bool,
         value: &Sql,
+        composite: &[(String, Sql)],
     ) -> Result<Rc<Vec<Image>>, Error> {
-        // `value` is portable, as images carry it (see
-        // [`Inner::portable_enums`]): an enum variant by its name, whatever
-        // column it came from. An enum column's cells hold this store's tags
-        // for it, so the lookup binds the tag; watch keys stay on the name,
-        // as written rows' keys are. A name the column has no tag for stays
-        // a name, which no cell holds.
-        let tagged;
-        let value = match value {
-            Sql::Text(name)
-                if !contains
-                    && column != "id"
-                    && self
-                        .names
-                        .stored_type(table, column)
-                        .is_some_and(crate::values::is_enum_type) =>
-            {
-                let tag = std::str::from_utf8(name)
-                    .ok()
-                    .and_then(|name| self.names.tags().column(table, column).borrow().tag(name));
-                match tag {
-                    Some(tag) => {
-                        tagged = Sql::Integer(tag);
-                        &tagged
-                    }
-                    None => value,
-                }
-            }
-            _ => value,
+        let tagged = if contains {
+            None
+        } else {
+            self.tag_for_lookup(table, column, value)
         };
+        let value = tagged.as_ref().unwrap_or(value);
+        // With a composite key, every further part binds its value too.
+        let further: Vec<(&str, Sql)> = composite
+            .iter()
+            .skip(1)
+            .map(|(column, value)| {
+                let bound = self.tag_for_lookup(table, column, value);
+                (column.as_str(), bound.unwrap_or_else(|| value.clone()))
+            })
+            .collect();
         let read = || {
-            let filter = if column == "id" {
+            let mut filter = if column == "id" {
                 "id = ?1".to_owned()
             } else if contains {
                 format!(
@@ -4829,13 +5143,27 @@ impl Inner {
             } else {
                 format!("{} = ?1", quote(column))
             };
-            self.images_where(table, false, &filter, &[value])
+            let mut values: Vec<&dyn rusqlite::ToSql> = vec![value];
+            for (column, value) in &further {
+                values.push(value);
+                filter.push_str(&format!(" AND {} = ?{}", quote(column), values.len()));
+            }
+            self.images_where(table, false, &filter, &values)
         };
         let mut memo = self.follow_memo.borrow_mut();
         let Some(memo) = memo.as_mut() else {
             return Ok(Rc::new(read()?));
         };
-        let key = FollowKey::of(table, column, contains, value);
+        let key = if composite.is_empty() {
+            FollowKey::of(table, column, contains, value)
+        } else {
+            let (columns, values) = self::composite(
+                composite
+                    .iter()
+                    .map(|(column, value)| (column.as_str(), value)),
+            );
+            FollowKey::of(table, &columns, false, &Sql::Text(values.into_bytes()))
+        };
         let at = FollowAt::of(&self.conn);
         if let Some(images) = memo.get(&key, at) {
             if follow_memo_oracle() {
@@ -4856,6 +5184,12 @@ impl Inner {
     /// Ship the readable rows of `table` whose `column` is `value` (or,
     /// `contains`, whose array `column` holds it) and their nested
     /// support, watching the correlation so later writes reach the replica.
+    ///
+    /// With `composite` (every part of a composite key, `column = value`
+    /// first), the rows must equal every part, and the watch is one
+    /// composite key over all of them (see [`composite`]): a correlated
+    /// `EXISTS` on several columns loads and watches only the rows that
+    /// match on all of them.
     #[allow(clippy::too_many_arguments)]
     fn follow_value(
         &self,
@@ -4863,6 +5197,7 @@ impl Inner {
         column: &str,
         value: Sql,
         contains: bool,
+        composite: &[(String, Sql)],
         nested: &[Support],
         policy_depth: Option<usize>,
         floor: Option<Floor>,
@@ -4873,8 +5208,25 @@ impl Inner {
         // followed again: a child that joined since may have unwatched
         // children. A key another subscription holds is followed for this
         // one too, so its rows stay watched when that one ends.
-        let key = wk((table.to_owned(), column.to_owned(), watch_key(&value)));
-        let (fresh, new) = follow.watch.hold(follow.owner, key);
+        let (key, (fresh, new)) = if composite.is_empty() {
+            let key = wk((table.to_owned(), column.to_owned(), watch_key(&value)));
+            (key, follow.watch.hold(follow.owner, key))
+        } else {
+            // Keyed on the values as images carry them, as a written row's
+            // keys are. A written row of the table is matched against this
+            // column set while the key is held ([`Watches::hold_composite`]).
+            let (columns, values) = self::composite(
+                composite
+                    .iter()
+                    .map(|(column, value)| (column.as_str(), value)),
+            );
+            let set = columns.split('\0').map(str::to_owned).collect();
+            let key = wk((table.to_owned(), columns, values));
+            (
+                key,
+                follow.watch.hold_composite(follow.owner, key, table, set),
+            )
+        };
         if !new && nested.is_empty() {
             return Ok(());
         }
@@ -4910,7 +5262,7 @@ impl Inner {
             }
         }
         for found in self
-            .followed_images(table, column, contains, &value)?
+            .followed_images(table, column, contains, &value, composite)?
             .iter()
         {
             let row = RowUuid::from_bytes(found.id);
@@ -5130,9 +5482,8 @@ impl Inner {
         let rows = statement
             .query_map(params, |r| {
                 if names.is_empty() {
-                    let statement = r.as_ref();
-                    names = (0..statement.column_count())
-                        .map(|i| statement.column_name(i).map(str::to_owned))
+                    names = (0..r.column_count())
+                        .map(|i| r.column_name(i).map(str::to_owned))
                         .collect::<Result<_, _>>()?;
                 }
                 let mut image = Image {
@@ -5674,11 +6025,8 @@ impl Inner {
         let Some(arity) = keys.first().map(Vec::len) else {
             return Ok(Vec::new());
         };
-        let variables = self
-            .conn
-            .limit(rusqlite::limits::Limit::SQLITE_LIMIT_VARIABLE_NUMBER)
-            .map_err(storage)?;
-        let largest = (usize::try_from(variables).unwrap_or(0) / arity).clamp(1, SIZES[3]);
+        let variables = self.conn.max_parameters().map_err(storage)?;
+        let largest = (variables / arity).clamp(1, SIZES[3]);
         let sizes: Vec<usize> = SIZES
             .into_iter()
             .filter(|size| *size < largest)
@@ -7183,14 +7531,14 @@ impl Inner {
     /// its transactions before it sends them, and builds on its commits
     /// under its own claims.
     ///
-    /// The node moves with its account's sign-in: a local-first guest that
+    /// The node moves with its account's sign-in: a device account that
     /// signs up keeps its account and its store, and so its node, and goes on
     /// writing under the principal the app's backend names; later the same
     /// account may sign in another way (another issuer, or an identity the
     /// backend linked). The first commit as the node by another signed-in
     /// principal of the same account takes the node over, and from then on
     /// only that principal writes as it, until another one takes it over.
-    /// A local-first principal never takes a node over, so a guest's key
+    /// A device-account principal never takes a node over, so a guest's key
     /// (unexpired, or leaked) no longer writes as its node once the account
     /// has signed in.
     pub(crate) fn claim_node(
@@ -7235,7 +7583,7 @@ impl Inner {
             return Ok(false);
         };
         if account == jazz_types::account_registry::SYSTEM_ACCOUNT_ID
-            || identity.principal_parts().0 == jazz_types::identity::LOCAL_FIRST_ISSUER
+            || identity.principal_parts().0 == jazz_types::identity::DEVICE_ACCOUNT_ISSUER
         {
             return Ok(false);
         }
@@ -9692,6 +10040,54 @@ impl Db {
         }
     }
 
+    /// How many composite policy-support watches (a correlated `EXISTS`
+    /// followed on several columns at once) this server's sessions hold,
+    /// and how many column sets a written row is matched against for them,
+    /// over every table.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn composite_watches_for_test(&self) -> (usize, usize) {
+        debug_assert_eq!(
+            self.inner
+                .borrow()
+                .composite_tables
+                .0
+                .borrow()
+                .values()
+                .sum::<usize>(),
+            self.inner
+                .borrow()
+                .sessions
+                .iter()
+                .flat_map(|session| session.watch.composite_sets.values())
+                .map(HashMap::len)
+                .sum::<usize>(),
+            "the server-wide count matches the sessions' sets"
+        );
+        let inner = self.inner.borrow();
+        let keys = inner
+            .sessions
+            .iter()
+            .map(|session| session.watch.composites.len())
+            .sum();
+        let sets = inner
+            .sessions
+            .iter()
+            .flat_map(|session| session.watch.composite_sets.values())
+            .map(HashMap::len)
+            .sum();
+        (keys, sets)
+    }
+
+    /// How many times a tick gathered the sessions' composite support
+    /// column sets for a written table: never for a table no session
+    /// follows on several columns.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn composite_scans_for_test(&self) -> usize {
+        self.inner.borrow().composite_scans.get()
+    }
+
     /// One-shot read records, answer slots, and queued one-shot requests.
     #[cfg(any(test, feature = "testing"))]
     pub fn pending_once_state_for_test(&self) -> (usize, usize, usize) {
@@ -9931,24 +10327,23 @@ impl Db {
         };
         let mut inner = self.inner();
         let seq = inner.seq + 1;
-        if begin_savepoint(&inner.conn, "advise").is_err() {
-            return PermissionAdvice::Unknown;
-        }
-        let mark = inner.changed.borrow().len();
-        // Dry-run under the session's policies: a pinned session's bundle.
-        let governed = inner.governed_view(&inner.schema.clone(), index);
-        let active = std::mem::replace(&mut inner.schema, governed);
-        let applied = inner.apply_as(&op, who, seq).map(drop);
-        inner.schema = active;
-        inner.changed.borrow_mut().truncate(mark);
-        let undone = end_savepoint(&inner.conn, "advise", false);
-        match (applied, undone) {
-            (_, Err(_)) => PermissionAdvice::Unknown,
-            (Ok(()), Ok(())) => PermissionAdvice::Allowed,
-            (Err(error), Ok(())) if error.code == ErrorCode::WriteRejected => {
-                PermissionAdvice::Denied
-            }
-            (Err(_), Ok(())) => PermissionAdvice::Unknown,
+        let conn = inner.conn.clone();
+        // A dry run: what it wrote is undone either way.
+        let advised = conn.scope_then("advise", |_| {
+            let mark = inner.changed.borrow().len();
+            // Dry-run under the session's policies: a pinned session's bundle.
+            let governed = inner.governed_view(&inner.schema.clone(), index);
+            let active = std::mem::replace(&mut inner.schema, governed);
+            let applied = inner.apply_as(&op, who, seq).map(drop);
+            inner.schema = active;
+            inner.changed.borrow_mut().truncate(mark);
+            Scoped::Undo(applied)
+        });
+        match advised {
+            Err(_) => PermissionAdvice::Unknown,
+            Ok(Ok(())) => PermissionAdvice::Allowed,
+            Ok(Err(error)) if error.code == ErrorCode::WriteRejected => PermissionAdvice::Denied,
+            Ok(Err(_)) => PermissionAdvice::Unknown,
         }
     }
 
@@ -9959,10 +10354,8 @@ impl Db {
             return Ok(());
         }
         // Everything one tick applies commits together.
-        begin_savepoint(&self.inner.borrow().conn, "sync_tick")?;
-        let applied = self.client_apply();
-        end_savepoint(&self.inner.borrow().conn, "sync_tick", applied.is_ok())?;
-        applied?;
+        let conn = self.inner.borrow().conn.clone();
+        conn.scope("sync_tick", |_| self.client_apply())?;
         self.notify();
         let arrived = {
             let mut inner = self.inner.borrow_mut();
@@ -11012,72 +11405,81 @@ impl Db {
         let view = inner.stored_view();
         let active = std::mem::replace(&mut inner.schema, view);
         inner.replayed_commits += pending.len() as u64;
+        let conn = inner.conn.clone();
         let replayed = pending.into_iter().try_for_each(|(order, tx, ops, rows)| {
-            begin_savepoint(&inner.conn, "replay")?;
-            inner.merging = true;
-            // The branches this commit wrote that an upstream's later
-            // version holds: there, that version shows.
-            let under: Vec<&RowKey> = rows
-                .iter()
-                .filter(|key| outranked.get(key).is_some_and(|&later| later >= order))
-                .collect();
-            // An op is left out where every branch it wrote is held so; one
-            // that also wrote a branch that is not applies, and the held
-            // branches are put back after the commit replays.
-            let shown = |op: &StagedOp| {
-                op.row().is_none_or(|row| {
-                    let table = op.table();
-                    let mut wrote = rows
-                        .iter()
-                        .filter(|(t, r, _)| t == table && *r == row)
-                        .peekable();
-                    wrote.peek().is_none() || wrote.any(|key| !under.contains(&key))
-                })
-            };
-            let replayed = ops
-                .iter()
-                .filter(|op| shown(op))
-                .try_for_each(|op| match inner.apply(op, tx) {
-                    // A part of a cross-shard commit that landed before its fate
-                    // (another shard answered first) already holds its row. The
-                    // writer's version overlays that baseline as it overlays any
-                    // other, until the fate: the whole commit still shows as its
-                    // writer's. Another writer's version of the same row id lands
-                    // here the same way and is overlaid alike: the conflicting
-                    // insert is refused upstream, and the fate drops the whole
-                    // commit, which uncovers theirs.
-                    Err(error) if error.reason == Some(Reason::RowAlreadyExists) => {
-                        let StagedOp::Insert(table, _, opts) = op else {
-                            return Err(error);
-                        };
-                        let landed = baseline.iter().find_map(|((t, row, key), image)| {
-                            let image = image.as_ref()?;
-                            (t == table && Some(*row) == opts.row_id).then_some((row, key, image))
-                        });
-                        let Some((row, key, image)) = landed else {
-                            return Err(error);
-                        };
-                        let at = image.at;
-                        inner.drop_row(table, *row, key, at)?;
-                        inner.apply(op, tx).map(drop)
-                    }
-                    other => other.map(drop),
-                })
-                .and_then(|()| {
-                    for key @ (table, row, branch) in &under {
-                        let Some(Some(image)) = baseline.get(*key) else {
-                            continue;
-                        };
-                        if inner.current_image(table, *row, branch)?.map(|i| i.at) != Some(image.at)
-                        {
-                            inner.drop_row(table, *row, branch, image.at)?;
-                            inner.put_image(image, false)?;
+            // A commit that fails to replay is undone and skipped; only a
+            // savepoint that cannot open or close stops the replay.
+            conn.scope_then("replay", |_| {
+                inner.merging = true;
+                // The branches this commit wrote that an upstream's later
+                // version holds: there, that version shows.
+                let under: Vec<&RowKey> = rows
+                    .iter()
+                    .filter(|key| outranked.get(key).is_some_and(|&later| later >= order))
+                    .collect();
+                // An op is left out where every branch it wrote is held so; one
+                // that also wrote a branch that is not applies, and the held
+                // branches are put back after the commit replays.
+                let shown = |op: &StagedOp| {
+                    op.row().is_none_or(|row| {
+                        let table = op.table();
+                        let mut wrote = rows
+                            .iter()
+                            .filter(|(t, r, _)| t == table && *r == row)
+                            .peekable();
+                        wrote.peek().is_none() || wrote.any(|key| !under.contains(&key))
+                    })
+                };
+                let replayed = ops
+                    .iter()
+                    .filter(|op| shown(op))
+                    .try_for_each(|op| match inner.apply(op, tx) {
+                        // A part of a cross-shard commit that landed before its fate
+                        // (another shard answered first) already holds its row. The
+                        // writer's version overlays that baseline as it overlays any
+                        // other, until the fate: the whole commit still shows as its
+                        // writer's. Another writer's version of the same row id lands
+                        // here the same way and is overlaid alike: the conflicting
+                        // insert is refused upstream, and the fate drops the whole
+                        // commit, which uncovers theirs.
+                        Err(error) if error.reason == Some(Reason::RowAlreadyExists) => {
+                            let StagedOp::Insert(table, _, opts) = op else {
+                                return Err(error);
+                            };
+                            let landed = baseline.iter().find_map(|((t, row, key), image)| {
+                                let image = image.as_ref()?;
+                                (t == table && Some(*row) == opts.row_id)
+                                    .then_some((row, key, image))
+                            });
+                            let Some((row, key, image)) = landed else {
+                                return Err(error);
+                            };
+                            let at = image.at;
+                            inner.drop_row(table, *row, key, at)?;
+                            inner.apply(op, tx).map(drop)
                         }
-                    }
-                    Ok(())
-                });
-            inner.merging = false;
-            end_savepoint(&inner.conn, "replay", replayed.is_ok())
+                        other => other.map(drop),
+                    })
+                    .and_then(|()| {
+                        for key @ (table, row, branch) in &under {
+                            let Some(Some(image)) = baseline.get(*key) else {
+                                continue;
+                            };
+                            if inner.current_image(table, *row, branch)?.map(|i| i.at)
+                                != Some(image.at)
+                            {
+                                inner.drop_row(table, *row, branch, image.at)?;
+                                inner.put_image(image, false)?;
+                            }
+                        }
+                        Ok(())
+                    });
+                inner.merging = false;
+                match replayed {
+                    Ok(()) => Scoped::Keep(()),
+                    Err(_) => Scoped::Undo(()),
+                }
+            })
         });
         inner.schema = active;
         replayed?;
@@ -12067,6 +12469,7 @@ impl Db {
         inner.accepted += 1;
         let generation = inner.accepted;
         let mut session = Session::new(transport, identity);
+        session.watch.composite_tables = Some(inner.composite_tables.clone());
         session.claims = claims;
         session.bundle = bundle;
         session.generation = generation;
@@ -12567,14 +12970,44 @@ impl Db {
         let mut cache: HashMap<(String, RowUuid, Pos), Vec<Image>> = HashMap::new();
         // Rows written since the last tick, with the watch keys they match.
         let written = std::mem::take(&mut inner.since_tick);
+        let written: BTreeSet<_> = written.into_iter().collect();
+        // The column sets of the composite watches open sessions hold on a
+        // written table: a written row matches a composite watch over each
+        // set its cells hold.
+        let mut composite_sets: HashMap<&str, BTreeSet<&Vec<String>>> = HashMap::new();
+        for (table, ..) in &written {
+            if composite_sets.contains_key(table.as_str()) {
+                continue;
+            }
+            // No session follows the table on several columns: no set to
+            // gather from them.
+            if !inner.composite_tables.any(table) {
+                composite_sets.insert(table, BTreeSet::new());
+                continue;
+            }
+            #[cfg(any(test, feature = "testing"))]
+            inner.composite_scans.set(inner.composite_scans.get() + 1);
+            let sets: BTreeSet<&Vec<String>> = inner
+                .sessions
+                .iter()
+                .filter(|session| session.open)
+                .flat_map(|session| session.watch.composite_sets(table))
+                .collect();
+            composite_sets.insert(table, sets);
+        }
         let mut written_keys: Vec<((String, RowUuid, Vec<u8>), Vec<u64>)> = Vec::new();
-        for (table, row, key) in written.into_iter().collect::<BTreeSet<_>>() {
+        for (table, row, key) in &written {
             let mut keys = vec![wk((
                 table.clone(),
                 "id".to_owned(),
                 watch_key(&Sql::Blob(row.0.as_bytes().to_vec())),
             ))];
-            if let Some(image) = inner.current_image(&table, row, &key)? {
+            if let Some(image) = inner.current_image(table, *row, key)? {
+                let sets = &composite_sets[table.as_str()];
+                let mut cells = Vec::with_capacity(image.cells.len() + 1);
+                if !sets.is_empty() {
+                    cells.push(("id".to_owned(), Sql::Blob(row.0.as_bytes().to_vec())));
+                }
                 for (column, cell) in &image.cells {
                     let cell = Sql::from(cell);
                     // An array cell matches a reverse array relation's
@@ -12583,10 +13016,15 @@ impl Db {
                         keys.push(wk((table.clone(), column.clone(), watch_key(&element))));
                     }
                     keys.push(wk((table.clone(), column.clone(), watch_key(&cell))));
+                    if !sets.is_empty() {
+                        cells.push((column.clone(), cell));
+                    }
                 }
+                keys.extend(composite_keys(table, sets.iter().copied(), &cells));
             }
-            written_keys.push(((table, row, key), keys));
+            written_keys.push(((table.clone(), *row, key.clone()), keys));
         }
+        drop(composite_sets);
         let written_tables: BTreeSet<&str> = written_keys
             .iter()
             .map(|((table, ..), _)| table.as_str())
@@ -12762,7 +13200,7 @@ impl Db {
             // mask base rows they match ship with them.
             let mut opening_masks = Vec::new();
             for (id, queue, group, list) in subs {
-                let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain(..).collect();
+                let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain_all();
                 if events.is_empty() {
                     continue;
                 }
@@ -13813,6 +14251,7 @@ impl Db {
                 policy,
                 wait.read,
                 SettledBy::Always(authority),
+                fanout::Backlog::Replica,
             )?;
             let session = &mut inner.sessions[index];
             if let Some((_, _, windowed, _)) = session.subs.remove(&id) {
@@ -14005,6 +14444,7 @@ impl Db {
                         Some((_, signal)) => SettledBy::Link(signal.clone()),
                         None => SettledBy::Always(authority),
                     },
+                    fanout::Backlog::Replica,
                 );
                 if attached.is_some() {
                     match &subscribed {
@@ -14132,7 +14572,7 @@ impl Db {
                     dropped.set(dropped.get() + 1);
                     // Rows the result lost since the last tick were not
                     // re-checked yet: the client may still hold them.
-                    let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain(..).collect();
+                    let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain_all();
                     if let Some(group) = group.upgrade() {
                         let table = group.borrow().root().to_owned();
                         for event in events {
@@ -14857,7 +15297,7 @@ impl Db {
                 // ahead of the commits that name it.
                 let relay = inner.client.is_some();
                 let author = receipt_author(&inner.sessions[index].identity);
-                in_savepoint(&inner.conn, "jazz_lv_push", || {
+                inner.conn.clone().scope("jazz_lv_push", |_| {
                     for node in nodes {
                         // A node that fails authentication is dropped; a
                         // commit that needs it is then rejected for missing
@@ -15422,8 +15862,7 @@ impl Db {
             }
             previous
         };
-        let merged: HashSet<RowKey>;
-        let (seq, mark, prior) = {
+        let (seq, prior, part, conn) = {
             let mut inner = self.inner();
             // A cross-shard part lands where all its parts do: at the
             // position its gateway fixed, under commits this shard accepted
@@ -15464,9 +15903,19 @@ impl Db {
                 inner.observe_hlc(clock);
                 inner.own_order.insert(seq, (clock, id.0, id.1));
             }
-            begin_savepoint(&inner.conn, "upload").map_err(|e| (e, Vec::new()))?;
+            let conn = inner.conn.clone();
+            drop(inner);
+            (seq, prior, part, conn)
+        };
+        // The unit lands in one scope: its writes, its fate and settlement,
+        // its hold's release, the relay's upload record and the bases it
+        // was built on. Any failure undoes all of it.
+        let mut merged = HashSet::new();
+        let landed_unit = conn.scope_then("upload", |_| {
+            let mut inner = self.inner();
             let mark = inner.changed.borrow().len();
             // The unit's write checks run at its end, grounded (SPEC 7).
+            inner.start_unit_heads();
             inner.defer_checks();
             // The unit was made over the sender's image (SPEC 4, INV-HIST-8);
             // text merges read what each row was built on.
@@ -15491,13 +15940,13 @@ impl Db {
                 .filter(|(_, columns)| columns.values().any(Option::is_some))
                 .map(|(row, _)| row.clone())
                 .collect();
+            // A refused write tells the sender which of its rows it
+            // mentioned, read once the unit is undone.
             if let Err(error) = applied {
                 inner.as_sent.borrow_mut().clear();
                 inner.abandon_checks();
                 inner.changed.borrow_mut().truncate(mark);
-                end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
-                let rows = mentioned(&inner);
-                return Err((error, rows));
+                return Scoped::Undo(Err((error, true)));
             }
             let recorded = inner
                 .record_fate(id.0, id.1, &Ok(()))
@@ -15505,82 +15954,80 @@ impl Db {
                 .and_then(|()| match relay {
                     true => Ok(()),
                     false => inner.prune_transactions(id, &ops),
-                });
+                })
+                // Its hold goes with it: the record of both commits together.
+                .and_then(|()| inner.forget_hold(part));
             if let Err(error) = recorded {
                 inner.changed.borrow_mut().truncate(mark);
-                end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
-                return Err((error, Vec::new()));
-            }
-            // Its hold goes with it: the record of both commits together.
-            if let Err(error) = inner.forget_hold(part) {
-                inner.changed.borrow_mut().truncate(mark);
-                end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
-                return Err((error, Vec::new()));
+                return Scoped::Undo(Err((error, false)));
             }
             inner.seq = inner.seq.max(seq);
-            (seq, mark, prior)
-        };
-        // The relay's own upload record and the rows the sender hears about
-        // are read before the commit is released, so a storage error
-        // rejects it whole instead of leaving it applied but not relayed.
-        // The authority keeps what each version was built on (INV-HIST-21);
-        // a relay passes the bases on instead.
-        let finished = if relay {
-            self.record_stored_upload(
-                ops.clone(),
-                seq,
-                upload,
-                Some(Relayed {
-                    origin: id,
-                    clock,
-                    bases,
-                }),
-                None,
-            )
-        } else {
-            Ok(())
-        }
-        .and_then(|()| self.inner.borrow().written_rows(&ops, seq))
-        .and_then(|rows| {
-            if !relay {
-                let inner = self.inner.borrow();
-                inner.record_bases(&ops, &by_row, &built, seq, &rows)?;
-                inner.record_as_sent(seq, id.0, &built, &rows)?;
+            drop(inner);
+            // The relay's own upload record and the rows the sender hears
+            // about are read before the commit is released, so a storage
+            // error rejects it whole instead of leaving it applied but not
+            // relayed. The authority keeps what each version was built on
+            // (INV-HIST-21); a relay passes the bases on instead.
+            let finished = if relay {
+                self.record_stored_upload(
+                    ops.clone(),
+                    seq,
+                    upload,
+                    Some(Relayed {
+                        origin: id,
+                        clock,
+                        bases,
+                    }),
+                    None,
+                )
+            } else {
+                Ok(())
             }
-            Ok(rows)
+            .and_then(|()| self.inner.borrow().written_rows(&ops, seq))
+            .and_then(|rows| {
+                if !relay {
+                    let inner = self.inner.borrow();
+                    inner.record_bases(&ops, &by_row, &built, seq, &rows)?;
+                    inner.record_as_sent(seq, id.0, &built, &rows)?;
+                }
+                Ok(rows)
+            });
+            match finished {
+                Ok(rows) => Scoped::Keep(Ok(rows)),
+                Err(error) => {
+                    let mut inner = self.inner();
+                    inner.as_sent.borrow_mut().clear();
+                    inner.changed.borrow_mut().truncate(mark);
+                    inner.seq = prior;
+                    Scoped::Undo(Err((error, false)))
+                }
+            }
         });
+        let rows = match landed_unit.map_err(|e| (e, Vec::new()))? {
+            Ok(rows) => rows,
+            Err((error, true)) => return Err((error, mentioned(&self.inner()))),
+            Err((error, false)) => return Err((error, Vec::new())),
+        };
         let mut inner = self.inner();
-        match finished {
-            Ok(rows) => {
-                end_savepoint(&inner.conn, "upload", true).map_err(|e| (e, Vec::new()))?;
-                inner.shard.landed(crate::db::shard::CommitRef {
-                    node: id.0,
-                    tx: id.1,
-                });
-                let on = if relay {
-                    landed
-                } else {
-                    built
-                        .iter()
-                        .map(|(row_key, built)| {
-                            let (Built::Seq(seq) | Built::On(seq)) = *built;
-                            (row_key.clone(), Pos::at(seq))
-                        })
-                        .collect()
-                };
-                let echoable = echoable(&ops, &by_row, &rows, &on, &previous, &merged);
-                drop(inner);
-                self.notify();
-                Ok((rows, echoable))
-            }
-            Err(error) => {
-                inner.as_sent.borrow_mut().clear();
-                inner.changed.borrow_mut().truncate(mark);
-                end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
-                inner.seq = prior;
-                Err((error, Vec::new()))
-            }
-        }
+        inner.shard.landed(crate::db::shard::CommitRef {
+            node: id.0,
+            tx: id.1,
+        });
+        let on = if relay {
+            landed
+        } else {
+            built
+                .iter()
+                .map(|(row_key, built)| {
+                    let (Built::Seq(seq) | Built::On(seq)) = *built;
+                    (row_key.clone(), Pos::at(seq))
+                })
+                .collect()
+        };
+        let echoable = echoable(&ops, &by_row, &rows, &on, &previous, &merged);
+        drop(inner);
+        self.notify();
+        Ok((rows, echoable))
     }
 
     /// One tick for both roles.
@@ -15935,13 +16382,7 @@ impl Db {
         if let Some(tx) = open_tx {
             let rows = self
                 .tx_ref(tx)
-                .all_prepared_in(
-                    &prepared,
-                    opts.read_view.include_deleted,
-                    identity,
-                    opts.tier,
-                    &opts.read_view.source,
-                )
+                .all_prepared_with_options(&prepared, identity, &opts, coverage)
                 .await?;
             return Ok(result(rows));
         }
@@ -16264,10 +16705,7 @@ pub fn pruned_txs_lookups_for_test() -> usize {
 /// `CREATE` (which moves the rollback count, and the table is read again).
 /// [`PRUNED_TXS_DDL`] has one user, which records it: anything else that
 /// came to create the table on an open connection would have to as well.
-fn has_pruned_txs(
-    conn: &rusqlite::Connection,
-    known: &std::cell::Cell<Option<Known>>,
-) -> Result<bool, Error> {
+fn has_pruned_txs(conn: &Storage, known: &std::cell::Cell<Option<Known>>) -> Result<bool, Error> {
     let rollbacks = crate::values::rollbacks(conn);
     if let Some(known) = known.get()
         && known.rollbacks == rollbacks
@@ -16289,7 +16727,7 @@ fn has_pruned_txs(
 }
 
 /// Record that `_jazz_pruned_txs` was just created on `conn`.
-fn pruned_txs_created(conn: &rusqlite::Connection, known: &std::cell::Cell<Option<Known>>) {
+fn pruned_txs_created(conn: &Storage, known: &std::cell::Cell<Option<Known>>) {
     known.set(Some(Known {
         holds: true,
         rollbacks: crate::values::rollbacks(conn),
@@ -16386,9 +16824,9 @@ mod tests {
     #[test]
     fn the_pruned_table_bit_follows_a_rolled_back_create() {
         use crate::values::{begin_savepoint, end_savepoint};
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = Storage::open_in_memory().unwrap();
         let known = std::cell::Cell::new(None);
-        let on_disk = |conn: &rusqlite::Connection| -> bool {
+        let on_disk = |conn: &Storage| -> bool {
             conn.query_row(
                 "SELECT count(*) > 0 FROM sqlite_master WHERE name = '_jazz_pruned_txs'",
                 [],
