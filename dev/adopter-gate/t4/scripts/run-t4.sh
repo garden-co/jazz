@@ -10,7 +10,8 @@ step "core and inventory before"; "$S/core-state.sh" || true
 step "deps -> $V"; "$S/rc-deps.sh" "$APP" "$V" || exit 1
 # Playwright for the smoke, in its own dir and in the background: it doesn't touch the app being built and deployed.
 ( rm -rf "$T4_WORK/pw" && mkdir -p "$T4_WORK/pw" && cd "$T4_WORK/pw" && echo '{"private":true}' > package.json \
-  && npm install --no-audit --no-fund playwright@1 && npx playwright install --with-deps chromium ) > "$T4_WORK/playwright.log" 2>&1 &
+  && { for i in 1 2 3; do npm install --no-audit --no-fund playwright@1.65.1 && break; [ $i = 3 ] && exit 1; sleep $((i * 5)); done; } \
+  && { for i in 1 2 3; do npx playwright install --with-deps chromium && break; [ $i = 3 ] && exit 1; sleep $((i * 5)); done; } ) > "$T4_WORK/playwright.log" 2>&1 &
 PW_PID=$!
 if ! grep -q 'region:' "$APP/jazz.server.ts"; then
   # T4_SKIP_NOREGION=1: the no-region check runs elsewhere (CI: its own job, t4-noregion.sh), off this critical path.

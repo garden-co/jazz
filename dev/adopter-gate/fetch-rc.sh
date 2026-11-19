@@ -12,7 +12,9 @@ R=${GITHUB_REPOSITORY:-garden-co/jazz}
 if [ "$1" = --run ]; then   # no release: workflow artifacts of a release-artifacts run (server, languages) and an RC run (rc-npm)
   RUNID=$2; NPMRUN=$RUNID; [ "${3:-}" = --npm-run ] && [ -n "${4:-}" ] && NPMRUN=$4
   mkdir -p "$AG_TGZ"; cd "$AG_TGZ"
-  get() { rm -rf "_$2"; gh run download "$1" -R "$R" -n "$2" -D "_$2" >/dev/null 2>&1 && cp -r "_$2"/. . && rm -rf "_$2"; }
+  # An artifact that doesn't exist yet fails at once (gh says "no artifact matches"); other failures are retried.
+  get() { local i; for i in 1 2 3; do rm -rf "_$2"; if gh run download "$1" -R "$R" -n "$2" -D "_$2" > "_$2.err" 2>&1; then cp -r "_$2"/. . && rm -rf "_$2" "_$2.err"; return 0; fi
+    grep -qiE "no artifact|not found" "_$2.err" && { rm -f "_$2.err"; return 1; }; sleep $((i * 5)); done; rm -f "_$2.err"; return 1; }
   get "$NPMRUN" rc-npm || { echo "missing artifact rc-npm in run $NPMRUN"; exit 1; }
   # Server binary: release-server (with SHA256SUMS) at ~+9, else the bare jazz-tools-linux-x64 at ~+3.5 (no sums: record ours).
   if need server && ! get "$RUNID" release-server; then get "$RUNID" jazz-tools-linux-x64 || { echo "missing release-server and jazz-tools-linux-x64 in run $RUNID"; exit 1; }
@@ -27,7 +29,7 @@ if [ "$1" = --run ]; then   # no release: workflow artifacts of a release-artifa
     [ "$(date +%s)" -ge $end ] && break; sleep 15
   done
   if need languages && [ -z "$langs" ]; then
-    if gh run download "$RUNID" -R "$R" -n jazz-ffi-linux-x86_64 -D _ffi >/dev/null 2>&1 && [ -d _ffi/libjazz_ffi-linux-x86_64 ]; then
+    if ag_retry 3 gh run download "$RUNID" -R "$R" -n jazz-ffi-linux-x86_64 -D _ffi >/dev/null 2>&1 && [ -d _ffi/libjazz_ffi-linux-x86_64 ]; then
       tar czf libjazz_ffi-linux-x86_64.tar.gz -C _ffi/libjazz_ffi-linux-x86_64 . && rm -rf _ffi
       sha256sum libjazz_ffi-linux-x86_64.tar.gz | tee -a SHA256SUMS-languages.local; langs=jazz-ffi-linux-x86_64
       echo "note: language artifacts not ready; using jazz-ffi-linux-x86_64 (no published sum yet; recorded above)"
@@ -58,8 +60,8 @@ elif gh release view "$TAG" -R "$R" --json assets -q '.assets[].name' | grep -qx
   FETCH_REPO=$R FETCH_TAG=$TAG FETCH_DEST=$AG_TGZ FETCH_NAMES="libjazz_ffi-linux-x86_64.tar.gz
 jazz-kotlin-*.jar" bash "$FETCH"
 elif [ -n "$RUN" ]; then
-  rm -rf ffi && gh run download "$RUN" -R "$R" -n jazz-ffi-linux-x86_64 -D ffi
+  rm -rf ffi && ag_retry 3 gh run download "$RUN" -R "$R" -n jazz-ffi-linux-x86_64 -D ffi
   tar czf libjazz_ffi-linux-x86_64.tar.gz -C ffi/libjazz_ffi-linux-x86_64 . && rm -rf ffi
-  gh run download "$RUN" -R "$R" -n jazz-kotlin-dist -D kt 2>/dev/null && mv kt/jazz-kotlin-*.jar . 2>/dev/null || true; rm -rf kt
+  ag_retry 3 gh run download "$RUN" -R "$R" -n jazz-kotlin-dist -D kt 2>/dev/null && mv kt/jazz-kotlin-*.jar . 2>/dev/null || true; rm -rf kt
 else echo "note: no libjazz_ffi for $TAG (no release asset, no run id): t9 go/swift/kotlin will build from source"; fi
 ls -la "$AG_TGZ"

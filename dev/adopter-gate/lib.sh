@@ -8,6 +8,9 @@ AG_RESULTS=${AG_RESULTS:-$AG/.results}; mkdir -p "$AG_RESULTS" "$AG/.work"
 AG_TGZ=${AG_TGZ:-$AG/.rc}
 ag_version() { cat "$AG_TGZ/VERSION"; }
 
+# Retry a network step (a download, an install): one flaky CDN or registry answer must not fail a release gate.
+# ag_retry <attempts> <cmd...>: waits 5 s, 10 s, … between attempts; returns the last attempt's status.
+ag_retry() { local n=$1 i rc; shift; for i in $(seq "$n"); do "$@" && return 0; rc=$?; [ "$i" -lt "$n" ] && sleep $((i * 5)); done; return $rc; }
 kill_port() { command -v ss >/dev/null || return 0; local p; for p in "$@"; do for pid in $(ss -ltnpH "sport = :$p" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u); do kill "$pid" 2>/dev/null; done; done; }
 # Listening check without ss (the swift image has none): a TCP connect via bash's /dev/tcp.
 wait_port() { local i; for i in $(seq "${2:-60}"); do (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && return 0; sleep 1; done; return 1; }
@@ -27,7 +30,7 @@ use_rc_pnpm() {
   printf 'blockExoticSubdeps: false\nstrictDepBuilds: false\noverrides:\n  jazz-wasm: file:%s/jazz-wasm-%s.tgz\n  jazz-napi: file:%s/jazz-napi-%s.tgz\n  "@garden-co/jazz-napi-linux-x64-gnu": file:%s/garden-co-jazz-napi-linux-x64-gnu-%s.tgz\n' \
     "$AG_TGZ" "$V" "$AG_TGZ" "$V" "$AG_TGZ" "$V" > pnpm-workspace.yaml
   rm -rf node_modules pnpm-lock.yaml
-  pnpm install --no-frozen-lockfile > install-rc.log 2>&1 || { echo "FAIL rc install ($(basename "$PWD"))"; tail -5 install-rc.log; return 1; }
+  ag_retry 3 pnpm install --no-frozen-lockfile > install-rc.log 2>&1 || { echo "FAIL rc install ($(basename "$PWD"))"; tail -5 install-rc.log; return 1; }
   local stray; stray=$(grep -oE "(jazz-tools|jazz-wasm|jazz-napi[a-z0-9-]*)@2\.0[^:'( ]*" pnpm-lock.yaml | grep -vc "$V")
   [ "$stray" = 0 ] && echo "PASS lockfile all $V ($(basename "$PWD"))" || echo "FAIL lockfile has $stray non-RC jazz entries ($(basename "$PWD"))"
 }
