@@ -911,6 +911,20 @@ test("Turbo cache uses its pinned OIDC policy only inside the trusted suite invo
     "export the signing key before the trusted Turbo setup step",
   );
   assert.match(fs.readFileSync(path.join(root, "turbo.json"), "utf8"), /"signature": true/);
+  // The signing key is an environment secret whose deployment branches are
+  // main and merge-group/* only: every job that reads it must select that
+  // environment under the same condition that gates the steps.
+  const suiteJobs = parse(workflowSuite).jobs;
+  const keyJobs = Object.entries(suiteJobs).filter(([, definition]) =>
+    JSON.stringify(definition).includes("TURBO_REMOTE_CACHE_SIGNATURE_KEY"),
+  );
+  assert.deepEqual(keyJobs.map(([name]) => name).sort(), ["test-react-native", "test-ts"]);
+  for (const [name, definition] of keyJobs)
+    assert.equal(
+      definition.environment,
+      `\${{ ${turboCache} && 'turbo-remote-cache' || '' }}`,
+      `${name} must read the Turbo signing key only from the trusted-ref environment`,
+    );
   for (const releaseWorkflow of otherWorkflows)
     assert.doesNotMatch(
       releaseWorkflow,
