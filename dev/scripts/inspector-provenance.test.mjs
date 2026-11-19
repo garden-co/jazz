@@ -40,7 +40,6 @@ test("accepts a release-artifacts run on release with an identical tree", () => 
   assert.equal(verifyInspectorHandoff(handoff()), artifactSha);
 });
 for (const [path, event, head_branch] of [
-  ["preview-build.yml", "pull_request", "feature/synthetic"],
   ["publish-jazz-tools-alpha.yml", "push", "release"],
   ["publish-jazz-tools-alpha.yml", "workflow_dispatch", "release"],
   ["release-artifacts.yml", "workflow_dispatch", "release"],
@@ -60,8 +59,24 @@ for (const [name, changes] of [
   ["another successful same-repository workflow", { path: ".github/workflows/unrelated.yml" }],
   ["unapproved reusable builder as caller", { path: ".github/workflows/build-jazz-packages.yml" }],
   [
-    "preview workflow on wrong event",
+    "a pull request's preview build (PR-controlled cache scope, unreviewed code)",
+    {
+      path: ".github/workflows/preview-build.yml",
+      event: "pull_request",
+      head_branch: "feature/synthetic",
+    },
+  ],
+  [
+    "preview workflow on another event",
     { path: ".github/workflows/preview-build.yml", event: "workflow_dispatch" },
+  ],
+  [
+    "release artifacts from a pull request",
+    {
+      path: ".github/workflows/release-artifacts.yml",
+      event: "pull_request",
+      head_branch: "release",
+    },
   ],
   ["release artifacts on an arbitrary branch", { head_branch: "feature/arbitrary" }],
   [
