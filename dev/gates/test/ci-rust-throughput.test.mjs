@@ -102,6 +102,7 @@ const assertUsesBlacksmithRunner = (jobName, jobSource) => {
     "test-storage-compat",
     "test-ts",
     "test-react-native",
+    "test-jazz-ffi-bindings",
   ].includes(jobName)
     ? 16
     : 4;
@@ -181,14 +182,22 @@ const assertSuiteS3ConfigurationBoundary = (source) => {
       `untrusted suite callers must not inherit ${name}`,
     );
 
-  for (const name of ["lint", "test-rust-workspace", "test-storage-compat", "test-ts"]) {
+  for (const name of [
+    "lint",
+    "test-rust-workspace",
+    "test-storage-compat",
+    "test-ts",
+    "test-jazz-ffi-bindings",
+  ]) {
     const parsedJob = document.jobs[name];
     assert.equal(parsedJob.env, undefined, `${name} must not configure S3 at job scope`);
     const exportIndex = parsedJob.steps.findIndex(
       (step) => step.name === "Export trusted sccache configuration",
     );
-    const setupIndex = parsedJob.steps.findIndex(
-      (step) => step.uses === "./.github/actions/setup-blacksmith",
+    // test-jazz-ffi-bindings runs on the runner image (swiftc, JDK), where
+    // setup-build starts its job-local sccache instead.
+    const setupIndex = parsedJob.steps.findIndex((step) =>
+      ["./.github/actions/setup-blacksmith", "./.github/actions/setup-build"].includes(step.uses),
     );
     assert.notEqual(exportIndex, -1, `${name} is missing trusted S3 configuration export`);
     assert.ok(exportIndex < setupIndex, `${name} must export S3 configuration before setup`);
@@ -852,7 +861,13 @@ test("Turbo cache uses its pinned OIDC policy only inside the trusted suite invo
 });
 
 test("shared Rust cache writes are main and merge-group only while trusted PRs receive read access", () => {
-  for (const name of ["lint", "test-rust-workspace", "test-storage-compat", "test-ts"]) {
+  for (const name of [
+    "lint",
+    "test-rust-workspace",
+    "test-storage-compat",
+    "test-ts",
+    "test-jazz-ffi-bindings",
+  ]) {
     const source = job(name);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN \}\}/);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_PR_READER_AWS_ROLE_ARN \}\}/);
@@ -866,6 +881,13 @@ test("shared Rust cache writes are main and merge-group only while trusted PRs r
   );
   assert.match(setupBlacksmithAction, /SCCACHE_MULTILEVEL_CHAIN=disk,s3/);
   assert.match(setupBlacksmithAction, /SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0/);
+  // setup-build chains S3 only when its caller passes the trusted condition.
+  assert.match(setupBuildAction, /sccache-s3:[\s\S]*default: "false"/);
+  assert.match(setupBuildAction, /ENABLE_S3: \$\{\{ inputs\.sccache-s3 \}\}/);
+  assert.match(
+    setupBuildAction,
+    /if \[\[ "\$\{ENABLE_S3\}" == "true" \]\]; then[\s\S]*SCCACHE_MULTILEVEL_CHAIN=disk,s3[\s\S]*SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0/,
+  );
 });
 
 test("entry workflow grants credentialed cross-ref caches only to main, merge groups and trusted stacked PRs", () => {
