@@ -24,6 +24,22 @@ impl Db {
     }
 }
 
+impl Db {
+    /// The columns of `table` that a schema migration added to rows stored
+    /// before them, each read as the migration's value until written: the
+    /// columns [`ReadSite::is_lens_default`] can hold. A column created
+    /// with its table, or one this schema declares itself, is not among
+    /// them.
+    pub fn lens_added_columns(
+        &self,
+        table: &str,
+    ) -> Result<std::collections::BTreeSet<String>, Error> {
+        let inner = self.inner();
+        inner.schema.table(table)?;
+        Ok(inner.lens_defaults(table).into_keys().collect())
+    }
+}
+
 impl Inner {
     /// Open `rows`, which `prepared` read under `read`, before they leave
     /// toward a reader, then apply a rewritten query's residual. A strict

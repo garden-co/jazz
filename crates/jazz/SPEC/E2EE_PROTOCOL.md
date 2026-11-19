@@ -2263,6 +2263,10 @@ meanings and are never reported as malformed:
   a row that predates the column), any writer Jazz permits could have put it
   there, so the row is returned with the default and the cell is reported
   `empty-cell`; the read does not fail. Core tells the two apart (H3).
+  A required column that declares no default has no value a never-written
+  cell could read as (deploy refuses to add one to rows already stored), so a
+  row whose cell of such a column is the empty byte string is left out of the
+  read and the cell is reported `empty-cell`; the other rows are returned.
 - The **cleared marker** `4a 45 32 58 01` means "moved by a schema
   conversion". A reader whose declaration names this column as the source or
   target of a conversion treats it as absent and applies the conversion rule
@@ -2371,8 +2375,11 @@ applied after each candidate is decrypted and its authenticated value
 compared. If the version set changes during the query it is retried (shared
 budget of 3 attempts). Offline, no tokens are computed: every candidate of
 the space is decrypted and compared. Ordering by encrypted columns,
-traversals, unions and partial selects are refused as unsupported; they
-never fall back to a scan. Includes of encrypted child tables are refused
+unions and partial selects are refused as unsupported; they never fall back
+to a scan. Joins, reachability and inheritance compare plain columns only:
+core refuses every condition of them that names an encrypted column, and the
+rest (the notes of the projects I am a member of, the projects that have a
+note) pass and return decrypted rows. Includes of encrypted child tables are refused
 too (a project list with its latest task takes two queries); developer
 documentation should say so.
 
