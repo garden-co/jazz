@@ -592,7 +592,7 @@ describe("JazzSession surface", () => {
     await device.createDeviceAccount();
     // This fake device account has no key material: the export reached the
     // account's own credentials (real keys: create-jazz-session.device-only).
-    expect(() => device.exportDeviceKey()).toThrow("local_first_recovery_unavailable");
+    expect(() => device.exportDeviceKey()).toThrow("device_account_recovery_unavailable");
     await device.close();
   });
   it("refuses operations once closed", async () => {

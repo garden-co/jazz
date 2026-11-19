@@ -223,6 +223,11 @@ pub fn check_deployable_json_schemas(schema: &Schema) -> Result<(), SchemaConver
 /// an address names one row, and a row listing several would inherit from
 /// any one of them.
 ///
+/// A policy comparing `session.authMode` with `"local-first"` is refused:
+/// device accounts are `"device-account"` since the rename, and such a
+/// policy would quietly never match. One already published fails closed when
+/// it is compiled (see `jazz_db::compile`).
+///
 /// A relation policy's unsupported shapes (output steps, query parameters,
 /// malformed union labels) are the schema compile's to refuse, which
 /// `jazz-tools validate`, the dev server and a deployment all run.
@@ -248,6 +253,9 @@ pub fn check_deployable_policies(schema: &Schema) -> Result<(), SchemaConversion
         for (slot, expr) in slots {
             if let Some(expr) = expr {
                 let path = format!("$.{}.policies.{slot}", name.as_str());
+                if let Some(message) = expr.removed_auth_mode_error() {
+                    return Err(err(path, message));
+                }
                 refuse_nested_outer_rows(expr, &path, false)?;
                 refuse_nested_inherits_from(schema, expr, &path)?;
                 let placement = Placement {

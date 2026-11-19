@@ -211,7 +211,7 @@ describe("installInspectorHost", () => {
         browserWorkerSession: {
           issuer: "urn:jazz:local-first",
           user_id: "inspector-test-user",
-          authMode: "local-first",
+          authMode: "device-account",
           claims: { role: "inspector-test" },
         },
       },

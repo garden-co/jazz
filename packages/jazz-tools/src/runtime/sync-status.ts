@@ -34,8 +34,9 @@ export type OfflineReason =
  *     automatically, so unsynced writes are never discarded behind the
  *     app's back.
  *   - `held-by-another-tab` (browser): another tab holds this account's
- *     local store under another sign-in (it was still the guest when this
- *     tab signed up) and has not let go for a while. The tab keeps trying
+ *     local store, under another sign-in (it was still the guest when this
+ *     tab signed up) or with another build's schema (it still runs the
+ *     app's previous deploy), and has not let go for a while. The tab keeps trying
  *     (`retrying: true`) and joins once the other tab follows or closes;
  *     waits fail meanwhile with a `StoreHeldByAnotherTabError`.
  */
@@ -158,7 +159,8 @@ export function linkFailureOf(link: LinkStatus, message: string | undefined): Li
     auth: "The server refused this client's credential.",
     stopped: "The link stopped for good; only db.reconnect() tries again.",
     "authority-changed": "The server serves another history than this client's local store.",
-    "held-by-another-tab": "Another tab holds this account's local store under another sign-in.",
+    "held-by-another-tab":
+      "Another tab holds this account's local store, under another sign-in or with another build of the app.",
   }[link.reason];
   return { kind: link.reason, message: message || said, at: Date.now() };
 }

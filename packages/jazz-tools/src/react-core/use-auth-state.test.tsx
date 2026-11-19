@@ -9,7 +9,7 @@ import { makeFakeClient } from "./test-utils.js";
 describe("useAuthState", () => {
   it("returns authMode, the account as user, the login as identity, and claims", async () => {
     const client = makeFakeClient({
-      authMode: "local-first",
+      authMode: "device-account",
       userId: "u-1",
       claims: { role: "admin" },
     });
@@ -18,7 +18,7 @@ describe("useAuthState", () => {
         <JazzClientProvider client={client as any}>{children}</JazzClientProvider>
       ),
     });
-    expect(result.current.authMode).toBe("local-first");
+    expect(result.current.authMode).toBe("device-account");
     expect(result.current.user).toBe("00000000-0000-4000-8000-000000000002");
     expect(result.current.identity).toEqual({ issuer: "urn:jazz:local-first", subject: "u-1" });
     expect(result.current.claims).toEqual({ role: "admin" });

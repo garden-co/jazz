@@ -25,8 +25,8 @@ export type PolicyTestAppOptions = {
 /**
  * Session accepted by {@link PolicyTestApp.as}.
  *
- * `issuer` may be omitted for `authMode: "local-first"`: the test app then
- * acts as a real local-first guest. It derives a local-first key from
+ * `issuer` may be omitted for `authMode: "device-account"`: the test app then
+ * acts as a real device-account guest. It derives a device-account key from
  * `user_id` and uses that key's verified subject and founding account (see
  * {@link PolicyTestApp.sessionFor}). A guest has no custom claims or
  * `account_id`. An explicit external issuer keeps the
@@ -36,7 +36,7 @@ export type PolicyTestAppOptions = {
 export type PolicyTestSession =
   | Session
   | (Omit<Session, "issuer" | "authMode"> & {
-      authMode: "local-first";
+      authMode: "device-account";
       issuer?: undefined;
     });
 type ExpectLike = (value: unknown) => {
@@ -252,10 +252,16 @@ export class PolicyTestApp {
   }
 
   private policySession(session: PolicyTestSession): Session {
-    // Only a session with no issuer, or the reserved local-first issuer, is a
-    // real local-first guest. Other sessions are trusted `forSession` actors.
+    if ((session.authMode as string) === "local-first") {
+      throw new Error(
+        'PolicyTestApp.as: authMode "local-first" was renamed to "device-account" ' +
+          'when local-first auth became device accounts; pass authMode: "device-account".',
+      );
+    }
+    // Only a session with no issuer, or the reserved device-account issuer, is
+    // a real device-account guest. Other sessions are trusted `forSession` actors.
     if (
-      session.authMode === "local-first" &&
+      session.authMode === "device-account" &&
       (session.issuer === undefined || session.issuer === LOCAL_FIRST_JWT_ISSUER)
     ) {
       return localFirstPolicySession(this.server.appId, session);

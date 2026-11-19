@@ -773,7 +773,25 @@ function leftOperand(raw: unknown, ctx: Ctx): string {
   );
 }
 
+/**
+ * Refuse comparing `session.authMode` with `"local-first"`, which device
+ * accounts were called before 2026-11. No session has it any more: a rule
+ * comparing with it would quietly never match, and `ne(session.authMode,
+ * "local-first")` would let device accounts in.
+ */
+function refuseRemovedAuthMode(left: unknown, right: unknown): void {
+  const h = handleOf(left);
+  if (h?.k !== "session" || h.path.length !== 1 || h.path[0] !== "authMode") return;
+  const values = Array.isArray(right) ? right : [right];
+  if (values.includes("local-first"))
+    fail(
+      'session.authMode is never "local-first" any more: local-first auth was renamed to ' +
+        'device accounts, so compare with "device-account"',
+    );
+}
+
 function compareText(data: NodeData & { k: "compare" }, ctx: Ctx): string {
+  refuseRemovedAuthMode(data.left, data.right);
   const left = leftOperand(data.left, ctx);
   const right = data.right;
   switch (data.op) {
