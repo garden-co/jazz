@@ -2602,7 +2602,7 @@ export class Db {
       );
       const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
         parseJwtPayload(newToken) ?? {},
-        "local-first",
+        "device-account",
       );
       if (!trustedReservedSession) {
         throw new Error("Minted device account token is missing its reserved session identity");
@@ -2846,7 +2846,7 @@ export class Db {
         account.identity.issuer === "urn:jazz:local-first"
           ? internalSessionFromVerifiedReservedJwtPayload(
               parseJwtPayload(token) ?? {},
-              "local-first",
+              "device-account",
             )
           : undefined;
       if (!this.authStateStore.validateJwtToken(token, reserved ?? undefined)) return token;
@@ -4878,7 +4878,7 @@ async function openDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
       );
       const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
         parseJwtPayload(jwtToken) ?? {},
-        "local-first",
+        "device-account",
       );
       resolvedConfig = { ...configWithoutAuth, jwtToken };
       setTrustedReservedSession(resolvedConfig, trustedReservedSession);

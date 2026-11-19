@@ -75,7 +75,7 @@ pub fn author_policy_claims(author: AuthorSubject) -> BTreeMap<String, Value> {
 
 fn auth_mode_for_author_issuer(issuer: &str) -> &'static str {
     match issuer {
-        AuthorSubject::DEVICE_ACCOUNT_ISSUER => "local-first",
+        AuthorSubject::DEVICE_ACCOUNT_ISSUER => "device-account",
         AuthorSubject::ANONYMOUS_ISSUER => "anonymous",
         _ => "external",
     }
@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn canonical_binding_derives_reserved_auth_modes_from_reserved_issuers() {
         for (issuer, expected) in [
-            (AuthorSubject::DEVICE_ACCOUNT_ISSUER, "local-first"),
+            (AuthorSubject::DEVICE_ACCOUNT_ISSUER, "device-account"),
             (AuthorSubject::ANONYMOUS_ISSUER, "anonymous"),
         ] {
             let author = AuthorSubject::reserved(issuer, "alice").unwrap();

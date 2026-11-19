@@ -1042,7 +1042,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     unsubscribe();
   });
 
-  it("surfaces schema mismatch errors and recovers after the pinning tab closes", async () => {
+  it("makes a tab of another build wait for the store and join once the old build tab closes", async () => {
     const dbName = uniqueDbName("schema-mismatch-recovery");
     // Both versions must already be admitted with their lineage lens. Merely
     // supplying a new schema at reopen is not a catalogue publication.
@@ -1071,6 +1071,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
       "Old tab should be durable-ready with the original schema",
     );
 
+    // Another build's tab (a deploy changed the schema) waits for the store
+    // rather than failing for good (#6100): connecting, retrying on its own.
     const newTab = track(
       await createDb({
         appId: server.appId,
@@ -1078,46 +1080,56 @@ describe("SharedWorker bridge with IndexedDB", () => {
         driver: { type: "persistent", dbName },
       }),
     );
-    await expect(
-      withTimeout(
-        newTab.all(nextApp.todos, { tier: "local-first" }),
-        8000,
-        "Schema-blocked tab query should reject instead of hanging",
-      ),
-    ).rejects.toThrow("incompatible persistent browser configuration");
-
-    // Each later call gets one fresh admission attempt, and must still fail
-    // visibly while the incompatible worker remains pinned.
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      await expect(
-        withTimeout(
-          newTab.all(nextApp.todos, { tier: "local-first" }),
-          8000,
-          "Repeated schema-blocked query should reject instead of hanging",
-        ),
-      ).rejects.toThrow("incompatible persistent browser configuration");
-    }
-
-    const failedTab = track(
-      await createDb({
-        appId: server.appId,
-        serverUrl: server.serverUrl,
-        driver: { type: "persistent", dbName },
-      }),
+    let outcome = "pending";
+    const waiting = newTab.all(nextApp.todos, { tier: "local-first" }).then(
+      (rows) => {
+        outcome = "fulfilled";
+        return rows;
+      },
+      (error: unknown) => {
+        outcome = `rejected: ${String(error)}`;
+        return [];
+      },
     );
-    await expect(failedTab.all(nextApp.todos, { tier: "local-first" })).rejects.toThrow(
-      "incompatible persistent browser configuration",
-    );
-    await failedTab.shutdown();
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    expect(outcome).toBe("pending");
+    expect(newTab.getSyncStatus().link).toMatchObject({ state: "connecting" });
 
+    // The old build's tab goes away (it reloads, or closes): the new one joins.
     await oldTab.shutdown();
     const rows = await withTimeout(
-      newTab.all(nextApp.todos, { tier: "local-first" }),
-      8000,
-      "Recovered tab should be able to query with its own schema",
+      waiting,
+      15_000,
+      "The waiting tab should join once the old build's tab lets go",
     );
-    expect(Array.isArray(rows)).toBe(true);
+    expect(outcome).toBe("fulfilled");
     expect(rows.some((row) => row.title === "Old schema row")).toBe(true);
+  });
+
+  it("still refuses another configuration besides the schema visibly, rather than wait", async () => {
+    // Waiting is only for another build's schema: no reload of the other tab
+    // makes a different configuration fit this store.
+    const appId = uniqueDbName("incompatible-config-app");
+    const dbName = uniqueDbName("incompatible-config");
+    const pinning = track(await createDb({ appId, driver: { type: "persistent", dbName } }));
+    pinning.insert(todos, { title: "Pinning row", done: false });
+    await waitForCondition(
+      async () => (await pinning.all(allTodos, { tier: "local-first" })).length === 1,
+      8_000,
+      "The first tab should open the store",
+    );
+    const other = track(
+      await createDb({ appId, logLevel: "debug", driver: { type: "persistent", dbName } }),
+    );
+    await expect(
+      withTimeout(
+        other.all(allTodos, { tier: "local-first" }),
+        8_000,
+        "A tab of another configuration should reject instead of waiting",
+      ),
+      // Its log level is part of the worker's telemetry configuration, which
+      // the worker checks first: either refusal fails visibly.
+    ).rejects.toThrow(/incompatible persistent browser (telemetry )?configuration/);
   });
 
   it("keeps explicit-name account caches separate, shared per scope, and destroys only the selected scope", async () => {

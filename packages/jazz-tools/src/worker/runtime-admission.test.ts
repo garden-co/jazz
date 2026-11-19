@@ -30,11 +30,13 @@ describe("compareRuntimeAdmission", () => {
     );
   });
 
-  it("refuses another schema, whoever is signed in", () => {
+  it("makes a tab of another build (another schema) wait for the store, whoever is signed in", () => {
     const other = { schemaHash: "older-deploy" };
-    expect(compareRuntimeAdmission(fingerprint(), fingerprint(other), tasks)).toBe("incompatible");
+    expect(compareRuntimeAdmission(fingerprint(), fingerprint(other), tasks)).toBe(
+      "held-by-another-build",
+    );
     expect(compareRuntimeAdmission(fingerprint(), fingerprint({ ...other, ...user }), tasks)).toBe(
-      "incompatible",
+      "held-by-another-build",
     );
   });
 
@@ -43,6 +45,17 @@ describe("compareRuntimeAdmission", () => {
       compareRuntimeAdmission(fingerprint(), fingerprint({ workerUrl: "other.js" }), tasks),
     ).toBe("incompatible");
     expect(compareRuntimeAdmission(fingerprint(), "not json", tasks)).toBe("incompatible");
+  });
+
+  it("refuses another configuration that also has another schema, rather than wait for it", () => {
+    // Waiting would never end: no reload of the other tab makes this one fit.
+    expect(
+      compareRuntimeAdmission(
+        fingerprint(),
+        fingerprint({ schemaHash: "older-deploy", workerUrl: "other.js" }),
+        tasks,
+      ),
+    ).toBe("incompatible");
   });
 
   // #5139: a Db that hasn't read or written opens the store with no schema,

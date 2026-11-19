@@ -884,6 +884,32 @@ it("keeps a revoked background tab whose second answer names the user again", as
   await t.session.close();
 });
 
+// A refused check whose question to the backend fails for a moment (the
+// server restarting) is asked again: as a refused check, so a background tab
+// still waits for focus, and not as a plain check that signs it out.
+it("retries a refused check that failed as a refused one, in a background tab", async () => {
+  vi.useFakeTimers();
+  const t = await setup(user("alice"), { confirmMs: 2_000 });
+  t.signIn(user("alice"));
+  await vi.advanceTimersByTimeAsync(0);
+  t.signIn(null);
+  t.probe.mockImplementationOnce(async () => {
+    throw new TypeError("fetch failed");
+  });
+  t.watch.authRefused("missing");
+  await vi.advanceTimersByTimeAsync(0);
+  expect(t.probe).toHaveBeenCalledTimes(2);
+  // The retry asks again, and the backend says no one: still a refusal.
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(t.probe.mock.calls.length).toBeGreaterThan(2);
+  expect(t.session.getSnapshot().status).toBe("ready");
+  t.focus();
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(t.session.getSnapshot().status).toBe("signed-out");
+  t.watch.stop();
+  await t.session.close();
+});
+
 it("leaves a background tab to the next focus when a later refusal isn't a revocation", async () => {
   vi.useFakeTimers();
   const t = await setup(user("alice"), { confirmMs: 2_000 });
