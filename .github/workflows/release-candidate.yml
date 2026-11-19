@@ -390,10 +390,26 @@ jobs:
         if: needs.resolve.outputs.dry_run == 'true'
         run: node .rc-tools/dev/artifacts/rc-tarballs.mjs link "${RUNNER_TEMP}/npm" "file:/tmp/jazz-rc-npm"
 
+      # The jazz-rn payloads (~100 MB) apart: the install checks, the Cloud RC
+      # probe and the adopter gate read rc-npm only. NPM-SHA256SUMS (in rc-npm)
+      # covers both.
+      - name: Set the jazz-rn payloads apart
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/npm-rn"
+          mv "${RUNNER_TEMP}"/npm/jazz-rn*.tgz "${RUNNER_TEMP}/npm-rn/"
+          ls "${RUNNER_TEMP}/npm-rn"
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rc-npm
           path: ${{ runner.temp }}/npm/*
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rc-npm-rn
+          path: ${{ runner.temp }}/npm-rn/*
           if-no-files-found: error
 
   # --- The prerelease (skipped in a dry run) ----------------------------------
@@ -479,6 +495,9 @@ jobs:
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with: { name: rc-npm, path: npm }
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with: { name: rc-npm-rn, path: npm }
 
       - name: Publish
         run: |
