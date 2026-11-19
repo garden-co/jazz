@@ -925,6 +925,27 @@ test("Turbo cache uses its pinned OIDC policy only inside the trusted suite invo
       `\${{ ${turboCache} && 'turbo-remote-cache' || '' }}`,
       `${name} must read the Turbo signing key only from the trusted-ref environment`,
     );
+  // The environment's OIDC subject is trusted as the sccache writer, and its
+  // branch policy is the only control. pull_request_target and workflow_run
+  // jobs evaluate that policy against the default branch, so no other job may
+  // select the environment and no workflow may use pull_request_target.
+  const workflowDir = path.join(root, ".github/workflows");
+  for (const file of fs.readdirSync(workflowDir).filter((name) => /\.ya?ml$/.test(name))) {
+    const document = parse(fs.readFileSync(path.join(workflowDir, file), "utf8"));
+    const triggers = document.on ?? document[true];
+    const triggerNames =
+      typeof triggers === "string"
+        ? [triggers]
+        : Array.isArray(triggers)
+          ? triggers
+          : Object.keys(triggers ?? {});
+    assert.ok(!triggerNames.includes("pull_request_target"), `${file} uses pull_request_target`);
+    for (const [name, definition] of Object.entries(document.jobs ?? {})) {
+      const selects = JSON.stringify(definition.environment ?? "").includes("turbo-remote-cache");
+      const allowed = file === "ci-suite.yml" && ["test-ts", "test-react-native"].includes(name);
+      assert.ok(!selects || allowed, `${file} job ${name} must not select turbo-remote-cache`);
+    }
+  }
   for (const releaseWorkflow of otherWorkflows)
     assert.doesNotMatch(
       releaseWorkflow,
