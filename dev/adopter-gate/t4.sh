@@ -7,7 +7,8 @@ body() {
   # "Not run" prints only NOTE lines: the verdict lists them and leaves t4 out of the status, so a dry run can still PASS.
   case "${T4_MODE:=production}" in
     skip) echo "NOTE t4 not run: dry run (t4_mode skip)"; return;;
-    preview) [ -n "${T4_VERCEL_BYPASS_SECRET:-}" ] || { echo "NOTE t4 not run: preview bypass secret pending (T4_VERCEL_BYPASS_SECRET)"; return; };;
+    # The eval project's previews are public (Anselm, 2026-11-19); a T4_VERCEL_BYPASS_SECRET, if one is ever set, is sent.
+    preview) ;;
     production)
       # Fail closed: production deploys to the long-lived eval core, so only for a real RC (its release may still be a draft).
       local tag=${T4_RC_TAG:-}

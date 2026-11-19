@@ -13,7 +13,8 @@ T4_MODE=${T4_MODE:-production}
 T4_PREVIEW_NS=$([ "${T4_TEARDOWN:-}" = 1 ] && echo "ci-${GITHUB_RUN_ID:-local$$}" || echo cli-previews)
 export T4_PREVIEW_NS
 t4_namespace() { [ "$T4_MODE" = preview ] && echo "$T4_PREVIEW_NS" || echo production; }
-# Preview URLs sit behind Vercel Authentication: T4_VERCEL_BYPASS_SECRET (Protection Bypass for Automation) opens them.
+# The eval project's previews are public (Vercel Authentication off, Anselm 2026-11-19). If protection is ever turned
+# back on, T4_VERCEL_BYPASS_SECRET (Protection Bypass for Automation) is sent; without it a protected preview FAILs.
 t4_curl() { curl ${T4_VERCEL_BYPASS_SECRET:+-H "x-vercel-protection-bypass: $T4_VERCEL_BYPASS_SECRET"} "$@"; }
 mkdir -p "$T4_WORK"
 # Name of the production core vercel() uses: jazz-<project id, lowercased, non-alnum runs -> "-">-production.
