@@ -252,10 +252,13 @@ type NativeRestoreOptions = NativeWriteOptions & {
 
 type NativeDb = {
   captureSnapshot?(): NativeReadResult | Promise<NativeReadResult>;
-  /** NAPI: a thin session's transaction request, as its backend's client serves it. */
-  serveThinTransaction?(request: Uint8Array): NativeReadResult;
-  /** NAPI: end the thin session's open transactions. */
-  releaseThinTransactions?(): NativeReadResult;
+  /**
+   * A thin session's transaction request, as its backend's client serves it
+   * (NAPI: a pending read; WASM: a promise).
+   */
+  serveThinTransaction?(request: Uint8Array): NativeReadResult | Promise<NativeReadResult>;
+  /** End the thin session's open transactions (NAPI: a pending read; WASM: a promise). */
+  releaseThinTransactions?(): NativeReadResult | Promise<NativeReadResult | void>;
   /** WASM settles its promise-shaped wait early once `cancelled` settles. */
   waitForPendingWrites?(
     tier: string,
@@ -2513,7 +2516,9 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.closed || !this.db.releaseThinTransactions) return;
     const released = this.db.releaseThinTransactions();
     this.scheduleCoreTick();
-    await this.awaitNativeRead(this.pumpingWhile(released));
+    // WASM's promise settles with nothing; NAPI's pending read is polled.
+    const settled = await this.pumpingWhile(released);
+    if (settled) await this.awaitNativeRead(settled);
   }
 
   captureSnapshot(): Promise<SnapshotRef> {
