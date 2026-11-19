@@ -84,7 +84,7 @@ jobs:
           if git rev-parse -q --verify "refs/tags/v$prev" >/dev/null && git diff --quiet "v$prev" HEAD -- packages/jazz-tools/src/upgrade; then
             echo "upgrade_changed=false" >> "$GITHUB_OUTPUT"; else echo "upgrade_changed=true" >> "$GITHUB_OUTPUT"; fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with: { name: rc-inputs, path: dev/adopter-gate/.rc, retention-days: 7 }
+        with: { name: rc-inputs, path: dev/adopter-gate/.rc, retention-days: 7, include-hidden-files: true, if-no-files-found: error }
 
   checks:
     needs: inputs
@@ -125,7 +125,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          { name: "results-${{ matrix.job }}", path: dev/adopter-gate/.results, retention-days: 14 }
+          { name: "results-${{ matrix.job }}", path: dev/adopter-gate/.results, retention-days: 14, include-hidden-files: true }
 
   t9-swift:
     needs: inputs
@@ -146,7 +146,7 @@ jobs:
       - run: $AG/t9.sh swift
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with: { name: results-t9-swift, path: dev/adopter-gate/.results, retention-days: 14 }
+        with: { name: results-t9-swift, path: dev/adopter-gate/.results, retention-days: 14, include-hidden-files: true }
 
   refusals:
     needs: inputs
@@ -165,7 +165,7 @@ jobs:
       - run: $AG/refusals.sh
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with: { name: results-refusals, path: dev/adopter-gate/.results, retention-days: 14 }
+        with: { name: results-refusals, path: dev/adopter-gate/.results, retention-days: 14, include-hidden-files: true }
 
   # One long-lived Vercel eval project, one core: never two runs at once, never cancelled midway.
   t4:
@@ -199,7 +199,7 @@ jobs:
       - run: $AG/t4.sh
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with: { name: results-t4, path: dev/adopter-gate/.results, retention-days: 14 }
+        with: { name: results-t4, path: dev/adopter-gate/.results, retention-days: 14, include-hidden-files: true }
 
   verdict:
     needs: [inputs, checks, t9-swift, refusals, t4]
