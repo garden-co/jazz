@@ -34,7 +34,7 @@ body() {
                if (l ~ /^FAIL:/) { sub(/^FAIL: +/, "", l); split(l, a, " "); l="NOTE t4 flaky pass: jazz#5553, run 1 " a[1] }
                else if (l ~ /^FAIL/) { sub(/^FAIL +/, "", l); l="NOTE t4 smoke run 1 (retried): " l } else continue }
              print l } }' "$AG_RESULTS/t4-full.log" \
-    | grep -E "^(PASS|FAIL|REVIEW|FINDING|SEEDED|smoke run 1 failed)" \
+    | grep -E "^(PASS|FAIL|REVIEW|NOTE|FINDING|SEEDED|smoke run 1 failed)" \
     | sed 's/^FINDING:\{0,1\} */NOTE t4 known finding (jazz#5615, wrong-region fall-through): /; s/^SEEDED/REVIEW t4 first run: seeded/; /^smoke run 1 failed; retrying once/d'
   # Per-step wall time (run-t4.sh stamps each "=== step @epoch"), for the release-gate budget.
   awk '/^=== .* @[0-9]+$/ { t=$NF; sub(/^@/,"",t); if (p) printf "TIME t4 %ss %s\n", t-pt, p; p=$0; sub(/^=== /,"",p); sub(/ @[0-9]+$/,"",p); pt=t }' "$AG_RESULTS/t4-full.log"
