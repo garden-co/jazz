@@ -667,34 +667,31 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      verdict: ${{ steps.verdict.outputs.verdict }}
     steps:
-      - name: Go / no-go
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          sparse-checkout: dev/scripts
+          persist-credentials: false
+
+      # NO-GO fails the run. HOLD passes it, listing each hold and its owner:
+      # a person clears holds before go, and release-publish.yml shows them
+      # with the publish approval (rc-verdict.json).
+      - name: Go / hold / no-go
+        id: verdict
         env:
           RESULTS: ${{ toJSON(needs) }}
           DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
+          # A dry run has no draft to probe.
+          DRY_RUN_SKIPPABLE: attach-server,publish,cloud-rc-probe
           PROBE: ${{ needs.cloud-rc-probe.outputs.verdict }}
           PROBE_ONLY: ${{ inputs.probe-tag != '' }}
-        run: |
-          node -e '
-            const needs = JSON.parse(process.env.RESULTS);
-            const dryRun = process.env.DRY_RUN === "true";
-            // A dry run publishes nothing, so it has no draft to probe either.
-            const probeOnly = process.env.PROBE_ONLY === "true";
-            const skippable = probeOnly
-              ? new Set(Object.keys(needs).filter((job) => !["resolve", "cloud-rc-probe"].includes(job)))
-              : dryRun
-                ? new Set(["attach-server", "publish", "cloud-rc-probe"])
-                : new Set();
-            let go = true, hold = false;
-            for (const [job, { result }] of Object.entries(needs)) {
-              const ok = result === "success" || (skippable.has(job) && result === "skipped");
-              let note = result;
-              if (job === "cloud-rc-probe" && process.env.PROBE) note += ` (${process.env.PROBE})`;
-              console.log(`${ok ? "✅" : "❌"} ${job}: ${note}`);
-              go &&= ok;
-            }
-            if (process.env.PROBE === "needs-infra") hold = true;
-            const verdict = !go ? "NO-GO" : hold ? "HOLD (needs-infra: a person resolves it)" : "GO";
-            console.log(verdict);
-            require("fs").appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## Release candidate: ${verdict}\n`);
-            if (verdict !== "GO") process.exit(1);'
+        run: node dev/scripts/rc-verdict.mjs
+
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rc-verdict
+          path: rc-verdict.json
+          if-no-files-found: error
