@@ -1014,6 +1014,9 @@ mod core_host {
         held_bytes: usize,
         /// Why the socket ends: its error frame goes out with its output.
         failed: Option<jazz::wire::WireError>,
+        /// What the client's `Hello` offered: its error frames name their
+        /// reason when it reads one.
+        client_features: u64,
         /// For a user session the backend stated: what a revocation of its
         /// user's sessions is checked against.
         revocation: Option<SessionRevocation>,
@@ -1132,8 +1135,10 @@ mod core_host {
         }
     }
 
-    fn error_frame(error: &jazz::wire::WireError) -> Vec<u8> {
-        jazz::wire::encode_frame(&jazz::wire::WireFrame::Error(error.clone()))
+    /// `error` as a client whose `Hello` offered `client_features` reads it:
+    /// naming its reason to one that offered `FEATURE_TYPED_ERROR_REASON`.
+    fn error_frame(error: &jazz::wire::WireError, client_features: u64) -> Vec<u8> {
+        jazz::wire::encode_error_frame_for_client(error, client_features)
             .and_then(|frame| encode_ws_frame_batches(&[frame]))
             .ok()
             .and_then(|mut batches| batches.pop())
@@ -1215,12 +1220,15 @@ mod core_host {
                         .unwrap_or_default(),
                 );
             }
+            // What the client offered, from the `Hello` behind its prelude.
+            let client_features = jazz_server::portable::websocket_codec::decode_ws_hello(first)
+                .map(|hello| hello.features)
+                .unwrap_or(0);
             let fail = |code, message: String| {
-                refused(error_frame(&jazz::wire::WireError::new(
-                    code,
-                    jazz::wire::WireRetry::Never,
-                    message,
-                )))
+                refused(error_frame(
+                    &jazz::wire::WireError::new(code, jazz::wire::WireRetry::Never, message),
+                    client_features,
+                ))
             };
             let prelude: WebSocketPrelude = match serde_json::from_str(prelude) {
                 Ok(prelude) => prelude,
@@ -1257,15 +1265,15 @@ mod core_host {
             let admission = match admit_by_core_secret(&prelude, upgrade, &secret, now, &mut guest)
             {
                 Ok(admission) => admission,
-                Err(message) => return fail(jazz::wire::WireErrorCode::AuthFailed, message),
+                Err(refusal) => return refused(error_frame(&refusal.into_wire(), client_features)),
             };
             let hello = match negotiate_hello(first, prelude.bootstrap_catalogue) {
                 Ok(hello) => hello,
-                Err(error) => return refused(error_frame(&error)),
+                Err(error) => return refused(error_frame(&error, client_features)),
             };
             let link = match link(&admission, &hello) {
                 Ok(link) => link,
-                Err(error) => return refused(error_frame(&error)),
+                Err(error) => return refused(error_frame(&error, client_features)),
             };
             // A stated session of a user whose sessions were revoked after
             // the backend authenticated it is refused, as native refuses it.
@@ -1275,24 +1283,30 @@ mod core_host {
             if let Some(revocation) = &revocation {
                 match self.revocation_mark(&revocation.principal) {
                     Ok(mark) if accounts::session_revoked(mark, revocation.authenticated_at_ms) => {
-                        return refused(error_frame(&revoked()));
+                        return refused(error_frame(&revoked(), client_features));
                     }
                     Ok(_) => {}
                     Err(error) => {
-                        return refused(error_frame(&jazz::wire::WireError::new(
-                            jazz::wire::WireErrorCode::NotReady,
-                            jazz::wire::WireRetry::Later,
-                            error,
-                        )));
+                        return refused(error_frame(
+                            &jazz::wire::WireError::new(
+                                jazz::wire::WireErrorCode::NotReady,
+                                jazz::wire::WireRetry::Later,
+                                error,
+                            ),
+                            client_features,
+                        ));
                     }
                 }
             }
             let Some(core) = self.core.as_mut() else {
-                return refused(error_frame(&jazz::wire::WireError::new(
-                    jazz::wire::WireErrorCode::NotReady,
-                    jazz::wire::WireRetry::Later,
-                    "no schema has been published for this app; start the app's createJazz backend, which publishes its schema, before connecting",
-                )));
+                return refused(error_frame(
+                    &jazz::wire::WireError::new(
+                        jazz::wire::WireErrorCode::NotReady,
+                        jazz::wire::WireRetry::Later,
+                        "no schema has been published for this app; start the app's createJazz backend, which publishes its schema, before connecting",
+                    ),
+                    client_features,
+                ));
             };
             let opened = if link.thin {
                 core.open_thin_session(
@@ -1326,6 +1340,7 @@ mod core_host {
                     held: VecDeque::new(),
                     held_bytes: 0,
                     failed: None,
+                    client_features,
                     revocation,
                     guest,
                 },
@@ -1405,6 +1420,7 @@ mod core_host {
             let mut batches = Vec::new();
             let mut ended = false;
             let failed = state.failed.clone();
+            let client_features = state.client_features;
             let taken = match self.core.as_mut() {
                 Some(core) => core.take_output(state.session),
                 None => Vec::new(),
@@ -1417,13 +1433,17 @@ mod core_host {
                         }
                     }
                     Err(error) => {
-                        batches.push(js_sys::Uint8Array::from(error_frame(&error).as_slice()));
+                        batches.push(js_sys::Uint8Array::from(
+                            error_frame(&error, client_features).as_slice(),
+                        ));
                         ended = true;
                     }
                 }
             }
             if let Some(error) = failed {
-                batches.push(js_sys::Uint8Array::from(error_frame(&error).as_slice()));
+                batches.push(js_sys::Uint8Array::from(
+                    error_frame(&error, client_features).as_slice(),
+                ));
                 ended = true;
             }
             if ended {
@@ -1678,6 +1698,7 @@ mod core_host {
             jazz::wire::WireRetry::AfterAuth,
             "session revoked: jazz.revokeUser ended this user's sessions",
         )
+        .with_reason(jazz::wire::WireErrorReason::Revoked)
     }
 
     fn no_content() -> HttpAnswer {
