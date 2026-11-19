@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createJazzClient } from "../../src/backend/index.js";
+import { createAccountManager } from "../../src/accounts/create-account-manager.js";
+import { createClient as createThinClient } from "../../src/thin/index.js";
 import { testPermissions } from "../../src/testing/index.js";
 import { app } from "./backend-app.generated.js";
 import { bundleWorker } from "./bundle.js";
@@ -81,5 +83,37 @@ describe.skipIf(!hostBuilt && !process.env.CI)("createJazz in a Cloudflare Worke
       .insert(app.todos, { title: "from a browser", done: false })
       .wait({ tier: "global" });
     expect(await (await fetch(`${url}/todos`)).json()).toEqual(["from a browser"]);
+  });
+
+  it("commits a thin client's transaction, which the backend runs on jazz-wasm", async () => {
+    const { url } = await worker();
+    const appId = await (await fetch(`${url}/app-id`)).text();
+    let stored: string | null = null;
+    const accounts = await createAccountManager({
+      appId,
+      serverUrl: `${url}/jazz`,
+      store: {
+        async read() {
+          return stored;
+        },
+        async update(transform) {
+          stored = transform(stored);
+        },
+      },
+    });
+    const thin = await createThinClient({
+      appId,
+      serverUrl: `${url}/jazz`,
+      account: accounts.createLocalFirst(),
+    });
+    cleanups.push(() => thin.shutdown());
+    const committed = await thin.transaction((tx) => {
+      tx.insert(app.todos, { title: "thin one", done: false });
+      tx.insert(app.todos, { title: "thin two", done: false });
+      return "done";
+    });
+    expect(committed.value).toBe("done");
+    await committed.wait({ tier: "global" });
+    expect(await (await fetch(`${url}/todos`)).json()).toEqual(["thin one", "thin two"]);
   });
 });
