@@ -217,14 +217,48 @@ jobs:
 
   test-crates-package:
     if: inputs.scope == 'full'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Compile-bound: cargo package's verify builds every published crate from
+    # its .crate, one after another. The toolchain container's pinned Rust,
+    # 16 vCPUs and the trusted shared compile cache, like the other Rust jobs.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 30
-    permissions:
-      contents: read
+    container:
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Authenticate trusted sccache writer
+        if: inputs.trusted-cache && inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Authenticate trusted sccache reader
+        if: inputs.trusted-cache && !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Export trusted sccache configuration
+        if: inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '')
+        env:
+          CACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
+          CACHE_REGION: ${{ vars.SCCACHE_REGION }}
+        run: |
+          echo "SCCACHE_BUCKET=${CACHE_BUCKET}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_REGION=${CACHE_REGION}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_USE_SSL=true" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_KEY_PREFIX=jazz-ci/v1/production/blacksmith-v1" >> "${GITHUB_ENV}"
+      - uses: ./.github/actions/setup-blacksmith
+        with:
+          sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
       - name: Package and verify the crates published to crates.io
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition crates-package
+      - name: Report sccache statistics
+        if: always()
+        run: sccache --show-stats
 
   # Branch protection requires this stable check name. It aggregates the Rust
   # correctness jobs and stays red whenever any dependency fails or is cancelled.
@@ -265,11 +299,11 @@ jobs:
   # the StagePlan Go example, on Linux: see dev/gates/go-bindings.sh.
   test-go:
     if: inputs.scope == 'full'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Compile-bound: the release NAPI/WASM pair, then four jazz-ffi/Go cargo
+    # builds before ~40s of Go tests. 16 vCPUs and the trusted shared compile
+    # cache (test-ts builds the same release NAPI), like the other Rust jobs.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 45
-    permissions:
-      contents: read
-      packages: read
     container:
       image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
       credentials:
@@ -277,11 +311,38 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Authenticate trusted sccache writer
+        if: inputs.trusted-cache && inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Authenticate trusted sccache reader
+        if: inputs.trusted-cache && !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Export trusted sccache configuration
+        if: inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '')
+        env:
+          CACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
+          CACHE_REGION: ${{ vars.SCCACHE_REGION }}
+        run: |
+          echo "SCCACHE_BUCKET=${CACHE_BUCKET}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_REGION=${CACHE_REGION}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_USE_SSL=true" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_KEY_PREFIX=jazz-ci/v1/production/blacksmith-v1" >> "${GITHUB_ENV}"
       # The artifact lock path, safe.directory and pnpm install, as test-ts:
       # the go partition builds jazz-tools for its TS main-backend e2e.
       - uses: ./.github/actions/setup-blacksmith
+        with:
+          sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
       - name: Build and test the Go bindings and the StagePlan Go example
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition go
+      - name: Report sccache statistics
+        if: always()
+        run: sccache --show-stats
 
   test-ts:
     if: inputs.scope == 'full'
