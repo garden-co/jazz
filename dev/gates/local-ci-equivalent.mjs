@@ -42,7 +42,7 @@ export const ciPartitionJobs = Object.freeze({
   "rust-workspace": "test-rust-workspace",
   "rust-differential": "test-storage-compat",
   "storage-compat": "test-storage-compat",
-  "durable-object-limits": "test-storage-compat",
+  "durable-object-limits": "test-durable-object-limits",
   // One test-ts matrix job per TypeScript shard (see typescriptPartitions).
   "typescript-tools-node-1": "test-ts",
   "typescript-tools-node-2": "test-ts",
@@ -434,9 +434,38 @@ export const ciPartitions = Object.freeze({
   // limits (100 bound parameters, 100 KB statements, expression depth 100,
   // ...), so SQL that would fail there fails here. See
   // dev/durable-objects/README.md.
+  // This is `cargo test --workspace` in three commands. Nextest builds the
+  // same targets and runs the unit, integration, bin and example tests, but
+  // runs test binaries in parallel where cargo test ran them one after
+  // another (~200s of a 260s step). The docs todo server's snippet tests
+  // keep cargo test's harness (one process, tests on threads): one of them
+  // depends on that timing under these limits and fails in a process of its
+  // own. Nextest skips doc tests, so the last command runs exactly those.
+  // All three use the same --workspace feature selection, so they share one
+  // build.
   "durable-object-limits": Object.freeze([
     command("Durable Object SQLite limits", "cargo", [
+      "nextest",
+      "run",
+      "--profile",
+      "jazz-ci",
+      "--workspace",
+      "--features",
+      "jazz-core/durable-object-limits",
+      "-E",
+      "not (package(todo-server-docs) and binary(snippets))",
+    ]),
+    command("Durable Object SQLite limits, docs todo server snippets", "cargo", [
       "test",
+      "--workspace",
+      "--features",
+      "jazz-core/durable-object-limits",
+      "--test",
+      "snippets",
+    ]),
+    command("Durable Object SQLite limits doc tests", "cargo", [
+      "test",
+      "--doc",
       "--workspace",
       "--features",
       "jazz-core/durable-object-limits",
