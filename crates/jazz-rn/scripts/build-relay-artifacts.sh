@@ -7,7 +7,7 @@ set -euo pipefail
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
 package="$root/crates/jazz-rn"
 relay_manifest="$root/crates/jazz-native-relay/Cargo.toml"
-platform=${1:?usage: build-relay-artifacts.sh <android|ios>}
+platform=${1:?usage: build-relay-artifacts.sh <android|android-slice <abi>|android-manifest|ios>}
 abi=$(sed -nE 's/^pub const NATIVE_RELAY_ABI_V1: u16 = ([0-9]+);/\1/p' \
   "$root/crates/jazz-native-relay/src/lib.rs")
 if [[ -z "$abi" ]]; then
@@ -76,12 +76,39 @@ stage_header() {
 }
 
 case "$platform" in
-  android)
+  android|android-slice|android-manifest)
+    # `android` builds and seals every ABI. Release CI splits that into one
+    # `android-slice <abi>` job per ABI and an `android-manifest` job that
+    # seals the downloaded slices with the same manifest.
+    stage="$package/android/src/main/jniLibs"
+    declare -A rust_targets=(
+      [arm64-v8a]=aarch64-linux-android
+      [armeabi-v7a]=armv7-linux-androideabi
+      [x86_64]=x86_64-linux-android
+    )
+    if [[ "$platform" == android-manifest ]]; then
+      if [[ ! "${JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "android-manifest requires JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION of the slice builds" >&2
+        exit 1
+      fi
+      for android_abi in "${!rust_targets[@]}"; do
+        [[ -f "$stage/$android_abi/libjazz_native_relay.a" ]] || {
+          echo "missing Android relay slice: $android_abi" >&2
+          exit 1
+        }
+      done
+      if [[ $(find "$stage" -type f | wc -l) -ne ${#rust_targets[@]} ]]; then
+        echo "unexpected files among the Android relay slices" >&2
+        exit 1
+      fi
+      stage_header
+      write_manifest "$package/android/jazz-native-relay.manifest.json" "$stage"
+      exit 0
+    fi
     command -v cargo-ndk >/dev/null || {
       echo "Android relay artifacts require cargo-ndk; run dev/scripts/install-jazz-rn-deps.sh" >&2
       exit 1
     }
-    stage="$package/android/src/main/jniLibs"
     detected_cargo_ndk_version=$(cargo ndk --version | sed -nE 's/.* ([0-9]+\.[0-9]+\.[0-9]+)$/\1/p')
     if [[ -z "$detected_cargo_ndk_version" ]]; then
       echo "could not determine cargo-ndk version" >&2
@@ -92,21 +119,28 @@ case "$platform" in
       exit 1
     fi
     export JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="$detected_cargo_ndk_version"
-    stage_header
-    rm -rf "$stage"
+    android_abis=("${!rust_targets[@]}")
+    if [[ "$platform" == android-slice ]]; then
+      android_abis=("${2:?usage: build-relay-artifacts.sh android-slice <abi>}")
+      [[ -n "${rust_targets[${android_abis[0]}]:-}" ]] || {
+        echo "unknown Android ABI: ${android_abis[0]}" >&2
+        exit 1
+      }
+      rm -rf "$stage/${android_abis[0]}"
+    else
+      stage_header
+      rm -rf "$stage"
+    fi
     mkdir -p "$stage"
-    declare -A rust_targets=(
-      [arm64-v8a]=aarch64-linux-android
-      [armeabi-v7a]=armv7-linux-androideabi
-      [x86_64]=x86_64-linux-android
-    )
-    for android_abi in "${!rust_targets[@]}"; do
+    for android_abi in "${android_abis[@]}"; do
       rust_target=${rust_targets[$android_abi]}
       cargo ndk -t "$android_abi" rustc --manifest-path "$relay_manifest" --crate-type staticlib --profile release-mobile
       mkdir -p "$stage/$android_abi"
       cp "$root/target/$rust_target/release-mobile/libjazz_native_relay.a" "$stage/$android_abi/"
     done
-    write_manifest "$package/android/jazz-native-relay.manifest.json" "$stage"
+    if [[ "$platform" == android ]]; then
+      write_manifest "$package/android/jazz-native-relay.manifest.json" "$stage"
+    fi
     ;;
   ios)
     command -v xcodebuild >/dev/null || {

@@ -143,6 +143,33 @@ jobs:
           REQUIRED_ARTIFACTS: pkg-jazz-tools,pkg-jazz-wasm,pkg-jazz-napi,pkg-jazz-rn,pkg-create-jazz,inspector-prebuilt,jazz-tools-linux-x64,jazz-tools-linux-arm64
         run: node dev/scripts/await-release-artifacts.mjs
 
+  # RN device acceptance needs only these, which a release-artifacts run has
+  # uploaded minutes before the packages and server binaries above.
+  find-device-artifacts:
+    name: Find the RN device acceptance artifacts
+    needs: resolve
+    if: inputs.probe-tag == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      run_id: ${{ steps.find.outputs.run_id }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          sparse-checkout: dev/scripts
+          persist-credentials: false
+      - id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ needs.resolve.outputs.sha }}
+          # Exactly what rn-device-acceptance.yml downloads.
+          REQUIRED_ARTIFACTS: jazz-rn-relay-android,jazz-rn-relay-ios,jazz-napi-loader,jazz-napi-binding-linux-x64-gnu,jazz-napi-binding-darwin-arm64,jazz-wasm-pkg
+        run: node dev/scripts/await-release-artifacts.mjs
+
   # Only when no release-artifacts run of this commit exists (e.g. a branch
   # that is neither main nor release).
   build:
@@ -248,11 +275,32 @@ jobs:
     with:
       artifacts_run_id: ${{ needs.artifacts.outputs.run_id }}
 
+  # On a release-artifacts run's device inputs, as soon as they exist.
   rn-device-acceptance:
     name: RN device acceptance
-    needs: artifacts
-    if: "!cancelled() && needs.artifacts.result == 'success'"
+    needs: [resolve, find-device-artifacts]
+    if: "!cancelled() && needs.find-device-artifacts.outputs.run_id != ''"
     uses: ./.github/workflows/rn-device-acceptance.yml
+    permissions:
+      actions: read
+      contents: read
+    with:
+      artifacts_run_id: ${{ needs.find-device-artifacts.outputs.run_id }}
+      # artifacts-complete requires the manifest to name this commit.
+      manifest_checked_by_caller: true
+
+  # No such run: on the artifacts this run builds. The verdict takes either.
+  rn-device-acceptance-built:
+    name: RN device acceptance
+    needs: [find-device-artifacts, artifacts]
+    if: "!cancelled() && needs.artifacts.result == 'success' && needs.find-device-artifacts.outputs.run_id == ''"
+    uses: ./.github/workflows/rn-device-acceptance.yml
+    permissions:
+      actions: read
+      contents: read
+    with:
+      artifacts_run_id: ${{ needs.artifacts.outputs.run_id }}
+      manifest_checked_by_caller: true
 
   preview:
     name: Release preview
@@ -569,13 +617,24 @@ jobs:
     # Public only after every gate that doesn't need a public release passed:
     # a NO-GO candidate is never published. Only the install-by-URL smoke and
     # the Cloud RC probe (which installs the tarball by URL) run after it.
-    needs: [resolve, attach-server, rc-tarballs, examples-e2e, rn-device-acceptance, preview]
+    needs:
+      [
+        resolve,
+        attach-server,
+        rc-tarballs,
+        examples-e2e,
+        rn-device-acceptance,
+        rn-device-acceptance-built,
+        preview,
+      ]
+    # Exactly one of the two device acceptance calls runs, and it must pass.
     if: >-
       !cancelled() &&
       needs.attach-server.result == 'success' &&
       needs.rc-tarballs.result == 'success' &&
       needs.examples-e2e.result == 'success' &&
-      needs.rn-device-acceptance.result == 'success' &&
+      ((needs.rn-device-acceptance.result == 'success' && needs.rn-device-acceptance-built.result == 'skipped') ||
+       (needs.rn-device-acceptance.result == 'skipped' && needs.rn-device-acceptance-built.result == 'success')) &&
       needs.preview.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -784,6 +843,7 @@ jobs:
         artifacts-complete,
         examples-e2e,
         rn-device-acceptance,
+        rn-device-acceptance-built,
         preview,
         rc-tarballs,
         smoke,
@@ -812,6 +872,8 @@ jobs:
           DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
           # A dry run has no draft to probe.
           DRY_RUN_SKIPPABLE: attach-server,publish,cloud-rc-probe
+          # Exactly one of the two device acceptance calls runs.
+          ALTERNATIVES: rn-device-acceptance|rn-device-acceptance-built
           PROBE: ${{ needs.cloud-rc-probe.outputs.verdict }}
           PROBE_ONLY: ${{ inputs.probe-tag != '' }}
         run: node dev/scripts/rc-verdict.mjs
