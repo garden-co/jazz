@@ -1,4 +1,5 @@
 import type { ClientMigrations } from "../client-migrations.js";
+import { plainSchema, type PlainEntries } from "../../encryption/plain-schema.js";
 import { streamingChunks } from "../streaming-source.js";
 import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
@@ -200,6 +201,21 @@ type NativeDbConstructor = {
     token: string,
     appId: string,
     claimedAuthor: string,
+  ): NativeDb;
+  openMemoryAsBackendKeyless?(
+    schema: Uint8Array,
+    config: Uint8Array,
+    bindings: string,
+    appId: string,
+    environment: string,
+  ): NativeDb;
+  openPersistentAsBackendKeyless?(
+    dataPath: string,
+    schema: Uint8Array,
+    config: Uint8Array,
+    bindings: string,
+    appId: string,
+    environment: string,
   ): NativeDb;
 };
 
@@ -1156,8 +1172,18 @@ export class NativeRuntimeAdapter implements Runtime {
       webSocket?: WebSocketConstructor;
       /** The app's versions and migrations: see {@link ClientMigrations}. */
       migrations?: ClientMigrations;
+      /**
+       * A backend of an app that declares encryption holds no keys: it opens
+       * with hooks that relay ciphertext and refuse encrypted columns.
+       */
+      keyless?: { bindings: string; appId: string; environment: string };
+      /** Where the app's declarations make a column plaintext to its code (see {@link plainSchema}). */
+      plainEntries?: PlainEntries;
     },
   ) {
+    // The app's code sees encrypted columns as their plaintext types; what
+    // goes to the database (`schemaBytes`, the hash) stays as stored.
+    (this as unknown as { schema: WasmSchema }).schema = plainSchema(schema, opts?.plainEntries);
     this.ownerRuntime = opts?.owner?.ownerRuntime ?? this;
     this.readAuthorizationHost =
       opts?.owner?.readAuthorizationHost ?? opts?.readAuthorizationHost ?? "client-local";
@@ -1189,6 +1215,37 @@ export class NativeRuntimeAdapter implements Runtime {
     this.schemaHash = serializeRuntimeSchema(schema);
     if (opts?.db) {
       this.db = opts.db;
+    } else if (opts?.keyless) {
+      if (!Runtime) throw new Error("Native runtime constructor required for an encrypted app");
+      const { bindings, appId, environment } = opts.keyless;
+      if (opts.persistentPath) {
+        if (!Runtime.openPersistentAsBackendKeyless) {
+          throw new Error(
+            "Native runtime does not support encrypted apps; rebuild the Jazz native artifact",
+          );
+        }
+        this.db = Runtime.openPersistentAsBackendKeyless(
+          opts.persistentPath,
+          this.schemaBytes,
+          this.configBytes,
+          bindings,
+          appId,
+          environment,
+        );
+      } else {
+        if (!Runtime.openMemoryAsBackendKeyless) {
+          throw new Error(
+            "Native runtime does not support encrypted apps; rebuild the Jazz native artifact",
+          );
+        }
+        this.db = Runtime.openMemoryAsBackendKeyless(
+          this.schemaBytes,
+          this.configBytes,
+          bindings,
+          appId,
+          environment,
+        );
+      }
     } else if (opts?.persistentPath) {
       if (!Runtime) {
         throw new Error("Native runtime constructor required for persistent storage");

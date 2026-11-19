@@ -12,13 +12,14 @@ rust-version.workspace = true
 include = ["src/**"]
 
 [dependencies]
+base64 = "0.22"
 futures = "0.3"
 jazz = { workspace = true, features = ["e2ee-client"] }
 jazz-e2ee = { path = "../jazz-e2ee" }
 serde_json = "1.0.145"
 thiserror = "2"
 uuid = { version = "1.18.1", features = ["v4"] }
-# Elapsed time that works in browsers too, as jazz-core uses.
+# Elapsed time that works in browsers too, as jazz-core uses (the host loop's clock).
 web-time = "1.1"
 
 # The browser's random source for the crates Jazz uses, as in jazz-wasm.

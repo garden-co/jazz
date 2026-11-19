@@ -116,6 +116,8 @@ export function permissionCoverageWarnings(deployment: DeploymentBody): string[]
   >;
   return Object.keys(tables)
     .filter((table) => {
+      // Jazz's system tables get their policies from the encryption declarations.
+      if (table.startsWith("__e2ee_")) return false;
       const operations = Object.values(permissions[table] ?? {});
       return !operations.some((policy) => policy?.using != null || policy?.with_check != null);
     })

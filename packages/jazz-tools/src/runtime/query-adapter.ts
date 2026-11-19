@@ -1,3 +1,4 @@
+import { plainSchema } from "../encryption/plain-schema.js";
 import { resolveQueryTable } from "./history-relation.js";
 /**
  * Translate public QueryBuilder JSON into the runtime query payload.
@@ -936,9 +937,11 @@ function toFlatConditions(
  */
 export function translateQuery(
   builderJson: string,
-  schema: WasmSchema,
+  stored: WasmSchema,
   prepared?: ReturnType<typeof normalizeBuiltQuery>,
 ): string {
+  // An encrypted column is compared by the plaintext type its code uses.
+  const schema = plainSchema(stored);
   const builder = prepared ?? normalizeBuiltQuery(JSON.parse(builderJson));
   const relations = analyzeRelations(schema);
   const translated = usesNativeRelationFeatures(builder)
