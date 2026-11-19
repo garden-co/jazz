@@ -27,6 +27,11 @@ pub enum ClientError {
     /// The database refused a call the runtime made.
     #[error(transparent)]
     Database(#[from] jazz::db::Error),
+    /// This device has not verified its account in this run
+    /// ([`E2eeClient::ensure_account`](crate::E2eeClient::ensure_account)):
+    /// its keys for spaces cannot be acquired or made without it.
+    #[error("the account is not verified on this device: verify it first")]
+    NoAccount,
     /// The store was wiped: nothing more is read or written through this
     /// runtime, so a late operation never recreates it (§6.4).
     #[error("the encryption runtime was closed")]

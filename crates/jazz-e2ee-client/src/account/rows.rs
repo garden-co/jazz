@@ -18,6 +18,7 @@ use jazz_e2ee::protocol::records::account::{
     DeviceRemovalRequest, DeviceRequest, PublicAccountSuccessor, PublicDeviceApproval,
     RecoveryDelivery, RecoveryRoot,
 };
+use jazz_e2ee::protocol::records::space::{SpaceDelivery, SpaceMember, SpaceRoot, SpaceSuccessor};
 
 /// The cells of one row, by column.
 pub(crate) type Cells = BTreeMap<String, Value>;
@@ -188,8 +189,8 @@ impl Write {
 pub(crate) use jazz::tools::deployment::artifact::system_tables::{
     ACCOUNT_IDENTITIES, ACCOUNT_KEYS, ACCOUNT_ROOTS, ACCOUNT_SUCCESSORS, DEVICE_APPROVALS,
     DEVICE_CHALLENGES, DEVICE_DELIVERIES, DEVICE_KEYS, DEVICE_PROOFS, DEVICE_REMOVAL_REQUESTS,
-    DEVICE_REQUESTS, PUBLIC_ACCOUNT_SUCCESSORS, PUBLIC_DEVICE_APPROVALS, RECOVERY_DELIVERIES,
-    RECOVERY_ROOTS,
+    DEVICE_REQUESTS, MEMBERS as SPACE_MEMBERS, PUBLIC_ACCOUNT_SUCCESSORS, PUBLIC_DEVICE_APPROVALS,
+    RECOVERY_DELIVERIES, RECOVERY_ROOTS, SPACE_DELIVERIES, SPACE_SUCCESSORS, SPACES as SPACE_ROOTS,
 };
 
 /// One column of a record's cells, written by its kind.
@@ -485,6 +486,59 @@ row! {
     }
 }
 
+row! {
+    SpaceMember => SPACE_MEMBERS {
+        scope_id: id "scopeId",
+        identifier: id "identifier",
+        account_id: id "accountId",
+    }
+}
+
+row! {
+    SpaceRoot => SPACE_ROOTS {
+        scope_id: id "scopeId",
+        identifier: id "identifier",
+        creator_account_id: id "creatorAccountId",
+        device_id: id "deviceId",
+        account_epoch_id: id "accountEpochId",
+        epoch_id: id "epochId",
+        mechanism: text "mechanism",
+        version: version "version",
+        verification: bytes "verification",
+        account_envelope: bytes "accountEnvelope",
+        signature: bytes "signature",
+    }
+}
+
+row! {
+    SpaceSuccessor => SPACE_SUCCESSORS {
+        scope_id: id "scopeId",
+        identifier: id "identifier",
+        predecessor: id "predecessor",
+        history_epoch_id: id "historyEpochId",
+        epoch_id: id "epochId",
+        author_account_id: id "authorAccountId",
+        author_device_id: id "authorDeviceId",
+        author_epoch_id: id "authorEpochId",
+        verification: bytes "verification",
+        history: bytes "history",
+        account_envelope: bytes "accountEnvelope",
+        signature: bytes "signature",
+    }
+}
+
+row! {
+    SpaceDelivery => SPACE_DELIVERIES {
+        scope_id: id "scopeId",
+        identifier: id "identifier",
+        key_epoch_id: id "keyEpochId",
+        sender_account_id: id "senderAccountId",
+        recipient_account_id: id "recipientAccountId",
+        recipient_account_epoch_id: id "recipientAccountEpochId",
+        envelope: bytes "envelope",
+    }
+}
+
 /// The codecs are the tables' column layout, as `E2EE_PROTOCOL.md` §1.2
 /// states it: a renamed column, a changed type or a swapped pair of
 /// columns would make every stored row of its table unreadable.
@@ -770,6 +824,69 @@ mod tests {
                 epoch_id: id(142),
                 device_id: id(143),
                 signature: bytes(144),
+            },
+        );
+    }
+
+    /// The space tables' records, as above.
+    #[test]
+    fn every_space_table_round_trips() {
+        let db = database();
+        round_trip(
+            &db,
+            SpaceMember {
+                id: id(150),
+                scope_id: id(151),
+                identifier: id(152),
+                account_id: id(153),
+            },
+        );
+        round_trip(
+            &db,
+            SpaceRoot {
+                id: id(160),
+                scope_id: id(161),
+                identifier: id(162),
+                creator_account_id: id(163),
+                device_id: id(164),
+                account_epoch_id: id(165),
+                epoch_id: id(166),
+                mechanism: "wrap-167".to_owned(),
+                version: 168,
+                verification: bytes(169),
+                account_envelope: bytes(170),
+                signature: bytes(171),
+            },
+        );
+        round_trip(
+            &db,
+            SpaceSuccessor {
+                id: id(180),
+                scope_id: id(181),
+                identifier: id(182),
+                predecessor: id(183),
+                history_epoch_id: id(184),
+                epoch_id: id(185),
+                author_account_id: id(186),
+                author_device_id: id(187),
+                author_epoch_id: id(188),
+                verification: bytes(189),
+                history: bytes(190),
+                account_envelope: bytes(191),
+                signature: bytes(192),
+            },
+        );
+        round_trip(
+            &db,
+            SpaceDelivery {
+                id: id(200),
+                scope_id: id(201),
+                identifier: id(202),
+                key_epoch_id: id(203),
+                sender_account_id: id(204),
+                recipient_account_id: id(205),
+                recipient_account_epoch_id: id(206),
+                envelope: bytes(207),
             },
         );
     }

@@ -27,12 +27,16 @@ use jazz_e2ee::protocol::content::equality::{
     QueryPlan as EqualityPlan, TableTarget, plan_equality,
 };
 use jazz_e2ee::protocol::content::{
-    ContentError, DataError, EncryptedColumn, EqualityValueBuf, RowTarget, WriteChoice, WriteKey,
+    ContentError, DataError, EncryptedColumn, EqualityValueBuf, KeyMark, RowTarget, WriteChoice,
+    WriteKey,
 };
 use jazz_e2ee::protocol::records::space::SpaceAddress;
 use jazz_e2ee::records::{RecordKind, read_stored_record};
 
-use crate::state::{Catalogue, KeyState, Report, Shared, TablePlan, db_address, not_observed};
+use crate::account::rows::{Row, SPACE_ROOTS};
+use crate::state::{
+    Catalogue, KeyState, Missing, Report, Shared, TablePlan, db_address, not_observed,
+};
 use crate::values::ColumnCodec;
 
 /// The hooks a database opens with; a handle on the runtime's state.
@@ -75,7 +79,7 @@ fn identifier(value: Option<&Value>) -> Result<Option<String>, ()> {
     }
 }
 
-fn code(error: DataError) -> UnreadableCode {
+pub(crate) fn code(error: DataError) -> UnreadableCode {
     match error {
         DataError::KeyUnavailable => UnreadableCode::KeyUnavailable,
         DataError::KeyPending => UnreadableCode::KeyPending,
@@ -118,9 +122,13 @@ impl Hooks {
 
 /// The key a write to `address` seals under, or the reason it cannot yet
 /// (protocol §3.2, §5.1).
-fn write_key<'k>(keys: &'k KeyState, address: &SpaceAddress) -> Result<WriteKey<'k>, SealError> {
+fn write_key<'k>(
+    keys: &'k KeyState,
+    address: &SpaceAddress,
+    refused_here: bool,
+) -> Result<WriteKey<'k>, SealError> {
     let space = || db_address(address);
-    match keys.held.write_key(address, false) {
+    match keys.held.write_key(address, refused_here) {
         WriteChoice::Key(key) => Ok(key),
         WriteChoice::NeedsKey => Err(SealError::NeedsKey { space: space() }),
         WriteChoice::SpacePending => Err(SealError::SpacePending { space: space() }),
@@ -268,7 +276,8 @@ impl E2eeHooks for Hooks {
                 .ok_or_else(|| refused("an encrypted write names its space"))?,
         };
         let address = Self::address(&keys, plan, &identifier).map_err(SealError::Refused)?;
-        let key = write_key(&keys, &address)?;
+        let refused_here = keys.creation_refused.contains(&address);
+        let key = write_key(&keys, &address, refused_here)?;
         let catalogue = keys
             .catalogue
             .as_ref()
@@ -323,6 +332,28 @@ impl E2eeHooks for Hooks {
                 write
                     .cells
                     .insert(format!("__e2ee_eq_{name}"), Value::Bytes(token));
+            }
+        }
+        // The key is this device's own creation, not yet accepted: the
+        // write stages its prepared root, once (protocol §3.2, §5.4).
+        if matches!(key.mark(), KeyMark::Unpublished { .. }) {
+            let mut creations = self.shared.creations.borrow_mut();
+            if creations
+                .prepared
+                .get(&address)
+                .is_some_and(|root| root.id == key.root_id())
+            {
+                let root = creations.prepared.remove(&address).expect("checked above");
+                let row = uuid::Uuid::parse_str(&root.id)
+                    .map_err(|_| refused("a space root's ID is not a UUID"))?;
+                let cells = root
+                    .cells()
+                    .ok_or_else(|| refused("a space root's IDs are not UUIDs"))?;
+                write
+                    .companion_rows
+                    .push((SPACE_ROOTS.to_owned(), RowUuid(row), cells));
+                creations.staged.insert(root.id.clone());
+                creations.attempt.push((address.clone(), root.id));
             }
         }
         Ok(())
@@ -463,6 +494,13 @@ impl E2eeHooks for Hooks {
                     Opened::Missing { epoch_id } => {
                         self.shared.report(Report::MissingKey {
                             table: site.table.to_owned(),
+                            space: db_address(&address),
+                            epoch_id: epoch_id.clone(),
+                        });
+                        self.shared.missing(Missing {
+                            table: site.table.to_owned(),
+                            id: row_uuid,
+                            column: name.clone(),
                             space: db_address(&address),
                             epoch_id: epoch_id.clone(),
                         });
@@ -703,7 +741,7 @@ impl E2eeHooks for Hooks {
         }
         .ok_or_else(|| refused("a streamed value names its space"))?;
         let address = Self::address(&keys, plan, &identifier).map_err(SealError::Refused)?;
-        let key = write_key(&keys, &address)?;
+        let key = write_key(&keys, &address, keys.creation_refused.contains(&address))?;
         let catalogue = keys
             .catalogue
             .as_ref()
