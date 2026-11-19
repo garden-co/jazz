@@ -4,7 +4,7 @@
 . "$(dirname "$0")/lib.sh"
 body() {
   local W=$AG/.work/sizes PREV=${1:-$(npm view jazz-tools dist-tags.latest)} V; V=$(ag_version); rm -rf "$W"; mkdir -p "$W/prev" "$W/rc"
-  ( cd "$W/prev" && npm pack "jazz-wasm@$PREV" "jazz-tools@$PREV" >/dev/null 2>&1 ) || { echo "FAIL sizes: npm pack $PREV"; return; }
+  ( cd "$W/prev" && ag_retry 3 npm pack "jazz-wasm@$PREV" "jazz-tools@$PREV" >/dev/null 2>&1 ) || { echo "FAIL sizes: npm pack $PREV"; return; }
   for n in jazz-wasm jazz-tools; do tar xzf "$W/prev/$n-$PREV.tgz" -C "$W/prev" && mv "$W/prev/package" "$W/prev/$n"; tar xzf "$AG_TGZ/$n-$V.tgz" -C "$W/rc" && mv "$W/rc/package" "$W/rc/$n"; done
   node - "$W" "$PREV" "$V" "${AG_SIZE_REVIEW_PCT:-3}" <<'JS'
 const fs = require("fs"), path = require("path"), zlib = require("zlib"), [W, prev, v, pct] = process.argv.slice(2);

@@ -17,7 +17,7 @@ body() {
           for (const n of ["jazz-tools", "jazz-wasm"]) if (p.dependencies[n]) p.dependencies[n] = `file:${d}/${n}-${v}.tgz`;
           p.overrides = { "jazz-wasm": `file:${d}/jazz-wasm-${v}.tgz`, "jazz-napi": `file:${d}/jazz-napi-${v}.tgz` };
           fs.writeFileSync("package.json", JSON.stringify(p, null, 2));' "$AG_TGZ" "$V"
-        rm -rf node_modules package-lock.json; npm install > install-rc.log 2>&1 || echo "FAIL t5 npm install"
+        rm -rf node_modules package-lock.json; ag_retry 3 npm install > install-rc.log 2>&1 || echo "FAIL t5 npm install"
         npx expo export -p web --clear > export.log 2>&1 && echo "PASS t5 expo export" || { echo "FAIL t5 expo export"; tail -5 export.log; } )
       ( cd "$W" && ./_common/run-smoke.sh t5-expo/server 8605 | grep -E "^(PASS|FAIL|SMOKE|SERVER)" | sed 's/^SMOKE FAIL/FAIL smoke/; s/^SERVER FAILED/FAIL server start/; s/^SMOKE PASS/PASS t5 smoke/' ) ;;
     *) echo "FAIL unknown app $1";;
