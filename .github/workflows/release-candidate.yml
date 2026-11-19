@@ -477,8 +477,9 @@ jobs:
           since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           base="repos/${repo}/actions/workflows/cloud-rc-probe.yml"
           branch=$(gh api "repos/${repo}" --jq .default_branch)
-          jq -n --arg ref "${branch}" --arg tag "v${VERSION}" --arg sha "${SHA}" --arg npm "${VERSION}" \
-            '{ref: $ref, inputs: {rc_tag: $tag, jazz_sha: $sha, rc_npm_version: $npm}}' |
+          # No rc_npm_version: candidates are release assets, never on npm.
+          jq -n --arg ref "${branch}" --arg tag "v${VERSION}" --arg sha "${SHA}" \
+            '{ref: $ref, inputs: {rc_tag: $tag, jazz_sha: $sha}}' |
             gh api -X POST "${base}/dispatches" --input -
           run_id=""
           for _ in $(seq 1 30); do
