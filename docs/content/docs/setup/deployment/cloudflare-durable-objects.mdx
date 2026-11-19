@@ -15,6 +15,10 @@ Cloudflare Worker you deploy. Your own backend sits in front of it: browsers tal
 backend, which signs users in with your auth and reaches the core with a secret only the two of them
 know.
 
+Your backend can run in the same Worker, so the whole app is on Cloudflare
+([below](#run-your-backend-in-the-worker-too)), or anywhere else (Node, Vercel, your own server), where
+it reaches the Worker by its URL ([Connect your backend](#connect-your-backend)).
+
 This page sets up your **main backend**: the backend that runs `createJazz`, serves sync to your
 browsers and apps, and decides who each user is. Other trusted machines reach Jazz through it as
 [backend clients](/docs/setup/backend-client).
@@ -56,6 +60,68 @@ npx wrangler secret put JAZZ_CORE_SECRET
 npx wrangler deploy
 ```
 
+## Run your backend in the Worker too
+
+`createJazz` runs in a second Durable Object of the same Worker, next to the core: a Jazz keeps its
+socket to the core open across requests, which a Worker's `fetch` can't. `jazzBackend` makes that
+object's class from your `createJazz` and your own routes (a Hono app, say), and
+`routeToJazzBackend` forwards the Worker's requests to it. Under the `workerd` condition, which
+wrangler uses, `jazz-tools/backend` runs on WebAssembly instead of the native Node addon.
+
+```ts title="worker.ts"
+import { Hono } from "hono";
+import { createJazz, durableObjects, jazzBackend, routeToJazzBackend } from "jazz-tools/backend";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
+
+export { JazzCore } from "jazz-tools/durable-object";
+
+export const JazzBackend = jazzBackend((env: Env) => {
+  const jazz = createJazz({
+    app,
+    permissions,
+    // The core in this Worker, through its binding.
+    store: durableObjects({ binding: env.JAZZ, secret: env.JAZZ_CORE_SECRET }),
+    // Read your session; return { userId, expiresAt, claims? } for a signed-in user, or null
+    authenticate: async (request) => null,
+  });
+  const routes = new Hono();
+  routes.get("/api/todos", async (c) => c.json(await jazz.db.all(app.todos)));
+  // Requests under /jazz (sync and sign-in) are Jazz's; everything else goes to `fetch`.
+  return { jazz, fetch: routes.fetch };
+});
+
+export default { fetch: routeToJazzBackend };
+```
+
+```jsonc title="wrangler.jsonc"
+{
+  "name": "my-app",
+  "main": "worker.ts",
+  "compatibility_date": "2026-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "JAZZ", "class_name": "JazzCore" },
+      { "name": "JAZZ_BACKEND", "class_name": "JazzBackend" },
+    ],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["JazzCore", "JazzBackend"] }],
+}
+```
+
+Set `JAZZ_CORE_SECRET` as above (`npx wrangler secret put JAZZ_CORE_SECRET`) and deploy. Browsers
+connect to the Worker's own origin, with `serverUrl: "/jazz"`. Static assets (your built client) can
+come from the same Worker: forward only your API and `/jazz` to `routeToJazzBackend`, and the rest to
+wrangler's `assets` binding. The BandChat example's `react-hono-betterauth` app does this, with Better
+Auth on Jazz (`examples/band-chat/apps/react-hono-betterauth`, "Deploy to Cloudflare").
+
+The core and the backend each bring a WebAssembly module, so the Worker needs the Workers Paid plan.
+
+The backend is one Durable Object, and every browser's sync socket passes through it, as every
+request does: like the core, it is one object per app. Neither hibernates its sockets yet, so both
+stay awake (and billed for duration) while any browser is connected.
+
 ## Connect your backend
 
 Put the Worker's values in your backend's environment. They stay server-side; the core secret is
@@ -93,5 +159,6 @@ export const jazz = createJazz({
   calls.
 - **No HTTP-stream fallback** between your backend and the core: they talk over WebSockets.
 - **Sockets keep the object awake** while they are open (no WebSocket hibernation yet).
-- **Your backend runs outside the Worker** (Node, Vercel, your own server). Running `createJazz`
-  inside a Worker comes later.
+- **In a Worker, only `durableObjects()` stores** run: `sqlite()` and `memory()` run their core in
+  the backend's process, which a Worker can't. The Inspector's query explanations aren't available
+  there yet.
