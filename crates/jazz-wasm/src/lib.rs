@@ -32,7 +32,9 @@ use wasm_bindgen_futures::future_to_promise;
 
 // What a backend's `createJazz` needs to run on this build; never in the
 // Durable Object core's build, which is sized for the Workers Free plan.
-#[cfg(not(feature = "durable-object"))]
+#[cfg(all(feature = "backend", feature = "durable-object"))]
+compile_error!("the `backend` and `durable-object` features are separate builds; enable one");
+#[cfg(feature = "backend")]
 mod backend;
 #[cfg(target_arch = "wasm32")]
 mod browser;
@@ -418,7 +420,7 @@ struct Host {
     tick_scheduler: RefCell<Option<js_sys::Function>>,
     /// A thin session's transactions, when this database serves them as
     /// the backend's client (`serveThinTransaction`).
-    #[cfg(not(feature = "durable-object"))]
+    #[cfg(feature = "backend")]
     thin: Rc<RefCell<Option<backend::ThinState>>>,
     /// Told of a write rejected at apply time that no wait claimed.
     mutation_errors: RefCell<Option<js_sys::Function>>,

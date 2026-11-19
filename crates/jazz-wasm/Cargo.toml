@@ -51,6 +51,10 @@ bench-probes = []
 # (`WasmDb.openDurableObject`), and the Jazz core a Durable Object hosts
 # (`DurableObjectCore`, on jazz-server's engine without its native host).
 durable-object = ["dep:jazz-server"]
+# What a backend's `createJazz` needs on this WASM build (`src/backend.rs`:
+# `serveThinTransaction`, `WasmThinRouter`, ...), for the workerd backend
+# (`backend/pkg`). Off by default, so browsers never download it.
+backend = []
 # Test-only checks for the workerd smoke test (`tests/durable-objects`); never in releases.
 durable-object-tests = ["durable-object"]
 # Browser store probes (IndexedDB vs in memory); never in release builds.
