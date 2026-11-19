@@ -1,0 +1,26 @@
+{
+  "name": "jazz-eval-a64-next",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev -p 8300",
+    "build": "next build",
+    "start": "next start -p 8301",
+    "smoke": "node smoke/smoke.mjs"
+  },
+  "dependencies": {
+    "@vercel/functions": "^3.10.0",
+    "@vercel/sandbox": "^3.9.0",
+    "better-auth": "~1.7.25",
+    "jazz-tools": "2.0.0-alpha.64",
+    "next": "16.4.6",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "typescript": "^5.9.0"
+  }
+}
