@@ -23,6 +23,9 @@ export const RELEASE_CANDIDATE_GATE = Object.freeze({
   file: "release-candidate.yml",
   label: "Release candidate gate",
   events: Object.freeze(["workflow_dispatch"]),
+  // A probe-only dispatch (`probe-tag`) runs no gate: release-candidate.yml
+  // names such runs so they never count.
+  excludeTitle: /^Cloud RC probe only\b/,
 });
 
 export const RELEASE_TEST_WORKFLOWS = Object.freeze([
@@ -47,7 +50,8 @@ export function isQualifyingRun(run, workflow, headSha) {
     run.head_sha === headSha &&
     run.status === "completed" &&
     run.conclusion === "success" &&
-    (workflow.events === null || workflow.events.includes(run.event))
+    (workflow.events === null || workflow.events.includes(run.event)) &&
+    !(workflow.excludeTitle && workflow.excludeTitle.test(run.display_title ?? ""))
   );
 }
 

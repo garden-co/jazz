@@ -114,6 +114,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     .map((name) => name.trim())
     .filter(Boolean);
   const runId = await awaitArtifacts({ headSha, list, listArtifacts, required });
-  console.log(runId ? `verifying ${ARTIFACTS_WORKFLOW} run ${runId}` : `no ${ARTIFACTS_WORKFLOW} run of ${headSha}: building here`);
+  console.log(
+    runId
+      ? `verifying ${ARTIFACTS_WORKFLOW} run ${runId}`
+      : `no ${ARTIFACTS_WORKFLOW} run of ${headSha}: building here`,
+  );
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `run_id=${runId}\n`);
 }
