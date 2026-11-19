@@ -976,6 +976,54 @@ pub fn load_client_encrypted(
     ))
 }
 
+/// The current version's encryption declarations from the compiled app
+/// generated bindings embed (JSON of `{ schema, relations }`, the options
+/// they pass to `bindApp`), for a client of app `app_id` in environment
+/// `environment`: what a client that has the bindings but not
+/// `jazz.app.json` builds its encryption hooks from. Checked as
+/// [`load_backend`] checks them. `None` when the current version has no
+/// system tables; one that keeps them without declaring encryption gives
+/// declarations with no table.
+pub fn bound_declarations(
+    bound: &[u8],
+    app_id: crate::tools::AppId,
+    environment: &str,
+) -> Result<Option<crate::tools::public_schema::E2eeDeclarations>, ArtifactError> {
+    let refuse = |message: String| {
+        ArtifactError::new(format!(
+            "the bindings' compiled app: {message}; regenerate them with `npx jazz-tools generate`"
+        ))
+    };
+    let bound: BoundApp =
+        serde_json::from_slice(bound).map_err(|error| refuse(error.to_string()))?;
+    let current = parse_schema_hash(&bound.schema.current).map_err(refuse)?;
+    let schema = bound
+        .schema
+        .schemas
+        .into_iter()
+        .find(|entry| parse_schema_hash(&entry.hash).is_ok_and(|hash| hash == current))
+        .map(|entry| structural(entry.schema))
+        .ok_or_else(|| refuse(format!("no schema {current}, the current one")))?;
+    let encryption = bound.schema.encryption.unwrap_or_default();
+    // The version's own declarations: a version that keeps Jazz's system
+    // tables without declaring encryption is still an encrypted app, with no
+    // declared table (as `load_client_encrypted` returns it).
+    let own = encryption.entries(&current.to_string());
+    if own.is_none() && !has_system_tables(&schema) {
+        return Ok(None);
+    }
+    for (table, entry) in own.into_iter().flatten() {
+        encryption::check_entry(table, entry, &schema)
+            .map_err(|(at, message)| refuse(format!("tables.{table}.encryption{at}: {message}")))?;
+    }
+    Ok(Some(crate::tools::public_schema::E2eeDeclarations {
+        app_id,
+        environment: environment.to_owned(),
+        settings: encryption.settings.clone(),
+        tables: own.cloned().unwrap_or_default(),
+    }))
+}
+
 /// The relations `jazz.app.json` declares, resolved against its current
 /// schema ([`relations::resolve_relations`]), and nothing else checked: what
 /// a client that follows relations itself (the FFI) needs at open.

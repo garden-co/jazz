@@ -13,6 +13,7 @@ export const {
   checkClientMigrations,
   compileApp,
   detachStore,
+  EncryptionRuntime,
   generate,
   generateForDir,
   JazzCore,

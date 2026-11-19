@@ -59,7 +59,7 @@ fn failed(error: ContentError) -> Error {
     Error::new(ErrorCode::Protocol, format!("encryption failed: {error}"))
 }
 
-fn unsupported_query(what: &str, table: &str) -> Error {
+pub(crate) fn unsupported_query(what: &str, table: &str) -> Error {
     Error::new(
         ErrorCode::Query,
         format!("Reading encrypted table `{table}` with {what} is not supported yet"),

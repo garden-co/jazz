@@ -103,7 +103,7 @@ describe("createJazz takes jazz.permissions.json in every form a project may hol
   });
 });
 
-describe("createJazz refuses apps that declare end-to-end encryption", () => {
+describe("createJazz validates and opens encrypted apps with keyless hooks", () => {
   // Projects are spaces; a task's title is encrypted in its project's space,
   // and its notes are being decrypted into `notesText`.
   const encrypted: TestAppFile = {
@@ -140,27 +140,63 @@ describe("createJazz refuses apps that declare end-to-end encryption", () => {
     },
   } as never;
 
-  function startEncrypted(store: ReturnType<typeof sqlite> | ReturnType<typeof remote>) {
+  function startEncrypted(
+    store: ReturnType<typeof memory> | ReturnType<typeof sqlite> | ReturnType<typeof remote>,
+    confirmDecrypt?: string[],
+    permissionsFile: unknown = permissions,
+  ) {
     const jazz = createJazz({
       app: testApp(encrypted),
-      permissions,
+      permissions: permissionsFile as never,
       store,
-      confirmDecrypt: ["tasks.notes"],
+      confirmDecrypt,
     });
     cleanups.push(() => jazz.close());
     return jazz.ready();
   }
 
-  it("leaves the SQLite store untouched even when the decrypt conversion is confirmed", async () => {
+  it("opens a confirmed decrypt conversion with a keyless backend", async () => {
     await inProject();
-    await expect(startEncrypted(sqlite({ path: join(process.cwd(), "store") }))).rejects.toThrow(
-      /declares end-to-end encryption/,
+    const jazz = await startEncrypted(sqlite({ path: join(process.cwd(), "store") }), [
+      "tasks.notes",
+    ]);
+    const app = testApp(encrypted);
+    expect(() =>
+      jazz.db.insert(app.tasks, {
+        projectId: crypto.randomUUID(),
+        title: "typed by the backend",
+        notes: "x",
+      } as never),
+    ).toThrow(
+      "the backend holds no encryption keys; encrypted columns are written by clients (`tasks.notes`)",
     );
+    expect(await jazz.db.all(app.tasks)).toEqual([]);
+  });
+
+  it("refuses, naming the column, without confirmDecrypt", async () => {
+    await inProject();
+    await expect(startEncrypted(memory())).rejects.toThrow(/decrypting tasks\.notes/);
+  });
+
+  it("refuses when confirmDecrypt names only another column", async () => {
+    await inProject();
+    await expect(startEncrypted(memory(), ["tasks.title"])).rejects.toThrow(
+      /decrypting tasks\.notes/,
+    );
+  });
+
+  it("leaves the SQLite store untouched when the app has invalid permissions", async () => {
+    await inProject();
+    await expect(
+      startEncrypted(sqlite({ path: join(process.cwd(), "store") }), ["tasks.notes"], {
+        tables: {},
+      }),
+    ).rejects.toThrow(/permissions.*must be the app's jazz\.permissions\.json/);
     expect(await readdir(process.cwd())).toEqual([]);
   });
 
-  it("refuses before sending a deployment request to a remote store", async () => {
-    await inProject();
+  it("rejects stale bindings before sending a deployment request to a remote store", async () => {
+    await inProject(notes);
     const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected request"));
     try {
       const store = remote({
@@ -168,7 +204,7 @@ describe("createJazz refuses apps that declare end-to-end encryption", () => {
         appId: "00000000-0000-4000-8000-000000000001",
         secret: "test-secret",
       });
-      await expect(startEncrypted(store)).rejects.toThrow(/declares end-to-end encryption/);
+      await expect(startEncrypted(store, ["tasks.notes"])).rejects.toThrow(/bindings out of date/);
       expect(fetch).not.toHaveBeenCalled();
     } finally {
       fetch.mockRestore();
