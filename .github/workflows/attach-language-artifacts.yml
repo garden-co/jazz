@@ -81,6 +81,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # Fail closed: only main, release and merge-group/** restore caches an
+  # untrusted ref could have written (#supply-chain, 2026-11-19).
+  JAZZ_TRUSTED_CACHE: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/heads/merge-group/')) && 'true' || 'false' }}
   CACHE_SCOPE_REPOSITORY_ID: ${{ github.repository_id }}
   # A pull_request run has no inputs: a dry run under a placeholder version.
   VERSION: ${{ inputs.version || '2.0.0-alpha.0' }}
@@ -174,6 +177,7 @@ jobs:
 
       - uses: ./.github/actions/setup-build
         with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           setup-node: "false"
           rust-cache: "false"
           rust-targets: ${{ matrix.target }}
@@ -302,6 +306,7 @@ jobs:
       # could write (and sccache never hits a fat-LTO build anyway).
       - uses: ./.github/actions/setup-build
         with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           setup-node: "false"
           rust-cache: "false"
           rust-targets: ${{ matrix.target }}
@@ -310,7 +315,8 @@ jobs:
       # directories are named by version), not refetched every run. Only
       # those: the SDK and NDK stay out of the cache. A pull_request run's
       # cache is scoped to its PR, never read by a release run.
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      - if: env.JAZZ_TRUSTED_CACHE == 'true'
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cache/jazz-kotlin/jdk-*
@@ -355,7 +361,8 @@ jobs:
       # directories are named by version), not refetched every run. Only
       # those: the SDK and NDK stay out of the cache. A pull_request run's
       # cache is scoped to its PR, never read by a release run.
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      - if: env.JAZZ_TRUSTED_CACHE == 'true'
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cache/jazz-kotlin/jdk-*
@@ -405,6 +412,7 @@ jobs:
       - uses: ./.github/actions/setup-build
         if: env.KOTLIN_ANDROID_JNI_LIBS == ''
         with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           setup-node: "false"
           rust-cache: "false"
 
@@ -448,7 +456,8 @@ jobs:
       # directories are named by version), not refetched every run. Only
       # those: the SDK and NDK stay out of the cache. A pull_request run's
       # cache is scoped to its PR, never read by a release run.
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      - if: env.JAZZ_TRUSTED_CACHE == 'true'
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cache/jazz-kotlin/jdk-*
@@ -498,6 +507,7 @@ jobs:
       - uses: ./.github/actions/setup-build
         if: env.KOTLIN_ANDROID_JNI_LIBS == ''
         with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           setup-node: "false"
           rust-cache: "false"
 

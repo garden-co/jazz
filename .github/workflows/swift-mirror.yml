@@ -78,6 +78,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  # Fail closed: only main, release and merge-group/** restore caches an
+  # untrusted ref could have written (#supply-chain, 2026-11-19).
+  JAZZ_TRUSTED_CACHE: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/heads/merge-group/')) && 'true' || 'false' }}
   REF: ${{ inputs.ref || github.sha }}
   VERSION: ${{ inputs.version || format('0.0.0-dry-run.{0}', github.run_number) }}
 
@@ -153,6 +156,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-build
         with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           setup-node: "false"
           rust-cache: "false"
           rust-targets: ${{ matrix.target }}
@@ -164,6 +168,7 @@ jobs:
         id: sccache
         uses: ./.github/actions/apple-sccache
         with:
+          restore-cache: ${{ env.JAZZ_TRUSTED_CACHE }}
           key: swift-${{ matrix.target }}
           min-os: ${{ matrix.min }}
           writer-role: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}

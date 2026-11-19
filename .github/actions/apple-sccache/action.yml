@@ -21,6 +21,10 @@ description: |
   not 'true'.
 
 inputs:
+  restore-cache:
+    description: "'false' never restores the Actions-cache fallback (an untrusted ref could have written it); the S3 tier with the reader role stays."
+    required: false
+    default: "true"
   key:
     description: "Cache name: the job and target, e.g. jazz-rn-aarch64-apple-ios."
     required: true
@@ -82,6 +86,7 @@ runs:
       uses: ./.github/actions/install-rust-tool
       with:
         tool: sccache@0.15.0
+        restore-cache: ${{ inputs.restore-cache }}
 
     - name: Choose the sccache tier
       id: tier
@@ -158,7 +163,7 @@ runs:
 
     - name: Restore the disk cache (no S3 tier)
       id: restore
-      if: steps.s3.outputs.enabled != 'true'
+      if: steps.s3.outputs.enabled != 'true' && inputs.restore-cache == 'true'
       uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
       with:
         path: ${{ runner.temp }}/sccache
