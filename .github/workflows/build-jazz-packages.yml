@@ -765,6 +765,18 @@ jobs:
         with:
           rust-toolchain: ""
 
+      # pod install's downloads: React Native's prebuilt tarballs (which
+      # pod-install-retrying.sh copies in and out) and CocoaPods' own caches.
+      # Its version is pinned by the lockfile; an older entry is harmless,
+      # since the tarballs are named by version.
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/Library/Caches/CocoaPods
+            ~/.cocoapods/repos
+            ${{ runner.temp }}/rn-pod-artifacts
+          key: rn-ios-pods-macos-15-v3-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: rn-ios-pods-macos-15-v3-
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: pkg-jazz-rn-tarball
@@ -798,7 +810,7 @@ jobs:
           JAZZ_RN_REQUIRE_RUBY: "1"
 
       - name: Install the packed native pod
-        run: pod install
+        run: '"${GITHUB_WORKSPACE}/dev/scripts/pod-install-retrying.sh" "${RUNNER_TEMP}/rn-pod-artifacts"'
         working-directory: ${{ env.JAZZ_RN_CONSUMER_FIXTURE }}/ios
 
       - name: Link the packed relay through an iOS simulator application
