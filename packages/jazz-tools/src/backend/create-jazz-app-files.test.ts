@@ -1,9 +1,9 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { testApp, type TestAppFile } from "../testing/test-app.js";
-import { createJazz, memory } from "./create-jazz.js";
+import { createJazz, memory, remote, sqlite } from "./create-jazz.js";
 
 const notes: TestAppFile = { format: 1, tables: { notes: { columns: { body: "string" } } } };
 const notesWithDone: TestAppFile = {
@@ -100,5 +100,78 @@ describe("createJazz takes jazz.permissions.json in every form a project may hol
     await expect(startWith({ tables })).rejects.toThrow(
       /`permissions` must be the app's jazz\.permissions\.json/,
     );
+  });
+});
+
+describe("createJazz refuses apps that declare end-to-end encryption", () => {
+  // Projects are spaces; a task's title is encrypted in its project's space,
+  // and its notes are being decrypted into `notesText`.
+  const encrypted: TestAppFile = {
+    format: 1,
+    tables: {
+      projects: { columns: { name: "string", ownerId: "uuid" } },
+      tasks: {
+        columns: {
+          projectId: "uuid",
+          title: "bytes",
+          notes: "bytes",
+          notesText: "string?",
+        },
+        relations: { project: { rel: "projects", column: "projectId" } },
+        encryption: {
+          space: "projectId",
+          scope: "projects",
+          columns: { title: "string", notes: { type: "string", to: "notesText" } },
+        },
+      },
+    },
+  };
+  const members =
+    "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.id, accountId = session.user)";
+  const permissions = {
+    $schema: "https://jazz.tools/schemas/jazz.permissions.v1.json",
+    tables: {
+      projects: {
+        read: members,
+        insert: "$createdBy.account = session.user",
+        update: "ownerId = session.user",
+      },
+      tasks: { read: "allowedTo.read(project)", insert: "allowedTo.update(project)" },
+    },
+  } as never;
+
+  function startEncrypted(store: ReturnType<typeof sqlite> | ReturnType<typeof remote>) {
+    const jazz = createJazz({
+      app: testApp(encrypted),
+      permissions,
+      store,
+      confirmDecrypt: ["tasks.notes"],
+    });
+    cleanups.push(() => jazz.close());
+    return jazz.ready();
+  }
+
+  it("leaves the SQLite store untouched even when the decrypt conversion is confirmed", async () => {
+    await inProject();
+    await expect(startEncrypted(sqlite({ path: join(process.cwd(), "store") }))).rejects.toThrow(
+      /declares end-to-end encryption/,
+    );
+    expect(await readdir(process.cwd())).toEqual([]);
+  });
+
+  it("refuses before sending a deployment request to a remote store", async () => {
+    await inProject();
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected request"));
+    try {
+      const store = remote({
+        url: "http://127.0.0.1:1",
+        appId: "00000000-0000-4000-8000-000000000001",
+        secret: "test-secret",
+      });
+      await expect(startEncrypted(store)).rejects.toThrow(/declares end-to-end encryption/);
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      fetch.mockRestore();
+    }
   });
 });

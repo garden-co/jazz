@@ -2024,6 +2024,15 @@ impl Error {
 }
 
 impl Db {
+    /// Open an in-memory database on `config`.
+    ///
+    /// This is the low-level open that servers, relays and tests use, and it
+    /// does not refuse an app whose schema holds Jazz's system tables (an
+    /// encrypted app): a server stores and serves encrypted cells as they
+    /// are. Only the client open paths refuse such a schema until the
+    /// client's encryption hooks are installed
+    /// ([`crate::binding_host::refuse_encrypted_app`]); the same holds for
+    /// the other `open_*` constructors.
     pub async fn open(config: DbConfig) -> Result<Self, Error> {
         #[cfg(not(feature = "managed-storage-emulation"))]
         let conn = Storage::open_in_memory().map_err(storage)?;
@@ -4242,6 +4251,20 @@ impl Db {
         &self,
         change: crate::catalogue::CatalogueChange,
     ) -> Result<(), Error> {
+        self.apply_catalogue_keeping(change, &[]).await
+    }
+
+    /// [`Self::apply_catalogue`] that also keeps `kept` (host table, key,
+    /// value) in the same transaction: each is written unless its key holds
+    /// a value already, and a key that holds a different value fails the
+    /// whole change (code `Schema`), leaving the file and this database as
+    /// they were. The transaction is the one this call owns and ends before
+    /// it returns.
+    pub async fn apply_catalogue_keeping(
+        &self,
+        change: crate::catalogue::CatalogueChange,
+        kept: &[(crate::host::HostTable, Vec<u8>, Vec<u8>)],
+    ) -> Result<(), Error> {
         let saved = {
             let inner = self.inner();
             (
@@ -4257,6 +4280,16 @@ impl Db {
             crate::catalogue::put(conn, &change.put)?;
             for (schema, lenses) in change.admit {
                 self.admit(schema, &lenses)?;
+            }
+            for (table, key, value) in kept {
+                if let Some(existing) = crate::host::put_if_absent(conn, *table, key, value)?
+                    && existing != *value
+                {
+                    return Err(Error::new(
+                        ErrorCode::Schema,
+                        "this change keeps a value that conflicts with the one kept before",
+                    ));
+                }
             }
             Ok(())
         });

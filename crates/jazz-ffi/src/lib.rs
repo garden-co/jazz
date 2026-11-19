@@ -118,6 +118,13 @@ impl JazzHandle {
         self.core.surface(self.core.bundle())
     }
 
+    /// The catalogue identity of a table, as UUID text: what a member row's
+    /// `scopeId` holds for its space table. Fails until the client has seen
+    /// the server's catalogue for this schema version.
+    pub fn table_identity(&self, table: String) -> Result<String> {
+        self.core.surface(self.core.table_identity(&table))
+    }
+
     /// The account id of the user this handle acts as (an end user, a
     /// scoped backend client, a `for_user` handle); `None` for a local app
     /// or a trusted backend client (the system).

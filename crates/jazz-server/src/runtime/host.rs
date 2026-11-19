@@ -1611,8 +1611,21 @@ impl ServerRuntimeHandle {
         change: CatalogueChange,
         supersedes: Option<jazz::catalogue::BundleId>,
     ) -> Result<(), CatalogueApplyError> {
+        self.apply_catalogue_keeping(change, supersedes, Vec::new())
+            .await
+    }
+
+    /// [`Self::apply_catalogue`] that also keeps `kept` host-table values
+    /// (table, key, value) in the same transaction: a key holding a different
+    /// value fails the whole change ([`Db::apply_catalogue_keeping`]).
+    pub async fn apply_catalogue_keeping(
+        &self,
+        change: CatalogueChange,
+        supersedes: Option<jazz::catalogue::BundleId>,
+        kept: Vec<(jazz::host::HostTable, Vec<u8>, Vec<u8>)>,
+    ) -> Result<(), CatalogueApplyError> {
         let (ended, result) = self
-            .run(move |owner| Ok(owner.apply_catalogue(change, supersedes)))
+            .run(move |owner| Ok(owner.apply_catalogue_keeping(change, supersedes, &kept)))
             .await
             .unwrap_or_else(|error| (0, Err(CatalogueApplyError::Failed(error))));
         // Sessions that ended are gone even when a later step failed: the

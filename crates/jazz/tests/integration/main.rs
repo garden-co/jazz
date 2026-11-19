@@ -29,6 +29,8 @@ mod branch_views;
 mod bundle_permissions;
 #[path = "../callback_transaction_cancellation.rs"]
 mod callback_transaction_cancellation;
+#[path = "../catalogue_keeping.rs"]
+mod catalogue_keeping;
 #[path = "../catalogue_rows.rs"]
 mod catalogue_rows;
 #[path = "../catalogue_unsupported_versions.rs"]

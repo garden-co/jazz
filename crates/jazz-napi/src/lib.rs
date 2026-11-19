@@ -2511,6 +2511,13 @@ impl NapiDb {
         Ok(())
     }
 
+    /// The catalogue identity of a table, as UUID text: what a member row's
+    /// `scopeId` holds for its space table.
+    #[napi(js_name = "tableIdentity")]
+    pub fn table_identity(&self, table: String) -> js::Result<String> {
+        Ok(self.binding()?.table_identity(&table).map_err(host_error)?)
+    }
+
     /// Exact local state for the write-merge bridge: the row as stored,
     /// deleted or not. Write authorization remains at the mutation boundary;
     /// this is not a query.

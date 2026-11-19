@@ -1189,9 +1189,20 @@ impl Owner {
         change: CatalogueChange,
         supersedes: Option<jazz::catalogue::BundleId>,
     ) -> (usize, Result<(), CatalogueApplyError>) {
+        self.apply_catalogue_keeping(change, supersedes, &[])
+    }
+
+    /// [`Self::apply_catalogue`], keeping `kept` host-table values in the
+    /// same transaction (see [`Db::apply_catalogue_keeping`]).
+    fn apply_catalogue_keeping(
+        &mut self,
+        change: CatalogueChange,
+        supersedes: Option<jazz::catalogue::BundleId>,
+        kept: &[(jazz::host::HostTable, Vec<u8>, Vec<u8>)],
+    ) -> (usize, Result<(), CatalogueApplyError>) {
         let mut ended = 0;
         let result = (|| {
-            block_on(self.db.apply_catalogue(change)).map_err(|error| {
+            block_on(self.db.apply_catalogue_keeping(change, kept)).map_err(|error| {
                 if error.code == jazz::db::ErrorCode::Storage {
                     CatalogueApplyError::Failed(error.to_string())
                 } else {
@@ -3376,6 +3387,7 @@ mod tests {
                         plain: PlainType {
                             column_type: ColumnType::Text,
                             nullable: false,
+                            default: None,
                         },
                         sealed_type: None,
                         from: None,

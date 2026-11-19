@@ -1005,7 +1005,7 @@ impl RelayWorker {
             std::fs::create_dir_all(parent)
                 .map_err(|error| RelayError::Storage(error.to_string()))?;
         }
-        let db = block_on(Db::open_at(
+        let db = block_on(binding_host::open_file(
             relay_db_config(config.schema.clone(), config.identity, &config.migrations),
             &config.sqlite_path,
             FileOptions::default(),
@@ -1117,7 +1117,7 @@ impl RelayWorker {
             .db
             .check_serves(identity.author)
             .map_err(|error| RelayError::Host(error.into()))?;
-        let db = block_on(Db::open(relay_db_config(
+        let db = block_on(binding_host::open_memory(relay_db_config(
             self.schema.clone(),
             identity,
             &self.migrations,
@@ -1365,7 +1365,7 @@ impl RelayWorker {
         }
         block_on(self.persistent.close()).map_err(|error| error.to_string())?;
         delete_store_files(&self.sqlite_path).map_err(|error| error.to_string())?;
-        let db = block_on(Db::open_at(
+        let db = block_on(binding_host::open_file(
             relay_db_config(self.schema.clone(), self.identity, &self.migrations),
             &self.sqlite_path,
             FileOptions::default(),

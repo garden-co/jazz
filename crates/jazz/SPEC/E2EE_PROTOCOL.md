@@ -721,7 +721,10 @@ accountId = session.user)` (`table_id` is T's catalogue identity, [core
 
 An encrypted table's `encryption` entry names its space: `space` is the
 column holding the space row's ID (`id` for a table whose rows are their own
-spaces), and `scope` is the space table. Nothing else is declared in
+spaces), and `scope` is the space table. An encrypted column may declare a
+plaintext `default` (§4.1), which is stored and deployed in plain text and
+visible to the server, so it must not be secret; changing it later takes a
+re-encrypt into a new column. Nothing else is declared in
 `jazz.app.json`. In `jazz.permissions.json`, the space table's read rule
 comes from the members table (R13), and its update rule decides who changes
 members, creates and rotates:
@@ -2253,7 +2256,9 @@ meanings and are never reported as malformed:
 
 - The **empty byte string** means "never written": the row predates the
   column, which a lens added with the empty default. The reader returns the
-  column's declared plaintext default, or null for an optional column. When
+  column's declared plaintext default (`{ "type": …, "default": … }` in the
+  encryption entry; it is stored and deployed in plain text, visible to the
+  server, so it must not be secret), or null for an optional column. When
   the empty value is stored in the row (rather than supplied by the lens for
   a row that predates the column), any writer Jazz permits could have put it
   there, so the row is returned with the default and the cell is reported

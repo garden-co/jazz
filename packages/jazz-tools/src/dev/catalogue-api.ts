@@ -251,6 +251,10 @@ export interface DeploymentBody {
   migrations: Array<{ fromHash: string; toHash: string; forward: unknown[] }>;
   permissions: unknown;
   allowDroppingHistory?: boolean;
+  /** The app's encryption declarations, as Jazz's Rust loader builds them. */
+  encryption?: unknown;
+  /** Decrypt conversions the deployer confirms, as `table.column`. */
+  confirmDecrypt?: string[];
 }
 
 export async function publishDeployment(

@@ -39,7 +39,9 @@ use jazz::tools::deployment::artifact::system_tables::{
 use jazz::tools::deployment::{
     DeploymentCatalogue, DeploymentError, DeploymentRequest, prepare_encrypted_deployment,
 };
-use jazz::tools::public_schema::{EncryptedColumn, EncryptionEntry, PlainType, SweepBy};
+use jazz::tools::public_schema::{
+    EncryptedColumn, EncryptionEntry, OperationPolicy, PlainType, SweepBy,
+};
 use jazz::tools::{
     CmpOp, ColumnType, OpenTransactionId, PolicyExpr, PolicyValue, Schema, SchemaBuilder,
     SchemaHash, TableName, TablePolicies, TableSchemaBuilder,
@@ -149,6 +151,7 @@ fn entries() -> BTreeMap<String, EncryptionEntry> {
                         plain: PlainType {
                             column_type: ColumnType::Text,
                             nullable: false,
+                            default: None,
                         },
                         sealed_type: None,
                         from: None,
@@ -1150,11 +1153,29 @@ fn deployment_accepts_only_jazzs_own_system_tables() {
         schema
     };
     let fragment = structural(with_e2ee_fragment(&app()));
-    deploy(&fragment, app_permissions()).expect("the encrypted app deploys");
+    let warnings = deploy(&fragment, app_permissions()).expect("the encrypted app deploys");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].contains("space table boards"),
+        "only the boards still read without members: {warnings:?}"
+    );
     deploy_declaring(&fragment, app_permissions(), false)
         .expect_err("system tables in a version that declares no encryption");
     deploy_declaring(&structural(app()), app_permissions(), true)
         .expect_err("declarations for a version without the system tables");
+
+    let mut wrong_rule = app_permissions();
+    wrong_rule
+        .get_mut(&TableName::from("projects"))
+        .unwrap()
+        .select = OperationPolicy::using(owner_is_me());
+    let error = deploy(&fragment, wrong_rule).expect_err("a space table read without members");
+    assert!(
+        error
+            .to_string()
+            .contains("space table projects: its read rule must come from the members table"),
+        "{error}"
+    );
 
     let mut tampered = fragment.clone();
     tampered

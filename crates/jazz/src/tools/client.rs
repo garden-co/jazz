@@ -926,6 +926,8 @@ impl JazzClient {
         let default_session = default_session_from_context(&context);
         let core_schema = crate::schema::JazzSchema::new(&context.schema)
             .map_err(|error| JazzError::Schema(error.to_string()))?;
+        crate::binding_host::refuse_encrypted_app(&core_schema)
+            .map_err(|error| JazzError::Schema(error.to_string()))?;
         let identity = core_identity(&context, client_id(&context)?, default_session.as_ref())?;
         let mut config = DbConfig::new(core_schema, identity);
         config.migrations = context.migrations.clone();
@@ -2137,6 +2139,20 @@ impl JazzClient {
     /// Get the current schema.
     pub fn schema(&self) -> Result<Schema> {
         Ok(self.shared.schema.clone())
+    }
+
+    /// The catalogue identity of table `table`: the `uuid` the authority
+    /// mints for it, the same for every client and for the table's whole
+    /// life. A member row names its space table by it (`scopeId`, E2EE
+    /// protocol §1.3). Fails until the client has seen the authority's
+    /// catalogue with this schema version in it (code `NotObserved`), and
+    /// for a table the schema doesn't have.
+    pub fn table_identity(&self, table: &str) -> Result<ObjectId> {
+        match self.db()?.table_identity(table) {
+            Ok(Some(identity)) => Ok(ObjectId::from_uuid(identity.0)),
+            Ok(None) => Err(JazzError::Schema(format!("no table {table}"))),
+            Err(error) => Err(JazzError::Query(error.to_string())),
+        }
     }
 
     /// Present a new bearer token upstream. A live link reconnects with it;

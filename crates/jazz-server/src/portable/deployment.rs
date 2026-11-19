@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use http::StatusCode;
 use jazz::catalogue::{CatalogueChange, CatalogueRows};
 use jazz::schema::JazzSchema;
-use jazz::tools::deployment::artifact::DeclaredEncryption;
+use jazz::tools::deployment::artifact::{DeclaredEncryption, encryption, system_tables};
 use jazz::tools::deployment::published::{PublishMigrationRequest, lower_migration};
 use jazz::tools::deployment::{self, DeploymentError, PreparedDeployment};
 use jazz::tools::public_schema::{Schema, SchemaHash, TableName, TablePolicies};
@@ -40,6 +40,11 @@ pub struct DeployBody {
     pub request: DeployRequest,
     #[serde(default)]
     pub encryption: Option<DeclaredEncryption>,
+    /// Decrypt conversions the deployer confirms, as `table.column`: the
+    /// server and every replica then hold their plaintext (migrations
+    /// §4.2).
+    #[serde(default)]
+    pub confirm_decrypt: Vec<String>,
 }
 
 impl From<DeployRequest> for DeployBody {
@@ -47,6 +52,7 @@ impl From<DeployRequest> for DeployBody {
         Self {
             request,
             encryption: None,
+            confirm_decrypt: Vec::new(),
         }
     }
 }
@@ -169,35 +175,43 @@ fn hash(text: &str) -> Result<SchemaHash, DeployError> {
 pub struct Deployment {
     pub prepared: PreparedDeployment,
     pub staged: StagedDeployment,
+    /// Initial encryption declarations to persist when the deployment
+    /// commits, in [`encryption::STORED_DECLARATIONS_V1`] form. An empty set
+    /// records a version with system tables that declared no encryption.
+    pub first_declared: Vec<(SchemaHash, Vec<u8>)>,
 }
 
 /// Validate `request` against `index` and stage what it publishes at
 /// `now` (Unix ms). A host commits the staged rows (with
 /// [`Deployment::catalogue_change`]) only while its catalogue still reads
 /// [`StagedDeployment::expected`]; with `staged.response.changed` false
-/// there is nothing to commit. A request with no declarations is refused
-/// if a schema holds Jazz's system tables.
+/// there is nothing to commit. A host that keeps encryption declarations
+/// prepares with [`prepare_encrypted`] instead.
 pub fn prepare(
     index: &CatalogueIndex,
     request: DeployRequest,
     now: u64,
 ) -> Result<Deployment, DeployError> {
-    prepare_encrypted(index, request.into(), now)
+    prepare_encrypted(index, request.into(), now, |_| Ok(None))
 }
 
-/// [`prepare`] with the app's encryption declarations: each schema has all
-/// of Jazz's system tables exactly as Jazz defines them or none, a version
-/// has them if and only if it declares encryption, the app's permissions
-/// name none of them, and Jazz derives the system tables' policies into the
-/// bundle.
+/// [`prepare`] with the app's encryption declarations: each version that
+/// declares encryption must carry exactly Jazz's system tables, every
+/// migration is checked against both its versions' declarations, the
+/// target's space tables must take their read rule from the members table,
+/// and Jazz derives the system tables' policies into the bundle. The staged
+/// response carries the deploy's warnings. `kept` reads the declarations a
+/// version was first deployed with, as the host keeps them.
 pub fn prepare_encrypted(
     index: &CatalogueIndex,
     body: DeployBody,
     now: u64,
+    kept: impl Fn(&SchemaHash) -> Result<Option<Vec<u8>>, String>,
 ) -> Result<Deployment, DeployError> {
     let DeployBody {
         request,
         encryption: declared,
+        confirm_decrypt,
     } = body;
     let declared = declared.unwrap_or_default();
     let stored = index.deployment_catalogue();
@@ -212,6 +226,87 @@ pub fn prepare_encrypted(
         .map(|schema| (SchemaHash::compute(schema), schema))
         .chain(schemas.iter().map(|(hash, schema)| (*hash, schema)))
         .collect::<HashMap<_, _>>();
+    // The declarations every version this deployment touches is judged by:
+    // the target, both ends of every migration, and every version it
+    // submits or declares. A version deployed before keeps the
+    // declarations it was deployed with: the body must repeat them, or
+    // change them only as a migration could without a conversion; it
+    // never decides them alone.
+    let target = hash(&request.target_schema_hash)?;
+    let mut touched = vec![target];
+    for migration in &request.migrations {
+        touched.push(hash(&migration.from_hash)?);
+        touched.push(hash(&migration.to_hash)?);
+    }
+    touched.extend(schemas.iter().map(|(hash, _)| *hash));
+    for hex in declared.versions.keys() {
+        touched.push(hash(hex)?);
+    }
+    touched.sort_by_key(|hash| hash.0);
+    touched.dedup();
+    let mut first_declared = Vec::new();
+    let empty = encryption::Entries::new();
+    for version in touched {
+        let hex = version.to_string();
+        let given = declared.entries(&hex);
+        let stored = kept(&version)
+            .map_err(DeployError::internal)?
+            .map(|bytes| encryption::decode_stored(&bytes))
+            .transpose()
+            .map_err(DeployError::internal)?;
+        let refused = |reason: String| {
+            DeployError::from(DeploymentError::InvalidSchema {
+                schema: version,
+                reason,
+            })
+        };
+        let has_system_tables = all_schemas.get(&version).is_some_and(|schema| {
+            schema
+                .keys()
+                .any(|name| system_tables::is_system_table(name.as_str()))
+        });
+        // Older hosts left no record when a deployed version declared nothing.
+        // A published schema identifies those deployments. An unpublished
+        // genesis schema can also be known to the catalogue, including on a
+        // Durable Object's scratch store before it commits its first deploy.
+        let previous = stored.as_ref().or_else(|| {
+            (has_system_tables && index.schema_published_at(&version).is_some()).then_some(&empty)
+        });
+        match (previous, given) {
+            (Some(stored), None) if !stored.is_empty() => {
+                return Err(refused(
+                    "this schema version was deployed with encryption declarations, which the \
+                     deployment leaves out; send them (`encryption`) as the app's files have them"
+                        .to_owned(),
+                ));
+            }
+            (Some(stored), Some(given)) => {
+                let schema = all_schemas
+                    .get(&version)
+                    .ok_or(DeploymentError::MissingSchema { schema: version })?;
+                encryption::check_redeclaration(schema, stored, given).map_err(refused)?;
+            }
+            _ => {}
+        }
+        if stored.is_none() && (has_system_tables || given.is_some()) {
+            let initial = previous.or(given).unwrap_or(&empty);
+            first_declared.push((
+                version,
+                encryption::encode_stored(initial).map_err(DeployError::internal)?,
+            ));
+        }
+        if let Some(given) = given
+            && let Some(unconfirmed) = encryption::new_decrypts(previous, given)
+                .into_iter()
+                .find(|column| !confirm_decrypt.contains(column))
+        {
+            return Err(DeployError::invalid(format!(
+                "decrypting {unconfirmed} puts its plaintext on the server and every replica; \
+                 confirm it with `confirmDecrypt: [\"{unconfirmed}\"]` (`confirmDecrypt` \
+                 on `createJazz`, `confirm_decrypt` on the Rust backend)"
+            )));
+        }
+    }
     let migrations = request
         .migrations
         .into_iter()
@@ -224,13 +319,22 @@ pub fn prepare_encrypted(
             let target = all_schemas
                 .get(&to)
                 .ok_or(DeploymentError::MissingSchema { schema: to })?;
+            // The declarations of both versions, before the lens is lowered.
+            encryption::check_transition(
+                (source, declared.entries(&migration.from_hash)),
+                (target, declared.entries(&migration.to_hash)),
+                &migration,
+            )
+            .map_err(|reason| {
+                DeployError::from(DeploymentError::InvalidMigration { from, to, reason })
+            })?;
             lower_migration(migration, source, target).map_err(DeployError::invalid)
         })
         .collect::<Result<Vec<_>, DeployError>>()?;
-    let (prepared, _warnings) = deployment::prepare_encrypted_deployment(
+    let (prepared, warnings) = deployment::prepare_encrypted_deployment(
         &stored,
         deployment::DeploymentRequest {
-            target_schema_hash: hash(&request.target_schema_hash)?,
+            target_schema_hash: target,
             schemas,
             migrations,
             permissions: request.permissions,
@@ -238,10 +342,15 @@ pub fn prepare_encrypted(
         },
         &declared,
     )?;
-    let staged = index
+    let mut staged = index
         .stage_deployment(&prepared, now)
         .map_err(|error| DeployError::invalid(staging_error(error)))?;
-    Ok(Deployment { prepared, staged })
+    staged.response.warnings = warnings;
+    Ok(Deployment {
+        prepared,
+        staged,
+        first_declared,
+    })
 }
 
 /// How a staging failure reads, as the native catalogue's write error

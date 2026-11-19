@@ -18,12 +18,28 @@ use jazz::tools::public_schema::{SchemaHash, TableName};
 #[cfg(test)]
 use std::collections::HashMap;
 
+/// The host table the server keeps each deployed schema version's
+/// encryption declarations in, keyed by the version's schema hash, in the
+/// form [`jazz::tools::deployment::artifact::encryption::STORED_DECLARATIONS_V1`]:
+/// a later deployment of the version may not change them in a way that
+/// breaks its sealed cells (migrations §3.1), even though the schema is
+/// unchanged.
+pub(crate) const DECLARATIONS: jazz::host::HostTable =
+    jazz::host::HostTable::new("e2ee_declarations");
+
 /// Validate and apply a deployment, with the app's encryption declarations
-/// when it has them (see [`portable::prepare_encrypted`]).
+/// when it has them (see [`portable::prepare_encrypted`]). The response
+/// carries the deploy's warnings.
 pub(crate) async fn deploy_body(
     state: Arc<ServerState>,
     body: DeployBody,
 ) -> Result<DeploymentResponse, DeployError> {
+    let kept = state
+        .store
+        .as_ref()
+        .map(|store| store.kv(DECLARATIONS))
+        .transpose()
+        .map_err(DeployError::internal)?;
     // This guard belongs to the detached task, so shutdown also waits when
     // the HTTP client disconnects while deployment is still committing.
     let _request = state
@@ -43,8 +59,23 @@ pub(crate) async fn deploy_body(
         .catalogue_store
         .index()
         .map_err(DeployError::internal)?;
-    let deployment =
-        portable::prepare_encrypted(&index, body, super::catalogue::unix_timestamp_millis())?;
+    // The kept declarations, read once on the store's own thread (a read on
+    // another connection fails as locked on a memory store whose connection
+    // is inside a write): the checks see one moment of the table.
+    let kept_now: std::collections::HashMap<Vec<u8>, Vec<u8>> = match &kept {
+        Some(kept) => kept
+            .all_on_store()
+            .map_err(DeployError::internal)?
+            .into_iter()
+            .collect(),
+        None => Default::default(),
+    };
+    let deployment = portable::prepare_encrypted(
+        &index,
+        body,
+        super::catalogue::unix_timestamp_millis(),
+        |version| Ok(kept_now.get(version.0.as_slice()).cloned()),
+    )?;
     let staged = &deployment.staged;
     // An encrypted app needs the account registry its checks read, as when
     // a runtime opens (`Owner::open`): a deployment that brings one to a
@@ -75,6 +106,7 @@ pub(crate) async fn deploy_body(
                 .await
                 .map_err(DeployError::internal)?;
         }
+        keep_declarations(kept.as_ref(), &deployment.first_declared)?;
         return Ok(deployment.staged.response);
     }
     let new_bundle = staged.new_bundle();
@@ -115,13 +147,56 @@ pub(crate) async fn deploy_body(
     // backend serves them now. Publishing a known bundle again (a cold
     // start, a rollback, a deployment running beside one that published the
     // same permissions) ends no one.
-    let applied = runtime.apply_catalogue(change, new_bundle).await;
+    // The first-declared declarations commit with the catalogue, in the one
+    // transaction the apply owns: a conflicting kept value refuses the whole
+    // deployment before anything is live, however many instances share the
+    // store.
+    let kept_values = match &kept {
+        Some(_) => deployment
+            .first_declared
+            .iter()
+            .map(|(version, stored)| (DECLARATIONS, version.0.to_vec(), stored.clone()))
+            .collect(),
+        None => Vec::new(),
+    };
+    let applied = runtime
+        .apply_catalogue_keeping(change, new_bundle, kept_values)
+        .await;
     state
         .catalogue_store
         .refresh()
         .map_err(DeployError::internal)?;
     applied?;
     Ok(deployment.staged.response)
+}
+
+/// Keep the declarations of each version deployed with them for the first
+/// time when the deployment changes no catalogue row. A deployment that does
+/// change the catalogue keeps them in the transaction that commits it
+/// (`deploy_body`), so a conflicting kept value refuses it before anything is
+/// live. A version whose declarations are kept already keeps them, and a
+/// deployment that names different ones for it is refused rather than
+/// ignored.
+fn keep_declarations(
+    kept: Option<&crate::kv::HostKv>,
+    first: &[(jazz::tools::public_schema::SchemaHash, Vec<u8>)],
+) -> Result<(), DeployError> {
+    let Some(kept) = kept else {
+        return Ok(());
+    };
+    for (version, stored) in first {
+        if let Some(existing) = kept
+            .put_if_absent(&version.0, stored)
+            .map_err(DeployError::internal)?
+            && existing != *stored
+        {
+            return Err(DeployError::invalid(format!(
+                "schema version {version} was deployed with other encryption declarations, \
+                 which its cells are sealed under; the deployment names different ones"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Publish `source` (a schema carrying its permissions as table policies)

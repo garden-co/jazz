@@ -22,7 +22,8 @@ pub(crate) type KvResult<T> = Result<T, String>;
 
 pub(crate) struct HostKv {
     table: HostTable,
-    /// Reads go here; servers only write through `HostKv` so far.
+    /// Reads go here, seeing what the store committed; servers only write
+    /// through `HostKv` and read through the store's thread, so far.
     #[cfg_attr(not(test), allow(dead_code))]
     reader: Arc<HostReader>,
     store: crate::runtime::HostSender,
@@ -56,11 +57,41 @@ impl HostKv {
             .map_err(|_| "server store closed before answering".to_owned())?
     }
 
+    /// The value at `key`, read on a connection of its own: what the store
+    /// has committed, without waiting for the store's thread (a held runtime
+    /// job does not delay it). On a shared in-memory database that
+    /// connection is locked out while the store's connection holds a write;
+    /// use [`Self::get_on_store`] where that can matter.
     #[cfg(test)]
     pub(crate) fn get(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
         self.reader
             .get(self.table, key)
             .map_err(|error| error.to_string())
+    }
+
+    /// The value at `key`, read on the store's own thread and connection,
+    /// after the work it is doing. A second connection to a shared in-memory
+    /// database is locked out while the store's connection holds a write and
+    /// waits out its busy timeout before it fails, so a read that may
+    /// arrive during one (the deploy's read of kept declarations) goes here.
+    #[cfg(test)]
+    pub(crate) fn get_on_store(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
+        let key = key.to_vec();
+        self.call(move |tables, table| tables.host_get(table, &key))
+    }
+
+    /// Every pair of the table, read on the store's own thread in one job
+    /// (see [`Self::get_on_store`]): a single read, so what a caller then
+    /// checks against it is one moment of the table.
+    pub(crate) fn all_on_store(&self) -> KvResult<Vec<HostPair>> {
+        self.call(move |tables, table| tables.host_prefix(table, &[]))
+    }
+
+    /// Write `value` at `key` unless a value is there already: the value
+    /// in force afterwards, `None` when it is `value`.
+    pub(crate) fn put_if_absent(&self, key: &[u8], value: &[u8]) -> KvResult<Option<Vec<u8>>> {
+        let (key, value) = (key.to_vec(), value.to_vec());
+        self.call(move |tables, table| tables.host_put_if_absent(table, &key, &value))
     }
 
     /// Write every pair in one transaction: all or none.

@@ -82,6 +82,26 @@ columns and a client-run rewrite between them.
   the stored schema is unchanged, as it is for a plaintext type change.
 - The entries still add nothing to the schema hash (H1); the deploy request
   carries every version's declarations so the server can check them.
+- **Known limits: hosts that keep no declarations.** A server keeps the
+  declarations a version was first deployed with in a host table of its
+  store; a version's later declarations are judged against them. Two hosts
+  keep none:
+  - A host whose deploy path takes no declarations (the Durable Object host)
+    refuses every schema that has Jazz's system tables, with "has Jazz's
+    system tables but declares no encryption", so an encrypted app cannot
+    deploy there.
+  - A server running without a store (a runtime only) accepts the
+    declarations in each deploy body but remembers none. It cannot refuse a
+    later deploy that changes a version's declarations, and it treats every
+    deploy of a decrypting migration as the first, so it asks for the
+    confirmation of §4.2 (`confirmDecrypt` in the deploy body) on every
+    deploy, not only the first.
+- **Kept declarations commit with the catalogue.** A deployment that changes
+  the catalogue keeps its first-declared versions' declarations in the same
+  transaction, and a deployment that names declarations different from the
+  kept ones for a version is refused before anything is live, however many
+  instances share the store. The transaction belongs to one call and ends
+  with it (a Durable Object core holds none open between calls).
 
 ### 3.2 The conversion pair
 
@@ -405,8 +425,9 @@ encrypted, the server sees only bytes.
 The inverse pair: lens adds the optional plaintext target, the entry gets
 `"to"`, and sweepers decrypt and write plaintext, clearing the ciphertext and
 its token. The deploy requires an explicit confirmation
-(`--confirm-decrypt notes.body`), because the server and every replica then
-hold the plaintext. Rows in spaces no key holder reaches stay encrypted (§3.8).
+(`confirmDecrypt: ["notes.body"]` in the deploy body, which the backend sets:
+`confirmDecrypt` on `createJazz` and `deploy`, `confirm_decrypt` on the Rust
+backend), because the server and every replica then hold the plaintext. Rows in spaces no key holder reaches stay encrypted (§3.8).
 
 ### 4.3 Renames, type changes and equality tagging
 
@@ -423,7 +444,8 @@ hold the plaintext. Rows in spaces no key holder reaches stay encrypted (§3.8).
   is unchanged in each case. Any other change is a re-encrypt into a new
   column, with `convert` when the conversion is not the identity.
 - **Adding equality tagging.** The lens adds `__e2ee_eq_<column>` with default
-  `""`, and the column is listed in `backfill`. Sweepers decrypt each cell and
+  `""`, and the column is listed in `backfill`; the deploy refuses an equality
+  column added to cells that exist without it. Sweepers decrypt each cell and
   write its token (and nothing else) under the cell's own epoch. Until every row of
   a space has a token, equality queries on it fail `conversion-pending`
   (§3.3). Unlike the conversions, an
@@ -432,7 +454,20 @@ hold the plaintext. Rows in spaces no key holder reaches stay encrypted (§3.8).
   floor in §6 or re-encryption into a new tagged column (whose seal works as
   in §3.7).
 - **Removing equality tagging.** Lens drop of the tag column. Tokens remain in
-  history; they disclose equality only.
+  history; they disclose equality only. The deploy refuses taking a column out
+  of `equality` while its tag column stays, since older clients would keep
+  querying tokens nobody writes.
+- **Conversions never write over an encrypted column.** A conversion
+  (`from`) targets a column the earlier version did not hold as encrypted:
+  the cells of an encrypted column are sealed under its type, which a
+  conversion in place would leave unreadable. The same holds for a version
+  redeployed with other declarations.
+- **Equality types.** Equality is declared only on the types the equality
+  format encodes: boolean, integer, bigint, timestamp, double, text, bytes,
+  uuid, enum and JSON columns, and arrays of any of them (also nested);
+  row and transaction-ID columns, and arrays of them, are refused. JSON is
+  matched by its exact stored text and arrays element by element, as Jazz's
+  own equality matches them.
 
 ### 4.4 Changing the space: re-homes, moves, splits and merges
 
@@ -463,10 +498,17 @@ Confirmed trivial, with one exception. A new table has no rows; its first
 inserts create spaces as usual. A new encrypted column on an encrypted table
 is a lens `add` of a `bytes` column with default `""`; existing rows read the
 declared plaintext default, or null for an optional column, until written. A
-required column with no default is refused by `generate`. The exception: a new
+required column with no declared default is refused by the loaders, `generate`
+and the deploy, and the stored column's own default must be the empty value
+(a plaintext default is declared in the entry, where it is public). The
+exception: a new
 equality-tagged column on a table that already has rows starts in `backfill`,
 because those rows have no token for the default value; sweepers write the
-default's cell and token.
+default's cell and token. The deploy applies this by the schema alone, never by
+looking at rows: a column newly tagged in a table that existed in the
+previous version (a column the migration adds, a plaintext column it
+encrypts, or an encrypted column gaining equality, in a table encrypted
+before or for the first time) must be listed in `backfill`.
 
 ## 5. Rollout for app developers
 
@@ -480,7 +522,8 @@ default's cell and token.
 | 6. Finalise | Optional: drop the source                                                           | `migrations create --finalise` refuses while rows are pending, or lists them with `--abandon`                                                 |
 
 Phases 3 and 4 may be one deploy when old clients' read-only degradation is
-acceptable. A decrypt requires `--confirm-decrypt` at phase 2.
+acceptable. A decrypt requires `confirmDecrypt` (`confirm_decrypt` on the Rust backend) at
+phase 2.
 
 **Earlier plaintext stays visible.** Encrypting an existing column protects
 only values written from then on. Its earlier plaintext remains in row

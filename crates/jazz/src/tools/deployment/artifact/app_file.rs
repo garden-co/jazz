@@ -7,8 +7,9 @@ use base64::Engine as _;
 
 use crate::tools::ObjectId;
 use crate::tools::public_schema::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, HistoryRetention, LegacyEnumCase,
-    RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, TableSchema, Value,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, EncryptedColumn, EncryptionEntry,
+    EncryptionSettings, HistoryRetention, LegacyEnumCase, PlainType, Rehome, RowDescriptor, Schema,
+    SchemaHash, SweepBy, TableName, TablePolicies, TableSchema, Value,
 };
 
 use super::super::published::{PublishLensOp, PublishMigrationRequest, PublishTableLens};
@@ -19,6 +20,9 @@ use super::{
 
 /// A refusal at a JSON path of the app file.
 pub type Refusal = (String, String);
+
+/// A schema version's encryption entries, by table.
+pub type Entries = BTreeMap<String, EncryptionEntry>;
 
 /// Why an `enum` given as an object of cases with fields is refused: Jazz
 /// had such columns declared but no store could hold them, and they were
@@ -37,8 +41,14 @@ fn refuse(path: impl Into<String>, message: impl Into<String>) -> Refusal {
 #[derive(Debug, Clone)]
 pub struct AppFile {
     pub current: Schema,
+    /// The current tables' `encryption` entries.
+    pub current_encryption: Entries,
     /// Earlier versions by name, oldest first.
     pub history: Vec<(String, Schema)>,
+    /// Each earlier version's `encryption` entries, in `history`'s order.
+    pub history_encryption: Vec<Entries>,
+    /// The top-level `encryption` settings.
+    pub settings: Option<EncryptionSettings>,
     /// Migrations, with `from`/`to` still as version names (`None` = current).
     pub migrations: Vec<(String, Option<String>, Vec<PublishTableLens>)>,
     pub codegen: Codegen,
@@ -58,6 +68,7 @@ pub const TOP_KEYS: &[&str] = &[
     "migrations",
     "transforms",
     "slices",
+    "encryption",
 ];
 pub const TABLE_KEYS: &[&str] = &[
     "columns",
@@ -67,6 +78,7 @@ pub const TABLE_KEYS: &[&str] = &[
     "history",
     "computed",
     "tsOnly",
+    "encryption",
 ];
 pub const COLUMN_KEYS: &[&str] = &[
     "type",
@@ -91,6 +103,13 @@ pub const MIGRATION_KEYS: &[&str] = &[
 pub const TRANSFORM_KEYS: &[&str] = &["stored", "view"];
 pub const COMPUTED_KEYS: &[&str] = &["type", "from"];
 pub const VERSION_KEYS: &[&str] = &["tables"];
+pub const SETTINGS_KEYS: &[&str] = &["allowAccountReset", "mechanisms"];
+pub const ENCRYPTION_KEYS: &[&str] = &[
+    "space", "scope", "columns", "equality", "backfill", "rehome", "sweep",
+];
+pub const ENCRYPTED_COLUMN_KEYS: &[&str] =
+    &["type", "sealedType", "from", "to", "convert", "reverse"];
+pub const REHOME_KEYS: &[&str] = &["space", "scope"];
 
 /// Keys of `object` that aren't `allowed` (nor `$comment`) are refused.
 fn only_keys(object: &[(String, Json)], allowed: &[&str], path: &str) -> Result<(), Refusal> {
@@ -182,7 +201,12 @@ pub fn read(root: &Json) -> Result<AppFile, Refusal> {
         .get("tables")
         .ok_or_else(|| refuse("(top)", "no `tables`"))?;
     let mut codegen = Codegen::default();
-    let current = read_tables(tables_json, "tables", Some((&mut codegen, &mut warnings)))?;
+    let (current, current_encryption) =
+        read_tables(tables_json, "tables", Some((&mut codegen, &mut warnings)))?;
+    let settings = root
+        .get("encryption")
+        .map(|value| read_settings(value, "encryption"))
+        .transpose()?;
     refuse_current_enum_cases(&current)?;
     if let Some(transforms) = root.get("transforms") {
         for (name, spec) in object(transforms, "transforms")? {
@@ -219,6 +243,7 @@ pub fn read(root: &Json) -> Result<AppFile, Refusal> {
     }
 
     let mut history = Vec::new();
+    let mut history_encryption = Vec::new();
     if let Some(versions) = root.get("history") {
         for (name, version) in object(versions, "history")? {
             let path = format!("history.{name}");
@@ -240,10 +265,9 @@ pub fn read(root: &Json) -> Result<AppFile, Refusal> {
             let tables = version
                 .get("tables")
                 .ok_or_else(|| refuse(&path, "no `tables`"))?;
-            history.push((
-                name.clone(),
-                read_tables(tables, &format!("{path}.tables"), None)?,
-            ));
+            let (schema, entries) = read_tables(tables, &format!("{path}.tables"), None)?;
+            history.push((name.clone(), schema));
+            history_encryption.push(entries);
         }
     }
 
@@ -267,7 +291,10 @@ pub fn read(root: &Json) -> Result<AppFile, Refusal> {
     }
     Ok(AppFile {
         current,
+        current_encryption,
         history,
+        history_encryption,
+        settings,
         migrations,
         codegen,
         warnings,
@@ -309,8 +336,9 @@ fn read_tables(
     value: &Json,
     path: &str,
     mut codegen: Option<(&mut Codegen, &mut Vec<String>)>,
-) -> Result<Schema, Refusal> {
+) -> Result<(Schema, Entries), Refusal> {
     let mut schema = Schema::new();
+    let mut entries = Entries::new();
     let mut forwards: Vec<(String, String, String)> = Vec::new();
     for (name, table) in object(value, path)? {
         let path = format!("{path}.{name}");
@@ -319,6 +347,12 @@ fn read_tables(
         // Every version: no app was deployed with such a table.
         if crate::schema::is_system_table(name) {
             return Err(refuse(&path, reserved_table_name(name)));
+        }
+        if let Some(entry) = table.get("encryption") {
+            entries.insert(
+                name.clone(),
+                read_entry(entry, &format!("{path}.encryption"))?,
+            );
         }
         let fields = object(table, &path)?;
         only_keys(fields, TABLE_KEYS, &path)?;
@@ -349,7 +383,11 @@ fn read_tables(
                 let name = string(transform, &transform_path)?;
                 transforms.insert(column.clone(), name.to_string());
             }
-            columns.push(read_column(column, spec, &column_path)?);
+            let descriptor = read_column(column, spec, &column_path)?;
+            if let Some(target) = &descriptor.references {
+                refuse_system_target(target.as_str(), &format!("{column_path}.references"))?;
+            }
+            columns.push(descriptor);
         }
         let mut computed = Vec::new();
         if let Some(fields) = table.get("computed") {
@@ -400,6 +438,7 @@ fn read_tables(
                         &format!("{rel_path}.column"),
                     )?;
                     let target = string(target, &format!("{rel_path}.rel"))?;
+                    refuse_system_target(target, &format!("{rel_path}.rel"))?;
                     forwards.push((name.clone(), column.to_string(), target.to_string()));
                     CodegenRelation::Forward {
                         table: target.to_string(),
@@ -411,8 +450,10 @@ fn read_tables(
                         spec.get("relation").ok_or_else(|| refuse(&rel_path, "a reverse relation needs `relation`, e.g. { \"reverse\": \"messages\", \"relation\": \"chat\" }"))?,
                         &format!("{rel_path}.relation"),
                     )?;
+                    let source = string(source, &format!("{rel_path}.reverse"))?;
+                    refuse_system_target(source, &format!("{rel_path}.reverse"))?;
                     CodegenRelation::Reverse {
-                        table: string(source, &format!("{rel_path}.reverse"))?.to_string(),
+                        table: source.to_string(),
                         relation: forward.to_string(),
                     }
                 } else {
@@ -578,7 +619,213 @@ fn read_tables(
             descriptor.references = Some(TableName::from(target.as_str()));
         }
     }
-    Ok(schema)
+    for (table, entry) in &entries {
+        super::encryption::check_entry(table, entry, &schema)
+            .map_err(|(at, message)| refuse(format!("{path}.{table}.encryption{at}"), message))?;
+    }
+    Ok((schema, entries))
+}
+
+/// An app relation or reference may not lead to a system table.
+fn refuse_system_target(table: &str, path: &str) -> Result<(), Refusal> {
+    if super::system_tables::is_system_table(table) {
+        return Err(refuse(
+            path,
+            format!(
+                "`{table}` is one of Jazz's system tables; an app table may not reference one \
+                 (test the members table in a policy with `exists` instead)"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The top-level `encryption` settings (protocol §1.5).
+fn read_settings(value: &Json, path: &str) -> Result<EncryptionSettings, Refusal> {
+    let fields = object(value, path)?;
+    only_keys(fields, SETTINGS_KEYS, path)?;
+    let allow_account_reset = match value.get("allowAccountReset") {
+        None => false,
+        Some(Json::Bool(b)) => *b,
+        Some(_) => {
+            return Err(refuse(
+                format!("{path}.allowAccountReset"),
+                "must be true or false",
+            ));
+        }
+    };
+    Ok(EncryptionSettings {
+        allow_account_reset,
+        mechanisms: value.get("mechanisms").map(to_serde),
+    })
+}
+
+/// A table's `encryption` entry (protocol §1.5, migrations §3.2), read
+/// for its form only; [`super::encryption::check_entry`] checks it against
+/// its schema version.
+fn read_entry(value: &Json, path: &str) -> Result<EncryptionEntry, Refusal> {
+    const EXAMPLE: &str = "e.g. { \"space\": \"projectId\", \"scope\": \"projects\", \"columns\": { \"title\": \"string\" } }";
+    let fields = object(value, path)?;
+    only_keys(fields, ENCRYPTION_KEYS, path)?;
+    let required = |key: &str| -> Result<&str, Refusal> {
+        let value = value.get(key).ok_or_else(|| {
+            refuse(
+                path,
+                format!("an encryption entry needs `{key}`, {EXAMPLE}"),
+            )
+        })?;
+        string(value, &format!("{path}.{key}"))
+    };
+    let space = required("space")?.to_string();
+    let scope = required("scope")?.to_string();
+    let columns_json = value.get("columns").ok_or_else(|| {
+        refuse(
+            path,
+            format!("an encryption entry needs `columns`, {EXAMPLE}"),
+        )
+    })?;
+    let mut columns = BTreeMap::new();
+    for (column, spec) in object(columns_json, &format!("{path}.columns"))? {
+        let column_path = format!("{path}.columns.{column}");
+        identifier(column, &column_path)?;
+        columns.insert(column.clone(), read_encrypted_column(spec, &column_path)?);
+    }
+    let list = |key: &str| -> Result<Vec<String>, Refusal> {
+        value
+            .get(key)
+            .map(|v| names(v, &format!("{path}.{key}")))
+            .transpose()
+            .map(Option::unwrap_or_default)
+    };
+    let rehome = match value.get("rehome") {
+        None => None,
+        Some(spec) => {
+            let rehome_path = format!("{path}.rehome");
+            only_keys(object(spec, &rehome_path)?, REHOME_KEYS, &rehome_path)?;
+            let field = |key: &str| -> Result<String, Refusal> {
+                let value = spec.get(key).ok_or_else(|| {
+                    refuse(
+                        &rehome_path,
+                        format!("a re-home names the old `space` and `scope`; `{key}` is missing"),
+                    )
+                })?;
+                Ok(string(value, &format!("{rehome_path}.{key}"))?.to_string())
+            };
+            Some(Rehome {
+                space: field("space")?,
+                scope: field("scope")?,
+            })
+        }
+    };
+    let sweep = match value.get("sweep") {
+        None => SweepBy::default(),
+        Some(sweep) => match sweep.as_str() {
+            Some("updaters") => SweepBy::Updaters,
+            Some("members") => SweepBy::Members,
+            _ => {
+                return Err(refuse(
+                    format!("{path}.sweep"),
+                    "must be \"updaters\" or \"members\"",
+                ));
+            }
+        },
+    };
+    Ok(EncryptionEntry {
+        space,
+        scope,
+        columns,
+        equality: list("equality")?,
+        backfill: list("backfill")?,
+        rehome,
+        sweep,
+    })
+}
+
+/// Whether every enum value in `value` is one of its column type's
+/// variants.
+fn in_variants(column_type: &ColumnType, value: &Value) -> bool {
+    match (column_type, value) {
+        (_, Value::Null) => true,
+        (ColumnType::Enum { variants }, Value::Text(variant)) => variants.contains(variant),
+        (ColumnType::Enum { .. }, _) => false,
+        (ColumnType::Array { element }, Value::Array(items)) => {
+            items.iter().all(|item| in_variants(element, item))
+        }
+        _ => true,
+    }
+}
+
+/// A plaintext type: a type string (`"string?"`) or type object, without
+/// the options only a stored column has, and, where `with_default`, its
+/// declared default (protocol §4.1): a sealed type takes none.
+fn read_plain(spec: &Json, path: &str, with_default: bool) -> Result<PlainType, Refusal> {
+    let mut column = read_column("", spec, path)?;
+    let default = if with_default {
+        column.default.take()
+    } else {
+        None
+    };
+    if let Some(default) = &default
+        && !in_variants(&column.column_type, default)
+    {
+        return Err(refuse(
+            format!("{path}.default"),
+            "an enum default must be one of the enum's variants",
+        ));
+    }
+    plain_type(&column, spec, path)?;
+    if spec.get("transform").is_some() {
+        return Err(refuse(
+            format!("{path}.transform"),
+            "an encrypted column takes no transform",
+        ));
+    }
+    Ok(PlainType {
+        column_type: column.column_type,
+        nullable: column.nullable,
+        default,
+    })
+}
+
+/// One `columns` value of an encryption entry: a plaintext type, or an
+/// object with `type` and the conversion fields.
+fn read_encrypted_column(spec: &Json, path: &str) -> Result<EncryptedColumn, Refusal> {
+    let conversion = ["sealedType", "from", "to", "convert", "reverse"]
+        .iter()
+        .any(|key| spec.get(key).is_some());
+    if !conversion {
+        return Ok(EncryptedColumn {
+            plain: read_plain(spec, path, true)?,
+            sealed_type: None,
+            from: None,
+            to: None,
+            convert: None,
+            reverse: None,
+        });
+    }
+    only_keys(object(spec, path)?, ENCRYPTED_COLUMN_KEYS, path)?;
+    let ty = spec.get("type").ok_or_else(|| {
+        refuse(
+            path,
+            "an encrypted column with conversion fields needs `type`, e.g. { \"type\": \"string\", \"from\": \"bodyPlain\" }",
+        )
+    })?;
+    let name = |key: &str| -> Result<Option<String>, Refusal> {
+        spec.get(key)
+            .map(|v| string(v, &format!("{path}.{key}")).map(str::to_string))
+            .transpose()
+    };
+    Ok(EncryptedColumn {
+        plain: read_plain(ty, &format!("{path}.type"), true)?,
+        sealed_type: spec
+            .get("sealedType")
+            .map(|t| read_plain(t, &format!("{path}.sealedType"), false))
+            .transpose()?,
+        from: name("from")?,
+        to: name("to")?,
+        convert: name("convert")?,
+        reverse: name("reverse")?,
+    })
 }
 
 /// A computed field's or transform's type: a type and `?`, without the
@@ -971,14 +1218,15 @@ pub fn version_name(hash: &SchemaHash) -> String {
 }
 
 pub fn write(
-    current: &Schema,
-    history: &[(String, &Schema)],
+    current: (&Schema, &Entries),
+    history: &[(String, &Schema, &Entries)],
     migrations: &[(Option<String>, Option<String>, &PublishMigrationRequest)],
     codegen: &Codegen,
+    settings: Option<&EncryptionSettings>,
 ) -> Result<Json, String> {
     let mut top = vec![(
         "tables".to_string(),
-        write_tables(current, Some(codegen)).map_err(|e| format!("tables.{e}"))?,
+        write_tables(current.0, Some(codegen), current.1).map_err(|e| format!("tables.{e}"))?,
     )];
     if !history.is_empty() {
         top.push((
@@ -986,12 +1234,12 @@ pub fn write(
             Json::Object(
                 history
                     .iter()
-                    .map(|(name, schema)| {
+                    .map(|(name, schema, entries)| {
                         Ok((
                             name.clone(),
                             Json::Object(vec![(
                                 "tables".into(),
-                                write_tables(schema, None)
+                                write_tables(schema, None, entries)
                                     .map_err(|e| format!("history.{name}.tables.{e}"))?,
                             )]),
                         ))
@@ -1036,19 +1284,58 @@ pub fn write(
             ),
         ));
     }
+    if let Some(settings) = settings.filter(|s| **s != EncryptionSettings::default()) {
+        let mut fields = Vec::new();
+        if settings.allow_account_reset {
+            fields.push(("allowAccountReset".to_string(), Json::Bool(true)));
+        }
+        if let Some(mechanisms) = &settings.mechanisms {
+            fields.push(("mechanisms".to_string(), from_serde(mechanisms)));
+        }
+        top.push(("encryption".into(), Json::Object(fields)));
+    }
     Ok(Json::Object(top))
 }
 
 /// A history version's `tables`: a schema without relations, computed fields
 /// or transforms.
 pub fn write_version_tables(schema: &Schema) -> Result<Json, String> {
-    write_tables(schema, None)
+    write_tables(schema, None, &Entries::new())
 }
 
-fn write_tables(schema: &Schema, codegen: Option<&Codegen>) -> Result<Json, String> {
+/// A schema's tables, with their encryption entries. Jazz's system tables
+/// are left out when they are exactly Jazz's fragment: the loaders add them.
+/// Any other table with the reserved prefix, or a partial or altered
+/// fragment, is refused before anything is written, as the reader would
+/// refuse it.
+fn write_tables(
+    schema: &Schema,
+    codegen: Option<&Codegen>,
+    entries: &Entries,
+) -> Result<Json, String> {
+    let system: Schema = schema
+        .iter()
+        .filter(|(name, _)| super::system_tables::is_system_table(name.as_str()))
+        .map(|(name, table)| (*name, table.clone()))
+        .collect();
+    if super::system_tables::check_e2ee_fragment(&system).is_err() {
+        let fragment = super::system_tables::e2ee_system_tables_v1();
+        let offender = system
+            .keys()
+            .find(|name| !fragment.contains_key(*name))
+            .or_else(|| system.keys().next())
+            .expect("a fragment that fails the check holds a table");
+        return Err(format!(
+            "{offender}: {}",
+            reserved_table_name(offender.as_str())
+        ));
+    }
     let mut tables = Vec::new();
     for (name, table) in schema.iter() {
         let name = name.as_str();
+        if super::system_tables::is_system_table(name) {
+            continue;
+        }
         let info = codegen.and_then(|c| c.tables.get(name));
         let relations = info.map(|i| &i.relations);
         let covered = |column: &str, target: &TableName| {
@@ -1183,9 +1470,83 @@ fn write_tables(schema: &Schema, codegen: Option<&Codegen>) -> Result<Json, Stri
                 ),
             ));
         }
+        if let Some(entry) = entries.get(name) {
+            fields.push((
+                "encryption".into(),
+                write_entry(entry).map_err(|e| format!("{name}.encryption: {e}"))?,
+            ));
+        }
         tables.push((name.to_string(), Json::Object(fields)));
     }
     Ok(Json::Object(tables))
+}
+
+fn write_plain(plain: &PlainType) -> Result<Json, String> {
+    let mut column = ColumnDescriptor::new("", plain.column_type.clone());
+    column.nullable = plain.nullable;
+    column.default = plain.default.clone();
+    write_column(&column, None)
+}
+
+/// A table's `encryption` entry, as [`read_entry`] reads it.
+fn write_entry(entry: &EncryptionEntry) -> Result<Json, String> {
+    let names = |list: &[String]| Json::Array(list.iter().map(Json::string).collect());
+    let mut fields = vec![
+        ("space".to_string(), Json::string(&entry.space)),
+        ("scope".to_string(), Json::string(&entry.scope)),
+        (
+            "columns".to_string(),
+            Json::Object(
+                entry
+                    .columns
+                    .iter()
+                    .map(|(name, column)| {
+                        let conversion = [
+                            ("from", &column.from),
+                            ("to", &column.to),
+                            ("convert", &column.convert),
+                            ("reverse", &column.reverse),
+                        ];
+                        let plain = write_plain(&column.plain)?;
+                        if column.sealed_type.is_none()
+                            && conversion.iter().all(|(_, v)| v.is_none())
+                        {
+                            return Ok((name.clone(), plain));
+                        }
+                        let mut spec = vec![("type".to_string(), plain)];
+                        if let Some(sealed) = &column.sealed_type {
+                            spec.push(("sealedType".to_string(), write_plain(sealed)?));
+                        }
+                        for (key, value) in conversion {
+                            if let Some(value) = value {
+                                spec.push((key.to_string(), Json::string(value)));
+                            }
+                        }
+                        Ok((name.clone(), Json::Object(spec)))
+                    })
+                    .collect::<Result<_, String>>()?,
+            ),
+        ),
+    ];
+    if !entry.equality.is_empty() {
+        fields.push(("equality".to_string(), names(&entry.equality)));
+    }
+    if !entry.backfill.is_empty() {
+        fields.push(("backfill".to_string(), names(&entry.backfill)));
+    }
+    if let Some(rehome) = &entry.rehome {
+        fields.push((
+            "rehome".to_string(),
+            Json::object(vec![
+                ("space", Json::string(&rehome.space)),
+                ("scope", Json::string(&rehome.scope)),
+            ]),
+        ));
+    }
+    if entry.sweep != SweepBy::default() {
+        fields.push(("sweep".to_string(), Json::string("members")));
+    }
+    Ok(Json::Object(fields))
 }
 
 /// A column type's spec, without options.
@@ -1355,7 +1716,13 @@ fn write_migration(
     let mut drop = Vec::new();
     let mut renames = Vec::new();
     let mut migrate = Vec::new();
-    for lens in &migration.forward {
+    // The loaders add Jazz's system tables along a migration that starts or
+    // stops declaring encryption; the file never names them.
+    for lens in migration
+        .forward
+        .iter()
+        .filter(|lens| !super::system_tables::is_system_table(&lens.table))
+    {
         if lens.added && lens.removed {
             return Err(format!(
                 "table {} cannot be both added and removed",

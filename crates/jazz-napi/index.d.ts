@@ -144,6 +144,11 @@ export declare class NapiDb {
   /** Set the claims reads and writes as `author` are checked with. */
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   /**
+   * The catalogue identity of a table, as UUID text: what a member row's
+   * `scopeId` holds for its space table.
+   */
+  tableIdentity(table: string): string
+  /**
    * Exact local state for the write-merge bridge: the row as stored,
    * deleted or not. Write authorization remains at the mutation boundary;
    * this is not a query.

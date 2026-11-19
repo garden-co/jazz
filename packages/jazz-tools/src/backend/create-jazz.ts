@@ -785,6 +785,14 @@ export interface CreateJazzOptions {
    */
   allowDroppingHistory?: boolean;
   /**
+   * Confirms the decrypt conversions this deployment makes, as
+   * `table.column` (`["notes.body"]`): a migration that decrypts a column
+   * puts its plaintext on the server and every replica, so starting a
+   * backend whose schema does that fails, naming the column, until it is
+   * listed here. Remove it again once the deployment is out.
+   */
+  confirmDecrypt?: string[];
+  /**
    * Who may use the Inspector and agent debug access at `<basePath>/inspect`:
    * return `{ by, write? }` for a request that may, null for one that may
    * not.
@@ -1325,6 +1333,7 @@ async function applyBundle(
     /** What the Rust loader built from the app's bindings and jazz.permissions.json. */
     loaded: LoadedBackendApp;
     allowDroppingHistory?: boolean;
+    confirmDecrypt?: string[];
     /** A test harness's backend: print no warnings. */
     quiet?: boolean;
   },
@@ -1338,6 +1347,7 @@ async function applyBundle(
       serverUrl: origin,
       adminSecret: options.adminSecret,
       allowDroppingHistory: options.allowDroppingHistory,
+      confirmDecrypt: options.confirmDecrypt,
     },
     options.loaded,
   ).catch((error: unknown) => {
@@ -1770,6 +1780,7 @@ interface OpenedJazz extends Omit<Jazz, "ready" | "db" | "attach"> {
  * declare to its core.
  */
 async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise<OpenedJazz> {
+  await compiledApp(initial);
   const store = opening.kind === "durableObjects" ? await durableObjectCore(opening) : opening;
   let options = initial;
   let { basePath, publicUrls, allowedOrigins } = jazzSettings(options);
@@ -1797,10 +1808,9 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
 
   /** Publish `next`'s bundle: what it is pinned by. Publishing one already published changes nothing. */
   const publish = async (next: CreateJazzOptions) => {
-    await compiledPermissions(next);
     return applyBundle(core.serverUrl, {
       ...next,
-      loaded: compiled.get(next)!,
+      loaded: await compiledApp(next),
       appId,
       adminSecret: core.adminSecret,
       quiet: testHarnessOptions.has(next),
@@ -1816,7 +1826,7 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
     const session = await openJazzSession({
       appId,
       app: next.app,
-      permissions: await compiledPermissions(next),
+      permissions: compiledPermissionsOf(next),
       serverUrl: core.serverUrl,
       driver: { type: "memory" },
       initial: { backendSecret: core.backendSecret },
@@ -4097,7 +4107,7 @@ const testHarnessOptions = new WeakSet<CreateJazzOptions>();
 /** What the Rust loader made of each options' bindings and permissions file, once checked. */
 const compiled = new WeakMap<CreateJazzOptions, LoadedBackendApp>();
 
-/** The checked permissions of options {@link compiledPermissions} has loaded. */
+/** The checked permissions of options {@link compiledApp} has loaded. */
 function compiledPermissionsOf(options: CreateJazzOptions): CompiledPermissionsMap {
   const loaded = compiled.get(options);
   if (!loaded) throw new Error("createJazz: the app's permissions are not loaded yet");
@@ -4112,9 +4122,9 @@ function compiledPermissionsOf(options: CreateJazzOptions): CompiledPermissionsM
  * app's schema. A deployed backend without jazz.app.json in reach checks
  * only the permissions.
  */
-async function compiledPermissions(options: CreateJazzOptions): Promise<CompiledPermissionsMap> {
+async function compiledApp(options: CreateJazzOptions): Promise<LoadedBackendApp> {
   const cached = compiled.get(options);
-  if (cached) return cached.permissions;
+  if (cached) return cached;
   const bound = boundAppOf(options.app);
   // Jazz's loader through a static jazz-napi import, so bundlers and file
   // tracers (Next.js, Vercel) ship the addon with the backend.
@@ -4137,9 +4147,22 @@ async function compiledPermissions(options: CreateJazzOptions): Promise<Compiled
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`createJazz: ${message}`, { cause: error });
   }
+  // Like the Rust runtime, check the current schema's system tables. They
+  // also carry forward into versions that remove their encryption declarations.
+  const current = bound.schema.schemas.find(
+    ({ hash }) => hash.toLowerCase() === loaded.current,
+  )?.schema;
+  const tables = isRecord(current) ? current.tables : undefined;
+  if (isRecord(tables) && Object.keys(tables).some((table) => table.startsWith("__e2ee_"))) {
+    throw new Error(
+      "createJazz: this backend can't open an app that declares end-to-end encryption yet: " +
+        "it has no encryption hooks. Deploy the app with `deploy` or the HTTP deploy route, " +
+        "and open it with a client that has encryption",
+    );
+  }
   for (const warning of loaded.warnings) console.warn(`jazz: ${warning}`);
   compiled.set(options, loaded);
-  return loaded.permissions;
+  return loaded;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

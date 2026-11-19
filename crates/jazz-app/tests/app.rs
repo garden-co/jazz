@@ -746,3 +746,39 @@ async fn shutdown_with_open_mergeable_transaction() {
     assert_eq!(titles, ["kept"]);
     jazz.shutdown().await.unwrap();
 }
+
+/// A client has no encryption hooks yet, so it refuses to open an app
+/// whose files declare encryption, whether it holds the permissions or not:
+/// it would store plaintext in the encrypted columns.
+///
+/// ```text
+/// app files declare encryption ──open (no hooks)──► ✗ refused
+/// ```
+#[tokio::test]
+async fn a_client_refuses_an_app_that_declares_encryption() {
+    let app = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": {
+            "projects": { "columns": { "name": "bytes" },
+                "encryption": { "space": "id", "scope": "projects", "columns": { "name": "string" } } }
+        } }"#;
+    let permissions = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": { "projects": { "read": "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.id, accountId = session.user)" } } }"#;
+    for files in [
+        AppFiles::new(app.as_bytes().to_vec(), None),
+        AppFiles::new(
+            app.as_bytes().to_vec(),
+            Some(permissions.as_bytes().to_vec()),
+        ),
+    ] {
+        let opened = Jazz::open(files, Config::new(AppId::random())).await;
+        match opened {
+            Err(Error::App(message)) => {
+                assert!(
+                    message.contains("declares end-to-end encryption"),
+                    "{message}"
+                )
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+}

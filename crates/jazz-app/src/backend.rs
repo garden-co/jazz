@@ -45,7 +45,7 @@ pub(crate) async fn publish(
     backend: &Backend,
     app: &LoadedApp,
 ) -> Result<String> {
-    let body = json!({
+    let mut body = json!({
         "targetSchemaHash": app.current_hash().to_string(),
         "schemas": app
             .schemas()
@@ -56,6 +56,15 @@ pub(crate) async fn publish(
         "permissions": app.permissions(),
         "allowDroppingHistory": backend.allow_dropping_history,
     });
+    // An app that declares encryption sends its declarations, and the
+    // decrypt conversions its deployer confirms.
+    if !app.encryption().is_empty() {
+        body["encryption"] = serde_json::to_value(app.encryption())
+            .map_err(|error| Error::Server(format!("encoding the app's encryption: {error}")))?;
+    }
+    if !backend.confirm_decrypt.is_empty() {
+        body["confirmDecrypt"] = json!(backend.confirm_decrypt);
+    }
     let response = http()?
         .post(app_url(server, app_id, "admin/bundles"))
         .header("X-Jazz-Admin-Secret", &backend.admin_secret)

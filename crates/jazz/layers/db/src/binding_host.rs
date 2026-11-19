@@ -674,9 +674,33 @@ pub fn db_config(schema: JazzSchema, config: &OpenConfig, identity: DbIdentity) 
     }
 }
 
+/// Why a client may not open an app whose schema holds Jazz's system tables
+/// (it declares end-to-end encryption): it has no encryption hooks yet, so
+/// it would write plaintext into the ciphertext columns, and the types
+/// generated code gives those columns would hide that.
+pub const ENCRYPTED_APP_REFUSAL: &str = "this client can't open an app that declares end-to-end \
+    encryption yet: it has no encryption hooks, so it would store plaintext in the encrypted \
+    columns. Deploy the app with `deploy` or the HTTP deploy route, and open it with a client \
+    that has encryption";
+
+/// Refuse `schema` if it holds Jazz's system tables, which only an
+/// encrypted app's schema does.
+pub fn refuse_encrypted_app(schema: &JazzSchema) -> Result<(), Error> {
+    if schema
+        .tables()
+        .iter()
+        .any(|table| jazz_model::schema::is_system_table(&table.name))
+    {
+        return Err(Error::new(ErrorCode::Schema, ENCRYPTED_APP_REFUSAL));
+    }
+    Ok(())
+}
+
 /// Open an in-memory database. `history_complete` needs nothing: every
-/// SQLite store keeps full history.
+/// SQLite store keeps full history. A schema with Jazz's system tables is
+/// refused ([`refuse_encrypted_app`]).
 pub async fn open_memory(db_config: DbConfig) -> Result<Db, Error> {
+    refuse_encrypted_app(&db_config.schema)?;
     Db::open(db_config).await
 }
 
@@ -686,6 +710,7 @@ pub async fn open_file(
     path: &std::path::Path,
     options: crate::db::FileOptions,
 ) -> Result<Db, Error> {
+    refuse_encrypted_app(&db_config.schema)?;
     Db::open_at(db_config, path, options).await
 }
 
@@ -1482,6 +1507,19 @@ impl Binding {
     }
 
     // ---- reads ----
+
+    /// The catalogue identity of table `table` (see
+    /// [`crate::db::Db::table_identity`]) as lowercase hyphenated UUID
+    /// text, which generated code writes into a member row's `scopeId`.
+    /// Fails with code `NotObserved` until the authority's catalogue with
+    /// this schema version is mirrored, and with an argument error for a
+    /// table the schema doesn't have.
+    pub fn table_identity(&self, table: &str) -> HostResult<String> {
+        match self.db.table_identity(table)? {
+            Some(identity) => Ok(identity.0.to_string()),
+            None => Err(HostError::Argument(format!("no table {table}"))),
+        }
+    }
 
     /// The row as stored, deleted or not: the write-merge bridge's exact
     /// local state. Not a query; write authorization stays at the mutation.
