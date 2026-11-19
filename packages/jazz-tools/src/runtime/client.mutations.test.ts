@@ -530,7 +530,7 @@ describe("JazzClient write attribution", () => {
     const { client, insertCalls } = makeClient();
     const session = internalSessionFromVerifiedReservedJwtPayload(
       { iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice", role: "owner" },
-      "local-first",
+      "device-account",
     );
     expect(session).toMatchObject({ issuer: LOCAL_FIRST_JWT_ISSUER, user_id: "alice" });
 
@@ -546,7 +546,7 @@ describe("JazzClient write attribution", () => {
       issuer: LOCAL_FIRST_JWT_ISSUER,
       user_id: "alice",
       claims: { role: "owner" },
-      authMode: "local-first",
+      authMode: "device-account",
       [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: expect.any(String),
     });
     expect(serialized).not.toHaveProperty("author");

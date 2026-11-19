@@ -10,12 +10,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::registry::Registry;
 
+use super::super::device_account;
 use super::super::domain::{AccountDomain, AppDomain};
 use super::super::error::{
     IntrinsicContradiction, ProtocolError, ProtocolResult, RootRejection, UnsupportedCapability,
 };
 use super::super::json;
-use super::super::local_first;
 use super::super::position::{Accepted, Position};
 use super::super::records::KeyColumns;
 use super::super::records::account::{
@@ -199,15 +199,15 @@ impl AccountState {
         Ok(())
     }
 
-    /// For a device holding the account's local-first identity: the
-    /// canonical root must be a `local-first` root of that identity's key,
+    /// For a device holding the account's device-account identity: the
+    /// canonical root must be a `device-account` root of that identity's key,
     /// or the root is not the account's own ([`ProtocolError::RootNotMine`]).
-    pub fn check_local_first(
+    pub fn check_device_account(
         &self,
-        identity: &local_first::LocalFirstIdentity,
+        identity: &device_account::DeviceAccountIdentity,
     ) -> ProtocolResult<()> {
-        let own = self.root.row.kind == AccountKind::LocalFirst
-            && self.root.row.local_first_public_key.as_deref() == Some(identity.public_key());
+        let own = self.root.row.kind == AccountKind::DeviceAccount
+            && self.root.row.device_account_public_key.as_deref() == Some(identity.public_key());
         if own {
             Ok(())
         } else {
@@ -245,7 +245,7 @@ pub struct AccountReplay<'a> {
     domain: AppDomain,
     recovery_validity: RefCell<BTreeMap<String, bool>>,
     root_checks: RefCell<BTreeMap<String, Option<RootRejection>>>,
-    local_first_key: RefCell<Option<Option<Vec<u8>>>>,
+    device_account_key: RefCell<Option<Option<Vec<u8>>>>,
     states: RefCell<BTreeMap<Position, Option<AccountState>>>,
 }
 
@@ -286,7 +286,7 @@ impl<'a> AccountReplay<'a> {
             registry,
             recovery_validity: RefCell::new(BTreeMap::new()),
             root_checks: RefCell::new(BTreeMap::new()),
-            local_first_key: RefCell::new(None),
+            device_account_key: RefCell::new(None),
             states: RefCell::new(BTreeMap::new()),
         })
     }
@@ -354,29 +354,29 @@ impl<'a> AccountReplay<'a> {
         Ok(self.select_roots(self.ledger)?.rejected)
     }
 
-    /// The local-first key of the account, if the cut has a valid
-    /// `local-first` root (the earliest one's key). Decided once over the
+    /// The device-account key of the account, if the cut has a valid
+    /// `device-account` root (the earliest one's key). Decided once over the
     /// whole read, so every view of this replay agrees on the account's
     /// kind.
-    fn account_local_first_key(&self) -> ProtocolResult<Option<Vec<u8>>> {
-        if let Some(key) = self.local_first_key.borrow().as_ref() {
+    fn account_device_key(&self) -> ProtocolResult<Option<Vec<u8>>> {
+        if let Some(key) = self.device_account_key.borrow().as_ref() {
             return Ok(key.clone());
         }
         let mut roots: Vec<_> = self
             .ledger
             .roots
             .iter()
-            .filter(|root| root.row.kind == AccountKind::LocalFirst)
+            .filter(|root| root.row.kind == AccountKind::DeviceAccount)
             .collect();
         by_position_then_id(&mut roots);
         let mut found = None;
         for root in roots {
-            if self.local_first_check(root)?.is_none() {
-                found = root.row.local_first_public_key.clone();
+            if self.device_account_check(root)?.is_none() {
+                found = root.row.device_account_public_key.clone();
                 break;
             }
         }
-        *self.local_first_key.borrow_mut() = Some(found.clone());
+        *self.device_account_key.borrow_mut() = Some(found.clone());
         Ok(found)
     }
 
@@ -392,9 +392,9 @@ impl<'a> AccountReplay<'a> {
         }
     }
 
-    /// A `local-first` root's own checks: its key derives the account ID,
+    /// A `device-account` root's own checks: its key derives the account ID,
     /// and its signature over the root and its device's keys verifies.
-    fn local_first_check(
+    fn device_account_check(
         &self,
         root: &Accepted<AccountRoot>,
     ) -> ProtocolResult<Option<RootRejection>> {
@@ -402,12 +402,12 @@ impl<'a> AccountReplay<'a> {
             return Ok(Some(rejection));
         }
         let (Some(public_key), Some(signature)) = (
-            root.row.local_first_public_key.as_deref(),
-            root.row.local_first_signature.as_deref(),
+            root.row.device_account_public_key.as_deref(),
+            root.row.device_account_signature.as_deref(),
         ) else {
             return Ok(Some(RootRejection::Malformed));
         };
-        if !local_first::derives_account(&self.domain, public_key, &root.row.account_id) {
+        if !device_account::derives_account(&self.domain, public_key, &root.row.account_id) {
             return Ok(Some(RootRejection::KeyMismatch));
         }
         // The signature binds the root device's published keys, accepted
@@ -420,7 +420,7 @@ impl<'a> AccountReplay<'a> {
         let Ok(bytes) = root.row.signed_bytes(&self.application, &device) else {
             return Ok(Some(RootRejection::Malformed));
         };
-        if local_first::verify(self.registry, public_key, &bytes, signature)? {
+        if device_account::verify(self.registry, public_key, &bytes, signature)? {
             Ok(None)
         } else {
             Ok(Some(RootRejection::SignatureInvalid))
@@ -434,11 +434,11 @@ impl<'a> AccountReplay<'a> {
             return Ok(*check);
         }
         let check = match root.row.kind {
-            AccountKind::LocalFirst => {
-                let check = self.local_first_check(root)?;
+            AccountKind::DeviceAccount => {
+                let check = self.device_account_check(root)?;
                 if check.is_none()
-                    && self.account_local_first_key()?.as_deref()
-                        != root.row.local_first_public_key.as_deref()
+                    && self.account_device_key()?.as_deref()
+                        != root.row.device_account_public_key.as_deref()
                 {
                     // Two keys deriving one account ID: not reachable
                     // without a SHA-1 collision of the derivation.
@@ -450,9 +450,7 @@ impl<'a> AccountReplay<'a> {
             }
             AccountKind::App => match self.common_root_check(&root.row) {
                 Some(rejection) => Some(rejection),
-                None if self.account_local_first_key()?.is_some() => {
-                    Some(RootRejection::KindMismatch)
-                }
+                None if self.account_device_key()?.is_some() => Some(RootRejection::KindMismatch),
                 None => None,
             },
         };
@@ -885,7 +883,7 @@ impl Run<'_, '_> {
     /// with it (§2.8): in an app account, every valid root of this
     /// generation, unretired before `position`, whose key pair the device
     /// held: each root it registered before `position`, and each root named
-    /// by any of its accepted recovery approvals. Empty for a local-first
+    /// by any of its accepted recovery approvals. Empty for a device
     /// account, whose roots derive from the secret every device holds.
     fn held_roots(
         &self,

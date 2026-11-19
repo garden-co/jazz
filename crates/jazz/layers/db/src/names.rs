@@ -743,15 +743,21 @@ impl Names {
         conn: &crate::storage::Storage,
         schema: &Schema,
     ) -> Result<(), Error> {
-        for table in schema.tables.values() {
-            for column in &table.columns {
-                if let Some(variants) = &column.variants {
-                    let variants: Vec<&str> = variants.iter().map(String::as_str).collect();
-                    self.intern(conn, &table.stored, &column.stored, &variants)?;
+        // One transaction for the whole schema: each column's `intern` is a
+        // scope, and outside a transaction every one would commit (and sync
+        // the file) alone. A schema with many enum columns then paid one
+        // durable commit per column when its store opened.
+        conn.scope("jazz_tags_mint", |conn| {
+            for table in schema.tables.values() {
+                for column in &table.columns {
+                    if let Some(variants) = &column.variants {
+                        let variants: Vec<&str> = variants.iter().map(String::as_str).collect();
+                        self.intern(conn, &table.stored, &column.stored, &variants)?;
+                    }
                 }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Give each of `names` that stored column `column` of stored table

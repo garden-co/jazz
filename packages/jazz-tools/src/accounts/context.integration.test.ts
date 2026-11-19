@@ -87,7 +87,7 @@ describe("account context authority", () => {
         });
       }
       expect(db.getAuthState()).toMatchObject({
-        authMode: "local-first",
+        authMode: "device-account",
         session: { identity: config.account.identity },
       });
     } finally {

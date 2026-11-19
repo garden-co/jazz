@@ -233,6 +233,8 @@ mod streaming_upload_ownership;
 mod structured_result_tree;
 #[path = "../subscription_backlog.rs"]
 mod subscription_backlog;
+#[path = "../subscription_scope_sharing.rs"]
+mod subscription_scope_sharing;
 #[path = "../sync_access_loss.rs"]
 mod sync_access_loss;
 #[path = "../sync_aggregates.rs"]

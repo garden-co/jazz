@@ -1600,23 +1600,29 @@ fn default_fits(column: &crate::values::Column, value: &Value) -> bool {
 /// limit applies to the whole text handed to one prepare, and schema DDL
 /// outgrows Durable Object SQLite's 100 KB.
 pub(crate) fn execute_script(conn: &Storage, script: &str) -> Result<(), Error> {
-    let mut start = 0;
-    for (end, _) in script.match_indices(';') {
-        let statement = &script[start..=end];
-        let text = std::ffi::CString::new(statement)
-            .map_err(|_| Error::new(ErrorCode::Storage, "NUL in SQL"))?;
-        // SAFETY: a NUL-terminated string; `sqlite3_complete` only reads it.
-        // A `;` inside a trigger body or a literal leaves it incomplete.
-        if unsafe { rusqlite::ffi::sqlite3_complete(text.as_ptr()) } != 0 {
-            conn.execute_batch(statement).map_err(storage)?;
-            start = end + 1;
+    // One transaction for the whole script: outside one, every statement
+    // commits (and syncs the file) alone, and a schema of a few hundred
+    // tables then paid a durable commit per table, index and trigger when
+    // its store opened. It also leaves no half-created schema behind.
+    conn.scope("jazz_ddl", |conn| {
+        let mut start = 0;
+        for (end, _) in script.match_indices(';') {
+            let statement = &script[start..=end];
+            let text = std::ffi::CString::new(statement)
+                .map_err(|_| Error::new(ErrorCode::Storage, "NUL in SQL"))?;
+            // SAFETY: a NUL-terminated string; `sqlite3_complete` only reads
+            // it. A `;` inside a trigger body or a literal leaves it incomplete.
+            if unsafe { rusqlite::ffi::sqlite3_complete(text.as_ptr()) } != 0 {
+                conn.execute_batch(statement).map_err(storage)?;
+                start = end + 1;
+            }
         }
-    }
-    let rest = &script[start..];
-    if !rest.trim().is_empty() {
-        conn.execute_batch(rest).map_err(storage)?;
-    }
-    Ok(())
+        let rest = &script[start..];
+        if !rest.trim().is_empty() {
+            conn.execute_batch(rest).map_err(storage)?;
+        }
+        Ok(())
+    })
 }
 
 pub(crate) fn rejected(message: impl Into<String>) -> Error {
@@ -12069,43 +12075,37 @@ impl TxRef<'_> {
         tier: ReadTier,
         source: &ReadViewSourceSpec,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let view = match source {
-            ReadViewSourceSpec::Current => None,
-            ReadViewSourceSpec::Snapshot { .. } => {
-                return Err(Error::new(
-                    ErrorCode::Query,
-                    "Reading a snapshot inside a transaction is not supported yet",
-                ));
-            }
-            // A live base needs nothing from the store; only a frozen one
-            // resolves its snapshot, under the store gate (which applies
-            // the staged writes of open transactions, so it is not taken
-            // for every branch read).
-            ReadViewSourceSpec::BranchView {
-                head,
-                base: None | Some(BranchViewBase::Current(_)),
-            } => Some(View {
-                head: head.clone(),
-                base: match source {
-                    ReadViewSourceSpec::BranchView {
-                        base: Some(BranchViewBase::Current(base)),
-                        ..
-                    } => Some(base.clone()),
-                    _ => None,
-                },
-                base_cut: None,
-            }),
-            ReadViewSourceSpec::BranchView { .. } => {
-                let opts = ReadOpts {
-                    read_view: ReadViewSpec {
-                        source: source.clone(),
-                        include_deleted,
-                    },
-                    ..ReadOpts::for_read_tier(ReadTier::LocalOnly)
-                };
-                ReadSpec::of(&opts, &self.db.inner())?.view
-            }
+        let opts = ReadOpts {
+            tier,
+            read_view: ReadViewSpec {
+                source: source.clone(),
+                include_deleted,
+            },
+            ..ReadOpts::default()
         };
+        self.all_prepared_with_options(prepared, identity, &opts, None)
+            .await
+    }
+
+    /// Binding entry point: as [`Self::all_prepared_in`], keeping the
+    /// caller's whole read options (its first-load policy) and coverage
+    /// check for a mergeable read's fetch, as outside a transaction. This
+    /// does not select a different identity or upgrade a mergeable read's
+    /// read set.
+    pub(crate) async fn all_prepared_with_options(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        opts: &ReadOpts,
+        coverage: Option<&dyn Fn() -> bool>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let source = &opts.read_view.source;
+        if let ReadViewSourceSpec::Snapshot { .. } = source {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "Reading a snapshot inside a transaction is not supported yet",
+            ));
+        }
         // Capture staging before queueing: later writes must not leak into
         // the prefix this read admitted, even when its predecessor is cancelled.
         let (prefix, state) = {
@@ -12125,12 +12125,7 @@ impl TxRef<'_> {
             .borrow_mut()
             .queue
             .push_back(guard.ticket.clone());
-        let through = ReadThrough {
-            view,
-            source: source.clone(),
-        };
-        let reading =
-            self.read_admitted(prepared, include_deleted, identity, tier, prefix, through);
+        let reading = self.read_admitted(prepared, identity, opts, coverage, prefix);
         let mut reading = std::pin::pin!(reading);
         std::future::poll_fn(|cx| {
             {
@@ -12160,15 +12155,55 @@ impl TxRef<'_> {
         .await
     }
 
+    /// The branch view `source` reads through (`None`: the root view). A
+    /// live base needs nothing from the store; only a frozen one resolves
+    /// its snapshot, under the store gate (which applies the staged writes
+    /// of open transactions, so it is not taken for every branch read).
+    fn read_view(
+        &self,
+        source: &ReadViewSourceSpec,
+        include_deleted: bool,
+    ) -> Result<Option<View>, Error> {
+        Ok(match source {
+            ReadViewSourceSpec::Current | ReadViewSourceSpec::Snapshot { .. } => None,
+            ReadViewSourceSpec::BranchView {
+                head,
+                base: None | Some(BranchViewBase::Current(_)),
+            } => Some(View {
+                head: head.clone(),
+                base: match source {
+                    ReadViewSourceSpec::BranchView {
+                        base: Some(BranchViewBase::Current(base)),
+                        ..
+                    } => Some(base.clone()),
+                    _ => None,
+                },
+                base_cut: None,
+            }),
+            ReadViewSourceSpec::BranchView { .. } => {
+                let frozen = ReadOpts {
+                    read_view: ReadViewSpec {
+                        source: source.clone(),
+                        include_deleted,
+                    },
+                    ..ReadOpts::for_read_tier(ReadTier::LocalOnly)
+                };
+                ReadSpec::of(&frozen, &self.db.inner())?.view
+            }
+        })
+    }
+
     async fn read_admitted(
         &self,
         prepared: &PreparedQuery,
-        include_deleted: bool,
         identity: Option<AuthorSubject>,
-        tier: ReadTier,
+        opts: &ReadOpts,
+        coverage: Option<&dyn Fn() -> bool>,
         prefix: BatchPrefix,
-        through: ReadThrough,
     ) -> Result<Vec<CurrentRow>, Error> {
+        let tier = opts.tier;
+        let include_deleted = opts.read_view.include_deleted;
+        let source = &opts.read_view.source;
         // Except for LocalOnly, a client hydrates a serializable read from
         // the authority at the snapshot first. LocalFirst may answer from
         // the replica when the link cannot answer.
@@ -12217,6 +12252,12 @@ impl TxRef<'_> {
                 ),
             ));
         }
+        // A serializable read resolves its view before fetching, so a
+        // frozen base it cannot resolve fails before asking the authority.
+        let mut view = match snapshot {
+            Some(_) => Some(self.read_view(source, include_deleted)?),
+            None => None,
+        };
         if let Some((snapshot, pinned)) = snapshot
             && self.db.is_client()
             && tier != ReadTier::LocalOnly
@@ -12243,7 +12284,7 @@ impl TxRef<'_> {
                     None,
                     None,
                     tier == ReadTier::Remote,
-                    &through.source,
+                    source,
                 )
                 .await?;
             if let Some(Batch {
@@ -12263,6 +12304,51 @@ impl TxRef<'_> {
                 *pinned = true;
             }
         }
+        let non_durable = self.db.inner().non_durable;
+        if snapshot.is_none()
+            && self.db.is_client()
+            && let Some(reach) = sync::remote_reach(opts, non_durable, false)
+            && let Some(deadline) = sync::remote_deadline(opts, non_durable, true)
+        {
+            // A mergeable read fetches as a read outside a transaction does.
+            // A cold non-durable foreground asks its durable relay (its
+            // worker) at its own tier and first-load wait, including while
+            // that relay's server is offline; a durable client asks the
+            // server on Remote, or on LocalFirst with `WaitForRemote`. A
+            // Remote read waits for the server while offline (`strict`).
+            //
+            // Records nothing: the read keeps its admitted prefix and its
+            // no-read-set semantics below. Unlike a read outside a
+            // transaction, it neither pins the fetched position
+            // (`Position::At`) nor filters a Remote read to settled rows: it
+            // has no snapshot, so it reads the overlay's current cut (at
+            // least as new as that answer), with other writers' unsettled
+            // rows visible, as a serializable read's overlay shows them.
+            // As outside a transaction, the query must have a synced shape.
+            self.db.remote_shape(&prepared.query)?;
+            self.db
+                .fetch(
+                    prepared,
+                    None,
+                    include_deleted,
+                    reach,
+                    deadline,
+                    coverage,
+                    tier == ReadTier::Remote,
+                    source,
+                )
+                .await?;
+        }
+        // A frozen base resolves its snapshot only now: a cold foreground
+        // learns the state it was captured at from the fetch above.
+        let view = match view.take() {
+            Some(view) => view,
+            None => self.read_view(source, include_deleted)?,
+        };
+        let through = ReadThrough {
+            view,
+            source: source.clone(),
+        };
         // Relations nest inside the overlay, so they see staged rows too.
         // Offloaded leaves are fetched as for any read.
         let (rows, prepared) = self
@@ -12825,5 +12911,92 @@ mod check_plan_tests {
         plans.put(key("c"), plan("r", 1));
         assert_eq!(plans.plans.len(), 1);
         assert!(kept(&plans, "c", "r", 1) && !kept(&plans, "a", "r", 1));
+    }
+}
+
+/// White-box on purpose: how many commits a store's DDL costs, and that a
+/// failing statement undoes the statements before it, are not visible
+/// through the public API (a store that fails to open is just an error).
+#[cfg(test)]
+mod execute_script_tests {
+    use super::execute_script;
+    use crate::storage::{Scoped, Storage};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// `tables` tables, each with an index and a trigger whose body holds
+    /// a `;` (so the script is not split inside it).
+    fn script(tables: usize) -> String {
+        (0..tables)
+            .map(|i| {
+                format!(
+                    "CREATE TABLE t{i} (a, b); CREATE INDEX t{i}_a ON t{i}(a); \
+                     CREATE TRIGGER t{i}_tr AFTER INSERT ON t{i} BEGIN SELECT 1; END;"
+                )
+            })
+            .collect()
+    }
+
+    /// Native SQLite and an emulated Durable Object store.
+    fn both() -> [(&'static str, Storage); 2] {
+        [
+            ("native", Storage::open_in_memory().unwrap()),
+            ("managed", Storage::managed_emulation_in_memory().unwrap()),
+        ]
+    }
+
+    fn objects(storage: &Storage) -> i64 {
+        storage
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name LIKE 't%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// A schema's DDL is one commit (one sync of the file), however many
+    /// statements it holds.
+    #[test]
+    fn a_script_commits_once() {
+        for (owner, storage) in both() {
+            let commits = Arc::new(AtomicUsize::new(0));
+            let counted = commits.clone();
+            storage
+                .commit_hook(Some(move || {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    false
+                }))
+                .unwrap();
+            execute_script(&storage, &script(50)).unwrap();
+            assert_eq!(commits.load(Ordering::SeqCst), 1, "{owner}");
+            assert_eq!(objects(&storage), 150, "{owner}");
+        }
+    }
+
+    /// A failing statement undoes the whole script: no half-created schema.
+    #[test]
+    fn a_failed_script_leaves_nothing() {
+        for (owner, storage) in both() {
+            let failing = format!("{} CREATE TABLE t0 (again);", script(3));
+            assert!(execute_script(&storage, &failing).is_err(), "{owner}");
+            assert_eq!(objects(&storage), 0, "{owner}");
+            assert!(storage.is_autocommit(), "{owner}");
+        }
+    }
+
+    /// Inside a caller's scope the script commits, or is undone, with it.
+    #[test]
+    fn a_script_inside_a_scope_goes_with_it() {
+        for (owner, storage) in both() {
+            storage
+                .scope_then("caller", |storage| {
+                    execute_script(storage, &script(2)).unwrap();
+                    assert!(!storage.is_autocommit(), "{owner}");
+                    Scoped::Undo(())
+                })
+                .unwrap();
+            assert_eq!(objects(&storage), 0, "{owner}");
+        }
     }
 }

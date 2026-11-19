@@ -1071,10 +1071,10 @@ impl Owner {
         // The checks beside the E2EE account tables' policies read the
         // account registry the store keeps beside the rows.
         // The registry names the app's founding namespace, parsed as device
-        // accounts' ids derive from it (`local_first_founding_app`).
+        // accounts' ids derive from it (`device_account_founding_app`).
         let installed = match (registry, owner.app.as_deref()) {
             (Some(reader), Some(app)) => {
-                let app = crate::portable::accounts::local_first_founding_app(app);
+                let app = crate::portable::accounts::device_account_founding_app(app);
                 owner.db.set_account_registry(Rc::new(
                     crate::server::account_store::RegistryFounders::new(reader, *app.uuid()),
                 ));

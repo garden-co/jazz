@@ -243,6 +243,38 @@ one_field_payload!(path_payload, path: Vec<String>);
 one_field_payload!(exprs_payload, exprs: Vec<PolicyExpr>);
 one_field_payload!(expr_payload, expr: Box<PolicyExpr>);
 
+/// `session.authMode` for a device account.
+pub const DEVICE_ACCOUNT_AUTH_MODE: &str = "device-account";
+
+/// What `session.authMode` was for device accounts before they were renamed
+/// from local-first auth. No session has it any more, so a policy comparing
+/// with it is refused instead of silently never matching (which would turn a
+/// guard like `session.authMode != 'local-first'` into an allow).
+pub const REMOVED_LOCAL_FIRST_AUTH_MODE: &str = "local-first";
+
+/// Whether `path` is `session.authMode` (or its `auth_mode` spelling).
+pub fn is_auth_mode_session_path(path: &[String]) -> bool {
+    matches!(path, [segment] if segment == "authMode" || segment == "auth_mode")
+}
+
+/// The refusal for a policy comparing `session.<path>` with `value`, when
+/// `value` is the removed `"local-first"` auth mode.
+pub fn removed_auth_mode_literal(path: &[String], value: &Value) -> Option<String> {
+    match value {
+        Value::Text(text)
+            if text == REMOVED_LOCAL_FIRST_AUTH_MODE && is_auth_mode_session_path(path) =>
+        {
+            Some(format!(
+                "session.{} is never \"{REMOVED_LOCAL_FIRST_AUTH_MODE}\" any more: \
+                 local-first auth was renamed to device accounts, so compare with \
+                 \"{DEVICE_ACCOUNT_AUTH_MODE}\"",
+                path.join(".")
+            ))
+        }
+        _ => None,
+    }
+}
+
 impl PolicyExpr {
     /// Create a comparison expression: column = @session.path
     pub fn eq_session(column: impl Into<String>, session_path: Vec<String>) -> Self {
@@ -343,6 +375,40 @@ impl PolicyExpr {
         }
     }
 
+    /// The refusal for a policy that compares `session.authMode` with the
+    /// removed `"local-first"` value anywhere in it, if it does.
+    pub fn removed_auth_mode_error(&self) -> Option<String> {
+        match self {
+            PolicyExpr::SessionCmp { path, value, .. }
+            | PolicyExpr::SessionContains { path, value } => removed_auth_mode_literal(path, value),
+            PolicyExpr::SessionInList { path, values } => values
+                .iter()
+                .find_map(|value| removed_auth_mode_literal(path, value)),
+            PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => {
+                exprs.iter().find_map(PolicyExpr::removed_auth_mode_error)
+            }
+            PolicyExpr::Not(expr) => expr.removed_auth_mode_error(),
+            PolicyExpr::Exists { condition, .. } => condition.removed_auth_mode_error(),
+            // Relation predicates compare a column with a session value,
+            // never a session value with a literal.
+            PolicyExpr::ExistsRel { .. }
+            | PolicyExpr::Cmp { .. }
+            | PolicyExpr::IsNull { .. }
+            | PolicyExpr::SessionIsNull { .. }
+            | PolicyExpr::IsNotNull { .. }
+            | PolicyExpr::SessionIsNotNull { .. }
+            | PolicyExpr::Contains { .. }
+            | PolicyExpr::In { .. }
+            | PolicyExpr::InList { .. }
+            | PolicyExpr::Inherits { .. }
+            | PolicyExpr::InheritsReferencing { .. }
+            | PolicyExpr::InheritsFrom { .. }
+            | PolicyExpr::InsertedByThisTransaction
+            | PolicyExpr::True
+            | PolicyExpr::False => None,
+        }
+    }
+
     /// Negate an expression.
     #[allow(clippy::should_implement_trait)]
     pub fn not(expr: PolicyExpr) -> Self {
@@ -358,6 +424,59 @@ mod tests {
         RelationPredicate as PredicateExpr, RelationValueRef as ValueRef,
     };
     use serde_json::json;
+
+    #[test]
+    fn comparing_auth_mode_with_the_removed_local_first_is_found_anywhere() {
+        let auth_mode = || vec!["authMode".to_owned()];
+        let local_first = || Value::Text("local-first".into());
+        let refused = [
+            PolicyExpr::SessionCmp {
+                path: auth_mode(),
+                op: CmpOp::Ne,
+                value: local_first(),
+            },
+            PolicyExpr::SessionCmp {
+                path: vec!["auth_mode".to_owned()],
+                op: CmpOp::Eq,
+                value: local_first(),
+            },
+            PolicyExpr::SessionInList {
+                path: auth_mode(),
+                values: vec![Value::Text("external".into()), local_first()],
+            },
+            PolicyExpr::Or(vec![
+                PolicyExpr::True,
+                PolicyExpr::Not(Box::new(PolicyExpr::Exists {
+                    table: "t".into(),
+                    condition: Box::new(PolicyExpr::And(vec![PolicyExpr::SessionCmp {
+                        path: auth_mode(),
+                        op: CmpOp::Eq,
+                        value: local_first(),
+                    }])),
+                })),
+            ]),
+        ];
+        for expr in refused {
+            let message = expr.removed_auth_mode_error().expect("refused");
+            assert!(message.contains("\"device-account\""), "{message}");
+        }
+        let kept = [
+            PolicyExpr::SessionCmp {
+                path: auth_mode(),
+                op: CmpOp::Eq,
+                value: Value::Text(DEVICE_ACCOUNT_AUTH_MODE.into()),
+            },
+            PolicyExpr::SessionCmp {
+                path: vec!["claims".into(), "mode".into()],
+                op: CmpOp::Eq,
+                value: local_first(),
+            },
+            PolicyExpr::eq_literal("tier", local_first()),
+        ];
+        for expr in kept {
+            assert_eq!(expr.removed_auth_mode_error(), None, "{expr:?}");
+        }
+    }
 
     #[test]
     fn test_policy_expr_builders() {
