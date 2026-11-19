@@ -26,8 +26,8 @@ else export T4_TARGET_URL=${T4_BASE_URL:?}; fi
 step "playwright (installed in the background since the deps step)"
 wait "$PW_PID" || { echo "FAIL playwright install"; tail -5 "$T4_WORK/playwright.log"; exit 1; }
 mkdir -p "$APP/node_modules" && ln -sfn "$T4_WORK/pw/node_modules/playwright" "$APP/node_modules/playwright" && ln -sfn "$T4_WORK/pw/node_modules/playwright-core" "$APP/node_modules/playwright-core"
-step "smoke (one retry for jazz#5553)"
-(cd "$APP" && BASE="$T4_TARGET_URL" node smoke/smoke.mjs) || { echo "smoke run 1 failed; retrying once"; (cd "$APP" && BASE="$T4_TARGET_URL" node smoke/smoke.mjs) || FAIL=1; }
+step "smoke (one run, no retry)"
+(cd "$APP" && BASE="$T4_TARGET_URL" node smoke/smoke.mjs) || FAIL=1
 step "core and inventory after"; "$S/core-state.sh" || true
 step "wrong-region probe (all creating calls stubbed)"
 for n in 0 1 2; do echo "-- FAIL_GET_AT=$n"; FAIL_GET_AT=$n node "$S/wrong-region-probe.mjs" "$APP" sfo1 2>&1 | grep -E "^(result|PASS|FAIL|FINDING)"; done

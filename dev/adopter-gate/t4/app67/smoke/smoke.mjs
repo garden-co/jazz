@@ -82,47 +82,13 @@ async function write(page, kind, text) {
   const err = await page.textContent('[data-testid="err"]', { timeout: 2000 }).catch(() => "");
   return { ok, err };
 }
-// jazz#5553 workaround (remove once its fix lands): on vercel() each function instance signs guest-link challenges with
-// its own key, so a sign-up or sign-in whose link calls hit two instances fails with exactly invalid_link_challenge.
-// Retry only that operation (reload, sign in again), up to 3 attempts in all; any other failure is not retried. Each
-// retried success prints a NOTE "flaky pass: jazz#5553" line, which the gate counts in verdict.json's flaky[].
-async function retryLink(page, label, attemptOnce, again) {
-  const before = page.__linkErrs ?? 0;
-  let r = await attemptOnce();
-  let attempt = 1;
-  while (r?.kind !== "backend" && (page.__linkErrs ?? 0) > before && attempt < 3) {
-    attempt++;
-    await page.reload();
-    await me(page, () => true, 30000);
-    r = await again();
-  }
-  if (attempt > 1)
-    console.log(
-      `${r?.kind === "backend" ? "NOTE" : "FAIL"} t4 flaky pass: jazz#5553 invalid_link_challenge at ${label}, ${attempt} attempts${r?.kind === "backend" ? "" : " (still failing)"}`,
-    );
-  return r;
-}
+// No retries: a sign-up or sign-in that fails is a FAIL (Anselm: flakes must fail until fixed). jazz#5553 (on
+// vercel() a guest-link challenge is signed per function instance) shows up as "pageerror: … invalid_link_challenge".
 async function signUp(page, email, password = PW) {
-  return retryLink(
-    page,
-    `sign-up of ${email}`,
-    () => signUpOnce(page, email, password),
-    async () =>
-      (await page.$('[data-testid="sign-in"]'))
-        ? signInOnce(page, email, password)
-        : me(page, (j) => j.kind === "backend", 30000),
-  );
+  return signUpOnce(page, email, password);
 }
 async function signIn(page, email, password) {
-  return retryLink(
-    page,
-    `sign-in of ${email}`,
-    () => signInOnce(page, email, password),
-    async () =>
-      (await page.$('[data-testid="sign-in"]'))
-        ? signInOnce(page, email, password)
-        : me(page, (j) => j.kind === "backend", 30000),
-  );
+  return signInOnce(page, email, password);
 }
 async function signUpOnce(page, email, password) {
   await page.fill('[data-testid="email"]', email);

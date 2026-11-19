@@ -14,7 +14,6 @@ const measure = (dir, pick) => files(dir).filter(pick).reduce((a, f) => { const 
 // Object build), reported with no threshold so it can't masquerade as browser growth.
 const rows = [
   ["jazz-wasm browser wasm (pkg/jazz_wasm_bg.wasm)", "jazz-wasm", (f) => /(^|\/)pkg\/jazz_wasm_bg\.wasm$/.test(f) && !f.includes("durable-object"), true],
-  ["jazz-wasm other wasm (server-only, e.g. durable-object/)", "jazz-wasm", (f) => f.endsWith(".wasm") && !(/(^|\/)pkg\/jazz_wasm_bg\.wasm$/.test(f) && !f.includes("durable-object")), false],
   ["jazz-tools dist JS", "jazz-tools", (f) => /\/dist\/.*\.js$/.test(f), true],
 ];
 const out = [];
@@ -28,6 +27,26 @@ for (const [label, pkg, pick, gated] of rows) {
   if (empty) console.log(`FAIL size ${label}: no file matched or 0 bytes (${prev}: ${a.n} files, ${a.raw} B; ${v}: ${b.n} files, ${b.raw} B)`);
   if (!empty) console.log(`${verdict} size ${label}: ${prev} → ${v}: raw ${a.raw} → ${b.raw} B, gzip ${a.gz} → ${b.gz} B (${a.raw === 0 ? "new" : `${d >= 0 ? "+" : ""}${d.toFixed(1)}%`}${gated ? `, review above +${pct}%` : ", not gated"})`);
   out.push({ label, prev, v, raw: [a.raw, b.raw], gzip: [a.gz, b.gz], pct: Number(d.toFixed(2)) });
+}
+// Cloudflare Worker bundles jazz-wasm ships (the Durable Object host, and since jazz#6153 the workerd backend). The
+// limit, per https://developers.cloudflare.com/workers/platform/limits/#worker-size (checked 2026-11-19): "Worker size
+// (uncompressed) | 64 MiB | 64 MiB" (Free | Paid), "There is no compressed size limit. Only the uncompressed bundle
+// size counts." So a bundle FAILs above 64 MiB uncompressed. AG_CF_GZIP_BUDGET (bytes, unset by default) adds a
+// compressed budget of our own (the retired 3 MB free-plan cap that size-build.mjs targets), if one is wanted.
+const CF_LIMIT = 64 * 1024 * 1024, GZ_BUDGET = Number(process.env.AG_CF_GZIP_BUDGET || 0);
+const listed = (pkgDir) => { try { return JSON.parse(fs.readFileSync(path.join(pkgDir, "package.json"), "utf8")).files ?? []; } catch { return []; } };
+for (const [label, dir] of [["Cloudflare Worker: Durable Object host (durable-object/)", "durable-object"], ["Cloudflare Worker: workerd backend (backend/)", "backend"]]) {
+  const pkgDir = path.join(W, "rc", "jazz-wasm"), sub = path.join(pkgDir, dir);
+  const required = listed(pkgDir).some((f) => f.startsWith(dir + "/"));
+  if (!fs.existsSync(sub)) {
+    console.log(required ? `FAIL size ${label}: package.json lists ${dir}/ but the package has none` : `PASS size ${label}: not in ${v}'s package`);
+    continue;
+  }
+  const m = measure(sub, () => true);
+  const over = m.raw > CF_LIMIT, gzOver = GZ_BUDGET > 0 && m.gz > GZ_BUDGET;
+  const verdict = m.n === 0 || m.raw === 0 ? "FAIL" : over || gzOver ? "FAIL" : "PASS";
+  console.log(`${verdict} size ${label}: ${m.n} files, ${m.raw} B uncompressed (Cloudflare limit ${CF_LIMIT} B, 64 MiB), gzip ${m.gz} B${GZ_BUDGET ? ` (budget ${GZ_BUDGET} B)` : ""}${m.n === 0 ? ": empty" : ""}`);
+  out.push({ label, v, raw: [null, m.raw], gzip: [null, m.gz], limit: CF_LIMIT, gzipBudget: GZ_BUDGET || null });
 }
 fs.writeFileSync(path.join(W, "sizes.json"), JSON.stringify(out, null, 2));
 JS

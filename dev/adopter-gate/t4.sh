@@ -27,15 +27,11 @@ body() {
   if [ -n "$cur" ] && newer "$cur" "$(ag_version)"; then
     echo "SKIP t4 vercel: $(ag_version) sorts below the eval core's $cur (a dry-run or older version); t4 deploys only versions that move the core"; return; fi
   "$AG/t4/scripts/run-t4.sh" "$(ag_version)" > "$AG_RESULTS/t4-full.log" 2>&1; local rc=$?
-  # When the smoke was retried and the retry passed, it's a flaky pass of a known bug (jazz#5553): run 1's lines become
-  # NOTE lines (listed, tracked in verdict.json's flaky count, not holding the gate). If the retry fails too, it's FAIL.
-  awk 'BEGIN{n=0} { lines[++n]=$0; if ($0 ~ /^smoke run 1 failed; retrying once/) cut=n }
-       END { for (i=1;i<=n;i++) { l=lines[i]; if (cut && i<cut && l ~ /^=== smoke/) insmoke=1; if (cut && i<cut && insmoke && l ~ /^(FAIL|PASS):? /) {
-               if (l ~ /^FAIL:/) { sub(/^FAIL: +/, "", l); split(l, a, " "); l="NOTE t4 flaky pass: jazz#5553, run 1 " a[1] }
-               else if (l ~ /^FAIL/) { sub(/^FAIL +/, "", l); l="NOTE t4 smoke run 1 (retried): " l } else continue }
-             print l } }' "$AG_RESULTS/t4-full.log" \
-    | grep -E "^(PASS|FAIL|REVIEW|NOTE|FINDING|SEEDED|smoke run 1 failed)" \
-    | sed 's/^FINDING:\{0,1\} */NOTE t4 known finding (jazz#5615, wrong-region fall-through): /; s/^SEEDED/REVIEW t4 first run: seeded/; /^smoke run 1 failed; retrying once/d'
+  cat "$AG_RESULTS/t4-full.log" \
+    | grep -E "^(PASS|FAIL|REVIEW|NOTE|FINDING|SEEDED)" \
+    | sed 's/^FINDING:\{0,1\} */NOTE t4 known finding (jazz#5615, wrong-region fall-through): /; s/^SEEDED/REVIEW t4 first run: seeded/'
+  local links; links=$(grep -c "invalid_link_challenge" "$AG_RESULTS/t4-full.log")
+  [ "$links" -gt 0 ] && echo "FAIL t4 smoke hit invalid_link_challenge $links× (jazz#5553: vercel() signs guest-link challenges per function instance)"
   # Per-step wall time (run-t4.sh stamps each "=== step @epoch"), for the release-gate budget.
   awk '/^=== .* @[0-9]+$/ { t=$NF; sub(/^@/,"",t); if (p) printf "TIME t4 %ss %s\n", t-pt, p; p=$0; sub(/^=== /,"",p); sub(/ @[0-9]+$/,"",p); pt=t }' "$AG_RESULTS/t4-full.log"
   # The core: its version after the deploy, and whether it existed before (the old-data checks need it to).
