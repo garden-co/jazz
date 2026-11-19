@@ -91,7 +91,13 @@ jobs:
       # The commit being gated, as a full sha: every job's fetch-rc.sh requires each producer run (artifacts_run_id,
       # rc_npm_run_id, language_run_id) to have built exactly it (#supply-chain's rule), and fails closed otherwise.
       - id: ref
-        env: { GH_TOKEN: "${{ github.token }}", RC_TAG: "${{ inputs.rc_tag }}", JAZZ_SHA: "${{ inputs.jazz_sha }}", RUN: "${{ inputs.artifacts_run_id }}" }
+        env:
+          {
+            GH_TOKEN: "${{ github.token }}",
+            RC_TAG: "${{ inputs.rc_tag }}",
+            JAZZ_SHA: "${{ inputs.jazz_sha }}",
+            RUN: "${{ inputs.artifacts_run_id }}",
+          }
         run: |
           set -euo pipefail
           [ -n "$RC_TAG$RUN" ] || { echo "::error::give rc_tag or artifacts_run_id"; exit 1; }
@@ -234,7 +240,12 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with: { ref: "${{ needs.inputs.outputs.rc_ref }}", path: rc-src }
       - name: Fetch the RC files this job needs
-        env: { GH_TOKEN: "${{ github.token }}", AG_EXPECT_SHA: "${{ needs.inputs.outputs.expect_sha }}", AG_NEED: "npm,languages" }
+        env:
+          {
+            GH_TOKEN: "${{ github.token }}",
+            AG_EXPECT_SHA: "${{ needs.inputs.outputs.expect_sha }}",
+            AG_NEED: "npm,languages",
+          }
         run: |
           if [ -n "${{ inputs.artifacts_run_id }}" ]; then
             $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}" --npm-run "${{ inputs.rc_npm_run_id || inputs.artifacts_run_id }}"
@@ -263,7 +274,12 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with: { sparse-checkout: "dev/adopter-gate\n.github/actions" }
       - name: Fetch the RC files this job needs
-        env: { GH_TOKEN: "${{ github.token }}", AG_EXPECT_SHA: "${{ needs.inputs.outputs.expect_sha }}", AG_NEED: "npm" }
+        env:
+          {
+            GH_TOKEN: "${{ github.token }}",
+            AG_EXPECT_SHA: "${{ needs.inputs.outputs.expect_sha }}",
+            AG_NEED: "npm",
+          }
         run: |
           if [ -n "${{ inputs.artifacts_run_id }}" ]; then
             $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}" --npm-run "${{ inputs.rc_npm_run_id || inputs.artifacts_run_id }}"
@@ -315,7 +331,12 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with: { sparse-checkout: "dev/adopter-gate\n.github/actions" }
       - name: Fetch the RC files this job needs
-        env: { GH_TOKEN: "${{ github.token }}", AG_EXPECT_SHA: "${{ needs.inputs.outputs.expect_sha }}", AG_NEED: "npm" }
+        env:
+          {
+            GH_TOKEN: "${{ github.token }}",
+            AG_EXPECT_SHA: "${{ needs.inputs.outputs.expect_sha }}",
+            AG_NEED: "npm",
+          }
         run: |
           if [ -n "${{ inputs.artifacts_run_id }}" ]; then
             $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}" --npm-run "${{ inputs.rc_npm_run_id || inputs.artifacts_run_id }}"
@@ -373,7 +394,12 @@ jobs:
       # within 4 min, is FAIL.
       - name: Require the artifacts run's release manifest to name the gated commit
         if: inputs.artifacts_run_id != ''
-        env: { GH_TOKEN: "${{ github.token }}", RUN: "${{ inputs.artifacts_run_id }}", EXPECT: "${{ needs.inputs.outputs.expect_sha }}" }
+        env:
+          {
+            GH_TOKEN: "${{ github.token }}",
+            RUN: "${{ inputs.artifacts_run_id }}",
+            EXPECT: "${{ needs.inputs.outputs.expect_sha }}",
+          }
         run: |
           mkdir -p results/provenance; out=results/provenance/provenance.txt; m="$RUNNER_TEMP/release-manifest"; end=$(( $(date +%s) + 240 ))
           until timeout 60 gh run download "$RUN" -R "$GITHUB_REPOSITORY" -n release-manifest -D "$m" 2>/dev/null; do
