@@ -424,7 +424,7 @@ fn an_account_root_of_the_wrong_kind_is_refused() {
 fn the_founders_view_reads_on_the_objects_connection_inside_a_scope() {
     use jazz::db::AccountRegistryView;
     let object = ObjectHost::new();
-    let app = *accounts::local_first_founding_app(APP_NAME).uuid();
+    let app = *accounts::device_account_founding_app(APP_NAME).uuid();
     let registry = object.handle();
     accounts::open(&registry).unwrap();
     let view = super::accounts::RegistryFounders::new(object.handle(), app);
@@ -443,11 +443,11 @@ fn the_founders_view_reads_on_the_objects_connection_inside_a_scope() {
     };
     let alice = register("alice");
     let stranger = jazz::account_registry::AccountId(uuid::Uuid::new_v4());
-    assert_eq!(view.founded_local_first(stranger), Ok(None));
+    assert_eq!(view.founded_by_device_account(stranger), Ok(None));
     registry
         .scope("core scope", |_| {
             // Founded by an external login: not by a local-first identity.
-            assert_eq!(view.founded_local_first(alice), Ok(Some(false)));
+            assert_eq!(view.founded_by_device_account(alice), Ok(Some(false)));
             // A device account founded inside the scope is seen at once.
             let device = accounts::execute(
                 &registry,
@@ -461,15 +461,15 @@ fn the_founders_view_reads_on_the_objects_connection_inside_a_scope() {
             )
             .map_err(accounts::storage_error)?;
             let device = accounts::assignment_of(device).account;
-            assert_eq!(view.founded_local_first(device), Ok(Some(true)));
+            assert_eq!(view.founded_by_device_account(device), Ok(Some(true)));
             // The check core runs inside the write passes the store's own
             // connection, which is the one this scope is open on.
             assert_eq!(
-                view.founded_local_first_on(&registry, device),
+                view.founded_by_device_account_on(&registry, device),
                 Ok(Some(true))
             );
             assert_eq!(
-                view.founded_local_first_on(&registry, alice),
+                view.founded_by_device_account_on(&registry, alice),
                 Ok(Some(false))
             );
             assert_eq!(
@@ -670,13 +670,13 @@ fn the_system_table_rules_hold_on_the_durable_object_host() {
 fn an_unreadable_registry_refuses_the_account_checks() {
     use jazz::db::AccountRegistryView;
     let object = ObjectHost::new();
-    let app = *accounts::local_first_founding_app(APP_NAME).uuid();
+    let app = *accounts::device_account_founding_app(APP_NAME).uuid();
     let view = super::accounts::RegistryFounders::new(object.handle(), app);
     let account = jazz::account_registry::AccountId(uuid::Uuid::new_v4());
     let handle = object.handle();
     for result in [
-        view.founded_local_first(account).map(drop),
-        view.founded_local_first_on(&handle, account).map(drop),
+        view.founded_by_device_account(account).map(drop),
+        view.founded_by_device_account_on(&handle, account).map(drop),
         view.founded_for_another_audience(account).map(drop),
         view.founded_for_another_audience_on(&handle, account)
             .map(drop),

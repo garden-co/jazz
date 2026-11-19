@@ -430,8 +430,8 @@ pub enum AccountRoute {
     LoginOrRegister,
     /// `link`: [`LinkRequest`] → [`AccountResponse`] (the account `to` now uses).
     Link,
-    /// `found-local-first`: [`FoundLocalFirstRequest`] → [`AccountResponse`].
-    FoundLocalFirst,
+    /// `found-local-first`: [`FoundDeviceAccountRequest`] → [`AccountResponse`].
+    FoundDeviceAccount,
     /// `revoke`: [`RevokeRequest`] → 204.
     Revoke,
     /// `revoke-sessions`: [`RevokeSessionsRequest`] → [`RevokeSessionsResponse`].
@@ -458,7 +458,7 @@ impl AccountRoute {
             "resolve" => Self::Resolve,
             "login-or-register" => Self::LoginOrRegister,
             "link" => Self::Link,
-            "found-local-first" => Self::FoundLocalFirst,
+            "found-local-first" => Self::FoundDeviceAccount,
             "revoke" => Self::Revoke,
             "revoke-sessions" => Self::RevokeSessions,
             _ => return None,
@@ -471,7 +471,7 @@ impl AccountRoute {
             Self::Resolve => "resolve",
             Self::LoginOrRegister => "login-or-register",
             Self::Link => "link",
-            Self::FoundLocalFirst => "found-local-first",
+            Self::FoundDeviceAccount => "found-local-first",
             Self::Revoke => "revoke",
             Self::RevokeSessions => "revoke-sessions",
         }
@@ -480,7 +480,7 @@ impl AccountRoute {
     /// The secret a host checks before calling the route.
     pub fn authority(self) -> RouteAuthority {
         match self {
-            Self::Resolve | Self::LoginOrRegister | Self::FoundLocalFirst => {
+            Self::Resolve | Self::LoginOrRegister | Self::FoundDeviceAccount => {
                 RouteAuthority::VouchingBackend
             }
             Self::Link | Self::Revoke | Self::RevokeSessions => RouteAuthority::Admin,
@@ -547,7 +547,7 @@ impl AccountResponse {
 /// would for the guest's own token.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FoundLocalFirstRequest {
+pub struct FoundDeviceAccountRequest {
     pub identity: Principal,
     /// The namespace the guest's account was founded in, when it is not
     /// this app: the endpoint an app-less client's proofs are for.
@@ -610,7 +610,7 @@ pub fn require_external_identity(identity: &Principal) -> Result<(), RouteFailur
 }
 
 /// `found-local-first` founds only local-first guests.
-pub fn require_local_first_identity(identity: &Principal) -> Result<(), RouteFailure> {
+pub fn require_device_account_identity(identity: &Principal) -> Result<(), RouteFailure> {
     if identity.issuer != jazz::tools::identity::DEVICE_ACCOUNT_ISSUER {
         return Err(refuse(400, "local_first_identity_required"));
     }
@@ -619,7 +619,7 @@ pub fn require_local_first_identity(identity: &Principal) -> Result<(), RouteFai
 
 /// The namespace a local-first founder's account id derives from: the
 /// audience its proof was verified against, an app id or any other name.
-pub fn local_first_founding_app(audience: &str) -> jazz::tools::AppId {
+pub fn device_account_founding_app(audience: &str) -> jazz::tools::AppId {
     jazz::tools::AppId::from_string(audience)
         .unwrap_or_else(|_| jazz::tools::AppId::from_name(audience))
 }
@@ -629,7 +629,7 @@ pub fn local_first_founding_app(audience: &str) -> jazz::tools::AppId {
 pub fn founding_app(audience: Option<&str>, app_id: Uuid) -> Result<Uuid, RouteFailure> {
     match audience.map(str::trim) {
         Some("") => Err(refuse(400, "invalid_local_first_audience")),
-        Some(audience) => Ok(*local_first_founding_app(audience).uuid()),
+        Some(audience) => Ok(*device_account_founding_app(audience).uuid()),
         None => Ok(app_id),
     }
 }
@@ -710,12 +710,12 @@ pub fn login_or_register_route(
 
 /// `found-local-first`, in the app `app_id` unless the request names
 /// another audience.
-pub fn found_local_first(
+pub fn found_device_account(
     storage: &Storage,
-    request: FoundLocalFirstRequest,
+    request: FoundDeviceAccountRequest,
     app_id: Uuid,
 ) -> Result<AccountResponse, RouteFailure> {
-    require_local_first_identity(&request.identity)?;
+    require_device_account_identity(&request.identity)?;
     let app = founding_app(request.audience.as_deref(), app_id)?;
     let result = execute(
         storage,
@@ -879,14 +879,14 @@ pub fn serve(
                 effects.assignments_changed = changed(&result);
                 json(result)
             }
-            AccountRoute::FoundLocalFirst => {
-                let request: FoundLocalFirstRequest = parse(body)?;
+            AccountRoute::FoundDeviceAccount => {
+                let request: FoundDeviceAccountRequest = parse(body)?;
                 let result = founding_app(request.audience.as_deref(), context.app_id)
                     .and_then(|app| {
                         refuse_foreign_founding(context.app_id, app, context.encrypts)
                             .map_err(|body| refuse(400, body))
                     })
-                    .and_then(|()| found_local_first(storage, request, context.app_id));
+                    .and_then(|()| found_device_account(storage, request, context.app_id));
                 effects.assignments_changed = changed(&result);
                 json(result)
             }
@@ -998,7 +998,7 @@ impl RegistryRead for jazz::host::HostReader {
 
 /// The registry as core's checks beside the account tables' policies read
 /// it (E2EE protocol R5, R6). Core reads it on the store's own connection,
-/// inside the write's transaction (`founded_local_first_on` and
+/// inside the write's transaction (`founded_by_device_account_on` and
 /// `founded_for_another_audience_on`): a second connection to a shared
 /// in-memory database, which has no write-ahead log, is locked out while the
 /// store's connection holds a write, and a Durable Object has one connection
@@ -1047,7 +1047,7 @@ fn external_identities_of(conn: &Storage, account: AccountId) -> Result<i64, jaz
 
 impl<R: RegistryRead> RegistryFounders<R> {
     /// `app` is the namespace device accounts' ids derive from
-    /// ([`local_first_founding_app`]).
+    /// ([`device_account_founding_app`]).
     pub fn new(reader: R, app: Uuid) -> Self {
         Self { reader, app }
     }
@@ -1076,14 +1076,14 @@ impl<R: RegistryRead> RegistryFounders<R> {
 }
 
 impl<R: RegistryRead> jazz::db::AccountRegistryView for RegistryFounders<R> {
-    fn founded_local_first(&self, account: AccountId) -> Result<Option<bool>, String> {
+    fn founded_by_device_account(&self, account: AccountId) -> Result<Option<bool>, String> {
         self.founded(
             account,
             self.reader.read(|conn| identities_of(conn, account)),
         )
     }
 
-    fn founded_local_first_on(
+    fn founded_by_device_account_on(
         &self,
         store: &Storage,
         account: AccountId,
@@ -1099,7 +1099,7 @@ impl<R: RegistryRead> jazz::db::AccountRegistryView for RegistryFounders<R> {
     /// refuse to create them. An account with an external identity is not
     /// told apart from one the app founded, so it reads as the app's.
     fn founded_for_another_audience(&self, account: AccountId) -> Result<bool, String> {
-        let Some(founded) = self.founded_local_first(account)? else {
+        let Some(founded) = self.founded_by_device_account(account)? else {
             return Ok(false);
         };
         if founded {
@@ -1116,7 +1116,7 @@ impl<R: RegistryRead> jazz::db::AccountRegistryView for RegistryFounders<R> {
         store: &Storage,
         account: AccountId,
     ) -> Result<bool, String> {
-        let Some(founded) = self.founded_local_first_on(store, account)? else {
+        let Some(founded) = self.founded_by_device_account_on(store, account)? else {
             return Ok(false);
         };
         if founded {
@@ -1567,7 +1567,7 @@ mod tests {
             AccountRoute::Resolve,
             AccountRoute::LoginOrRegister,
             AccountRoute::Link,
-            AccountRoute::FoundLocalFirst,
+            AccountRoute::FoundDeviceAccount,
             AccountRoute::Revoke,
             AccountRoute::RevokeSessions,
         ] {
@@ -1598,7 +1598,7 @@ mod tests {
             let mut ids = Uuid::new_v4;
             let (reply, _) = serve(
                 &storage,
-                AccountRoute::FoundLocalFirst,
+                AccountRoute::FoundDeviceAccount,
                 body.to_string().as_bytes(),
                 RouteContext {
                     app_id: Uuid::from_u128(0xa11),

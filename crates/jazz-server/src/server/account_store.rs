@@ -175,7 +175,7 @@ mod tests {
     // the registry's own read connection (E2EE protocol R5, R6). Internal:
     // the view has no public reader of its own to observe it through.
     #[test]
-    fn the_founders_view_tells_local_first_founded_accounts() {
+    fn the_founders_view_tells_device_account_founded_accounts() {
         use jazz::db::AccountRegistryView;
         let dir = tempfile::tempdir().unwrap();
         let storage = crate::runtime::StorageConfig::data_dir(dir.path());
@@ -208,17 +208,20 @@ mod tests {
             .unwrap(),
             app,
         );
-        assert_eq!(view.founded_local_first(founded.account), Ok(Some(true)));
-        assert_eq!(view.founded_local_first(external), Ok(Some(false)));
         assert_eq!(
-            view.founded_local_first(AccountId(Uuid::from_bytes([3; 16]))),
+            view.founded_by_device_account(founded.account),
+            Ok(Some(true))
+        );
+        assert_eq!(view.founded_by_device_account(external), Ok(Some(false)));
+        assert_eq!(
+            view.founded_by_device_account(AccountId(Uuid::from_bytes([3; 16]))),
             Ok(None)
         );
     }
 
-    /// An account whose identities are all local-first and none of which
-    /// derives its id in the app's namespace was founded for another
-    /// audience; the app's own founders, external accounts and unknown
+    /// An account whose identities are all device-account identities and
+    /// none of which derives its id in the app's namespace was founded for
+    /// another audience; the app's own founders, external accounts and unknown
     /// accounts are not.
     #[test]
     fn an_account_founded_for_another_audience_is_told_apart() {

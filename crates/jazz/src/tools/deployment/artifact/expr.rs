@@ -1967,11 +1967,11 @@ fn compile_in(ast: &Ast, context: &Context<'_>, scope: &Scope) -> Result<PolicyE
                 }),
                 _ => match left {
                     Operand::Session(path, _) => Ok(PolicyExpr::SessionInList {
-                        path,
                         values: values
                             .iter()
-                            .map(|v| literal_value(v, None))
+                            .map(|v| session_literal(&path, v))
                             .collect::<Result<_, _>>()?,
+                        path,
                     }),
                     other => Err(ExprError::new(
                         other.span().min(*span),
@@ -2269,6 +2269,20 @@ fn classify(operand: &Operand, context: &Context<'_>, scope: &Scope) -> Result<R
     }
 }
 
+/// A literal compared with `session.<path>`. `session.authMode` is never
+/// `"local-first"` since device accounts were renamed, so comparing with it is
+/// refused rather than left to quietly never match.
+fn session_literal(path: &[String], literal: &Operand) -> Result<Value, ExprError> {
+    let value = literal_value(literal, None)?;
+    match crate::model::public_api::policy::removed_auth_mode_literal(path, &value) {
+        Some(message) => {
+            Err(ExprError::new(literal.span(), message)
+                .example("session.authMode = 'device-account'"))
+        }
+        None => Ok(value),
+    }
+}
+
 fn outer_ref(column: String) -> PolicyValue {
     PolicyValue::SessionRef(vec![OUTER_ROW.to_string(), column])
 }
@@ -2308,7 +2322,7 @@ fn compile_cmp(
             other => Ok(PolicyExpr::SessionCmp {
                 path: path.clone(),
                 op,
-                value: literal_value(other, None)?,
+                value: session_literal(path, other)?,
             }),
         };
     }

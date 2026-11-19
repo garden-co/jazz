@@ -155,7 +155,7 @@ pub fn self_signed_session(
         })?;
     let auth_mode = match issuer {
         identity::ANONYMOUS_ISSUER => AuthMode::Anonymous,
-        _ => AuthMode::LocalFirst,
+        _ => AuthMode::DeviceAccount,
     };
     Ok(Session {
         account_id: None,
@@ -194,7 +194,7 @@ pub fn founding_command(principal: &Principal, audience: &str) -> Option<Account
     (principal.issuer == identity::DEVICE_ACCOUNT_ISSUER).then(|| {
         AccountCommand::FoundDeviceAccount {
             principal: principal.clone(),
-            app: *accounts::local_first_founding_app(audience).uuid(),
+            app: *accounts::device_account_founding_app(audience).uuid(),
         }
     })
 }
@@ -239,7 +239,7 @@ pub fn admit_guest(
     if let Some(command) = founding_command(&principal, &audience) {
         accounts::refuse_foreign_founding(
             *app_id.uuid(),
-            *accounts::local_first_founding_app(&audience).uuid(),
+            *accounts::device_account_founding_app(&audience).uuid(),
             encrypts,
         )?;
         accounts::execute(storage, &command)?;
@@ -306,7 +306,7 @@ mod tests {
         AuthorSubject::reserved(identity::DEVICE_ACCOUNT_ISSUER, &subject)
             .unwrap()
             .with_account(jazz::account_registry::device_account_id(
-                *accounts::local_first_founding_app(audience).uuid(),
+                *accounts::device_account_founding_app(audience).uuid(),
                 &subject,
             ))
     }
@@ -348,7 +348,7 @@ mod tests {
                 assert_eq!(session.account_id, peer.account_id(), "{name}");
                 assert_eq!(session.issuer, identity::DEVICE_ACCOUNT_ISSUER, "{name}");
                 assert_eq!(session.user_id, subject(&guest), "{name}");
-                assert_eq!(session.auth_mode, AuthMode::LocalFirst, "{name}");
+                assert_eq!(session.auth_mode, AuthMode::DeviceAccount, "{name}");
                 assert_eq!(session.author_subject().unwrap(), peer, "{name}");
             }
             let principal = Principal {
@@ -371,7 +371,7 @@ mod tests {
             let app = app();
             let guest = seed(2);
             let peer = peer(&guest, &app.to_string());
-            accounts::found_local_first(
+            accounts::found_device_account(
                 &storage,
                 serde_json::from_value(serde_json::json!({
                     "identity": { "issuer": identity::DEVICE_ACCOUNT_ISSUER, "subject": subject(&guest) },

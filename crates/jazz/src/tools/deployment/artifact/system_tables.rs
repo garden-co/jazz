@@ -257,8 +257,8 @@ pub fn e2ee_system_tables_v1() -> Schema {
                     req("deviceId", Id),
                     req("epochId", Id),
                     req("kind", Text),
-                    opt("localFirstPublicKey", Bytes),
-                    opt("localFirstSignature", Bytes),
+                    opt("deviceAccountPublicKey", Bytes),
+                    opt("deviceAccountSignature", Bytes),
                 ],
                 &["accountId", "deviceId"],
                 &[],
@@ -503,13 +503,13 @@ fn created_by_me() -> PolicyExpr {
     eq("$createdBy.account", me())
 }
 
-/// A public table's rows: readable by every `local-first` or `external`
+/// A public table's rows: readable by every `device-account` or `external`
 /// session (protocol R10).
 fn public() -> PolicyExpr {
     PolicyExpr::SessionInList {
         path: vec!["authMode".to_owned()],
         values: vec![
-            Value::Text("local-first".to_owned()),
+            Value::Text("device-account".to_owned()),
             Value::Text("external".to_owned()),
         ],
     }
@@ -719,7 +719,7 @@ pub fn derive_e2ee_policies(
                 {
                     // The first identity is the account's own row id; a
                     // reset is a later generation, by a session that isn't
-                    // local-first, when the app allows resets.
+                    // a device-account session, when the app allows resets.
                     let first = and(vec![
                         literal("generation", Value::BigInt(0)),
                         eq("id", me()),
@@ -736,7 +736,7 @@ pub fn derive_e2ee_policies(
                                 PolicyExpr::SessionCmp {
                                     path: vec!["authMode".to_owned()],
                                     op: CmpOp::Ne,
-                                    value: Value::Text("local-first".to_owned()),
+                                    value: Value::Text("device-account".to_owned()),
                                 },
                             ]),
                         ])

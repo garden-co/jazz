@@ -791,7 +791,7 @@ mod smoke {
         )
         .expect("a proof");
         let subject = identity::derive_user_id(&seed).to_string();
-        let founding = jazz_server::portable::accounts::local_first_founding_app(audience);
+        let founding = jazz_server::portable::accounts::device_account_founding_app(audience);
         let peer = AuthorSubject::reserved(identity::DEVICE_ACCOUNT_ISSUER, &subject)
             .expect("a local-first author")
             .with_account(jazz::account_registry::device_account_id(

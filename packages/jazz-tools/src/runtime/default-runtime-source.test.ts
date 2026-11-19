@@ -41,7 +41,7 @@ describe("browserWorkerTransportAuth", () => {
 describe("selfSignedClientProofFromConfig", () => {
   it("binds local-first and anonymous runtime opens to their signed author", () => {
     for (const [issuer, authMode] of [
-      [LOCAL_FIRST_JWT_ISSUER, "local-first"],
+      [LOCAL_FIRST_JWT_ISSUER, "device-account"],
       [ANONYMOUS_JWT_ISSUER, "anonymous"],
     ] as const) {
       const session = internalSessionFromVerifiedReservedJwtPayload(
@@ -93,7 +93,7 @@ describe("trustAttachedBrowserWorkerSession", () => {
     issuer: LOCAL_FIRST_JWT_ISSUER,
     user_id: "alice",
     claims: { role: "writer" },
-    authMode: "local-first" as const,
+    authMode: "device-account" as const,
   };
 
   function attachedConfig(
@@ -150,7 +150,7 @@ describe("trustAttachedBrowserWorkerSession", () => {
     expect(getTrustedReservedSession(config)).toMatchObject({
       issuer: LOCAL_FIRST_JWT_ISSUER,
       user_id: "alice",
-      authMode: "local-first",
+      authMode: "device-account",
       claims: { role: "writer" },
     });
   });

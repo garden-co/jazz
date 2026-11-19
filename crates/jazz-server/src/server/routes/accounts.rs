@@ -1,7 +1,7 @@
 //! Account control endpoints, for the app's backend: it vouches for the
 //! identities it names with its admin secret.
 use crate::portable::accounts::{
-    self, AccountResponse, FoundLocalFirstRequest, IdentityRequest, LinkRequest, RegistryError,
+    self, AccountResponse, FoundDeviceAccountRequest, IdentityRequest, LinkRequest, RegistryError,
     RevokeRequest, RevokeSessionsRequest, RevokeSessionsResponse, RouteFailure, registry_failure,
 };
 use crate::server::ServerState;
@@ -117,14 +117,14 @@ async fn refuse_foreign_founding(state: &ServerState, app: uuid::Uuid) -> Result
 }
 
 /// The app's backend vouches for a local-first guest
-/// ([`FoundLocalFirstRequest`]).
-pub(super) async fn found_local_first_for_admin(
+/// ([`FoundDeviceAccountRequest`]).
+pub(super) async fn found_device_account_for_admin(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
-    Json(request): Json<FoundLocalFirstRequest>,
+    Json(request): Json<FoundDeviceAccountRequest>,
 ) -> Result<Json<AccountResponse>, Failure> {
     validate_vouching_backend(&headers, &state)?;
-    accounts::require_local_first_identity(&request.identity).map_err(fail)?;
+    accounts::require_device_account_identity(&request.identity).map_err(fail)?;
     let registry = owner(&state)?;
     let app =
         accounts::founding_app(request.audience.as_deref(), *state.app_id.uuid()).map_err(fail)?;
@@ -332,7 +332,7 @@ pub(in crate::server) async fn admit_local_founder(
     };
     refuse_foreign_founding(
         state,
-        *crate::portable::accounts::local_first_founding_app(&audience).uuid(),
+        *crate::portable::accounts::device_account_founding_app(&audience).uuid(),
     )
     .await?;
     if let Some(registry) = &state.accounts {

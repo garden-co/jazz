@@ -40,6 +40,7 @@ import {
   encodeStreamRecord,
 } from "../runtime/native-runtime/http-stream-socket.js";
 import { resolveSchemaSource } from "../schema-source.js";
+import { shippedMigrations } from "../runtime/client-migrations.js";
 import { checkRunningBindings } from "../dev/app-files.js";
 import { loadBackendApp, provideCodegenNapi, type LoadedBackendApp } from "../dev/codegen-napi.js";
 import { BUNDLE_HEADER } from "./admission.js";
@@ -140,6 +141,15 @@ export type JazzStore =
       readonly backendCredential: BackendCredential;
       /** The app's secret, when `remote()` was given one: agent tokens are signed with a key derived from it. */
       readonly secret?: string;
+      /** What runs the core, when a store other than `remote()` made this one (`durableObjects()`). */
+      readonly host?: "durable-objects";
+    }
+  | {
+      readonly kind: "durableObjects";
+      /** The Worker's origin. */
+      readonly url: string;
+      /** The Worker's `JAZZ_CORE_SECRET`. */
+      readonly secret: string;
     }
   | {
       readonly kind: "vercel";
@@ -245,6 +255,122 @@ export function remote(
     appId,
     backendCredential,
     ...(secret === undefined ? {} : { secret }),
+  };
+}
+
+/** The shortest core secret a Durable Object core accepts. */
+const DURABLE_OBJECT_SECRET_MIN_LENGTH = 32;
+/** The hosts a `durableObjects()` url may reach over plain http. */
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+/** How long the store waits for the core to name its app. */
+const DURABLE_OBJECT_APP_TIMEOUT_MS = 30_000;
+/** An app id the core may name: no path separators, dots or line breaks. */
+const DURABLE_OBJECT_APP_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * A core running in a Cloudflare Durable Object: one SQLite-backed object per
+ * app, in a Worker you deploy that exports `JazzCore` and forwards requests to
+ * it with `routeJazzRequest` (both from `jazz-tools/durable-object`). `url` is
+ * that Worker's origin (e.g. `https://my-app-jazz.example.workers.dev`) and
+ * `secret` its `JAZZ_CORE_SECRET`: a random string of at least 32 characters
+ * that stays the same across deployments. The object keeps its own app id,
+ * which this backend asks it for when the store opens.
+ *
+ * The core admits only this backend, which holds the secret; browsers keep
+ * talking to your backend. A Durable Object core doesn't run thin-client
+ * transactions (your backend runs them, as with any core) and has no
+ * HTTP-stream fallback for the backend's own sockets.
+ *
+ * @experimental Durable Object cores are new; the options and the Worker's
+ * bindings may still change.
+ */
+export function durableObjects(options: {
+  url: string;
+  secret: string;
+  appId?: never;
+}): Extract<JazzStore, { kind: "durableObjects" }> {
+  if (typeof options === "object" && options !== null && "appId" in options) {
+    throw new Error(
+      "durableObjects(): appId is not an option: the store keeps its own app id, in the Worker's Durable Object",
+    );
+  }
+  const { url, secret } = options ?? ({} as typeof options);
+  let origin: URL | undefined;
+  try {
+    origin = new URL(url);
+  } catch {
+    // Refused below.
+  }
+  if (
+    !origin ||
+    (origin.protocol !== "https:" && origin.protocol !== "http:") ||
+    origin.pathname.replace(/\/+$/, "") !== "" ||
+    origin.search ||
+    origin.hash
+  ) {
+    throw new Error(
+      `durableObjects(): url must be the Worker's origin, like "https://my-app-jazz.example.workers.dev"; got ${JSON.stringify(url)}`,
+    );
+  }
+  if (origin.username || origin.password) {
+    throw new Error(
+      "durableObjects(): url must not carry a user name or password; the core secret is the only credential",
+    );
+  }
+  // The secret goes with every request: in the clear only to this machine
+  // (`wrangler dev`, tests).
+  if (origin.protocol === "http:" && !LOOPBACK_HOSTS.has(origin.hostname)) {
+    throw new Error(
+      `durableObjects(): url must be https:// (http:// only for localhost, 127.0.0.1 or [::1]); got ${JSON.stringify(url)}`,
+    );
+  }
+  if (typeof secret !== "string" || secret.length < DURABLE_OBJECT_SECRET_MIN_LENGTH) {
+    throw new Error(
+      `durableObjects(): secret must be the Worker's JAZZ_CORE_SECRET, a random string of at least ${DURABLE_OBJECT_SECRET_MIN_LENGTH} characters`,
+    );
+  }
+  return { kind: "durableObjects", url: origin.origin, secret };
+}
+
+/**
+ * The `remote()` store a `durableObjects()` store opens as: the Worker's
+ * object tells this backend its app id (`GET /app`, with the core secret).
+ */
+async function durableObjectCore(
+  store: Extract<JazzStore, { kind: "durableObjects" }>,
+): Promise<Extract<JazzStore, { kind: "remote" }>> {
+  let response: Response;
+  let body: { appId?: unknown } | undefined;
+  try {
+    response = await fetch(`${store.url}/app`, {
+      headers: { [CREDENTIAL_HEADER]: store.secret },
+      redirect: "manual",
+      signal: AbortSignal.timeout(DURABLE_OBJECT_APP_TIMEOUT_MS),
+    });
+    body = (await response.json().catch(() => undefined)) as typeof body;
+  } catch (error) {
+    if ((error as { name?: unknown } | null)?.name === "TimeoutError") {
+      throw new Error(
+        `createJazz: the Durable Object core at ${store.url} did not answer within ${DURABLE_OBJECT_APP_TIMEOUT_MS / 1000}s; this Jazz tries again on its next use`,
+        { cause: error },
+      );
+    }
+    throw unreachableCore(store.url, error);
+  }
+  if (response.status === 401 || response.status === 403) {
+    throw new Error(
+      `createJazz: the Durable Object core at ${store.url} refused the secret: durableObjects()'s secret must be the Worker's JAZZ_CORE_SECRET`,
+    );
+  }
+  // The id goes into request paths and log lines: only a plain one.
+  if (!response.ok || typeof body?.appId !== "string" || !DURABLE_OBJECT_APP_ID.test(body.appId)) {
+    throw new Error(
+      `createJazz: ${store.url} did not answer as a Jazz Durable Object core (GET /app: ${response.status}); is url the Worker that exports JazzCore, on this jazz-tools version?`,
+    );
+  }
+  return {
+    ...remote({ url: store.url, appId: body.appId, secret: store.secret }),
+    host: "durable-objects",
   };
 }
 
@@ -1630,9 +1756,11 @@ function runningStore(store: JazzStore): JazzStore {
 }
 
 /** The line a store logs when it opens (a `vercel()` core logs its own). */
-function storeOpenedLine(store: Exclude<JazzStore, { kind: "vercel" }>): string {
+function storeOpenedLine(store: Exclude<JazzStore, { kind: "vercel" | "durableObjects" }>): string {
   if (store.kind === "sqlite") return `jazz: store sqlite at ${store.path}`;
   if (store.kind === "memory") return "jazz: store memory (its data lasts as long as this process)";
+  if (store.host === "durable-objects")
+    return `jazz: store durableObjects at ${store.url} (app ${store.appId})`;
   return `jazz: store remote at ${store.url} (app ${store.appId})`;
 }
 
@@ -1651,7 +1779,8 @@ interface OpenedJazz extends Omit<Jazz, "ready" | "db" | "attach"> {
  * Open `store` and apply the schema, migrations and permissions `options`
  * declare to its core.
  */
-async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<OpenedJazz> {
+async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise<OpenedJazz> {
+  const store = opening.kind === "durableObjects" ? await durableObjectCore(opening) : opening;
   let options = initial;
   let { basePath, publicUrls, allowedOrigins } = jazzSettings(options);
   // The bundle this backend published: every socket to the core carries it,
@@ -2384,6 +2513,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       prelude: link.prelude,
       trusted: link.trusted,
       webSocket,
+      migrations: shippedMigrations(resolveSchemaSource(options.app)),
     });
     thinClients += 1;
     let closed = false;

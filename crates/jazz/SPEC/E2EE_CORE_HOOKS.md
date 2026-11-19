@@ -262,7 +262,7 @@ Multi-column correlation applies to the support of every application's read poli
 - **Cost accepted.** Per internal row or space row served: the member rows of that one space, at most 1,000 in a supported space (spec §3.8), never member rows of other spaces. Also binding the session conjunct (`accountId = session.user`) would narrow this to the session's own rows; that is a later optimisation, to be measured with the rest (Main risks).
 - **Not taken:** fixing the conjunct order so that `identifier` comes first, with an `identifier` index on members. It would work for these shapes but depends on conjunct order, which the deploy check of `M(T)` deliberately ignores (H1).
 
-- **Account tables.** Fixed policies, R3–R11 of the spec. They check access only (spec §1.4). The founder, root-kind and `allowAccountReset` conditions of R5–R6 read Jazz's account registry and the deployed configuration; they are checks beside the policy, next to the existing local-first registry, not part of `InheritsFrom`.
+- **Account tables.** Fixed policies, R3–R11 of the spec. They check access only (spec §1.4). The founder, root-kind and `allowAccountReset` conditions of R5–R6 read Jazz's account registry and the deployed configuration; they are checks beside the policy, next to the existing device-account registry checks, not part of `InheritsFrom`.
 
 #### Encoding, fixture and compatibility
 
