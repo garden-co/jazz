@@ -1,4 +1,4 @@
-//! Cancelling a callback transaction releases its SQLite and runtime state.
+//! Dropping a staged transaction releases its overlay and pending writes.
 
 use crate::common::{allow_all_policies, compile_schema};
 use jazz::db::{
@@ -78,27 +78,27 @@ fn drive<T>(alice: &Db, bob: &Db, future: impl Future<Output = T>) -> T {
     panic!("sync operation did not finish within 100 turns");
 }
 
-/// A suspended callback transaction holds its savepoint across the
-/// callback's await, as `Db::held_for_test` reports; dropping it releases
-/// everything.
+/// Alice stages a write and pauses. The cached overlay and batch are held
+/// until she drops the handle; dropping it releases both.
 #[test]
-fn held_for_test_sees_a_suspended_callback_transaction() {
+fn held_for_test_sees_a_suspended_staged_transaction() {
     let alice = open(1, AuthorSubject::SYSTEM);
     assert!(alice.held_for_test().is_nothing());
-    let mut transaction = Box::pin(alice.transaction(async |tx| {
+    let mut transaction = Box::pin(async {
+        let tx = alice.mergeable_tx().await?;
         tx.insert("notes", body("uncommitted"), Default::default())
             .await?;
         pending::<Result<(), Error>>().await
-    }));
+    });
     poll_pending(transaction.as_mut());
     let held = alice.held_for_test();
-    assert!(held.callback_transaction);
+    assert_eq!(held.open_batches, 1);
     assert!(held.sqlite_transaction);
     drop(transaction);
     assert!(alice.held_for_test().is_nothing());
 }
 
-/// Alice cancels a suspended callback after an update and a large insert. Her
+/// Alice cancels a suspended staged transaction after an update and a large insert. Her
 /// retained view sees the original row, subscribers hear no rolled-back change,
 /// SQLite releases its writer lock, and a subsequent transaction can commit.
 ///
@@ -107,7 +107,7 @@ fn held_for_test_sees_a_suspended_callback_transaction() {
 /// view:  original row -----------------------------------------> original row
 /// ```
 #[test]
-fn dropping_a_suspended_callback_releases_rows_chunks_and_the_writer_lock() {
+fn dropping_a_suspended_staged_transaction_releases_rows_chunks_and_the_writer_lock() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("alice.sqlite");
     let alice = block_on(Db::open_at(
@@ -123,13 +123,14 @@ fn dropping_a_suspended_callback_releases_rows_chunks_and_the_writer_lock() {
     let query = alice.prepare_query(&Query::from("notes")).unwrap();
     let mut subscription = block_on(alice.subscribe(&query, ReadOpts::default())).unwrap();
     assert!(subscription.try_next_event().is_some());
-    let mut transaction = Box::pin(alice.transaction(async |tx| {
+    let mut transaction = Box::pin(async {
+        let tx = alice.mergeable_tx().await?;
         tx.update("notes", row, body("uncommitted"), Default::default())
             .await?;
         tx.insert("notes", body(&"large".repeat(50_000)), Default::default())
             .await?;
         pending::<Result<(), Error>>().await
-    }));
+    });
     poll_pending(transaction.as_mut());
     drop(transaction);
     let visible = bodies(&view);
@@ -146,11 +147,12 @@ fn dropping_a_suspended_callback_releases_rows_chunks_and_the_writer_lock() {
     contender
         .execute_batch("BEGIN IMMEDIATE; ROLLBACK")
         .unwrap();
-    block_on(view.transaction(async |tx| {
+    block_on(async {
+        let tx = view.mergeable_tx().await?;
         tx.update("notes", row, body("committed"), Default::default())
             .await?;
-        Ok(())
-    }))
+        tx.commit().await
+    })
     .unwrap();
     drop(subscription);
     drop(view);
@@ -179,11 +181,12 @@ fn cancelled_writes_do_not_leak_into_the_next_authority_upload() {
     let (client, server) = duplex();
     let _upstream = block_on(alice.connect_upstream(client));
     bob.accept_subscriber(server, author).unwrap();
-    let mut transaction = Box::pin(alice.transaction(async |tx| {
+    let mut transaction = Box::pin(async {
+        let tx = alice.mergeable_tx().await?;
         tx.insert("notes", body("cancelled"), Default::default())
             .await?;
         pending::<Result<(), Error>>().await
-    }));
+    });
     poll_pending(transaction.as_mut());
     drop(transaction);
     assert!(bodies(&alice).is_empty());
@@ -209,19 +212,21 @@ fn cancelled_author_codes_cannot_alias_a_later_writer() {
     let backend = open(1, AuthorSubject::SYSTEM);
     let alice = AuthorSubject::for_test_bytes([1; 16]);
     let bob = AuthorSubject::for_test_bytes([2; 16]);
-    let mut transaction = Box::pin(backend.transaction_for_identity(alice, async |tx| {
+    let mut transaction = Box::pin(async {
+        let tx = backend.mergeable_tx_for_identity(alice).await?;
         tx.insert("notes", body("cancelled"), Default::default())
             .await?;
         pending::<Result<(), Error>>().await
-    }));
+    });
     poll_pending(transaction.as_mut());
     drop(transaction);
     assert!(bodies(&backend).is_empty());
     for (author, label) in [(bob, "bob"), (alice, "alice")] {
-        block_on(backend.transaction_for_identity(author, async |tx| {
+        block_on(async {
+            let tx = backend.mergeable_tx_for_identity(author).await?;
             tx.insert("notes", body(label), Default::default()).await?;
-            Ok(())
-        }))
+            tx.commit().await
+        })
         .unwrap();
     }
     let rows = read(
@@ -249,59 +254,64 @@ fn cancelled_author_codes_cannot_alias_a_later_writer() {
 #[test]
 fn cancellation_after_sqlite_automatic_rollback_keeps_the_owner_usable() {
     let alice = open(1, AuthorSubject::SYSTEM);
-    let mut transaction = Box::pin(alice.transaction(async |tx| {
+    let mut transaction = Box::pin(async {
+        let tx = alice.mergeable_tx().await?;
         tx.insert("notes", body("gone"), Default::default()).await?;
         // Existing fault injection reproduces SQLite's whole-transaction
         // rollback after disk-full/I/O errors; no public API causes that fault.
         alice.rollback_sqlite_transaction_for_test();
         pending::<Result<(), Error>>().await
-    }));
+    });
     poll_pending(transaction.as_mut());
     drop(transaction);
     assert!(bodies(&alice).is_empty());
-    block_on(alice.transaction(async |tx| {
+    block_on(async {
+        let tx = alice.mergeable_tx().await?;
         tx.insert("notes", body("recovered"), Default::default())
             .await?;
-        Ok(())
-    }))
+        tx.commit().await
+    })
     .unwrap();
     assert_eq!(bodies(&alice), [Value::String("recovered".to_owned())]);
 }
 
-/// Alice catches a panic from her transaction callback. Unwinding must release
+/// Alice catches a panic while holding a staged transaction. Unwinding must release
 /// the same transaction state as cancellation, leaving no row and allowing retry.
 #[test]
-fn unwinding_a_callback_rolls_back_before_the_owner_is_reused() {
+fn unwinding_a_staged_transaction_rolls_back_before_the_owner_is_reused() {
     let alice = open(1, AuthorSubject::SYSTEM);
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _: Result<((), _), Error> = block_on(alice.transaction(async |tx| {
+        let _: Result<(), Error> = block_on(async {
+            let tx = alice.mergeable_tx().await?;
             tx.insert("notes", body("panicked"), Default::default())
                 .await?;
-            panic!("application callback panic");
-        }));
+            panic!("application staged transaction panic");
+        });
     }));
     assert!(panic.is_err());
     assert!(bodies(&alice).is_empty());
-    block_on(alice.transaction(async |tx| {
+    block_on(async {
+        let tx = alice.mergeable_tx().await?;
         tx.insert("notes", body("retry"), Default::default())
             .await?;
-        Ok(())
-    }))
+        tx.commit().await
+    })
     .unwrap();
     assert_eq!(bodies(&alice), [Value::String("retry".to_owned())]);
 }
 
-/// While Alice's callback is suspended, her store learns it must never hand
+/// While Alice's staged transaction is suspended, her store learns it must never hand
 /// out a seq at or below a floor (a peer's position, a host's seeded floor).
 /// Rolling her unit back, by cancellation or by error, undoes only the unit:
 /// the floor stays, so her next commit's transaction id is above it and the
 /// authority cannot mistake it for one it already deduplicated.
 #[test]
-fn rolling_back_a_callback_keeps_seq_floors_raised_while_it_ran() {
+fn rolling_back_a_staged_transaction_keeps_seq_floors_raised_while_it_ran() {
     for cancel in [true, false] {
         let alice = open(1, AuthorSubject::for_test_bytes([1; 16]));
         let floor = alice.seq_high_water().saturating_mul(2) + 1_000;
-        let mut transaction = Box::pin(alice.transaction(async |tx| {
+        let mut transaction = Box::pin(async {
+            let tx = alice.mergeable_tx().await?;
             tx.insert("notes", body("rolled back"), Default::default())
                 .await?;
             alice.seed_seq_floor(floor);
@@ -310,7 +320,7 @@ fn rolling_back_a_callback_keeps_seq_floors_raised_while_it_ran() {
             } else {
                 Err(Error::new(jazz::db::ErrorCode::Protocol, "refused"))
             }
-        }));
+        });
         if cancel {
             poll_pending(transaction.as_mut());
             drop(transaction);
@@ -319,59 +329,53 @@ fn rolling_back_a_callback_keeps_seq_floors_raised_while_it_ran() {
         }
         assert!(bodies(&alice).is_empty());
         assert!(alice.seq_high_water() >= floor, "cancel: {cancel}");
-        let ((), receipt) = block_on(alice.transaction(async |tx| {
+        let ((), receipt) = block_on(async {
+            let tx = alice.mergeable_tx().await?;
             tx.insert("notes", body("committed"), Default::default())
                 .await?;
-            Ok(())
-        }))
+            let receipt = tx.commit().await?;
+            Ok::<_, jazz::db::Error>(((), receipt))
+        })
         .unwrap();
         assert!(receipt.0 > floor, "cancel: {cancel}");
     }
 }
 
-/// While Alice's callback transaction is suspended, a standalone write
-/// under another identity (a session) on the same store would join that
-/// transaction's commit and upload under its author. It is refused, and
-/// the transaction commits only its own write.
+/// Alice pauses a staged transaction. Carol's standalone write commits
+/// independently; Alice sees it only after reading outside her own staging.
 #[test]
-fn a_write_as_another_identity_is_refused_while_a_transaction_is_open() {
+fn a_write_as_another_identity_commits_independently() {
     use jazz::db::{InsertOptions, WriteIdentity};
     let alice = open(1, AuthorSubject::SYSTEM);
     let carol = AuthorSubject::for_test_bytes([7; 16]);
-    let (resume, resumed) = futures_channel::oneshot::channel::<()>();
-    let mut transaction = Box::pin(alice.transaction(async |tx| {
-        tx.insert("notes", body("own"), Default::default()).await?;
-        resumed.await.unwrap();
-        Ok(())
-    }));
-    poll_pending(transaction.as_mut());
-    let joined = block_on(alice.insert(
+    let tx = block_on(alice.mergeable_tx()).unwrap();
+    block_on(tx.insert("notes", body("own"), Default::default())).unwrap();
+    block_on(alice.insert(
         "notes",
         body("carol's"),
         InsertOptions {
             identity: WriteIdentity::Session(carol),
             ..Default::default()
         },
-    ));
-    let refused = joined.expect_err("a joining write is refused");
-    assert!(
-        refused
-            .to_string()
-            .contains("a write as another identity while a transaction is open"),
-        "{refused}"
+    ))
+    .unwrap();
+    assert_eq!(bodies(&alice), [Value::String("carol's".to_owned())]);
+    block_on(tx.commit()).unwrap();
+    let mut visible = bodies(&alice);
+    visible.sort_by_key(|value| format!("{value:?}"));
+    assert_eq!(
+        visible,
+        [
+            Value::String("carol's".to_owned()),
+            Value::String("own".to_owned())
+        ]
     );
-    resume.send(()).unwrap();
-    block_on(transaction).unwrap();
-    assert_eq!(bodies(&alice), [Value::String("own".to_owned())]);
 }
 
-/// A transaction handle (`begin_mergeable`) committed while Alice's callback
-/// transaction is suspended would join that callback's commit. It is refused
-/// and stays open. Whether the callback then finishes (`resume`) or is
-/// cancelled, the handle commits afterwards and keeps its row. With
-/// `synced`, Alice is a client of Bob's authority, and both commits reach
-/// Bob without wedging sync.
-fn handle_commit_waits_for_a_suspended_callback(resume: bool, synced: bool) {
+/// Alice commits an ID-based handle while a second staged transaction is
+/// suspended. The first commit survives whether the second commits or is
+/// abandoned. With syncing enabled, Bob's authority sees those same commits.
+fn handle_commits_beside_a_suspended_transaction(resume: bool, synced: bool) {
     use jazz::model::transaction::OpenTransactionId;
     let author = AuthorSubject::for_test_bytes([1; 16]);
     let alice = open(
@@ -398,32 +402,28 @@ fn handle_commit_waits_for_a_suspended_callback(resume: bool, synced: bool) {
     )
     .unwrap();
     let (finish, finished) = futures_channel::oneshot::channel::<()>();
-    let mut transaction = Box::pin(alice.transaction(async |tx| {
-        tx.insert("notes", body("callback's"), Default::default())
+    let mut transaction = Box::pin(async {
+        let tx = alice.mergeable_tx().await?;
+        tx.insert("notes", body("staged transaction's"), Default::default())
             .await?;
         finished.await.unwrap();
-        Ok(())
-    }));
+        let receipt = tx.commit().await?;
+        Ok::<_, jazz::db::Error>(((), receipt))
+    });
     poll_pending(transaction.as_mut());
 
-    let refused = block_on(alice.commit_mergeable_handle(handle))
-        .expect_err("a handle's commit waits for the callback transaction");
-    assert!(
-        refused
-            .to_string()
-            .contains("committing a transaction while a callback transaction is open"),
-        "{refused}"
-    );
+    let committed = block_on(alice.commit_mergeable_handle(handle)).unwrap();
+    let mut last_commit = committed.0;
+    assert_eq!(bodies(&alice), [Value::String("handle's".to_owned())]);
 
     let mut expected = vec![Value::String("handle's".to_owned())];
     if resume {
         finish.send(()).unwrap();
-        block_on(transaction).unwrap();
-        expected.push(Value::String("callback's".to_owned()));
+        last_commit = block_on(transaction).unwrap().1.0;
+        expected.push(Value::String("staged transaction's".to_owned()));
     } else {
         drop(transaction);
     }
-    let committed = block_on(alice.commit_mergeable_handle(handle)).unwrap();
     expected.sort_by_key(|value| format!("{value:?}"));
     let sorted = |db: &Db| {
         let mut bodies = bodies(db);
@@ -435,7 +435,7 @@ fn handle_commit_waits_for_a_suspended_callback(resume: bool, synced: bool) {
         drive(
             &alice,
             &bob,
-            alice.wait_for_transaction(committed.0, DurabilityTier::Global),
+            alice.wait_for_transaction(last_commit, DurabilityTier::Global),
         )
         .unwrap();
         assert_eq!(sorted(&bob), expected);
@@ -443,22 +443,39 @@ fn handle_commit_waits_for_a_suspended_callback(resume: bool, synced: bool) {
     }
 }
 
+/// Alice commits one transaction while another is paused, then commits both.
 #[test]
-fn a_handle_commit_waits_for_a_suspended_callback_that_resumes() {
-    handle_commit_waits_for_a_suspended_callback(true, false);
+fn a_handle_commits_beside_a_suspended_transaction_that_resumes() {
+    handle_commits_beside_a_suspended_transaction(true, false);
 }
 
+/// Alice abandoning the paused transaction cannot undo her independent commit.
 #[test]
-fn a_handle_commit_waits_for_a_suspended_callback_that_is_cancelled() {
-    handle_commit_waits_for_a_suspended_callback(false, false);
+fn a_handle_commits_beside_a_suspended_transaction_that_is_cancelled() {
+    handle_commits_beside_a_suspended_transaction(false, false);
 }
 
+/// Bob's authority receives both of Alice's independently committed transactions.
 #[test]
-fn a_client_handle_commit_waits_for_a_suspended_callback_that_resumes() {
-    handle_commit_waits_for_a_suspended_callback(true, true);
+fn a_client_handle_commits_beside_a_suspended_transaction_that_resumes() {
+    handle_commits_beside_a_suspended_transaction(true, true);
 }
 
+/// Bob receives Alice's committed write, but never her abandoned staged write.
 #[test]
-fn a_client_handle_commit_waits_for_a_suspended_callback_that_is_cancelled() {
-    handle_commit_waits_for_a_suspended_callback(false, true);
+fn a_client_handle_commits_beside_a_suspended_transaction_that_is_cancelled() {
+    handle_commits_beside_a_suspended_transaction(false, true);
+}
+
+/// Alice abandons her staged write after Bob commits through the same Db.
+/// alice: stage -> suspend -> drop
+/// bob:              insert -> survives
+#[test]
+fn abandoning_a_transaction_keeps_an_unrelated_write() {
+    let db = open(1, AuthorSubject::SYSTEM);
+    let tx = block_on(db.mergeable_tx()).unwrap();
+    block_on(tx.insert("notes", body("inside"), Default::default())).unwrap();
+    block_on(db.insert("notes", body("outside"), Default::default())).unwrap();
+    drop(tx);
+    assert_eq!(bodies(&db), [Value::String("outside".to_owned())]);
 }
