@@ -173,14 +173,17 @@ function refused(request: StoreRequest) {
 /**
  * Runs the app's store for the native runtime: takes its requests as they
  * arise, runs each against `store` (one at a time, in order) and answers.
- * Stops with `stop()`; the timer never keeps the process alive.
+ * `stop()` stops polling. A host closing its runtime can also cancel answers
+ * already in flight. The timer never keeps the process alive.
  */
 export function servePrivateStore(
   target: StoreTarget,
   store: PrivateStore,
   intervalMs = 2,
-): { stop(): void; drain(): Promise<void> } {
+): { stop(options?: { cancelPending?: boolean }): void; drain(): Promise<void> } {
   const queue: StoreRequest[] = [];
+  const stop = new AbortController();
+  const { signal } = stop;
   let running: Promise<void> | undefined;
   const drain = async () => {
     for (let request = queue.shift(); request; request = queue.shift()) {
@@ -188,9 +191,11 @@ export function servePrivateStore(
         // A store that never answers must not hold the others back: the
         // runtime fails that call after the same time, and its late answer
         // is refused.
-        const payload = JSON.stringify(await withinAnswerTime(answer(store, request)));
+        const payload = JSON.stringify(await withinAnswerTime(answer(store, request), signal));
+        if (signal.aborted) return;
         if (!target.replyStore(request.id, true, payload)) refused(request);
       } catch (error) {
+        if (signal.aborted) return;
         if (error instanceof StoreAnswerTimeout) continue;
         const reason =
           error instanceof PrivateStoreConflictError
@@ -205,6 +210,7 @@ export function servePrivateStore(
     }
   };
   const tick = () => {
+    if (signal.aborted) return Promise.resolve();
     // Taking the requests is also how the runtime's clock runs (a request
     // nobody answers times out there), so it never waits for the store.
     for (const text of target.takeStoreRequests()) queue.push(JSON.parse(text) as StoreRequest);
@@ -216,7 +222,16 @@ export function servePrivateStore(
   };
   const timer = setInterval(() => void tick(), intervalMs);
   (timer as { unref?: () => void }).unref?.();
-  return { stop: () => clearInterval(timer), drain: tick };
+  return {
+    stop({ cancelPending = false } = {}) {
+      clearInterval(timer);
+      if (cancelPending) {
+        queue.length = 0;
+        stop.abort();
+      }
+    },
+    drain: tick,
+  };
 }
 
 /** How long the app's store may take to answer a request (the runtime gives up at the same time). */
@@ -224,17 +239,27 @@ const STORE_ANSWER_MS = 30_000;
 
 class StoreAnswerTimeout extends Error {}
 
-function withinAnswerTime<T>(work: Promise<T>): Promise<T> {
+function withinAnswerTime<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new StoreAnswerTimeout()), STORE_ANSWER_MS);
+    const expire = () => {
+      cleanup();
+      reject(new StoreAnswerTimeout());
+    };
+    const timer = setTimeout(expire, STORE_ANSWER_MS);
     (timer as { unref?: () => void }).unref?.();
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", expire);
+    };
+    signal.addEventListener("abort", expire);
+    if (signal.aborted) expire();
     work.then(
       (value) => {
-        clearTimeout(timer);
+        cleanup();
         resolve(value);
       },
       (error) => {
-        clearTimeout(timer);
+        cleanup();
         reject(error);
       },
     );

@@ -1,5 +1,5 @@
 ---
-title: Encryption in Rust, Swift, Kotlin and Go
+title: Encryption in native apps
 description: "The private store each native platform supplies, a suggested place for it, and how a Rust backend takes part."
 ---
 
@@ -120,6 +120,30 @@ handle refuses every call.
 
 ## React Native
 
-The native relay behind React Native opens an encrypted app too: its own store holds no keys, and a
-device's screens attach with the runtime over a store your app supplies. The JavaScript side of that,
-the calls and the store, are not wired yet; see [limits](/docs/e2ee/limits).
+Pass your generated app and a `PrivateStore` to `createJazzClient`. Use the device's
+Keychain on iOS or Android Keystore for the key that protects the store. Keep the
+documents in your app's private directory. See [Private store](/docs/e2ee/private-store).
+
+Keep the protecting key on this device only and out of backups. On iOS, store it in the Keychain with a
+`...ThisDeviceOnly` accessibility class, such as `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`. On
+Android, use an Android Keystore key, and exclude the store's files from Auto Backup. A restored backup
+is a copied device, and a copy whose protection travels with it can answer a device-approval challenge
+as the original would (see [limits](/docs/e2ee/limits#copied-stores)).
+
+```ts
+import { createJazzClient } from "jazz-tools/react-native";
+import { app } from "./jazz.generated";
+import { accountStore, privateStore } from "./device-storage";
+
+const session = await createJazzClient({
+  serverUrl: "https://app.example/jazz",
+  initial: "device",
+  store: accountStore,
+  encryption: { app, store: privateStore },
+});
+const status = await session.db.encryption.ready();
+```
+
+The account store remembers the signed-in account. The private store holds the device's
+encryption keys. In Expo, import `createJazzClient` from `jazz-tools/expo`, keep the
+same `encryption` option, and let Expo supply the account store.

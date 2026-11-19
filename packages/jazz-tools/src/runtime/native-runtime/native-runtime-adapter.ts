@@ -1188,14 +1188,33 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private serveEncryption(options: NativeEncryptionOptions): void {
     const native = this.db as unknown as NativeEncryptionDb;
-    this.encryptionState = {
-      native,
-      createHandle: options.createHandle,
-      serving: servePrivateStore(native, options.store),
-      uses: new SpaceUse(native),
-    };
-    // Verify the account in the background; the app may await `ready()` too.
-    this.encryptionHandle()?.start();
+    const serving = servePrivateStore(native, options.store);
+    try {
+      this.bindEncryption(native, serving, options.createHandle);
+      // Verify the account in the background; the app may await `ready()` too.
+      this.encryptionHandle()?.start();
+    } catch (error) {
+      serving.stop();
+      throw error;
+    }
+  }
+
+  /** Adopt the private store bridge of the React Native foreground. */
+  attachEncryption(
+    native: NativeEncryptionDb,
+    serving: { stop(): void },
+    createHandle: EncryptionHandleFactory,
+  ): void {
+    this.bindEncryption(native, serving, createHandle);
+    this.signalEncryptionOnline();
+  }
+
+  private bindEncryption(
+    native: NativeEncryptionDb,
+    serving: { stop(): void },
+    createHandle: EncryptionHandleFactory,
+  ): void {
+    this.encryptionState = { native, createHandle, serving, uses: new SpaceUse(native) };
   }
 
   /** Runs a write, and again once the space's key is ready if it failed `key-pending`. */

@@ -71,6 +71,10 @@ impl NativeBuilt {
 struct NativeReadiness {
     recovery: RefCell<Option<RecoverySecret>>,
     result: RefCell<Verification>,
+    observed_initial: Cell<bool>,
+    requested: Cell<u64>,
+    started: Cell<u64>,
+    finished: Cell<u64>,
 }
 
 enum Verification {
@@ -259,6 +263,10 @@ impl Encryption {
         let native = NativeReadiness {
             recovery: RefCell::new(built.recovery),
             result: RefCell::new(Verification::Pending),
+            observed_initial: Cell::new(false),
+            requested: Cell::new(0),
+            started: Cell::new(0),
+            finished: Cell::new(0),
         };
         Self::start(built.built, store, db, Some(native))
     }
@@ -401,6 +409,49 @@ impl Encryption {
             .expect("an expired readiness call always has an outcome")
     }
 
+    /// An explicit foreground waiter joins initial recovery, or asks the
+    /// loop for a new verification once it has seen the initial outcome.
+    /// Waiters for the same explicit pass share its work.
+    pub fn request_foreground_ready(&self) -> u64 {
+        let Some(native) = &self.native else { return 0 };
+        // A terminal preparation error exits the loop before it can
+        // take any further passes. Keep returning its recorded outcome.
+        if !native.observed_initial.get() || self.main.borrow().is_none() {
+            return 0;
+        }
+        if native.requested.get() <= native.finished.get() {
+            native.requested.set(native.started.get() + 1);
+        }
+        native.requested.get()
+    }
+
+    /// Read only an outcome of the requested pass, even if an earlier pass
+    /// succeeded. A caller can stop waiting without cancelling recovery.
+    pub fn foreground_ready_outcome(
+        &self,
+        requested: u64,
+        expired: bool,
+    ) -> Option<Result<&'static str, String>> {
+        if let Some(native) = &self.native {
+            if native.finished.get() < requested && self.main.borrow().is_some() {
+                return expired.then(|| Err(self.readiness_timeout()));
+            }
+            let result = self.native_ready_outcome(expired);
+            if requested == 0 && self.native_ready_outcome(false).is_some() {
+                native.observed_initial.set(true);
+            }
+            return result;
+        }
+        self.native_ready_outcome(expired)
+    }
+
+    fn readiness_timeout(&self) -> String {
+        format!(
+            "timeout: the account was not verified in time (waiting: {})",
+            self.stage.get()
+        )
+    }
+
     fn native_ready_outcome(&self, expired: bool) -> Option<Result<&'static str, String>> {
         let Some(native) = &self.native else {
             return Some(Err("the runtime is not native".to_owned()));
@@ -412,10 +463,7 @@ impl Encryption {
             Verification::Failed(error) => Some(Err(describe_native(error))),
             Verification::AwaitingRecovery if expired => Some(Ok("awaiting-approval")),
             Verification::Retry(error) if expired => Some(Err(describe_native(error))),
-            _ if expired => Some(Err(format!(
-                "timeout: the account was not verified in time (waiting: {})",
-                self.stage.get()
-            ))),
+            _ if expired => Some(Err(self.readiness_timeout())),
             _ => None,
         }
     }
@@ -496,6 +544,7 @@ impl Encryption {
         // The delivery pass belongs to the loop, which takes its turn itself.
         let _turn = match op {
             "keysDeliver" => None,
+            "prepareSpace" if self.native.is_some() => None,
             _ => Some(self.gate.enter().await),
         };
         let (client, db) = (&self.client, &*self.db);
@@ -665,7 +714,11 @@ impl Encryption {
                     scope_id: text("scopeId")?,
                     identifier: text("identifier")?,
                 };
-                json!(client.prepare_space(db, &space).await.map_err(describe)?)
+                if self.native.is_some() {
+                    json!(self.prepare_native_space(&space).await?)
+                } else {
+                    json!(client.prepare_space(db, &space).await.map_err(describe)?)
+                }
             }
             "spaceRow" => {
                 let space = self.space_address(&text("table")?, &text("id")?)?;
@@ -745,8 +798,14 @@ async fn main_loop(this: Rc<Encryption>) {
             retry_at = None;
             verify = true;
         }
+        if let Some(native) = &this.native {
+            verify |= native.requested.get() > native.started.get();
+        }
         if verify {
             verify = false;
+            if let Some(native) = &this.native {
+                native.started.set(native.started.get() + 1);
+            }
             this.stage.set("verifying the account");
             let recovering = this.native.as_ref().filter(|native| {
                 !matches!(
@@ -762,6 +821,9 @@ async fn main_loop(this: Rc<Encryption>) {
                 this.status.set(Some(*status));
                 this.stage.set("preparing account-secret recovery");
                 verified = this.verify_native(native, *status).await;
+            }
+            if let Some(native) = &this.native {
+                native.finished.set(native.started.get());
             }
             match verified {
                 Ok(Some(status)) => {
@@ -1165,6 +1227,121 @@ mod tests {
         };
         assert_eq!(built.client.account_id(), account);
         assert!(built.reports.borrow().is_empty());
+    }
+
+    fn native_runtime_with_catalogue(include_notes: bool) -> Rc<Encryption> {
+        use jazz::db::{DbConfig, DbIdentity};
+        use jazz::ids::{AuthorSubject, NodeUuid};
+        use jazz::schema::JazzSchema;
+        use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+
+        let options = Options {
+            app_file: br#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+                "tables": {
+                    "projects": { "columns": { "name": "string" } },
+                    "notes": {
+                        "columns": { "projectId": "uuid", "body": "bytes" },
+                        "relations": { "project": { "rel": "projects", "column": "projectId" } },
+                        "encryption": { "space": "projectId", "scope": "projects",
+                            "columns": { "body": "string" } }
+                    }
+                } }"#
+                .to_vec(),
+            from_bindings: false,
+            device_account_secret: None,
+            app_id: "terminal-catalogue".to_owned(),
+            environment: "test".to_owned(),
+        };
+        let store = Rc::new(JsStore::served_by(super::super::bridge::serve(Rc::new(
+            crate::MemoryStore::new(),
+        ))));
+        let built = run(build_native(
+            options,
+            uuid::Uuid::new_v4().to_string(),
+            Rc::clone(&store),
+            None,
+        ))
+        .unwrap();
+
+        let mut schema = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("projects").column("name", ColumnType::Text));
+        if include_notes {
+            schema = schema.table(
+                TableSchemaBuilder::new("notes")
+                    .fk_column("projectId", "projects")
+                    .column("body", ColumnType::Bytea),
+            );
+        }
+        let db = Rc::new(
+            run(Db::open(DbConfig::new(
+                JazzSchema::new(&schema.build()).unwrap(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([1; 16]),
+                    author: AuthorSubject::SYSTEM,
+                },
+            )))
+            .unwrap(),
+        );
+        db.set_authority().unwrap();
+        Encryption::new_native(built, store, db)
+    }
+
+    /// A confirmed catalogue that lacks an encrypted table stops
+    /// preparation. Later foreground readiness calls still report why.
+    #[test]
+    fn foreground_readiness_keeps_a_terminal_catalogue_error() {
+        let runtime = native_runtime_with_catalogue(false);
+        let first = runtime.request_foreground_ready();
+        runtime.drive();
+        let cause = runtime
+            .foreground_ready_outcome(first, false)
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            cause.starts_with("unsupported:") && cause.contains("`notes`"),
+            "{cause}"
+        );
+
+        let second = runtime.request_foreground_ready();
+        runtime.drive();
+        assert_eq!(
+            runtime.foreground_ready_outcome(second, false),
+            Some(Err(cause.clone()))
+        );
+        assert_eq!(
+            runtime.foreground_ready_outcome(second, true),
+            Some(Err(cause))
+        );
+    }
+
+    #[test]
+    fn foreground_readiness_reports_closed_to_both_pending_waiters() {
+        // The encryption catalogue is valid here. Missing ledger tables
+        // fail account verification, which leaves the loop able to retry.
+        let runtime = native_runtime_with_catalogue(true);
+        let initial = runtime.request_foreground_ready();
+        runtime.drive();
+        assert!(matches!(
+            runtime.foreground_ready_outcome(initial, false),
+            Some(Err(message)) if message.starts_with("database:")
+        ));
+
+        let first = runtime.request_foreground_ready();
+        let second = runtime.request_foreground_ready();
+        assert_ne!(first, 0);
+        assert_eq!(first, second);
+        assert_eq!(runtime.foreground_ready_outcome(first, false), None);
+
+        runtime.stop();
+        let closed = describe_native(&ClientError::Closed);
+        assert_eq!(
+            runtime.foreground_ready_outcome(first, false),
+            Some(Err(closed.clone()))
+        );
+        assert_eq!(
+            runtime.foreground_ready_outcome(second, true),
+            Some(Err(closed))
+        );
     }
 
     /// What the app's store answers a request with, as the TypeScript side
