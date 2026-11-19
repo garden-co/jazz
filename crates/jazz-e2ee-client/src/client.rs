@@ -93,6 +93,8 @@ pub struct E2eeClient {
     pub(crate) device_account: Option<DeviceAccountIdentity>,
     /// The account as this device last verified it.
     pub(crate) account: RefCell<Option<OwnAccount>>,
+    /// Whether this run reconciled the creations it found stored.
+    pub(crate) reconciled: Cell<bool>,
     /// Every store write and the wipe run under this lock, so a wipe waits
     /// for writes in flight and no write follows it (§6.4).
     documents: Mutex<Documents>,
@@ -224,6 +226,10 @@ impl E2eeClient {
             .into(),
             random,
             reports: Default::default(),
+            outbox: Default::default(),
+            published: Default::default(),
+            creations: Default::default(),
+            missing: Default::default(),
         });
         let client = Self {
             hooks: Rc::new(Hooks {
@@ -236,6 +242,7 @@ impl E2eeClient {
             incarnation: Cell::new(incarnation),
             device_account,
             account: RefCell::new(None),
+            reconciled: Cell::new(false),
             documents: Mutex::new(Documents::default()),
         };
         client.load_documents().await?;
@@ -461,6 +468,8 @@ impl E2eeClient {
     /// until then encrypted tables can be neither read nor written, so a
     /// client that has never synced cannot encrypt or decrypt.
     pub fn prepare(&self, db: &Db) -> Result<bool, ClientError> {
+        // A refused creation is found among the refusals the store keeps.
+        db.track_upstream_rejections();
         let catalogue = Catalogue::resolve(db, &self.shared.plans)?;
         let known = catalogue.is_some();
         if known {
@@ -489,6 +498,24 @@ impl E2eeClient {
     /// first.
     pub fn take_reports(&self) -> Vec<Report> {
         self.shared.reports.borrow_mut().drain(..).collect()
+    }
+
+    /// Calls `listener` with every report from now on, each distinct report
+    /// once: `(table, row, column, code)` identifies a report, a
+    /// per-space one `(table, space, code)`; a report is withdrawn
+    /// ([`Report::Withdrawn`]) when the key arrives (protocol §4.3). The
+    /// reports still in the bounded set of ten thousand are delivered first.
+    /// Hooks never call out while the database is busy: listeners are
+    /// called by the runtime's own operations and [`E2eeClient::flush_reports`].
+    pub fn on_report(&self, listener: impl Fn(&Report) + 'static) {
+        self.shared.listen(Rc::new(listener));
+    }
+
+    /// Delivers the reports reads left since the last call to the
+    /// listeners. The runtime's reads and writes do it themselves; a host
+    /// that reads the database directly calls it afterwards.
+    pub fn flush_reports(&self) {
+        self.shared.flush(Vec::new());
     }
 
     /// Calls `f` with the keys this device holds.
@@ -674,9 +701,20 @@ impl E2eeClient {
         let mut documents = self.documents.lock().await;
         self.ensure_open()?;
         {
+            // Everything but what describes the open database starts again.
             let mut keys = self.shared.keys.borrow_mut();
-            keys.held = Default::default();
+            *keys = KeyState {
+                catalogue: keys.catalogue.take(),
+                online: keys.online,
+                closed: keys.closed,
+                ..Default::default()
+            };
         }
+        *self.shared.creations.borrow_mut() = Default::default();
+        // What belongs to the device and account that are gone: versions its
+        // reads found missing.
+        self.shared.missing.borrow_mut().clear();
+        self.reconciled.set(false);
         *self.account.borrow_mut() = None;
         *documents = Documents::default();
         self.store.delete(&self.scope).await?;

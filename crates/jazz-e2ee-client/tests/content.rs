@@ -146,12 +146,26 @@ fn a_version_alice_does_not_hold_leaves_her_rows_out() {
 
     let alice = open_client(Rc::new(MemoryStore::new()));
     let (db, _link, _) = online(&alice, &server, None);
+    let heard = Rc::new(std::cell::RefCell::new(0));
+    let sink = heard.clone();
+    alice.on_report(move |report| {
+        if matches!(report, Report::MissingKey { .. }) {
+            *sink.borrow_mut() += 1;
+        }
+    });
     let query = Query::from("notes").filter(eq(col("projectId"), lit(Value::Uuid(space))));
     let _live =
         block_on(db.subscribe(&db.prepare_query(&query).unwrap(), Default::default())).unwrap();
     pump(&server, &db);
 
     assert!(all(&db, query.clone()).unwrap().is_empty());
+    assert!(all(&db, query.clone()).unwrap().is_empty());
+    alice.flush_reports();
+    assert_eq!(
+        *heard.borrow(),
+        1,
+        "a missing version reaches the listener once"
+    );
     let reports = alice.take_reports();
     assert!(
         reports.iter().any(|report| matches!(
