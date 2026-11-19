@@ -45,6 +45,7 @@ for (const [path, event, head_branch] of [
   ["preview-jazz-tools-alpha-release.yml", "push", "changeset-release/release"],
   ["publish-jazz-tools-alpha.yml", "push", "release"],
   ["publish-jazz-tools-alpha.yml", "workflow_dispatch", "release"],
+  ["release-artifacts.yml", "workflow_dispatch", "changeset-release/release"],
 ]) {
   test(`accepts approved caller ${path} on ${event}`, () => {
     assert.equal(
@@ -75,6 +76,14 @@ for (const [name, changes] of [
       head_branch: "release",
       event: "pull_request_target",
     },
+  ],
+  [
+    "release artifacts built on a release push (a predicted tree)",
+    { path: ".github/workflows/release-artifacts.yml", event: "push", head_branch: "release" },
+  ],
+  [
+    "release artifacts dispatched on main",
+    { path: ".github/workflows/release-artifacts.yml", head_branch: "main" },
   ],
   ["unsuccessful producer", { conclusion: "failure" }],
   ["unfinished producer", { status: "in_progress" }],

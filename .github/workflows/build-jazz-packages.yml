@@ -213,6 +213,17 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+      # Merge groups run jazz-tools' Durable Object suite on a wasm-opt -O1
+      # host; this runs the full suite on the -Oz host built (and uploaded)
+      # above, so an -Oz-only break (a wasm-opt miscompile, or the glue or
+      # reinstantiation interacting with optimised code) fails the release
+      # build. Last, after both uploads: the correctness producer republishes
+      # crates/jazz-wasm/pkg as its fast build.
+      - name: Build correctness artifacts for the Durable Object suite
+        run: node dev/gates/ensure-correctness-artifacts.mjs
+      - name: Run jazz-tools' Durable Object suite on the release host
+        run: node dev/gates/run-ts-consumers.mjs --shard durable-objects
+
   build-napi:
     name: Build jazz-napi (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}

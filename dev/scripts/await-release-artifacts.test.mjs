@@ -31,7 +31,10 @@ test("ignores runs of other commits and other workflows", () => {
 });
 
 test("waits while a run is still building", () => {
-  assert.equal(artifactsDecision([run(1, { status: "in_progress", conclusion: null })], sha).state, "waiting");
+  assert.equal(
+    artifactsDecision([run(1, { status: "in_progress", conclusion: null })], sha).state,
+    "waiting",
+  );
 });
 
 test("fails when every run failed, but a cancelled run alone means build", () => {
@@ -41,16 +44,33 @@ test("fails when every run failed, but a cancelled run alone means build", () =>
 
 test("awaitArtifacts polls until ready, and returns empty when missing", async () => {
   const answers = [[run(1, { status: "queued", conclusion: null })], [run(1)]];
-  const id = await awaitArtifacts({ headSha: sha, list: async () => answers.shift(), pollMs: 1, log: () => {} });
+  const id = await awaitArtifacts({
+    headSha: sha,
+    list: async () => answers.shift(),
+    pollMs: 1,
+    log: () => {},
+  });
   assert.equal(id, "1");
   assert.equal(
-    await awaitArtifacts({ headSha: sha, list: async () => [], pollMs: 1, missingGraceMs: 0, log: () => {} }),
+    await awaitArtifacts({
+      headSha: sha,
+      list: async () => [],
+      pollMs: 1,
+      missingGraceMs: 0,
+      log: () => {},
+    }),
     "",
   );
   // A run dispatched alongside the gate shows up within the grace period.
   const late = [[], [run(2)]];
   assert.equal(
-    await awaitArtifacts({ headSha: sha, list: async () => late.shift(), pollMs: 1, missingGraceMs: 60_000, log: () => {} }),
+    await awaitArtifacts({
+      headSha: sha,
+      list: async () => late.shift(),
+      pollMs: 1,
+      missingGraceMs: 60_000,
+      log: () => {},
+    }),
     "2",
   );
 });
