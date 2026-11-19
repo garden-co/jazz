@@ -1,6 +1,7 @@
 # Adopter gate: scripted, parallel adopter checks against a release candidate (dev/adopter-gate/README.md).
 # Each job prints PASS/FAIL/REVIEW/SKIP lines; `verdict` collects them into the step summary and verdict.json.
 # FAIL = a regression; REVIEW/SKIP = needs a person or agent (sizes over threshold, known findings, t4 without secrets).
+# The gate's scripts come from this workflow's commit; the RC's own source (example clients) is checked out into rc-src/.
 name: Adopter gate
 
 on:
@@ -14,38 +15,54 @@ on:
         }
       artifacts_run_id:
         {
-          description: "RC dry-run / release-artifacts run holding rc-npm, release-server, release-languages",
+          description: "release-artifacts run: release-server / release-languages (or their early names)",
+          required: false,
+          type: string,
+        }
+      rc_npm_run_id:
+        {
+          description: "RC run holding rc-npm (default: artifacts_run_id)",
           required: false,
           type: string,
         }
       jazz_sha:
         {
-          description: "Commit to take the bed and examples from (default: the tag's)",
+          description: "The RC's commit (default: rc_tag's commit, else this workflow's)",
           required: false,
           type: string,
         }
       language_run_id:
         {
-          description: "attach-language-artifacts dry-run id, when the RC has no libjazz_ffi/jar assets",
+          description: "With rc_tag: attach-language-artifacts dry run, when the release has no libjazz_ffi/jar",
           required: false,
           type: string,
         }
       previous_version:
         {
-          description: "Previous release for size comparison (default: npm latest)",
+          description: "Previous release for sizes and the upgrade diff (default: npm latest)",
           required: false,
           type: string,
+        }
+      t4_mode:
+        {
+          description: "t4: production (a real RC, rc_tag required) | preview (dry runs: a preview + its own core) | skip",
+          required: false,
+          type: string,
+          default: production,
         }
   workflow_call:
     inputs:
       rc_tag: { required: false, type: string }
       artifacts_run_id: { required: false, type: string }
+      rc_npm_run_id: { required: false, type: string }
       jazz_sha: { required: false, type: string }
       language_run_id: { required: false, type: string }
       previous_version: { required: false, type: string }
+      t4_mode: { required: false, type: string, default: production }
     secrets:
       VERCEL_TOKEN: { required: false }
       T4_BASELINE_RED_PASSWORD: { required: false }
+      T4_VERCEL_BYPASS_SECRET: { required: false }
 
 permissions:
   contents: read
@@ -53,45 +70,54 @@ permissions:
 
 env:
   AG: dev/adopter-gate
+  AG_REPO: ${{ github.workspace }}/rc-src
   PNPM_VERSION: 11.28.10
 
 jobs:
+  # Resolves refs only (no checkout, no downloads): every job fetches the RC files it needs itself, in parallel.
   inputs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
-      ref: ${{ steps.ref.outputs.ref }}
+      rc_ref: ${{ steps.ref.outputs.rc_ref }}
+      expect_sha: ${{ steps.ref.outputs.expect_sha }}
       upgrade_changed: ${{ steps.diff.outputs.upgrade_changed }}
       previous: ${{ steps.prev.outputs.previous }}
     steps:
-      - id: ref
-        run: |
-          [ -n "${{ inputs.rc_tag }}${{ inputs.artifacts_run_id }}" ] || { echo "::error::give rc_tag or artifacts_run_id"; exit 1; }
-          echo "ref=${{ inputs.jazz_sha || inputs.rc_tag || github.sha }}" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with: { ref: "${{ steps.ref.outputs.ref }}", fetch-depth: 0 }
-      - name: Fetch and verify the RC's gate inputs
-        env: { GH_TOKEN: "${{ github.token }}" }
+        with: { sparse-checkout: dev/adopter-gate }
+      - name: Test the producer-run check (stubbed gh, no network)
+        run: dev/adopter-gate/provenance.test.sh
+      # The commit being gated, as a full sha: every job's fetch-rc.sh requires each producer run (artifacts_run_id,
+      # rc_npm_run_id, language_run_id) to have built exactly it (#supply-chain's rule), and fails closed otherwise.
+      - id: ref
+        env: { GH_TOKEN: "${{ github.token }}", RC_TAG: "${{ inputs.rc_tag }}", JAZZ_SHA: "${{ inputs.jazz_sha }}", RUN: "${{ inputs.artifacts_run_id }}" }
         run: |
-          if [ -n "${{ inputs.artifacts_run_id }}" ]; then $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}"
-          else $AG/fetch-rc.sh "${{ inputs.rc_tag }}" "${{ inputs.language_run_id }}"; fi
+          set -euo pipefail
+          [ -n "$RC_TAG$RUN" ] || { echo "::error::give rc_tag or artifacts_run_id"; exit 1; }
+          if [ -n "$JAZZ_SHA" ]; then [[ "$JAZZ_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::jazz_sha must be a full 40-character commit sha"; exit 1; }; fi
+          if [ -n "$RUN" ] && [ -z "$JAZZ_SHA" ]; then echo "::error::artifacts_run_id needs jazz_sha: the commit those runs must have built"; exit 1; fi
+          expect=$JAZZ_SHA
+          if [ -n "$RC_TAG" ] && [ -z "$RUN" ]; then
+            tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$RC_TAG" --jq .sha)
+            [ -z "$expect" ] || [ "$expect" = "$tag_sha" ] || { echo "::error::$RC_TAG is $tag_sha, not jazz_sha $expect"; exit 1; }
+            expect=$tag_sha
+          fi
+          echo "gating $expect"
+          echo "expect_sha=$expect" >> "$GITHUB_OUTPUT"
+          echo "rc_ref=$expect" >> "$GITHUB_OUTPUT"
       - id: prev
-        run: echo "previous=${{ inputs.previous_version || '' }}" >> "$GITHUB_OUTPUT"; [ -n "${{ inputs.previous_version }}" ] || echo "previous=$(npm view jazz-tools dist-tags.latest)" >> "$GITHUB_OUTPUT"
+        run: echo "previous=${{ inputs.previous_version }}" | sed "s/=$/=$(npm view jazz-tools dist-tags.latest)/" >> "$GITHUB_OUTPUT"
       - id: diff
         name: Did the upgrade codemod change since the previous release?
+        env: { GH_TOKEN: "${{ github.token }}" }
         run: |
-          prev=$(npm view jazz-tools dist-tags.latest)
-          if git rev-parse -q --verify "refs/tags/v$prev" >/dev/null && git diff --quiet "v$prev" HEAD -- packages/jazz-tools/src/upgrade; then
+          # The compare API lists at most 300 files: at the cap, or on any error, assume it changed (run the refusals).
+          files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/compare/v${{ steps.prev.outputs.previous }}...${{ steps.ref.outputs.rc_ref }}?per_page=100" -q '.files[].filename' 2>/dev/null) || files=
+          n=$(printf '%s\n' "$files" | grep -c . || true)
+          if [ -n "$files" ] && [ "$n" -lt 300 ] && ! printf '%s\n' "$files" | grep -q '^packages/jazz-tools/src/upgrade/'; then
             echo "upgrade_changed=false" >> "$GITHUB_OUTPUT"; else echo "upgrade_changed=true" >> "$GITHUB_OUTPUT"; fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          {
-            name: rc-inputs,
-            path: dev/adopter-gate/.rc,
-            retention-days: 7,
-            include-hidden-files: true,
-            if-no-files-found: error,
-          }
+          echo "compared $n files since v${{ steps.prev.outputs.previous }}"
 
   checks:
     needs: inputs
@@ -101,34 +127,79 @@ jobs:
       fail-fast: false
       matrix:
         job:
-          [bed-t1, bed-t3, bed-t5, bed-t6, fixtures, t10, sizes, t9-ts, t9-rust, t9-go, t9-kotlin]
+          [
+            bed-t1,
+            bed-t3,
+            bed-t5,
+            bed-t6,
+            fixtures,
+            t10,
+            sizes,
+            t4-noregion,
+            t9-ts,
+            t9-rust,
+            t9-go,
+            t9-kotlin,
+          ]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with: { ref: "${{ needs.inputs.outputs.ref }}" }
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with: { name: rc-inputs, path: dev/adopter-gate/.rc }
+        with: { sparse-checkout: "dev/adopter-gate\n.github/actions" }
+      - if: startsWith(matrix.job, 't9-')
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with: { ref: "${{ needs.inputs.outputs.rc_ref }}", path: rc-src }
+      - name: Fetch the RC files this job needs
+        env:
+          {
+            GH_TOKEN: "${{ github.token }}",
+            AG_EXPECT_SHA: "${{ needs.inputs.outputs.expect_sha }}",
+            AG_NEED: "${{ matrix.job == 't10' && 'npm,server' || ((matrix.job == 't9-go' || matrix.job == 't9-kotlin') && 'npm,languages' || 'npm') }}",
+          }
+        run: |
+          if [ -n "${{ inputs.artifacts_run_id }}" ]; then
+            $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}" --npm-run "${{ inputs.rc_npm_run_id || inputs.artifacts_run_id }}"
+          else $AG/fetch-rc.sh "${{ inputs.rc_tag }}" "${{ inputs.language_run_id }}"; fi
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with: { node-version-file: .nvmrc }
       # The gate's apps are their own pnpm projects (pnpm 11), not the repo workspace (packageManager pnpm@10).
-      - run: npm install --global "pnpm@$PNPM_VERSION" > /dev/null
+      - name: pnpm (retried)
+        run: for i in 1 2 3; do npm install --global "pnpm@$PNPM_VERSION" > /dev/null && exit 0; sleep $((i * 5)); done; exit 1
       - if: matrix.job == 't9-rust'
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with: { workspaces: rc-src }
+      # jazz#6158: a fresh runner's Gradle dependency fetch failed once. No retry (a failure fails); the cache makes
+      # most runs fetch nothing.
+      - name: Gradle dependency cache
+        if: matrix.job == 't9-kotlin'
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.gradle/caches
+          key: gradle-deps-${{ hashFiles('rc-src/examples/stage-plan/apps/kotlin-cli/build.gradle.kts', 'dev/adopter-gate/t9.sh') }}
+      - name: Gradle 8.14.3 zip cache (keyed by its sha256)
+        if: matrix.job == 't9-kotlin'
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          {
+            path: ~/gradle-dist,
+            key: gradle-8.14.3-bin-bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531,
+          }
       - name: Gradle 8.14.3
         if: matrix.job == 't9-kotlin'
         run: |
-          curl -sSfL -o /tmp/gradle.zip https://services.gradle.org/distributions/gradle-8.14.3-bin.zip
+          mkdir -p ~/gradle-dist && cd ~/gradle-dist
+          [ -f gradle.zip ] || curl -sSfL --retry 5 --retry-all-errors -o gradle.zip https://services.gradle.org/distributions/gradle-8.14.3-bin.zip
+          cp gradle.zip /tmp/gradle.zip
           echo "bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531  /tmp/gradle.zip" | sha256sum -c
           unzip -q /tmp/gradle.zip -d /opt && echo /opt/gradle-8.14.3/bin >> "$GITHUB_PATH" && echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
       - name: Run ${{ matrix.job }}
+        env: { MATRIX_JOB: "${{ matrix.job }}" }
         run: |
-          chmod +x $AG/.rc/jazz-tools-linux-x64
-          case "${{ matrix.job }}" in
+          [ -f $AG/.rc/jazz-tools-linux-x64 ] && chmod +x $AG/.rc/jazz-tools-linux-x64
+          case "$MATRIX_JOB" in
             bed-*) $AG/bed.sh "${MATRIX_JOB#bed-}" ;;
             t9-*) $AG/t9.sh "${MATRIX_JOB#t9-}" ;;
             sizes) $AG/sizes.sh "${{ needs.inputs.outputs.previous }}" ;;
-            *) $AG/${{ matrix.job }}.sh ;;
+            *) $AG/$MATRIX_JOB.sh ;;
           esac
-        env: { MATRIX_JOB: "${{ matrix.job }}" }
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -146,15 +217,32 @@ jobs:
     container: swift:6.0-noble
     steps:
       - name: Tools the gate scripts use
-        run: apt-get update -qq && apt-get install -y -qq curl git iproute2 python3 sqlite3 unzip xz-utils >/dev/null
+        # Only if the image lacks them: an apt mirror once took 6 min here. The scripts need no ss (bash /dev/tcp, PIDs).
+        run: |
+          # The swift image has git but no curl CLI (the t9 scripts need it). Its apt sources point at archive.ubuntu.com,
+          # which took 3+ min from Actions; GitHub's runners sit next to Azure's Ubuntu mirror, so use that one.
+          if ! command -v curl >/dev/null || ! command -v git >/dev/null; then
+            sed -i 's#http://archive.ubuntu.com/ubuntu#http://azure.archive.ubuntu.com/ubuntu#g; s#http://security.ubuntu.com/ubuntu#http://azure.archive.ubuntu.com/ubuntu#g' /etc/apt/sources.list.d/*.sources /etc/apt/sources.list 2>/dev/null || true
+            apt-get update -qq -o Acquire::Retries=3 && apt-get install -y -qq --no-install-recommends -o Acquire::Retries=3 curl git ca-certificates >/dev/null
+          fi
+          # gh (fetch-rc.sh) isn't in the swift image: a pinned release binary, checked against its published sum.
+          curl -sSfL --retry 5 --retry-all-errors -o /tmp/gh.tgz https://github.com/cli/cli/releases/download/v2.103.3/gh_2.103.3_linux_amd64.tar.gz
+          echo "4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d  /tmp/gh.tgz" | sha256sum -c
+          tar xzf /tmp/gh.tgz -C /tmp && install /tmp/gh_2.103.3_linux_amd64/bin/gh /usr/local/bin/gh
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with: { ref: "${{ needs.inputs.outputs.ref }}" }
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with: { name: rc-inputs, path: dev/adopter-gate/.rc }
+        with: { sparse-checkout: "dev/adopter-gate\n.github/actions" }
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with: { ref: "${{ needs.inputs.outputs.rc_ref }}", path: rc-src }
+      - name: Fetch the RC files this job needs
+        env: { GH_TOKEN: "${{ github.token }}", AG_EXPECT_SHA: "${{ needs.inputs.outputs.expect_sha }}", AG_NEED: "npm,languages" }
+        run: |
+          if [ -n "${{ inputs.artifacts_run_id }}" ]; then
+            $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}" --npm-run "${{ inputs.rc_npm_run_id || inputs.artifacts_run_id }}"
+          else $AG/fetch-rc.sh "${{ inputs.rc_tag }}" "${{ inputs.language_run_id }}"; fi
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with: { node-version-file: .nvmrc }
-      # The gate's apps are their own pnpm projects (pnpm 11), not the repo workspace (packageManager pnpm@10).
-      - run: npm install --global "pnpm@$PNPM_VERSION" > /dev/null
+      - name: pnpm (retried)
+        run: for i in 1 2 3; do npm install --global "pnpm@$PNPM_VERSION" > /dev/null && exit 0; sleep $((i * 5)); done; exit 1
       - run: $AG/t9.sh swift
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -173,13 +261,17 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with: { ref: "${{ needs.inputs.outputs.ref }}" }
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with: { name: rc-inputs, path: dev/adopter-gate/.rc }
+        with: { sparse-checkout: "dev/adopter-gate\n.github/actions" }
+      - name: Fetch the RC files this job needs
+        env: { GH_TOKEN: "${{ github.token }}", AG_EXPECT_SHA: "${{ needs.inputs.outputs.expect_sha }}", AG_NEED: "npm" }
+        run: |
+          if [ -n "${{ inputs.artifacts_run_id }}" ]; then
+            $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}" --npm-run "${{ inputs.rc_npm_run_id || inputs.artifacts_run_id }}"
+          else $AG/fetch-rc.sh "${{ inputs.rc_tag }}" "${{ inputs.language_run_id }}"; fi
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with: { node-version-file: .nvmrc }
-      # The gate's apps are their own pnpm projects (pnpm 11), not the repo workspace (packageManager pnpm@10).
-      - run: npm install --global "pnpm@$PNPM_VERSION" > /dev/null
+      - name: pnpm (retried)
+        run: for i in 1 2 3; do npm install --global "pnpm@$PNPM_VERSION" > /dev/null && exit 0; sleep $((i * 5)); done; exit 1
       - run: $AG/refusals.sh
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -191,12 +283,14 @@ jobs:
             include-hidden-files: true,
           }
 
-  # One long-lived Vercel eval project, one core: never two runs at once, never cancelled midway.
+  # One long-lived Vercel eval project, one core: never two runs at once, never cancelled midway. The missing-region
+  # check is t4-noregion in `checks` (no secrets), off this critical path.
   t4:
     needs: inputs
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 15
-    concurrency: { group: adopter-gate-t4, cancel-in-progress: false }
+    concurrency:
+      { group: "adopter-gate-t4-${{ inputs.t4_mode || 'production' }}", cancel-in-progress: false }
     # Its secrets and vars live only in this environment (no reviewers: the gate must not wait on a person).
     environment: adopter-gate-t4
     env:
@@ -209,17 +303,33 @@ jobs:
       BASELINE_RED_PASSWORD: ${{ secrets.T4_BASELINE_RED_PASSWORD }}
       # A baseline account that doesn't exist yet is created (with its rows) on the first run, then checked on every later one.
       BASELINE_SEED: "1"
+      T4_SKIP_NOREGION: "1"
+      T4_MODE: ${{ inputs.t4_mode || 'production' }}
+      # production fails closed unless rc_tag names an existing release (a draft is fine) and isn't dryrun-*.
+      T4_RC_TAG: ${{ inputs.rc_tag }}
+      GH_TOKEN: ${{ github.token }}
+      # Per-run preview cores, deleted after the run, only once Anselm approves (set the var to 1).
+      T4_TEARDOWN: ${{ vars.T4_TEARDOWN }}
+      T4_VERCEL_BYPASS_SECRET: ${{ secrets.T4_VERCEL_BYPASS_SECRET }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with: { ref: "${{ needs.inputs.outputs.ref }}" }
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with: { name: rc-inputs, path: dev/adopter-gate/.rc }
+        with: { sparse-checkout: "dev/adopter-gate\n.github/actions" }
+      - name: Fetch the RC files this job needs
+        env: { GH_TOKEN: "${{ github.token }}", AG_EXPECT_SHA: "${{ needs.inputs.outputs.expect_sha }}", AG_NEED: "npm" }
+        run: |
+          if [ -n "${{ inputs.artifacts_run_id }}" ]; then
+            $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}" --npm-run "${{ inputs.rc_npm_run_id || inputs.artifacts_run_id }}"
+          else $AG/fetch-rc.sh "${{ inputs.rc_tag }}" "${{ inputs.language_run_id }}"; fi
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with: { node-version-file: .nvmrc }
-      # The gate's apps are their own pnpm projects (pnpm 11), not the repo workspace (packageManager pnpm@10).
-      - run: npm install --global "pnpm@$PNPM_VERSION" > /dev/null
+      - name: pnpm (retried)
+        run: for i in 1 2 3; do npm install --global "pnpm@$PNPM_VERSION" > /dev/null && exit 0; sleep $((i * 5)); done; exit 1
       - if: env.VERCEL_TOKEN != ''
-        run: npm install --global vercel@latest > /dev/null
+        # Pinned, so t4 is reproducible (the version its green runs used); retried.
+        run: for i in 1 2 3; do npm install --global vercel@66.2.0 > /dev/null && exit 0; sleep $((i * 5)); done; exit 1
+      - name: Playwright browsers cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with: { path: ~/.cache/ms-playwright, key: playwright-chromium-v1 }
       - run: $AG/t4.sh
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -244,15 +354,43 @@ jobs:
     needs: [inputs, checks, t9-swift, refusals, t4]
     if: always()
     runs-on: ubuntu-24.04
-    timeout-minutes: 3
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with: { ref: "${{ needs.inputs.outputs.ref }}", sparse-checkout: dev/adopter-gate }
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with: { pattern: "results-*", path: results }
+        with: { sparse-checkout: dev/adopter-gate }
+      # The artifact service has bad minutes (RC 44567203253: this download hung until the job timed out): each attempt
+      # is capped at 90 s, up to 4 attempts with backoff. Same layout as download-artifact's pattern (results/<name>/).
+      - name: Download the jobs' results (retried)
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          for i in 1 2 3 4; do
+            rm -rf results && mkdir -p results
+            timeout 90 gh run download "${{ github.run_id }}" -R "$GITHUB_REPOSITORY" -p 'results-*' -D results && exit 0
+            echo "results download attempt $i failed"; sleep $((i * 10))
+          done; exit 1
+      # release-artifacts uploads its manifest last, so it's checked here, at the end (rn-device-acceptance.yml's
+      # pattern): it must name the commit being gated. Fail closed: no manifest by the time the run finished, or
+      # within 4 min, is FAIL.
+      - name: Require the artifacts run's release manifest to name the gated commit
+        if: inputs.artifacts_run_id != ''
+        env: { GH_TOKEN: "${{ github.token }}", RUN: "${{ inputs.artifacts_run_id }}", EXPECT: "${{ needs.inputs.outputs.expect_sha }}" }
+        run: |
+          mkdir -p results/provenance; out=results/provenance/provenance.txt; m="$RUNNER_TEMP/release-manifest"; end=$(( $(date +%s) + 240 ))
+          until timeout 60 gh run download "$RUN" -R "$GITHUB_REPOSITORY" -n release-manifest -D "$m" 2>/dev/null; do
+            if [ "$(gh run view "$RUN" -R "$GITHUB_REPOSITORY" --json status --jq .status)" = completed ] || [ "$(date +%s)" -ge $end ]; then
+              timeout 60 gh run download "$RUN" -R "$GITHUB_REPOSITORY" -n release-manifest -D "$m" 2>/dev/null && break
+              echo "FAIL provenance: run $RUN has no release-manifest (finished without one, or not within 4 min)" > "$out"; exit 0
+            fi
+            sleep 15
+          done
+          sha=$(node -p 'require(process.argv[1]).sha' "$m/manifest.json")
+          if [ -n "$EXPECT" ] && [ "$sha" = "$EXPECT" ]; then echo "PASS provenance: run $RUN's release manifest names $EXPECT" > "$out"
+          else echo "FAIL provenance: run $RUN's release manifest is for $sha, not '${EXPECT}'" > "$out"; fi
+          cat "$out"
       - name: Verdict
         run: |
-          expected=bed-t1,bed-t3,bed-t5,bed-t6,fixtures,t10,sizes,t9-ts,t9-rust,t9-go,t9-kotlin,t9-swift,t4
+          expected=bed-t1,bed-t3,bed-t5,bed-t6,fixtures,t10,sizes,t4-noregion,t9-ts,t9-rust,t9-go,t9-kotlin,t9-swift,t4
+          [ -n "${{ inputs.artifacts_run_id }}" ] && expected=$expected,provenance
           [ "${{ needs.inputs.outputs.upgrade_changed }}" = true ] && expected=$expected,refusals
           node $AG/verdict.mjs results "$expected"
       - if: always()

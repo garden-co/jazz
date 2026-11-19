@@ -24,6 +24,7 @@ permissions:
 
 env:
   AG: dev/adopter-gate
+  AG_REPO: ${{ github.workspace }}/rc-src
   PNPM_VERSION: 11.28.10
 
 jobs:
@@ -35,16 +36,29 @@ jobs:
       matrix:
         target: [npm, create-jazz, crates, go, kotlin]
     steps:
+      # The gate's scripts from this workflow's commit; the released source (example clients) into rc-src/.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with: { ref: "v${{ inputs.version }}" }
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with: { ref: "v${{ inputs.version }}", path: rc-src }
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with: { node-version-file: .nvmrc }
       # The gate's apps are their own pnpm projects (pnpm 11), not the repo workspace (packageManager pnpm@10).
-      - run: npm install --global "pnpm@$PNPM_VERSION" > /dev/null
+      - name: pnpm (retried)
+        run: for i in 1 2 3; do npm install --global "pnpm@$PNPM_VERSION" > /dev/null && exit 0; sleep $((i * 5)); done; exit 1
+      - name: Gradle 8.14.3 zip cache (keyed by its sha256)
+        if: matrix.target == 'kotlin'
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          {
+            path: ~/gradle-dist,
+            key: gradle-8.14.3-bin-bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531,
+          }
       - name: Gradle 8.14.3
         if: matrix.target == 'kotlin'
         run: |
-          curl -sSfL -o /tmp/gradle.zip https://services.gradle.org/distributions/gradle-8.14.3-bin.zip
+          mkdir -p ~/gradle-dist && cd ~/gradle-dist
+          [ -f gradle.zip ] || curl -sSfL --retry 5 --retry-all-errors -o gradle.zip https://services.gradle.org/distributions/gradle-8.14.3-bin.zip
+          cp gradle.zip /tmp/gradle.zip
           echo "bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531  /tmp/gradle.zip" | sha256sum -c
           unzip -q /tmp/gradle.zip -d /opt && echo /opt/gradle-8.14.3/bin >> "$GITHUB_PATH" && echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
       - run: $AG/registry-smoke.sh "${{ inputs.version }}" "${{ matrix.target }}"
@@ -64,13 +78,16 @@ jobs:
     timeout-minutes: 40
     container: swift:6.0-noble
     steps:
-      - run: apt-get update -qq && apt-get install -y -qq curl git iproute2 python3 sqlite3 unzip xz-utils gh >/dev/null
+      - run: apt-get update -qq -o Acquire::Retries=3 && apt-get install -y -qq -o Acquire::Retries=3 curl git iproute2 python3 sqlite3 unzip xz-utils gh >/dev/null
+      # The gate's scripts from this workflow's commit; the released source (example clients) into rc-src/.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with: { ref: "v${{ inputs.version }}" }
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with: { ref: "v${{ inputs.version }}", path: rc-src }
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with: { node-version-file: .nvmrc }
       # The gate's apps are their own pnpm projects (pnpm 11), not the repo workspace (packageManager pnpm@10).
-      - run: npm install --global "pnpm@$PNPM_VERSION" > /dev/null
+      - name: pnpm (retried)
+        run: for i in 1 2 3; do npm install --global "pnpm@$PNPM_VERSION" > /dev/null && exit 0; sleep $((i * 5)); done; exit 1
       - run: $AG/registry-smoke.sh "${{ inputs.version }}" swift
         env: { AG_WAIT_MIN: "${{ inputs.wait_minutes }}", GH_TOKEN: "${{ github.token }}" }
       - if: always()

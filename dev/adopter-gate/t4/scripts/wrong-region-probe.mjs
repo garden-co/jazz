@@ -91,7 +91,10 @@ let result;
 try {
   await store.openVercelCore({
     options: {
-      namespace: "production",
+      namespace:
+        process.env.T4_MODE === "preview"
+          ? process.env.T4_PREVIEW_NS || "cli-previews"
+          : "production",
       region,
       sdk,
       credentials: {
