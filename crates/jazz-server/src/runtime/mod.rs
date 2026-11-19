@@ -338,6 +338,7 @@ struct Owner {
     app: Option<String>,
     /// Whether the account registry the checks beside the account tables
     /// read is installed.
+    #[cfg(feature = "native")]
     registry_installed: bool,
     /// Runs a network chunk store's I/O beside this thread.
     #[cfg(feature = "native")]
@@ -1154,6 +1155,7 @@ impl Owner {
             slice: Rc::default(),
             catalogue,
             app,
+            #[cfg(feature = "native")]
             registry_installed: false,
             #[cfg(feature = "native")]
             chunk_io: None,
@@ -1163,6 +1165,7 @@ impl Owner {
     }
 
     /// Whether the app's schema has Jazz's E2EE system tables.
+    #[cfg(feature = "native")]
     fn encrypts(&self) -> Result<bool, String> {
         // The admitted versions, not the owner's schema: a running server
         // keeps its first schema while deployments admit later ones.
