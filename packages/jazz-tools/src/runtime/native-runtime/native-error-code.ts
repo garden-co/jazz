@@ -76,7 +76,12 @@ export type NativeCoreErrorReason =
   | "predecessor_rejected"
   | "schema_version_not_deployed"
   | "identity_mismatch"
-  | "schema_version_unsupported";
+  | "schema_version_unsupported"
+  // End-to-end encryption (builds with the feature): a write, query or strict
+  // read needs the key of an encrypted space this device does not hold yet, or
+  // writes to a space that has no valid root.
+  | "key-pending"
+  | "space-pending";
 
 /** Every reason this build knows; a test checks it against the engine's `Reason::ALL`. */
 export const NATIVE_CORE_ERROR_REASONS: ReadonlySet<string> = new Set<NativeCoreErrorReason>([
@@ -93,6 +98,8 @@ export const NATIVE_CORE_ERROR_REASONS: ReadonlySet<string> = new Set<NativeCore
   "schema_version_not_deployed",
   "identity_mismatch",
   "schema_version_unsupported",
+  "key-pending",
+  "space-pending",
 ]);
 
 /** The core `Reason` a thrown value carries, or `undefined` when it has none this build knows. */

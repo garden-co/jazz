@@ -157,6 +157,32 @@ export function exportLocalFirstSecret(handle: AccountHandle): string {
   return material.localFirstSecret;
 }
 
+/**
+ * The secret of a local-first account, which is its encryption recovery
+ * secret too; `undefined` for any other account (one the app signs in).
+ */
+export function deviceAccountSecretOf(account: AccountHandle): string | undefined {
+  if (account.identity.issuer !== "urn:jazz:local-first") return undefined;
+  try {
+    return exportLocalFirstSecret(account);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * How the encryption runtime reads a local-first account's secret when it
+ * needs it; `undefined` for any other account, which recovers with a
+ * recovery key of its own (`recovery.create`/`enable`).
+ */
+export function deviceAccountSecretReader(
+  account: AccountHandle,
+): (() => string | undefined) | undefined {
+  return deviceAccountSecretOf(account) === undefined
+    ? undefined
+    : () => deviceAccountSecretOf(account);
+}
+
 /** @internal Context creation validates the opaque handle and refresh identity. */
 export async function accountToken(
   handle: AccountHandle,

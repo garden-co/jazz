@@ -59,3 +59,18 @@ export {
 
 // Removed in alpha.61: stubs that throw, naming the replacement (one release).
 export { acceptLocalFirstAuth } from "../removed-api.js";
+
+export {
+  memoryPrivateStore,
+  PrivateStoreConflictError,
+  PrivateStoreWipedError,
+  EncryptionError,
+  EncryptionNotDeclaredError,
+  EncryptionStoreRequiredError,
+} from "../encryption/index.js";
+export type {
+  Encryption,
+  EncryptionReport,
+  PrivateStore,
+  StoredDocument,
+} from "../encryption/index.js";

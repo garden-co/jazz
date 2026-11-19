@@ -1,0 +1,59 @@
+---
+title: Sharing and Keys
+description: "Add and remove the members of an encrypted space, and when their devices get keys."
+languageTabs: backend
+---
+
+A space is a row of the table your encryption declaration names (a project, a room). Its **members**
+are the rows of `__e2ee_members` for it, and Jazz's permissions decide who may add them: the space row's
+update rule is the rule for managing members, plus one exception: the account that creates the space row
+may add itself in the same transaction.
+
+## Create a space and add members
+
+A new space and its creator's own membership are one transaction. `db.encryption.members.row` gives the
+values of a member row, so you insert and delete members with your own permissions:
+
+```ts
+const id = crypto.randomUUID();
+const self = await db.encryption.members.row({ table: "projects", id }, accountId);
+const written = await db.transaction((tx) => {
+  tx.insert(app.projects, { name: "plans", ownerId: accountId }, { id });
+  tx.insert(app.__e2ee_members, self);
+});
+await written.wait({ tier: "global" });
+
+// Later, the owner adds a member:
+const row = await db.encryption.members.row({ table: "projects", id }, otherAccountId);
+await db.insert(app.__e2ee_members, row).wait({ tier: "global" });
+```
+
+The space's key is made by its first write. A member gets the key from any device that holds it (the
+first holder to deliver wins), sealed to the member's account, so the member's devices can all read.
+
+## When keys arrive
+
+A pass over the spaces a device holds keys of delivers keys to members that lack them. It runs by itself
+when the app starts, when the connection comes back, and while the device has a subscription on a space.
+Call it when you want new members served now:
+
+```ts
+const { delivered } = await db.encryption.keys.deliver();
+```
+
+A member's device that reads rows it has no key for yet leaves them out and acquires the key once a
+delivery arrives; read again, or keep a subscription on the space.
+
+## Remove a member
+
+Delete the member rows, then rotate the key so that content written from now on is sealed under a key
+the removed member never gets:
+
+```ts
+await db.delete(app.__e2ee_members, memberRowId).wait({ tier: "global" });
+await db.encryption.keys.rotate({ table: "projects", id });
+```
+
+Rotation is otherwise lazy: the next pass notices that a key is held by an account that is no longer a
+member and rotates. A removed member keeps what they could already read; Jazz's permissions stop them
+reading any row after.

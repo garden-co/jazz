@@ -1,0 +1,59 @@
+---
+title: Devices and Recovery
+description: "Approve a second device, remove one, and recover an account when every device is gone."
+languageTabs: backend
+---
+
+An account's devices share its keys. The first device founds the account; every other device is
+approved by one that is already trusted, or recovers the account from its recovery secret.
+
+## Device accounts recover by themselves
+
+For a [device account](/docs/setup/auth) the recovery secret **is** the account's secret: restoring the
+account (its 24-word phrase, passkey or exported key) restores access to encrypted data. There is
+nothing extra to show or ask:
+
+- the first time encryption is used on the account, the device registers the recovery credential
+  derived from the account secret;
+- a device that signs in with the restored account secret recovers by itself;
+  `db.encryption.ready()` returns `"active"` without another device.
+
+The account secret stays where the device account keeps it, as before. Encryption reads it from the session for each call and keeps no copy of its own.
+
+## Approve a device
+
+For an account your own sign-in manages, a new device starts `"awaiting-approval"`: it publishes a
+request and waits. On a trusted device, list the waiting devices and challenge one; the new device
+answers and both show the same six-digit code. Confirm they match, and approve:
+
+```ts
+// On the new device: told when it is challenged, then answers and shows the code.
+db.encryption.onChallenge(async () => {
+  const code = await db.encryption.devices.answer();
+  show(code);
+});
+
+// On a trusted device:
+const waiting = (await db.encryption.devices.list()).filter((d) => d.status === "waiting");
+const session = await db.encryption.devices.challenge(waiting[0].id);
+const code = await session.code(); // null until the new device answered
+await session.approve(code); // after the user confirmed both screens show the same code
+```
+
+A wrong code approves nothing. The code is how a server that substituted keys is caught.
+
+## Remove a device and recover with a phrase
+
+`devices.remove(id)` removes a device and rotates the account; `devices.requestRemoval()` asks another
+device to remove this one. An account your own sign-in manages keeps a 24-word recovery phrase, shown
+once:
+
+```ts
+const phrase = db.encryption.recovery.create(); // keep it; registers nothing
+await db.encryption.recovery.register(phrase); // on an approved device
+// After losing every device, on a new one:
+await db.encryption.recovery.restore(phrase);
+```
+
+The encryption recovery phrase is a different phrase from a device account's own (entering the wrong one
+just fails). `recovery.list()` shows the registered credentials and `recovery.retire(id)` retires one.
