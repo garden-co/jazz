@@ -102,6 +102,8 @@ const assertUsesBlacksmithRunner = (jobName, jobSource) => {
     "test-storage-compat",
     "test-ts",
     "test-react-native",
+    "test-go",
+    "test-crates-package",
   ].includes(jobName)
     ? 16
     : 4;
@@ -181,7 +183,14 @@ const assertSuiteS3ConfigurationBoundary = (source) => {
       `untrusted suite callers must not inherit ${name}`,
     );
 
-  for (const name of ["lint", "test-rust-workspace", "test-storage-compat", "test-ts"]) {
+  for (const name of [
+    "lint",
+    "test-rust-workspace",
+    "test-storage-compat",
+    "test-ts",
+    "test-go",
+    "test-crates-package",
+  ]) {
     const parsedJob = document.jobs[name];
     assert.equal(parsedJob.env, undefined, `${name} must not configure S3 at job scope`);
     const exportIndex = parsedJob.steps.findIndex(
@@ -836,7 +845,7 @@ test("the lint job checks the integration workspace and TypeScript runs its own 
   assert.doesNotMatch(workflowSuite, /^  build-integration:/m);
   assert.match(
     typescript,
-    /name: Run CI-equivalent TypeScript partition\s+run: node dev\/gates\/local-ci-equivalent\.mjs --ci-partition typescript/,
+    /name: Run CI-equivalent TypeScript partition\s+run: node dev\/gates\/local-ci-equivalent\.mjs --ci-partition \$\{\{ matrix\.partition \}\}/,
   );
   assert.match(
     lint,
@@ -873,7 +882,14 @@ test("Turbo cache uses its pinned OIDC policy only inside the trusted suite invo
 });
 
 test("shared Rust cache writes are main and merge-group only while trusted PRs receive read access", () => {
-  for (const name of ["lint", "test-rust-workspace", "test-storage-compat", "test-ts"]) {
+  for (const name of [
+    "lint",
+    "test-rust-workspace",
+    "test-storage-compat",
+    "test-ts",
+    "test-go",
+    "test-crates-package",
+  ]) {
     const source = job(name);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN \}\}/);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_PR_READER_AWS_ROLE_ARN \}\}/);
@@ -1551,7 +1567,7 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   const typescript = job("test-ts");
   const runner = fs.readFileSync(path.join(root, "dev/gates/run-ts-tests.sh"), "utf8");
   const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
-  assert.match(typescript, /local-ci-equivalent\.mjs --ci-partition typescript/);
+  assert.match(typescript, /local-ci-equivalent\.mjs --ci-partition \$\{\{ matrix\.partition \}\}/);
   assert.match(
     localCi,
     /native correctness-artifact producer[\s\S]*ensure-correctness-artifacts\.mjs/,
