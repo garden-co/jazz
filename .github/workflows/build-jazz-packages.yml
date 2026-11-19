@@ -1027,7 +1027,8 @@ jobs:
           tar -tf "${wasm}" > wasm.txt
           for f in pkg/jazz_wasm_bg.wasm pkg/jazz_wasm.js pkg/jazz_wasm.d.ts \
             durable-object/pkg/jazz_wasm_do_bg.wasm durable-object/pkg/jazz_wasm_do.js \
-            durable-object/index.js durable-object/host.js; do
+            durable-object/index.js durable-object/host.js \
+            backend/index.js backend/pkg/jazz_wasm_backend.js backend/pkg/jazz_wasm_backend_bg.wasm; do
             grep -qx "package/${f}" wasm.txt || { echo "::error::${wasm} lacks ${f}"; exit 1; }
           done
           node "${GITHUB_WORKSPACE}/dev/artifacts/verify-packed-napi.mjs" "jazz-napi-${VERSION}.tgz"
