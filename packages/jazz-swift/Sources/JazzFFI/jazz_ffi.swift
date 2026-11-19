@@ -778,6 +778,13 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
     func syncStatus() throws  -> String
     
     /**
+     * The catalogue identity of a table, as UUID text: what a member row's
+     * `scopeId` holds for its space table. Fails until the client has seen
+     * the server's catalogue for this schema version.
+     */
+    func tableIdentity(table: String) throws  -> String
+    
+    /**
      * Sets the columns `patch_json` names on the row with this id.
      */
     func update(table: String, id: String, patchJson: String) throws 
@@ -1350,6 +1357,21 @@ open func syncStatus()throws  -> String  {
         uniffiCallStatus in
     uniffi_jazz_ffi_fn_method_jazzhandle_sync_status(
             self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The catalogue identity of a table, as UUID text: what a member row's
+     * `scopeId` holds for its space table. Fails until the client has seen
+     * the server's catalogue for this schema version.
+     */
+open func tableIdentity(table: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_table_identity(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(table),uniffiCallStatus
     )
 })
 }
@@ -3609,6 +3631,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_sync_status() != 19594) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_table_identity() != 32496) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_update() != 36759) {
