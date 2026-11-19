@@ -458,9 +458,9 @@ jobs:
 
   publish:
     name: Publish the prerelease
-    # Public only after every gate that doesn't need a public release passed:
-    # a NO-GO candidate is never published. Only the install-by-URL smoke and
-    # the Cloud RC probe (which installs the tarball by URL) run after it.
+    # Public only after every gate that doesn't need a public release passed
+    # (the adopter gate with PASS): a NO-GO or held candidate is never
+    # published. Only the install-by-URL smoke runs after it.
     needs: [resolve, attach-server, rc-tarballs, examples-e2e, rn-device-acceptance, preview, adopter-verdict]
     if: >-
       !cancelled() &&
