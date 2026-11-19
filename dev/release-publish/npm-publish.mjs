@@ -105,7 +105,8 @@ async function publishOne(pkg, dryRun) {
 
 async function main() {
   const [dirArg, version, ...flags] = process.argv.slice(2);
-  if (!dirArg || !version) throw new Error("usage: npm-publish.mjs <dir> <version> [--dry-run | --check]");
+  if (!dirArg || !version)
+    throw new Error("usage: npm-publish.mjs <dir> <version> [--dry-run | --check]");
   const dryRun = flags.includes("--dry-run");
   const dir = resolve(dirArg);
 

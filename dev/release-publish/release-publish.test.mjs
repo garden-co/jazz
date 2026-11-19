@@ -32,7 +32,11 @@ test("manifests must be at the version, without workspace ranges", () => {
   checkManifest({ name: "x", version: "1.0.0", dependencies: { y: "1.0.0" } }, "1.0.0");
   assert.throws(() => checkManifest({ name: "x", version: "1.0.1" }, "1.0.0"), /not 1.0.0/);
   assert.throws(
-    () => checkManifest({ name: "x", version: "1.0.0", optionalDependencies: { y: "workspace:*" } }, "1.0.0"),
+    () =>
+      checkManifest(
+        { name: "x", version: "1.0.0", optionalDependencies: { y: "workspace:*" } },
+        "1.0.0",
+      ),
     /workspace/,
   );
 });

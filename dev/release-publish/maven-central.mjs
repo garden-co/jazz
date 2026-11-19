@@ -53,7 +53,11 @@ export function requiredFiles(artifact, version) {
 
 /** Whether `name` is something Central gets signed and checksummed. */
 export function isPayload(name) {
-  return !/\.(asc|md5|sha1|sha256|sha512)$/.test(name) && !/^maven-metadata/.test(name) && name !== "_remote.repositories";
+  return (
+    !/\.(asc|md5|sha1|sha256|sha512)$/.test(name) &&
+    !name.startsWith("maven-metadata") &&
+    name !== "_remote.repositories"
+  );
 }
 
 function summary(text) {
@@ -68,8 +72,21 @@ function bundle(tree, version, out) {
   const work = mkdtempSync(join(tmpdir(), "maven-bundle-"));
   const gnupg = mkdtempSync(join(tmpdir(), "gnupg-"));
   try {
-    execFileSync("gpg", ["--homedir", gnupg, "--batch", "--quiet", "--pinentry-mode", "loopback",
-      "--passphrase", passphrase, "--import"], { input: key, stdio: ["pipe", "inherit", "inherit"] });
+    execFileSync(
+      "gpg",
+      [
+        "--homedir",
+        gnupg,
+        "--batch",
+        "--quiet",
+        "--pinentry-mode",
+        "loopback",
+        "--passphrase",
+        passphrase,
+        "--import",
+      ],
+      { input: key, stdio: ["pipe", "inherit", "inherit"] },
+    );
     for (const artifact of Object.keys(ARTIFACTS)) {
       const from = join(resolve(tree), artifact, version);
       const to = join(work, GROUP, artifact, version);
@@ -81,9 +98,27 @@ function bundle(tree, version, out) {
         if (!files.includes(name)) throw new Error(`${artifact} ${version} lacks ${name}`);
       for (const name of files) {
         const path = join(to, name);
-        execFileSync("gpg", ["--homedir", gnupg, "--batch", "--quiet", "--yes", "--pinentry-mode", "loopback",
-          "--passphrase", passphrase, "--armor", "--detach-sign", "--output", `${path}.asc`, path]);
-        execFileSync("gpg", ["--homedir", gnupg, "--batch", "--quiet", "--verify", `${path}.asc`, path], { stdio: "ignore" });
+        execFileSync("gpg", [
+          "--homedir",
+          gnupg,
+          "--batch",
+          "--quiet",
+          "--yes",
+          "--pinentry-mode",
+          "loopback",
+          "--passphrase",
+          passphrase,
+          "--armor",
+          "--detach-sign",
+          "--output",
+          `${path}.asc`,
+          path,
+        ]);
+        execFileSync(
+          "gpg",
+          ["--homedir", gnupg, "--batch", "--quiet", "--verify", `${path}.asc`, path],
+          { stdio: "ignore" },
+        );
         const bytes = readFileSync(path);
         for (const algorithm of ["md5", "sha1"])
           writeFileSync(`${path}.${algorithm}`, createHash(algorithm).update(bytes).digest("hex"));
@@ -101,7 +136,8 @@ function bundle(tree, version, out) {
 
 function auth() {
   const { MAVEN_CENTRAL_USERNAME: user, MAVEN_CENTRAL_PASSWORD: password } = process.env;
-  if (!user || !password) throw new Error("MAVEN_CENTRAL_USERNAME and MAVEN_CENTRAL_PASSWORD are needed");
+  if (!user || !password)
+    throw new Error("MAVEN_CENTRAL_USERNAME and MAVEN_CENTRAL_PASSWORD are needed");
   return { Authorization: `Bearer ${Buffer.from(`${user}:${password}`).toString("base64")}` };
 }
 
@@ -152,7 +188,8 @@ async function upload(zip, version, type, drop) {
     if (state === target) break;
     await new Promise((r) => setTimeout(r, 10_000));
   }
-  if (state !== target && state !== "FAILED") throw new Error(`deployment ${id} is ${state} after 60 minutes`);
+  if (state !== target && state !== "FAILED")
+    throw new Error(`deployment ${id} is ${state} after 60 minutes`);
   if (drop) {
     await portal("DELETE", `/deployment/${encodeURIComponent(id)}`);
     seen.push(["dropped (dry run)", Date.now()]);
@@ -173,7 +210,9 @@ async function main() {
   if (command === "bundle") return bundle(args[0], args[1], args[2]);
   if (command === "published") process.exit((await isPublished(args[0])) ? 0 : 1);
   if (command === "upload") return upload(args[0], args[1], args[2], args.includes("--drop"));
-  throw new Error("usage: maven-central.mjs bundle <tree> <version> <out.zip> | published <version> | upload <zip> <version> <type> [--drop]");
+  throw new Error(
+    "usage: maven-central.mjs bundle <tree> <version> <out.zip> | published <version> | upload <zip> <version> <type> [--drop]",
+  );
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -276,7 +276,13 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: release-swift, path: out/swift, if-no-files-found: error }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with: { name: release-swift-mirror, path: out/swift-mirror, if-no-files-found: error, include-hidden-files: true }
+        with:
+          {
+            name: release-swift-mirror,
+            path: out/swift-mirror,
+            if-no-files-found: error,
+            include-hidden-files: true,
+          }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: release-manifest, path: out/manifest, if-no-files-found: error }
 
@@ -958,7 +964,25 @@ jobs:
   # How long each leg took: the run's summary.
   timings:
     name: Timings
-    needs: [resolve, repack, checks, crates-verify, go-prepare, draft, ready, npm, crates, maven, go, swift, inspector-preflight, inspector-stage, inspector-promote, finalize]
+    needs:
+      [
+        resolve,
+        repack,
+        checks,
+        crates-verify,
+        go-prepare,
+        draft,
+        ready,
+        npm,
+        crates,
+        maven,
+        go,
+        swift,
+        inspector-preflight,
+        inspector-stage,
+        inspector-promote,
+        finalize,
+      ]
     if: always()
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
