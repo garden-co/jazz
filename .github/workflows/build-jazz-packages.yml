@@ -424,6 +424,10 @@ jobs:
         with:
           key: jazz-rn-${{ matrix.target }}
           min-os: ios${{ steps.ios.outputs.min }}
+          writer-role: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
+          reader-role: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
+          bucket: ${{ vars.SCCACHE_BUCKET }}
+          region: ${{ vars.SCCACHE_REGION }}
 
       - name: Build the relay staticlib
         run: |
