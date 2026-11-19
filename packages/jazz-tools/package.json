@@ -26,7 +26,9 @@
     "./dist/solid/**",
     "./dist/svelte/**",
     "./dist/worker/**",
-    "**/*.css"
+    "**/*.css",
+    "./dist/backend/node-native.js",
+    "./dist/backend/workerd.js"
   ],
   "main": "dist/index.js",
   "browser": {
@@ -57,6 +59,7 @@
     },
     "./backend": {
       "types": "./dist/backend/index.d.ts",
+      "workerd": "./dist/backend/workerd.js",
       "default": "./dist/backend/index.js"
     },
     "./durable-object": {
