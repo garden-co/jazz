@@ -47,3 +47,5 @@ Needs Node, pnpm 11, sqlite3 and `ss`, plus cargo, Go, JDK 17 with Gradle, or Sw
 - The TS client derives its app id from `serverUrl`. The t9 backend serves the id derived from `http://127.0.0.1:8780/jazz`.
 - User tokens and `backendClients` workload tokens come from different issuers (8791 and 8790). A user token from a workload issuer never reaches `authenticate`, so that user is silently signed out.
 - Synthetic data only. No keys or tokens in this directory.
+
+The refusal apps keep `jazz.app.json` and `jazz.permissions.json` as `*.fixture`: they are invalid under the current JSON schema on purpose, and `every_committed_app_file_fits_its_json_schema` scans every committed file of those names. `refusals.sh` restores the names in its scratch copy.

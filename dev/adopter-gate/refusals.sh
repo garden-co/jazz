@@ -5,6 +5,9 @@
 . "$(dirname "$0")/lib.sh"
 body() {
   local W=$AG/.work/refusals; rm -rf "$W"; mkdir -p "$W/cli"; cp -r "$AG/refusals/." "$W/"
+  # Committed as *.fixture: these alpha.65 files are invalid under today's JSON schema on purpose, and the repo's
+  # every_committed_app_file_fits_its_json_schema test scans every committed jazz.app.json / jazz.permissions.json.
+  for f in "$W"/*/jazz.*.json.fixture; do mv "$f" "${f%.fixture}"; done
   ( cd "$W/cli" && echo '{"name":"rc-cli","private":true}' > package.json && use_rc_pnpm >/dev/null ) || { echo "FAIL rc cli install"; return; }
   local CLI=$W/cli/node_modules/jazz-tools/bin/jazz-tools.js
   for spec in "t7-enum-cases:tickets.kind" "t2-computed:computed columns and transforms"; do
