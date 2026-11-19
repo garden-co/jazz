@@ -2504,7 +2504,7 @@ export class NativeRuntimeAdapter implements Runtime {
       return Promise.reject(new Error("this native binding serves no thin transactions"));
     const served = this.db.serveThinTransaction(request);
     this.scheduleCoreTick();
-    return this.awaitNativeRead(served);
+    return this.awaitNativeRead(this.pumpingWhile(served));
   }
 
   /** @internal End the thin session's open transactions: nothing of them reached the core. */
@@ -2513,7 +2513,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.closed || !this.db.releaseThinTransactions) return;
     const released = this.db.releaseThinTransactions();
     this.scheduleCoreTick();
-    await this.awaitNativeRead(released);
+    await this.awaitNativeRead(this.pumpingWhile(released));
   }
 
   captureSnapshot(): Promise<SnapshotRef> {
@@ -3722,6 +3722,27 @@ export class NativeRuntimeAdapter implements Runtime {
 
   /** Drive the binding-owned coverage and hydration operation while the
    * existing peer pump delivers whatever remote state it is waiting for. */
+  /**
+   * A thin transaction WASM serves answers with a promise (NAPI with a
+   * pending read it polls): keep the server transport pumping while it
+   * waits, as polling does, so the core's confirmation it waits for is
+   * taken in.
+   */
+  private async pumpingWhile<T>(started: T | Promise<T>): Promise<T> {
+    if (!(started instanceof Promise)) return started;
+    let settled = false;
+    const done = started.finally(() => {
+      settled = true;
+    });
+    void (async () => {
+      while (!settled && !this.closed && !this.ownerRuntime.closed) {
+        this.startServerPump();
+        await sleep(5);
+      }
+    })();
+    return done;
+  }
+
   private async awaitNativeRead(
     started: NativeReadResult | Promise<NativeReadResult>,
     tier?: string,
