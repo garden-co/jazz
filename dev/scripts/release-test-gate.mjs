@@ -13,15 +13,32 @@
  * runs its simulator/emulator jobs on dispatch (or a labelled PR), so an
  * ordinary pull_request run of it is scaffold-only and must not satisfy the
  * gate.
+ *
+ * `alternatives`: workflows that run this one as a called gate. The release
+ * candidate gate (release-candidate.yml) calls RN device acceptance and
+ * Examples E2E and succeeds only when both did, so its successful dispatch on
+ * the same head stands for them.
  */
+export const RELEASE_CANDIDATE_GATE = Object.freeze({
+  file: "release-candidate.yml",
+  label: "Release candidate gate",
+  events: Object.freeze(["workflow_dispatch"]),
+});
+
 export const RELEASE_TEST_WORKFLOWS = Object.freeze([
-  Object.freeze({ file: "ci.yml", label: "CI", events: null }),
+  Object.freeze({ file: "ci.yml", label: "CI", events: null, alternatives: Object.freeze([]) }),
   Object.freeze({
     file: "rn-device-acceptance.yml",
     label: "React Native device acceptance",
     events: Object.freeze(["workflow_dispatch"]),
+    alternatives: Object.freeze([RELEASE_CANDIDATE_GATE]),
   }),
-  Object.freeze({ file: "examples-e2e.yml", label: "Examples E2E", events: null }),
+  Object.freeze({
+    file: "examples-e2e.yml",
+    label: "Examples E2E",
+    events: null,
+    alternatives: Object.freeze([RELEASE_CANDIDATE_GATE]),
+  }),
 ]);
 
 /** True when a run is a completed success of the given workflow at `headSha`. */
@@ -65,18 +82,37 @@ export async function evaluateReleaseTestGate({ github, owner, repo, sha, headSh
     lines.push(`published tree matches release PR head ${headRef}@${headSha}`);
   }
 
-  for (const workflow of RELEASE_TEST_WORKFLOWS) {
-    const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+  const runsOf = (file) =>
+    github.paginate(github.rest.actions.listWorkflowRuns, {
       owner,
       repo,
-      workflow_id: workflow.file,
+      workflow_id: file,
       branch: headRef,
       head_sha: headSha,
       per_page: 100,
     });
+
+  for (const workflow of RELEASE_TEST_WORKFLOWS) {
+    const runs = await runsOf(workflow.file);
     const passing = runs.find((run) => isQualifyingRun(run, workflow, headSha));
     if (passing) {
       lines.push(`${workflow.label}: passed in run ${passing.id} (${passing.event})`);
+      continue;
+    }
+    let covered;
+    for (const alternative of workflow.alternatives ?? []) {
+      const run = (await runsOf(alternative.file)).find((candidate) =>
+        isQualifyingRun(candidate, alternative, headSha),
+      );
+      if (run) {
+        covered = { alternative, run };
+        break;
+      }
+    }
+    if (covered) {
+      lines.push(
+        `${workflow.label}: passed as part of ${covered.alternative.label} run ${covered.run.id} (${covered.run.event})`,
+      );
       continue;
     }
     ok = false;

@@ -84,7 +84,14 @@ test("release triggers and cache trust retain development and release separation
   );
   const dispatch = changesets.jobs["release-pr"].steps.at(-1).run;
   assert.match(dispatch, /gh workflow run ci.yml/);
-  assert.match(dispatch, /gh workflow run preview-jazz-tools-alpha-release.yml/);
+  // The release preview runs inside the release candidate gate, on the
+  // artifacts release-artifacts.yml builds for this head.
+  assert.match(dispatch, /gh workflow run release-artifacts.yml/);
+  assert.match(dispatch, /gh workflow run release-candidate.yml[^\n]*-f dry-run=true/);
+  assert.equal(
+    workflow("release-candidate").jobs.preview.uses,
+    "./.github/workflows/preview-jazz-tools-alpha-release.yml",
+  );
   assert.match(dispatch, /CURRENT_SHA.*!=.*RELEASE_SHA/);
   assert.match(dispatch, /PR_SHA.*!=.*RELEASE_SHA/);
   assert.deepEqual(workflow("ci").on.push.branches, ["main", "release", "merge-group/**"]);
@@ -220,7 +227,7 @@ test("release refresh dispatches required CI and refuses a moved branch", () => 
     });
   assert.match(
     run(script, "candidate"),
-    /DISPATCH ci.yml[\s\S]*DISPATCH preview-jazz-tools-alpha-release.yml/,
+    /DISPATCH ci.yml[\s\S]*DISPATCH release-artifacts.yml[\s\S]*DISPATCH release-candidate.yml/,
   );
   assert.throws(
     () => run(script, "moved"),

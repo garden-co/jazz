@@ -1,74 +1,320 @@
 name: Release candidate
 
-# Publishes a GitHub prerelease, v2.0.0-alpha.N-rc.M, carrying exactly the
-# native assets the release v2.0.0-alpha.N will carry, so Jazz Cloud and
-# self-hosters can try a candidate before it ships:
-#   - the server binaries Jazz Cloud's images run, jazz-tools-linux-{x64,arm64},
-#     with SHA256SUMS ("Publish jazz-tools alpha" attaches the same files).
-# It publishes nothing to npm, moves no dist-tag, and is never Latest. The
-# Actions token creates the tag on the exact commit built, when the
-# prerelease is published; an existing tag or release refuses the run.
+# The release candidate gate: from a commit to a go/no-go verdict, verifying
+# the artifacts release-artifacts.yml built for that commit (after every merge
+# to main and release) instead of rebuilding them. If no run of the commit
+# exists, it builds them here first; one still running is waited for.
+#
+# Gates, all in parallel once the artifacts exist:
+#   - Pack the rc tarballs (stamp the version, link them to each other) and
+#     install jazz-tools from them on Linux and macOS (by URL from the release
+#     when publishing; from the files in a dry run);
+#   - Examples E2E (examples-e2e.yml) on the artifacts' packages;
+#   - React Native device acceptance (rn-device-acceptance.yml);
+#   - the release preview (preview-jazz-tools-alpha-release.yml, publish's
+#     dry run) on the artifacts' packages.
+# Checks that used to run here and now run in release-artifacts.yml, on the
+# same files: the server binaries' heap-profile check, the packed Linux NAPI
+# receipts, the packaged jazz-rn Android and iOS consumer builds, the jazz-wasm
+# Durable Object smoke test, the packed tarball checks.
+#
+# Unless `dry-run`, it publishes the GitHub prerelease v<version>
+# (2.0.0-alpha.N-rc.M), carrying what the release v2.0.0-alpha.N will carry so
+# Jazz Cloud and self-hosters can try it: the server binaries
+# jazz-tools-linux-{x64,arm64} with SHA256SUMS, and the npm tarballs (each
+# pointing at its siblings' asset URLs) with NPM-SHA256SUMS. Nothing goes to
+# npm, no dist-tag moves, it is never Latest. The Actions token creates the
+# tag on the exact commit verified; an existing tag or release refuses the
+# run. A successful run on the Version Packages head also satisfies publish's
+# release test gate for RN device acceptance and Examples E2E
+# (dev/scripts/release-test-gate.mjs).
+#
+# It verifies the commit it is dispatched on (the called gates check out
+# github.sha): `gh workflow run release-candidate.yml --ref <branch>
+# -f version=2.0.0-alpha.N-rc.M`, or `-f dry-run=true`.
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Candidate version, e.g. 2.0.0-alpha.60-rc.1 (tag v<version>)."
-        required: true
+        description: "Candidate version, e.g. 2.0.0-alpha.60-rc.1 (tag v<version>). Empty: <package version>-rc.0, dry run only."
+        required: false
         type: string
-      ref:
-        description: "Branch, tag or commit to build."
-        required: true
-        type: string
-        default: main
+        default: ""
+      dry-run:
+        description: "Run every gate, publish no prerelease."
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-candidate-${{ inputs.version }}
+  group: release-candidate-${{ inputs.version != '' && !inputs.dry-run && inputs.version || github.run_id }}
   cancel-in-progress: false
 
 env:
   GH_REPO: ${{ github.repository }}
-  VERSION: ${{ inputs.version }}
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.repository_id }}
+  JAZZ_RN_CARGO_NDK_VERSION: 4.1.2
 
 jobs:
+  resolve:
+    name: Resolve ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      INPUT_VERSION: ${{ inputs.version }}
+      DRY_RUN: ${{ inputs.dry-run || inputs.version == '' }}
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      version: ${{ steps.resolve.outputs.version }}
+      dry_run: ${{ steps.resolve.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - id: resolve
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          version="${INPUT_VERSION}"
+          if [ -z "${version}" ]; then
+            version="$(node -p 'require("./packages/jazz-tools/package.json").version')-rc.0"
+          fi
+          if ! [[ "${version}" =~ ^2\.0\.0-alpha\.[0-9]+(\.[0-9]+)?-rc\.[0-9]+$ ]]; then
+            echo "::error::version must look like 2.0.0-alpha.N-rc.M or 2.0.0-alpha.N.K-rc.M, got '${version}'"
+            exit 1
+          fi
+          if [ "${DRY_RUN}" != true ]; then
+            if git ls-remote --exit-code --tags origin "refs/tags/v${version}" >/dev/null; then
+              echo "::error::tag v${version} already exists; pick the next rc number."
+              exit 1
+            fi
+            if gh release view "v${version}" >/dev/null 2>&1; then
+              echo "::error::a release v${version} already exists; pick the next rc number."
+              exit 1
+            fi
+          fi
+          {
+            echo "sha=${sha}"
+            echo "version=${version}"
+            echo "dry_run=${DRY_RUN}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Verifying ${sha} as ${version} (dry run: ${DRY_RUN})"
+
+  find-artifacts:
+    name: Find the release artifacts
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      run_id: ${{ steps.find.outputs.run_id }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          sparse-checkout: dev/scripts
+          persist-credentials: false
+      - id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ needs.resolve.outputs.sha }}
+        run: node dev/scripts/await-release-artifacts.mjs
+
+  # Only when no release-artifacts run of this commit exists (e.g. a branch
+  # that is neither main nor release).
+  build:
+    name: Build
+    needs: [resolve, find-artifacts]
+    if: needs.find-artifacts.outputs.run_id == ''
+    uses: ./.github/workflows/release-artifacts.yml
+    permissions:
+      contents: write
+      actions: read
+      attestations: write
+      id-token: write
+    with:
+      ref: ${{ needs.resolve.outputs.sha }}
+
+  artifacts:
+    name: Artifacts ready
+    needs: [find-artifacts, build]
+    if: always() && needs.find-artifacts.result == 'success' && needs.build.result != 'failure' && needs.build.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_id: ${{ steps.pick.outputs.run_id }}
+    steps:
+      - id: pick
+        env:
+          FOUND: ${{ needs.find-artifacts.outputs.run_id }}
+        run: |
+          run_id="${FOUND:-${GITHUB_RUN_ID}}"
+          echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
+          echo "Verifying the artifacts of https://github.com/${GH_REPO}/actions/runs/${run_id}"
+
+  # --- Gates -----------------------------------------------------------------
+
+  examples-e2e:
+    name: Examples E2E
+    needs: artifacts
+    uses: ./.github/workflows/examples-e2e.yml
+    permissions:
+      actions: read
+      contents: read
+    with:
+      artifacts_run_id: ${{ needs.artifacts.outputs.run_id }}
+
+  rn-device-acceptance:
+    name: RN device acceptance
+    needs: artifacts
+    uses: ./.github/workflows/rn-device-acceptance.yml
+
+  preview:
+    name: Release preview
+    needs: artifacts
+    uses: ./.github/workflows/preview-jazz-tools-alpha-release.yml
+    # The preview's (publish's) permission ceiling; its dry run never uses
+    # the write scopes.
+    permissions:
+      actions: write
+      contents: write
+      id-token: write
+      pull-requests: read
+      statuses: write
+    secrets: inherit
+    with:
+      artifacts_run_id: ${{ needs.artifacts.outputs.run_id }}
+
+  # The rc tarballs: the built packages stamped <version> and linked to each
+  # other (dev/artifacts/rc-tarballs.mjs), by release URL when publishing and
+  # by file path in a dry run.
+  rc-tarballs:
+    name: Pack the rc tarballs
+    needs: [resolve, artifacts]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+      RUN_ID: ${{ needs.artifacts.outputs.run_id }}
+      JAZZ_NATIVE_RELAY_SOURCE_REVISION: ${{ needs.resolve.outputs.sha }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-toolchain: ""
+
+      # The verified commit can predate rc-tarballs.mjs: take it from here.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
+          path: .rc-tools
+          sparse-checkout: dev/artifacts/rc-tarballs.mjs
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with: { name: pkg-jazz-tools, path: packages/jazz-tools, run-id: "${{ env.RUN_ID }}", github-token: "${{ github.token }}" }
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with: { name: pkg-jazz-wasm, path: crates/jazz-wasm, run-id: "${{ env.RUN_ID }}", github-token: "${{ github.token }}" }
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with: { name: pkg-jazz-napi, path: crates/jazz-napi, run-id: "${{ env.RUN_ID }}", github-token: "${{ github.token }}" }
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with: { name: pkg-jazz-rn, path: crates/jazz-rn, run-id: "${{ env.RUN_ID }}", github-token: "${{ github.token }}" }
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with: { name: pkg-create-jazz, path: packages/create-jazz, run-id: "${{ env.RUN_ID }}", github-token: "${{ github.token }}" }
+
+      - name: Verify the built payloads
+        run: |
+          set -euo pipefail
+          test -f crates/jazz-wasm/pkg/jazz_wasm_bg.wasm
+          test -f crates/jazz-wasm/pkg/jazz_wasm.js
+          for platform in linux-x64-gnu linux-arm64-gnu darwin-x64 darwin-arm64 win32-x64-msvc; do
+            test -f "crates/jazz-napi/npm/${platform}/jazz-napi.${platform}.node"
+          done
+          test -f packages/jazz-tools/dist/index.js
+          test -f packages/jazz-tools/dist/backend/index.js
+          node dev/artifacts/rn-packages.mjs verify
+
+      - name: Stamp ${{ env.VERSION }}
+        run: node .rc-tools/dev/artifacts/rc-tarballs.mjs stamp "${VERSION}"
+
+      # Bundled into jazz-tools' dist, as "Publish jazz-tools alpha" does.
+      - name: Stage inspector overlay assets into jazz-tools
+        run: |
+          pnpm --filter inspector run build:embedded
+          pnpm --filter jazz-tools run stage:inspector-overlay
+
+      - name: Pack
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/npm"
+          mkdir -p "${out}"
+          for pkg in jazz-wasm jazz-napi jazz-tools create-jazz; do
+            pnpm --filter "${pkg}" pack --pack-destination "${out}"
+          done
+          for dir in crates/jazz-napi/npm/*/; do
+            npm pack "${dir}" --pack-destination "${out}"
+          done
+          JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
+            node dev/artifacts/rn-packages.mjs pack "${out}"
+          rm -f "${out}/rn-packages.json"
+          node dev/artifacts/verify-packed-napi.mjs "${out}/jazz-napi-${VERSION}.tgz"
+          # Not `grep -q`: under pipefail its early exit makes tar fail with a write error.
+          tar -tf "${out}/jazz-tools-${VERSION}.tgz" > "${RUNNER_TEMP}/jazz-tools-files.txt"
+          grep -qx "package/dist/dev/inspector-overlay/embedded/embedded.html" "${RUNNER_TEMP}/jazz-tools-files.txt"
+          grep -qx "package/dist/dev/inspector-overlay/embedded/backend.html" "${RUNNER_TEMP}/jazz-tools-files.txt"
+          # createJazz serves the Inspector from this module, which ships wherever the code does.
+          tar -xOf "${out}/jazz-tools-${VERSION}.tgz" package/dist/backend/inspector-ui-files.js > "${RUNNER_TEMP}/inspector-ui-files.js"
+          grep -Fq '"backend.html":' "${RUNNER_TEMP}/inspector-ui-files.js"
+          ls -la "${out}"
+
+      - name: Link the tarballs to the release
+        if: needs.resolve.outputs.dry_run != 'true'
+        run: |
+          node .rc-tools/dev/artifacts/rc-tarballs.mjs link "${RUNNER_TEMP}/npm" \
+            "https://github.com/${GH_REPO}/releases/download/v${VERSION}"
+
+      # The smoke jobs unpack them at this path.
+      - name: Link the tarballs to each other's files (dry run)
+        if: needs.resolve.outputs.dry_run == 'true'
+        run: node .rc-tools/dev/artifacts/rc-tarballs.mjs link "${RUNNER_TEMP}/npm" "file:/tmp/jazz-rc-npm"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rc-npm
+          path: ${{ runner.temp }}/npm/*
+          if-no-files-found: error
+
+  # --- The prerelease (skipped in a dry run) ----------------------------------
+
   draft:
-    name: Draft v${{ inputs.version }}
+    name: Draft v${{ needs.resolve.outputs.version }}
+    needs: resolve
+    if: needs.resolve.outputs.dry_run != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
-    outputs:
-      sha: ${{ steps.resolve.outputs.sha }}
+      SHA: ${{ needs.resolve.outputs.sha }}
+      VERSION: ${{ needs.resolve.outputs.version }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ inputs.ref }}
-
-      - id: resolve
-        name: Validate inputs and resolve the commit
-        run: |
-          set -euo pipefail
-          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+(\.[0-9]+)?-rc\.[0-9]+$ ]]; then
-            echo "::error::version must look like 2.0.0-alpha.N-rc.M or 2.0.0-alpha.N.K-rc.M, got '${VERSION}'"
-            exit 1
-          fi
-          if git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null; then
-            echo "::error::tag v${VERSION} already exists; pick the next rc number."
-            exit 1
-          fi
-          if gh release view "v${VERSION}" >/dev/null 2>&1; then
-            echo "::error::a release v${VERSION} already exists; pick the next rc number."
-            exit 1
-          fi
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
       - name: Create the draft prerelease
-        env:
-          SHA: ${{ steps.resolve.outputs.sha }}
         run: |
           set -euo pipefail
           printf 'Release candidate for %s, built from %s. Not published to npm.\n' \
@@ -76,56 +322,45 @@ jobs:
           gh release create "v${VERSION}" --draft --prerelease --latest=false \
             --target "${SHA}" --title "Jazz ${VERSION}" --notes-file "${RUNNER_TEMP}/notes.md"
 
-  build:
-    name: Build Jazz packages
-    needs: draft
-    uses: ./.github/workflows/build-jazz-packages.yml
-    secrets: inherit
-    with:
-      ref: ${{ needs.draft.outputs.sha }}
-
-  attach-server-binaries:
-    name: Attach server binaries
-    needs: [draft, build]
+  # The server binaries go on the draft first: the Cloud RC probe tests them
+  # there while the other gates run.
+  attach-server:
+    name: Attach the server binaries
+    needs: [resolve, artifacts, draft]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
+      actions: read
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.resolve.outputs.version }}
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          pattern: jazz-tools-linux-*
-          merge-multiple: true
-          path: dist
+        with: { name: release-server, path: server, run-id: "${{ needs.artifacts.outputs.run_id }}", github-token: "${{ github.token }}" }
 
-      - name: Checksums
-        working-directory: dist
+      - name: Upload to the draft
         run: |
           set -euo pipefail
-          test -s jazz-tools-linux-x64
-          test -s jazz-tools-linux-arm64
-          sha256sum jazz-tools-linux-x64 jazz-tools-linux-arm64 > SHA256SUMS
-          cat SHA256SUMS
-
-      - name: Upload
-        run: |
-          set -euo pipefail
+          (cd server && sha256sum -c SHA256SUMS)
           test "$(gh release view "v${VERSION}" --json isDraft --jq .isDraft)" = true
-          gh release upload "v${VERSION}" dist/jazz-tools-linux-x64 dist/jazz-tools-linux-arm64 dist/SHA256SUMS
+          gh release upload "v${VERSION}" server/jazz-tools-linux-x64 server/jazz-tools-linux-arm64 server/SHA256SUMS
 
   publish:
     name: Publish the prerelease
-    needs: [draft, attach-server-binaries]
+    needs: [resolve, attach-server, rc-tarballs]
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     permissions:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.resolve.outputs.version }}
     steps:
-      - name: Check the assets and publish
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with: { name: rc-npm, path: npm }
+
+      - name: Publish
         run: |
           set -euo pipefail
           assets=$(gh release view "v${VERSION}" --json assets --jq '.assets[].name')
@@ -134,3 +369,154 @@ jobs:
           done
           gh release edit "v${VERSION}" --draft=false --prerelease --latest=false
           gh release view "v${VERSION}" --json url,tagName,targetCommitish
+
+      # Asset URLs exist once the release is published.
+      - name: Attach the npm tarballs and add install notes
+        run: |
+          set -euo pipefail
+          (cd npm && sha256sum -c NPM-SHA256SUMS)
+          gh release upload "v${VERSION}" npm/*.tgz npm/NPM-SHA256SUMS
+          base="https://github.com/${GH_REPO}/releases/download/v${VERSION}"
+          gh release view "v${VERSION}" --json body --jq .body > "${RUNNER_TEMP}/notes.md"
+          cat >> "${RUNNER_TEMP}/notes.md" <<EOF
+
+          ## Try the client packages
+
+          These npm packages are attached here and are not on npm. Each tarball points at
+          its sibling assets, so one install pulls in jazz-wasm, jazz-napi and its
+          platform binary:
+
+          \`\`\`sh
+          npm install ${base}/jazz-tools-${VERSION}.tgz
+          # React Native apps also add:
+          npm install ${base}/jazz-rn-${VERSION}.tgz
+          \`\`\`
+
+          pnpm, yarn and bun take the same URLs. NPM-SHA256SUMS lists the tarballs' checksums.
+          EOF
+          gh release edit "v${VERSION}" --notes-file "${RUNNER_TEMP}/notes.md"
+
+  # garden-co/infra's Cloud RC probe (cloud-rc-probe.yml) runs the candidate's
+  # server binary the way Jazz Cloud does and answers green, red or
+  # needs-infra (a hold a person resolves). Dispatching it needs
+  # INFRA_RC_PROBE_TOKEN (actions: read/write on garden-co/infra); without it
+  # the leg reports "skipped: token pending". A dry run has no draft to probe.
+  cloud-rc-probe:
+    name: Cloud RC probe
+    needs: [resolve, attach-server]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      verdict: ${{ steps.probe.outputs.verdict }}
+    env:
+      TOKEN: ${{ secrets.INFRA_RC_PROBE_TOKEN }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      SHA: ${{ needs.resolve.outputs.sha }}
+    steps:
+      - id: probe
+        run: |
+          set -euo pipefail
+          if [ -z "${TOKEN}" ]; then
+            echo "verdict=skipped: token pending" >> "$GITHUB_OUTPUT"
+            echo "::notice::Cloud RC probe skipped: token pending (INFRA_RC_PROBE_TOKEN is not set)"
+            exit 0
+          fi
+          export GH_TOKEN="${TOKEN}"
+          repo=garden-co/infra
+          since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          gh workflow run cloud-rc-probe.yml -R "${repo}" \
+            -f rc_tag="v${VERSION}" -f jazz_sha="${SHA}" -f rc_npm_version="${VERSION}"
+          run_id=""
+          for _ in $(seq 1 30); do
+            run_id=$(gh run list -R "${repo}" -w cloud-rc-probe.yml -e workflow_dispatch -L 20 \
+              --json databaseId,createdAt --jq "[.[] | select(.createdAt >= \"${since}\")] | sort_by(.createdAt) | .[0].databaseId // empty")
+            [ -n "${run_id}" ] && break
+            sleep 5
+          done
+          [ -n "${run_id}" ] || { echo "::error::the probe run did not start"; exit 1; }
+          echo "Probe: https://github.com/${repo}/actions/runs/${run_id}"
+          gh run watch "${run_id}" -R "${repo}" --interval 15 > /dev/null || true
+          gh run download "${run_id}" -R "${repo}" -n verdict -D verdict
+          verdict=$(jq -r .verdict verdict/verdict.json)
+          jq . verdict/verdict.json
+          echo "verdict=${verdict}" >> "$GITHUB_OUTPUT"
+          case "${verdict}" in
+            green) ;;
+            needs-infra) echo "::warning::Cloud RC probe: needs-infra (hold: a person resolves it)" ;;
+            *) echo "::error::Cloud RC probe: ${verdict}"; exit 1 ;;
+          esac
+
+  # Slot: adopter-gate.yml (#adopter-evals) joins as `uses:
+  # ./.github/workflows/adopter-gate.yml` with rc_tag once it is on main
+  # (a `uses:` of a missing file fails the whole workflow).
+
+  smoke:
+    name: Install jazz-tools from the rc tarballs (${{ matrix.os }})
+    needs: [resolve, rc-tarballs, publish]
+    if: always() && needs.rc-tarballs.result == 'success' && (needs.publish.result == 'success' || (needs.resolve.outputs.dry_run == 'true' && needs.publish.result == 'skipped'))
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+      DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        if: env.DRY_RUN == 'true'
+        with: { name: rc-npm, path: /tmp/jazz-rc-npm }
+
+      - name: npm install and load
+        run: |
+          set -euo pipefail
+          if [ "${DRY_RUN}" = true ]; then
+            spec="file:/tmp/jazz-rc-npm/jazz-tools-${VERSION}.tgz"
+          else
+            spec="https://github.com/${GH_REPO}/releases/download/v${VERSION}/jazz-tools-${VERSION}.tgz"
+          fi
+          mkdir app && cd app
+          npm init -y >/dev/null
+          npm install "${spec}"
+          node -e 'for (const name of ["jazz-tools","jazz-wasm","jazz-napi"]) { const v = require(`./node_modules/${name}/package.json`).version; if (v !== process.env.VERSION) throw new Error(`${name} is ${v}`); }'
+          node -e 'require("jazz-napi"); console.log("jazz-napi loaded")'
+          node --input-type=module -e 'await import("jazz-tools"); await import("jazz-tools/backend"); console.log("jazz-tools loaded")'
+
+  # --- The verdict -------------------------------------------------------------
+
+  verdict:
+    name: Release candidate verdict
+    needs: [resolve, artifacts, examples-e2e, rn-device-acceptance, preview, rc-tarballs, smoke, attach-server, publish, cloud-rc-probe]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Go / no-go
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
+          PROBE: ${{ needs.cloud-rc-probe.outputs.verdict }}
+        run: |
+          node -e '
+            const needs = JSON.parse(process.env.RESULTS);
+            const dryRun = process.env.DRY_RUN === "true";
+            // A dry run publishes nothing, so it has no draft to probe either.
+            const skippable = dryRun ? new Set(["attach-server", "publish", "cloud-rc-probe"]) : new Set();
+            let go = true, hold = false;
+            for (const [job, { result }] of Object.entries(needs)) {
+              const ok = result === "success" || (skippable.has(job) && result === "skipped");
+              let note = result;
+              if (job === "cloud-rc-probe" && process.env.PROBE) note += ` (${process.env.PROBE})`;
+              console.log(`${ok ? "✅" : "❌"} ${job}: ${note}`);
+              go &&= ok;
+            }
+            if (process.env.PROBE === "needs-infra") hold = true;
+            const verdict = !go ? "NO-GO" : hold ? "HOLD (needs-infra: a person resolves it)" : "GO";
+            console.log(verdict);
+            require("fs").appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## Release candidate: ${verdict}\n`);
+            if (verdict !== "GO") process.exit(1);'

@@ -13,6 +13,11 @@ on:
         required: false
         type: string
         default: publish
+      artifacts_run_id:
+        description: "dry-run only: verify the packages of this release-artifacts.yml run (or the calling run) instead of building them."
+        required: false
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       mode:
@@ -244,6 +249,7 @@ jobs:
           RELEASE_PR_NUMBER: ${{ needs.release-push-gate.outputs.release_pr_number }}
           RELEASE_PR_HEAD_REF: ${{ needs.release-push-gate.outputs.release_pr_head_ref }}
           RELEASE_PR_HEAD_SHA: ${{ needs.release-push-gate.outputs.release_pr_head_sha }}
+          ARTIFACTS_RUN_ID: ${{ inputs.artifacts_run_id }}
         with:
           script: |
             const eventName = process.env.EVENT_NAME;
@@ -276,7 +282,17 @@ jobs:
               ).version;
             }
 
-            if (releaseMode !== "publish") {
+            const artifactsRunId = process.env.ARTIFACTS_RUN_ID;
+            if (artifactsRunId && releaseMode === "dry-run") {
+              // The release candidate gate passes the release-artifacts run it
+              // verified for this commit (the caller checked commit and status).
+              if (!/^[0-9]+$/.test(artifactsRunId)) throw new Error(`artifacts_run_id must be a run ID, got ${artifactsRunId}`);
+              usePreviewArtifacts = "true";
+              previewRunId = artifactsRunId;
+              reason = `verifying release-artifacts run ${artifactsRunId}`;
+            } else if (artifactsRunId) {
+              reason = "artifacts_run_id is honoured in dry-run only";
+            } else if (releaseMode !== "publish") {
               reason = `preview artifact reuse disabled for mode=${releaseMode}`;
             } else if (ref !== "refs/heads/release") {
               reason = `preview artifact reuse disabled for ${eventName} on ${ref}`;
@@ -576,7 +592,9 @@ jobs:
           # the latter's commit SHA here: it is the value sealed into its
           # relay-artifact manifests, whereas release's merge commit has a
           # different SHA despite the same source tree.
-          JAZZ_REUSE_PREVIEW_ARTIFACTS: ${{ needs.resolve-preview-artifacts.outputs.use_preview_artifacts }}
+          # A release-artifacts run (artifacts_run_id) was built at this very
+          # commit: it sealed GITHUB_SHA, like a build in this run.
+          JAZZ_REUSE_PREVIEW_ARTIFACTS: ${{ needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true' && inputs.artifacts_run_id == '' }}
           JAZZ_RELEASE_PR_HEAD_SHA: ${{ needs.release-push-gate.outputs.release_pr_head_sha }}
         run: |
           JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(node dev/artifacts/release-artifact-source-revision.mjs)" \
