@@ -149,6 +149,19 @@ case "$platform" in
       -library "$(lib "$device_target")" -headers "$root/crates/jazz-native-relay/include" \
       -library "$simulator_stage/libjazz_native_relay.a" -headers "$root/crates/jazz-native-relay/include" \
       -output "$framework"
+    # xcodebuild lists the libraries (and their architectures) in any order:
+    # sort them, so the same slices give the same Info.plist and manifest.
+    python3 - "$framework/Info.plist" <<'PY'
+import plistlib, sys
+path = sys.argv[1]
+with open(path, "rb") as f:
+    info = plistlib.load(f)
+for library in info["AvailableLibraries"]:
+    library["SupportedArchitectures"].sort()
+info["AvailableLibraries"].sort(key=lambda library: library["LibraryIdentifier"])
+with open(path, "wb") as f:
+    plistlib.dump(info, f, sort_keys=True)
+PY
     write_manifest "$package/ios/jazz-native-relay.manifest.json" "$framework"
     ;;
   *)
