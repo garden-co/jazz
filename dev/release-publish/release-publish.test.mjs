@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { checkManifest, publishLevels } from "./npm-publish.mjs";
 import { isPayload, requiredFiles } from "./maven-central.mjs";
-import { summarize } from "./rc-verdict.mjs";
+import { pickGateRun, summarize } from "./rc-verdict.mjs";
 
 const pkg = (name, deps = []) => ({ name, deps });
 
@@ -88,4 +88,32 @@ test("a gate run without rc-verdict is reported, and refused only if it failed",
   assert.equal(summarize(null, run).refuse, false);
   assert.equal(summarize(null, { ...run, conclusion: "failure" }).refuse, true);
   assert.equal(summarize(null, null).refuse, false);
+});
+
+const gateRun = (id, display_title, created_at) => ({ id, display_title, created_at });
+
+test("a Cloud RC probe-only run never counts as the gate run", () => {
+  const picked = pickGateRun([
+    gateRun(1, "Release candidate dry run, changeset-release/release", "2026-11-19T10:00:00Z"),
+    gateRun(2, "Cloud RC probe only, v2.0.0-alpha.68-rc.1", "2026-11-19T11:00:00Z"),
+  ]);
+  assert.equal(picked.id, 1);
+  assert.equal(pickGateRun([gateRun(2, "Cloud RC probe only, x", "2026-11-19T11:00:00Z")]), null);
+});
+
+test("a real candidate wins over a newer dry run; otherwise the newest", () => {
+  assert.equal(
+    pickGateRun([
+      gateRun(1, "Release candidate v2.0.0-alpha.68-rc.1", "2026-11-19T10:00:00Z"),
+      gateRun(2, "Release candidate dry run, changeset-release/release", "2026-11-19T11:00:00Z"),
+    ]).id,
+    1,
+  );
+  assert.equal(
+    pickGateRun([
+      gateRun(1, "Release candidate dry run, a", "2026-11-19T10:00:00Z"),
+      gateRun(2, "Release candidate dry run, b", "2026-11-19T11:00:00Z"),
+    ]).id,
+    2,
+  );
 });

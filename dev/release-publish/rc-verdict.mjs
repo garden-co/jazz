@@ -84,6 +84,19 @@ export function summarize(verdict, run) {
   return { lines, annotations, refuse: state === "NO-GO" };
 }
 
+/**
+ * The gate run whose verdict counts, of the completed release-candidate.yml
+ * runs on the head: never a Cloud RC probe-only run (it runs no gate); a real
+ * candidate ("Release candidate v<version>") over a dry run when one exists;
+ * the newest of those. Null when none is left.
+ */
+export function pickGateRun(runs) {
+  const gates = runs.filter((r) => !(r.display_title ?? "").startsWith("Cloud RC probe only"));
+  const real = gates.filter((r) => (r.display_title ?? "").startsWith("Release candidate v"));
+  const pool = real.length > 0 ? real : gates;
+  return [...pool].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0] ?? null;
+}
+
 function gh(args) {
   return execFileSync("gh", args, {
     encoding: "utf8",
@@ -102,7 +115,7 @@ function main() {
         `repos/${repo}/actions/workflows/release-candidate.yml/runs?head_sha=${head}&status=completed&per_page=20`,
       ]),
     ).workflow_runs ?? [];
-  const run = runs.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0] ?? null;
+  const run = pickGateRun(runs);
   let verdict = null;
   if (run) {
     const dir = mkdtempSync(join(tmpdir(), "rc-verdict-"));
