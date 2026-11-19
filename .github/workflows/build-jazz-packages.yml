@@ -967,7 +967,8 @@ jobs:
     name: Verify packaged jazz-rn Android consumer
     needs: assemble-jazz-rn
     if: inputs.include_rn && needs.assemble-jazz-rn.result == 'success'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # 16 vCPUs: the C++ build for every ABI is most of this job.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -976,6 +977,27 @@ jobs:
       - uses: ./.github/actions/setup-build
         with:
           rust-toolchain: ""
+
+      # Gradle's distribution, dependencies and build cache on a sticky disk
+      # of this job's own (the device acceptance one is shared with PRs).
+      - name: Point Gradle at its sticky disk
+        run: echo "GRADLE_USER_HOME=${RUNNER_TEMP}/gradle-home" >> "${GITHUB_ENV}"
+      - uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
+        with:
+          key: rn-consumer-android-gradle-${{ github.repository_id }}-v1
+          path: ${{ runner.temp }}/gradle-home
+
+      # Gradle would otherwise fetch these itself, once per run and without
+      # retry. sdkmanager has no retry of its own.
+      - name: Install the NDK and CMake the Android build uses
+        run: |
+          sdkmanager="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          for attempt in 1 2 3; do
+            "${sdkmanager}" --install "ndk;27.1.12297006" "cmake;3.22.1" && exit 0
+            echo "::warning::NDK/CMake install attempt ${attempt} failed"
+            sleep $((attempt * 10))
+          done
+          exit 1
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
@@ -1005,8 +1027,19 @@ jobs:
         run: pnpm --dir "$JAZZ_RN_CONSUMER_FIXTURE" exec expo prebuild --platform android --clean --no-install
 
       - name: Link the packed relay through an Android application
-        run: ./gradlew :app:assembleDebug --no-daemon
+        run: ./gradlew :app:assembleDebug --no-daemon --build-cache
         working-directory: ${{ env.JAZZ_RN_CONSUMER_FIXTURE }}/android
+
+      # The sticky disk unmounts after this: nothing may still run from it.
+      - name: Stop Gradle and Kotlin
+        if: always()
+        run: |
+          pkill -f GradleDaemon || true
+          pkill -f KotlinCompileDaemon || true
+          sleep 2
+          # -m targets the whole filesystem: only ever a mounted sticky disk.
+          if mountpoint -q "${GRADLE_USER_HOME}"; then fuser -km "${GRADLE_USER_HOME}" 2>/dev/null || true; fi
+
 
   verify-jazz-rn-ios-consumer:
     name: Verify packaged jazz-rn iOS consumer
