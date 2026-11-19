@@ -75,17 +75,20 @@ jobs:
         include:
           # Ubuntu 22.04 for its older glibc (2.35), so the library links on
           # more systems.
+          # 16 vCPUs: a release's fresh version compiles jazz-ffi from scratch
+          # (no cache here), 8.5 min on 4 vCPUs (run 44548302340), followed by
+          # the bindings, Kotlin and the manifest.
           # jna: the directory JNA loads the library from inside the Kotlin
           # jar (dev/scripts/build-kotlin-dist.sh).
           # static/shared: the libraries shipped (on Windows also
           # jazz_ffi.dll.lib, the DLL's import library).
-          - os: blacksmith-4vcpu-ubuntu-2204
+          - os: blacksmith-16vcpu-ubuntu-2204
             platform: linux-x86_64
             target: x86_64-unknown-linux-gnu
             static: libjazz_ffi.a
             shared: libjazz_ffi.so
             jna: linux-x86-64
-          - os: blacksmith-4vcpu-ubuntu-2204-arm
+          - os: blacksmith-16vcpu-ubuntu-2204-arm
             platform: linux-aarch64
             target: aarch64-unknown-linux-gnu
             static: libjazz_ffi.a
