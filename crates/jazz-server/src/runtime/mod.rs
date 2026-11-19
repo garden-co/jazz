@@ -22,6 +22,7 @@ mod thin;
 pub use core::ServerCore;
 #[cfg(feature = "native")]
 pub use host::*;
+pub use thin::ThinRegistration;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};

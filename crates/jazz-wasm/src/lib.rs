@@ -43,6 +43,8 @@ mod durable_object;
 #[cfg(target_arch = "wasm32")]
 mod idb_vfs;
 mod identity;
+#[cfg(all(feature = "durable-object", any(target_arch = "wasm32", test)))]
+mod socket_attachment;
 mod text;
 
 #[cfg(feature = "bench-probes")]

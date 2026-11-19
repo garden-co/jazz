@@ -135,6 +135,8 @@ import { optionalPeerImportError } from "./optional-peer.js";
 import { closingBeforeDeadline } from "./socket-deadline.js";
 import { importWs, vercelUpgradesSockets } from "./ws-peer.js";
 
+type DurableObjectLifecycle = "while-connected" | "hibernate";
+
 /** Where the core keeps its data. */
 export type JazzStore =
   | {
@@ -152,13 +154,10 @@ export type JazzStore =
       readonly backendCredential: BackendCredential;
       /** The app's secret, when `remote()` was given one: agent tokens are signed with a key derived from it. */
       readonly secret?: string;
-      /** What runs the core, when a store other than `remote()` made this one (`durableObjects()`). */
-      readonly host?: "durable-objects";
-      /** How this backend reaches the core (default: the network). */
-      readonly transport?: CoreTransport;
     }
   | {
       readonly kind: "durableObjects";
+      readonly lifecycle?: DurableObjectLifecycle;
       /** The Worker's origin, or a label for a binding. */
       readonly url: string;
       /** The core's Durable Object binding, in this Worker. */
@@ -300,14 +299,19 @@ const DURABLE_OBJECT_APP_ID = /^[A-Za-z0-9_-]{1,128}$/;
  * bindings may still change.
  */
 export function durableObjects(
-  options:
+  options: { lifecycle?: DurableObjectLifecycle } & (
     | { url: string; secret: string; appId?: never }
-    | { binding: CoreBinding; secret: string; appId?: never },
+    | { binding: CoreBinding; secret: string; appId?: never }
+  ),
 ): Extract<JazzStore, { kind: "durableObjects" }> {
   if (typeof options === "object" && options !== null && "appId" in options) {
     throw new Error(
       "durableObjects(): appId is not an option: the store keeps its own app id, in the Worker's Durable Object",
     );
+  }
+  const lifecycle = options?.lifecycle;
+  if (lifecycle !== undefined && lifecycle !== "while-connected" && lifecycle !== "hibernate") {
+    throw new TypeError('durableObjects(): lifecycle must be "while-connected" or "hibernate"');
   }
   if (typeof options === "object" && options !== null && "binding" in options) {
     const { binding, secret } = options;
@@ -322,7 +326,13 @@ export function durableObjects(
       );
     }
     checkCoreSecret(secret);
-    return { kind: "durableObjects", url: BINDING_ORIGIN, binding, secret };
+    return {
+      kind: "durableObjects",
+      url: BINDING_ORIGIN,
+      binding,
+      secret,
+      ...(lifecycle && { lifecycle }),
+    };
   }
   const { url, secret } = (options ?? {}) as { url: string; secret: string };
   let origin: URL | undefined;
@@ -355,7 +365,7 @@ export function durableObjects(
     );
   }
   checkCoreSecret(secret);
-  return { kind: "durableObjects", url: origin.origin, secret };
+  return { kind: "durableObjects", url: origin.origin, secret, ...(lifecycle && { lifecycle }) };
 }
 
 function checkCoreSecret(secret: unknown): void {
@@ -370,9 +380,7 @@ function checkCoreSecret(secret: unknown): void {
  * The `remote()` store a `durableObjects()` store opens as: the Worker's
  * object tells this backend its app id (`GET /app`, with the core secret).
  */
-async function durableObjectCore(
-  store: Extract<JazzStore, { kind: "durableObjects" }>,
-): Promise<Extract<JazzStore, { kind: "remote" }>> {
+async function durableObjectCore(store: Extract<JazzStore, { kind: "durableObjects" }>) {
   const transport = store.binding ? bindingTransport(store.binding) : networkTransport();
   let response: Response;
   let body: { appId?: unknown } | undefined;
@@ -405,8 +413,8 @@ async function durableObjectCore(
   }
   return {
     ...remote({ url: store.url, appId: body.appId, secret: store.secret }),
-    host: "durable-objects",
     transport,
+    lifecycle: store.lifecycle,
   };
 }
 
@@ -1551,6 +1559,7 @@ function openRemoteCore(
     backendCredential: BackendCredential;
     secrets?: { adminSecret: string; backendSecret: string };
     transport?: CoreTransport;
+    lifecycle?: DurableObjectLifecycle;
   },
   bundle: () => string | undefined,
 ): Core {
@@ -1634,6 +1643,8 @@ function openRemoteCore(
     credentialHeaders(access)
       .then((headers) => {
         if (ended) return;
+        if (target.lifecycle === "hibernate")
+          headers.push(["x-jazz-socket-lifecycle", "hibernate"]);
         ws = transport.openWebSocket(url, Object.fromEntries(headers));
         ws.binaryType = "arraybuffer";
         ws.addEventListener("open", () => {
@@ -1781,12 +1792,13 @@ function runningStore(store: JazzStore): JazzStore {
 }
 
 /** The line a store logs when it opens (a `vercel()` core logs its own). */
-function storeOpenedLine(store: Exclude<JazzStore, { kind: "vercel" | "durableObjects" }>): string {
+function storeOpenedLine(
+  store: Exclude<JazzStore, { kind: "vercel" | "durableObjects" }>,
+  provider: JazzStore["kind"],
+): string {
   if (store.kind === "sqlite") return `jazz: store sqlite at ${store.path}`;
   if (store.kind === "memory") return "jazz: store memory (its data lasts as long as this process)";
-  if (store.host === "durable-objects")
-    return `jazz: store durableObjects at ${store.url} (app ${store.appId})`;
-  return `jazz: store remote at ${store.url} (app ${store.appId})`;
+  return `jazz: store ${provider} at ${store.url} (app ${store.appId})`;
 }
 
 /** A Jazz with its store open: what a `createJazz` facade hands each call to. */
@@ -1824,7 +1836,7 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
           })
         : await openInProcessCore(store, bundle);
   // A vercel() core says which it opened itself.
-  if (store.kind !== "vercel") logStoreOpened(storeOpenedLine(store));
+  if (store.kind !== "vercel") logStoreOpened(storeOpenedLine(store, opening.kind));
   const appId = core.appId;
   const issuer = BACKEND_USER_ISSUER;
   // An in-memory store's agent tokens last as long as its data: this process.

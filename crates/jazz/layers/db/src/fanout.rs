@@ -427,6 +427,7 @@ fn correlation_enabled() -> bool {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct GroupKey {
+    dormant: bool,
     /// The renamed tables and columns of the schema naming the rows:
     /// versions on either side of a rename compile to the same SQL but
     /// label rows differently.
@@ -822,6 +823,15 @@ impl Fanout {
         }
     }
 
+    /// An already active identical group can keep serving new subscribers.
+    fn activate(&mut self, gid: u64, group: &mut Group) {
+        if self.by_key.get(&group.key) == Some(&gid) {
+            self.by_key.remove(&group.key);
+        }
+        group.key.dormant = false;
+        self.by_key.entry(group.key.clone()).or_insert(gid);
+    }
+
     /// Forget groups no live subscription holds.
     pub(super) fn collect(&mut self) {
         if self.dropped.replace(0) == 0 {
@@ -917,9 +927,11 @@ impl Inner {
         read: &ReadSpec,
         compiled: &Compiled,
         session_used: bool,
+        dormant: bool,
     ) -> GroupKey {
         let effective = identity.unwrap_or(self.identity.author);
         GroupKey {
+            dormant,
             renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
             sql: compiled.sql.clone(),
             params: format!("{:?}", compiled.params),
@@ -940,6 +952,7 @@ impl Inner {
         read: ReadSpec,
         settled: sync::SettledBy,
         backlog: Backlog,
+        dormant: bool,
     ) -> Result<(Queue, Weak<RefCell<Group>>), Error> {
         let limit = match backlog {
             Backlog::Replica => None,
@@ -959,7 +972,7 @@ impl Inner {
         };
         self.check_splices(&prepared.query, &read.splices)?;
         let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
-        let key = self.group_key(prepared, identity, &read, &compiled, session_used);
+        let key = self.group_key(prepared, identity, &read, &compiled, session_used, dormant);
         let now = settled.get();
         // `opened`: the member's queue starts with an opening.
         let member = |queue: &Queue, opened: bool| Member {
@@ -1004,7 +1017,7 @@ impl Inner {
         }
         let (gid, handle) = self.register_read_watches(prepared, identity, read, &compiled, key)?;
         let mut group = handle.borrow_mut();
-        if let Err(error) = self.open_registered_read(&mut group, &compiled) {
+        if !dormant && let Err(error) = self.open_registered_read(&mut group, &compiled) {
             drop(group);
             self.fan.drop_group(gid);
             return Err(error);
@@ -1653,6 +1666,10 @@ impl Inner {
                 {
                     continue;
                 }
+                if group.key.dormant {
+                    woken.insert(*gid, None);
+                    continue;
+                }
                 let root = group.root == table;
                 let entry = woken.entry(*gid).or_insert_with(|| Some(BTreeSet::new()));
                 let columns: Vec<&String> = group
@@ -1729,6 +1746,10 @@ impl Inner {
                 let Some(group) = self.fan.groups.get(gid) else {
                     continue;
                 };
+                if group.borrow().key.dormant {
+                    woken.insert(*gid, None);
+                    continue;
+                }
                 let rechecking = woken
                     .get(gid)
                     .is_some_and(|ids| ids.as_ref().is_some_and(|ids| ids.contains(&row)))
@@ -1822,7 +1843,7 @@ impl Inner {
                 let Some(group) = self.fan.groups.get(gid) else {
                     continue;
                 };
-                if evidenced(&group.borrow(), table, images, gone) {
+                if group.borrow().key.dormant || evidenced(&group.borrow(), table, images, gone) {
                     woken.insert(*gid, None);
                 } else {
                     unread += 1;
@@ -1880,6 +1901,12 @@ impl Inner {
             .collect();
         for (gid, group, ids) in groups {
             let mut group = group.borrow_mut();
+            if group.key.dormant {
+                self.fan.activate(gid, &mut group);
+                self.reset_group(&mut group);
+                self.fan.stats.reran += 1;
+                continue;
+            }
             // Only include targets changed: the result's rows are as before.
             if ids.as_ref().is_none_or(|ids| !ids.is_empty()) {
                 #[cfg(any(test, feature = "testing"))]
@@ -2025,6 +2052,7 @@ impl Inner {
                         &group.read,
                         &compiled,
                         session_used,
+                        group.key.dormant,
                     );
                     self.fan.by_key.entry(group.key.clone()).or_insert(gid);
                     Ok(plan)
@@ -2050,7 +2078,11 @@ impl Inner {
             group.root_plans.stamp = None;
             group.root_plans.by_count.clear();
             Self::hold(&mut group, false);
-            if reset {
+            let dormant = group.key.dormant;
+            if dormant {
+                self.fan.activate(gid, &mut group);
+            }
+            if reset || dormant {
                 self.reset_group(&mut group);
             } else {
                 self.refresh_group(&mut group, None);

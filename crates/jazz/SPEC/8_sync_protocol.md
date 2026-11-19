@@ -57,7 +57,7 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-21`: Wire messages MUST name nodes by UUID, authors by identity and schemas by version id; node-local codes never leave their database.
 - `INV-SYNC-24`: A fresh subscription MUST receive its whole result; only a resumed one may be sent just the rows changed after the seq it held.
 - `INV-SYNC-25`: A resumed subscription MUST leave the replica with the same rows as a fresh subscription to the same query.
-- `INV-SYNC-27`: Per-session delivery state MUST live only in the serving process and be released on disconnect.
+- `INV-SYNC-27`: Per-session delivery state MUST live only in the serving process and be released on disconnect. A hibernating host MAY keep admission and active query registrations on their live socket.
 - `INV-SYNC-28`: Results MUST travel as rows and be assembled into result trees by the receiver.
 - `INV-SYNC-30`: A replica MUST treat a subscription as settled only once an upstream has confirmed that subscription with its own `Settled`, and reports the last such confirmation, at its tier, until another replaces it (through an outage too); what waits for the server (a first load, a `Remote` opening, a relay settling its own sessions' reads) waits for the current connection's `Settled`. A node with no upstream settles locally.
 - `INV-SYNC-44`: The read protocol MUST be rows plus settlement.
