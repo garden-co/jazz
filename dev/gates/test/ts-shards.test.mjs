@@ -220,20 +220,37 @@ test("the -Oz host that ships runs the full Durable Object suite before every re
   ];
   const runs = (job) => job.steps.filter(({ run }) => run).map(({ run }) => run.trim());
 
-  // Release: in the job that builds the -Oz host, after both packages are
-  // uploaded (the producer republishes crates/jazz-wasm/pkg as its fast build).
-  const release = parse(
+  // Release: on the -Oz host the release build uploads (build-wasm-durable-object
+  // builds it; test-wasm-durable-object unpacks that artifact where the build
+  // leaves it and runs the suite, beside the package assembly).
+  const releaseJobs = parse(
     fs.readFileSync(path.join(root, ".github/workflows/build-jazz-packages.yml"), "utf8"),
-  ).jobs["build-wasm"];
+  ).jobs;
+  const builder = releaseJobs["build-wasm-durable-object"];
+  assert.ok(runs(builder).includes("pnpm --filter jazz-wasm build:durable-object"));
+  assert.ok(
+    builder.steps.some(
+      ({ uses, with: w }) =>
+        uses?.startsWith("actions/upload-artifact") && w.name === "jazz-wasm-durable-object-pkg",
+    ),
+  );
+  const release = releaseJobs["test-wasm-durable-object"];
+  assert.equal(release.needs, "build-wasm-durable-object");
   const releaseRuns = runs(release);
-  const built = releaseRuns.indexOf("pnpm --filter jazz-wasm build:durable-object");
-  assert.notEqual(built, -1);
+  assert.ok(!releaseRuns.includes("pnpm --filter jazz-wasm build:durable-object"), "it tests, never rebuilds, the host");
   assert.deepEqual(releaseRuns.slice(-2), suite);
-  const lastUpload = release.steps.findLastIndex(({ uses }) =>
-    uses?.startsWith("actions/upload-artifact"),
+  const download = release.steps.findIndex(
+    ({ uses, with: w }) =>
+      uses?.startsWith("actions/download-artifact") &&
+      w.name === "jazz-wasm-durable-object-pkg" &&
+      w.path === "crates/jazz-wasm/durable-object/pkg",
   );
   const firstSuite = release.steps.findIndex(({ run }) => run?.trim() === suite[0]);
-  assert.ok(lastUpload < firstSuite, "the suite runs after the release packages are uploaded");
+  assert.ok(download !== -1 && download < firstSuite, "the suite runs on the downloaded release host");
+  assert.ok(
+    releaseRuns.some((run) => run.includes("release.test.mjs") && run.includes("-Oz build")),
+    "the downloaded host is checked to be the -Oz build",
+  );
 
   // Nightly: the same, on main.
   const nightly = parse(
