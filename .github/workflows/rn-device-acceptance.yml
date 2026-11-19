@@ -127,12 +127,18 @@ jobs:
           cache-on-failure: true
           prefix-key: rn-device-ios-macos-15
           key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-native-transport/**', 'crates/jazz-napi/**', 'crates/jazz-wasm/**', 'dev/artifacts/**') }}
+      # pod install's downloads: React Native's prebuilt tarballs (which
+      # pod-install-retrying.sh copies in and out) and CocoaPods' own caches.
+      # Its version is pinned by the lockfile; an older entry is harmless,
+      # since the tarballs are named by version.
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
-            dev/rn-device-acceptance/ios/Pods
             ~/Library/Caches/CocoaPods
-          key: rn-device-ios-pods-macos-15-v2-${{ hashFiles('pnpm-lock.yaml', 'dev/rn-device-acceptance/**', 'crates/jazz-rn/**') }}
+            ~/.cocoapods/repos
+            ${{ runner.temp }}/rn-pod-artifacts
+          key: rn-ios-pods-macos-15-v3-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: rn-ios-pods-macos-15-v3-
       - run: pnpm install --frozen-lockfile
       - name: Verify synthetic scope authorization and generated native fixture
         run: cargo test -p jazz-native-relay --example rn_server_session_harness --no-fail-fast
@@ -216,7 +222,7 @@ jobs:
           project.save
           RUBY
       - name: Install CocoaPods for the staged native package
-        run: pod install
+        run: ../../../dev/scripts/pod-install-retrying.sh "${RUNNER_TEMP}/rn-pod-artifacts"
         working-directory: dev/rn-device-acceptance/ios
       - name: Select and boot an available iOS simulator
         shell: bash
