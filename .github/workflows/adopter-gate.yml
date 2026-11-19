@@ -326,12 +326,20 @@ jobs:
     needs: [inputs, checks, t9-swift, refusals, t4]
     if: always()
     runs-on: ubuntu-24.04
-    timeout-minutes: 3
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with: { sparse-checkout: dev/adopter-gate }
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with: { pattern: "results-*", path: results }
+      # The artifact service has bad minutes (RC 44567203253: this download hung until the job timed out): each attempt
+      # is capped at 90 s, up to 4 attempts with backoff. Same layout as download-artifact's pattern (results/<name>/).
+      - name: Download the jobs' results (retried)
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          for i in 1 2 3 4; do
+            rm -rf results && mkdir -p results
+            timeout 90 gh run download "${{ github.run_id }}" -R "$GITHUB_REPOSITORY" -p 'results-*' -D results && exit 0
+            echo "results download attempt $i failed"; sleep $((i * 10))
+          done; exit 1
       - name: Verdict
         run: |
           expected=bed-t1,bed-t3,bed-t5,bed-t6,fixtures,t10,sizes,t4-noregion,t9-ts,t9-rust,t9-go,t9-kotlin,t9-swift,t4
