@@ -7,6 +7,7 @@ import type { Duplex } from "node:stream";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import * as jazzNapi from "jazz-napi";
+import { declaresEncryption } from "../encryption/node-host.js";
 import { JazzCore, type JazzCoreSocketEvent } from "jazz-napi";
 import { registerInProcessTransport } from "../runtime/in-process-transport.js";
 import { accountAppId, localFirstAccountId } from "../accounts/local-first.js";
@@ -4153,11 +4154,14 @@ async function compiledApp(options: CreateJazzOptions): Promise<LoadedBackendApp
     ({ hash }) => hash.toLowerCase() === loaded.current,
   )?.schema;
   const tables = isRecord(current) ? current.tables : undefined;
-  if (isRecord(tables) && Object.keys(tables).some((table) => table.startsWith("__e2ee_"))) {
+  if (
+    isRecord(tables) &&
+    Object.keys(tables).some((table) => table.startsWith("__e2ee_")) &&
+    (!declaresEncryption(options.app) ||
+      typeof jazzNapi.NapiDb?.openMemoryAsBackendKeyless !== "function")
+  ) {
     throw new Error(
-      "createJazz: this backend can't open an app that declares end-to-end encryption yet: " +
-        "it has no encryption hooks. Deploy the app with `deploy` or the HTTP deploy route, " +
-        "and open it with a client that has encryption",
+      "createJazz: this backend cannot open the encrypted app with keyless hooks; rebuild the Jazz native artifact",
     );
   }
   for (const warning of loaded.warnings) console.warn(`jazz: ${warning}`);

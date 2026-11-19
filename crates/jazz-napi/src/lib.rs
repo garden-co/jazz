@@ -68,6 +68,8 @@ use jazz_server::{
     AuthConfig, JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend,
 };
 mod embedded;
+use jazz_e2ee_client::host::bridge as js_store;
+use jazz_e2ee_client::host::runtime as encryption;
 
 use napi::bindgen_prelude::*;
 use napi::sys;
@@ -948,9 +950,231 @@ fn js_error_value(env: sys::napi_env, error: &napi::Error) -> sys::napi_value {
 /// tick, a local write or a claims change made progress, so every call that
 /// can do so ends here.
 fn settle_promises() {
+    settle_json_promises();
     let mut pending = PENDING_PROMISES.with(|promises| std::mem::take(&mut *promises.borrow_mut()));
     pending.retain_mut(|promise| !promise.poll());
     PENDING_PROMISES.with(|promises| {
+        let mut promises = promises.borrow_mut();
+        pending.append(&mut promises);
+        *promises = pending;
+    });
+}
+
+/// The encryption hooks an open installs: a client's, over its runtime, or a
+/// backend's keyless ones.
+enum Hooks<'a> {
+    Client(&'a EncryptionRuntime),
+    Keyless(Rc<dyn jazz::e2ee::E2eeHooks>),
+}
+
+/// A Jazz self-signed client identity for an encrypted open, as for the
+/// plain one.
+#[napi(object)]
+pub struct EncryptionProof {
+    pub token: String,
+    pub claimed_author: String,
+}
+
+/// The end-to-end encryption runtime of an app, built over the private store
+/// the app supplies, before the database that uses it opens. The store is
+/// JavaScript: its requests are taken with `takeStoreRequests` and answered
+/// with `replyStore` (see `js_store`).
+#[napi]
+pub struct EncryptionRuntime {
+    store: Rc<js_store::JsStore>,
+    options: RefCell<Option<encryption::Options>>,
+    account_id: String,
+    app_id: String,
+    built: Rc<RefCell<Option<encryption::Built>>>,
+}
+
+#[napi]
+impl EncryptionRuntime {
+    /// A runtime for the app whose files are `app_file`, for the account
+    /// `account_id` of the session that will open the database;
+    /// `device_account_secret` (64 hexadecimal characters) for a device
+    /// account, whose secret is its recovery secret.
+    #[napi(constructor)]
+    pub fn new(
+        app_file: Uint8Array,
+        app_id: String,
+        environment: String,
+        account_id: String,
+        device_account_secret: Option<String>,
+    ) -> Self {
+        Self::from_source(
+            app_file.to_vec(),
+            false,
+            app_id,
+            environment,
+            account_id,
+            device_account_secret,
+        )
+    }
+
+    /// A runtime for the app whose generated bindings embed the compiled app
+    /// `bindings` (JSON of `{ schema, relations }`, the options they pass to
+    /// `bindApp`): what a deployed app has in place of `jazz.app.json`.
+    #[napi(factory, js_name = "fromBindings")]
+    pub fn from_bindings(
+        bindings: String,
+        app_id: String,
+        environment: String,
+        account_id: String,
+        device_account_secret: Option<String>,
+    ) -> Self {
+        Self::from_source(
+            bindings.into_bytes(),
+            true,
+            app_id,
+            environment,
+            account_id,
+            device_account_secret,
+        )
+    }
+}
+
+impl EncryptionRuntime {
+    fn from_source(
+        app_file: Vec<u8>,
+        from_bindings: bool,
+        app_id: String,
+        environment: String,
+        account_id: String,
+        device_account_secret: Option<String>,
+    ) -> Self {
+        Self {
+            store: Rc::default(),
+            options: RefCell::new(Some(encryption::Options {
+                app_file,
+                from_bindings,
+                device_account_secret,
+                app_id: app_id.clone(),
+                environment,
+            })),
+            account_id,
+            app_id,
+            built: Rc::default(),
+        }
+    }
+}
+
+#[napi]
+impl EncryptionRuntime {
+    /// Builds the runtime: settles when its device is loaded or made, which
+    /// takes the app's store (answer its requests while waiting).
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn ready(&self, env: &Env) -> js::Result<PromiseRaw<'static, String>> {
+        let options = self
+            .options
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("the runtime is already built"))?;
+        let (account, store) = (self.account_id.clone(), Rc::clone(&self.store));
+        let slot = Rc::clone(&self.built);
+        let future: encryption::JsonFuture = Box::pin(async move {
+            let built = encryption::build(options, account, store).await?;
+            *slot.borrow_mut() = Some(built);
+            Ok(serde_json::Value::Null)
+        });
+        Ok(json_promise(env, future)?)
+    }
+
+    /// The store requests queued since the last call, each a JSON text.
+    #[napi(js_name = "takeStoreRequests")]
+    pub fn take_store_requests(&self) -> Vec<String> {
+        let requests = self.store.take_requests();
+        settle_promises();
+        requests
+    }
+
+    /// The app's answer to a store request; `false` when no such request is
+    /// outstanding (the answer is dropped).
+    #[napi(js_name = "replyStore")]
+    pub fn reply_store(&self, id: String, ok: bool, payload: String) -> bool {
+        let accepted = id
+            .parse()
+            .is_ok_and(|id| self.store.reply(id, ok, &payload));
+        settle_promises();
+        accepted
+    }
+}
+
+/// A JavaScript promise waiting on a runtime call, settled with its JSON
+/// result (a text) or an error.
+struct PendingJsonPromise {
+    env: sys::napi_env,
+    deferred: sys::napi_deferred,
+    future: encryption::JsonFuture,
+}
+
+thread_local! {
+    static PENDING_JSON_PROMISES: RefCell<Vec<PendingJsonPromise>> = const { RefCell::new(Vec::new()) };
+}
+
+fn json_promise(
+    env: &Env,
+    future: encryption::JsonFuture,
+) -> napi::Result<PromiseRaw<'static, String>> {
+    let env = env.raw();
+    let mut deferred = std::ptr::null_mut();
+    let mut promise = std::ptr::null_mut();
+    if unsafe { sys::napi_create_promise(env, &mut deferred, &mut promise) } != sys::Status::napi_ok
+    {
+        return Err(napi::Error::from_reason("failed to create a promise"));
+    }
+    let mut pending = PendingJsonPromise {
+        env,
+        deferred,
+        future,
+    };
+    if !pending.poll() {
+        PENDING_JSON_PROMISES.with(|promises| promises.borrow_mut().push(pending));
+    }
+    Ok(PromiseRaw::new(env, promise))
+}
+
+impl PendingJsonPromise {
+    fn poll(&mut self) -> bool {
+        let mut context = Context::from_waker(Waker::noop());
+        let result = match self.future.as_mut().poll(&mut context) {
+            Poll::Ready(result) => result,
+            Poll::Pending => return false,
+        };
+        let (env, deferred) = (self.env, self.deferred);
+        let string = |text: &str| {
+            let mut value = std::ptr::null_mut();
+            unsafe {
+                sys::napi_create_string_utf8(
+                    env,
+                    text.as_ptr().cast(),
+                    text.len() as isize,
+                    &mut value,
+                )
+            };
+            value
+        };
+        match result {
+            Ok(value) => unsafe {
+                sys::napi_resolve_deferred(env, deferred, string(&value.to_string()));
+            },
+            Err(message) => {
+                let mut error = std::ptr::null_mut();
+                unsafe {
+                    sys::napi_create_error(env, std::ptr::null_mut(), string(&message), &mut error)
+                };
+                unsafe { sys::napi_reject_deferred(env, deferred, error) };
+            }
+        }
+        true
+    }
+}
+
+fn settle_json_promises() {
+    let mut pending =
+        PENDING_JSON_PROMISES.with(|promises| std::mem::take(&mut *promises.borrow_mut()));
+    pending.retain_mut(|promise| !promise.poll());
+    PENDING_JSON_PROMISES.with(|promises| {
         let mut promises = promises.borrow_mut();
         pending.append(&mut promises);
         *promises = pending;
@@ -1003,6 +1227,8 @@ struct Inner {
     /// backend's client for one (`serveThinTransaction`): taken while a
     /// request is served, so requests run one at a time.
     thin: Rc<RefCell<Option<ThinState>>>,
+    /// The end-to-end encryption runtime, when the app declares encryption.
+    encryption: Option<Rc<encryption::Encryption>>,
 }
 
 /// A thin session's transactions, made on the first request.
@@ -1049,6 +1275,7 @@ impl Inner {
             binding,
             host,
             thin: Rc::default(),
+            encryption: None,
         }
     }
 
@@ -1800,6 +2027,45 @@ impl Drop for NapiDb {
 }
 
 impl NapiDb {
+    /// The runtime of an encrypted app, or why there is none.
+    fn encryption(&self) -> napi::Result<Rc<encryption::Encryption>> {
+        self.open_inner()?
+            .encryption
+            .ok_or_else(|| napi::Error::from_reason("this database has no encryption runtime"))
+    }
+
+    fn keyless_hooks(
+        bindings: &str,
+        app_id: &str,
+        environment: &str,
+    ) -> napi::Result<Rc<dyn jazz::e2ee::E2eeHooks>> {
+        let app = jazz::tools::AppId::from_string(app_id)
+            .unwrap_or_else(|_| jazz::tools::AppId::from_name(app_id));
+        let declarations = jazz::tools::deployment::artifact::bound_declarations(
+            bindings.as_bytes(),
+            app,
+            environment,
+        )
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?
+        .ok_or_else(|| napi::Error::from_reason("the app's bindings declare no encryption"))?;
+        Ok(jazz_e2ee_client::KeylessHooks::hooks(declarations))
+    }
+
+    fn encrypted_how<'a>(
+        token: &'a Option<String>,
+        author: &'a Option<String>,
+        app_id: &'a str,
+    ) -> OpenAs<'a> {
+        match (token, author) {
+            (Some(token), Some(author)) => OpenAs::SelfSigned {
+                token,
+                app_id,
+                claimed_author: author,
+            },
+            _ => OpenAs::Untrusted,
+        }
+    }
+
     fn open_inner(&self) -> napi::Result<Inner> {
         self.inner.borrow().clone().ok_or_else(closed)
     }
@@ -1820,15 +2086,40 @@ impl NapiDb {
         config: &[u8],
         data_path: Option<&str>,
         how: OpenAs<'_>,
+        encrypted: Option<Hooks<'_>>,
     ) -> napi::Result<Self> {
         let (schema, mut config) = binding_host::decode_open(schema, config).map_err(host_error)?;
         let (identity, trusted) =
             binding_host::open_identity(&mut config, how).map_err(host_error)?;
-        let db_config = jazz::tools::deployment::published::with_client_migrations(
+        let mut db_config = jazz::tools::deployment::published::with_client_migrations(
             binding_host::db_config(schema, &config, identity),
             config.migrations.as_deref(),
         )
         .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
+        // An app that declares encryption opens with the runtime's hooks,
+        // built from its own declarations.
+        let mut runtime = None;
+        if let Some(Hooks::Keyless(hooks)) = &encrypted {
+            db_config = db_config.with_e2ee(Rc::clone(hooks));
+        }
+        if let Some(Hooks::Client(encrypted)) = encrypted {
+            let built =
+                encrypted.built.borrow_mut().take().ok_or_else(|| {
+                    napi::Error::from_reason("the encryption runtime is not ready")
+                })?;
+            if identity
+                .author
+                .account_id()
+                .map(|account| account.0.to_string())
+                != Some(encrypted.account_id.clone())
+            {
+                return Err(napi::Error::from_reason(
+                    "the encryption runtime is for another account than this session's",
+                ));
+            }
+            db_config = db_config.with_e2ee(built.client.hooks());
+            runtime = Some((built, Rc::clone(&encrypted.store)));
+        }
         let db = match data_path {
             None => block_on(binding_host::open_memory(db_config)),
             Some(data_path) => block_on(binding_host::open_file(
@@ -1838,7 +2129,20 @@ impl NapiDb {
             )),
         }
         .map_err(|error| napi_core_error(&error))?;
-        Ok(Self::runtime_owner(Binding::new(db, identity, trusted)))
+        let binding = Binding::new(db, identity, trusted);
+        let owner = Self::runtime_owner(binding);
+        if let Some((built, store)) = runtime {
+            let mut inner = owner.inner.borrow_mut();
+            let inner = inner.as_mut().expect("just opened");
+            let host = Rc::clone(&inner.host);
+            store.set_wake(Box::new(move || host.request_tick()));
+            inner.encryption = Some(encryption::Encryption::new(
+                built,
+                store,
+                Rc::clone(&inner.binding.db),
+            ));
+        }
+        Ok(owner)
     }
 
     fn request_permission_advice(
@@ -2266,16 +2570,70 @@ impl NapiDb {
         Ok(StreamingMutation { inner, mutation })
     }
 
+    /// Open a backend runtime for an app that declares encryption, with
+    /// hooks that hold no keys: it relays the clients' ciphertext and works
+    /// on plain columns (`bindings` is the generated bindings' compiled app).
+    #[napi(factory, js_name = "openMemoryAsBackendKeyless")]
+    pub fn open_memory_as_backend_keyless(
+        schema: Uint8Array,
+        config: Uint8Array,
+        bindings: String,
+        app_id: String,
+        environment: String,
+    ) -> js::Result<Self> {
+        let hooks = Self::keyless_hooks(&bindings, &app_id, &environment)?;
+        Ok(Self::open_as(
+            &schema,
+            &config,
+            None,
+            OpenAs::Backend,
+            Some(Hooks::Keyless(hooks)),
+        )?)
+    }
+
+    /// [`Self::open_memory_as_backend_keyless`] over a durable store in
+    /// directory `data_path`.
+    #[napi(factory, js_name = "openPersistentAsBackendKeyless")]
+    pub fn open_persistent_as_backend_keyless(
+        data_path: String,
+        schema: Uint8Array,
+        config: Uint8Array,
+        bindings: String,
+        app_id: String,
+        environment: String,
+    ) -> js::Result<Self> {
+        let hooks = Self::keyless_hooks(&bindings, &app_id, &environment)?;
+        Ok(Self::open_as(
+            &schema,
+            &config,
+            Some(&data_path),
+            OpenAs::Backend,
+            Some(Hooks::Keyless(hooks)),
+        )?)
+    }
+
     #[napi(factory, js_name = "openMemory")]
     pub fn open_memory(schema: Uint8Array, config: Uint8Array) -> js::Result<Self> {
-        Ok(Self::open_as(&schema, &config, None, OpenAs::Untrusted)?)
+        Ok(Self::open_as(
+            &schema,
+            &config,
+            None,
+            OpenAs::Untrusted,
+            None,
+        )?)
     }
 
     /// Open a deliberate backend runtime. Unlike the public raw-open entrypoint,
     /// this explicit ABI derives the canonical system author.
     #[napi(factory, js_name = "openMemoryAsBackend")]
     pub fn open_memory_as_backend(schema: Uint8Array, config: Uint8Array) -> js::Result<Self> {
-        Ok(Self::open_as(&schema, &config, None, OpenAs::Backend)?)
+        Ok(Self::open_as(
+            &schema,
+            &config,
+            None,
+            OpenAs::Backend,
+            None,
+        )?)
     }
 
     /// Open with a verified Jazz self-signed client identity. This is a
@@ -2295,7 +2653,7 @@ impl NapiDb {
             app_id: &app_id,
             claimed_author: &claimed_author,
         };
-        Ok(Self::open_as(&schema, &config, None, how)?)
+        Ok(Self::open_as(&schema, &config, None, how, None)?)
     }
 
     /// Open the durable store in directory `data_path` (one SQLite file).
@@ -2310,6 +2668,7 @@ impl NapiDb {
             &config,
             Some(&data_path),
             OpenAs::Untrusted,
+            None,
         )?)
     }
 
@@ -2326,6 +2685,7 @@ impl NapiDb {
             &config,
             Some(&data_path),
             OpenAs::Backend,
+            None,
         )?)
     }
 
@@ -2343,7 +2703,138 @@ impl NapiDb {
             app_id: &app_id,
             claimed_author: &claimed_author,
         };
-        Ok(Self::open_as(&schema, &config, Some(&data_path), how)?)
+        Ok(Self::open_as(
+            &schema,
+            &config,
+            Some(&data_path),
+            how,
+            None,
+        )?)
+    }
+
+    /// Open an encrypted app's in-memory database with its runtime
+    /// installed (see [`EncryptionRuntime`]).
+    #[napi(factory, js_name = "openMemoryEncrypted")]
+    pub fn open_memory_encrypted(
+        schema: Uint8Array,
+        config: Uint8Array,
+        runtime: &EncryptionRuntime,
+        proof: Option<EncryptionProof>,
+    ) -> js::Result<Self> {
+        let (token, author) =
+            proof.map_or((None, None), |p| (Some(p.token), Some(p.claimed_author)));
+        let how = Self::encrypted_how(&token, &author, &runtime.app_id);
+        Ok(Self::open_as(
+            &schema,
+            &config,
+            None,
+            how,
+            Some(Hooks::Client(runtime)),
+        )?)
+    }
+
+    /// Open an encrypted app's durable database in directory `data_path`
+    /// with its runtime installed. The private store is the app's.
+    #[napi(factory, js_name = "openPersistentEncrypted")]
+    pub fn open_persistent_encrypted(
+        data_path: String,
+        schema: Uint8Array,
+        config: Uint8Array,
+        runtime: &EncryptionRuntime,
+        proof: Option<EncryptionProof>,
+    ) -> js::Result<Self> {
+        let (token, author) =
+            proof.map_or((None, None), |p| (Some(p.token), Some(p.claimed_author)));
+        let how = Self::encrypted_how(&token, &author, &runtime.app_id);
+        Ok(Self::open_as(
+            &schema,
+            &config,
+            Some(&data_path),
+            how,
+            Some(Hooks::Client(runtime)),
+        )?)
+    }
+
+    /// The private-store requests queued since the last call, each a JSON text.
+    #[napi(js_name = "takeStoreRequests")]
+    pub fn take_store_requests(&self) -> js::Result<Vec<String>> {
+        let encryption = self.encryption()?;
+        let requests = encryption.store.take_requests();
+        // The host polls here, so a request the store never answers times out.
+        encryption.drive();
+        settle_promises();
+        Ok(requests)
+    }
+
+    /// The app's answer to a private-store request; `false` when no such
+    /// request is outstanding (the answer is dropped).
+    #[napi(js_name = "replyStore")]
+    pub fn reply_store(&self, id: String, ok: bool, payload: String) -> js::Result<bool> {
+        let encryption = self.encryption()?;
+        let accepted = id
+            .parse()
+            .is_ok_and(|id| encryption.store.reply(id, ok, &payload));
+        encryption.drive();
+        settle_promises();
+        Ok(accepted)
+    }
+
+    /// Run one end-to-end encryption operation: its name and arguments (JSON),
+    /// answered with the JSON text of its result.
+    #[napi(js_name = "encryptionCall", ts_return_type = "Promise<string>")]
+    pub fn encryption_call(
+        &self,
+        env: &Env,
+        op: String,
+        #[napi(ts_arg_type = "Record<string, unknown> | undefined | null")] args: Option<JsonValue>,
+    ) -> js::Result<PromiseRaw<'static, String>> {
+        let encryption = self.encryption()?;
+        let future = encryption.call(op, json_or_null(args));
+        let driver = Rc::clone(&encryption);
+        let future: encryption::JsonFuture = Box::pin(async move {
+            let result = future.await;
+            driver.drive();
+            result
+        });
+        let promise = json_promise(env, future)?;
+        encryption.drive();
+        settle_promises();
+        Ok(promise)
+    }
+
+    /// The runtime's reports since the last call, each a JSON text.
+    #[napi(js_name = "takeEncryptionReports")]
+    pub fn take_encryption_reports(&self) -> js::Result<Vec<String>> {
+        Ok(self.encryption()?.take_reports())
+    }
+
+    /// The runtime's account status and last error, as JSON text.
+    #[napi(js_name = "encryptionState")]
+    pub fn encryption_state(&self) -> js::Result<String> {
+        Ok(self.encryption()?.state().to_string())
+    }
+
+    /// An app subscription on an encrypted table opened (`open`) or closed:
+    /// `table` is the space table's name, `id` the space's row.
+    #[napi(js_name = "encryptionUseSpace")]
+    pub fn encryption_use_space(&self, table: String, id: String, open: bool) -> js::Result<()> {
+        self.encryption()?.use_space(open, table, id);
+        Ok(())
+    }
+
+    /// Where each encrypted table keeps its space, as JSON text:
+    /// `{ table: { scope, column } }` (`column` is `id` when a table's rows
+    /// are their own spaces).
+    #[napi(js_name = "encryptionSpaces")]
+    pub fn encryption_spaces(&self) -> js::Result<String> {
+        Ok(self.encryption()?.spaces.to_string())
+    }
+
+    /// The connection to the server went away (`false`) or came back (`true`).
+    #[napi(js_name = "encryptionSetOnline")]
+    pub fn encryption_set_online(&self, online: bool) -> js::Result<()> {
+        self.encryption()?.set_online(online);
+        Ok(())
     }
 
     /// Register and return a typed view backed by this same runtime owner,
@@ -2582,6 +3073,9 @@ impl NapiDb {
     #[napi]
     pub fn tick(&self) -> js::Result<()> {
         let result = block_on(self.binding()?.tick());
+        if let Some(encryption) = self.open_inner()?.encryption {
+            encryption.drive();
+        }
         settle_promises();
         Ok(result.map_err(host_error)?)
     }

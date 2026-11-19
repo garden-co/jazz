@@ -18,7 +18,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 jazz-native-relay = { path = "../jazz-native-relay", optional = true }
-jazz = { package = "jazz-core", path = "../jazz", default-features = false, features = ["runtime"] }
+jazz = { package = "jazz-core", path = "../jazz", default-features = false, features = ["runtime", "e2ee-client"] }
+jazz-e2ee-client = { path = "../jazz-e2ee-client" }
+jazz-e2ee = { path = "../jazz-e2ee" }
 jazz-codegen.workspace = true
 jazz-server = { path = "../jazz-server", features = ["embedded-server"] }
 jazz-otel.workspace = true
@@ -44,3 +46,7 @@ mimalloc-safe = { version = "0.1", features = ["local_dynamic_tls", "no_opt_arch
 
 [build-dependencies]
 napi-build = "2"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+uuid = { version = "1.18.1", features = ["v4"] }

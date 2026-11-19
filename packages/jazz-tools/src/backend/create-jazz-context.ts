@@ -1,6 +1,8 @@
 import { textAnchorsFrom, type TextAnchors } from "../runtime/text-anchors.js";
 import type { WebSocketConstructor } from "../runtime/native-runtime/websocket.js";
 import { clientScope } from "../runtime/client-scope.js";
+import { keylessBackend } from "../encryption/node-host.js";
+import { declaredEntries } from "../encryption/plain-schema.js";
 import { isWhitespaceOnlySecret, WHITESPACE_BACKEND_SECRET } from "../accounts/registry-client.js";
 import {
   NapiDb,
@@ -265,6 +267,12 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
         },
         subscriptionBacklogRows: this.config.subscriptionBacklogRows,
         migrations,
+        plainEntries: this.config.app
+          ? declaredEntries(resolveSchemaSource(this.config.app))
+          : undefined,
+        keyless: this.config.app
+          ? keylessBackend(this.config.app, this.config.appId, env)
+          : undefined,
       },
     );
 
