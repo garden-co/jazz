@@ -688,6 +688,15 @@ fn check_encryption(
         }
     };
     let Some(entries) = entries else {
+        if follows.contains_key(&target.0) {
+            return Err(invalid(
+                target,
+                "the schema keeps Jazz's system tables, but no ancestor has declarations in \
+                 this deployment; send the ancestor's encryption declarations so Jazz can \
+                 derive the system-table policies"
+                    .to_owned(),
+            ));
+        }
         return Ok(Vec::new());
     };
     let derived =

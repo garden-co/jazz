@@ -778,7 +778,9 @@ added by an updater.
   derived from the declarations of the nearest version before it that has
   them (the nearest wins, however far apart earlier declaring versions sit,
   and without a warning; two nearest versions that declare differently are
-  refused). The stored catalogue decides what came earlier: a new version
+  refused). A deploy targeting a version that inherits the system tables
+  must supply the declarations needed to derive their policies.
+  The stored catalogue decides what came earlier: a new version
   without the system tables is refused when any stored version has them,
   whatever lens it hangs on and whether or not the deploy allows dropping
   history. Only a stored lens could show it to be earlier than a version
