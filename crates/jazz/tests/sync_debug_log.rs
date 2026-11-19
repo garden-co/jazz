@@ -69,6 +69,51 @@ impl Subscriber for Capture {
     fn exit(&self, _: &Id) {}
 }
 
+/// The binary's global default subscriber while this module runs: it is
+/// interested in every callsite (`sometimes`) and enables nothing, so the
+/// thread-local captures alone decide what is kept.
+///
+/// Why: a callsite's interest is cached. Every other test in this binary
+/// runs sync code on threads with no subscriber, and the sync layer gates
+/// its message logs on one `tracing::enabled!` callsite (`log_enabled`). A
+/// callsite that registers, or whose interest is computed, while no
+/// interested dispatcher exists is cached as never; if that races with the
+/// rebuild a capture triggers when it is installed, it stays never, and the
+/// DEBUG capture misses every message (the client's Read first) while plain
+/// `debug!` events still arrive. With this subscriber always registered,
+/// no interest is ever computed as never.
+struct Interested;
+
+impl Subscriber for Interested {
+    fn register_callsite(&self, _: &'static Metadata<'static>) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::sometimes()
+    }
+    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+        Some(tracing::level_filters::LevelFilter::TRACE)
+    }
+    fn enabled(&self, _: &Metadata<'_>) -> bool {
+        false
+    }
+    fn new_span(&self, _: &Attributes<'_>) -> Id {
+        Id::from_u64(1)
+    }
+    fn record(&self, _: &Id, _: &Record<'_>) {}
+    fn record_follows_from(&self, _: &Id, _: &Id) {}
+    fn event(&self, _: &Event<'_>) {}
+    fn enter(&self, _: &Id) {}
+    fn exit(&self, _: &Id) {}
+}
+
+/// Install [`Interested`] as the global default, once per binary. (The
+/// binary installs no other global subscriber; were one already set, the
+/// rebuild in [`logged_subscription`] is what remains.)
+fn interested_global_default() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = tracing::subscriber::set_global_default(Interested);
+    });
+}
+
 fn config(node: u8, author: AuthorSubject) -> DbConfig {
     let schema = compile_schema(
         &SchemaBuilder::new()
@@ -102,6 +147,7 @@ const SEEDED: &str = "seeded-label-7f3a";
 static CAPTURE: Mutex<()> = Mutex::new(());
 
 fn logged_subscription(level: Level) -> Vec<BTreeMap<String, String>> {
+    interested_global_default();
     // A test that failed while holding it leaves it poisoned; the capture
     // it guarded has ended either way.
     let _one_capture = CAPTURE
