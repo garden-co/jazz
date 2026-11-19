@@ -86,6 +86,12 @@ jobs:
         run: |
           set -euo pipefail
           sha=$(git rev-parse HEAD)
+          # The run is found (and attested) by its head_sha: it must build
+          # exactly that commit. Dispatch on the branch whose head to build.
+          if [ "${sha}" != "${GITHUB_SHA}" ]; then
+            echo "::error::ref ${{ inputs.ref }} is ${sha}, not this run's commit ${GITHUB_SHA}; dispatch with --ref on the branch to build."
+            exit 1
+          fi
           version=$(node -p 'require("./packages/jazz-tools/package.json").version')
           # Attest only what a release can ship: the release branch and the
           # Version Packages head (by name or by a dispatch of either).
