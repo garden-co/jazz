@@ -126,8 +126,11 @@ jobs:
     needs: resolve
     runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 60
+    # id-token: the S3 sccache tier (granted by release-artifacts.yml; a
+    # pull request from a trusted author gets the reader role).
     permissions:
       contents: read
+      id-token: write
     strategy:
       fail-fast: true
       matrix:
@@ -153,31 +156,16 @@ jobs:
           setup-node: "false"
           rust-cache: "false"
           rust-targets: ${{ matrix.target }}
-      # setup-build's sccache is Linux-only, and Blacksmith's sticky disks
-      # don't mount on macOS: the sccache directory goes to the Actions
-      # cache. sccache doesn't hash MACOSX_/IPHONEOS_DEPLOYMENT_TARGET, so a
-      # hit could be an object built for another minimum OS: the key holds
-      # them, and "Check the minimum OS" below catches any that slip in.
-      - uses: ./.github/actions/install-rust-tool
+      # sccache (.github/actions/apple-sccache): the trusted S3 tier where
+      # this run may use it, else the Actions cache. sccache doesn't hash
+      # MACOSX_/IPHONEOS_DEPLOYMENT_TARGET, so both hold the minimum OS, and
+      # "Check the minimum OS" below catches any object that slips in.
+      - name: Set up sccache
+        id: sccache
+        uses: ./.github/actions/apple-sccache
         with:
-          tool: sccache@0.15.0
-      - name: Restore sccache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ${{ runner.temp }}/sccache
-          key: sccache-apple-${{ matrix.target }}-${{ matrix.min }}-v1-${{ needs.resolve.outputs.sha }}
-          restore-keys: sccache-apple-${{ matrix.target }}-${{ matrix.min }}-v1-
-      - name: Start sccache
-        run: |
-          dir="$RUNNER_TEMP/sccache"
-          mkdir -p "$dir"
-          SCCACHE_DIR="$dir" SCCACHE_SERVER_UDS="$dir/server.sock" SCCACHE_CACHE_SIZE=8G sccache --start-server
-          {
-            echo "RUSTC_WRAPPER=sccache"
-            echo "SCCACHE_DIR=$dir"
-            echo "SCCACHE_SERVER_UDS=$dir/server.sock"
-            echo "SCCACHE_CACHE_SIZE=8G"
-          } >> "$GITHUB_ENV"
+          key: swift-${{ matrix.target }}
+          min-os: ${{ matrix.min }}
       - name: Build
         run: |
           cargo rustc -p jazz-ffi --release --lib --target "$TARGET" --crate-type staticlib -- --print native-static-libs 2>&1 \
@@ -223,12 +211,20 @@ jobs:
       - name: Stop sccache
         if: always()
         run: sccache --stop-server || true
+      # Without the S3 tier, the disk cache goes to the Actions cache: from
+      # main, or when nothing was restored. Saved after a failed build too.
       - name: Save sccache
-        if: always()
+        if: >-
+          ${{
+            always() &&
+            steps.sccache.outputs.s3 != 'true' &&
+            steps.sccache.outputs.fallback-hit != 'true' &&
+            (github.ref == 'refs/heads/main' || steps.sccache.outputs.fallback-matched == '')
+          }}
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ runner.temp }}/sccache
-          key: sccache-apple-${{ matrix.target }}-${{ matrix.min }}-v1-${{ needs.resolve.outputs.sha }}
+          key: ${{ steps.sccache.outputs.fallback-key }}
 
   # lipo, xcodebuild -create-xcframework, zip and checksum: the script's own
   # steps, over the slices.
