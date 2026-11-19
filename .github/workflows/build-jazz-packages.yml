@@ -18,6 +18,11 @@ on:
         required: false
         type: boolean
         default: false
+      release_bundles:
+        description: Also bundle release-server (the server binaries + SHA256SUMS) and release-npm (every tarball, packed and checked as publish does), for release-artifacts.yml. Needs include_rn.
+        required: false
+        type: boolean
+        default: false
     outputs:
       tools_artifact:
         description: Artifact name for the assembled jazz-tools package.
@@ -877,3 +882,182 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             build
         working-directory: ${{ env.JAZZ_RN_CONSUMER_FIXTURE }}/ios
+
+  # The server binaries, as "Publish jazz-tools alpha" attaches them.
+  release-server:
+    name: Server binaries
+    if: inputs.release_bundles
+    needs: [build-linux, check-linux-heap-profile]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-tools-linux-*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          test -s jazz-tools-linux-x64
+          test -s jazz-tools-linux-arm64
+          sha256sum jazz-tools-linux-x64 jazz-tools-linux-arm64 > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-server
+          path: dist/*
+          if-no-files-found: error
+
+  # Every npm tarball, packed the way publish-jazz-tools-alpha.yml packs and
+  # checks them, so publish uploads these exact files.
+  release-npm:
+    name: Pack npm tarballs
+    if: inputs.release_bundles
+    needs: [assemble-packages, assemble-jazz-rn]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-toolchain: ""
+
+      - name: The version and source revision
+        run: |
+          {
+            echo "VERSION=$(node -p 'require("./packages/jazz-tools/package.json").version')"
+            echo "JAZZ_NATIVE_RELAY_SOURCE_REVISION=$(git rev-parse HEAD)"
+          } >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-tools
+          path: packages/jazz-tools
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-wasm
+          path: crates/jazz-wasm
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-napi
+          path: crates/jazz-napi
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-rn
+          path: crates/jazz-rn
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-create-jazz
+          path: packages/create-jazz
+
+      - name: Verify the built payloads
+        run: |
+          set -euo pipefail
+          test -f crates/jazz-wasm/pkg/jazz_wasm_bg.wasm
+          test -f crates/jazz-wasm/pkg/jazz_wasm.js
+          test -f crates/jazz-wasm/pkg/jazz_wasm.d.ts
+          for platform in linux-x64-gnu linux-arm64-gnu darwin-x64 darwin-arm64 win32-x64-msvc; do
+            test -f "crates/jazz-napi/npm/${platform}/jazz-napi.${platform}.node"
+          done
+          test -f packages/jazz-tools/dist/index.js
+          test -f packages/jazz-tools/dist/index.d.ts
+          test -f packages/jazz-tools/dist/backend/index.js
+          test -f packages/jazz-tools/dist/react/index.js
+          test -f packages/jazz-tools/dist/permissions/index.js
+          node dev/artifacts/rn-packages.mjs verify
+
+      # As publish does (assemble already did it; idempotent).
+      - name: Sync jazz-napi platform package versions and optional deps
+        run: |
+          cd crates/jazz-napi
+          pnpm exec napi version --npm-dir npm
+          node -e 'const fs=require("fs");const rootPath="package.json";const pkg=JSON.parse(fs.readFileSync(rootPath,"utf8"));const deps=[];for(const entry of fs.readdirSync("npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const child=JSON.parse(fs.readFileSync(`npm/${entry.name}/package.json`,"utf8"));deps.push([child.name,pkg.version]);}deps.sort((a,b)=>a[0].localeCompare(b[0]));pkg.optionalDependencies=Object.fromEntries(deps);fs.writeFileSync(rootPath,`${JSON.stringify(pkg,null,2)}\n`);'
+
+      - name: Stage inspector overlay assets into jazz-tools
+        run: |
+          pnpm --filter inspector run build:embedded
+          pnpm --filter jazz-tools run stage:inspector-overlay
+
+      - name: Check the lock-stepped versions
+        run: |
+          node -e '
+            const fs = require("fs");
+            const read = (p) => JSON.parse(fs.readFileSync(p, "utf8"));
+            const want = process.env.VERSION;
+            const paths = ["packages/jazz-tools", "packages/create-jazz", "crates/jazz-wasm", "crates/jazz-napi",
+              "crates/jazz-rn", "crates/jazz-rn/npm/android", "crates/jazz-rn/npm/ios",
+              ...fs.readdirSync("crates/jazz-napi/npm").map((d) => `crates/jazz-napi/npm/${d}`)];
+            for (const p of paths) {
+              const { name, version } = read(`${p}/package.json`);
+              if (version !== want) throw new Error(`${name} is ${version}, expected ${want}`);
+            }
+            for (const [name, v] of Object.entries(read("crates/jazz-napi/package.json").optionalDependencies || {}))
+              if (v !== want) throw new Error(`jazz-napi optional dep ${name} is ${v}`);
+            console.log(`all packages at ${want}`);'
+
+      - name: Pack
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/npm"
+          mkdir -p "${out}"
+          for pkg in jazz-wasm jazz-napi jazz-tools create-jazz; do
+            pnpm --filter "${pkg}" pack --pack-destination "${out}"
+          done
+          for dir in crates/jazz-napi/npm/*/; do
+            npm pack "${dir}" --pack-destination "${out}"
+          done
+          JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
+            node dev/artifacts/rn-packages.mjs pack "${out}"
+          ls -la "${out}"
+
+      # publish-jazz-tools-alpha.yml's packed checks, on the packed files.
+      - name: Check the tarballs
+        working-directory: ${{ runner.temp }}/npm
+        run: |
+          set -euo pipefail
+          wasm="jazz-wasm-${VERSION}.tgz"
+          tar -tf "${wasm}" > wasm.txt
+          for f in pkg/jazz_wasm_bg.wasm pkg/jazz_wasm.js pkg/jazz_wasm.d.ts \
+            durable-object/pkg/jazz_wasm_do_bg.wasm durable-object/pkg/jazz_wasm_do.js \
+            durable-object/index.js durable-object/host.js \
+            backend/index.js backend/pkg/jazz_wasm_backend.js backend/pkg/jazz_wasm_backend_bg.wasm; do
+            grep -qx "package/${f}" wasm.txt || { echo "::error::${wasm} lacks ${f}"; exit 1; }
+          done
+          node "${GITHUB_WORKSPACE}/dev/artifacts/verify-packed-napi.mjs" "jazz-napi-${VERSION}.tgz"
+          for tgz in "jazz-tools-${VERSION}.tgz" "create-jazz-${VERSION}.tgz" "jazz-napi-${VERSION}.tgz"; do
+            tar -xOf "${tgz}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);for(const field of ["dependencies","optionalDependencies","peerDependencies"]){for(const [name,version] of Object.entries(p[field]||{})){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`${p.name}: ${field}.${name} uses workspace protocol (${version})`);}}}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
+          done
+          tar -tf "jazz-tools-${VERSION}.tgz" > tools.txt
+          grep -qx "package/dist/dev/inspector-overlay/embedded/embedded.html" tools.txt
+          grep -qx "package/dist/dev/inspector-overlay/embedded/backend.html" tools.txt
+          # Not `tar | grep -q`: under pipefail, grep's early exit makes tar
+          # fail with SIGPIPE once the file outgrows the pipe buffer.
+          tar -xOf "jazz-tools-${VERSION}.tgz" package/dist/backend/inspector-ui-files.js > inspector-ui-files.js
+          grep -Fq '"backend.html":' inspector-ui-files.js
+          tar -tf "create-jazz-${VERSION}.tgz" > create.txt
+          grep -qx "package/bin/create-jazz.js" create.txt
+          grep -qx "package/dist/index.js" create.txt
+          rm -f wasm.txt tools.txt create.txt inspector-ui-files.js
+          # The RN receipt names tarballs by the absolute path they were packed
+          # to; consumers resolve them next to rn-packages.json.
+          node -e '
+            const fs = require("fs"), path = require("path");
+            const receipt = JSON.parse(fs.readFileSync("rn-packages.json", "utf8"));
+            for (const entry of receipt) entry.tarball = path.basename(entry.tarball);
+            fs.writeFileSync("rn-packages.json", JSON.stringify(receipt, null, 2) + "\n");'
+          sha256sum *.tgz > NPM-SHA256SUMS
+          cat NPM-SHA256SUMS
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-npm
+          path: ${{ runner.temp }}/npm/*
+          if-no-files-found: error
