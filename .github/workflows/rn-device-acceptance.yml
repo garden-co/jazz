@@ -308,18 +308,24 @@ jobs:
       # never runs on main, so every RC on a fresh branch started cold and
       # then spent ~50 s saving. A sticky disk is shared by every branch and
       # commits a snapshot instead of uploading a tarball.
+      # Every run mounts them, but only a run of reviewed code on main or
+      # release commits them (this job never runs on push, so dispatches,
+      # including the RC's, count): a PR can never write state, such as a
+      # Gradle init script, that a later gate mounts.
       # The pinned toolchain; bootstrap-android.sh re-verifies what it reuses.
       # The AVD lives in RUNNER_TEMP, not here.
-      - uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
+      - uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1.7.2
         with:
-          key: rn-device-android-toolchain-${{ github.repository_id }}-v1
+          key: rn-device-android-toolchain-${{ github.repository_id }}-v2
+          commit: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release') && 'true' || 'false' }}
           path: ${{ github.workspace }}/.cache/android-device-acceptance
       # Gradle's distribution, dependencies and local build cache.
       - name: Point Gradle at its sticky disk
         run: echo "GRADLE_USER_HOME=${RUNNER_TEMP}/gradle-home" >> "${GITHUB_ENV}"
-      - uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
+      - uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1.7.2
         with:
-          key: rn-device-android-gradle-${{ github.repository_id }}-v1
+          key: rn-device-android-gradle-${{ github.repository_id }}-v2
+          commit: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release') && 'true' || 'false' }}
           path: ${{ runner.temp }}/gradle-home
       - run: pnpm install --frozen-lockfile
       - name: Verify synthetic scope authorization and generated native fixture

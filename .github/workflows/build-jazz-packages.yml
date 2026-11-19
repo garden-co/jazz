@@ -692,9 +692,12 @@ jobs:
       # of this job's own (the device acceptance one is shared with PRs).
       - name: Point Gradle at its sticky disk
         run: echo "GRADLE_USER_HOME=${RUNNER_TEMP}/gradle-home" >> "${GITHUB_ENV}"
-      - uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
+      # Committed only by release-artifacts' pushes to main and release, never
+      # by a PR's run, which still mounts it.
+      - uses: useblacksmith/stickydisk@3f6be1451e3cad893b778bc93495c80452a5da26 # v1.7.2
         with:
-          key: rn-consumer-android-gradle-${{ github.repository_id }}-v1
+          key: rn-consumer-android-gradle-${{ github.repository_id }}-v2
+          commit: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release') && 'true' || 'false' }}
           path: ${{ runner.temp }}/gradle-home
 
       # Gradle would otherwise fetch these itself, once per run and without
@@ -749,7 +752,6 @@ jobs:
           sleep 2
           # -m targets the whole filesystem: only ever a mounted sticky disk.
           if mountpoint -q "${GRADLE_USER_HOME}"; then fuser -km "${GRADLE_USER_HOME}" 2>/dev/null || true; fi
-
 
   verify-jazz-rn-ios-consumer:
     name: Verify packaged jazz-rn iOS consumer
