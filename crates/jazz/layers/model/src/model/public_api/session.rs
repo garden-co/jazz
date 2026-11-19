@@ -21,7 +21,11 @@ use crate::model::transaction::OpenTransactionId;
 pub enum AuthMode {
     #[default]
     External,
-    LocalFirst,
+    /// A device account (issuer `urn:jazz:local-first`). Reads the
+    /// pre-rename `"local-first"` spelling too, so a session serialized by an
+    /// older client still decodes; it is always written `"device-account"`.
+    #[serde(alias = "local-first")]
+    DeviceAccount,
     Anonymous,
 }
 
@@ -80,7 +84,7 @@ impl Session {
     pub fn author_subject(&self) -> Result<AuthorSubject, crate::ids::AuthorSubjectError> {
         let principal = match self.auth_mode {
             AuthMode::External => AuthorSubject::authenticated(&self.issuer, self.get_user_id()),
-            AuthMode::LocalFirst if self.issuer == AuthorSubject::DEVICE_ACCOUNT_ISSUER => {
+            AuthMode::DeviceAccount if self.issuer == AuthorSubject::DEVICE_ACCOUNT_ISSUER => {
                 AuthorSubject::reserved(&self.issuer, self.get_user_id())
             }
             AuthMode::Anonymous if self.issuer == AuthorSubject::ANONYMOUS_ISSUER => {
@@ -190,7 +194,7 @@ impl Session {
         if Self::is_auth_mode_path(path) {
             return Some(match self.auth_mode {
                 AuthMode::External => "external",
-                AuthMode::LocalFirst => "local-first",
+                AuthMode::DeviceAccount => "device-account",
                 AuthMode::Anonymous => "anonymous",
             });
         }
@@ -428,12 +432,12 @@ mod tests {
     fn session_auth_mode_roundtrips_through_serde() {
         for mode in [
             AuthMode::External,
-            AuthMode::LocalFirst,
+            AuthMode::DeviceAccount,
             AuthMode::Anonymous,
         ] {
             let issuer = match mode {
                 AuthMode::External => "https://issuer.example",
-                AuthMode::LocalFirst => AuthorSubject::DEVICE_ACCOUNT_ISSUER,
+                AuthMode::DeviceAccount => AuthorSubject::DEVICE_ACCOUNT_ISSUER,
                 AuthMode::Anonymous => AuthorSubject::ANONYMOUS_ISSUER,
             };
             let session = Session::new(issuer, "user-1").with_auth_mode(mode);
@@ -452,10 +456,21 @@ mod tests {
     }
 
     #[test]
+    fn session_auth_mode_serializes_device_account_and_reads_the_old_spelling() {
+        let session = Session::new(AuthorSubject::DEVICE_ACCOUNT_ISSUER, "u")
+            .with_auth_mode(AuthMode::DeviceAccount);
+        let json = serde_json::to_value(&session).unwrap();
+        assert_eq!(json["auth_mode"], "device-account");
+        let old = r#"{"issuer":"urn:jazz:local-first","user_id":"u","claims":{},"authMode":"local-first"}"#;
+        let session: Session = serde_json::from_str(old).unwrap();
+        assert_eq!(session.auth_mode, AuthMode::DeviceAccount);
+    }
+
+    #[test]
     fn session_get_string_returns_auth_mode_as_kebab_string() {
-        let s = Session::new("urn:jazz:test", "u").with_auth_mode(AuthMode::LocalFirst);
-        assert_eq!(s.get_string(&["authMode".into()]), Some("local-first"));
-        assert_eq!(s.get_string(&["auth_mode".into()]), Some("local-first"));
+        let s = Session::new("urn:jazz:test", "u").with_auth_mode(AuthMode::DeviceAccount);
+        assert_eq!(s.get_string(&["authMode".into()]), Some("device-account"));
+        assert_eq!(s.get_string(&["auth_mode".into()]), Some("device-account"));
         assert!(s.has_path(&["authMode".into()]));
     }
 

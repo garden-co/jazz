@@ -434,7 +434,10 @@ struct GroupKey {
     sql: String,
     params: String,
     /// Set only when the SQL depends on the identity's session (array
-    /// relations, read as the identity, always may).
+    /// relations, read as the identity, always may): the identity and where
+    /// its claims come from. A registry-following read and one carrying
+    /// fixed request claims can compile to the same SQL today, but only the
+    /// first follows a later registry change.
     identity: Option<String>,
     /// The array relations nested in each row: queries that differ only
     /// in them compile to the same root SQL.
@@ -815,7 +818,11 @@ impl Fanout {
     fn drop_group(&mut self, gid: u64) {
         if let Some(group) = self.groups.remove(&gid) {
             let group = group.borrow();
-            self.by_key.remove(&group.key);
+            // A refreshed group may have converged on a key another group
+            // already owns: that owner's entry stays.
+            if self.by_key.get(&group.key) == Some(&gid) {
+                self.by_key.remove(&group.key);
+            }
             self.unindex(gid, &group.watches);
         }
     }
@@ -907,6 +914,34 @@ impl Fanout {
 }
 
 impl Inner {
+    /// The key subscriptions share a group by (see [`GroupKey`]).
+    fn group_key(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+        compiled: &Compiled,
+        session_used: bool,
+    ) -> GroupKey {
+        let effective = identity.unwrap_or(self.identity.author);
+        GroupKey {
+            renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
+            sql: compiled.sql.clone(),
+            params: format!("{:?}", compiled.params),
+            identity: (session_used || !prepared.query.array_subqueries.is_empty())
+                .then(|| format!("{identity:?} {:?}", prepared.fixed_claims_for(effective))),
+            relations: format!("{:?}", prepared.query.array_subqueries),
+            partial: format!("{:?}", compiled.partial),
+            splices: read.splices.clone(),
+            position: format!("{:?}", read.position),
+            #[cfg(feature = "e2ee-client")]
+            residual: prepared
+                .planned
+                .as_ref()
+                .map(|planned| planned.residual_key),
+        }
+    }
+
     /// Open a subscription: join the group with identical SQL, or start one.
     pub(super) fn subscribe_member(
         &mut self,
@@ -934,22 +969,7 @@ impl Inner {
         };
         self.check_splices(&prepared.query, &read.splices)?;
         let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
-        let key = GroupKey {
-            renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
-            sql: compiled.sql.clone(),
-            params: format!("{:?}", compiled.params),
-            identity: (session_used || !prepared.query.array_subqueries.is_empty())
-                .then(|| format!("{identity:?}")),
-            relations: format!("{:?}", prepared.query.array_subqueries),
-            partial: format!("{:?}", compiled.partial),
-            splices: read.splices.clone(),
-            position: format!("{:?}", read.position),
-            #[cfg(feature = "e2ee-client")]
-            residual: prepared
-                .planned
-                .as_ref()
-                .map(|planned| planned.residual_key),
-        };
+        let key = self.group_key(prepared, identity, &read, &compiled, session_used);
         let now = settled.get();
         // `opened`: the member's queue starts with an opening.
         let member = |queue: &Queue, opened: bool| Member {
@@ -1985,10 +2005,25 @@ impl Inner {
             // which a schema change can rename or renumber: they are
             // rebuilt with the watches, and dropped (the tables watched
             // whole) when the watches cannot be.
+            // The group is found by what it now compiles to: its old key
+            // may name SQL (claim values, policies) it no longer runs.
+            if self.fan.by_key.get(&group.key) == Some(&gid) {
+                self.fan.by_key.remove(&group.key);
+            }
             let (watches, correlations, evidence) = self
-                .compile(&group.prepared, group.identity, &group.read)
-                .and_then(|compiled| {
-                    self.watch_plan(&group.prepared, group.identity, &group.read, &compiled)
+                .compile_tracked(&group.prepared, group.identity, &group.read)
+                .and_then(|(compiled, session_used)| {
+                    let plan =
+                        self.watch_plan(&group.prepared, group.identity, &group.read, &compiled)?;
+                    group.key = self.group_key(
+                        &group.prepared,
+                        group.identity,
+                        &group.read,
+                        &compiled,
+                        session_used,
+                    );
+                    self.fan.by_key.entry(group.key.clone()).or_insert(gid);
+                    Ok(plan)
                 })
                 .unwrap_or_else(|_| {
                     let watches = old

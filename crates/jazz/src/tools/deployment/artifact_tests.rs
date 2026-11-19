@@ -3376,3 +3376,39 @@ fn rewriting_refuses_what_load_refuses() {
     assert_eq!(error.file(), PERMISSIONS_FILE);
     assert!(error.message().contains("did you mean `owner`"), "{error}");
 }
+
+/// Device accounts were `"local-first"` in `session.authMode` before the
+/// rename. A file still comparing with it is refused where the literal is,
+/// naming the new value: kept, `session.authMode != 'local-first'` would let
+/// every device account in.
+#[test]
+fn the_removed_local_first_auth_mode_is_refused_by_name() {
+    for source in [
+        "session.authMode = 'local-first'",
+        "session.authMode != 'local-first'",
+        "session.authMode in ['external', 'local-first']",
+        "not (session.authMode = 'local-first')",
+        "owner = session.user and session.authMode != 'local-first'",
+    ] {
+        let error = read_policy("todos", source).unwrap_err();
+        assert!(
+            error.starts_with("jazz.permissions.json: tables.todos.read:"),
+            "{source}: {error}"
+        );
+        assert!(
+            error.contains("never \"local-first\" any more")
+                && error.contains("compare with \"device-account\""),
+            "{source}: {error}"
+        );
+    }
+    assert_eq!(
+        read_policy("todos", "session.authMode = 'device-account'").unwrap(),
+        PolicyExpr::SessionCmp {
+            path: vec!["authMode".into()],
+            op: crate::tools::CmpOp::Eq,
+            value: Value::Text("device-account".into()),
+        }
+    );
+    // A claim may still hold the text: only `session.authMode` changed.
+    read_policy("todos", "session.claims.mode = 'local-first'").unwrap();
+}

@@ -890,12 +890,12 @@ fn a_public_approval_pairs_with_its_private_approval_by_row_id() {
         .expect_err("its public half in a later transaction");
 }
 
-/// The account registry as a test sets it: which accounts a local-first
+/// The account registry as a test sets it: which accounts a device-account
 /// identity founded.
 struct Founders(Vec<jazz::account_registry::AccountId>);
 
 impl jazz::db::AccountRegistryView for Founders {
-    fn founded_local_first(
+    fn founded_by_device_account(
         &self,
         account: jazz::account_registry::AccountId,
     ) -> Result<Option<bool>, String> {
@@ -903,7 +903,7 @@ impl jazz::db::AccountRegistryView for Founders {
     }
 }
 
-/// A local-first session: its account is the one its key founded.
+/// A device-account session: its account is the one its key founded.
 fn lena() -> AuthorSubject {
     let subject = uuid::Uuid::from_bytes([0x1f; 16]).to_string();
     AuthorSubject::reserved(jazz::identity::DEVICE_ACCOUNT_ISSUER, &subject)
@@ -987,14 +987,14 @@ impl World {
 
 /// An account bootstraps at generation 0 with a root naming how it was
 /// founded, and resets to the next generation only when the app allows
-/// resets, the session isn't local-first and the account wasn't founded by
-/// a local-first identity (R5, R6).
+/// resets, the session isn't a device-account session and the account
+/// wasn't founded by a device-account identity (R5, R6).
 ///
 /// ```text
-/// alice (external) ── gen 0 + root "app" ──► ✓     root "local-first" ✗
+/// alice (external) ── gen 0 + root "app" ──► ✓     root "device-account" ✗
 /// alice ── gen 1 ──► ✓ with allowAccountReset, ✗ without; gen 3 ✗ (no gen 2)
-/// lena (local-first) ── gen 0 + root "local-first" ✓; gen 1 ✗
-/// bob (external, account founded local-first) ── gen 1 ✗; root "app" ✗
+/// lena (device account) ── gen 0 + root "device-account" ✓; gen 1 ✗
+/// bob (external, account founded by a device account) ── gen 1 ✗; root "app" ✗
 /// ```
 #[test]
 fn account_identities_follow_the_founder_and_the_reset_setting() {
@@ -1011,7 +1011,7 @@ fn account_identities_follow_the_founder_and_the_reset_setting() {
         ])));
     let device = world.device(alice());
     world
-        .identity(alice(), device, 0, "local-first")
+        .identity(alice(), device, 0, "device-account")
         .expect_err("a root's kind names how its account was founded");
     world
         .identity(alice(), device, 0, "app")
@@ -1031,22 +1031,22 @@ fn account_identities_follow_the_founder_and_the_reset_setting() {
 
     let device = world.device(lena());
     world
-        .identity(lena(), device, 0, "local-first")
-        .expect("a local-first account bootstraps with a local-first root");
+        .identity(lena(), device, 0, "device-account")
+        .expect("a device account bootstraps with a device-account root");
     world
-        .identity(lena(), device, 1, "local-first")
-        .expect_err("a local-first session never resets");
+        .identity(lena(), device, 1, "device-account")
+        .expect_err("a device-account session never resets");
 
     let device = world.device(bob());
     world
         .identity(bob(), device, 0, "app")
-        .expect_err("bob's account was founded by a local-first identity");
+        .expect_err("bob's account was founded by a device-account identity");
     world
-        .identity(bob(), device, 0, "local-first")
+        .identity(bob(), device, 0, "device-account")
         .expect("so its root says so");
     world
-        .identity(bob(), device, 1, "local-first")
-        .expect_err("an account founded by a local-first identity never resets");
+        .identity(bob(), device, 1, "device-account")
+        .expect_err("an account founded by a device-account identity never resets");
 
     let closed = World::new();
     let device = closed.device(alice());
@@ -1714,7 +1714,7 @@ fn alices_ledger(world: &World) -> Ledger {
 }
 
 /// Private account records reach only their own account (R3, R5, R7, R9);
-/// public ones every local-first or external session, never an anonymous
+/// public ones every device-account or external session, never an anonymous
 /// one (R10).
 #[test]
 fn account_records_are_read_by_their_account_or_by_signed_in_sessions() {
@@ -2286,7 +2286,7 @@ fn uploaded_records_are_checked(world: World) {
     world.uploading.set(true);
     let device = world.device(alice());
     world
-        .identity(alice(), device, 0, "local-first")
+        .identity(alice(), device, 0, "device-account")
         .expect_err("a root's kind names how its account was founded");
     world
         .identity(alice(), device, 0, "app")
@@ -2346,7 +2346,7 @@ struct Namespaces {
 }
 
 impl jazz::db::AccountRegistryView for Namespaces {
-    fn founded_local_first(
+    fn founded_by_device_account(
         &self,
         account: jazz::account_registry::AccountId,
     ) -> Result<Option<bool>, String> {
@@ -2361,10 +2361,10 @@ impl jazz::db::AccountRegistryView for Namespaces {
     }
 }
 
-/// An encrypting app serves local-first accounts founded for its own app id
+/// An encrypting app serves device accounts founded for its own app id
 /// only (R5, R6): for an account founded for another audience, neither an
-/// honest `local-first` root nor an `app` one is accepted. The app's own
-/// local-first accounts and app-founded accounts still bootstrap.
+/// honest `device-account` root nor an `app` one is accepted. The app's own
+/// device accounts and app-founded accounts still bootstrap.
 #[test]
 fn an_account_founded_for_another_audience_cannot_bootstrap() {
     let world = World::new();
@@ -2375,14 +2375,14 @@ fn an_account_founded_for_another_audience_cannot_bootstrap() {
             other: vec![alice().account_id().unwrap()],
         }));
     let device = world.device(alice());
-    for kind in ["local-first", "app"] {
+    for kind in ["device-account", "app"] {
         world
             .identity(alice(), device, 0, kind)
             .expect_err("no root of either kind for an account of another audience");
     }
     let device = world.device(bob());
     world
-        .identity(bob(), device, 0, "local-first")
+        .identity(bob(), device, 0, "device-account")
         .expect("an account the app's own audience founded");
     let device = world.device(carol());
     world

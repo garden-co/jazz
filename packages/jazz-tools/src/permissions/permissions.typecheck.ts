@@ -71,6 +71,20 @@ exists.members({ role: "owner" });
 // @ts-expect-error null for a column that isn't optional
 exists.members({ userId: null });
 
+// `session.authMode` compares only with its values: device accounts were
+// "local-first" before the rename, and comparing with that is refused.
+eq(session.authMode, "device-account");
+ne(session.authMode, "anonymous");
+isIn(session.authMode, ["external", "device-account"]);
+// @ts-expect-error "local-first" was renamed to "device-account"
+eq(session.authMode, "local-first");
+// @ts-expect-error "local-first" was renamed to "device-account"
+ne(session.authMode, "local-first");
+// @ts-expect-error "local-first" was renamed to "device-account"
+isIn(session.authMode, ["external", "local-first"]);
+// Claims compare with any text.
+eq(session.claims.mode, "local-first");
+
 // `update` together with `updateIf`.
 definePermissions({
   // @ts-expect-error update with updateIf

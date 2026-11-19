@@ -38,6 +38,6 @@ export function shopper(testApp: PolicyTestApp, name: string): { account: string
  * custom claims; the test app derives its account from the device key.
  */
 export function guest(testApp: PolicyTestApp, device: string): { account: string; db: TestDb } {
-  const session = { user_id: device, claims: {}, authMode: "local-first" } as const;
+  const session = { user_id: device, claims: {}, authMode: "device-account" } as const;
   return { account: testApp.accountFor(session), db: testApp.as(session) };
 }
