@@ -37,9 +37,11 @@ body() {
   awk '/^=== .* @[0-9]+$/ { t=$NF; sub(/^@/,"",t); if (p) printf "TIME t4 %ss %s\n", t-pt, p; p=$0; sub(/^=== /,"",p); sub(/ @[0-9]+$/,"",p); pt=t }' "$AG_RESULTS/t4-full.log"
   # The core: its version after the deploy, and whether it existed before (the old-data checks need it to).
   local L=$AG_RESULTS/t4-full.log
-  local before; before=$(sed -n '/^=== core and inventory before/,/^=== deps/p' "$L" | grep -cE '^  jazz-.*-data ')
-  [ "$before" -ge 1 ] && echo "PASS t4 the existing core's Drive was there before the deploy" \
-    || echo "REVIEW t4 no core existed before the deploy: vercel() created a new, empty one, so old data couldn't be checked against it"
+  if [ "$T4_MODE" = production ]; then   # the long-lived production core must carry over (its old data is checked)
+    local before; before=$(sed -n '/^=== core and inventory before/,/^=== deps/p' "$L" | grep -cE '^  jazz-.*-production-data ')
+    [ "$before" -ge 1 ] && echo "PASS t4 the existing core's Drive was there before the deploy" \
+      || echo "REVIEW t4 no core existed before the deploy: vercel() created a new, empty one, so old data couldn't be checked against it"
+  fi
   local ran; ran=$(sed -n '/^=== core and inventory after/,/^=== wrong-region/p' "$L" | grep -oE 'core running=[^ ]+' | cut -d= -f2)
   [ "$ran" = "$(ag_version)" ] && echo "PASS t4 production core runs $ran" || echo "REVIEW t4 couldn't confirm the core's version (read: '${ran:-nothing}')"
   # run-t4.sh stops at a failed required step (build, deploy, playwright) without always printing a FAIL line.

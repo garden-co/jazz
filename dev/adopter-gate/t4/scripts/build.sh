@@ -9,6 +9,12 @@ if [ -n "${VERCEL_TOKEN:-}" ]; then
   # Build once, here: the deploy uploads this output (deploy.sh --prebuilt) instead of Vercel rebuilding remotely.
   if [ "$T4_MODE" = preview ]; then ENVN=preview; PROD=; else ENVN=production; PROD=--prod; fi
   t4_vercel pull --yes --environment=$ENVN > "$T4_WORK/pull.log" 2>&1 || { echo "vercel pull failed"; tail -10 "$T4_WORK/pull.log"; exit 1; }
+  # vercel build re-runs the project's install command; the app is already installed (and its lockfile checked) by
+  # rc-deps.sh, and a second pnpm install trips over a dry run's file:/tmp/jazz-rc-npm links (ENOTDIR). Skip it.
+  python3 - .vercel/project.json <<'PY'
+import json, sys; p = sys.argv[1]; j = json.load(open(p)); j.setdefault("settings", {})["installCommand"] = "true"
+json.dump(j, open(p, "w"))
+PY
   # Sensitive production vars come down redacted, which breaks the prerender (BETTER_AUTH_URL isn't a URL). The build
   # only needs placeholders: the deployed functions get the project's real values at runtime.
   sed -i '/^BETTER_AUTH_SECRET=/d; /^BETTER_AUTH_URL=/d' .vercel/.env.production.local 2>/dev/null
