@@ -18,7 +18,7 @@ use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::storage::Storage;
 use jazz::tools::OpenTransactionId;
-use jazz::tools::deployment::artifact::{self, LoadedApp, system_tables};
+use jazz::tools::deployment::artifact::{self, LoadedApp, encryption, system_tables};
 use serde_json::{Value as Json, json};
 
 use super::accounts;
@@ -733,6 +733,77 @@ fn a_deploy_that_changes_nothing_cannot_declare_for_an_undeclared_version() {
         host.core.take().unwrap().close();
         refused(&mut host, "no core open");
         assert!(host.core.is_none(), "{name}: nothing to open a core for");
+    }
+}
+
+/// Simulate an older store that published a successor with no encrypted
+/// columns before empty declaration records were written.
+fn legacy_undeclared_version(host: &mut Host) -> LoadedApp {
+    let file = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": { "notes": { "columns": { "done": "boolean" } } },
+        "history": { "v1": { "tables": { "notes": {
+            "columns": { "title": "bytes", "done": "boolean" },
+            "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } } } } },
+        "migrations": [{ "from": "v1", "migrate": { "notes": {
+            "title": { "drop": "bytes", "backwardsDefault": "" } } } }] }"#;
+    let permissions = permissions(json!({
+        "notes": {
+            "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)"
+        }
+    }));
+    let app = artifact::load(file.as_bytes(), permissions.as_bytes()).unwrap();
+    let first = host.deploy(&app.deployment_body(false)).unwrap();
+    assert_eq!(first["changed"], true);
+    let version = app.current_hash();
+    let kept = host
+        .kept(&version)
+        .expect("empty declaration record on deploy");
+    assert!(encryption::decode_stored(&kept).unwrap().is_empty());
+    host.host
+        .store()
+        .unwrap()
+        .host_delete(DECLARATIONS, &version.0)
+        .unwrap();
+    assert_eq!(host.kept(&version), None);
+    app
+}
+
+/// With a core open, an unchanged redeploy records that the legacy
+/// successor kept the system tables and declared no encryption.
+#[test]
+fn an_unchanged_deploy_backfills_empty_declarations_on_the_open_core() {
+    for (name, backing) in hosts() {
+        let mut host = Host::new(backing);
+        let app = legacy_undeclared_version(&mut host);
+        assert!(host.core.is_some(), "{name}");
+
+        let response = host.deploy(&app.deployment_body(false)).unwrap();
+        assert_eq!(response["changed"], false, "{name}");
+        let kept = host.kept(&app.current_hash()).expect("declarations kept");
+        assert!(
+            encryption::decode_stored(&kept).unwrap().is_empty(),
+            "{name}"
+        );
+    }
+}
+
+/// With the core closed, an unchanged redeploy records empty declarations
+/// directly on the store without reopening the core.
+#[test]
+fn an_unchanged_deploy_backfills_empty_declarations_without_a_core() {
+    for (name, backing) in hosts() {
+        let mut host = Host::new(backing);
+        let app = legacy_undeclared_version(&mut host);
+        host.core.take().unwrap().close();
+
+        let response = host.deploy(&app.deployment_body(false)).unwrap();
+        assert_eq!(response["changed"], false, "{name}");
+        assert!(host.core.is_none(), "{name}");
+        let kept = host.kept(&app.current_hash()).expect("declarations kept");
+        assert!(
+            encryption::decode_stored(&kept).unwrap().is_empty(),
+            "{name}"
+        );
     }
 }
 
