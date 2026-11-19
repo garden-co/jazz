@@ -1,0 +1,11 @@
+// server/worker.ts runs in a Cloudflare Worker: it resolves jazz-tools/backend
+// under the `workerd` condition, as wrangler bundles it.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "customConditions": ["workerd"],
+    "lib": ["esnext", "dom"]
+  },
+  "include": ["server/worker.ts"],
+  "exclude": ["node_modules", "dist"]
+}

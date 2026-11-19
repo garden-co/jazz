@@ -450,7 +450,7 @@ test("CI uses the correctness artifact path while package builds keep release WA
     "utf8",
   );
   assert.match(ensureArtifacts, /spawn\("pnpm", \["build:correctness-artifacts"\]/);
-  assert.match(workflow, /local-ci-equivalent\.mjs --ci-partition typescript/);
+  assert.match(workflow, /local-ci-equivalent\.mjs --ci-partition \$\{\{ matrix\.partition \}\}/);
   assert.match(
     localCi,
     /native correctness-artifact producer[\s\S]*ensure-correctness-artifacts\.mjs/,

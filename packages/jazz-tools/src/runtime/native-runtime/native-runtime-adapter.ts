@@ -252,9 +252,9 @@ type NativeRestoreOptions = NativeWriteOptions & {
 
 type NativeDb = {
   captureSnapshot?(): NativeReadResult | Promise<NativeReadResult>;
-  /** NAPI: a thin session's transaction request, as its backend's client serves it. */
+  /** A thin session's transaction request, as its backend's client serves it. */
   serveThinTransaction?(request: Uint8Array): NativeReadResult;
-  /** NAPI: end the thin session's open transactions. */
+  /** End the thin session's open transactions. */
   releaseThinTransactions?(): NativeReadResult;
   /** WASM settles its promise-shaped wait early once `cancelled` settles. */
   waitForPendingWrites?(
