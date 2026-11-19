@@ -344,8 +344,24 @@ jobs:
         if: always()
         run: sccache --show-stats
 
+  # One job per TypeScript partition (dev/gates/local-ci-equivalent.mjs), so
+  # the longest shard rather than the sum sets this job's wall time. Each
+  # shard produces or reuses the sealed native pair itself and admits it the
+  # same way; together they run every TypeScript suite.
   test-ts:
     if: inputs.scope == 'full'
+    name: test-ts (${{ matrix.partition }})
+    strategy:
+      fail-fast: false
+      matrix:
+        partition:
+          - typescript-tools-node-1
+          - typescript-tools-node-2
+          - typescript-tools-other
+          - typescript-browser-1
+          - typescript-browser-2
+          - typescript-packages
+          - typescript-examples
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 20
     # JAZZ_NAPI_RELEASE=0 (debug builds) removed 2026-07-19: debug-profile
@@ -412,12 +428,12 @@ jobs:
       # The integration-branch workspace target-class check that used to run
       # first here now runs in the lint partition, off this job's critical path.
       - name: Run CI-equivalent TypeScript partition
-        run: node dev/gates/local-ci-equivalent.mjs --ci-partition typescript
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition ${{ matrix.partition }}
       - name: Upload BandChat failure screenshots
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: band-chat-browser-failure-screenshots
+          name: band-chat-browser-failure-screenshots-${{ matrix.partition }}
           # This fixture renders synthetic users and rooms; do not broaden to
           # browser traces, storage profiles, or arbitrary application captures.
           path: examples/band-chat/apps/nextjs-betterauth/tests/browser/__screenshots__/band-chat.test.tsx/*.png
