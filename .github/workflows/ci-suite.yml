@@ -336,6 +336,19 @@ jobs:
         with:
           sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
 
+      # Raw jazz-napi / jazz-wasm compiler output from earlier runs, keyed in
+      # dev/artifacts/native-build-cache.mjs by the exact native inputs, tools
+      # and build arguments. The producer reuses an entry only on a key match
+      # and then validates, seals and verifies it for this checkout exactly as
+      # it would a fresh build. This key only picks which entries to restore.
+      - name: Restore native correctness builds
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: node_modules/.cache/jazz-native-builds
+          key: jazz-native-builds-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', 'crates/**/*.rs', 'vendor/**', 'dev/artifacts/*.mjs') }}
+          restore-keys: |
+            jazz-native-builds-v1-${{ runner.os }}-${{ runner.arch }}-
+
       # Restore compiler state only; tsc still checks current source and native
       # declarations. Compatible prior revisions are invalidated by TypeScript.
       - name: Restore TypeScript test compiler state
