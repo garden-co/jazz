@@ -293,6 +293,9 @@ jobs:
           sccache: ${{ matrix.use_sccache && 'true' || 'false' }}
           sccache-key: release-napi-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-${{ matrix.platform }}-v1
 
+      # The second restore key: a Version Packages commit always changes
+      # Cargo.lock (the workspace version), so start from this platform's last
+      # build anyway, and only the workspace crates recompile.
       - name: Cache baseline-specific Linux Cargo products
         if: startsWith(matrix.platform, 'linux-')
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -301,9 +304,6 @@ jobs:
           key: linux-napi-${{ matrix.platform }}-${{ hashFiles('dev/artifacts/linux-napi/Dockerfile') }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
             linux-napi-${{ matrix.platform }}-${{ hashFiles('dev/artifacts/linux-napi/Dockerfile') }}-${{ hashFiles('Cargo.lock') }}-
-            # A Version Packages commit always changes Cargo.lock (the workspace
-            # version): start from the last build of this platform anyway, so
-            # only the workspace crates recompile.
             linux-napi-${{ matrix.platform }}-${{ hashFiles('dev/artifacts/linux-napi/Dockerfile') }}-
 
       - name: Build Linux NAPI on pinned Bullseye userspace
