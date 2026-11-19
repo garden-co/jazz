@@ -96,9 +96,9 @@ A conversion names a **source** column (the old form) and a **target** column
 | Re-home    | Encrypted columns under the old space | New encrypted columns under the new space |
 
 The source is **absent** when it is null (plaintext) or the cleared marker
-(encrypted; a real cell record is at least 47 bytes). The target is absent
-when it is null (plaintext), empty or the cleared marker (encrypted). One rule
-decides a row's value:
+(encrypted; a real cell record is at least 78 bytes in all, spec §4.1). The
+target is absent when it is null (plaintext), empty or the cleared marker
+(encrypted). One rule decides a row's value:
 
 > **If the source is present, it is the value; otherwise the target is.**
 
@@ -159,7 +159,9 @@ re-encrypt are per column; re-home is per entry:
 
 The read hook (H3) applies the rule per row and column. A present plaintext
 source is returned as the value; a present encrypted source is decrypted with
-its own context (the old type, or the old space for a re-home). Rows are never
+its own context (the old type, or the old space for a re-home). An encrypted
+source holding the empty value counts as present, and a re-home of it stays
+empty. Rows are never
 dropped for being unconverted, so a half-converted table reads as one table.
 
 Equality queries (H4) on a converting column must not send the searched value
@@ -180,7 +182,9 @@ false candidates but cannot add omitted ones, so the source predicate must
 reach **every** source value that converts to the searched value. That is
 possible only in two cases:
 
-- **Identity conversions**: a re-home, and a re-encrypt without `convert`.
+- **Identity conversions**: a re-home, and a re-encrypt without `convert`
+  (a decrypt conversion has no source tokens: its source rows are found as
+  for an untagged source, below).
   The source value equals the target value, so `sourceTokens` are the
   searched value's tokens under the source context.
 - **A declared bounded reverse mapping**: a re-encrypt whose `convert` names
@@ -208,6 +212,11 @@ returned.
   it. The check is one indexed count (source present, or tag empty, in the
   space); the runtime runs it as an ordinary read before planning and hands
   the result to the query hook, which never reads `Db` itself (H4).
+
+A count of zero holds only when it is taken: until the seal (§3.7) a client
+can write a source again. A query therefore keeps the source predicate
+whenever it can compute one, and a live query without one counts again when
+source rows change and is planned again.
 
 ### 3.4 Writes while a conversion is partial
 

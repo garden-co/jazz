@@ -2187,7 +2187,8 @@ declared type. Changing any of these otherwise makes old cells unreadable.
 Plaintext is Jazz's native encoding of the single value.
 
 **Short values.** A stored encrypted value is never ciphertext when it is
-shorter than a cell record (47 payload bytes). Two such values have fixed
+shorter than the smallest cell record: 78 bytes in all, the 31-byte common
+envelope header of `jazz.e2ee.cell-record` v1 and a 47-byte payload. Two such values have fixed
 meanings and are never reported as malformed:
 
 - The **empty byte string** means "never written": the row predates the
@@ -2228,7 +2229,11 @@ large-value format carries the stream mechanism's header once.
   per read. When an acquisition shows that an epoch is not in the space's
   chain, the device remembers that until the chain it knows advances, and
   reports cells of that epoch `invalid-ciphertext` without acquiring again;
-  otherwise a live query pays the acquisition again on each refresh.
+  otherwise a live query pays the acquisition again on each refresh. A cell
+  whose epoch could lie beyond the point where the chain is unresolved (§3.3)
+  has no data-error code of its own: it is reported with the unresolved
+  chain, as an unsupported capability (§7), never as `invalid-ciphertext`.
+- A member of a space that has no valid root yet reports it `space-pending`.
 - When the acquisition obtains no key for a needed version and the account
   is a member (§3.4), the read returns the rows its held keys decrypt,
   leaves the space's other rows out and reports the space once as
@@ -2285,14 +2290,17 @@ of the results.
 ### 4.4 Strict reads
 
 Reads inside a transaction, mutation pre-image reads and authority reads are
-strict: any bad cell fails the read, so a write never rests on skipped rows.
+strict: any outcome that would leave a row out fails the read, so a write
+never rests on skipped rows. Rows returned with a report (`empty-cell`,
+`stale-space`) are returned as in any read.
 
 ### 4.5 Equality-filtered queries
 
 Encrypted predicates must be `eq` (or a complete enum `match`) on a column
 declared with an equality index, together with a plaintext `eq` on the space
 column. Tags are per key version: a query computes one token per held
-version, and the physical predicate becomes `__e2ee_eq_<column> IN tokens`
+version, under the selected equality mechanism only, and the physical
+predicate becomes `__e2ee_eq_<column> IN tokens`
 (the server can link those tokens to one another, §8). Limit and offset are
 applied after each candidate is decrypted and its authenticated value
 compared. If the version set changes during the query it is retried (shared
@@ -2380,7 +2388,13 @@ the ledger position is not needed. When acquiring, the device starts from
 the current version and, if it cannot open that version's key (its delivery
 has not arrived), steps back through predecessors; a version not yet
 delivered therefore does not block writes. Equality tokens use the same key
-and version.
+and version. Once the device has read the space's chain, only keys of that
+chain's root write. Before such a read in this session (the chain read is
+kept only in memory, so also after a restart), a device that holds keys of
+more than one root of the address not marked `refused` cannot tell which
+root is the space's: the runtime reads the space's chain and retries the
+write at once, and offline reports it `space-pending`. Keys of one root
+alone write without a read.
 
 ### 5.3 Offline and provisional writes
 
@@ -2396,8 +2410,9 @@ only from an updater (R15), and a refusal fails that transaction alone. The
 new key is stored as a held key before commit, with a persisted
 `unpublished` mark (§6.2) carrying the creation's durable transaction
 identity, and the mark is cleared once the creation is accepted as the
-space's root. An unpublished key never wins a tie against a published key at
-the same depth, including after a restart.
+space's root. An unpublished key is never chosen over a key of another root:
+a device holding both writes only after it has read the space's chain, and
+then only under the chain's root (§5.2), including after a restart.
 
 Later writes under an unpublished key are ordinary transactions of their
 own. They do not depend on the creation and are not held back or refused
@@ -2406,7 +2421,9 @@ a second root for a space while it holds an unpublished key for it.
 
 The creation's outcome decides the key's fate:
 
-- **Accepted, and the space's root** (§3.2): the mark is cleared.
+- **Accepted, and the space's root** (§3.2): the mark is cleared. Until a
+  valid root of the address is readable, the device cannot tell, so the
+  mark stays `unpublished`.
 - **Not accepted** (the root was refused, or its transaction failed
   otherwise, at Local or Global, or was cancelled before possible
   submission, §3.2), or **accepted but lost** to an earlier valid root: the
@@ -2497,7 +2514,7 @@ small record per held version that refers to it by depth:
 lineage record:
 { format: "jazz-e2ee-held-lineage-v1",
   binding: { application: Dₐ(self), device: deviceId, keys: <device hash> },
-  scopeTable, root: <space root row, bytes as arrays>,
+  root: <space root row, bytes as arrays>,
   successors: [ <space successor row>, … ],
   signature: [..] }
 
@@ -2505,22 +2522,33 @@ held-key record (one per epoch):
 { format: "jazz-e2ee-held-key-v3",
   binding: { application: Dₐ(self), device: deviceId, keys: <device hash> },
   rootId, epochId, depth: "<decimal>",
-  prefix: sha256hex(canonical([root, successors[0 .. depth]])),
+  prefix: <lineage prefix hash>,
   unpublished?: { transaction: "<durable transaction identity>" },
   refused?: true,
   envelope: [..], signature: [..] }
 ```
 
-`<device hash>` is `sha256hex(canonical([publicKey, signingPublicKey,
-envelopeMechanism, signingMechanism]))`. `root` is the original space root
-(its own row ID, address and creator domain); `successors` are the accepted
-successor rows from the root's epoch onward in chain order, as far as the
-deepest held epoch, appended as deeper keys are kept. A held-key record names
-its exact `epochId`, its `depth` (§5.2) and the hash of the lineage prefix up
-to it. `canonical` sorts object keys by code unit, drops undefined, and
+`canonical` sorts object keys by code unit, drops undefined, and
 encodes bytes as arrays and big integers as decimal strings; `B(f, x) =
-UTF8(json(canonical([f, x])))` with `f` the record's format. The lineage
-record is signed by the device over `B(format, record without signature)`.
+UTF8(json(canonical([f, x])))` with `f` the record's format. `sha256hex` is
+the lowercase hex of SHA-256. `<device hash>` is
+`sha256hex(B("jazz-e2ee-held-device-v1", [publicKey, signingPublicKey,
+envelopeMechanism, signingMechanism]))`, the two public keys as their raw
+bytes (as in the device document) and each mechanism written as the object
+`{ "id": <mechanism id>, "version": <version> }`. `root` is the space root
+row and each of `successors` a space successor row, each a JSON object whose
+fields are the row's columns as named in §1.3 plus `id` for its row ID,
+`version` a number; the creator's domain is derived from `creatorAccountId`
+as elsewhere. `successors` are the accepted successor rows from the root's
+epoch onward in chain order, as far as the deepest held epoch, appended as
+deeper keys are kept. A held-key record names its exact `epochId`, its
+`depth` (§5.2) and the hash of the lineage prefix up to it,
+`<lineage prefix hash>` = `sha256hex(B("jazz-e2ee-held-prefix-v1", [root,
+[s₁, …, s_depth]]))`, where the list holds exactly the first `depth`
+successors in chain order (at depth 0, the root and an empty list). `signature`, `envelope` and every bytes
+column of a stored row are complete common envelopes (§0), stored as byte
+arrays. The lineage record is signed by the device over `B(format, record
+without signature)`.
 A key is sealed to the device: `envelope = seal(device.pub, B(format, body),
 K)` with `body` the record without envelope and signature; then `signature =
 sign(device.signingKey, B(format, body + envelope))`. Storage grows linearly
@@ -2541,16 +2569,24 @@ creator's domain, §3.1). The signatures and author activity of the lineage
 were checked when the key was acquired (§3.3); the device's own
 signatures protect them since. A record that fails is skipped and reported,
 never fatal to the read (§4.2); a failed lineage record skips the space's
-keys and the space is acquired again. Nothing in either record depends on the
+keys and the space is acquired again. When the device rewrites the document,
+a held-key record skipped as unsupported is carried over unchanged, since it
+may hold a key only this device has, such as a `refused` key written by a
+newer client; a record that failed any other check may be dropped.
+Unsupported here means a record of this format whose envelope or signature
+uses a mechanism this client lacks. A newer client that changes the
+record's encoding uses a new document format, which older clients refuse
+and never overwrite (§6.1); a record of this format that does not decode
+is malformed and may be dropped. Nothing in either record depends on the
 application schema, so a schema update never invalidates held keys; the cell
 context binds table, column and type (§4.1). Keeping a key replaces any
 record of the same device, root and epoch. `unpublished` is present only for
 a space creation not yet accepted (§5.4), carries the creation's durable
 transaction identity for reconciliation after a restart, and is removed by
 rewriting the record. `refused` marks the key of a refused or lost creation
-(§3.2, §5.4): it is never chosen for a write (§5.2) and is kept only until
-the device's rows under it are repaired. The lineage records also give the runtime its
-epoch-to-space lookup ([migrations](E2EE_MIGRATIONS.md) §3.9).
+(§3.2, §5.4): it is kept for good, is never chosen for a write (§5.2), and
+still opens the cells this device wrote under it. The lineage records also
+give the runtime its epoch-to-space lookup ([migrations](E2EE_MIGRATIONS.md) §3.9).
 
 ### 6.3 Binding
 
@@ -2693,7 +2729,7 @@ Refusal codes:
 | `no-other-device`                  | A removal request with no other active device to complete it (§2.8).                                                                                                      |
 | `unsupported-recipient`            | A recipient device, recovery root or account has no key of the selected mechanism (§0, §2.12).                                                                            |
 | `account-reset-not-allowed`        | An account reset by a device-account session, or where the application has not enabled `allowAccountReset` (§2.11).                                                       |
-| `space-pending`                    | An encrypted write to a space that has no valid root, after this device's creation of it was refused while the client runs (§3.2).                                        |
+| `space-pending`                    | A write to a space with no valid root after this device's creation was refused in this run (§3.2), or offline with competing roots before a chain read (§5.2).            |
 | `space-create-refused`             | The authority refused the root itself, staged with a write or by `createSpace` (§3.2); only that transaction fails, and the device stops automatic creation of the space. |
 | `rotation-needs-key`               | A rotation by a device that holds no authenticated key of the current version (§3.5), or a recovery rotation by one that holds no version at all.                         |
 | `device-account-identity-mismatch` | A device-account root written with an identity whose key does not derive the account ID (§2.3).                                                                           |
@@ -2853,6 +2889,21 @@ Limits:
   space. Nothing enforces it (§3.8); beyond it, costs grow past what the
   first release is designed for, and members' apps are told
   (`space-over-member-limit`).
+- **A space's chain is the one the server last showed.** Spaces have no
+  floor (§6.3a), but a read never rolls the chain a device knows back: one
+  that shows a prefix of it, or the same chain again, changes nothing. Only
+  a read that names another root, shows versions that are not a prefix of
+  the known ones (later versions, or a fork where both have a version), or
+  is newly unresolved replaces it. A server that leaves rows out of reads
+  can still withhold a later version, so that the device reports it as
+  invalid until a read shows it; can switch the device to another valid
+  root of the address, or another branch of a fork; and, where the device
+  holds keys of two roots of one address, so choose which of them it
+  writes under. Before its first read in a session, such a device reads
+  the chain before it writes (§5.2), so it never writes under a root no
+  read of the session showed. A device holding one root writes under it as
+  its last read showed. It cannot forge a chain: every root and
+  successor is signed and checked (§3.3).
 - **Any updater can add roots.** The server does not limit roots per space
   (R15). Roots after the first valid one are ignored by every client (§3.2);
   they cost storage only, and a creator whose root lost repairs its own rows.

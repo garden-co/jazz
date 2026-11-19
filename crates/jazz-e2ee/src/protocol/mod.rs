@@ -23,10 +23,14 @@
 //!   authentication and account sealing key validity.
 //! - [`space`]: spaces (§3): the space's root, its chain, key acquisition,
 //!   who lacks a version, the needs-rotation mark and record builders.
+//! - [`content`]: content under held keys (§4–§6): sealing and opening
+//!   cells and streams, key selection, equality tokens, held-key records,
+//!   repair of refused creations and schema conversion helpers.
 //! - [`position`]: accepted positions and the checks of one ledger read.
 //! - [`error`]: the protocol's failures and their codes (§7).
 
 pub mod account;
+pub mod content;
 pub mod derive;
 pub mod device_account;
 pub mod domain;
