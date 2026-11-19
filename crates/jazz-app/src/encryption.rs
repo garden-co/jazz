@@ -65,8 +65,8 @@ impl EncryptionConfig {
         }
     }
 
-    /// A private store of a foreign language, answered request by request
-    /// (see [`StoreSource::Calls`]'s contract in the crate's docs).
+    /// A private store of a foreign language, answered request by request.
+    /// See the [store callback contract](jazz_e2ee_client::host::bridge).
     pub fn store_calls(call: impl Fn(String) -> (bool, String) + Send + Sync + 'static) -> Self {
         Self {
             environment: "dev".to_owned(),
