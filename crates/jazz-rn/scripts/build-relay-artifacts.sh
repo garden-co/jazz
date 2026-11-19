@@ -27,7 +27,8 @@ const source = execFileSync(
   [
     "-C", root, "ls-tree", "-r", "--full-tree", "HEAD", "--",
     "Cargo.lock", "Cargo.toml",
-    "crates/jazz", "crates/jazz-compression", "crates/jazz-native-relay", "crates/jazz-native-transport",
+    "crates/jazz", "crates/jazz-compression", "crates/jazz-e2ee", "crates/jazz-e2ee-client",
+    "crates/jazz-native-relay", "crates/jazz-native-transport",
     "crates/jazz-rn/scripts/build-relay-artifacts.sh",
   ],
 );
@@ -102,7 +103,7 @@ case "$platform" in
     )
     for android_abi in "${!rust_targets[@]}"; do
       rust_target=${rust_targets[$android_abi]}
-      cargo ndk -t "$android_abi" rustc --manifest-path "$relay_manifest" --crate-type staticlib --profile release-mobile
+      cargo ndk -t "$android_abi" rustc --manifest-path "$relay_manifest" --features e2ee-client --crate-type staticlib --profile release-mobile
       mkdir -p "$stage/$android_abi"
       cp "$root/target/$rust_target/release-mobile/libjazz_native_relay.a" "$stage/$android_abi/"
     done
@@ -122,7 +123,7 @@ case "$platform" in
     stage_header
     simulator_targets=(aarch64-apple-ios-sim x86_64-apple-ios)
     for target in "$device_target" "${simulator_targets[@]}"; do
-      cargo rustc --manifest-path "$relay_manifest" --target "$target" --crate-type staticlib --profile release-mobile
+      cargo rustc --manifest-path "$relay_manifest" --features e2ee-client --target "$target" --crate-type staticlib --profile release-mobile
     done
     staging=$(mktemp -d)
     trap 'rm -rf "$staging"' EXIT

@@ -2533,6 +2533,11 @@ test("relay artifact staging targets every supported Android ABI and iOS framewo
   assert.match(script, /\[armeabi-v7a\]=armv7-linux-androideabi/);
   assert.match(script, /\[x86_64\]=x86_64-linux-android/);
   assert.doesNotMatch(script, /i686-linux-android|\[x86\]/);
+  assert.match(script, /cargo ndk [^\n]+ --features e2ee-client --crate-type staticlib/);
+  assert.match(
+    script,
+    /cargo rustc [^\n]+ --features e2ee-client --target "\$target" --crate-type staticlib/,
+  );
   assert.match(script, /JazzNativeRelay\.xcframework/);
   assert.match(script, /aarch64-apple-ios-sim x86_64-apple-ios/);
   assert.match(script, /simulator_stage=.*simulator/);
@@ -2612,6 +2617,8 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
       "Cargo.toml",
       "crates/jazz",
       "crates/jazz-compression",
+      "crates/jazz-e2ee",
+      "crates/jazz-e2ee-client",
       "crates/jazz-native-relay",
       "crates/jazz-native-transport",
       "crates/jazz-rn/scripts/build-relay-artifacts.sh",
@@ -2823,6 +2830,8 @@ ${
     for (const transitiveInput of [
       "crates/jazz/layers/db/",
       "crates/jazz-compression/",
+      "crates/jazz-e2ee/",
+      "crates/jazz-e2ee-client/",
       "crates/jazz-native-transport/",
     ]) {
       const entry = nativeSourceInventory
@@ -3149,6 +3158,7 @@ test("release, preview, and labeled platform gates seal and link the staged rela
     alphaPublish,
     previewBuild,
     rnWorkflow,
+    rnDeviceWorkflow,
     fixturePreparation,
     artifactScript,
     verifier,
@@ -3164,6 +3174,10 @@ test("release, preview, and labeled platform gates seal and link the staged rela
     readFile(new URL("../../../.github/workflows/preview-build.yml", import.meta.url), "utf8"),
     readFile(
       new URL("../../../.github/workflows/rn-native-artifacts.yml", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../../../.github/workflows/rn-device-acceptance.yml", import.meta.url),
       "utf8",
     ),
     readFile(
@@ -3324,12 +3338,34 @@ test("release, preview, and labeled platform gates seal and link the staged rela
     "Cargo.toml",
     "crates/jazz",
     "crates/jazz-compression",
+    "crates/jazz-e2ee",
+    "crates/jazz-e2ee-client",
     "crates/jazz-native-relay",
     "crates/jazz-native-transport",
   ]) {
-    assert.ok(artifactScript.includes(nativeInput), `artifact fingerprint omits ${nativeInput}`);
-    assert.ok(verifier.includes(nativeInput), `artifact verifier omits ${nativeInput}`);
+    const fingerprintPath = JSON.stringify(nativeInput);
+    assert.ok(
+      artifactScript.includes(fingerprintPath),
+      `artifact fingerprint omits ${nativeInput}`,
+    );
+    assert.ok(verifier.includes(fingerprintPath), `artifact verifier omits ${nativeInput}`);
     assert.ok(rnWorkflow.includes(nativeInput), `native workflow receipt omits ${nativeInput}`);
+  }
+  for (const [workflow, event] of [
+    [rnWorkflow, "push"],
+    [rnDeviceWorkflow, "pull_request"],
+  ]) {
+    const triggerPaths = parse(workflow).on[event].paths;
+    const cacheInputs = [...workflow.matchAll(/hashFiles\(([^\n]+)\)/g)]
+      .map(([, inputs]) => inputs)
+      .filter((inputs) => inputs.includes("'crates/jazz-native-relay/**'"));
+    assert.equal(cacheInputs.length, 2, `${event} must have Android and iOS Rust cache keys`);
+    for (const input of ["crates/jazz-e2ee/**", "crates/jazz-e2ee-client/**"]) {
+      assert.ok(triggerPaths.includes(input), `${event} trigger omits ${input}`);
+      for (const inputs of cacheInputs) {
+        assert.ok(inputs.includes(`'${input}'`), `${event} Rust cache key omits ${input}`);
+      }
+    }
   }
   assert.match(packageBuild, /cargo-ndk@\$\{\{ env\.JAZZ_RN_CARGO_NDK_VERSION \}\}/);
   assert.match(packageBuild, /rn-packages\.mjs pack/);

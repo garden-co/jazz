@@ -11,6 +11,8 @@ on:
       - "crates/jazz-native-relay/**"
       - "crates/jazz/**"
       - "crates/jazz-compression/**"
+      - "crates/jazz-e2ee/**"
+      - "crates/jazz-e2ee-client/**"
       - "crates/jazz-native-transport/**"
       - "crates/jazz-napi/**"
       - "crates/jazz-wasm/**"
@@ -101,7 +103,7 @@ jobs:
         with:
           cache-on-failure: true
           prefix-key: rn-device-ios-macos-15
-          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-native-transport/**', 'crates/jazz-napi/**', 'crates/jazz-wasm/**', 'dev/artifacts/**') }}
+          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-e2ee/**', 'crates/jazz-e2ee-client/**', 'crates/jazz-native-transport/**', 'crates/jazz-napi/**', 'crates/jazz-wasm/**', 'dev/artifacts/**') }}
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
@@ -206,7 +208,7 @@ jobs:
         with:
           cache-on-failure: true
           prefix-key: rn-device-android-ubuntu-2404
-          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-native-transport/**', 'crates/jazz-napi/**', 'crates/jazz-wasm/**', 'dev/artifacts/**') }}
+          key: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/jazz-native-relay/**', 'crates/jazz-rn/**', 'crates/jazz/**', 'crates/jazz-compression/**', 'crates/jazz-e2ee/**', 'crates/jazz-e2ee-client/**', 'crates/jazz-native-transport/**', 'crates/jazz-napi/**', 'crates/jazz-wasm/**', 'dev/artifacts/**') }}
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: .cache/android-device-acceptance

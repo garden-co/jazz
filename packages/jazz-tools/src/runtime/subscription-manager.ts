@@ -14,6 +14,7 @@ import type {
   WasmRow,
 } from "../drivers/types.js";
 import { isValidUtf8 } from "./util.js";
+import { cloneRowData } from "./structural-values.js";
 
 export const RowChangeKind = {
   Added: 0 as const,
@@ -704,7 +705,7 @@ export class SubscriptionManager<T extends { id: string }> {
         if (edit.Insert.row.id !== id) {
           throw new Error("terminal insert row key does not match its edit key");
         }
-        const value: Value = { type: "Row", value: cloneTerminalRow(edit.Insert.row) };
+        const value: Value = { type: "Row", value: cloneRowData(edit.Insert.row) };
         setTerminalChildAddress(value, key);
         removeTerminalValue(values, key);
         values.splice(Math.max(0, Math.min(edit.Insert.index, values.length)), 0, value);
@@ -716,7 +717,7 @@ export class SubscriptionManager<T extends { id: string }> {
         if (edit.Update.row.id !== id) {
           throw new Error("terminal update row key does not match its edit key");
         }
-        const value: Value = { type: "Row", value: cloneTerminalRow(edit.Update.row) };
+        const value: Value = { type: "Row", value: cloneRowData(edit.Update.row) };
         setTerminalChildAddress(value, key);
         values[index] = value;
       } else if ("Remove" in edit) {
@@ -753,7 +754,7 @@ export class SubscriptionManager<T extends { id: string }> {
     if (!retained) throw new Error(`terminal child edit addressed missing root ${rootId}`);
     if (writableRoots.has(rootId)) return retained;
 
-    const writable = cloneTerminalRow(retained);
+    const writable = cloneRowData(retained);
     this.terminalRows.set(rootId, writable);
     writableRoots.add(rootId);
     return writable;
@@ -1179,48 +1180,6 @@ function terminalValueIndex(values: Value[], key: string): number {
     }
   }
   return values.findIndex((value) => (value as OccurrenceValue)[terminalChildOccurrence] === key);
-}
-
-function cloneTerminalRow(row: WasmRow): WasmRow {
-  return cloneTerminalGraph(row, new WeakMap<object, unknown>());
-}
-
-/** Clone the positional tree while preserving hidden named-value maps and aliases. */
-function cloneTerminalGraph<T>(value: T, seen: WeakMap<object, unknown>): T {
-  if (typeof value !== "object" || value === null) return value;
-  const existing = seen.get(value);
-  if (existing !== undefined) return existing as T;
-  if (value instanceof Uint8Array) {
-    const clone = value.slice();
-    seen.set(value, clone);
-    return clone as T;
-  }
-  if (value instanceof Map) {
-    const clone = new Map<unknown, unknown>();
-    seen.set(value, clone);
-    for (const [key, entry] of value) {
-      clone.set(cloneTerminalGraph(key, seen), cloneTerminalGraph(entry, seen));
-    }
-    return clone as T;
-  }
-  if (Array.isArray(value)) {
-    const clone: unknown[] = [];
-    seen.set(value, clone);
-    for (const entry of value) clone.push(cloneTerminalGraph(entry, seen));
-    return clone as T;
-  }
-
-  const clone = Object.create(Object.getPrototypeOf(value)) as object;
-  seen.set(value, clone);
-  for (const key of Reflect.ownKeys(value)) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor) continue;
-    if ("value" in descriptor) {
-      descriptor.value = cloneTerminalGraph(descriptor.value, seen);
-    }
-    Object.defineProperty(clone, key, descriptor);
-  }
-  return clone as T;
 }
 
 function removeTerminalValue(values: Value[], id: string): boolean {

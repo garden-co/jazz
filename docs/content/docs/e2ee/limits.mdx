@@ -18,9 +18,9 @@ languageTabs: backend
 - **No default store.** The app supplies the private store and its protection.
 - **Node, the browser and the native clients.** Node (`createJazzClient` from `jazz-tools/backend`), the
   web client (`createJazzClient` from `jazz-tools/client`, also the client for Deno, Bun and
-  command-line apps with a bearer), and the Rust, Swift, Kotlin and Go clients (see
-  [Encryption in Rust, Swift, Kotlin and Go](/docs/e2ee/native)).
-- **What the native clients do not do yet.**
+  command-line apps with a bearer), and the Rust, Swift, Kotlin, Go, React Native and Expo clients.
+  See [Encryption in native apps](/docs/e2ee/native).
+- **What the Rust, Swift, Kotlin and Go clients do not do yet.**
   - A subscription holds no key watch. Keys reach a device through the pass that runs at start and on
     reconnect, through reads that left rows out for want of a key, and when the app calls
     `keysDeliver`; a member added while another member's device is running may wait for that device's
@@ -31,8 +31,6 @@ languageTabs: backend
     online.
   - The Swift, Kotlin and Go `Session` (account switching) takes no private store yet: open an encrypted
     app with a client instead.
-  - React Native: the relay opens an encrypted app in Rust; the JavaScript calls and the store are not
-    wired.
 - **Persistent browser storage on older Jazz versions.** On versions without the shared-worker read
   fix from [Jazz #6152](https://github.com/garden-co/jazz/pull/6152), a transaction can stall between
   reads and `db.encryption.ready()` can time out. Use in-page storage (`driver: { type: "memory" }`)

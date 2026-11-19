@@ -349,6 +349,75 @@ export class NativeForegroundDb {
     return this.closed || this.runtime.isClosed?.() === true;
   }
 
+  async openEncryption(): Promise<void> {
+    for (;;) {
+      const response = this.execute({ type: "encryptionOpen" });
+      if (response.type === "operationError") throw foregroundOperationError(response);
+      if (response.type !== "encryptionOpen") return unexpected("encryptionOpen", response.type);
+      if (response.ready) return;
+      await new Promise<void>((resolve) => setTimeout(resolve, 2));
+    }
+  }
+
+  takeStoreRequests(): string[] {
+    if (this.closed || this.runtime.isClosed?.()) return [];
+    const response = this.execute({ type: "takeStoreRequests" });
+    if (response.type === "operationError") throw foregroundOperationError(response);
+    if (response.type !== "storeRequests") return unexpected("takeStoreRequests", response.type);
+    return response.requests;
+  }
+
+  replyStore(id: string, ok: boolean, payload: string): boolean {
+    if (this.closed || this.runtime.isClosed?.()) return false;
+    const response = this.execute({ type: "replyStore", id, ok, payload });
+    if (response.type === "operationError") throw foregroundOperationError(response);
+    if (response.type !== "storeReply") return unexpected("replyStore", response.type);
+    return response.accepted;
+  }
+
+  async encryptionCall(op: string, args?: Record<string, unknown> | null): Promise<string> {
+    // The relay drives readiness even while its owner is busy. Polling that
+    // operation must leave JS free to answer private store requests.
+    const response = await this.completeOperation(this.encryptionCommand(op, args), op !== "ready");
+    return this.encryptionResult(op, response);
+  }
+
+  encryptionState(): string {
+    return this.encryptionResult("state", this.encryptionCommand("state"));
+  }
+
+  encryptionSpaces(): string {
+    return this.encryptionResult("spaces", this.encryptionCommand("spaces"));
+  }
+
+  encryptionUseSpace(table: string, id: string, open: boolean): void {
+    this.encryptionResult("useSpace", this.encryptionCommand("useSpace", { table, id, open }));
+  }
+
+  encryptionSetOnline(online: boolean): void {
+    this.encryptionResult("setOnline", this.encryptionCommand("setOnline", { online }));
+  }
+
+  takeEncryptionReports(): string[] {
+    if (this.closed || this.runtime.isClosed?.()) return [];
+    const response = this.execute({ type: "takeEncryptionReports" });
+    if (response.type === "operationError") throw foregroundOperationError(response);
+    if (response.type !== "encryptionReports") {
+      return unexpected("takeEncryptionReports", response.type);
+    }
+    return response.reports;
+  }
+
+  private encryptionCommand(op: string, args?: Record<string, unknown> | null): ForegroundResponse {
+    return this.execute({ type: "encryptionCall", op, argsJson: JSON.stringify(args ?? {}) });
+  }
+
+  private encryptionResult(op: string, response: ForegroundResponse): string {
+    if (response.type === "operationError") throw foregroundOperationError(response);
+    if (response.type !== "encryptionResult") return unexpected(op, response.type);
+    return response.json;
+  }
+
   nativeSessionMetadata(): {
     node: Uint8Array;
     registryAuthority: string;
@@ -808,7 +877,7 @@ export class NativeForegroundDb {
     return {
       push: async (chunk: Uint8Array): Promise<void> => {
         assertOpen();
-        const pushed = await this.completeMutationOperation(
+        const pushed = await this.completeOperation(
           this.execute({ type: "pushStreamingMutation", upload, chunk }),
         );
         if (pushed.type === "operationError") throw foregroundOperationError(pushed);
@@ -817,7 +886,7 @@ export class NativeForegroundDb {
       },
       finishInTransaction: async (): Promise<void> => {
         assertOpen();
-        const finished = await this.completeMutationOperation(
+        const finished = await this.completeOperation(
           this.execute({ type: "finishStreamingMutation", upload }),
         );
         closed = true;
@@ -846,7 +915,7 @@ export class NativeForegroundDb {
         const admitted = this.execute({ type: "abortStreamingMutation", upload });
         if (admitted.type === "operationError") throw foregroundOperationError(admitted);
         closed = true;
-        const aborted = await this.completeMutationOperation(admitted);
+        const aborted = await this.completeOperation(admitted);
         if (aborted.type === "operationError") throw foregroundOperationError(aborted);
         if (aborted.type !== "streamingMutationAborted")
           return unexpected("abortStreamingMutation", aborted.type);
@@ -855,16 +924,40 @@ export class NativeForegroundDb {
     };
   }
 
-  private async completeMutationOperation(
+  private async completeOperation(
     response: ForegroundResponse,
+    driveCore = true,
   ): Promise<ForegroundResponse> {
     while (response.type === "pending") {
       const operation = response.operation;
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      this.tick();
-      response = this.execute({ type: "poll", operation });
+      try {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        if (driveCore) this.tick();
+        response = this.execute({ type: "poll", operation });
+      } catch (error) {
+        this.cancelInterruptedOperation(operation, driveCore);
+        throw error;
+      }
     }
     return response;
+  }
+
+  private cancelInterruptedOperation(operation: number, probe: boolean): void {
+    if (this.closed) return;
+    // A probe can ask the owner to drive. Readiness uses its nonblocking
+    // cancel directly and lets the native handle check its own liveness.
+    if (probe) {
+      try {
+        if (this.isNativeForegroundClosed()) return;
+      } catch {
+        // A failed probe leaves native cancellation to validate the handle.
+      }
+    }
+    try {
+      this.execute({ type: "cancel", operation });
+    } catch {
+      // Preserve the error that interrupted the wait.
+    }
   }
 
   private directMutation(

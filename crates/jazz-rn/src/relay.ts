@@ -178,6 +178,11 @@ export type NativeForegroundCommand =
   | { type: "uploadStatus" }
   /** Delete the scope's local store (ABI 6). */
   | { type: "deleteStore" }
+  | { type: "encryptionOpen" }
+  | { type: "takeStoreRequests" }
+  | { type: "replyStore"; id: string; ok: boolean; payload: string }
+  | { type: "encryptionCall"; op: string; argsJson: string }
+  | { type: "takeEncryptionReports" }
   | {
       type: "beginStreamingMutation";
       mutation: "insert" | "update" | "upsert";
@@ -273,7 +278,12 @@ export type NativeForegroundResponse =
   | { type: "slowQueryThresholdSet" }
   | { type: "pendingUploadCount"; count: number }
   | { type: "uploadStatus"; statusJson: string }
-  | { type: "storeDeleted"; pendingUploads: number };
+  | { type: "storeDeleted"; pendingUploads: number }
+  | { type: "encryptionOpen"; ready: boolean }
+  | { type: "storeRequests"; requests: string[] }
+  | { type: "storeReply"; accepted: boolean }
+  | { type: "encryptionResult"; json: string }
+  | { type: "encryptionReports"; reports: string[] };
 
 export type NativeForegroundSubscriptionEvent =
   | {
@@ -427,6 +437,24 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
   if (command.type === "pendingUploadCount") return Uint8Array.of(38);
   if (command.type === "uploadStatus") return Uint8Array.of(39);
   if (command.type === "deleteStore") return Uint8Array.of(40);
+  if (command.type === "encryptionOpen") return Uint8Array.of(41);
+  if (command.type === "takeStoreRequests") return Uint8Array.of(42);
+  if (command.type === "replyStore") {
+    return concatForegroundBytes(
+      Uint8Array.of(43),
+      encodeForegroundString(command.id),
+      Uint8Array.of(command.ok ? 1 : 0),
+      encodeForegroundString(command.payload),
+    );
+  }
+  if (command.type === "encryptionCall") {
+    return concatForegroundBytes(
+      Uint8Array.of(44),
+      encodeForegroundString(command.op),
+      encodeForegroundString(command.argsJson),
+    );
+  }
+  if (command.type === "takeEncryptionReports") return Uint8Array.of(45);
   if (command.type === "takeSlowQueryReport") {
     return concatForegroundBytes(
       Uint8Array.of(36),
@@ -846,6 +874,27 @@ export function decodeNativeForegroundResponse(bytes: Uint8Array): NativeForegro
       pendingUploads: decodeForegroundU64(bytes.subarray(1), "deleted store's pending uploads"),
     };
   }
+  if (tag === 32 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1)) {
+    return { type: "encryptionOpen", ready: bytes[1] === 1 };
+  }
+  if (tag === 33) {
+    return { type: "storeRequests", requests: decodeForegroundStrings(bytes, "store requests") };
+  }
+  if (tag === 34 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1)) {
+    return { type: "storeReply", accepted: bytes[1] === 1 };
+  }
+  if (tag === 35) {
+    return {
+      type: "encryptionResult",
+      json: decodeForegroundString(bytes.subarray(1), "encryption result"),
+    };
+  }
+  if (tag === 36) {
+    return {
+      type: "encryptionReports",
+      reports: decodeForegroundStrings(bytes, "encryption reports"),
+    };
+  }
   if (
     tag === 16 &&
     bytes.length >= 5 &&
@@ -988,6 +1037,23 @@ function decodeForegroundPrefixedString(
 function decodeForegroundString(bytes: Uint8Array, label: string): string {
   const encoded = decodeForegroundBytes(bytes, label);
   return decodeForegroundUtf8(encoded, 0, encoded.byteLength, label);
+}
+
+/** A postcard vector of length-prefixed strings, following the command tag. */
+function decodeForegroundStrings(bytes: Uint8Array, label: string): string[] {
+  let end = 1;
+  while (end < bytes.length && (bytes[end]! & 0x80) !== 0) end++;
+  const count = decodeForegroundU64(bytes.subarray(1, end + 1), `${label} count`);
+  let offset = end + 1;
+  if (count > bytes.length - offset) throw new Error(`Malformed native operation ${label}`);
+  const strings: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const [value, next] = decodeForegroundPrefixedString(bytes, offset, label);
+    strings.push(value);
+    offset = next;
+  }
+  if (offset !== bytes.length) throw new Error(`Malformed native operation ${label}`);
+  return strings;
 }
 
 function decodeForegroundSubscriptionEvents(

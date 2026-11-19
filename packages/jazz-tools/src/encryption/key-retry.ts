@@ -37,10 +37,10 @@ export function retryAfterKey<T>(
     return (async () => {
       const deadline = Date.now() + waitMs;
       let error: unknown = first;
-      for (;;) {
+      do {
         // Making the space ready is bounded by the same window.
         const left = Math.max(0, deadline - Date.now());
-        const ready = await within(prepare(space), left).catch(() => false);
+        const ready = await prepareWithin(prepare(space), left);
         if (ready) {
           try {
             return operation();
@@ -49,17 +49,18 @@ export function retryAfterKey<T>(
             error = next;
           }
         }
-        if (Date.now() >= deadline) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 200));
-      }
+        const delay = Math.min(200, deadline - Date.now());
+        if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+      } while (Date.now() < deadline);
+      throw error;
     })();
   }
 }
 
-/** `work`'s result, or a rejection once `ms` have passed. */
-function within<T>(work: Promise<T>, ms: number): Promise<T> {
+/** A ready space, or `false` once the wait expires. Preparation failures propagate. */
+function prepareWithin(work: Promise<boolean>, ms: number): Promise<boolean> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("timed out")), ms);
+    const timer = setTimeout(() => resolve(false), ms);
     work.then(
       (value) => {
         clearTimeout(timer);

@@ -28,6 +28,7 @@ import type { RemoteLinkState } from "./remote-link-state.js";
 import type { LinkFailure, LinkStatus, UploadStatus } from "./sync-status.js";
 import { toError } from "./util.js";
 import { parseUuidBytes } from "./hex.js";
+import { cloneRowData } from "./structural-values.js";
 
 /** @internal Runtime operations bound to the currently executing preparation. */
 export type TransactionPreparationIO = Pick<
@@ -1521,7 +1522,7 @@ export class JazzClient {
   /** @internal Prepare a return value without publishing or staging a physical row. */
   previewInsertInternal(table: string, values: InsertValues, objectId?: string): Row {
     if (!this.runtime.previewInsert) throw new Error("This runtime cannot prepare an inserted row");
-    return this.runtime.previewInsert(table, structuredClone(values), objectId);
+    return this.runtime.previewInsert(table, cloneRowData(values), objectId);
   }
 
   commitTransaction(id: OpenTransactionId): WriteHandle {
