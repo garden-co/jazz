@@ -2,6 +2,8 @@ name: ci-speed oidc probe
 on:
   push:
     branches: ["ci-speed/apple-oidc"]
+  pull_request:
+    branches: ["ci-speed/apple-oidc"]
 permissions:
   contents: read
   id-token: write
