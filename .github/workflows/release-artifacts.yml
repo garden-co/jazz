@@ -1,0 +1,480 @@
+name: Release artifacts
+
+# Builds every release artifact once per commit, so the release candidate gate
+# and the publish workflows verify and ship these files instead of rebuilding:
+#   release-server     jazz-tools-linux-{x64,arm64}, SHA256SUMS
+#                      (+ debug-symbols-jazz-tools-linux-* from the build)
+#   release-npm        every npm tarball, packed exactly as publish packs them,
+#                      NPM-SHA256SUMS, rn-packages.json
+#   release-languages  libjazz_ffi-<platform>.tar.gz, jazz-ffi-bindings.tar.gz,
+#                      jazz-kotlin-<v>.jar, jazz-kotlin-android-<v>.aar,
+#                      libjazz_ffi-source.txt, SHA256SUMS-languages
+#   release-maven      the tools/jazz tree of a local Maven repository, signed
+#                      with a throwaway key (publish re-signs it)
+#   release-swift      JazzFFI.xcframework.zip, JazzFFI.xcframework.zip.checksum
+#   release-swift-mirror  the assembled garden-co/jazz-swift tree, verified
+#   release-manifest   manifest.json: sha, tree, version, run, publish order,
+#                      every file's artifact and sha256
+# plus the intermediate artifacts publish-jazz-tools-alpha.yml downloads
+# today (pkg-jazz-tools, pkg-jazz-wasm, pkg-jazz-napi, pkg-jazz-rn,
+# pkg-create-jazz, inspector-prebuilt), under the same names.
+#
+# Versions are baked in: the Cargo workspace version reaches the server and
+# jazz-napi binaries (jazz-otel's service.version), and the package.json
+# versions reach the tarballs and the Kotlin jar. So only a run on the Version
+# Packages head (changeset-release/release, dispatched by
+# changesets-release-pr.yml, since GITHUB_TOKEN pushes trigger nothing), or
+# on a commit with the same tree, carries what a release ships. Runs on main
+# and release keep the build caches warm and catch packaging breakage after
+# merge. Consumers find a run by commit (head_sha) or by tree
+# (manifest.json `tree`, the way publish matches the release merge commit to
+# the Version Packages head).
+on:
+  push:
+    branches: [main, release]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or commit to build."
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      ref:
+        description: "Commit to build."
+        required: true
+        type: string
+    outputs:
+      run_id:
+        description: The run holding the artifacts.
+        value: ${{ jobs.manifest.outputs.run_id }}
+
+permissions:
+  contents: read
+
+concurrency:
+  # A newer main commit supersedes an older one's build; release builds and
+  # dispatched builds always finish.
+  group: release-artifacts-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('{0}-{1}', inputs.ref || github.ref, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+env:
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.repository_id }}
+  JAZZ_RN_CARGO_NDK_VERSION: 4.1.2
+
+jobs:
+  resolve:
+    name: Resolve the commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      tree: ${{ steps.resolve.outputs.tree }}
+      version: ${{ steps.resolve.outputs.version }}
+      release: ${{ steps.resolve.outputs.release }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - id: resolve
+        env:
+          # The branch the run belongs to (a dispatch's or caller's ref; inputs.ref
+          # is usually a SHA).
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          version=$(node -p 'require("./packages/jazz-tools/package.json").version')
+          # Attest only what a release can ship: the release branch and the
+          # Version Packages head (by name or by a dispatch of either).
+          release=false
+          case "${REF_NAME}" in
+            release|refs/heads/release|changeset-release/*|refs/heads/changeset-release/*) release=true ;;
+          esac
+          {
+            echo "sha=${sha}"
+            echo "tree=$(git rev-parse 'HEAD^{tree}')"
+            echo "version=${version}"
+            echo "release=${release}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building ${version} at ${sha} (tree $(git rev-parse 'HEAD^{tree}'), release=${release})"
+
+  packages:
+    name: Packages
+    needs: resolve
+    uses: ./.github/workflows/build-jazz-packages.yml
+    with:
+      ref: ${{ needs.resolve.outputs.sha }}
+      include_rn: true
+
+  # The called workflows' publish jobs never run here (dry-run, publish:
+  # false), but GitHub checks every called job's permissions against the
+  # caller's before it evaluates their conditions.
+  languages:
+    name: Languages
+    needs: resolve
+    permissions:
+      contents: write
+      attestations: write
+      id-token: write
+    uses: ./.github/workflows/attach-language-artifacts.yml
+    with:
+      version: ${{ needs.resolve.outputs.version }}
+      ref: ${{ needs.resolve.outputs.sha }}
+      dry-run: true
+
+  swift:
+    name: Swift
+    needs: resolve
+    permissions:
+      contents: write
+    uses: ./.github/workflows/swift-mirror.yml
+    with:
+      ref: ${{ needs.resolve.outputs.sha }}
+      version: ${{ needs.resolve.outputs.version }}
+      publish: false
+
+  # The server binaries, as "Publish jazz-tools alpha" attaches them.
+  server:
+    name: Server binaries
+    needs: packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-tools-linux-*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          test -s jazz-tools-linux-x64
+          test -s jazz-tools-linux-arm64
+          sha256sum jazz-tools-linux-x64 jazz-tools-linux-arm64 > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-server
+          path: dist/*
+          if-no-files-found: error
+
+  # Every npm tarball, packed the way publish-jazz-tools-alpha.yml packs and
+  # checks them, so publish uploads these exact files.
+  npm:
+    name: Pack npm tarballs
+    needs: [resolve, packages]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+      JAZZ_NATIVE_RELAY_SOURCE_REVISION: ${{ needs.resolve.outputs.sha }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-toolchain: ""
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-tools
+          path: packages/jazz-tools
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-wasm
+          path: crates/jazz-wasm
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-napi
+          path: crates/jazz-napi
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-rn
+          path: crates/jazz-rn
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-create-jazz
+          path: packages/create-jazz
+
+      - name: Verify the built payloads
+        run: |
+          set -euo pipefail
+          test -f crates/jazz-wasm/pkg/jazz_wasm_bg.wasm
+          test -f crates/jazz-wasm/pkg/jazz_wasm.js
+          test -f crates/jazz-wasm/pkg/jazz_wasm.d.ts
+          for platform in linux-x64-gnu linux-arm64-gnu darwin-x64 darwin-arm64 win32-x64-msvc; do
+            test -f "crates/jazz-napi/npm/${platform}/jazz-napi.${platform}.node"
+          done
+          test -f packages/jazz-tools/dist/index.js
+          test -f packages/jazz-tools/dist/index.d.ts
+          test -f packages/jazz-tools/dist/backend/index.js
+          test -f packages/jazz-tools/dist/react/index.js
+          test -f packages/jazz-tools/dist/permissions/index.js
+          node dev/artifacts/rn-packages.mjs verify
+
+      # As publish does (assemble already did it; idempotent).
+      - name: Sync jazz-napi platform package versions and optional deps
+        run: |
+          cd crates/jazz-napi
+          pnpm exec napi version --npm-dir npm
+          node -e 'const fs=require("fs");const rootPath="package.json";const pkg=JSON.parse(fs.readFileSync(rootPath,"utf8"));const deps=[];for(const entry of fs.readdirSync("npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const child=JSON.parse(fs.readFileSync(`npm/${entry.name}/package.json`,"utf8"));deps.push([child.name,pkg.version]);}deps.sort((a,b)=>a[0].localeCompare(b[0]));pkg.optionalDependencies=Object.fromEntries(deps);fs.writeFileSync(rootPath,`${JSON.stringify(pkg,null,2)}\n`);'
+
+      - name: Stage inspector overlay assets into jazz-tools
+        run: |
+          pnpm --filter inspector run build:embedded
+          pnpm --filter jazz-tools run stage:inspector-overlay
+
+      - name: Check the lock-stepped versions
+        run: |
+          node -e '
+            const fs = require("fs");
+            const read = (p) => JSON.parse(fs.readFileSync(p, "utf8"));
+            const want = process.env.VERSION;
+            const paths = ["packages/jazz-tools", "packages/create-jazz", "crates/jazz-wasm", "crates/jazz-napi",
+              "crates/jazz-rn", "crates/jazz-rn/npm/android", "crates/jazz-rn/npm/ios",
+              ...fs.readdirSync("crates/jazz-napi/npm").map((d) => `crates/jazz-napi/npm/${d}`)];
+            for (const p of paths) {
+              const { name, version } = read(`${p}/package.json`);
+              if (version !== want) throw new Error(`${name} is ${version}, expected ${want}`);
+            }
+            for (const [name, v] of Object.entries(read("crates/jazz-napi/package.json").optionalDependencies || {}))
+              if (v !== want) throw new Error(`jazz-napi optional dep ${name} is ${v}`);
+            console.log(`all packages at ${want}`);'
+
+      - name: Pack
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/npm"
+          mkdir -p "${out}"
+          for pkg in jazz-wasm jazz-napi jazz-tools create-jazz; do
+            pnpm --filter "${pkg}" pack --pack-destination "${out}"
+          done
+          for dir in crates/jazz-napi/npm/*/; do
+            npm pack "${dir}" --pack-destination "${out}"
+          done
+          JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
+            node dev/artifacts/rn-packages.mjs pack "${out}"
+          ls -la "${out}"
+
+      # publish-jazz-tools-alpha.yml's packed checks, on the packed files.
+      - name: Check the tarballs
+        working-directory: ${{ runner.temp }}/npm
+        run: |
+          set -euo pipefail
+          wasm="jazz-wasm-${VERSION}.tgz"
+          tar -tf "${wasm}" > wasm.txt
+          for f in pkg/jazz_wasm_bg.wasm pkg/jazz_wasm.js pkg/jazz_wasm.d.ts \
+            durable-object/pkg/jazz_wasm_do_bg.wasm durable-object/pkg/jazz_wasm_do.js \
+            durable-object/index.js durable-object/host.js; do
+            grep -qx "package/${f}" wasm.txt || { echo "::error::${wasm} lacks ${f}"; exit 1; }
+          done
+          node "${GITHUB_WORKSPACE}/dev/artifacts/verify-packed-napi.mjs" "jazz-napi-${VERSION}.tgz"
+          for tgz in "jazz-tools-${VERSION}.tgz" "create-jazz-${VERSION}.tgz" "jazz-napi-${VERSION}.tgz"; do
+            tar -xOf "${tgz}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);for(const field of ["dependencies","optionalDependencies","peerDependencies"]){for(const [name,version] of Object.entries(p[field]||{})){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`${p.name}: ${field}.${name} uses workspace protocol (${version})`);}}}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
+          done
+          tar -tf "jazz-tools-${VERSION}.tgz" > tools.txt
+          grep -qx "package/dist/dev/inspector-overlay/embedded/embedded.html" tools.txt
+          grep -qx "package/dist/dev/inspector-overlay/embedded/backend.html" tools.txt
+          tar -xOf "jazz-tools-${VERSION}.tgz" package/dist/backend/inspector-ui-files.js | grep -Fq '"backend.html":'
+          tar -tf "create-jazz-${VERSION}.tgz" > create.txt
+          grep -qx "package/bin/create-jazz.js" create.txt
+          grep -qx "package/dist/index.js" create.txt
+          rm -f wasm.txt tools.txt create.txt
+          # The RN receipt names tarballs by the absolute path they were packed
+          # to; consumers resolve them next to rn-packages.json.
+          node -e '
+            const fs = require("fs"), path = require("path");
+            const receipt = JSON.parse(fs.readFileSync("rn-packages.json", "utf8"));
+            for (const entry of receipt) entry.tarball = path.basename(entry.tarball);
+            fs.writeFileSync("rn-packages.json", JSON.stringify(receipt, null, 2) + "\n");'
+          sha256sum *.tgz > NPM-SHA256SUMS
+          cat NPM-SHA256SUMS
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-npm
+          path: ${{ runner.temp }}/npm/*
+          if-no-files-found: error
+
+  # The Maven Central bundle, built and signed locally with a throwaway key,
+  # from the natives the Kotlin jar in release-languages bundles.
+  maven:
+    name: Maven repository
+    needs: [resolve, languages]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-build
+        with:
+          setup-node: "false"
+          rust-cache: "false"
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: natives-*
+          merge-multiple: true
+          path: natives
+
+      - name: Throwaway signing key
+        run: |
+          set -euo pipefail
+          GNUPGHOME="$(mktemp -d)"
+          export GNUPGHOME
+          gpg --batch --pinentry-mode loopback --passphrase dry-run \
+            --quick-gen-key "Jazz dry run <dry-run@example.invalid>" rsa4096 sign 1d
+          {
+            echo "ORG_GRADLE_PROJECT_signingInMemoryKey<<EOF_KEY"
+            gpg --batch --pinentry-mode loopback --passphrase dry-run --armor --export-secret-keys
+            echo "EOF_KEY"
+            echo "ORG_GRADLE_PROJECT_signingInMemoryKeyPassword=dry-run"
+          } >> "${GITHUB_ENV}"
+
+      - name: Build, sign, check
+        run: bash dev/scripts/publish-kotlin.sh natives local
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-maven
+          path: ~/.m2/repository/tools/jazz
+          if-no-files-found: error
+
+  # Collects the release-* artifacts, writes manifest.json and, for release
+  # runs, attests every file's build provenance.
+  manifest:
+    name: Manifest
+    needs: [resolve, packages, languages, swift, server, npm, maven]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    outputs:
+      run_id: ${{ github.run_id }}
+    env:
+      SHA: ${{ needs.resolve.outputs.sha }}
+      TREE: ${{ needs.resolve.outputs.tree }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: language-artifacts
+          path: out/release-languages
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: JazzFFI.xcframework
+          path: out/release-swift
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-swift-mirror
+          path: out/release-swift-mirror
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-server
+          path: out/release-server
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-npm
+          path: out/release-npm
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-maven
+          path: out/release-maven
+
+      - name: Check and write manifest.json
+        run: |
+          set -euo pipefail
+          cd out
+          (cd release-languages && sha256sum -c SHA256SUMS-languages)
+          (cd release-server && sha256sum -c SHA256SUMS)
+          (cd release-npm && sha256sum -c NPM-SHA256SUMS)
+          test -s release-languages/libjazz_ffi-source.txt
+          test "$(cat release-languages/libjazz_ffi-source.txt)" = "${SHA}"
+          test -s "release-languages/jazz-kotlin-${VERSION}.jar"
+          test -s "release-languages/jazz-kotlin-android-${VERSION}.aar"
+          (cd release-swift && echo "$(cat JazzFFI.xcframework.zip.checksum)  JazzFFI.xcframework.zip" | sha256sum -c -)
+          grep -q "releases/download/v${VERSION}/JazzFFI.xcframework.zip" release-swift-mirror/Package.swift
+          find . -type f | sort | sed 's|^\./||' | xargs sha256sum > "${RUNNER_TEMP}/all.txt"
+          node -e '
+            const fs = require("fs");
+            const files = fs.readFileSync(process.argv[1], "utf8").trim().split("\n").map((line) => {
+              const [sha256, path] = line.split(/\s+/, 2);
+              const [artifact, ...rest] = path.split("/");
+              return { artifact, path: rest.join("/"), sha256 };
+            });
+            const v = process.env.VERSION;
+            const npm = new Set(files.filter((f) => f.artifact === "release-npm").map((f) => f.path));
+            const napiPlatforms = [...npm].filter((f) => f.startsWith("garden-co-jazz-napi-")).sort();
+            const order = [`jazz-wasm-${v}.tgz`, ...napiPlatforms, `jazz-napi-${v}.tgz`,
+              `jazz-rn-android-${v}.tgz`, `jazz-rn-ios-${v}.tgz`, `jazz-rn-${v}.tgz`,
+              `jazz-tools-${v}.tgz`, `create-jazz-${v}.tgz`];
+            const missing = order.filter((f) => !npm.has(f));
+            if (missing.length) throw new Error(`release-npm lacks ${missing.join(", ")}`);
+            const manifest = {
+              schema: 1,
+              sha: process.env.SHA,
+              tree: process.env.TREE,
+              version: v,
+              repository: process.env.GITHUB_REPOSITORY,
+              workflow: "release-artifacts.yml",
+              run_id: Number(process.env.GITHUB_RUN_ID),
+              run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+              publish_order: order,
+              files,
+            };
+            fs.writeFileSync("manifest.json", JSON.stringify(manifest, null, 2) + "\n");
+          ' "${RUNNER_TEMP}/all.txt"
+          echo "$(jq '.files | length' manifest.json) files"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-manifest
+          path: out/manifest.json
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-languages
+          path: out/release-languages/*
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-swift
+          path: out/release-swift/*
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-swift-mirror
+          path: out/release-swift-mirror
+          include-hidden-files: true
+          if-no-files-found: error
+
+      # This run is the release's provenance: verify an asset with
+      # `gh attestation verify <file> --repo garden-co/jazz
+      #  --signer-workflow garden-co/jazz/.github/workflows/release-artifacts.yml`.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: needs.resolve.outputs.release == 'true'
+        with:
+          subject-path: |
+            out/release-server/*
+            out/release-npm/*.tgz
+            out/release-languages/*
+            out/release-swift/JazzFFI.xcframework.zip
+            out/manifest.json

@@ -34,6 +34,20 @@ on:
   pull_request:
     paths:
       - .github/workflows/attach-language-artifacts.yml
+  # release-artifacts.yml builds these once per commit (always a dry run).
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      ref:
+        required: false
+        type: string
+        default: ""
+      dry-run:
+        required: false
+        type: boolean
+        default: true
   workflow_dispatch:
     inputs:
       version:
@@ -55,7 +69,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: attach-language-artifacts-${{ inputs.version || github.ref }}
+  # Called from release-artifacts.yml (github.workflow is then the caller's),
+  # one group per calling run: its dry runs never queue behind, or block, a
+  # real attach of the same version.
+  group: attach-language-artifacts-${{ inputs.version || github.ref }}${{ github.workflow != 'Attach language artifacts' && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: false
 
 env:
@@ -303,9 +320,17 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
+      # Not jazz-*: called from release-artifacts.yml, the run also holds
+      # jazz-napi-*, jazz-wasm-*, jazz-rn-* and jazz-tools-linux-*.
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          pattern: jazz-*
+          pattern: jazz-ffi-*
+          merge-multiple: true
+          path: built
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-kotlin-dist
           merge-multiple: true
           path: built
 
