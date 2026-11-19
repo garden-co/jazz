@@ -300,11 +300,14 @@ jobs:
           tar -tf "jazz-tools-${VERSION}.tgz" > tools.txt
           grep -qx "package/dist/dev/inspector-overlay/embedded/embedded.html" tools.txt
           grep -qx "package/dist/dev/inspector-overlay/embedded/backend.html" tools.txt
-          tar -xOf "jazz-tools-${VERSION}.tgz" package/dist/backend/inspector-ui-files.js | grep -Fq '"backend.html":'
+          # Not `tar | grep -q`: under pipefail, grep's early exit makes tar
+          # fail with SIGPIPE once the file outgrows the pipe buffer.
+          tar -xOf "jazz-tools-${VERSION}.tgz" package/dist/backend/inspector-ui-files.js > inspector-ui-files.js
+          grep -Fq '"backend.html":' inspector-ui-files.js
           tar -tf "create-jazz-${VERSION}.tgz" > create.txt
           grep -qx "package/bin/create-jazz.js" create.txt
           grep -qx "package/dist/index.js" create.txt
-          rm -f wasm.txt tools.txt create.txt
+          rm -f wasm.txt tools.txt create.txt inspector-ui-files.js
           # The RN receipt names tarballs by the absolute path they were packed
           # to; consumers resolve them next to rn-packages.json.
           node -e '

@@ -10,7 +10,7 @@ crates/jazz-wasm/tests/durable-objects/run.sh
 It builds jazz-wasm with the test-only `durable-object-tests` feature into
 `./pkg` and runs `smoke.test.mjs`: a Durable Object writes a short and a
 300 KiB note, reads them back, restarts (a new workerd over the same
-persisted storage), reads them again, and has a callback transaction
+persisted storage), reads them again, and has a mergeable transaction
 refused (a core there accepts finished transactions only).
 
 `host.test.mjs` runs the Jazz core a Durable Object hosts

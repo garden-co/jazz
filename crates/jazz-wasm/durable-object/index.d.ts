@@ -16,5 +16,5 @@ export declare const JazzCore: typeof DurableObject<JazzCoreEnv>;
 /** `JazzCore`, for callers that prefer a factory. */
 export declare function createJazzCore(): typeof JazzCore;
 
-/** The Worker's fetch: every request goes to the app's one object. */
+/** The Worker's fetch: answers /health locally and forwards core requests to the object. */
 export declare function routeJazzRequest(request: Request, env: JazzCoreEnv): Promise<Response>;

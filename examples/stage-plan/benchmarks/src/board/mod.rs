@@ -400,7 +400,8 @@ impl Fixture {
         let projects = (0..PROJECTS).map(|i| row_id(2, i)).collect::<Vec<_>>();
         let task_ids = (0..tasks).map(|i| row_id(3, i)).collect::<Vec<_>>();
 
-        block_on(db.transaction(async |tx| {
+        block_on(async {
+            let tx = db.mergeable_tx().await?;
             for (index, id) in users.iter().copied().enumerate() {
                 tx.insert(
                     "users",
@@ -501,8 +502,8 @@ impl Fixture {
                 )
                 .await?;
             }
-            Ok(())
-        }))
+            tx.commit().await
+        })
         .expect("seed W1 fixture transaction");
 
         let board = prepare_page(&db, "tasks", "project", projects[0], "updated_at");

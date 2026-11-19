@@ -1,0 +1,37 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "c5495dff5d53d5cc9b5a33cbd756107386f0641f263f667724a63e3c2762b549"
+  },
+  "tables": {
+    "boards": {
+      "columns": { "title": "string", "color": "string?", "owner_id": "uuid" },
+      "relations": { "notes": { "reverse": "notes", "relation": "board" } }
+    },
+    "notes": {
+      "columns": { "text": "string", "owner_id": "uuid", "boardId": "uuid?" },
+      "relations": { "board": { "rel": "boards", "column": "boardId" } }
+    }
+  },
+  "history": {
+    "82d3aaff21db": {
+      "tables": {
+        "boards": { "columns": { "title": "string", "owner_id": "uuid" } },
+        "notes": {
+          "columns": {
+            "text": "string",
+            "owner_id": "uuid",
+            "boardId": { "type": "uuid", "optional": true, "references": "boards" }
+          }
+        }
+      }
+    }
+  },
+  "migrations": [
+    {
+      "from": "82d3aaff21db",
+      "migrate": { "boards": { "color": { "add": "string", "default": null } } }
+    }
+  ]
+}

@@ -3,7 +3,7 @@
 // sends everything to one object, which holds the app's store in its own
 // SQL and serves the native server's routes for it:
 //
-//   GET  /health                       200 once the store is open
+//   GET  /ready                        200 once the store is open
 //   GET  /app                          {"appId"}: for the backend's credential
 //   GET  /apps/{x}/ws                  WebSocket: prelude, Hello, then wire frames
 //   POST /apps/{x}/backend/admit       204 for the app's backend
@@ -26,9 +26,9 @@
 //   (`X-Jazz-Backend-Access`, or which secret header is sent) is a
 //   convention between the backend's own calls, not a boundary: whoever
 //   holds the secret is admin. Keep it to the app's backend.
-// - Sockets are held open by the object (`accept()`, no WebSocket
-//   hibernation yet): they drop when the object is evicted, and clients
-//   reconnect. A peer must send its prelude and Hello within
+// - By default, sockets keep the object resident. In hibernate mode the
+//   host restores watches and sends a fresh snapshot on the first matching change.
+//   A peer must send its prelude and Hello within
 //   HANDSHAKE_TIMEOUT_MS, as on a native core.
 // - If the Rust core panics, the trap leaves the wasm instance unusable:
 //   the object drops its core, closes every socket (1011) and replaces the
@@ -106,8 +106,27 @@ export function jazzCoreClass(wasm) {
       this.env = env;
       this.core = null;
       this.sockets = new Map();
-      this.flushQueued = false;
+      this.flushTimer = undefined;
       this.alarmSet = false;
+      this.handlers = new WeakMap();
+      for (const ws of ctx.getWebSockets()) {
+        if (ws.readyState !== WebSocket.OPEN) continue;
+        try {
+          const saved = ws.deserializeAttachment();
+          if (!saved?.length) throw new Error("no resumable session");
+          const core = this.open();
+          const socket = this.guard(() => core.restoreSocket(saved));
+          this.sockets.set(socket, ws);
+          this.bindSocket(ws, core, true, socket);
+        } catch {
+          close(ws, 1012, "Jazz session must reconnect");
+        }
+      }
+      if (this.sockets.size) {
+        this.flush();
+        const core = this.current();
+        if (core) this.guard(() => core.finishSocketRestore());
+      }
     }
 
     open() {
@@ -167,7 +186,7 @@ export function jazzCoreClass(wasm) {
 
     async fetch(request) {
       const path = new URL(request.url).pathname;
-      if (path === "/health") {
+      if (path === "/ready") {
         this.open();
         return new Response("ok");
       }
@@ -207,11 +226,21 @@ export function jazzCoreClass(wasm) {
       // Binary messages as ArrayBuffers, not Blobs (each Blob is one more
       // async read), whatever the Worker's compatibility date.
       server.binaryType = "arraybuffer";
-      server.accept();
+      const hibernate = request.headers.get("X-Jazz-Socket-Lifecycle") === "hibernate";
+      if (hibernate) this.acceptHibernatingWebSocket(server);
+      else server.accept();
       const credential = request.headers.get("X-Jazz-Backend-Credential") ?? undefined;
       const access = request.headers.get("X-Jazz-Backend-Access") ?? undefined;
+      this.bindSocket(server, core, hibernate, null, credential, access);
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
+    acceptHibernatingWebSocket(server) {
+      this.ctx.acceptWebSocket(server);
+    }
+
+    bindSocket(server, core, hibernate, socket, credential, access) {
       let prelude = null;
-      let socket = null;
       let ended = false;
       const end = (code, reason) => {
         if (ended) return;
@@ -234,9 +263,12 @@ export function jazzCoreClass(wasm) {
         socket = null;
         close(server, code, reason);
       };
-      const handshake = setTimeout(() => {
-        if (socket === null) end(1008, "the handshake timed out");
-      }, HANDSHAKE_TIMEOUT_MS);
+      const handshake =
+        socket === null
+          ? setTimeout(() => {
+              if (socket === null) end(1008, "the handshake timed out");
+            }, HANDSHAKE_TIMEOUT_MS)
+          : undefined;
       // A socket's messages are taken in order, one at a time (reading a
       // Blob's bytes waits); a failure ends this socket alone, and the
       // queue never rejects, so later messages are not silently dropped.
@@ -244,7 +276,7 @@ export function jazzCoreClass(wasm) {
       const take = async (data) => {
         if (ended) return;
         try {
-          if (prelude === null) {
+          if (socket === null && prelude === null) {
             prelude = typeof data === "string" ? data : decoder.decode(await bytes(data));
             return;
           }
@@ -252,7 +284,11 @@ export function jazzCoreClass(wasm) {
           if (message === null) return end(1003, "wire frames are binary");
           if (this.current() !== core) return end(1011, "the core restarted");
           if (socket === null) {
-            const accepted = this.guard(() => core.accept(prelude, message, credential, access));
+            const accepted = this.guard(() =>
+              hibernate
+                ? core.acceptHibernating(prelude, message, credential, access)
+                : core.accept(prelude, message, credential, access),
+            );
             for (const frame of accepted.frames) server.send(frame);
             if (accepted.socket === undefined) return end(1008, "refused");
             clearTimeout(handshake);
@@ -266,12 +302,33 @@ export function jazzCoreClass(wasm) {
           end(1011, error?.message ?? error);
         }
       };
-      server.addEventListener("message", (event) => {
-        queue = queue.then(() => take(event.data));
-      });
-      server.addEventListener("close", () => end(1000, "closed"));
-      server.addEventListener("error", () => end(1011, "socket error"));
-      return new Response(null, { status: 101, webSocket: client });
+      const message = (data) => (queue = queue.then(() => take(data)));
+      if (hibernate) {
+        this.handlers.set(server, { message, end });
+      } else {
+        server.addEventListener("message", (event) => message(event.data));
+        server.addEventListener("close", () => end(1000, "closed"));
+        server.addEventListener("error", () => end(1011, "socket error"));
+      }
+    }
+
+    webSocketMessage(ws, data) {
+      const handler = this.handlers.get(ws);
+      if (handler) return handler.message(data);
+      // The transport survived eviction, but its WASM session did not.
+      close(ws, 1012, "Jazz session must reconnect");
+    }
+
+    webSocketClose(ws) {
+      const handler = this.handlers.get(ws);
+      if (handler) handler.end(1000, "closed");
+      else close(ws, 1000, "closed");
+    }
+
+    webSocketError(ws) {
+      const handler = this.handlers.get(ws);
+      if (handler) handler.end(1011, "socket error");
+      else close(ws, 1011, "socket error");
     }
 
     /**
@@ -289,30 +346,41 @@ export function jazzCoreClass(wasm) {
       } catch {
         return;
       }
+      let needsIdleTick = false;
       for (const [socket, ws] of this.sockets) {
         try {
           const out = this.guard(() => core.output(socket));
           for (const batch of out.batches) ws.send(batch);
+          if (this.handlers.has(ws) && !out.ended) {
+            try {
+              const attachment = this.guard(() => core.changedAttachment(socket));
+              if (attachment !== undefined) ws.serializeAttachment(attachment);
+            } catch (error) {
+              this.handlers.get(ws).end(1011, error?.message ?? error);
+              continue;
+            }
+          }
           if (out.ended) {
             this.sockets.delete(socket);
             close(ws, 1000, "session ended");
+          } else if (!this.handlers.has(ws)) {
+            needsIdleTick = true;
           }
         } catch {
-          // This socket is gone; the others are still served.
+          // A partially sent batch must never be resumed.
+          close(ws, 1011, "socket send failed");
           this.sockets.delete(socket);
           try {
             if (this.current() === core) core.close(socket);
           } catch {}
         }
       }
-      if (this.current() === core && core.wantsTick() && !this.flushQueued) {
-        this.flushQueued = true;
-        setTimeout(() => {
-          this.flushQueued = false;
-          this.flush();
-        }, 0);
+      clearTimeout(this.flushTimer);
+      if (this.current() === core) {
+        const delay = core.wantsTick() ? 0 : core.nextChunkPullTickMs();
+        if (delay !== undefined) this.flushTimer = setTimeout(() => this.flush(), delay);
       }
-      if (this.sockets.size > 0 && !this.alarmSet) {
+      if (needsIdleTick && !this.alarmSet) {
         this.alarmSet = true;
         this.ctx.storage.setAlarm(Date.now() + wasm.DurableObjectCore.idleTickMs());
       }
@@ -326,7 +394,8 @@ export function jazzCoreClass(wasm) {
   };
 }
 
-/** The Worker's fetch: everything goes to the app's one object. */
-export function routeJazzRequest(request, env) {
+/** Answer liveness at the Worker and forward core requests to the object. */
+export async function routeJazzRequest(request, env) {
+  if (new URL(request.url).pathname === "/health") return new Response("ok");
   return env.JAZZ.get(env.JAZZ.idFromName("jazz")).fetch(request);
 }
