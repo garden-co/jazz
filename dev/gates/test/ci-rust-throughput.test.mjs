@@ -102,6 +102,8 @@ const assertUsesBlacksmithRunner = (jobName, jobSource) => {
     "test-storage-compat",
     "test-ts",
     "test-react-native",
+    "test-go",
+    "test-crates-package",
   ].includes(jobName)
     ? 16
     : 4;
@@ -181,7 +183,14 @@ const assertSuiteS3ConfigurationBoundary = (source) => {
       `untrusted suite callers must not inherit ${name}`,
     );
 
-  for (const name of ["lint", "test-rust-workspace", "test-storage-compat", "test-ts"]) {
+  for (const name of [
+    "lint",
+    "test-rust-workspace",
+    "test-storage-compat",
+    "test-ts",
+    "test-go",
+    "test-crates-package",
+  ]) {
     const parsedJob = document.jobs[name];
     assert.equal(parsedJob.env, undefined, `${name} must not configure S3 at job scope`);
     const exportIndex = parsedJob.steps.findIndex(
@@ -873,7 +882,14 @@ test("Turbo cache uses its pinned OIDC policy only inside the trusted suite invo
 });
 
 test("shared Rust cache writes are main and merge-group only while trusted PRs receive read access", () => {
-  for (const name of ["lint", "test-rust-workspace", "test-storage-compat", "test-ts"]) {
+  for (const name of [
+    "lint",
+    "test-rust-workspace",
+    "test-storage-compat",
+    "test-ts",
+    "test-go",
+    "test-crates-package",
+  ]) {
     const source = job(name);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN \}\}/);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_PR_READER_AWS_ROLE_ARN \}\}/);
