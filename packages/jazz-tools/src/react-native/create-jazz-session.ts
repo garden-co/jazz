@@ -86,6 +86,8 @@ const NATIVE_SESSION_OPTIONS = {
   store: true,
   bearer: true,
   nativeRelay: true,
+  // Accepted so the option types agree; an encrypted app is refused at open here.
+  encryption: true,
 } as const satisfies Record<Exclude<keyof JazzClientConfig, "appId" | "backendSecret">, true>;
 
 /**

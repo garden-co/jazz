@@ -1,5 +1,5 @@
 import type { ClientMigrations } from "../client-migrations.js";
-import { Encryption, type EncryptionNative } from "../../encryption/index.js";
+import type { Encryption, EncryptionNative } from "../../encryption/index.js";
 import { servePrivateStore, type PrivateStore } from "../../encryption/private-store.js";
 import { retryAfterKey } from "../../encryption/key-retry.js";
 import { plainSchema, type PlainEntries } from "../../encryption/plain-schema.js";
@@ -244,9 +244,11 @@ export type NativeEncryptionOptions = {
   /** The native `EncryptionRuntime`, built and ready. */
   runtime: unknown;
   store: PrivateStore;
-  /** The local-first account's secret, when the account is local-first. */
-  accountSecret?: () => string | undefined;
+  /** Builds the device's public handle. The keyless broker has no handle. */
+  createHandle: EncryptionHandleFactory;
 };
+
+type EncryptionHandleFactory = (native: EncryptionNative) => Encryption;
 
 /** What a database that has the runtime installed adds to the native calls. */
 type NativeEncryptionDb = EncryptionNative & {
@@ -1148,7 +1150,7 @@ export class NativeRuntimeAdapter implements Runtime {
   /** The installed encryption runtime's side, on the runtime that owns the database. */
   private encryptionState?: {
     native: NativeEncryptionDb;
-    options: NativeEncryptionOptions;
+    createHandle: EncryptionHandleFactory;
     serving: { stop(): void };
     uses: SpaceUse;
     handle?: Encryption;
@@ -1180,7 +1182,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const native = this.db as unknown as NativeEncryptionDb;
     this.encryptionState = {
       native,
-      options,
+      createHandle: options.createHandle,
       serving: servePrivateStore(native, options.store),
       uses: new SpaceUse(native),
     };
@@ -1206,9 +1208,7 @@ export class NativeRuntimeAdapter implements Runtime {
   encryptionHandle(): Encryption | undefined {
     const state = this.ownerRuntime.encryptionState;
     if (!state) return undefined;
-    state.handle ??= new Encryption(state.native, {
-      accountSecret: state.options.accountSecret,
-    });
+    state.handle ??= state.createHandle(state.native);
     return state.handle;
   }
 

@@ -8,7 +8,8 @@
  * from it.
  */
 import { RecoveryPhrase } from "../local-first-auth/recovery-phrase.js";
-import { parseSecret } from "../local-first-auth/secret.js";
+import { formatSecret, parseSecret } from "../local-first-auth/secret.js";
+import { BrowserPasskeyBackup, PasskeyBackupError } from "../local-first-auth/passkey.js";
 
 export {
   memoryPrivateStore,
@@ -156,10 +157,16 @@ export class Encryption {
       const state = JSON.parse(this.native.encryptionState()) as {
         status: AccountStatus | null;
         error: string | null;
+        stage?: string;
       };
       if (state.status !== null) return state.status;
       if (Date.now() >= deadline) {
-        throw failure(new Error(state.error ?? "database: the account was not verified in time"));
+        throw failure(
+          new Error(
+            state.error ??
+              `database: the account was not verified in time (waiting: ${state.stage ?? "unknown"})`,
+          ),
+        );
       }
       await new Promise((resolve) => {
         const timer = setTimeout(resolve, 100);
@@ -353,6 +360,59 @@ export class Recovery {
   create(): string {
     this.refuseForDeviceAccount();
     return RecoveryPhrase.fromBytes(crypto.getRandomValues(new Uint8Array(32)));
+  }
+
+  /**
+   * For an account the app signs in itself: makes a recovery secret, backs it
+   * up and registers it, in one call. Call it from a button the user pressed
+   * (creating a passkey needs a user gesture), when `recovery.list()` shows
+   * the account has none. Where the browser has passkeys the secret is kept
+   * in one, as a credential whose name says it is the encryption recovery
+   * key, and `method` is `"passkey"`; otherwise, or if the user declines the
+   * passkey, `method` is `"phrase"` and `phrase` holds the 24 words to keep.
+   * Either way the recovery is registered.
+   */
+  async enable(options: {
+    /** Names the passkey's relying party, as the app is called to the user. */
+    appName: string;
+    /** Who the account is, as the passkey shows it (the encryption recovery key of whom). */
+    accountName: string;
+    /** The passkey's relying-party ID; defaults to the page's host name. */
+    appHostname?: string;
+  }): Promise<{ method: "passkey" } | { method: "phrase"; phrase: string }> {
+    this.refuseForDeviceAccount();
+    const secret = crypto.getRandomValues(new Uint8Array(32));
+    const phrase = RecoveryPhrase.fromBytes(secret);
+    let method: "passkey" | "phrase" = "phrase";
+    // First, while the user's click still counts as a gesture.
+    try {
+      await new BrowserPasskeyBackup({
+        appName: options.appName,
+        appHostname: options.appHostname,
+      }).backup(formatSecret(secret), `${options.accountName} (encryption recovery key)`);
+      method = "passkey";
+    } catch (error) {
+      if (!(error instanceof PasskeyBackupError)) throw error;
+    }
+    await this.call("recoveryRegister", { secret: toHex(secret) });
+    return method === "passkey" ? { method } : { method, phrase };
+  }
+
+  /**
+   * On a new device of an account the app signs in itself: reads the recovery
+   * secret from the passkey that `enable` made and approves this device with
+   * it. Call it from a button (reading a passkey needs a user gesture).
+   */
+  async restoreFromPasskey(options: {
+    appName: string;
+    appHostname?: string;
+  }): Promise<AccountStatus> {
+    this.refuseForDeviceAccount();
+    const secret = await new BrowserPasskeyBackup({
+      appName: options.appName,
+      appHostname: options.appHostname,
+    }).restore();
+    return this.call("recoveryRestore", { secret: toHex(parseSecret(secret)) });
   }
 
   /** Registers the recovery root this phrase gives for the account. */

@@ -1,0 +1,86 @@
+---
+title: Encryption in the Browser
+description: "Encrypted columns in a web app: nothing to configure for the keys, what happens in a second tab, and how an app's own users back up their recovery key."
+languageTabs: backend
+---
+
+In a browser the client keeps the device's keys for you. You pass your app and encryption works (for now with in-page storage, `driver: { type: "memory" }`; see [limits](/docs/e2ee/limits)):
+
+```ts
+import { createJazzClient } from "jazz-tools/client";
+import { app } from "./jazz.generated";
+
+const session = await createJazzClient({
+  serverUrl: "/jazz",
+  driver: { type: "memory" },
+  encryption: { app },
+});
+```
+
+Passing `app` is how the client learns which columns are encrypted before the first query, so the
+device's keys are ready when your code reads. A plain app leaves `encryption` out and opens as before.
+Reads, writes and equality filters are the ones in [Getting started](/docs/e2ee/getting-started);
+`db.encryption` is the same handle as on Node.
+
+## Where the keys live
+
+The device's keys are saved in the browser's IndexedDB and protected by a key that scripts on your
+page can use but can never read out (a non-extractable WebCrypto key). Clearing the site's data clears
+the keys; the device then enrols again as a new device, like any other new device (see
+[Devices and recovery](/docs/e2ee/devices-and-recovery)). To keep keys somewhere else, pass your own
+`store` next to `app`: it is the [private store](/docs/e2ee/private-store) every platform uses.
+
+## Tabs
+
+Every tab of your app is one device. Each tab opens the same saved keys and does its own reading and
+writing, so a tab needs nothing from another tab to work.
+
+- **Saving is safe.** Each change to the saved keys is one IndexedDB transaction that checks what it
+  replaces. If two tabs save at once, one wins and the other reads the winner's state again and merges
+  it; neither drops the other's keys, and a device's one-time approval secret is never used twice.
+- **The first tab makes the key.** The key that protects the saved keys is made under a Web Lock, so a
+  second tab that opens at the same moment waits for the first tab's key and uses it. Where the browser
+  has no Web Locks, the tab that loses the race uses the key that won.
+- **Background work may run in every tab.** Each tab checks for keys to hand to new members and
+  devices. When tabs do the same pass, the first one to commit wins and the others find nothing left to
+  do, so doing it twice is harmless. It costs one more pass of reads per open tab; if that matters to
+  you, call `db.encryption.keys.deliver()` only from the tab you pick.
+- **Deleting is visible.** If the device's saved state is deleted while another tab has it open, that
+  tab stops writing keys instead of making the state again.
+
+## Backing up the recovery key of your own users
+
+When your app signs its users in, there is no account secret to restore, so an account needs a recovery
+key made for it. When `db.encryption.ready()` returns `"active"` and `db.encryption.recovery.list()` is
+empty, offer a backup from a button (creating a passkey needs a click):
+
+```ts
+const result = await session.db.encryption.recovery.enable({
+  appName: "My app",
+  accountName: user.email,
+});
+if (result.method === "phrase") showToKeep(result.phrase);
+```
+
+With a passkey available the recovery key is kept in a passkey on the user's device, named as the
+encryption recovery key of the account. Where there is none, or the user declines it, `enable` returns
+the 24-word phrase to keep. Either way the recovery key is registered. After losing every device, the
+user signs in on a new one, which is `awaiting-approval`, and recovers with their passkey or their phrase:
+
+```ts
+await session.db.encryption.recovery.restoreFromPasskey({ appName: "My app" });
+// or
+await session.db.encryption.recovery.restore(phrase);
+```
+
+The passkey is the backup: the recovery secret is stored in the passkey's user handle, which is what lets a
+new device read it back, and passkey providers (a platform account, a password manager) may sync passkeys
+to the user's other devices, so the secret is readable wherever the provider syncs the passkey. Treat the
+passkey's account like the recovery phrase. `enable` creates the passkey before it registers the recovery
+key (creating one needs the click), so a call that fails part way, for example when the server is not
+reachable, can leave a passkey for a recovery key that was never registered; call `enable` again, and the
+user may see the unused passkey in their picker and can delete it.
+
+The phrase is a different phrase from a local-first account's own recovery phrase: entering the wrong
+one fails. Accounts that are local-first device accounts need none of this: restoring the account
+restores encryption with it.

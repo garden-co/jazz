@@ -138,6 +138,7 @@ import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 import { RuntimeClosedError } from "./runtime-closed-error.js";
 import { notDeclaredEncryption, type Encryption } from "../encryption/index.js";
 import { plainSchema } from "../encryption/plain-schema.js";
+import type { BrowserEncryptionConfig } from "../encryption/browser-host.js";
 
 /** `getDeviceAccountProof` hands out a session's sync proof only with this long left. */
 const SESSION_PROOF_MIN_REMAINING_SECONDS = 30;
@@ -179,6 +180,15 @@ export type DbConfig = {
   backendSecret?: never;
   /** IndexedDB database name for browser persistence (default: appId). */
   dbName?: string;
+  /**
+   * For an app that declares end-to-end encryption: its app and, optionally,
+   * where this device keeps its keys (see {@link BrowserEncryptionConfig}).
+   * A plain app leaves it out.
+   */
+  encryption?: BrowserEncryptionConfig & {
+    /** @internal A device account's secret, read from its handle for each use. */
+    accountSecret?: () => string | undefined;
+  };
   /**
    * Initial-sync durability boundary, in writes (default: 512 for clients).
    * A crash can lose up to M - 1 writes since the previous durable IndexedDB
@@ -2450,7 +2460,10 @@ export class Db {
   }
 
   get encryption(): Encryption {
-    return this.runtimeSource.encryptionHandle() ?? notDeclaredEncryption();
+    // A thin Db that upgraded is a handle on its local-first successor, which holds the runtime.
+    const live = this.current();
+    if (live !== this) return live.encryption;
+    return this.runtimeSource?.encryptionHandle() ?? notDeclaredEncryption();
   }
 
   /**
@@ -3120,8 +3133,11 @@ export class Db {
       browserWorkerSession: _browserWorkerSession,
       ...runtimeSources
     } = this.config.runtimeSources ?? {};
+    // The encryption option holds the app's own store (functions): a live
+    // handle, like the ports above, not configuration.
+    const { encryption: _encryption, ...config } = this.config;
     return structuredClone({
-      ...this.config,
+      ...config,
       runtimeSources: Object.keys(runtimeSources).length > 0 ? runtimeSources : undefined,
     });
   }

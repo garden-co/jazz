@@ -1467,6 +1467,8 @@ export interface CompiledAppSchema {
   readonly computed?: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>>;
   /** Transformed columns: table → column → transform name. */
   readonly transforms?: Readonly<Record<string, Readonly<Record<string, string>>>>;
+  /** Encrypted columns: schema hash → table → the declaration of its encryption. */
+  readonly encryption?: { readonly versions?: Readonly<Record<string, object>> };
 }
 
 /** Relations as the generator may emit them beside `schema`. */

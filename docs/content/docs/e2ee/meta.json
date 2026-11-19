@@ -3,6 +3,7 @@
   "pages": [
     "getting-started",
     "private-store",
+    "browser",
     "sharing-and-keys",
     "devices-and-recovery",
     "limits"
