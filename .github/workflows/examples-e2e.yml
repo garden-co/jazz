@@ -146,30 +146,33 @@ jobs:
           PREVIEW_RUN_ID: ${{ inputs.preview_run_id }}
         run: node dev/scripts/await-release-preview.mjs
 
+      # Not actions/download-artifact: a GitHub artifact-service "Server Error"
+      # failed a release gate here once (RC 44567203253), and it doesn't retry.
       - name: Download the release preview's packages
         if: env.REUSE_PREVIEW == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: pkg-jazz-tools
-          path: packages/jazz-tools
-          run-id: ${{ inputs.artifacts_run_id || steps.preview.outputs.run_id }}
-          github-token: ${{ github.token }}
-
-      - if: env.REUSE_PREVIEW == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: pkg-jazz-wasm
-          path: crates/jazz-wasm
-          run-id: ${{ inputs.artifacts_run_id || steps.preview.outputs.run_id }}
-          github-token: ${{ github.token }}
-
-      - if: env.REUSE_PREVIEW == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: pkg-jazz-napi
-          path: crates/jazz-napi
-          run-id: ${{ inputs.artifacts_run_id || steps.preview.outputs.run_id }}
-          github-token: ${{ github.token }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.artifacts_run_id || steps.preview.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          fetch() {
+            local name=$1 dest=$2 tmp
+            for attempt in 1 2 3 4 5; do
+              tmp=$(mktemp -d)
+              if gh run download "${RUN_ID}" -R "${GITHUB_REPOSITORY}" -n "${name}" -D "${tmp}"; then
+                cp -a "${tmp}/." "${dest}/"
+                return 0
+              fi
+              echo "::warning::download of ${name} failed (attempt ${attempt}); retrying"
+              sleep $((attempt * 5))
+            done
+            echo "::error::could not download ${name} from run ${RUN_ID}"
+            return 1
+          }
+          fetch pkg-jazz-tools packages/jazz-tools &
+          fetch pkg-jazz-wasm crates/jazz-wasm &
+          fetch pkg-jazz-napi crates/jazz-napi &
+          for job in $(jobs -p); do wait "${job}"; done
 
       - name: Pack workspace tarballs
         # Mirrors PACKAGES_TO_PACK in dev/examples-e2e/run.mjs. The harness picks
@@ -200,10 +203,12 @@ jobs:
         with:
           name: examples-e2e-build-state
           # Tarballs feed `--tarball-dir`; the NAPI binary is copied into each
-          # installed jazz-napi after its fingerprint is checked.
+          # installed jazz-napi after its fingerprint is checked. Only the
+          # runners' linux-x64 binary: a release's packages carry every
+          # platform's (about 195 MB), which every variant job downloaded.
           path: |
             _e2e-state/tarballs/**
-            crates/jazz-napi/*.node
+            crates/jazz-napi/jazz-napi.linux-x64-gnu.node
           if-no-files-found: error
           retention-days: 1
 
