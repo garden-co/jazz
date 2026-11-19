@@ -4,8 +4,8 @@
 //!
 //! A core there accepts finished transactions only: nothing it holds may
 //! stay open between calls. Plain writes and reads work as anywhere; a
-//! transaction handle's staged writes and a callback transaction, which
-//! stay open between calls, are refused with a typed error. Chunked large
+//! transaction handle's staged writes, which stay open between calls, are
+//! refused with a typed error. Chunked large
 //! values live in the store itself and read back after the object
 //! restarts.
 
@@ -167,21 +167,19 @@ fn chunked_values_read_back_after_a_restart() {
     assert_eq!(cell(&seats(&db)[0], "notes"), Value::String(notes));
 }
 
-/// A callback transaction holds its savepoint across the callback's
-/// awaits, which managed storage cannot: it is refused with the typed
-/// error before the callback runs, and the store stays usable.
+/// A mergeable transaction keeps its staged writes applied between its
+/// writes, which managed storage cannot: its first write is refused with
+/// the typed error, nothing is written, and the store stays usable.
 #[test]
-fn a_callback_transaction_is_refused_on_managed_storage() {
+fn a_mergeable_transaction_is_refused_on_managed_storage() {
     let db = open_on(EmulatedObjectSql::open_in_memory().unwrap());
-    let mut ran = false;
-    let refused = block_on(db.transaction(async |tx| {
-        ran = true;
+    let refused = block_on(async {
+        let tx = db.mergeable_tx().await?;
         tx.insert("seats", seat("A", true), row(1)).await?;
-        Ok(())
-    }))
+        tx.commit().await
+    })
     .unwrap_err();
     assert!(is_refused_on_managed_storage(&refused), "{refused}");
-    assert!(!ran, "the callback never runs");
     block_on(db.insert("seats", seat("B", false), row(2))).unwrap();
     assert_eq!(seats(&db).len(), 1);
 }
