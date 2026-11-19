@@ -3,7 +3,7 @@
 # users 8791), then one client language against it. Usage: t9.sh ts|rust|go|kotlin|swift
 # StagePlan's app files and the client examples come from this checkout (the RC's commit in CI).
 . "$(dirname "$0")/lib.sh"
-REPO=$(cd "$AG/../.." && pwd); SP=$REPO/examples/stage-plan/apps
+REPO=${AG_REPO:-$(cd "$AG/../.." && pwd)}; SP=$REPO/examples/stage-plan/apps   # AG_REPO: a checkout of the RC commit (CI: rc-src/)
 APP_ID=d1e92c0e-2b64-5e3b-9684-a6fb3205dc2b   # what the TS client derives from http://127.0.0.1:8780/jazz
 backend() {
   local W=$AG/.work/t9; rm -rf "$W"; cp -r "$AG/t9" "$W"; cd "$W" && use_rc_pnpm || return 1
