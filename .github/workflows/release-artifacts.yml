@@ -31,7 +31,7 @@ name: Release artifacts
 # the Version Packages head).
 on:
   push:
-    branches: [main, release]
+    branches: [main, release, "ci-speed/release-artifacts-*"]
   workflow_dispatch:
     inputs:
       ref:
