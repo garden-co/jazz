@@ -57,6 +57,7 @@ export const ciPartitionJobs = Object.freeze({
   "jazz-ffi-bindings": "test-jazz-ffi-bindings",
   "crates-package": "test-crates-package",
   go: "test-go",
+  "go-ts-backend": "test-go-ts-backend",
   kotlin: "test-kotlin",
   "kotlin-android": "test-kotlin-android",
   "warm-native-builds": "warm-native-builds",
@@ -137,11 +138,29 @@ export const TYPESCRIPT_SHARDS = Object.freeze([
   "browser-2",
   "packages",
 ]);
+// tools-other runs jazz-tools' Durable Object suite, whose host build
+// (fat-LTO cargo plus wasm-opt) is minutes; it starts alongside the producer
+// instead of after the suites' preparation. Merge groups build that host at
+// wasm-opt -O1; build-jazz-packages.yml and nightly run the same suite on the
+// -Oz host that ships (dev/gates/ensure-artifacts-and-durable-object-host.mjs).
+const producerAndDurableObjectHost = command(
+  "native correctness-artifact producer and Durable Object host",
+  "node",
+  ["dev/gates/ensure-artifacts-and-durable-object-host.mjs"],
+);
 const typescriptPartitions = Object.freeze({
   ...Object.fromEntries(
     TYPESCRIPT_SHARDS.map((shard) => [
       `typescript-${shard}`,
-      Object.freeze([...typescriptPrelude, typescriptConsumers(shard)]),
+      Object.freeze(
+        shard === "tools-other"
+          ? [
+              producerAndDurableObjectHost,
+              ...typescriptPrelude.slice(1),
+              typescriptConsumers(shard),
+            ]
+          : [...typescriptPrelude, typescriptConsumers(shard)],
+      ),
     ]),
   ),
   // The examples shard runs no suite of its own; it admits the prepared
@@ -444,9 +463,13 @@ export const ciPartitions = Object.freeze({
     ]),
   ]),
   // The Go bindings and the StagePlan Go example (installs Go when the
-  // image has none). go-cli's suite also runs against StagePlan's main
-  // backend in TypeScript (createJazz), so it needs a jazz-tools build.
-  go: Object.freeze([
+  // image has none), against jazz-tools' Rust server.
+  go: Object.freeze([command("Go bindings", "bash", ["dev/gates/go-bindings.sh"])]),
+  // go-cli's suite again against StagePlan's main backend in TypeScript
+  // (createJazz), which needs the NAPI/WASM pair and a jazz-tools build. Its
+  // own partition and job so that build runs beside the go partition rather
+  // than ahead of it.
+  "go-ts-backend": Object.freeze([
     command("native correctness-artifact producer", "node", [
       "dev/gates/ensure-correctness-artifacts.mjs",
     ]),
@@ -461,21 +484,21 @@ export const ciPartitions = Object.freeze({
       "--filter=jazz-tools",
       "--only",
     ]),
-    command("Go bindings", "bash", ["dev/gates/go-bindings.sh"], {
-      env: { JAZZ_GO_TS_MAIN_BACKEND: "1" },
-    }),
+    command(
+      "Go bindings against the TypeScript main backend",
+      "bash",
+      ["dev/gates/go-bindings.sh"],
+      {
+        env: { JAZZ_GO_TS_MAIN_BACKEND: "only" },
+      },
+    ),
   ]),
   // Fills the native build cache (dev/artifacts/native-build-cache.mjs) for
-  // main's tree: the sealed napi/wasm pair and the Durable Object host. It
-  // checks nothing new; the producer still validates and seals what it built.
-  "warm-native-builds": Object.freeze([
-    command("native correctness-artifact producer", "node", [
-      "dev/gates/ensure-correctness-artifacts.mjs",
-    ]),
-    command("Durable Object host", "node", [
-      "packages/jazz-tools/scripts/ensure-durable-object-host.mjs",
-    ]),
-  ]),
+  // main's tree: the sealed napi/wasm pair and the Durable Object host, by
+  // the very step tools-other runs, so the host is the merge-group (-O1)
+  // build whose key merge groups look up. It checks nothing new; the
+  // producer still validates and seals what it built.
+  "warm-native-builds": Object.freeze([producerAndDurableObjectHost]),
   // jazz-kotlin over jazz-ffi, and the StagePlan Kotlin CLI and the docs todo
   // app's Kotlin snippets end to end against `jazz-tools server`, on the JVM.
   kotlin: Object.freeze([
@@ -528,8 +551,13 @@ export function assertFullWorkspaceCoverage(commands) {
     throw new Error("CI-equivalent workspace check omits the required CI feature selection.");
 }
 
+const producerLabels = new Set([
+  "native correctness-artifact producer",
+  "native correctness-artifact producer and Durable Object host",
+]);
+
 export function assertArtifactBoundary(commands) {
-  const artifacts = commands.find(({ label }) => label === "native correctness-artifact producer");
+  const artifacts = commands.find(({ label }) => producerLabels.has(label));
   const suites = commands.find(({ label }) => label === "TypeScript consumers");
   if (!artifacts || !suites)
     throw new Error("CI-equivalent TypeScript plan omits artifacts or test suites.");
