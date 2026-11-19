@@ -14,8 +14,24 @@ if [ "$1" = --run ]; then   # no release: workflow artifacts of a release-artifa
   # Server binary: release-server (with SHA256SUMS) at ~+9, else the bare jazz-tools-linux-x64 at ~+3.5 (no sums: record ours).
   if ! get "$RUNID" release-server; then get "$RUNID" jazz-tools-linux-x64 || { echo "missing release-server and jazz-tools-linux-x64 in run $RUNID"; exit 1; }
     sha256sum jazz-tools-linux-x64 | tee -a SHA256SUMS; echo "note: jazz-tools-linux-x64 has no published sum yet; recorded above"; fi
-  # Languages: release-languages at the end, else language-artifacts (~+7.5, the same files and sums).
-  get "$RUNID" release-languages || get "$RUNID" language-artifacts || echo "note: no language artifacts in run $RUNID (t9 go/swift/kotlin will fail or build from source)"
+  # Languages: release-languages (at the end) or language-artifacts (~+7.5): the same files, with SHA256SUMS-languages.
+  # If neither is there yet, wait up to AG_LANG_WAIT_S (120 s) for language-artifacts, then fall back to the early
+  # jazz-ffi-linux-x86_64 (~+4.5, unpacked: repacked like the attach step, sum recorded) and jazz-kotlin-dist (~+7).
+  langs=; end=$(( $(date +%s) + ${AG_LANG_WAIT_S:-120} ))
+  while :; do
+    get "$RUNID" release-languages && { langs=release-languages; break; }
+    get "$RUNID" language-artifacts && { langs=language-artifacts; break; }
+    [ "$(date +%s)" -ge $end ] && break; sleep 15
+  done
+  if [ -z "$langs" ]; then
+    if gh run download "$RUNID" -R "$R" -n jazz-ffi-linux-x86_64 -D _ffi >/dev/null 2>&1 && [ -d _ffi/libjazz_ffi-linux-x86_64 ]; then
+      tar czf libjazz_ffi-linux-x86_64.tar.gz -C _ffi/libjazz_ffi-linux-x86_64 . && rm -rf _ffi
+      sha256sum libjazz_ffi-linux-x86_64.tar.gz | tee -a SHA256SUMS-languages.local; langs=jazz-ffi-linux-x86_64
+      echo "note: language artifacts not ready; using jazz-ffi-linux-x86_64 (no published sum yet; recorded above)"
+    fi
+    get "$RUNID" jazz-kotlin-dist && echo "note: Kotlin jar from jazz-kotlin-dist" || echo "note: no Kotlin jar yet (t9 kotlin builds from source)"
+  fi
+  echo "languages from: ${langs:-none}"; [ -n "$langs" ] || echo "note: no language artifacts in run $RUNID (t9 go/swift will fail)"
   V=$(ls jazz-tools-*.tgz | sed -E 's/^jazz-tools-(.*)\.tgz$/\1/' | head -1); echo "$V" > VERSION
   sha256sum -c NPM-SHA256SUMS --ignore-missing
   mkdir -p /tmp/jazz-rc-npm && cp ./*.tgz /tmp/jazz-rc-npm/   # dry-run tarballs link each other by file:/tmp/jazz-rc-npm/<tgz>
