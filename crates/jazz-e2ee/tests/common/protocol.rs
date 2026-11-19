@@ -11,8 +11,8 @@ use jazz_e2ee::protocol::account::{
     PrivateEvidence, PublicAccountLedger, verify_private,
 };
 use jazz_e2ee::protocol::derive::{RecoveryKeys, RecoverySecret};
+use jazz_e2ee::protocol::device_account::DeviceAccountIdentity;
 use jazz_e2ee::protocol::domain::{AccountDomain, AppDomain};
-use jazz_e2ee::protocol::local_first::LocalFirstIdentity;
 use jazz_e2ee::protocol::records::account::RecoveryRoot;
 use jazz_e2ee::protocol::{Accepted, Position, ProtocolResult};
 use jazz_e2ee::registry::Registry;
@@ -30,8 +30,8 @@ pub struct Env {
     pub config: MechanismConfig,
     pub domain: AppDomain,
     pub account: String,
-    /// The local-first identity of a local-first account.
-    pub identity: Option<LocalFirstIdentity>,
+    /// The device-account identity of a device account.
+    pub identity: Option<DeviceAccountIdentity>,
 }
 
 impl Env {
@@ -49,11 +49,11 @@ impl Env {
         }
     }
 
-    /// A local-first account: its ID is the one the secret's identity
+    /// A device account: its ID is the one the secret's identity
     /// founds, and its roots are signed by that identity.
-    pub fn local_first(secret: [u8; 32]) -> Self {
+    pub fn device_account(secret: [u8; 32]) -> Self {
         let identity =
-            LocalFirstIdentity::from_secret(&RecoverySecret::from_bytes(secret)).unwrap();
+            DeviceAccountIdentity::from_secret(&RecoverySecret::from_bytes(secret)).unwrap();
         let mut env = Self::new("pending");
         env.account = identity.account_id(&env.domain).unwrap();
         env.identity = Some(identity);
@@ -62,7 +62,7 @@ impl Env {
 
     pub fn authority(&self) -> RootAuthority<'_> {
         match &self.identity {
-            Some(identity) => RootAuthority::LocalFirst(identity),
+            Some(identity) => RootAuthority::DeviceAccount(identity),
             None => RootAuthority::App,
         }
     }
@@ -144,7 +144,7 @@ impl Ledger {
             build::check_bootstrap(&writer, device, &self.public, &self.private).unwrap()
         } else {
             let policy = ResetPolicy {
-                local_first: false,
+                device_account: false,
                 allow_account_reset: true,
             };
             let state = self.state(env);

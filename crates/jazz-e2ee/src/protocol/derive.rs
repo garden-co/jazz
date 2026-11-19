@@ -25,7 +25,7 @@ const RECOVERY_MATERIAL_CHECK_LABEL: &str = "jazz.e2ee.recovery-material-check.v
 /// The prefix of a formatted account or recovery secret.
 pub const SECRET_PREFIX: &str = "jazz-auth-v1:";
 
-/// A 32-byte recovery secret `s` (§2.9): a local-first account's account
+/// A 32-byte recovery secret `s` (§2.9): a device account's account
 /// secret, or an externally authenticated account's separate secret. Cleared
 /// on drop.
 #[derive(Clone, PartialEq, Eq)]

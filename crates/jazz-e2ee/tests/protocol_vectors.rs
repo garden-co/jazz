@@ -434,8 +434,8 @@ const SIGNED_DIGESTS: &[(&str, &str)] = &[
         "3c14d7506f3fbe7c8f98ffcb62e3b5865bef12d4becb41773320e047ad1d41d1",
     ),
     (
-        "local-first account root",
-        "a40be2825d055a2c33e2289958ae563497a0bd6291c8d3a18aeef0dd6f733942",
+        "device account root",
+        "3460c55eee934c716da5d2af5df84521d7343137447a7d720cbfbe3e2dfc68bf",
     ),
     (
         "recovery delivery context",
@@ -783,22 +783,22 @@ fn signed_bytes() {
         account_id: ALICE.into(),
         device_id: D1.into(),
         epoch_id: E1.into(),
-        kind: AccountKind::LocalFirst,
-        local_first_public_key: Some(vec![0x33; 32]),
-        local_first_signature: Some(vec![]),
+        kind: AccountKind::DeviceAccount,
+        device_account_public_key: Some(vec![0x33; 32]),
+        device_account_signature: Some(vec![]),
     };
     cases.push((
-        "local-first account root",
+        "device account root",
         account_root.signed_bytes(&da, &keys()).unwrap(),
         append(
             ctx(
                 da.as_str(),
-                "jazz.e2ee.local-first-account-root.v1",
+                "jazz.e2ee.device-account-root.v1",
                 "account",
                 ALICE,
                 "__e2ee_account_roots",
                 R1,
-                "local-first-signature",
+                "device-account-signature",
                 E1,
                 D1,
             ),
@@ -813,19 +813,19 @@ fn signed_bytes() {
     ));
     let app_root = AccountRoot {
         kind: AccountKind::App,
-        local_first_public_key: None,
-        local_first_signature: None,
+        device_account_public_key: None,
+        device_account_signature: None,
         ..account_root.clone()
     };
     assert!(app_root.validate().is_ok());
     assert!(app_root.signed_bytes(&da, &keys()).is_err());
     for broken in [
         AccountRoot {
-            local_first_signature: None,
+            device_account_signature: None,
             ..account_root.clone()
         },
         AccountRoot {
-            local_first_public_key: Some(vec![0x33; 31]),
+            device_account_public_key: Some(vec![0x33; 31]),
             ..account_root.clone()
         },
         AccountRoot {
@@ -833,7 +833,7 @@ fn signed_bytes() {
             ..account_root.clone()
         },
         AccountRoot {
-            local_first_signature: Some(vec![]),
+            device_account_signature: Some(vec![]),
             ..account_root.clone()
         },
     ] {

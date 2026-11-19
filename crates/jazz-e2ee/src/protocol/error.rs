@@ -62,14 +62,14 @@ pub enum RootRejection {
     Malformed,
     /// The row names another account than the one replayed.
     ForeignAccount,
-    /// A `local-first` root whose public key does not derive the account ID.
+    /// A `device-account` root whose public key does not derive the account ID.
     KeyMismatch,
-    /// A `local-first` root whose device has no published keys at or
+    /// A `device-account` root whose device has no published keys at or
     /// before the root, so its signature cannot verify.
     DeviceKeysMissing,
-    /// A `local-first` root whose signature does not verify.
+    /// A `device-account` root whose signature does not verify.
     SignatureInvalid,
-    /// An `app` root of an account that has a valid `local-first` root.
+    /// An `app` root of an account that has a valid `device-account` root.
     KindMismatch,
     /// A root of generation `g > 0` not accepted after a counting root of
     /// generation `g − 1`.
@@ -118,7 +118,7 @@ pub enum RefusalCode {
     SpacePending,
     SpaceCreateRefused,
     RotationNeedsKey,
-    LocalFirstIdentityMismatch,
+    DeviceAccountIdentityMismatch,
 }
 
 impl RefusalCode {
@@ -143,7 +143,7 @@ impl RefusalCode {
             Self::SpacePending => "space-pending",
             Self::SpaceCreateRefused => "space-create-refused",
             Self::RotationNeedsKey => "rotation-needs-key",
-            Self::LocalFirstIdentityMismatch => "local-first-identity-mismatch",
+            Self::DeviceAccountIdentityMismatch => "device-account-identity-mismatch",
         }
     }
 }

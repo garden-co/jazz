@@ -1,5 +1,5 @@
-//! Account roots (`E2EE_PROTOCOL.md` §2.3, §2.4 step 1): local-first roots
-//! signed by the local-first identity, app roots and their trust-on-first-use
+//! Account roots (`E2EE_PROTOCOL.md` §2.3, §2.4 step 1): device-account roots
+//! signed by the device-account identity, app roots and their trust-on-first-use
 //! limit, rejected roots, floors and `root-not-mine`; and the
 //! same-transaction rule of §2.4 step 3, which only valid rows take part in.
 
@@ -10,11 +10,11 @@ use common::protocol::{ALICE, Env, Ledger};
 use jazz_e2ee::protocol::account::build::{self, ResetPolicy, RootAuthority, RotationTarget};
 use jazz_e2ee::protocol::account::{AccountReplay, verify_private};
 use jazz_e2ee::protocol::derive::{RecoveryKeys, RecoverySecret};
+use jazz_e2ee::protocol::device_account::{self, DeviceAccountIdentity};
 use jazz_e2ee::protocol::domain::AppDomain;
 use jazz_e2ee::protocol::error::{
     IntrinsicContradiction, ProtocolError, RefusalCode, RootRejection,
 };
-use jazz_e2ee::protocol::local_first::{self, LocalFirstIdentity};
 use jazz_e2ee::protocol::records::account::{AccountKind, AccountRoot};
 use jazz_e2ee::protocol::{Accepted, Position, ids};
 
@@ -22,18 +22,18 @@ const SECRET: [u8; 32] = [7; 32];
 
 type Tamper = Box<dyn Fn(&mut jazz_e2ee::protocol::records::account::PublicAccountSuccessor)>;
 
-fn identity(secret: [u8; 32]) -> LocalFirstIdentity {
-    LocalFirstIdentity::from_secret(&RecoverySecret::from_bytes(secret)).unwrap()
+fn identity(secret: [u8; 32]) -> DeviceAccountIdentity {
+    DeviceAccountIdentity::from_secret(&RecoverySecret::from_bytes(secret)).unwrap()
 }
 
-/// The local-first derivations match `local-first-auth` and Jazz's account
+/// The device-account derivations match `local-first-auth` and Jazz's account
 /// registry. Public keys, subjects and the founder IDs for application
 /// `6b0c3f8e-…` are the cases of `local-first-auth/test-vectors.json`, which
 /// the TypeScript and Rust suites both check; the founder ID for the
 /// protocol tests' application was computed with the TypeScript
 /// `identityOf` and `localFirstAccountId`.
 #[test]
-fn local_first_derivation_matches_typescript() {
+fn device_account_derivation_matches_typescript() {
     let vectors =
         include_str!("../../../packages/jazz-tools/src/local-first-auth/test-vectors.json");
     let app = AppDomain::new("6b0c3f8e-2d9a-4f61-9a57-1c2e3d4f5a6b", None).unwrap();
@@ -69,12 +69,12 @@ fn local_first_derivation_matches_typescript() {
         assert_eq!(identity.subject(), subject);
         assert_eq!(identity.account_id(&app).unwrap(), founder);
         assert!(vectors.contains(subject) && vectors.contains(founder));
-        assert!(local_first::derives_account(
+        assert!(device_account::derives_account(
             &app,
             identity.public_key(),
             founder
         ));
-        assert!(!local_first::derives_account(
+        assert!(!device_account::derives_account(
             &app,
             identity.public_key(),
             subject
@@ -90,21 +90,21 @@ fn local_first_derivation_matches_typescript() {
     assert!(!format!("{:?}", identity(SECRET)).contains("signing: KeyPair"));
 }
 
-/// A local-first account's root is signed by its identity; the account
+/// A device account's root is signed by its identity; the account
 /// replays and its device obtains the key.
 #[test]
-fn local_first_root_is_signed_and_counts() {
-    let env = Env::local_first(SECRET);
+fn device_account_root_is_signed_and_counts() {
+    let env = Env::device_account(SECRET);
     let mut rng = TestRandom(101);
     let laptop = env.device(&mut rng);
     let mut ledger = Ledger::new(&env.account);
     ledger.request(&laptop, &mut rng);
     ledger.root(&env, &laptop, 0, &mut rng);
     let state = ledger.state(&env);
-    assert_eq!(state.root.row.kind, AccountKind::LocalFirst);
+    assert_eq!(state.root.row.kind, AccountKind::DeviceAccount);
     assert!(state.rejected_roots.is_empty());
     state
-        .check_local_first(env.identity.as_ref().unwrap())
+        .check_device_account(env.identity.as_ref().unwrap())
         .unwrap();
     assert!(ledger.acquire(&env, &laptop).is_ok());
 
@@ -120,15 +120,15 @@ fn local_first_root_is_signed_and_counts() {
             &writer,
             &laptop,
             &permit,
-            RootAuthority::LocalFirst(&other),
+            RootAuthority::DeviceAccount(&other),
             &mut rng
         )
         .unwrap_err(),
-        ProtocolError::Refused(RefusalCode::LocalFirstIdentityMismatch)
+        ProtocolError::Refused(RefusalCode::DeviceAccountIdentityMismatch)
     );
 }
 
-fn local_first_ledger(
+fn device_account_ledger(
     seed: u64,
 ) -> (
     Env,
@@ -136,7 +136,7 @@ fn local_first_ledger(
     TestRandom,
     jazz_e2ee::protocol::account::build::LocalDevice,
 ) {
-    let env = Env::local_first(SECRET);
+    let env = Env::device_account(SECRET);
     let mut rng = TestRandom(seed);
     let laptop = env.device(&mut rng);
     let mut ledger = Ledger::new(&env.account);
@@ -155,13 +155,13 @@ fn rejection(ledger: &Ledger, env: &Env, root_id: &str) -> Option<RootRejection>
         .map(|rejected| rejected.reason)
 }
 
-/// Nobody without the secret can write or substitute a local-first root:
+/// Nobody without the secret can write or substitute a device-account root:
 /// an unsigned app root, a tampered signature, a key that does not derive
 /// the account and substituted root device keys are all rejected and
 /// reported, never counted.
 #[test]
-fn forged_local_first_roots_do_not_count() {
-    let (env, ledger, mut rng, laptop) = local_first_ledger(102);
+fn forged_device_account_roots_do_not_count() {
+    let (env, ledger, mut rng, laptop) = device_account_ledger(102);
     let genuine = ledger.public.roots[0].clone();
     let mallory = env.device(&mut rng);
 
@@ -172,8 +172,8 @@ fn forged_local_first_roots_do_not_count() {
         device_id: mallory.id.clone(),
         epoch_id: ids::random_v4(&mut rng).unwrap(),
         kind: AccountKind::App,
-        local_first_public_key: None,
-        local_first_signature: None,
+        device_account_public_key: None,
+        device_account_signature: None,
         ..genuine.row.clone()
     };
     forged
@@ -198,7 +198,7 @@ fn forged_local_first_roots_do_not_count() {
     tampered.public = ledger.public.clone();
     let signature = tampered.public.roots[0]
         .row
-        .local_first_signature
+        .device_account_signature
         .as_mut()
         .unwrap();
     let last = signature.len() - 1;
@@ -210,7 +210,7 @@ fn forged_local_first_roots_do_not_count() {
     );
 
     // A root signed by a key that does not derive the account ID.
-    let other_env = Env::local_first([9; 32]);
+    let other_env = Env::device_account([9; 32]);
     let mut other = Ledger::new(&other_env.account);
     other.request(&laptop, &mut rng);
     other.root(&other_env, &laptop, 0, &mut rng);
@@ -239,7 +239,7 @@ fn forged_local_first_roots_do_not_count() {
     // A malformed root is reported too.
     let mut malformed = Ledger::new(&env.account);
     malformed.public = ledger.public.clone();
-    malformed.public.roots[0].row.local_first_public_key = None;
+    malformed.public.roots[0].row.device_account_public_key = None;
     assert_eq!(
         rejection(&malformed, &env, &genuine.row.id),
         Some(RootRejection::Malformed)
@@ -251,8 +251,8 @@ fn forged_local_first_roots_do_not_count() {
 /// reported, and replay of the genuine root proceeds. So is a root whose
 /// device's keys were accepted only after it.
 #[test]
-fn local_first_root_without_device_keys_is_rejected() {
-    let (env, ledger, mut rng, laptop) = local_first_ledger(108);
+fn device_account_root_without_device_keys_is_rejected() {
+    let (env, ledger, mut rng, laptop) = device_account_ledger(108);
     let genuine = ledger.public.roots[0].clone();
     let ghost = ids::random_v4(&mut rng).unwrap();
 
@@ -293,17 +293,17 @@ fn local_first_root_without_device_keys_is_rejected() {
     );
 }
 
-/// A later generation of a local-first account counts only if it is signed
+/// A later generation of a device account counts only if it is signed
 /// by the same identity: an app reset root is rejected, a signed one counts.
-/// The builders never reset a local-first account.
+/// The builders never reset a device account.
 #[test]
-fn local_first_generations_need_the_same_identity() {
-    let (env, mut ledger, mut rng, laptop) = local_first_ledger(103);
+fn device_account_generations_need_the_same_identity() {
+    let (env, mut ledger, mut rng, laptop) = device_account_ledger(103);
     let phone = env.device(&mut rng);
     ledger.request(&phone, &mut rng);
     let state = ledger.state(&env);
     let external = ResetPolicy {
-        local_first: false,
+        device_account: false,
         allow_account_reset: true,
     };
     assert_eq!(
@@ -411,9 +411,9 @@ fn substituted_app_root_is_not_mine() {
         verify_private(&replay, &forged, &substituted.private).unwrap_err(),
         ProtocolError::RootNotMine
     );
-    // A local-first device checks the root against its own identity.
+    // A device of a device account checks the root against its own identity.
     assert_eq!(
-        forged.check_local_first(&identity(SECRET)),
+        forged.check_device_account(&identity(SECRET)),
         Err(ProtocolError::RootNotMine)
     );
 
