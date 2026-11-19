@@ -20,7 +20,7 @@
 # commit the artifacts were built from), tree, inspector_run_id, legacy (a
 # JSON map of old artifact name -> run id).
 set -euo pipefail
-: "${SHA:?}" "${VERSION:?}" "${GH_REPO:?}"
+: "${SHA:?}" "${VERSION:?}" "${GH_REPO:?}" "${MODE:?}"
 out="${GITHUB_OUTPUT:-/dev/stdout}"
 tree="$(gh api "repos/${GH_REPO}/git/commits/${SHA}" --jq .tree.sha)"
 echo "tree=${tree}" >> "${out}"
@@ -68,7 +68,7 @@ fi
 # The legacy runs were dispatched from main with a `ref` input, so their
 # head_sha is never the commit they built: they can't meet the rule, and only
 # a dry run takes them.
-if [ -n "${LEGACY_RUN_IDS:-}" ] && [ "${MODE:-}" = publish ]; then
+if [ -n "${LEGACY_RUN_IDS:-}" ] && [ "${MODE}" != dry-run ]; then
   echo "::error::legacy-run-ids is for dry runs only: a publish takes a release-artifacts.yml run that built ${SHA}."
   exit 1
 fi

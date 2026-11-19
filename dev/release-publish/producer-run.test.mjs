@@ -8,11 +8,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { manifestProblems, producerRunProblems } from "./producer-run.mjs";
+import { expectedProblems, manifestProblems, producerRunProblems } from "./producer-run.mjs";
 
 const repo = "garden-co/jazz";
 const sha = "a".repeat(40);
-const tree = "t".repeat(40);
+const tree = "f".repeat(40);
 const version = "2.0.0-alpha.69";
 const run = (overrides = {}) => ({
   id: 1,
@@ -50,7 +50,7 @@ for (const [name, changes] of [
 for (const [name, changes] of [
   ["another commit", { sha: "b".repeat(40) }],
   ["another source commit", { source_sha: "b".repeat(40) }],
-  ["another tree", { tree: "u".repeat(40) }],
+  ["another tree", { tree: "e".repeat(40) }],
   ["another version", { version: "2.0.0-alpha.68" }],
   ["no sha", { sha: undefined }],
 ]) {
@@ -94,6 +94,37 @@ test("resolve-artifacts.sh holds every input to the rule", () => {
   // Legacy runs can't meet it: refused when publishing.
   assert.match(
     script,
-    /if \[ -n "\$\{LEGACY_RUN_IDS:-\}" \] && \[ "\$\{MODE:-\}" = publish \]; then[^\n]*\n[^\n]*\n  exit 1/,
+    /if \[ -n "\$\{LEGACY_RUN_IDS:-\}" \] && \[ "\$\{MODE\}" != dry-run \]; then[^\n]*\n[^\n]*\n  exit 1/,
+  );
+  // MODE is required: no mode, no default.
+  assert.match(script, /: "\$\{SHA:\?\}" "\$\{VERSION:\?\}" "\$\{GH_REPO:\?\}" "\$\{MODE:\?\}"/);
+});
+
+test("unusable expected values fail closed", () => {
+  assert.deepEqual(expectedProblems({ sha, tree, version, repo }), []);
+  for (const bad of [
+    { sha: "" },
+    { sha: "abc" },
+    { tree: undefined },
+    { version: "" },
+    { repo: "" },
+    { repo: "jazz" },
+  ])
+    assert.notDeepEqual(
+      expectedProblems({ sha, tree, version, repo, ...bad }),
+      [],
+      JSON.stringify(bad),
+    );
+  const dir = mkdtempSync(join(tmpdir(), "producer-"));
+  writeFileSync(join(dir, "run.json"), JSON.stringify(run()));
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest()));
+  const script = fileURLToPath(new URL("./producer-run.mjs", import.meta.url));
+  assert.throws(
+    () =>
+      execFileSync("node", [script, join(dir, "run.json"), join(dir, "manifest.json")], {
+        env: { ...process.env, SHA: "", TREE: tree, VERSION: version, GH_REPO: repo },
+        encoding: "utf8",
+      }),
+    (error) => error.status === 1 && /refusing/.test(error.stdout),
   );
 });

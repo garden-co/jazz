@@ -14,6 +14,19 @@ import { pathToFileURL } from "node:url";
 export const PRODUCER_PATH = ".github/workflows/release-artifacts.yml";
 const EVENTS = new Set(["push", "workflow_dispatch"]);
 
+/** Reasons the expected values themselves are unusable (fail closed); empty when fine. */
+export function expectedProblems({ sha, tree, version, repo }) {
+  const problems = [];
+  if (!/^[0-9a-f]{40}$/.test(sha ?? ""))
+    problems.push(`SHA ${JSON.stringify(sha)} is not 40 hex characters`);
+  if (!/^[0-9a-f]{40}$/.test(tree ?? ""))
+    problems.push(`TREE ${JSON.stringify(tree)} is not 40 hex characters`);
+  if (!version) problems.push("VERSION is empty");
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo ?? ""))
+    problems.push(`GH_REPO ${JSON.stringify(repo)} is not owner/repo`);
+  return problems;
+}
+
 /** Reasons the run (from GET /actions/runs/{id}) may not be imported; empty when it may. */
 export function producerRunProblems(run, { sha, repo }) {
   const problems = [];
@@ -42,6 +55,11 @@ export function manifestProblems(manifest, { sha, tree, version }) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [runFile, manifestFile] = process.argv.slice(2);
   const { SHA: sha, TREE: tree, VERSION: version, GH_REPO: repo } = process.env;
+  const inputProblems = expectedProblems({ sha, tree, version, repo });
+  if (inputProblems.length > 0) {
+    console.log(`refusing: ${inputProblems.join("; ")}`);
+    process.exit(1);
+  }
   const run = JSON.parse(readFileSync(runFile, "utf8"));
   const manifest = JSON.parse(readFileSync(manifestFile, "utf8"));
   const problems = [
