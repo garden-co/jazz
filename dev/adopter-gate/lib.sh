@@ -3,7 +3,7 @@
 # tee them to $AG_RESULTS/<job>.txt for the verdict job, and exit non-zero on any FAIL.
 set -u
 AG=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-AG_RESULTS=${AG_RESULTS:-$AG/.results}; mkdir -p "$AG_RESULTS"
+AG_RESULTS=${AG_RESULTS:-$AG/.results}; mkdir -p "$AG_RESULTS" "$AG/.work"
 # RC inputs (see fetch-rc.sh): AG_TGZ holds the npm tarballs + NPM-SHA256SUMS, the core binary and language libs.
 AG_TGZ=${AG_TGZ:-$AG/.rc}
 ag_version() { cat "$AG_TGZ/VERSION"; }
@@ -29,4 +29,7 @@ use_rc_pnpm() {
 }
 
 # Run a job body with its output teed to the results file; exit 1 if any FAIL line.
-ag_job() { local name=$1; shift; "$@" 2>&1 | tee "$AG_RESULTS/$name.txt"; ! grep -q "^FAIL" "$AG_RESULTS/$name.txt"; }
+ag_job() { local name=$1; shift; "$@" 2>&1 | tee "$AG_RESULTS/$name.txt"
+  # A job that checked nothing failed: a setup step broke before any check ran (it once passed silently).
+  grep -qE "^(PASS|FAIL|REVIEW|SKIP) " "$AG_RESULTS/$name.txt" || echo "FAIL $name ran no checks (setup broke before the first check; see the log above)" | tee -a "$AG_RESULTS/$name.txt"
+  ! grep -q "^FAIL" "$AG_RESULTS/$name.txt"; }

@@ -3,10 +3,11 @@
 # users 8791), then one client language against it. Usage: t9.sh ts|rust|go|kotlin|swift
 # StagePlan's app files and the client examples come from this checkout (the RC's commit in CI).
 . "$(dirname "$0")/lib.sh"
-REPO=$(cd "$AG/../.." && pwd); SP=$REPO/examples/stage-plan/apps
+REPO=${AG_REPO:-$(cd "$AG/../.." && pwd)}; SP=$REPO/examples/stage-plan/apps   # AG_REPO: a checkout of the RC commit (CI: rc-src/)
 APP_ID=d1e92c0e-2b64-5e3b-9684-a6fb3205dc2b   # what the TS client derives from http://127.0.0.1:8780/jazz
 backend() {
-  local W=$AG/.work/t9; rm -rf "$W"; cp -r "$AG/t9" "$W"; cd "$W" && use_rc_pnpm || return 1
+  local W=$AG/.work/t9; rm -rf "$W"; cp -r "$AG/t9" "$W" && cd "$W" || { echo "FAIL t9 setup: copy to $W"; return 1; }
+  use_rc_pnpm || return 1
   mkdir -p stageplan && cp "$SP"/react-localfirst/jazz.{app.json,permissions.json,generated.ts} stageplan/   # resolve jazz-tools from the RC install
   kill_port 8780 8790 8791
   OIDC_PORT=8790 setsid npx tsx oidc.ts > oidc-w.log 2>&1 < /dev/null &

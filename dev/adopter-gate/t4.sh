@@ -8,6 +8,8 @@ body() {
   "$AG/t4/scripts/run-t4.sh" "$(ag_version)" > "$AG_RESULTS/t4-full.log" 2>&1; local rc=$?
   grep -E "^(PASS|FAIL|FINDING|SEEDED|smoke run 1 failed)" "$AG_RESULTS/t4-full.log" \
     | sed 's/^FINDING/REVIEW t4 finding:/; s/^SEEDED/REVIEW t4 first run: seeded/; s/^smoke run 1 failed; retrying once/REVIEW t4 smoke run 1 failed, retried once (known flake jazz#5553; remove the retry once it is fixed)/'
+  # Per-step wall time (run-t4.sh stamps each "=== step @epoch"), for the release-gate budget.
+  awk '/^=== .* @[0-9]+$/ { t=$NF; sub(/^@/,"",t); if (p) printf "TIME t4 %ss %s\n", t-pt, p; p=$0; sub(/^=== /,"",p); sub(/ @[0-9]+$/,"",p); pt=t }' "$AG_RESULTS/t4-full.log"
   # The core: its version after the deploy, and whether it existed before (the old-data checks need it to).
   local L=$AG_RESULTS/t4-full.log
   local before; before=$(sed -n '/^=== core and inventory before/,/^=== deps/p' "$L" | grep -cE '^  jazz-.*-production-data ')

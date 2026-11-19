@@ -24,6 +24,7 @@ permissions:
 
 env:
   AG: dev/adopter-gate
+  AG_REPO: ${{ github.workspace }}/rc-src
   PNPM_VERSION: 11.28.10
 
 jobs:
@@ -35,8 +36,10 @@ jobs:
       matrix:
         target: [npm, create-jazz, crates, go, kotlin]
     steps:
+      # The gate's scripts from this workflow's commit; the released source (example clients) into rc-src/.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with: { ref: "v${{ inputs.version }}" }
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with: { ref: "v${{ inputs.version }}", path: rc-src }
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with: { node-version-file: .nvmrc }
       # The gate's apps are their own pnpm projects (pnpm 11), not the repo workspace (packageManager pnpm@10).
@@ -65,8 +68,10 @@ jobs:
     container: swift:6.0-noble
     steps:
       - run: apt-get update -qq && apt-get install -y -qq curl git iproute2 python3 sqlite3 unzip xz-utils gh >/dev/null
+      # The gate's scripts from this workflow's commit; the released source (example clients) into rc-src/.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with: { ref: "v${{ inputs.version }}" }
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with: { ref: "v${{ inputs.version }}", path: rc-src }
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with: { node-version-file: .nvmrc }
       # The gate's apps are their own pnpm projects (pnpm 11), not the repo workspace (packageManager pnpm@10).
