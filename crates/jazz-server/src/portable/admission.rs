@@ -582,4 +582,41 @@ mod core_secret_tests {
         assert_eq!(admitted.trust, CommitUnitTrust::Session);
         assert_eq!(admitted.credential, WebSocketCredential::Session);
     }
+
+    /// A guest's proof gets no further without the core's secret: with no
+    /// upgrade credential and no secret in the prelude, or with a wrong
+    /// credential, the socket is refused and the guest verifier is never
+    /// asked.
+    #[test]
+    fn a_guest_proof_without_the_secret_never_reaches_the_verifier() {
+        let guest: WebSocketPrelude = serde_json::from_value(serde_json::json!({
+            "peer_identity": alice().canonical(),
+            "auth": { "jwt_token": "a.b.c" },
+            "local_first_audience": "https://app.example/jazz",
+        }))
+        .unwrap();
+        let wrong = SECRET.replace('s', "x");
+        for upgrade in [None, upgrade(&wrong, "backend"), upgrade(&wrong, "admin")] {
+            let mut asked = false;
+            let refused = admit_by_core_secret(&guest, upgrade, SECRET, NOW, &mut |_, _, _| {
+                asked = true;
+                Err("asked".to_owned())
+            });
+            assert!(
+                refused.is_err(),
+                "a guest proof without the secret is refused"
+            );
+            assert!(!asked, "the guest verifier is not asked without the secret");
+        }
+        let without_access = Some(UpgradeCredential {
+            credential: &wrong,
+            access: None,
+        });
+        let mut asked = false;
+        let refused = admit_by_core_secret(&guest, without_access, SECRET, NOW, &mut |_, _, _| {
+            asked = true;
+            Err("asked".to_owned())
+        });
+        assert!(refused.is_err() && !asked);
+    }
 }
