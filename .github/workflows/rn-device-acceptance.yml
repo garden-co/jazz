@@ -228,6 +228,25 @@ jobs:
         env:
           JAZZ_DEVICE_APP: ${{ env.JAZZ_DEVICE_DERIVED_DATA }}/Build/Products/Release-iphonesimulator/JazzRNdeviceacceptance.app
         run: pnpm --filter rn-device-acceptance device:ios
+      # release-artifacts uploads its manifest last, about when this job starts,
+      # so require it at the end rather than wait for it up front.
+      - name: Require the artifacts run's release manifest to name this commit
+        if: inputs.artifacts_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          manifest="${RUNNER_TEMP}/release-manifest"
+          until gh run download "${ARTIFACTS_RUN_ID}" -R "${GITHUB_REPOSITORY}" -n release-manifest -D "${manifest}" 2>/dev/null; do
+            if [[ "$(gh run view "${ARTIFACTS_RUN_ID}" -R "${GITHUB_REPOSITORY}" --json status --jq .status)" == completed ]]; then
+              gh run download "${ARTIFACTS_RUN_ID}" -R "${GITHUB_REPOSITORY}" -n release-manifest -D "${manifest}" && break
+              echo "::error::run ${ARTIFACTS_RUN_ID} finished without a release-manifest"
+              exit 1
+            fi
+            sleep 15
+          done
+          sha="$(node -p 'require(process.argv[1]).sha' "${manifest}/manifest.json")"
+          [[ "$sha" == "$GITHUB_SHA" ]] || { echo "::error::run ${ARTIFACTS_RUN_ID}'s release manifest is for ${sha}, not ${GITHUB_SHA}"; exit 1; }
 
   android-device-acceptance:
     # Keep the expensive installed-device receipt opt-in, but make its label
@@ -388,6 +407,25 @@ jobs:
           export JAZZ_DEVICE_APK="$GITHUB_WORKSPACE/dev/rn-device-acceptance/android/app/build/outputs/apk/release/app-release.apk"
           export JAZZ_DEVICE_RELAY_SOURCE_REVISION="$GITHUB_SHA"
           pnpm --filter rn-device-acceptance device:android
+      # release-artifacts uploads its manifest last, about when this job starts,
+      # so require it at the end rather than wait for it up front.
+      - name: Require the artifacts run's release manifest to name this commit
+        if: inputs.artifacts_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          manifest="${RUNNER_TEMP}/release-manifest"
+          until gh run download "${ARTIFACTS_RUN_ID}" -R "${GITHUB_REPOSITORY}" -n release-manifest -D "${manifest}" 2>/dev/null; do
+            if [[ "$(gh run view "${ARTIFACTS_RUN_ID}" -R "${GITHUB_REPOSITORY}" --json status --jq .status)" == completed ]]; then
+              gh run download "${ARTIFACTS_RUN_ID}" -R "${GITHUB_REPOSITORY}" -n release-manifest -D "${manifest}" && break
+              echo "::error::run ${ARTIFACTS_RUN_ID} finished without a release-manifest"
+              exit 1
+            fi
+            sleep 15
+          done
+          sha="$(node -p 'require(process.argv[1]).sha' "${manifest}/manifest.json")"
+          [[ "$sha" == "$GITHUB_SHA" ]] || { echo "::error::run ${ARTIFACTS_RUN_ID}'s release manifest is for ${sha}, not ${GITHUB_SHA}"; exit 1; }
       - name: Retain matching Android crash-symbol artifacts
         if: failure()
         env:
