@@ -142,6 +142,9 @@ jobs:
       ref: ${{ needs.resolve.outputs.sha }}
       version: ${{ needs.resolve.outputs.version }}
       publish: false
+      # What a release can ship is also rebuilt without any cache, and must
+      # give the same checksum.
+      reproduce: ${{ needs.resolve.outputs.release == 'true' }}
 
   # The server binaries, as "Publish jazz-tools alpha" attaches them.
   server:
