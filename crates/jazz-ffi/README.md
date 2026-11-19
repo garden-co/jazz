@@ -364,15 +364,15 @@ in and out as ordinary JSON; writes of a space whose key the device does not hol
 
 A request is JSON text `{ "op": ..., ... }`; bytes are base64 and numbers that may exceed 2^53 are decimal text:
 
-| `op`          | Fields                                                   | Answer (JSON)                                |
-| ------------- | -------------------------------------------------------- | -------------------------------------------- |
-| `openScope`   | `scope`                                                  | the incarnation, as text                     |
-| `load`        | `scope`, `doc`                                           | `{ "bytes", "revision" }`, or `null`         |
-| `save`        | `scope`, `incarnation`, `doc`, `bytes`, `expected`/`null` | the new revision, as text                    |
-| `list`        | `scope`                                                  | the document names                           |
-| `delete`      | `scope`                                                  | `null`                                       |
-| `protect`     | `secret`                                                 | the protected blob, base64                   |
-| `unprotect`   | `blob`                                                   | the secret, base64                           |
+| `op`        | Fields                                                    | Answer (JSON)                        |
+| ----------- | --------------------------------------------------------- | ------------------------------------ |
+| `openScope` | `scope`                                                   | the incarnation, as text             |
+| `load`      | `scope`, `doc`                                            | `{ "bytes", "revision" }`, or `null` |
+| `save`      | `scope`, `incarnation`, `doc`, `bytes`, `expected`/`null` | the new revision, as text            |
+| `list`      | `scope`                                                   | the document names                   |
+| `delete`    | `scope`                                                   | `null`                               |
+| `protect`   | `secret`                                                  | the protected blob, base64           |
+| `unprotect` | `blob`                                                    | the secret, base64                   |
 
 An answer is ok with its JSON, or not ok with `conflict` (the document's revision is not `expected`), `wiped`
 (the scope is not of that incarnation) or a message.

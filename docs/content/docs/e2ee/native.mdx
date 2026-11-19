@@ -19,12 +19,12 @@ operating system's key store. `protect` encrypts a secret with that key and `unp
 Because the key stays in the key store, a copy of the files on its own cannot answer a
 device-approval challenge as your device would.
 
-| Platform       | The key lives in                                          | The files live in                       |
-| -------------- | --------------------------------------------------------- | --------------------------------------- |
-| Swift (Apple)  | the Keychain (this device only, not synced)               | Application Support                     |
-| Kotlin/Android | the Android Keystore (a key that cannot be exported)      | the app's `filesDir`                    |
-| Go             | the OS key store (Keychain, Credential Manager, libsecret) | the user's config or data directory     |
-| Rust           | the OS key store, through a crate such as `keyring`       | the app's data directory                |
+| Platform       | The key lives in                                           | The files live in                   |
+| -------------- | ---------------------------------------------------------- | ----------------------------------- |
+| Swift (Apple)  | the Keychain (this device only, not synced)                | Application Support                 |
+| Kotlin/Android | the Android Keystore (a key that cannot be exported)       | the app's `filesDir`                |
+| Go             | the OS key store (Keychain, Credential Manager, libsecret) | the user's config or data directory |
+| Rust           | the OS key store, through a crate such as `keyring`        | the app's data directory            |
 
 ## Opening an encrypted app
 

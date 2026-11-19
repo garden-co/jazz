@@ -18,7 +18,10 @@ crate-type = ["cdylib"]
 
 [dependencies]
 jazz-native-relay = { path = "../jazz-native-relay", optional = true }
-jazz = { package = "jazz-core", path = "../jazz", default-features = false, features = ["runtime", "e2ee-client"] }
+jazz = { package = "jazz-core", path = "../jazz", default-features = false, features = [
+  "runtime",
+  "e2ee-client",
+] }
 jazz-e2ee-client = { path = "../jazz-e2ee-client" }
 jazz-e2ee = { path = "../jazz-e2ee" }
 jazz-codegen.workspace = true
