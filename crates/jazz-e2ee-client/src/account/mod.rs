@@ -9,6 +9,7 @@
 //! whose evidence changed before it commits; a conflict reads again. A
 //! publication waits until the authority accepts it.
 
+mod devices;
 pub(crate) mod rows;
 
 use std::cell::Cell;
@@ -21,7 +22,7 @@ use jazz::records::Value;
 use jazz::tools::OpenTransactionId;
 use jazz::tx::DurabilityTier;
 use jazz_e2ee::protocol::account::build::{
-    AccountWriter, ResetPolicy, RootAuthority, account_root, check_bootstrap, check_reset,
+    ResetPolicy, RootAuthority, account_root, check_bootstrap, check_reset,
 };
 use jazz_e2ee::protocol::account::{
     AccountEpochKeys, AccountKey, AccountKeyEvidence, AccountReplay, AccountState,
@@ -32,6 +33,8 @@ use jazz_e2ee::protocol::records::account::{
     RecoveryRoot,
 };
 use jazz_e2ee::protocol::{Accepted, Position, ProtocolError};
+
+pub use devices::{DeviceInfo, DeviceStatus, PendingApproval};
 
 use crate::client::E2eeClient;
 use crate::error::ClientError;
@@ -124,30 +127,6 @@ fn by_account(table: &str, account: &Value) -> Query {
 /// A device whose state this runtime keeps changing (re-enrolment) is read
 /// once per operation.
 impl E2eeClient {
-    fn writer(&self) -> Result<AccountWriter<'_>, ClientError> {
-        Ok(AccountWriter {
-            suite: self.shared.registry.select(&self.shared.selected)?,
-            registry: &self.shared.registry,
-            domain: &self.shared.domain,
-            account_id: &self.shared.account_id,
-        })
-    }
-
-    /// Runs `step` in serializable transactions, reading again after a
-    /// conflict.
-    async fn serializable<T>(
-        &self,
-        db: &Db,
-        mut step: impl AsyncFnMut(OpenTransactionId) -> Result<T, ClientError>,
-    ) -> Result<T, ClientError> {
-        serializable(db, ATTEMPTS, async |tx| {
-            self.ensure_open()?;
-            step(tx).await
-        })
-        .await
-        .map_err(|error| self.forget_account_on(error))
-    }
-
     /// Reads `query` in transaction `tx`, as records with their positions;
     /// rows that are not records of their table are left out and reported.
     pub(crate) async fn read_rows<R: Row>(
