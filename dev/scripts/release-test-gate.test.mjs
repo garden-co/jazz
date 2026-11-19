@@ -163,8 +163,11 @@ function job(source, name) {
 
 test("the release PR workflow dispatches every release test workflow on the release head", () => {
   for (const workflow of RELEASE_TEST_WORKFLOWS) {
-    const dispatch = `gh workflow run ${workflow.file} --repo "\${REPO}" --ref "\${RELEASE_BRANCH}"`;
-    assert.ok(releasePr.includes(dispatch), `missing dispatch of ${workflow.file}`);
+    const files = [workflow.file, ...workflow.alternatives.map((alternative) => alternative.file)];
+    const dispatched = files.filter((file) =>
+      releasePr.includes(`gh workflow run ${file} --repo "\${REPO}" --ref "\${RELEASE_BRANCH}"`),
+    );
+    assert.ok(dispatched.length > 0, `missing dispatch of ${files.join(" or ")}`);
   }
 });
 
@@ -182,4 +185,57 @@ test("npm publication needs the release test gate in publish mode", () => {
     ),
     "publish-npm must require the release test gate outside dry runs",
   );
+});
+
+test("a successful release candidate gate on the head stands for RN device acceptance and Examples E2E", async () => {
+  const runs = passingRuns();
+  delete runs["rn-device-acceptance.yml"];
+  delete runs["examples-e2e.yml"];
+  runs["release-candidate.yml"] = [
+    {
+      id: 7,
+      head_sha: headSha,
+      event: "workflow_dispatch",
+      status: "completed",
+      conclusion: "success",
+    },
+  ];
+  const result = await evaluate(fakeGithub({ runs }));
+  assert.equal(result.ok, true, result.lines.join("\n"));
+  assert.ok(
+    result.lines.some((line) =>
+      /^Examples E2E: passed as part of Release candidate gate run 7/.test(line),
+    ),
+  );
+});
+
+test("a release candidate gate does not stand for CI, nor counts when it failed or ran elsewhere", async () => {
+  for (const [drop, patch] of [
+    ["ci.yml", {}],
+    ["examples-e2e.yml", { conclusion: "failure" }],
+    ["examples-e2e.yml", { head_sha: "c".repeat(40) }],
+    ["examples-e2e.yml", { event: "push" }],
+    ["examples-e2e.yml", { display_title: "Cloud RC probe only, v2.0.0-alpha.68-rc.1" }],
+  ]) {
+    const runs = passingRuns();
+    delete runs[drop];
+    runs["release-candidate.yml"] = [
+      {
+        id: 7,
+        head_sha: headSha,
+        event: "workflow_dispatch",
+        status: "completed",
+        conclusion: "success",
+        ...patch,
+      },
+    ];
+    const result = await evaluate(fakeGithub({ runs }));
+    assert.equal(result.ok, false, `${drop} ${JSON.stringify(patch)}`);
+  }
+});
+
+test("the release candidate workflow names probe-only runs the way the gate excludes them", () => {
+  const rc = fs.readFileSync(path.join(root, ".github/workflows/release-candidate.yml"), "utf8");
+  const runName = rc.match(/^run-name: (.*)$/m)?.[1] ?? "";
+  assert.match(runName, /inputs\.probe-tag != '' && format\('Cloud RC probe only, \{0\}'/);
 });

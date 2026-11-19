@@ -150,7 +150,7 @@ jobs:
           tar -czf "${RUNNER_TEMP}/art/libjazz_ffi-linux-x86_64.tar.gz" -C "${RUNNER_TEMP}/pack" .
 
       # The tag's commit can predate a fix to the embed script, so take it
-      # from the commit this workflow runs from (as release-candidate-npm.yml
+      # from the commit this workflow runs from (as release-candidate.yml
       # does with rc-tarballs.mjs). It only lays out files; the push job
       # still refuses a commit that touches more than lib/ and embed_*.go.
       - name: Take the embed script from the workflow's commit
