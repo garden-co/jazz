@@ -31,7 +31,7 @@ name: Release artifacts
 # the Version Packages head).
 on:
   push:
-    branches: [main, release]
+    branches: [main, release, "ci-speed/release-artifacts-*"]
   workflow_dispatch:
     inputs:
       ref:
@@ -119,6 +119,7 @@ jobs:
     with:
       ref: ${{ needs.resolve.outputs.sha }}
       include_rn: true
+      reproduce_ios_relay: ${{ needs.resolve.outputs.release == 'true' }}
 
   # The called workflows' publish jobs never run here (dry-run, publish:
   # false), but GitHub checks every called job's permissions against the
