@@ -27,7 +27,13 @@ body() {
   if [ -n "$cur" ] && newer "$cur" "$(ag_version)"; then
     echo "SKIP t4 vercel: $(ag_version) sorts below the eval core's $cur (a dry-run or older version); t4 deploys only versions that move the core"; return; fi
   "$AG/t4/scripts/run-t4.sh" "$(ag_version)" > "$AG_RESULTS/t4-full.log" 2>&1; local rc=$?
-  grep -E "^(PASS|FAIL|REVIEW|FINDING|SEEDED|smoke run 1 failed)" "$AG_RESULTS/t4-full.log" \
+  # When the smoke was retried (jazz#5553), run 1's step lines are history, not the result: they become REVIEW lines
+  # (still listed), and only the retried run's steps can FAIL.
+  awk 'BEGIN{n=0} { lines[++n]=$0; if ($0 ~ /^smoke run 1 failed; retrying once/) cut=n }
+       END { for (i=1;i<=n;i++) { l=lines[i]; if (cut && i<cut && l ~ /^=== smoke/) insmoke=1; if (cut && i<cut && insmoke && l ~ /^(FAIL|PASS):? /) {
+               if (l ~ /^FAIL/) { sub(/^FAIL:? +/, "", l); l="REVIEW t4 smoke run 1 (retried): " l } else continue }
+             print l } }' "$AG_RESULTS/t4-full.log" \
+    | grep -E "^(PASS|FAIL|REVIEW|FINDING|SEEDED|smoke run 1 failed)" \
     | sed 's/^FINDING/REVIEW t4 finding:/; s/^SEEDED/REVIEW t4 first run: seeded/; s/^smoke run 1 failed; retrying once/REVIEW t4 smoke run 1 failed, retried once (known flake jazz#5553; remove the retry once it is fixed)/'
   # Per-step wall time (run-t4.sh stamps each "=== step @epoch"), for the release-gate budget.
   awk '/^=== .* @[0-9]+$/ { t=$NF; sub(/^@/,"",t); if (p) printf "TIME t4 %ss %s\n", t-pt, p; p=$0; sub(/^=== /,"",p); sub(/ @[0-9]+$/,"",p); pt=t }' "$AG_RESULTS/t4-full.log"
