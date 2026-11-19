@@ -15,11 +15,11 @@ esac; }
 end=$(( $(date +%s) + ${AG_WAIT_MIN:-0} * 60 )); until available; do [ "$(date +%s)" -ge $end ] && break; sleep 30; done
 available || { echo "FAIL registry-$T: $V not available (waited ${AG_WAIT_MIN:-0} min)" | tee "$AG_RESULTS/registry-$T.txt"; exit 1; }
 # The TS backend runs on npm's packages (packed into AG_TGZ, which t9.sh installs from).
-mkdir -p "$AG_TGZ" && ( cd "$AG_TGZ" && echo "$V" > VERSION && npm pack "jazz-tools@$V" "jazz-wasm@$V" "jazz-napi@$V" "@garden-co/jazz-napi-linux-x64-gnu@$V" >/dev/null 2>&1 ) \
+mkdir -p "$AG_TGZ" && ( cd "$AG_TGZ" && echo "$V" > VERSION && ag_retry 3 npm pack "jazz-tools@$V" "jazz-wasm@$V" "jazz-napi@$V" "@garden-co/jazz-napi-linux-x64-gnu@$V" >/dev/null 2>&1 ) \
   || { echo "FAIL registry-$T: npm pack $V" | tee "$AG_RESULTS/registry-$T.txt"; exit 1; }
 case $T in
   npm) body() { local W=$AG/.work/npm-plain; rm -rf "$W"; mkdir -p "$W" && cd "$W" && echo '{"name":"plain","private":true,"type":"module"}' > package.json
-         npm install "jazz-tools@$V" ws@8 > install.log 2>&1 && echo "PASS npm install jazz-tools@$V" || { echo "FAIL npm install"; tail -5 install.log; return; }
+         ag_retry 3 npm install "jazz-tools@$V" ws@8 > install.log 2>&1 && echo "PASS npm install jazz-tools@$V" || { echo "FAIL npm install"; tail -5 install.log; return; }
          node -e 'import("jazz-tools/backend").then(m => process.exit(m.createJazz ? 0 : 1))' && echo "PASS jazz-tools/backend imports" || echo "FAIL jazz-tools/backend import"
          "$AG/t9.sh" ts | grep -E "^(PASS|FAIL) t9 ts"; }
        ag_job registry-npm body ;;
