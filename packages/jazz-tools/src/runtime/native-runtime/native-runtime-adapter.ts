@@ -3720,8 +3720,6 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.db.subscribe(query, opts, author, this.nativeReadClaims(context));
   }
 
-  /** Drive the binding-owned coverage and hydration operation while the
-   * existing peer pump delivers whatever remote state it is waiting for. */
   /**
    * A thin transaction WASM serves answers with a promise (NAPI with a
    * pending read it polls): keep the server transport pumping while it
@@ -3743,6 +3741,8 @@ export class NativeRuntimeAdapter implements Runtime {
     return done;
   }
 
+  /** Drive the binding-owned coverage and hydration operation while the
+   * existing peer pump delivers whatever remote state it is waiting for. */
   private async awaitNativeRead(
     started: NativeReadResult | Promise<NativeReadResult>,
     tier?: string,

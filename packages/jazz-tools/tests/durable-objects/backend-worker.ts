@@ -16,6 +16,10 @@ export { JazzCore } from "jazz-tools/durable-object";
 interface Env {
   JAZZ: Parameters<typeof durableObjects>[0] extends { binding: infer B } ? B : never;
   JAZZ_CORE_SECRET: string;
+  /** Test switch: the backend presents this secret instead of the core's. */
+  TEST_BACKEND_SECRET?: string;
+  /** Test switch: `authenticate` lets no one in. */
+  TEST_REFUSE_ALL?: string;
 }
 
 const permissions = { format: 1, tables: { todos: { read: "true", insert: "true" } } };
@@ -24,8 +28,11 @@ export const JazzBackend = jazzBackend((env: Env) => {
   const jazz = createJazz({
     app,
     permissions,
-    store: durableObjects({ binding: env.JAZZ, secret: env.JAZZ_CORE_SECRET }),
-    authenticate: (request) => acceptDeviceAccounts(request),
+    store: durableObjects({
+      binding: env.JAZZ,
+      secret: env.TEST_BACKEND_SECRET ?? env.JAZZ_CORE_SECRET,
+    }),
+    authenticate: (request) => (env.TEST_REFUSE_ALL ? null : acceptDeviceAccounts(request)),
   });
   return {
     jazz,

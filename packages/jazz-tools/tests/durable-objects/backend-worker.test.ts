@@ -26,8 +26,11 @@ describe.skipIf(!hostBuilt && !process.env.CI)("createJazz in a Cloudflare Worke
     script = await bundleWorker(join(__dirname, "backend-worker.ts"));
   });
 
-  async function worker(persist?: string): Promise<DurableObjectCore> {
-    const started = await startDurableObjectCore({ script, backend: true, persist });
+  async function worker(
+    persist?: string,
+    bindings?: Record<string, string>,
+  ): Promise<DurableObjectCore> {
+    const started = await startDurableObjectCore({ script, backend: true, persist, bindings });
     cleanups.push(() => started.dispose());
     return started;
   }
@@ -115,5 +118,51 @@ describe.skipIf(!hostBuilt && !process.env.CI)("createJazz in a Cloudflare Worke
     expect(committed.value).toBe("done");
     await committed.wait({ tier: "global" });
     expect(await (await fetch(`${url}/todos`)).json()).toEqual(["thin one", "thin two"]);
+  });
+
+  describe("refuses", () => {
+    it("a backend whose secret isn't the core's, naming it", async () => {
+      const { url } = await worker(undefined, { TEST_BACKEND_SECRET: "w".repeat(40) });
+      const response = await fetch(`${url}/todos`);
+      expect(response.status).toBe(500);
+      expect(await response.text()).toMatch(/refused the secret/);
+    });
+
+    it("a sync socket from another origin", async () => {
+      const { url } = await worker();
+      const appId = await (await fetch(`${url}/app-id`)).text();
+      const socket = new (globalThis.WebSocket as unknown as new (
+        url: string,
+        options: { headers: Record<string, string> },
+      ) => WebSocket)(`${url.replace(/^http/, "ws")}/jazz/apps/${appId}/ws`, {
+        headers: { origin: "https://elsewhere.example" },
+      });
+      // The Worker has already upgraded the socket: createJazz's origin
+      // check closes it before any session starts (Node refuses the upgrade).
+      const closed = await new Promise<{ code: number; reason: string }>((resolve) =>
+        socket.addEventListener("close", (event) =>
+          resolve({ code: event.code, reason: event.reason }),
+        ),
+      );
+      expect(closed).toEqual({ code: 1008, reason: "origin not allowed" });
+    });
+
+    it("a device account its authenticate doesn't accept: its write never reaches the core", async () => {
+      const { url } = await worker(undefined, { TEST_REFUSE_ALL: "1" });
+      const guest = await guestOf(url, await (await fetch(`${url}/app-id`)).text());
+      const written = guest.db
+        .insert(app.todos, { title: "refused guest", done: false })
+        .wait({ tier: "global" })
+        .then(
+          () => "confirmed",
+          () => "refused",
+        );
+      const outcome = await Promise.race([
+        written,
+        new Promise((resolve) => setTimeout(() => resolve("unconfirmed"), 5_000)),
+      ]);
+      expect(outcome).not.toBe("confirmed");
+      expect(await (await fetch(`${url}/todos`)).json()).toEqual([]);
+    });
   });
 });

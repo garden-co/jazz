@@ -1,3 +1,4 @@
+import "../backend/node-native.js";
 import { createJazzContext, type JazzContext } from "../backend/create-jazz-context.js";
 import { Db } from "../runtime/db.js";
 import { localFirstAccountId } from "../accounts/local-first.js";

@@ -117,6 +117,10 @@ Auth on Jazz (`examples/band-chat/apps/react-hono-betterauth`, "Deploy to Cloudf
 
 The core and the backend each bring a WebAssembly module, so the Worker needs the Workers Paid plan.
 
+The backend is one Durable Object, and every browser's sync socket passes through it, as every
+request does: like the core, it is one object per app. Neither hibernates its sockets yet, so both
+stay awake (and billed for duration) while any browser is connected.
+
 ## Connect your backend
 
 Put the Worker's values in your backend's environment. They stay server-side; the core secret is

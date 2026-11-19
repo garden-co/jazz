@@ -27,6 +27,8 @@ export async function startDurableObjectCore(
     persist?: string;
     /** The app's backend object too (class `JazzBackend`, as `JAZZ_BACKEND`). */
     backend?: boolean;
+    /** More bindings for the Worker (test switches). */
+    bindings?: Record<string, string>;
   } = {},
 ): Promise<DurableObjectCore> {
   const script = options.script ?? join(here, "mock-core.mjs");
@@ -44,7 +46,7 @@ export async function startDurableObjectCore(
     },
     compatibilityFlags: ["nodejs_compat"],
     ...(options.persist ? { durableObjectsPersist: options.persist } : {}),
-    bindings: { JAZZ_CORE_SECRET: secret },
+    bindings: { ...options.bindings, JAZZ_CORE_SECRET: secret },
     host: "127.0.0.1",
     port: 0,
   });

@@ -110,7 +110,12 @@ function underBasePath(pathname: string, basePath: string): boolean {
 
 const textEncoder = new TextEncoder();
 
-/** workerd's server socket in the `ws` package's shape, which `acceptSocket` takes. */
+/**
+ * workerd's server socket in the `ws` package's shape, which `acceptSocket`
+ * takes. It has no `pause`/`resume`: workerd can't stop reading an accepted
+ * socket. A client that ignores flow control still can't grow its session's
+ * queue without bound: past `MAX_WAITING_SESSION_BYTES` its session ends.
+ */
 function wsLike(ws: WorkerdWebSocket): WsLikeSocket {
   const socket = {
     send: (data: Uint8Array) => ws.send(data),
