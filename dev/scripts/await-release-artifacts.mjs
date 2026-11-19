@@ -3,7 +3,11 @@
  * The release candidate gate verifies the release-artifacts.yml run of the
  * commit it was dispatched on (pushes to main and release start one after
  * every merge). Find that run, wait for it while it is still building, and
- * report its ID as the `run_id` step output. Prints an empty `run_id` when no
+ * report its ID as the `run_id` step output. The gate needs only some of the
+ * artifacts (REQUIRED_ARTIFACTS: comma-separated names), so a run still
+ * building others (the Swift and Maven ones) is ready as soon as those are
+ * uploaded; the gate separately requires the whole run to succeed
+ * (WAIT_FOR=completion). Prints an empty `run_id` when no
  * run of this commit exists after `missingGraceMs` (a run dispatched together
  * with the gate, as changesets-release-pr.yml does, takes a moment to be
  * listed), so the gate builds the artifacts itself.
@@ -58,6 +62,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export async function awaitArtifacts({
   headSha,
   list,
+  listArtifacts = async () => [],
+  required = [],
   timeoutMs = 60 * 60_000,
   missingGraceMs = 90_000,
   pollMs = 20_000,
@@ -65,8 +71,18 @@ export async function awaitArtifacts({
 }) {
   const started = Date.now();
   for (;;) {
-    const decision = artifactsDecision(await list(headSha), headSha);
+    const runs = await list(headSha);
+    const decision = artifactsDecision(runs, headSha);
     if (decision.state === "ready") return String(decision.runId);
+    if (decision.state === "waiting" && required.length > 0) {
+      for (const run of runs.filter((r) => r.head_sha === headSha && r.status !== "completed")) {
+        const names = new Set(await listArtifacts(run.id));
+        if (required.every((name) => names.has(name))) {
+          log(`run ${run.id} is still building, but has uploaded ${required.join(", ")}`);
+          return String(run.id);
+        }
+      }
+    }
     if (decision.state === "missing" && Date.now() - started >= missingGraceMs) return "";
     if (decision.state === "failed") throw new Error(decision.reason);
     if (Date.now() - started > timeoutMs)
@@ -89,7 +105,15 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         `actions/workflows/${ARTIFACTS_WORKFLOW}/runs?${new URLSearchParams({ head_sha: sha, per_page: "50" })}`,
       )
     ).workflow_runs;
-  const runId = await awaitArtifacts({ headSha, list });
+  const listArtifacts = async (runId) =>
+    (await api(`actions/runs/${runId}/artifacts?per_page=100`)).artifacts
+      .filter((artifact) => !artifact.expired)
+      .map((artifact) => artifact.name);
+  const required = (process.env.REQUIRED_ARTIFACTS ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  const runId = await awaitArtifacts({ headSha, list, listArtifacts, required });
   console.log(runId ? `verifying ${ARTIFACTS_WORKFLOW} run ${runId}` : `no ${ARTIFACTS_WORKFLOW} run of ${headSha}: building here`);
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `run_id=${runId}\n`);
 }

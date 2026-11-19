@@ -54,3 +54,17 @@ test("awaitArtifacts polls until ready, and returns empty when missing", async (
     "2",
   );
 });
+
+test("a run still building is ready once the required artifacts are uploaded", async () => {
+  const building = run(4, { status: "in_progress", conclusion: null });
+  const uploads = [["pkg-jazz-tools"], ["pkg-jazz-tools", "release-server", "other"]];
+  const id = await awaitArtifacts({
+    headSha: sha,
+    list: async () => [building],
+    listArtifacts: async () => uploads.shift(),
+    required: ["pkg-jazz-tools", "release-server"],
+    pollMs: 1,
+    log: () => {},
+  });
+  assert.equal(id, "4");
+});

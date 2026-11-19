@@ -125,6 +125,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ needs.resolve.outputs.sha }}
+          # What the gates read; the rest (Swift, Maven, languages) is
+          # checked by artifacts-complete.
+          REQUIRED_ARTIFACTS: pkg-jazz-tools,pkg-jazz-wasm,pkg-jazz-napi,pkg-jazz-rn,pkg-create-jazz,inspector-prebuilt,release-server
         run: node dev/scripts/await-release-artifacts.mjs
 
   # Only when no release-artifacts run of this commit exists (e.g. a branch
@@ -158,6 +161,31 @@ jobs:
           run_id="${FOUND:-${GITHUB_RUN_ID}}"
           echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
           echo "Verifying the artifacts of https://github.com/${GH_REPO}/actions/runs/${run_id}"
+
+  # The gates start once the artifacts they read exist; a candidate is still
+  # only good if every release artifact of its commit built.
+  artifacts-complete:
+    name: Every release artifact built
+    needs: artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: ${{ needs.artifacts.outputs.run_id }}
+    steps:
+      - name: Wait for the release-artifacts run
+        if: env.RUN_ID != github.run_id
+        run: |
+          set -euo pipefail
+          while :; do
+            read -r status conclusion < <(gh run view "${RUN_ID}" --json status,conclusion --jq '"\(.status) \(.conclusion)"')
+            [ "${status}" = completed ] && break
+            sleep 20
+          done
+          echo "release-artifacts run ${RUN_ID}: ${conclusion}"
+          test "${conclusion}" = success
 
   # --- Gates -----------------------------------------------------------------
 
@@ -491,7 +519,7 @@ jobs:
 
   verdict:
     name: Release candidate verdict
-    needs: [resolve, artifacts, examples-e2e, rn-device-acceptance, preview, rc-tarballs, smoke, attach-server, publish, cloud-rc-probe]
+    needs: [resolve, artifacts, artifacts-complete, examples-e2e, rn-device-acceptance, preview, rc-tarballs, smoke, attach-server, publish, cloud-rc-probe]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
