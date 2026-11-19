@@ -27,8 +27,9 @@ browsers and apps, and decides who each user is. Other trusted machines reach Ja
 
 ## Deploy the core's Worker
 
-The Worker holds one SQLite-backed Durable Object for your app. Its module exports the object's
-class and forwards every request to it:
+The Worker holds one SQLite-backed Durable Object for your app. It needs the Workers Paid plan:
+the Jazz core makes the Worker about 4 MB compressed, over the Free plan's 3 MB limit. Its module
+exports the object's class and forwards every request to it:
 
 ```ts title="worker/index.ts"
 import { JazzCore, routeJazzRequest } from "jazz-tools/durable-object";
