@@ -250,8 +250,9 @@ impl PartialEq<&str> for CoreSecretRefusal {
 /// - A backend's own link is served as the backend; a user session the
 ///   backend states (`backend_session`) is served under that user's
 ///   policies, and must be the peer its prelude named.
-/// - A local-first guest's own proof (`jwt_token`) comes on session access
-///   and is admitted by `guest` (below); on backend access it is refused.
+/// - A local-first guest's own proof (`jwt_token`) is admitted by `guest`
+///   (below), on session access or, with the audience the backend vouches
+///   for (`local_first_audience`), on backend access.
 /// - A credential that holds decides the access, and the prelude's secret
 ///   slots are ignored (as native's workload gate): without a stated
 ///   access it vouches only that it relays a client, which must prove who
@@ -351,11 +352,27 @@ pub fn admit_by_core_secret(
             ),
         });
     }
-    if auth.jwt_token.is_some() {
-        return Err(CoreSecretRefusal::because(
-            "a guest's local-first proof is admitted on session access: relay it with the backend credential and no X-Jazz-Backend-Access",
-            WireErrorReason::Invalid,
-        ));
+    // A guest the backend relays with its own proof on backend access: the
+    // backend vouches for the audience the proof was signed for (a
+    // browser's endpoint URL, which only the backend knows), as native's
+    // `local_first_audience` does; the guest is still only the guest.
+    if let (None, Some(token)) = (&auth.backend_session, auth.jwt_token.as_deref()) {
+        // A proof the verifier refuses is the client's credential refused.
+        let session = guest(
+            token,
+            peer_identity,
+            prelude.local_first_audience.as_deref(),
+        )
+        .map_err(|message| CoreSecretRefusal::because(message, WireErrorReason::Invalid))?;
+        return Ok(WebSocketAdmission {
+            identity: peer_identity,
+            claims: crate::portable::session::session_claims(session)?,
+            trust: CommitUnitTrust::Session,
+            credential: WebSocketCredential::Session,
+            requested_link: prelude.requested_link,
+            bundle,
+            revocation: None,
+        });
     }
     let Some(stated) = &auth.backend_session else {
         return Ok(WebSocketAdmission {
@@ -481,6 +498,14 @@ mod core_secret_tests {
             reason(serde_json::json!({ "jwt_token": "a.b.c" }), None),
             Some(WireErrorReason::Invalid)
         );
+        // A relayed guest's proof the verifier refuses, on backend access.
+        assert_eq!(
+            reason(
+                serde_json::json!({ "jwt_token": "a.b.c" }),
+                upgrade(SECRET, "backend")
+            ),
+            Some(WireErrorReason::Invalid)
+        );
         // Session access with no proof to admit.
         let session_access = Some(UpgradeCredential {
             credential: SECRET,
@@ -548,9 +573,11 @@ mod core_secret_tests {
         let refused = admit(&prelude(stated, &bob), upgrade(SECRET, "backend"));
         assert!(refused.unwrap_err().contains("peer_identity must match"));
 
+        // A guest's own proof on backend access goes to the guest verifier,
+        // with the audience the backend vouches for.
         let guest = prelude(serde_json::json!({ "jwt_token": "a.b.c" }), &alice());
         let refused = admit(&guest, upgrade(SECRET, "backend")).unwrap_err();
-        assert!(refused.contains("admitted on session access"), "{refused}");
+        assert!(refused.contains("no guest verifier"), "{refused}");
     }
 
     /// A stated session carries what a revocation is checked against: its
@@ -635,5 +662,81 @@ mod core_secret_tests {
         assert_eq!(admitted.trust, CommitUnitTrust::Session);
         assert_eq!(admitted.credential, WebSocketCredential::Session);
         assert!(admitted.revocation.is_none());
+    }
+
+    /// A guest's own proof relayed on backend access, with the audience the
+    /// backend vouches for (a browser's endpoint): the verifier is asked
+    /// with that audience, and the guest is served as itself.
+    #[test]
+    fn a_guest_relayed_on_backend_access_is_verified_for_the_vouched_audience() {
+        let relayed: WebSocketPrelude = serde_json::from_value(serde_json::json!({
+            "peer_identity": alice().canonical(),
+            "auth": { "jwt_token": "a.b.c" },
+            "local_first_audience": "https://app.example/jazz",
+        }))
+        .unwrap();
+        let guest_session: jazz::tools::Session = serde_json::from_value(serde_json::json!({
+            "issuer": "https://idp.example", "user_id": "guest", "claims": {}
+        }))
+        .unwrap();
+        let mut asked = None;
+        let admitted = admit_by_core_secret(
+            &relayed,
+            upgrade(SECRET, "backend"),
+            SECRET,
+            NOW,
+            &mut |token, peer, audience| {
+                asked = Some((token.to_owned(), peer, audience.map(str::to_owned)));
+                Ok(guest_session.clone())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            asked,
+            Some((
+                "a.b.c".to_owned(),
+                alice(),
+                Some("https://app.example/jazz".to_owned())
+            ))
+        );
+        assert_eq!(admitted.trust, CommitUnitTrust::Session);
+        assert_eq!(admitted.credential, WebSocketCredential::Session);
+    }
+
+    /// A guest's proof gets no further without the core's secret: with no
+    /// upgrade credential and no secret in the prelude, or with a wrong
+    /// credential, the socket is refused and the guest verifier is never
+    /// asked.
+    #[test]
+    fn a_guest_proof_without_the_secret_never_reaches_the_verifier() {
+        let guest: WebSocketPrelude = serde_json::from_value(serde_json::json!({
+            "peer_identity": alice().canonical(),
+            "auth": { "jwt_token": "a.b.c" },
+            "local_first_audience": "https://app.example/jazz",
+        }))
+        .unwrap();
+        let wrong = SECRET.replace('s', "x");
+        for upgrade in [None, upgrade(&wrong, "backend"), upgrade(&wrong, "admin")] {
+            let mut asked = false;
+            let refused = admit_by_core_secret(&guest, upgrade, SECRET, NOW, &mut |_, _, _| {
+                asked = true;
+                Err("asked".to_owned())
+            });
+            assert!(
+                refused.is_err(),
+                "a guest proof without the secret is refused"
+            );
+            assert!(!asked, "the guest verifier is not asked without the secret");
+        }
+        let without_access = Some(UpgradeCredential {
+            credential: &wrong,
+            access: None,
+        });
+        let mut asked = false;
+        let refused = admit_by_core_secret(&guest, without_access, SECRET, NOW, &mut |_, _, _| {
+            asked = true;
+            Err("asked".to_owned())
+        });
+        assert!(refused.is_err() && !asked);
     }
 }
