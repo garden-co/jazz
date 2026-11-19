@@ -204,6 +204,9 @@ export function jazzCoreClass(wasm) {
       }
       const core = this.open();
       const [client, server] = Object.values(new WebSocketPair());
+      // Binary messages as ArrayBuffers, not Blobs (each Blob is one more
+      // async read), whatever the Worker's compatibility date.
+      server.binaryType = "arraybuffer";
       server.accept();
       const credential = request.headers.get("X-Jazz-Backend-Credential") ?? undefined;
       const access = request.headers.get("X-Jazz-Backend-Access") ?? undefined;
