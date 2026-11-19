@@ -45,7 +45,7 @@ on:
         }
       t4_mode:
         {
-          description: "t4: production (a real RC upgrades the long-lived eval core) or preview (dry runs: a preview + its own core)",
+          description: "t4: production (a real RC, rc_tag required) | preview (dry runs: a preview + its own core) | skip",
           required: false,
           type: string,
           default: production,
@@ -249,6 +249,11 @@ jobs:
       BASELINE_SEED: "1"
       T4_SKIP_NOREGION: "1"
       T4_MODE: ${{ inputs.t4_mode || 'production' }}
+      # production fails closed unless rc_tag names an existing release (a draft is fine) and isn't dryrun-*.
+      T4_RC_TAG: ${{ inputs.rc_tag }}
+      GH_TOKEN: ${{ github.token }}
+      # Per-run preview cores, deleted after the run, only once Anselm approves (set the var to 1).
+      T4_TEARDOWN: ${{ vars.T4_TEARDOWN }}
       T4_VERCEL_BYPASS_SECRET: ${{ secrets.T4_VERCEL_BYPASS_SECRET }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6

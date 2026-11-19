@@ -3,6 +3,8 @@
 // Usage: verdict.mjs <results dir> [expected job names, comma-separated]
 // Writes <results dir>/verdict.json and, in Actions, a table to $GITHUB_STEP_SUMMARY.
 // Verdict: FAIL if any FAIL line or an expected job left no results; NEEDS_REVIEW if any REVIEW or SKIP; else PASS.
+// A job that prints only NOTE lines ("t4 not run: …") was deliberately not run: it's listed under attention and left
+// out of the status (and of `expected`), so it can't turn a dry run into NEEDS_REVIEW.
 import fs from "node:fs";
 import path from "node:path";
 const [dir, expected = ""] = process.argv.slice(2);
@@ -16,7 +18,7 @@ for (const f of files) {
   const lines = fs
     .readFileSync(path.join(dir, f), "utf8")
     .split("\n")
-    .filter((l) => /^(PASS|FAIL|REVIEW|SKIP) /.test(l));
+    .filter((l) => /^(PASS|FAIL|REVIEW|SKIP|NOTE) /.test(l));
   jobs[name] = lines;
   for (const l of fs.readFileSync(path.join(dir, f), "utf8").split("\n")) {
     const m = /^TIME (\S+) (\d+)s (.*)$/.exec(l);
@@ -28,9 +30,15 @@ for (const [name, ls] of Object.entries(jobs))
 for (const name of expected.split(",").filter(Boolean))
   if (!jobs[name])
     jobs[name] = ["FAIL no results (the job did not run or crashed before reporting)"];
+const notRun = new Set(
+  Object.entries(jobs)
+    .filter(([, ls]) => ls.length && ls.every((l) => l.startsWith("NOTE ")))
+    .map(([n]) => n),
+);
 const count = (k) =>
-  Object.values(jobs)
-    .flat()
+  Object.entries(jobs)
+    .filter(([n]) => !notRun.has(n))
+    .flatMap(([, ls]) => ls)
     .filter((l) => l.startsWith(k + " ")).length;
 const status = count("FAIL") ? "FAIL" : count("REVIEW") || count("SKIP") ? "NEEDS_REVIEW" : "PASS";
 const sizesFile = fs
@@ -40,13 +48,15 @@ const sizes = sizesFile ? JSON.parse(fs.readFileSync(path.join(dir, sizesFile), 
 const summary = Object.fromEntries(
   Object.entries(jobs).map(([n, ls]) => [
     n,
-    ls.some((l) => l.startsWith("FAIL"))
-      ? "FAIL"
-      : ls.some((l) => /^(REVIEW|SKIP)/.test(l))
-        ? "NEEDS_REVIEW"
-        : ls.length
-          ? "PASS"
-          : "FAIL",
+    notRun.has(n)
+      ? "NOT_RUN"
+      : ls.some((l) => l.startsWith("FAIL"))
+        ? "FAIL"
+        : ls.some((l) => /^(REVIEW|SKIP)/.test(l))
+          ? "NEEDS_REVIEW"
+          : ls.length
+            ? "PASS"
+            : "FAIL",
   ]),
 );
 const verdict = {
@@ -65,7 +75,7 @@ const verdict = {
   ),
 };
 fs.writeFileSync(path.join(dir, "verdict.json"), JSON.stringify(verdict, null, 2));
-const icon = { PASS: "✅", FAIL: "❌", NEEDS_REVIEW: "🟡" };
+const icon = { PASS: "✅", FAIL: "❌", NEEDS_REVIEW: "🟡", NOT_RUN: "⏭️" };
 let md = `## Adopter gate: ${icon[status]} ${status}\n\n| Job | Result |\n|---|---|\n`;
 for (const [n, s] of Object.entries(summary).sort()) md += `| ${n} | ${icon[s]} ${s} |\n`;
 if (verdict.attention.length)

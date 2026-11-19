@@ -3,9 +3,22 @@
 # Without VERCEL_TOKEN it reports SKIP (secrets pending), which the verdict shows as not green.
 . "$(dirname "$0")/lib.sh"
 body() {
+  # Modes: production (a real RC), preview (a dry run: a Vercel preview with its own core), skip (not run).
+  # "Not run" prints only NOTE lines: the verdict lists them and leaves t4 out of the status, so a dry run can still PASS.
+  case "${T4_MODE:=production}" in
+    skip) echo "NOTE t4 not run: dry run (t4_mode skip)"; return;;
+    preview) [ -n "${T4_VERCEL_BYPASS_SECRET:-}" ] || { echo "NOTE t4 not run: preview bypass secret pending (T4_VERCEL_BYPASS_SECRET)"; return; };;
+    production)
+      # Fail closed: production deploys to the long-lived eval core, so only for a real RC (its release may still be a draft).
+      local tag=${T4_RC_TAG:-}
+      [ -n "$tag" ] && [ "${tag#dryrun-}" = "$tag" ] || { echo "FAIL t4 production mode needs a real rc_tag (got '${tag:-none}'); not deploying"; return; }
+      # An existing release of this repo (the RC's draft counts: the gate runs before publish) named by a real tag.
+      gh release view "$tag" -R "${GITHUB_REPOSITORY:-garden-co/jazz}" --json tagName >/dev/null 2>&1 \
+        || { echo "FAIL t4 production mode: no release $tag in ${GITHUB_REPOSITORY:-garden-co/jazz}; not deploying"; return; };;
+    *) echo "FAIL t4 unknown t4_mode '$T4_MODE'"; return;;
+  esac
+  export T4_MODE
   if [ -z "${VERCEL_TOKEN:-}" ]; then echo "SKIP t4 vercel: secrets pending (VERCEL_TOKEN, BASELINE_RED_PASSWORD; see t4/README.md)"; return; fi
-  if [ "${T4_MODE:-production}" = preview ] && [ -z "${T4_VERCEL_BYPASS_SECRET:-}" ]; then
-    echo "SKIP t4 vercel (preview mode): T4_VERCEL_BYPASS_SECRET pending; previews are behind Vercel Authentication"; return; fi
   export T4_RELEASE_BASE=${T4_RELEASE_BASE:-file://$AG_TGZ}
   # The eval core only moves to newer versions (newerVersion). A version that sorts below what it runs (an RC dry run's
   # rc.0, an old RC) would deploy a backend onto a newer core: not an upgrade test, and it leaves the eval app skewed.
@@ -14,7 +27,7 @@ body() {
   if [ -n "$cur" ] && newer "$cur" "$(ag_version)"; then
     echo "SKIP t4 vercel: $(ag_version) sorts below the eval core's $cur (a dry-run or older version); t4 deploys only versions that move the core"; return; fi
   "$AG/t4/scripts/run-t4.sh" "$(ag_version)" > "$AG_RESULTS/t4-full.log" 2>&1; local rc=$?
-  grep -E "^(PASS|FAIL|FINDING|SEEDED|smoke run 1 failed)" "$AG_RESULTS/t4-full.log" \
+  grep -E "^(PASS|FAIL|REVIEW|FINDING|SEEDED|smoke run 1 failed)" "$AG_RESULTS/t4-full.log" \
     | sed 's/^FINDING/REVIEW t4 finding:/; s/^SEEDED/REVIEW t4 first run: seeded/; s/^smoke run 1 failed; retrying once/REVIEW t4 smoke run 1 failed, retried once (known flake jazz#5553; remove the retry once it is fixed)/'
   # Per-step wall time (run-t4.sh stamps each "=== step @epoch"), for the release-gate budget.
   awk '/^=== .* @[0-9]+$/ { t=$NF; sub(/^@/,"",t); if (p) printf "TIME t4 %ss %s\n", t-pt, p; p=$0; sub(/^=== /,"",p); sub(/ @[0-9]+$/,"",p); pt=t }' "$AG_RESULTS/t4-full.log"

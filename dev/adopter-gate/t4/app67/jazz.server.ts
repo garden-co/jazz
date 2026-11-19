@@ -18,8 +18,10 @@ export const jazz = createJazz({
   app,
   permissions,
   store: vercel({
+    // T4_NAMESPACE: the adopter gate's per-run preview core (set only on its preview deployments).
     namespace: ({ environment, branch }) =>
-      environment === "production" ? "production" : perBranch(branch) || "cli-previews",
+      process.env.T4_NAMESPACE ||
+      (environment === "production" ? "production" : perBranch(branch) || "cli-previews"),
   }),
   publicUrl: [
     process.env.VERCEL_PROJECT_PRODUCTION_URL,

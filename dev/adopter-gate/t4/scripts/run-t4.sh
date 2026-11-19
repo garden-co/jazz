@@ -30,5 +30,14 @@ step "smoke (one retry for jazz#5553)"
 step "core and inventory after"; "$S/core-state.sh" || true
 step "wrong-region probe (all creating calls stubbed)"
 for n in 0 1 2; do echo "-- FAIL_GET_AT=$n"; FAIL_GET_AT=$n node "$S/wrong-region-probe.mjs" "$APP" sfo1 2>&1 | grep -E "^(result|PASS|FAIL|FINDING)"; done
+if [ "$T4_MODE" = preview ] && [ "${T4_TEARDOWN:-}" = 1 ]; then
+  # Delete exactly this run's preview core: the Sandbox and Drive named for ci-<this run id>, nothing else.
+  step "teardown (this run's preview core only)"; core=$(t4_core_name)
+  case "$core" in *-ci-"${GITHUB_RUN_ID:-local}"*) ;; *) echo "FAIL teardown: refusing to delete '$core' (not this run's)"; FAIL=1; core=;; esac
+  if [ -n "$core" ]; then
+    t4_vercel sandbox rm --project "$VERCEL_PROJECT_ID" "$core" > "$T4_WORK/teardown.log" 2>&1 && echo "PASS teardown: sandbox $core removed" || echo "REVIEW teardown: sandbox $core not removed (see teardown.log)"
+    t4_vercel sandbox drives rm --project "$VERCEL_PROJECT_ID" "$core-data" >> "$T4_WORK/teardown.log" 2>&1 && echo "PASS teardown: drive $core-data removed" || echo "REVIEW teardown: drive $core-data not removed (see teardown.log)"
+  fi
+fi
 step "end"
 exit $FAIL

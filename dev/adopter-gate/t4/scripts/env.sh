@@ -8,7 +8,11 @@ T4_PACKAGES="jazz-tools jazz-wasm jazz-napi garden-co-jazz-napi-linux-x64-gnu"
 # T4_MODE=production (a real RC: the long-lived production core, upgraded in place) or preview (a dry run: a Vercel
 # preview with the app's preview core, namespace "cli-previews"; production and its core are never touched).
 T4_MODE=${T4_MODE:-production}
-t4_namespace() { [ "$T4_MODE" = preview ] && echo cli-previews || echo production; }
+# Preview core: per run (ci-<run id>) when T4_TEARDOWN=1, so no dry run inherits a newer core from an earlier one, and
+# t4 deletes exactly that Sandbox and Drive afterwards; otherwise the shared preview core (cli-previews), never deleted.
+T4_PREVIEW_NS=$([ "${T4_TEARDOWN:-}" = 1 ] && echo "ci-${GITHUB_RUN_ID:-local$$}" || echo cli-previews)
+export T4_PREVIEW_NS
+t4_namespace() { [ "$T4_MODE" = preview ] && echo "$T4_PREVIEW_NS" || echo production; }
 # Preview URLs sit behind Vercel Authentication: T4_VERCEL_BYPASS_SECRET (Protection Bypass for Automation) opens them.
 t4_curl() { curl ${T4_VERCEL_BYPASS_SECRET:+-H "x-vercel-protection-bypass: $T4_VERCEL_BYPASS_SECRET"} "$@"; }
 mkdir -p "$T4_WORK"

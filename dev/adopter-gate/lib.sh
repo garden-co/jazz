@@ -35,5 +35,5 @@ use_rc_pnpm() {
 # Run a job body with its output teed to the results file; exit 1 if any FAIL line.
 ag_job() { local name=$1; shift; "$@" 2>&1 | tee "$AG_RESULTS/$name.txt"
   # A job that checked nothing failed: a setup step broke before any check ran (it once passed silently).
-  grep -qE "^(PASS|FAIL|REVIEW|SKIP) " "$AG_RESULTS/$name.txt" || echo "FAIL $name ran no checks (setup broke before the first check; see the log above)" | tee -a "$AG_RESULTS/$name.txt"
+  grep -qE "^(PASS|FAIL|REVIEW|SKIP|NOTE) " "$AG_RESULTS/$name.txt" || echo "FAIL $name ran no checks (setup broke before the first check; see the log above)" | tee -a "$AG_RESULTS/$name.txt"
   ! grep -q "^FAIL" "$AG_RESULTS/$name.txt"; }
