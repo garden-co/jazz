@@ -199,3 +199,42 @@ jobs:
               -f description="${description}" \
               -f target_url="${TARGET_URL}" > /dev/null
           done
+
+  # Land a green merge group on main right away, instead of waiting for the
+  # Review Loop's agent to poll for the result (dev/ci/land-group.sh). It runs
+  # only after full-suite is posted on every PR head the group covers, merges
+  # each PR at the exact sha the group tested and stops at the first PR whose
+  # head moved, lacks its approval comment or would leave main on another tree.
+  # Inert until the repository variable LAND_MERGE_GROUPS is "true": the merges
+  # use the Review Loop's GitHub App, whose key is a secret only Anselm adds.
+  land-group:
+    if: >-
+      always() && vars.LAND_MERGE_GROUPS == 'true' &&
+      github.event_name == 'push' && startsWith(github.ref, 'refs/heads/merge-group/') &&
+      needs.report-full-suite.result == 'success'
+    needs: [report-full-suite]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    concurrency:
+      group: land-merge-groups
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: app-token
+        with:
+          client-id: ${{ vars.LAND_MERGE_GROUPS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.LAND_MERGE_GROUPS_APP_PRIVATE_KEY }}
+      - name: Land the group's PRs on main
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          FINAL: ${{ github.sha }}
+          GROUP: ${{ github.ref_name }}
+        run: dev/ci/land-group.sh "${FINAL}" "g${GROUP#merge-group/}"

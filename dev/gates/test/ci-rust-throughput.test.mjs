@@ -243,6 +243,7 @@ const assertEntryCacheTrustBoundary = (source) => {
   assert.deepEqual(
     Object.keys(entryJobs).sort(),
     [
+      "land-group",
       "main-coverage",
       "report-dispatched-test-rust",
       "report-full-suite",
@@ -259,7 +260,27 @@ const assertEntryCacheTrustBoundary = (source) => {
     "report-dispatched-test-rust": dispatchedStatus,
     "report-full-suite": fullSuiteStatus,
     "main-coverage": mainCoverage,
+    "land-group": landGroup,
   } = entryJobs;
+  // Landing a green merge group is the only job holding a merge-capable
+  // credential: the Review Loop's App key, minted only for merge-group pushes
+  // after full-suite was posted, behind an explicit opt-in variable.
+  assert.equal(
+    landGroup.if,
+    "always() && vars.LAND_MERGE_GROUPS == 'true' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/merge-group/') && needs.report-full-suite.result == 'success'",
+  );
+  assert.deepEqual(landGroup.needs, ["report-full-suite"]);
+  assert.deepEqual(landGroup.permissions, { contents: "read" });
+  assert.deepEqual(landGroup.concurrency, {
+    group: "land-merge-groups",
+    "cancel-in-progress": false,
+  });
+  assert.equal(landGroup.steps[0].with["persist-credentials"], false);
+  assert.deepEqual(
+    [...JSON.stringify(landGroup).matchAll(/secrets\.([A-Z_]+)/g)].map((m) => m[1]),
+    ["LAND_MERGE_GROUPS_APP_PRIVATE_KEY"],
+  );
+  assert.match(landGroup.steps.at(-1).run, /^dev\/ci\/land-group\.sh /);
   assert.deepEqual(
     Object.keys(untrusted).sort(),
     ["if", "permissions", "uses", "with"],
