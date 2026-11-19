@@ -23,8 +23,17 @@ const step = (name, ok, detail = "") => {
 };
 
 async function browser() {
+  const bypass = process.env.T4_VERCEL_BYPASS_SECRET; // Vercel preview protection (Protection Bypass for Automation)
   const ctx = await chromium.launchPersistentContext(mkdtempSync(join(tmpdir(), "smoke-")), {
     headless: true,
+    ...(bypass
+      ? {
+          extraHTTPHeaders: {
+            "x-vercel-protection-bypass": bypass,
+            "x-vercel-set-bypass-cookie": "true",
+          },
+        }
+      : {}),
   });
   const page = ctx.pages()[0] ?? (await ctx.newPage());
   page.on("pageerror", (e) => console.log("  pageerror:", String(e).slice(0, 300)));
@@ -172,7 +181,9 @@ try {
       const s = await signUp(S.page, process.env.BASELINE_RED_EMAIL, BASELINE_PW);
       const t1 = await write(S.page, "team", "red-team-63");
       const t2 = await write(S.page, "private", "red-private-63");
-      console.log(`SEEDED baseline user ${process.env.BASELINE_RED_EMAIL}: ${s?.claims?.team === "red" && t1.ok && t2.ok ? "ok" : "FAILED"}`);
+      console.log(
+        `SEEDED baseline user ${process.env.BASELINE_RED_EMAIL}: ${s?.claims?.team === "red" && t1.ok && t2.ok ? "ok" : "FAILED"}`,
+      );
       await S.ctx.close();
       await R.page.goto(BASE);
       await me(R.page);

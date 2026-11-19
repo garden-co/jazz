@@ -43,6 +43,13 @@ on:
           required: false,
           type: string,
         }
+      t4_mode:
+        {
+          description: "t4: production (a real RC, rc_tag required) | preview (dry runs: a preview + its own core) | skip",
+          required: false,
+          type: string,
+          default: production,
+        }
   workflow_call:
     inputs:
       rc_tag: { required: false, type: string }
@@ -51,9 +58,11 @@ on:
       jazz_sha: { required: false, type: string }
       language_run_id: { required: false, type: string }
       previous_version: { required: false, type: string }
+      t4_mode: { required: false, type: string, default: production }
     secrets:
       VERCEL_TOKEN: { required: false }
       T4_BASELINE_RED_PASSWORD: { required: false }
+      T4_VERCEL_BYPASS_SECRET: { required: false }
 
 permissions:
   contents: read
@@ -224,7 +233,8 @@ jobs:
     needs: inputs
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 15
-    concurrency: { group: adopter-gate-t4, cancel-in-progress: false }
+    concurrency:
+      { group: "adopter-gate-t4-${{ inputs.t4_mode || 'production' }}", cancel-in-progress: false }
     # Its secrets and vars live only in this environment (no reviewers: the gate must not wait on a person).
     environment: adopter-gate-t4
     env:
@@ -238,6 +248,13 @@ jobs:
       # A baseline account that doesn't exist yet is created (with its rows) on the first run, then checked on every later one.
       BASELINE_SEED: "1"
       T4_SKIP_NOREGION: "1"
+      T4_MODE: ${{ inputs.t4_mode || 'production' }}
+      # production fails closed unless rc_tag names an existing release (a draft is fine) and isn't dryrun-*.
+      T4_RC_TAG: ${{ inputs.rc_tag }}
+      GH_TOKEN: ${{ github.token }}
+      # Per-run preview cores, deleted after the run, only once Anselm approves (set the var to 1).
+      T4_TEARDOWN: ${{ vars.T4_TEARDOWN }}
+      T4_VERCEL_BYPASS_SECRET: ${{ secrets.T4_VERCEL_BYPASS_SECRET }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
