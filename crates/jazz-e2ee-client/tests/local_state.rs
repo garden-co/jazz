@@ -38,6 +38,7 @@ fn try_open(
         account_id: ALICE.to_owned(),
         registry: Registry::builtin(),
         random: Box::new(OsRandom),
+        device_account: None,
     }))
 }
 

@@ -1,6 +1,10 @@
 //! Acquiring and authenticating the account epoch key (`E2EE_PROTOCOL.md`
 //! §2.6, §2.7, §2.9 "Restore").
 //!
+//! An account key delivery this device cannot open is skipped. If no
+//! candidate succeeds and one named an unregistered mechanism or version,
+//! acquisition reports an unsupported capability.
+//!
 //! A required proof that is provably invalid (malformed, failed
 //! authentication, or a marker other than `Z32`) makes the key
 //! [`ProtocolError::AccountKeyUnavailable`]; a provably invalid optional
@@ -22,7 +26,7 @@ use crate::registry::Registry;
 
 use super::super::derive::RecoveryKeys;
 use super::super::domain::AccountDomain;
-use super::super::error::{ProtocolError, ProtocolResult, RecoveryFailure};
+use super::super::error::{ProtocolError, ProtocolResult, RecoveryFailure, UnsupportedCapability};
 use super::super::json;
 use super::super::position::{Accepted, Position};
 use super::super::records::account::{
@@ -171,6 +175,11 @@ fn unwrap(
     let wrapper = match registry.key_wrapper_for(envelope) {
         Ok(wrapper) => wrapper,
         Err(Error::InvalidCiphertext) => return Ok(None),
+        Err(Error::UnsupportedFormat) => {
+            return Err(ProtocolError::Unsupported(
+                UnsupportedCapability::AccountKeyEnvelope,
+            ));
+        }
         Err(error) => return Err(error.into()),
     };
     match wrapper
@@ -514,18 +523,24 @@ impl AccountKeyEvidence<'_> {
         Ok(keys)
     }
 
-    /// Opens one candidate and authenticates it. `Ok(None)` when the
-    /// candidate provably fails; any other failure stops.
+    /// Opens and authenticates one candidate. Unsupported or unopenable
+    /// deliveries are skipped, recording unsupported ones for exhaustion.
+    /// Authentication errors other than an unavailable key still propagate.
     fn try_candidate(
         &self,
         keys: &[KeyPair],
         context: &[u8],
         envelope: &[u8],
         delivery_approval: Option<&str>,
+        unsupported_delivery: &mut bool,
     ) -> ProtocolResult<Option<AccountKey>> {
         let key = match self.registry().open_sealed(keys, context, envelope) {
             Ok(key) => key,
-            Err(Error::InvalidCiphertext) => return Ok(None),
+            Err(Error::InvalidCiphertext | Error::NoKeyForMechanism) => return Ok(None),
+            Err(Error::UnsupportedFormat) => {
+                *unsupported_delivery = true;
+                return Ok(None);
+            }
             Err(error) => return Err(error.into()),
         };
         match self.authenticate(&key, delivery_approval) {
@@ -544,6 +559,7 @@ impl AccountKeyEvidence<'_> {
         let current = chain.last().expect("a state has its root epoch");
         let application = self.application();
         let account_id = self.account_id();
+        let mut unsupported_delivery = false;
         match current.successor {
             Some(successor) => {
                 let deliveries = json::decode_delivery_map(&successor.deliveries)
@@ -559,7 +575,13 @@ impl AccountKeyEvidence<'_> {
                         "delivery",
                         device_id,
                     )?;
-                    if let Some(key) = self.try_candidate(keys, &context, envelope, None)? {
+                    if let Some(key) = self.try_candidate(
+                        keys,
+                        &context,
+                        envelope,
+                        None,
+                        &mut unsupported_delivery,
+                    )? {
                         return Ok(key);
                     }
                 }
@@ -576,9 +598,13 @@ impl AccountKeyEvidence<'_> {
                         "envelope",
                         device_id,
                     )?;
-                    if let Some(key) =
-                        self.try_candidate(keys, &context, &identity.row.envelope, None)?
-                    {
+                    if let Some(key) = self.try_candidate(
+                        keys,
+                        &context,
+                        &identity.row.envelope,
+                        None,
+                        &mut unsupported_delivery,
+                    )? {
                         return Ok(key);
                     }
                 }
@@ -603,9 +629,15 @@ impl AccountKeyEvidence<'_> {
                 &context,
                 &delivery.envelope,
                 Some(&candidate.approval.row.id),
+                &mut unsupported_delivery,
             )? {
                 return Ok(key);
             }
+        }
+        if unsupported_delivery {
+            return Err(ProtocolError::Unsupported(
+                UnsupportedCapability::AccountKeyEnvelope,
+            ));
         }
         Err(ProtocolError::AccountKeyUnavailable)
     }
@@ -637,12 +669,24 @@ impl AccountKeyEvidence<'_> {
             return Err(ProtocolError::Recovery(RecoveryFailure::DeliveryMissing));
         }
         let keys = core::slice::from_ref(&recovery.sealing);
+        let mut unsupported_delivery = false;
         for delivery in candidates {
             let context =
                 recovery_delivery_context(self.application(), self.account_id(), &delivery.row)?;
-            if let Some(key) = self.try_candidate(keys, &context, &delivery.row.envelope, None)? {
+            if let Some(key) = self.try_candidate(
+                keys,
+                &context,
+                &delivery.row.envelope,
+                None,
+                &mut unsupported_delivery,
+            )? {
                 return Ok(key);
             }
+        }
+        if unsupported_delivery {
+            return Err(ProtocolError::Unsupported(
+                UnsupportedCapability::AccountKeyEnvelope,
+            ));
         }
         Err(ProtocolError::Recovery(RecoveryFailure::DeliveryUnusable))
     }
