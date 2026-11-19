@@ -148,7 +148,8 @@ fn transaction_update_of_small_column_keeps_large_values() {
         )))
         .expect("prepare point read");
 
-    let ((point, rows), _) = block_on(db.transaction(async |tx| {
+    let ((point, rows), _) = block_on(async {
+        let tx = db.mergeable_tx().await?;
         tx.update("docs", row, rank_patch(0), UpdateOptions::default())
             .await?;
         let point = tx
@@ -157,8 +158,10 @@ fn transaction_update_of_small_column_keeps_large_values() {
             .into_iter()
             .find(|candidate| candidate.row_uuid() == row);
         let rows = tx.all_prepared(&query).await?;
-        Ok((point, rows))
-    }))
+        let value = (point, rows);
+        let receipt = tx.commit().await?;
+        Ok::<_, jazz::db::Error>((value, receipt))
+    })
     .expect("transactional small-column update commits");
 
     // Read-your-writes inside the transaction, through a point query and a
@@ -183,7 +186,9 @@ fn transaction_with_repeated_patches_keeps_large_values() {
     let db = open_db();
     let row = seed(&db);
 
-    block_on(db.transaction(async |tx| {
+    block_on(async {
+        let tx = db.mergeable_tx().await?;
+
         tx.update("docs", row, rank_patch(1), UpdateOptions::default())
             .await?;
         tx.update(
@@ -192,8 +197,9 @@ fn transaction_with_repeated_patches_keeps_large_values() {
             BTreeMap::from([("title".to_owned(), Value::String("final".to_owned()))]),
             UpdateOptions::default(),
         )
-        .await
-    }))
+        .await?;
+        tx.commit().await
+    })
     .expect("repeated patches commit");
 
     let after = committed(&db, row);
@@ -209,7 +215,9 @@ fn transaction_update_of_large_columns_themselves() {
     let db = open_db();
     let row = seed(&db);
 
-    block_on(db.transaction(async |tx| {
+    block_on(async {
+        let tx = db.mergeable_tx().await?;
+
         tx.update(
             "docs",
             row,
@@ -219,8 +227,9 @@ fn transaction_update_of_large_columns_themselves() {
             ]),
             UpdateOptions::default(),
         )
-        .await
-    }))
+        .await?;
+        tx.commit().await
+    })
     .expect("large-column update commits");
 
     let after = committed(&db, row);
@@ -237,10 +246,13 @@ fn transaction_upsert_of_existing_row_keeps_large_values() {
     let db = open_db();
     let row = seed(&db);
 
-    block_on(db.transaction(async |tx| {
+    block_on(async {
+        let tx = db.mergeable_tx().await?;
+
         tx.upsert("docs", row, rank_patch(9), UpsertOptions::default())
-            .await
-    }))
+            .await?;
+        tx.commit().await
+    })
     .expect("transactional upsert commits");
 
     let after = committed(&db, row);
@@ -275,10 +287,13 @@ fn caller_authored_descriptor_is_still_rejected() {
     let row = seed(&db);
     let forged = || BTreeMap::from([("body".to_owned(), forged_descriptor())]);
 
-    let tx_result = block_on(db.transaction(async |tx| {
+    let tx_result = block_on(async {
+        let tx = db.mergeable_tx().await?;
+
         tx.update("docs", row, forged(), UpdateOptions::default())
-            .await
-    }));
+            .await?;
+        tx.commit().await
+    });
     let tx_error = tx_result.expect_err("transactional update must reject a forged descriptor");
     assert!(
         format!("{tx_error:?}").contains("descriptor"),

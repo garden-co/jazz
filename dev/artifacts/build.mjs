@@ -25,7 +25,11 @@ import {
   artifactLockPath,
   verifyArtifactBuildLease,
 } from "../gates/build-test-artifacts.mjs";
-import { assertNoOmittedSqliteExtensions, stripSymbolHashesInFile } from "./wasm-names.mjs";
+import {
+  assertNoBackendExports,
+  assertNoOmittedSqliteExtensions,
+  stripSymbolHashesInFile,
+} from "./wasm-names.mjs";
 import { wasmBuildEnvironment } from "./wasm-toolchain.mjs";
 import { nativeBuildCache } from "./native-build-cache.mjs";
 
@@ -597,6 +601,7 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
         stripSymbolHashesInFile(wasm);
         assertNoOmittedSqliteExtensions(readFileSync(wasm));
       }
+      assertNoBackendExports(readFileSync(join(wasmStage.path, "jazz_wasm_bg.wasm")));
       writeWasmStageManifest(wasmStage.path, profile);
       publishWasmPackage(wasmStage.path, join(root, "crates", "jazz-wasm", "pkg"), {
         profile,

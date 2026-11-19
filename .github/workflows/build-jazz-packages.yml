@@ -240,15 +240,61 @@ jobs:
           path: crates/jazz-wasm/durable-object/pkg
           if-no-files-found: error
 
-  # Merge groups run jazz-tools' Durable Object suite on a wasm-opt -O1 host;
-  # this runs the full suite on the -Oz host that ships (the uploaded
-  # jazz-wasm-durable-object-pkg, unpacked where the build leaves it), so an
+  # `jazz-wasm/backend`, the build a backend's `createJazz` runs on in a
+  # Cloudflare Worker (jazz-tools' `workerd` entry): the browser build plus
+  # the `backend` feature, which the browser build leaves out. Its own job
+  # beside build-wasm and build-wasm-durable-object.
+  build-wasm-backend:
+    name: Build jazz-wasm backend entry
+    # 16 vCPUs, like the other jazz-wasm builds: a release's version bump
+    # recompiles every jazz crate.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: wasm32-unknown-unknown
+          sccache: "true"
+          sccache-key: release-wasm-backend-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+
+      - uses: ./.github/actions/install-rust-tool
+        with:
+          tool: wasm-pack@0.13.1
+
+      # The whole script, not bare wasm-pack: it also runs the size-tuned
+      # wasm-opt pass and deletes wasm-pack's `.gitignore` of `*`, which
+      # would keep the build out of the tarball.
+      - name: Build jazz-wasm backend entry
+        run: pnpm --filter jazz-wasm build:backend
+
+      - name: Verify built jazz-wasm backend artifacts
+        run: |
+          test -f crates/jazz-wasm/backend/pkg/jazz_wasm_backend_bg.wasm
+          test -f crates/jazz-wasm/backend/pkg/jazz_wasm_backend.js
+          test -f crates/jazz-wasm/backend/pkg/jazz_wasm_backend.d.ts
+          test ! -e crates/jazz-wasm/backend/pkg/.gitignore
+          grep --quiet serveThinTransaction crates/jazz-wasm/backend/pkg/jazz_wasm_backend.js
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-wasm-backend-pkg
+          path: crates/jazz-wasm/backend/pkg
+          if-no-files-found: error
+
+  # Merge groups run jazz-tools' Durable Object suite on wasm-opt -O1 builds;
+  # this runs the full suite on the -Oz builds that ship (the uploaded
+  # jazz-wasm-durable-object-pkg and jazz-wasm-backend-pkg, unpacked where
+  # the builds leave them), so an
   # -Oz-only break (a wasm-opt miscompile, or the glue or reinstantiation
   # interacting with optimised code) fails the release build. Beside the
   # package assembly, not before it.
   test-wasm-durable-object:
     name: Durable Object suite on the release host
-    needs: build-wasm-durable-object
+    needs: [build-wasm-durable-object, build-wasm-backend]
     # 16 vCPUs: it builds the correctness artifacts, then runs the suite (5.4
     # min on 4 vCPUs); the release build's last packages job.
     runs-on: blacksmith-16vcpu-ubuntu-2404
@@ -273,7 +319,12 @@ jobs:
           name: jazz-wasm-durable-object-pkg
           path: crates/jazz-wasm/durable-object/pkg
 
-      - name: Check it is the -Oz host
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-wasm-backend-pkg
+          path: crates/jazz-wasm/backend/pkg
+
+      - name: Check they are the -Oz builds
         run: node --test --test-name-pattern='-Oz build' crates/jazz-wasm/tests/durable-objects/release.test.mjs
 
       - name: Build correctness artifacts for the Durable Object suite
@@ -421,6 +472,7 @@ jobs:
       - check-linux-heap-profile
       - build-wasm
       - build-wasm-durable-object
+      - build-wasm-backend
       - build-napi
 
     steps:
@@ -442,10 +494,20 @@ jobs:
           name: jazz-wasm-durable-object-pkg
           path: crates/jazz-wasm/durable-object/pkg
 
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-wasm-backend-pkg
+          path: crates/jazz-wasm/backend/pkg
+
       # Fails unless `npm pack` puts durable-object/pkg/jazz_wasm_do_bg.wasm
       # (and the rest of the Durable Object entry) in the jazz-wasm tarball.
       - name: Verify the jazz-wasm tarball carries the Durable Object entry
         run: pnpm --filter jazz-wasm check:durable-object-pack
+
+      # Fails unless `npm pack` puts backend/pkg/jazz_wasm_backend_bg.wasm
+      # (and the rest of the backend entry) in the jazz-wasm tarball.
+      - name: Verify the jazz-wasm tarball carries the backend entry
+        run: pnpm --filter jazz-wasm check:backend-pack
 
       # The release build (wasm-opt, the patched glue) starts in workerd and
       # admits its backend, before anything is published.

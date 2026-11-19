@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  assertNoBackendExports,
   assertNoOmittedSqliteExtensions,
   functionNames,
   stripSymbolHashes,
@@ -130,4 +131,38 @@ test("rejects a module that still links FTS5, R-Tree, session, dbstat or sqlite_
 
 test("refuses to vouch for a module without function names", () => {
   assert.throws(() => assertNoOmittedSqliteExtensions(moduleWithNames([])), /no function names/);
+});
+
+// One function `() -> ()` exported under each of `names`.
+function moduleExporting(names) {
+  return Uint8Array.from([
+    ...MAGIC_AND_VERSION,
+    ...section(1, [1, 0x60, 0, 0]),
+    ...section(3, [1, 0]),
+    ...section(7, [...u32(names.length), ...names.flatMap((name) => [...string(name), 0, 0])]),
+    ...section(10, [1, 2, 0, 0x0b]),
+  ]);
+}
+
+test("accepts a browser module without the backend's exports", () => {
+  const module = moduleExporting(["wasmdb_open", "wasmdb_waitForWrite", "generateId"]);
+  assert.doesNotThrow(() => assertNoBackendExports(module));
+});
+
+test("rejects a browser module exporting what only the backend build has", () => {
+  for (const name of [
+    "wasmdb_serveThinTransaction",
+    "wasmdb_releaseThinTransactions",
+    "wasmdb_admitLocalFirstSession",
+    "wasmdb_waitForSync",
+    "__wbg_wasmthinrouter_free",
+    "wasmthinrouter_new",
+    "loadBackendApp",
+  ]) {
+    assert.throws(
+      () => assertNoBackendExports(moduleExporting(["wasmdb_open", name])),
+      /exports the backend's/,
+      name,
+    );
+  }
 });
