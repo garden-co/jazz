@@ -583,8 +583,10 @@ jobs:
 
   smoke:
     name: Install jazz-tools from the rc tarballs (${{ matrix.os }})
-    needs: [resolve, rc-tarballs, publish]
-    if: "!cancelled() && needs.rc-tarballs.result == 'success' && (needs.publish.result == 'success' || (needs.resolve.outputs.dry_run == 'true' && needs.publish.result == 'skipped'))"
+    # Not on publish's chain: a dry run installs from the files at once, a real
+    # run waits here for the published release's tarball.
+    needs: [resolve, rc-tarballs]
+    if: "!cancelled() && needs.rc-tarballs.result == 'success'"
     strategy:
       fail-fast: false
       matrix:
@@ -594,10 +596,21 @@ jobs:
     env:
       VERSION: ${{ needs.resolve.outputs.version }}
       DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 22
+
+      - name: Wait for the published prerelease's tarball
+        if: env.DRY_RUN != 'true'
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          until gh release view "v${VERSION}" --json isDraft,assets \
+            --jq "(.isDraft | not) and ([.assets[].name] | index(\"jazz-tools-${VERSION}.tgz\") != null)" 2>/dev/null | grep -qx true; do
+            sleep 15
+          done
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         if: env.DRY_RUN == 'true'
