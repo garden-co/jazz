@@ -44,3 +44,7 @@ Playwright needs no secrets. `npx playwright install --with-deps chromium` needs
 - Delete nothing: the core and its Drive carry the data that later releases are checked against.
 - `region` must stay the core's actual region (`iad1`).
 - Serialise runs: one core, one production deployment.
+
+## Preview mode (dry-run RCs)
+
+`T4_MODE=preview` (workflow input `t4_mode: preview`) runs the same steps against a Vercel **preview** of the app instead of production. It builds without `--prod` and runs `deploy --prebuilt`, with a per-run `BETTER_AUTH_SECRET`, since the project's auth vars are production-only. The app's preview core is namespace `cli-previews`. The long-lived production core and the production deployment are never touched. That preview core is shared by dry runs and isn't deleted, because deleting eval resources needs Anselm's word. Previews sit behind Vercel Authentication, so the smoke and `core-state.sh` send `T4_VERCEL_BYPASS_SECRET` (the project's _Protection Bypass for Automation_) as `x-vercel-protection-bypass`. Without it, preview mode reports SKIP.

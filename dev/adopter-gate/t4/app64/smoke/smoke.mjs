@@ -23,8 +23,12 @@ const step = (name, ok, detail = "") => {
 };
 
 async function browser() {
+  const bypass = process.env.T4_VERCEL_BYPASS_SECRET; // Vercel preview protection (Protection Bypass for Automation)
   const ctx = await chromium.launchPersistentContext(mkdtempSync(join(tmpdir(), "smoke-")), {
     headless: true,
+    ...(bypass
+      ? { extraHTTPHeaders: { "x-vercel-protection-bypass": bypass, "x-vercel-set-bypass-cookie": "true" } }
+      : {}),
   });
   const page = ctx.pages()[0] ?? (await ctx.newPage());
   page.on("pageerror", (e) => console.log("  pageerror:", String(e).slice(0, 300)));

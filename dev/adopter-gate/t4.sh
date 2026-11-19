@@ -4,6 +4,8 @@
 . "$(dirname "$0")/lib.sh"
 body() {
   if [ -z "${VERCEL_TOKEN:-}" ]; then echo "SKIP t4 vercel: secrets pending (VERCEL_TOKEN, BASELINE_RED_PASSWORD; see t4/README.md)"; return; fi
+  if [ "${T4_MODE:-production}" = preview ] && [ -z "${T4_VERCEL_BYPASS_SECRET:-}" ]; then
+    echo "SKIP t4 vercel (preview mode): T4_VERCEL_BYPASS_SECRET pending; previews are behind Vercel Authentication"; return; fi
   export T4_RELEASE_BASE=${T4_RELEASE_BASE:-file://$AG_TGZ}
   # The eval core only moves to newer versions (newerVersion). A version that sorts below what it runs (an RC dry run's
   # rc.0, an old RC) would deploy a backend onto a newer core: not an upgrade test, and it leaves the eval app skewed.
@@ -18,7 +20,7 @@ body() {
   awk '/^=== .* @[0-9]+$/ { t=$NF; sub(/^@/,"",t); if (p) printf "TIME t4 %ss %s\n", t-pt, p; p=$0; sub(/^=== /,"",p); sub(/ @[0-9]+$/,"",p); pt=t }' "$AG_RESULTS/t4-full.log"
   # The core: its version after the deploy, and whether it existed before (the old-data checks need it to).
   local L=$AG_RESULTS/t4-full.log
-  local before; before=$(sed -n '/^=== core and inventory before/,/^=== deps/p' "$L" | grep -cE '^  jazz-.*-production-data ')
+  local before; before=$(sed -n '/^=== core and inventory before/,/^=== deps/p' "$L" | grep -cE '^  jazz-.*-data ')
   [ "$before" -ge 1 ] && echo "PASS t4 the existing core's Drive was there before the deploy" \
     || echo "REVIEW t4 no core existed before the deploy: vercel() created a new, empty one, so old data couldn't be checked against it"
   local ran; ran=$(sed -n '/^=== core and inventory after/,/^=== wrong-region/p' "$L" | grep -oE 'core running=[^ ]+' | cut -d= -f2)
