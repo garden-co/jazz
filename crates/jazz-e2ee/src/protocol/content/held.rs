@@ -67,6 +67,7 @@ pub enum CreationFate {
     UnknownToStore,
 }
 
+#[derive(Clone)]
 pub(crate) struct HeldEntry {
     pub(crate) key: Zeroizing<[u8; 32]>,
     pub(crate) mark: KeyMark,
@@ -77,7 +78,9 @@ pub(crate) struct HeldEntry {
 /// authenticated acquisition ([`HeldSpace::from_acquisition`]), this
 /// device's own creation ([`HeldSpace::from_creation`]) or held-key records
 /// that pass their load-time checks ([`super::store`]), so every key passed
-/// its version's marker. Keys are cleared on drop and never printed.
+/// its version's marker. Keys are cleared on drop and never printed; a
+/// clone holds its own copies, cleared on its own drop.
+#[derive(Clone)]
 pub struct HeldSpace {
     pub(crate) application: AccountDomain,
     pub(crate) scope: SpaceScope,

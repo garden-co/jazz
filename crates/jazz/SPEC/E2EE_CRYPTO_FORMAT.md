@@ -91,9 +91,9 @@ the canonical context with application = the shared application domain,
 policy `jazz.e2ee.cell-record.v1`, scope = the space table's catalogue
 identity, identifier = the space identifier, table, row and column = the
 catalogue table identity, row UUID and catalogue column identity, epoch = the
-epoch UUID and empty recipient, and `T` is the UTF-8 canonical JSON (sorted
-keys, no whitespace) of `{column_type, nullable}` for the logical column. The
-plaintext is Jazz's native row encoding of the single value.
+epoch UUID and empty recipient, and `T` is the
+[cell type](#cell-type-version-1) of the logical column. The plaintext is
+Jazz's native row encoding of the single value.
 
 Readers reject a record whose mechanism is another (reported as
 `unsupported-format`, which lets a reader try the
@@ -109,6 +109,23 @@ fixture above:
 `4a45324501156a617a7a2e653265652e63656c6c2d7265636f72640000000130303030303030302d303030302d343030302d383030302d3030303030303030303030304a45324501047465737400000001aa`.
 This example is pinned by this document and asserted by the `jazz-e2ee`
 vector tests.
+
+### Cell type, version 1
+
+`T`, encoding `jazz-e2ee-cell-type-v1`, is UTF-8 JSON without whitespace,
+object keys in UTF-16 code unit order:
+`{"column_type":<column type>,"nullable":<true|false>}`. A column type is
+`{"type":"<name>"}` for `Integer`, `BigInt`, `Boolean`, `Text`, `Timestamp`,
+`Double`, `Uuid` and `Bytea`;
+`{"type":"Enum","variants":[<variant>, …]}` in declaration order;
+`{"schema":<schema>,"type":"Json"}`, or `{"type":"Json"}` without a schema;
+and `{"element":<column type>,"type":"Array"}`. Strings are written as
+ECMAScript `JSON.stringify` writes them. A JSON schema keeps its values,
+objects with sorted keys and integers in decimal; a schema with any other
+number cannot be encrypted. Other column types cannot be encrypted.
+Fixtures: `{"column_type":{"type":"Text"},"nullable":false}` and
+`{"column_type":{"element":{"type":"Enum","variants":["x"]},"type":"Array"},"nullable":false}`,
+asserted by the `jazz-e2ee-client` tests.
 
 ## Built-in key wrapping, version 1
 
