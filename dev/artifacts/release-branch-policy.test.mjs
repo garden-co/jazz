@@ -239,3 +239,13 @@ test("release refresh dispatches required CI and refuses a moved branch", () => 
   );
   assert.match(run(mutation, "moved"), /DISPATCH ci.yml/);
 });
+
+test("a called publish dry run ignores the caller's dispatch inputs", () => {
+  // Called from release-candidate.yml, github.event is the gate's dispatch:
+  // its `version` (an rc version) is not publish's manual version override.
+  const source = readFileSync(join(root, ".github/workflows/publish-jazz-tools-alpha.yml"), "utf8");
+  const uses = source.match(/EXPECTED_VERSION="\$\{\{[^}]*\}\}"/g) ?? [];
+  assert.ok(uses.length >= 2);
+  for (const use of uses)
+    assert.match(use, /inputs\.artifacts_run_id == '' && github\.event\.inputs\.version/);
+});
