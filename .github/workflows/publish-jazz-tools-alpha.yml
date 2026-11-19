@@ -407,6 +407,8 @@ jobs:
     with:
       # Alpha releases publish jazz-rn, unlike an ordinary pkg.pr.new preview.
       include_rn: true
+      # What ships is also built without cache, and must match.
+      reproduce_ios_relay: true
 
   publish-npm:
     name: Publish npm alpha

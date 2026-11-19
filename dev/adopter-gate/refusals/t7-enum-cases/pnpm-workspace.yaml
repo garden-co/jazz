@@ -1,0 +1,10 @@
+minimumReleaseAgeExclude:
+  - '@garden-co/jazz-napi-darwin-arm64@2.0.0-alpha.65'
+  - '@garden-co/jazz-napi-darwin-x64@2.0.0-alpha.65'
+  - '@garden-co/jazz-napi-linux-arm64-gnu@2.0.0-alpha.65'
+  - '@garden-co/jazz-napi-linux-x64-gnu@2.0.0-alpha.65'
+  - '@garden-co/jazz-napi-win32-x64-msvc@2.0.0-alpha.65'
+  - jazz-napi@2.0.0-alpha.65
+  - jazz-tools@2.0.0-alpha.65
+  - jazz-wasm@2.0.0-alpha.65
+strictDepBuilds: false
