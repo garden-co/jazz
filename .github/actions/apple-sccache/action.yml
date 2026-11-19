@@ -4,9 +4,10 @@ description: |
   Linux-only, and Blacksmith's sticky disks don't mount on macOS).
 
   The shared trusted S3 tier when this run may use it: the writer role for
-  pushes and dispatches on main (and, once their OIDC trust exists, release
-  and changeset-release/*), the reader role for trusted pull requests (same
-  repository, trusted author, as ci.yml grants). Otherwise, or if
+  pushes and dispatches on main; on release and changeset-release/* the
+  writer role if its OIDC trust covers them, else the reader role (once its
+  trust does); the reader role for trusted pull requests (same repository,
+  trusted author, as ci.yml grants). Otherwise, or if
   the role can't be assumed, a job-local disk cache restored from and saved to
   the Actions cache, which Blacksmith evicts under load.
 
@@ -93,14 +94,19 @@ runs:
         WRITER: ${{ inputs.writer-role }}
         READER: ${{ inputs.reader-role }}
       run: |
-        role=""
+        role="" then_role=""
         case "${EVENT}:${REF}" in
-          push:refs/heads/main|workflow_dispatch:refs/heads/main|push:refs/heads/release|workflow_dispatch:refs/heads/release|push:refs/heads/changeset-release/*|workflow_dispatch:refs/heads/changeset-release/*)
+          push:refs/heads/main|workflow_dispatch:refs/heads/main)
             role="${WRITER}" ;;
+          # The release refs write if the writer role trusts them, else read
+          # main's entries (enough for a warm Version Packages build).
+          push:refs/heads/release|workflow_dispatch:refs/heads/release|push:refs/heads/changeset-release/*|workflow_dispatch:refs/heads/changeset-release/*)
+            role="${WRITER}" then_role="${READER}" ;;
           pull_request:*)
             [[ "${TRUSTED_PR}" != true ]] || role="${READER}" ;;
         esac
         echo "role=${role}" >> "$GITHUB_OUTPUT"
+        echo "then-role=${then_role}" >> "$GITHUB_OUTPUT"
         if [[ -n "${role}" ]]; then
           echo "sccache tier for ${EVENT} on ${REF}: S3 via ${role##*/}"
         else
@@ -118,11 +124,20 @@ runs:
         role-to-assume: ${{ steps.tier.outputs.role }}
         aws-region: ${{ inputs.region }}
 
+    - name: Authenticate the trusted sccache tier (read only)
+      id: aws-reader
+      if: steps.tier.outputs.then-role != '' && steps.aws.outcome != 'success'
+      continue-on-error: true
+      uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+      with:
+        role-to-assume: ${{ steps.tier.outputs.then-role }}
+        aws-region: ${{ inputs.region }}
+
     - name: Export the S3 tier
       id: s3
       shell: bash
       env:
-        AUTHENTICATED: ${{ steps.aws.outcome == 'success' }}
+        AUTHENTICATED: ${{ steps.aws.outcome == 'success' || steps.aws-reader.outcome == 'success' }}
         CACHE_BUCKET: ${{ inputs.bucket }}
         CACHE_REGION: ${{ inputs.region }}
         MIN_OS: ${{ inputs.min-os }}
