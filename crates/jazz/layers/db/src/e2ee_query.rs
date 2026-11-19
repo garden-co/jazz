@@ -91,9 +91,18 @@ impl Inner {
         // the window may differ from the query it was given.
         match &plan {
             QueryPlan::Plain => self.refuse_reads(tables, query, false)?,
-            QueryPlan::Rewritten { physical, .. } => {
+            QueryPlan::Rewritten {
+                physical, residual, ..
+            } => {
                 refuse_changed_beyond_conditions(query, physical)?;
-                self.refuse_reads(tables, physical, false)?
+                self.refuse_reads(tables, physical, false)?;
+                if !residual.preds.is_empty() && (physical.limit.is_some() || physical.offset != 0)
+                {
+                    return Err(unsupported(format!(
+                        "Applying LIMIT or OFFSET before post-decryption filtering on `{}`",
+                        query.table
+                    )));
+                }
             }
             QueryPlan::NeedsKey { .. } => {}
         }

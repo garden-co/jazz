@@ -215,6 +215,8 @@ struct Fake {
     /// Plan as offline: no tokens, the space filter alone, the residual
     /// doing all the filtering (protocol §4.5).
     offline: Cell<bool>,
+    /// Leave pagination on the physical query despite post-decryption filtering.
+    keep_physical_window: Cell<bool>,
     /// Return a query that still filters the encrypted column: 1 keeps the
     /// filter in a rewritten query, 2 plans nothing at all.
     leak: Cell<u8>,
@@ -504,8 +506,10 @@ impl E2eeHooks for Fake {
                 vec![Operand::Literal(Value::Bytes(token(plain)))],
             );
         }
-        physical.limit = None;
-        physical.offset = 0;
+        if !self.keep_physical_window.get() {
+            physical.limit = None;
+            physical.offset = 0;
+        }
         Ok(QueryPlan::Rewritten {
             physical: Box::new(physical),
             residual: Residual {
@@ -2097,6 +2101,31 @@ fn a_hook_cannot_return_a_query_that_changes_more_than_its_conditions() {
         error.message,
         "the encryption hooks returned a query that changes more than its conditions"
     );
+}
+
+/// Contract: Alice's client refuses a hook's physical LIMIT or OFFSET when
+/// rows still need to pass a filter after decryption.
+#[test]
+fn a_hook_cannot_window_rows_before_residual_filtering() {
+    let hooks = Fake::new();
+    let alice = client(&hooks);
+    let space = uuid::Uuid::new_v4();
+    hooks.hold(space);
+    hooks.offline.set(true);
+    hooks.keep_physical_window.set(true);
+    let query = Query::from("notes")
+        .filter(eq(col("projectId"), lit(Value::Uuid(space))))
+        .filter(eq(col("body"), lit(text("x"))));
+
+    alice.prepare_query(&query).unwrap();
+    for windowed in [query.clone().limit(1), query.offset(1)] {
+        let error = alice.prepare_query(&windowed).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Query);
+        assert_eq!(
+            error.message,
+            "Applying LIMIT or OFFSET before post-decryption filtering on `notes` is not supported yet"
+        );
+    }
 }
 
 /// Contract: hooks are not installed on a schema that gives an encrypted
