@@ -48,11 +48,23 @@ fi
 for run in "${candidates[@]}"; do
   if source_sha="$(manifest_matches "${run}")"; then
     echo "release-artifacts run ${run} (built from ${source_sha}) matches"
+    # The Inspector's provenance check takes only a run that built a real
+    # commit with this tree: the dispatch on the Version Packages head.
+    inspector_run="${run}"
+    if [ -n "${runs:-}" ]; then
+      while read -r id head; do
+        if [ "$(gh api "repos/${GH_REPO}/git/commits/${head}" --jq .tree.sha)" = "${tree}" ]; then
+          inspector_run="${id}"
+          break
+        fi
+      done < <(jq -r '.workflow_runs[] | select(.event == "workflow_dispatch" and (.head_branch | startswith("changeset-release/"))) | "\(.id) \(.head_sha)"' <<<"${runs}")
+    fi
+    echo "inspector-prebuilt from run ${inspector_run}"
     {
       echo "mode=release-artifacts"
       echo "run_id=${run}"
       echo "source_sha=${source_sha}"
-      echo "inspector_run_id=${run}"
+      echo "inspector_run_id=${inspector_run}"
       echo "legacy={}"
     } >> "${out}"
     exit 0
