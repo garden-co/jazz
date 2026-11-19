@@ -174,7 +174,7 @@ impl ServerCore {
     pub fn observe_thin_registrations(
         &mut self,
         session: ServerSession,
-        observe: Rc<dyn Fn(super::ThinRegistration)>,
+        observe: super::ThinRegistrationObserver,
     ) {
         if let Some(thin) = self.owner.thin.get_mut(&session) {
             thin.observer = Some(observe);

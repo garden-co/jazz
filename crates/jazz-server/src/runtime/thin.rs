@@ -59,6 +59,9 @@ struct ThinStream {
     transaction: Option<OpenTransactionId>,
 }
 
+/// Observes a thin session's registration changes (see [`ThinRegistration`]).
+pub type ThinRegistrationObserver = std::rc::Rc<dyn Fn(ThinRegistration)>;
+
 /// Changes to thin session state that can survive an idle host.
 pub enum ThinRegistration<'a> {
     Schema(SchemaVersionId),
@@ -67,7 +70,7 @@ pub enum ThinRegistration<'a> {
 }
 
 pub(super) struct ThinSession {
-    pub(super) observer: Option<std::rc::Rc<dyn Fn(ThinRegistration)>>,
+    pub(super) observer: Option<ThinRegistrationObserver>,
     identity: AuthorSubject,
     /// The identity's claims, bound to every read; `None` for SYSTEM.
     claims: Option<BTreeMap<String, Value>>,
