@@ -26,7 +26,9 @@
     "./dist/solid/**",
     "./dist/svelte/**",
     "./dist/worker/**",
-    "**/*.css"
+    "**/*.css",
+    "./dist/backend/node-native.js",
+    "./dist/backend/workerd.js"
   ],
   "main": "dist/index.js",
   "browser": {
@@ -56,8 +58,14 @@
       "default": "./dist/e2ee/native.js"
     },
     "./backend": {
-      "types": "./dist/backend/index.d.ts",
-      "default": "./dist/backend/index.js"
+      "workerd": {
+        "types": "./dist/backend/workerd.d.ts",
+        "default": "./dist/backend/workerd.js"
+      },
+      "default": {
+        "types": "./dist/backend/index.d.ts",
+        "default": "./dist/backend/index.js"
+      }
     },
     "./durable-object": {
       "types": "./dist/durable-object/index.d.ts",
