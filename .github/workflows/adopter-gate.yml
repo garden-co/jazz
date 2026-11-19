@@ -1,0 +1,260 @@
+# Adopter gate: scripted, parallel adopter checks against a release candidate (dev/adopter-gate/README.md).
+# Each job prints PASS/FAIL/REVIEW/SKIP lines; `verdict` collects them into the step summary and verdict.json.
+# FAIL = a regression; REVIEW/SKIP = needs a person or agent (sizes over threshold, known findings, t4 without secrets).
+name: Adopter gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      rc_tag:
+        {
+          description: "RC tag, e.g. v2.0.0-alpha.68-rc.1 (or give artifacts_run_id)",
+          required: false,
+          type: string,
+        }
+      artifacts_run_id:
+        {
+          description: "RC dry-run / release-artifacts run holding rc-npm, release-server, release-languages",
+          required: false,
+          type: string,
+        }
+      jazz_sha:
+        {
+          description: "Commit to take the bed and examples from (default: the tag's)",
+          required: false,
+          type: string,
+        }
+      language_run_id:
+        {
+          description: "attach-language-artifacts dry-run id, when the RC has no libjazz_ffi/jar assets",
+          required: false,
+          type: string,
+        }
+      previous_version:
+        {
+          description: "Previous release for size comparison (default: npm latest)",
+          required: false,
+          type: string,
+        }
+  workflow_call:
+    inputs:
+      rc_tag: { required: false, type: string }
+      artifacts_run_id: { required: false, type: string }
+      jazz_sha: { required: false, type: string }
+      language_run_id: { required: false, type: string }
+      previous_version: { required: false, type: string }
+    secrets:
+      VERCEL_TOKEN: { required: false }
+      T4_BASELINE_RED_PASSWORD: { required: false }
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  AG: dev/adopter-gate
+  PNPM_VERSION: 11.28.10
+
+jobs:
+  inputs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      ref: ${{ steps.ref.outputs.ref }}
+      upgrade_changed: ${{ steps.diff.outputs.upgrade_changed }}
+      previous: ${{ steps.prev.outputs.previous }}
+    steps:
+      - id: ref
+        run: |
+          [ -n "${{ inputs.rc_tag }}${{ inputs.artifacts_run_id }}" ] || { echo "::error::give rc_tag or artifacts_run_id"; exit 1; }
+          echo "ref=${{ inputs.jazz_sha || inputs.rc_tag || github.sha }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with: { ref: "${{ steps.ref.outputs.ref }}", fetch-depth: 0 }
+      - name: Fetch and verify the RC's gate inputs
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          if [ -n "${{ inputs.artifacts_run_id }}" ]; then $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}"
+          else $AG/fetch-rc.sh "${{ inputs.rc_tag }}" "${{ inputs.language_run_id }}"; fi
+      - id: prev
+        run: echo "previous=${{ inputs.previous_version || '' }}" >> "$GITHUB_OUTPUT"; [ -n "${{ inputs.previous_version }}" ] || echo "previous=$(npm view jazz-tools dist-tags.latest)" >> "$GITHUB_OUTPUT"
+      - id: diff
+        name: Did the upgrade codemod change since the previous release?
+        run: |
+          prev=$(npm view jazz-tools dist-tags.latest)
+          if git rev-parse -q --verify "refs/tags/v$prev" >/dev/null && git diff --quiet "v$prev" HEAD -- packages/jazz-tools/src/upgrade; then
+            echo "upgrade_changed=false" >> "$GITHUB_OUTPUT"; else echo "upgrade_changed=true" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          {
+            name: rc-inputs,
+            path: dev/adopter-gate/.rc,
+            retention-days: 7,
+            include-hidden-files: true,
+            if-no-files-found: error,
+          }
+
+  checks:
+    needs: inputs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          [bed-t1, bed-t3, bed-t5, bed-t6, fixtures, t10, sizes, t9-ts, t9-rust, t9-go, t9-kotlin]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with: { ref: "${{ needs.inputs.outputs.ref }}" }
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with: { name: rc-inputs, path: dev/adopter-gate/.rc }
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with: { node-version-file: .nvmrc }
+      # The gate's apps are their own pnpm projects (pnpm 11), not the repo workspace (packageManager pnpm@10).
+      - run: npm install --global "pnpm@$PNPM_VERSION" > /dev/null
+      - if: matrix.job == 't9-rust'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Gradle 8.14.3
+        if: matrix.job == 't9-kotlin'
+        run: |
+          curl -sSfL -o /tmp/gradle.zip https://services.gradle.org/distributions/gradle-8.14.3-bin.zip
+          echo "bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531  /tmp/gradle.zip" | sha256sum -c
+          unzip -q /tmp/gradle.zip -d /opt && echo /opt/gradle-8.14.3/bin >> "$GITHUB_PATH" && echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+      - name: Run ${{ matrix.job }}
+        run: |
+          chmod +x $AG/.rc/jazz-tools-linux-x64
+          case "${{ matrix.job }}" in
+            bed-*) $AG/bed.sh "${MATRIX_JOB#bed-}" ;;
+            t9-*) $AG/t9.sh "${MATRIX_JOB#t9-}" ;;
+            sizes) $AG/sizes.sh "${{ needs.inputs.outputs.previous }}" ;;
+            *) $AG/${{ matrix.job }}.sh ;;
+          esac
+        env: { MATRIX_JOB: "${{ matrix.job }}" }
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          {
+            name: "results-${{ matrix.job }}",
+            path: dev/adopter-gate/.results,
+            retention-days: 14,
+            include-hidden-files: true,
+          }
+
+  t9-swift:
+    needs: inputs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    container: swift:6.0-noble
+    steps:
+      - name: Tools the gate scripts use
+        run: apt-get update -qq && apt-get install -y -qq curl git iproute2 python3 sqlite3 unzip xz-utils >/dev/null
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with: { ref: "${{ needs.inputs.outputs.ref }}" }
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with: { name: rc-inputs, path: dev/adopter-gate/.rc }
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with: { node-version-file: .nvmrc }
+      # The gate's apps are their own pnpm projects (pnpm 11), not the repo workspace (packageManager pnpm@10).
+      - run: npm install --global "pnpm@$PNPM_VERSION" > /dev/null
+      - run: $AG/t9.sh swift
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          {
+            name: results-t9-swift,
+            path: dev/adopter-gate/.results,
+            retention-days: 14,
+            include-hidden-files: true,
+          }
+
+  refusals:
+    needs: inputs
+    if: needs.inputs.outputs.upgrade_changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with: { ref: "${{ needs.inputs.outputs.ref }}" }
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with: { name: rc-inputs, path: dev/adopter-gate/.rc }
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with: { node-version-file: .nvmrc }
+      # The gate's apps are their own pnpm projects (pnpm 11), not the repo workspace (packageManager pnpm@10).
+      - run: npm install --global "pnpm@$PNPM_VERSION" > /dev/null
+      - run: $AG/refusals.sh
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          {
+            name: results-refusals,
+            path: dev/adopter-gate/.results,
+            retention-days: 14,
+            include-hidden-files: true,
+          }
+
+  # One long-lived Vercel eval project, one core: never two runs at once, never cancelled midway.
+  t4:
+    needs: inputs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    concurrency: { group: adopter-gate-t4, cancel-in-progress: false }
+    # Its secrets and vars live only in this environment (no reviewers: the gate must not wait on a person).
+    environment: adopter-gate-t4
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ vars.T4_VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ vars.T4_VERCEL_PROJECT_ID }}
+      VERCEL_SCOPE: ${{ vars.T4_VERCEL_SCOPE }}
+      T4_BASE_URL: ${{ vars.T4_BASE_URL }}
+      BASELINE_RED_EMAIL: ${{ vars.T4_BASELINE_RED_EMAIL }}
+      BASELINE_RED_PASSWORD: ${{ secrets.T4_BASELINE_RED_PASSWORD }}
+      # A baseline account that doesn't exist yet is created (with its rows) on the first run, then checked on every later one.
+      BASELINE_SEED: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with: { ref: "${{ needs.inputs.outputs.ref }}" }
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with: { name: rc-inputs, path: dev/adopter-gate/.rc }
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with: { node-version-file: .nvmrc }
+      # The gate's apps are their own pnpm projects (pnpm 11), not the repo workspace (packageManager pnpm@10).
+      - run: npm install --global "pnpm@$PNPM_VERSION" > /dev/null
+      - if: env.VERCEL_TOKEN != ''
+        run: npm install --global vercel@latest > /dev/null
+      - run: $AG/t4.sh
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          {
+            name: results-t4,
+            path: dev/adopter-gate/.results,
+            retention-days: 14,
+            include-hidden-files: true,
+          }
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          {
+            name: t4-logs,
+            path: "${{ runner.temp }}/t4-work/*.log",
+            retention-days: 14,
+            if-no-files-found: ignore,
+          }
+
+  verdict:
+    needs: [inputs, checks, t9-swift, refusals, t4]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with: { ref: "${{ needs.inputs.outputs.ref }}", sparse-checkout: dev/adopter-gate }
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with: { pattern: "results-*", path: results }
+      - name: Verdict
+        run: |
+          expected=bed-t1,bed-t3,bed-t5,bed-t6,fixtures,t10,sizes,t9-ts,t9-rust,t9-go,t9-kotlin,t9-swift,t4
+          [ "${{ needs.inputs.outputs.upgrade_changed }}" = true ] && expected=$expected,refusals
+          node $AG/verdict.mjs results "$expected"
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: verdict, path: results/verdict.json, retention-days: 30 }
