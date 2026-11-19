@@ -473,20 +473,29 @@ jobs:
           fi
           export GH_TOKEN="${TOKEN}"
           repo=garden-co/infra
+          # REST only: a fine-grained token scoped to garden-co/infra.
           since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          gh workflow run cloud-rc-probe.yml -R "${repo}" \
-            -f rc_tag="v${VERSION}" -f jazz_sha="${SHA}" -f rc_npm_version="${VERSION}"
+          base="repos/${repo}/actions/workflows/cloud-rc-probe.yml"
+          branch=$(gh api "repos/${repo}" --jq .default_branch)
+          jq -n --arg ref "${branch}" --arg tag "v${VERSION}" --arg sha "${SHA}" --arg npm "${VERSION}" \
+            '{ref: $ref, inputs: {rc_tag: $tag, jazz_sha: $sha, rc_npm_version: $npm}}' |
+            gh api -X POST "${base}/dispatches" --input -
           run_id=""
           for _ in $(seq 1 30); do
-            run_id=$(gh run list -R "${repo}" -w cloud-rc-probe.yml -e workflow_dispatch -L 20 \
-              --json databaseId,createdAt --jq "[.[] | select(.createdAt >= \"${since}\")] | sort_by(.createdAt) | .[0].databaseId // empty")
+            run_id=$(gh api "${base}/runs?event=workflow_dispatch&per_page=20" \
+              --jq "[.workflow_runs[] | select(.created_at >= \"${since}\")] | sort_by(.created_at) | .[0].id // empty")
             [ -n "${run_id}" ] && break
             sleep 5
           done
           [ -n "${run_id}" ] || { echo "::error::the probe run did not start"; exit 1; }
           echo "Probe: https://github.com/${repo}/actions/runs/${run_id}"
-          gh run watch "${run_id}" -R "${repo}" --interval 15 > /dev/null || true
-          gh run download "${run_id}" -R "${repo}" -n verdict -D verdict
+          while [ "$(gh api "repos/${repo}/actions/runs/${run_id}" --jq .status)" != completed ]; do sleep 15; done
+          echo "Probe run conclusion: $(gh api "repos/${repo}/actions/runs/${run_id}" --jq .conclusion)"
+          artifact=$(gh api "repos/${repo}/actions/runs/${run_id}/artifacts" --jq '[.artifacts[] | select(.name == "verdict")][0].id // empty')
+          [ -n "${artifact}" ] || { echo "::error::the probe run left no verdict artifact"; exit 1; }
+          mkdir -p verdict
+          gh api "repos/${repo}/actions/artifacts/${artifact}/zip" > verdict.zip
+          unzip -o -q verdict.zip -d verdict
           verdict=$(jq -r .verdict verdict/verdict.json)
           jq . verdict/verdict.json
           echo "verdict=${verdict}" >> "$GITHUB_OUTPUT"
