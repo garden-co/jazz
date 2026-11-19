@@ -564,7 +564,7 @@ jobs:
           # REST only: a fine-grained token scoped to garden-co/infra.
           since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           base="repos/${repo}/actions/workflows/cloud-rc-probe.yml"
-          branch=$(gh api "repos/${repo}" --jq .default_branch)
+          branch=agent/rc-probe-artifacts  # TEST ONLY: infra#428 before it merges
           if [ -n "${PROBE_TAG}" ]; then
             # An existing release: its assets, by URL.
             tarball="https://github.com/${GH_REPO}/releases/download/v${VERSION}/jazz-tools-${VERSION}.tgz"
