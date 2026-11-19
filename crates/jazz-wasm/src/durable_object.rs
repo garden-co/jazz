@@ -895,7 +895,7 @@ mod smoke {
     /// Run `step` on this object's storage; a JSON summary of what it saw.
     /// - `write`: insert a short note and a 300 KiB one.
     /// - `read`: every note's title and body length (after a restart too).
-    /// - `transaction`: a callback transaction, which a Durable Object core
+    /// - `transaction`: a mergeable transaction, which a Durable Object core
     ///   refuses; the refusal's message.
     #[wasm_bindgen(js_name = durableObjectSmoke)]
     pub fn durable_object_smoke(storage: ObjectStorage, step: &str) -> Result<String, JsValue> {
@@ -950,12 +950,13 @@ mod smoke {
                 serde_json::to_string(&seen).map_err(js)
             }
             "transaction" => {
-                let refused = block_on(db.transaction(async |tx| {
+                let refused = block_on(async {
+                    let tx = db.mergeable_tx().await?;
                     tx.insert("notes", note("inside", "x"), row(3)).await?;
-                    Ok(())
-                }));
+                    tx.commit().await
+                });
                 match refused {
-                    Ok(_) => Err(js("a callback transaction committed on a Durable Object")),
+                    Ok(_) => Err(js("a mergeable transaction committed on a Durable Object")),
                     Err(error) => serde_json::to_string(&error.to_string()).map_err(js),
                 }
             }

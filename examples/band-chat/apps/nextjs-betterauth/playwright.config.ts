@@ -9,10 +9,12 @@ const PROD = process.env.JAZZ_E2E_PROD === "1";
 export default defineConfig({
   testDir: "./e2e",
   testMatch: "**/*.spec.ts",
-  timeout: 180_000,
+  // The smoke test takes ~5 s. A step that hangs (an input that never
+  // appears) fails within the action timeout, not after minutes.
+  timeout: 60_000,
   fullyParallel: false,
   workers: 1,
-  use: { baseURL: ORIGIN, trace: "retain-on-failure" },
+  use: { baseURL: ORIGIN, trace: "retain-on-failure", actionTimeout: 30_000 },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {
     command: PROD ? "pnpm start" : "pnpm dev",

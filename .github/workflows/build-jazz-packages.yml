@@ -12,7 +12,7 @@ on:
         description: JSON matrix for NAPI platform packages. Release callers use every platform; preview callers may omit expensive optional platforms.
         required: false
         type: string
-        default: '[{"os":"blacksmith-4vcpu-ubuntu-2404","target":"x86_64-unknown-linux-gnu","platform":"linux-x64-gnu","use_sccache":false},{"os":"blacksmith-4vcpu-ubuntu-2404-arm","target":"aarch64-unknown-linux-gnu","platform":"linux-arm64-gnu","use_sccache":false},{"os":"blacksmith-6vcpu-macos-15","target":"x86_64-apple-darwin","platform":"darwin-x64","use_sccache":false},{"os":"blacksmith-6vcpu-macos-15","target":"aarch64-apple-darwin","platform":"darwin-arm64","use_sccache":false},{"os":"blacksmith-16vcpu-windows-2025","target":"x86_64-pc-windows-msvc","platform":"win32-x64-msvc","use_sccache":false}]'
+        default: '[{"os":"blacksmith-16vcpu-ubuntu-2404","target":"x86_64-unknown-linux-gnu","platform":"linux-x64-gnu","use_sccache":false},{"os":"blacksmith-16vcpu-ubuntu-2404-arm","target":"aarch64-unknown-linux-gnu","platform":"linux-arm64-gnu","use_sccache":false},{"os":"blacksmith-6vcpu-macos-15","target":"x86_64-apple-darwin","platform":"darwin-x64","use_sccache":false},{"os":"blacksmith-6vcpu-macos-15","target":"aarch64-apple-darwin","platform":"darwin-arm64","use_sccache":false},{"os":"blacksmith-16vcpu-windows-2025","target":"x86_64-pc-windows-msvc","platform":"win32-x64-msvc","use_sccache":false}]'
       include_rn:
         description: Build and stage jazz-rn's Android and iOS relay artifacts. Keep false for ordinary package previews; releases opt in explicitly.
         required: false
@@ -174,6 +174,15 @@ jobs:
         with:
           tool: wasm-pack@0.13.1
 
+      # wasm-pack downloads wasm-bindgen and binaryen (wasm-opt) at build
+      # time, with no retry: keep them, so a flaky CDN can't fail a release.
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.cache/.wasm-pack
+          key: wasm-pack-0.13.1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            wasm-pack-0.13.1-${{ runner.os }}-
+
       - name: Build jazz-wasm npm package
         run: pnpm --filter jazz-wasm build
 
@@ -183,8 +192,47 @@ jobs:
           test -f crates/jazz-wasm/pkg/jazz_wasm.js
           test -f crates/jazz-wasm/pkg/jazz_wasm.d.ts
 
-      # `jazz-wasm/durable-object`: the core a Cloudflare Durable Object
-      # hosts. The whole script, not bare wasm-pack: it also patches the glue
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-wasm-pkg
+          path: crates/jazz-wasm/pkg
+          # The sealed provenance receipt is intentionally dot-prefixed. The
+          # upload action excludes hidden files unless this is explicit.
+          include-hidden-files: true
+          if-no-files-found: error
+
+  # `jazz-wasm/durable-object`, the core a Cloudflare Durable Object hosts,
+  # in its own job beside build-wasm: a separate wasm-pack build and wasm-opt
+  # pass that used to add about 2.5 min after the main one.
+  build-wasm-durable-object:
+    name: Build jazz-wasm Durable Object entry
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: wasm32-unknown-unknown
+          sccache: "true"
+          sccache-key: release-wasm-do-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+
+      - uses: ./.github/actions/install-rust-tool
+        with:
+          tool: wasm-pack@0.13.1
+
+      # wasm-pack downloads wasm-bindgen and binaryen (wasm-opt) at build
+      # time, with no retry: keep them, so a flaky CDN can't fail a release.
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.cache/.wasm-pack
+          key: wasm-pack-0.13.1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            wasm-pack-0.13.1-${{ runner.os }}-
+
+      # The whole script, not bare wasm-pack: it also patches the glue
       # (reinstantiable.mjs) and deletes wasm-pack's `.gitignore` of `*`,
       # which would keep the build out of the tarball.
       - name: Build jazz-wasm Durable Object entry
@@ -204,21 +252,98 @@ jobs:
           path: crates/jazz-wasm/durable-object/pkg
           if-no-files-found: error
 
+  # `jazz-wasm/backend`, the build a backend's `createJazz` runs on in a
+  # Cloudflare Worker (jazz-tools' `workerd` entry): the browser build plus
+  # the `backend` feature, which the browser build leaves out. Its own job
+  # beside build-wasm and build-wasm-durable-object.
+  build-wasm-backend:
+    name: Build jazz-wasm backend entry
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: wasm32-unknown-unknown
+          sccache: "true"
+          sccache-key: release-wasm-backend-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+
+      - uses: ./.github/actions/install-rust-tool
+        with:
+          tool: wasm-pack@0.13.1
+
+      # The whole script, not bare wasm-pack: it also runs the size-tuned
+      # wasm-opt pass and deletes wasm-pack's `.gitignore` of `*`, which
+      # would keep the build out of the tarball.
+      - name: Build jazz-wasm backend entry
+        run: pnpm --filter jazz-wasm build:backend
+
+      - name: Verify built jazz-wasm backend artifacts
+        run: |
+          test -f crates/jazz-wasm/backend/pkg/jazz_wasm_backend_bg.wasm
+          test -f crates/jazz-wasm/backend/pkg/jazz_wasm_backend.js
+          test -f crates/jazz-wasm/backend/pkg/jazz_wasm_backend.d.ts
+          test ! -e crates/jazz-wasm/backend/pkg/.gitignore
+          grep --quiet serveThinTransaction crates/jazz-wasm/backend/pkg/jazz_wasm_backend.js
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: jazz-wasm-pkg
-          path: crates/jazz-wasm/pkg
-          # The sealed provenance receipt is intentionally dot-prefixed. The
-          # upload action excludes hidden files unless this is explicit.
-          include-hidden-files: true
+          name: jazz-wasm-backend-pkg
+          path: crates/jazz-wasm/backend/pkg
           if-no-files-found: error
 
-      # Merge groups run jazz-tools' Durable Object suite on a wasm-opt -O1
-      # host; this runs the full suite on the -Oz host built (and uploaded)
-      # above, so an -Oz-only break (a wasm-opt miscompile, or the glue or
-      # reinstantiation interacting with optimised code) fails the release
-      # build. Last, after both uploads: the correctness producer republishes
-      # crates/jazz-wasm/pkg as its fast build.
+  # Merge groups run jazz-tools' Durable Object suite on wasm-opt -O1 builds;
+  # this runs the full suite on the -Oz builds that ship (the uploaded
+  # jazz-wasm-durable-object-pkg and jazz-wasm-backend-pkg, unpacked where
+  # the builds leave them), so an
+  # -Oz-only break (a wasm-opt miscompile, or the glue or reinstantiation
+  # interacting with optimised code) fails the release build. Beside the
+  # package assembly, not before it.
+  test-wasm-durable-object:
+    name: Durable Object suite on the release host
+    needs: [build-wasm-durable-object, build-wasm-backend]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: wasm32-unknown-unknown
+          sccache: "true"
+          sccache-key: release-wasm-do-suite-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+
+      - uses: ./.github/actions/install-rust-tool
+        with:
+          tool: wasm-pack@0.13.1
+
+      # wasm-pack downloads wasm-bindgen and binaryen (wasm-opt) at build
+      # time, with no retry: keep them, so a flaky CDN can't fail a release.
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.cache/.wasm-pack
+          key: wasm-pack-0.13.1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            wasm-pack-0.13.1-${{ runner.os }}-
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-wasm-durable-object-pkg
+          path: crates/jazz-wasm/durable-object/pkg
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-wasm-backend-pkg
+          path: crates/jazz-wasm/backend/pkg
+
+      - name: Check they are the -Oz builds
+        run: node --test --test-name-pattern='-Oz build' crates/jazz-wasm/tests/durable-objects/release.test.mjs
+
       - name: Build correctness artifacts for the Durable Object suite
         run: node dev/gates/ensure-correctness-artifacts.mjs
       - name: Run jazz-tools' Durable Object suite on the release host
@@ -244,6 +369,9 @@ jobs:
           sccache: ${{ matrix.use_sccache && 'true' || 'false' }}
           sccache-key: release-napi-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-${{ matrix.platform }}-v1
 
+      # The second restore key: a Version Packages commit always changes
+      # Cargo.lock (the workspace version), so start from this platform's last
+      # build anyway, and only the workspace crates recompile.
       - name: Cache baseline-specific Linux Cargo products
         if: startsWith(matrix.platform, 'linux-')
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -252,6 +380,7 @@ jobs:
           key: linux-napi-${{ matrix.platform }}-${{ hashFiles('dev/artifacts/linux-napi/Dockerfile') }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
             linux-napi-${{ matrix.platform }}-${{ hashFiles('dev/artifacts/linux-napi/Dockerfile') }}-${{ hashFiles('Cargo.lock') }}-
+            linux-napi-${{ matrix.platform }}-${{ hashFiles('dev/artifacts/linux-napi/Dockerfile') }}-
 
       - name: Build Linux NAPI on pinned Bullseye userspace
         if: startsWith(matrix.platform, 'linux-')
@@ -363,6 +492,8 @@ jobs:
       - build-linux
       - check-linux-heap-profile
       - build-wasm
+      - build-wasm-durable-object
+      - build-wasm-backend
       - build-napi
 
     steps:
@@ -384,10 +515,20 @@ jobs:
           name: jazz-wasm-durable-object-pkg
           path: crates/jazz-wasm/durable-object/pkg
 
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-wasm-backend-pkg
+          path: crates/jazz-wasm/backend/pkg
+
       # Fails unless `npm pack` puts durable-object/pkg/jazz_wasm_do_bg.wasm
       # (and the rest of the Durable Object entry) in the jazz-wasm tarball.
       - name: Verify the jazz-wasm tarball carries the Durable Object entry
         run: pnpm --filter jazz-wasm check:durable-object-pack
+
+      # Fails unless `npm pack` puts backend/pkg/jazz_wasm_backend_bg.wasm
+      # (and the rest of the backend entry) in the jazz-wasm tarball.
+      - name: Verify the jazz-wasm tarball carries the backend entry
+        run: pnpm --filter jazz-wasm check:backend-pack
 
       # The release build (wasm-opt, the patched glue) starts in workerd and
       # admits its backend, before anything is published.

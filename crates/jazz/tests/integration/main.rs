@@ -25,8 +25,6 @@ mod branch_view_sync;
 mod branch_views;
 #[path = "../bundle_permissions.rs"]
 mod bundle_permissions;
-#[path = "../callback_transaction_cancellation.rs"]
-mod callback_transaction_cancellation;
 #[path = "../catalogue_rows.rs"]
 mod catalogue_rows;
 #[path = "../catalogue_unsupported_versions.rs"]
@@ -207,6 +205,8 @@ mod shard_role;
 mod slow_queries;
 #[path = "../snapshots.rs"]
 mod snapshots;
+#[path = "../staged_transaction_cancellation.rs"]
+mod staged_transaction_cancellation;
 #[path = "../storage_corpus.rs"]
 mod storage_corpus;
 #[path = "../storage_errors.rs"]

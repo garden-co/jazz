@@ -192,7 +192,8 @@ fn message_cells(chat: usize, sender: usize, index: usize) -> BTreeMap<String, V
 /// Seed profiles, chats (odd chats public), four members per chat and
 /// `messages` chat messages. Writes run as the database identity.
 fn seed(db: &BenchDb, messages: usize) {
-    block_on(db.transaction(async |tx| {
+    block_on(async {
+        let tx = db.mergeable_tx().await?;
         for user in 0..USERS {
             tx.insert(
                 "profiles",
@@ -229,13 +230,14 @@ fn seed(db: &BenchDb, messages: usize) {
                 .await?;
             }
         }
-        Ok(())
-    }))
+        tx.commit().await
+    })
     .expect("seed Chat profiles, chats and memberships");
 
     for start in (0..messages).step_by(SEED_BATCH) {
         let end = (start + SEED_BATCH).min(messages);
-        block_on(db.transaction(async |tx| {
+        block_on(async {
+            let tx = db.mergeable_tx().await?;
             for index in start..end {
                 let chat = message_chat(index);
                 tx.insert(
@@ -246,8 +248,8 @@ fn seed(db: &BenchDb, messages: usize) {
                 )
                 .await?;
             }
-            Ok(())
-        }))
+            tx.commit().await
+        })
         .unwrap_or_else(|error| panic!("seed Chat messages {start}..{end}: {error}"));
     }
 }

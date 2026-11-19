@@ -1742,7 +1742,8 @@ fn a_paged_relation_reads_each_parents_page_not_all_its_children() {
     .unwrap();
     // Busy rooms, a room with two messages and an empty one.
     let rooms = BUSY_ROOMS + 2;
-    block_on(db.transaction(async |tx| {
+    block_on(async {
+        let tx = db.mergeable_tx().await?;
         for r in 0..rooms {
             tx.insert(
                 "rooms",
@@ -1775,8 +1776,8 @@ fn a_paged_relation_reads_each_parents_page_not_all_its_children() {
                 .await?;
             }
         }
-        Ok(())
-    }))
+        tx.commit().await
+    })
     .unwrap();
     block_on(db.tick()).unwrap();
 

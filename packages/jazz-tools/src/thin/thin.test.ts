@@ -1218,6 +1218,28 @@ describe("thin client", () => {
     );
   }, 60_000);
 
+  // band-chat's room dialog commits a hand-built transaction, and the
+  // session's local-first upgrade can drain this Db right then: the drain
+  // must wait for that commit, which becomes a write only once its staged
+  // requests are answered, instead of closing the runtime under it.
+  it("lets a shutdown that waits for sync finish a commit still being staged", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.all(app.notes);
+    const tx = db.beginTransaction();
+    tx.insert(app.notes, { text: "committed as the Db drained", done: false });
+    const committed = tx.commit();
+    const outcome = committed.wait({ tier: "global" }).then(
+      () => "global",
+      (error: unknown) => error,
+    );
+    // In the same turn as the commit, before the server answered its staged
+    // insert.
+    await db.shutdown({ waitForSync: true });
+    // The server confirmed it: not "the thin runtime is closed".
+    expect(await outcome).toBe("global");
+  }, 60_000);
+
   it("fails a transaction its connection took with it, and nothing else", async () => {
     const server = await startServer();
     const db = await thinDb(server);

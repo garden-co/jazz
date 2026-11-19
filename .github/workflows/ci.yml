@@ -90,6 +90,22 @@ jobs:
       scope: ${{ github.event_name != 'pull_request' && 'full' || github.base_ref == 'release' && 'full' || github.event.pull_request.draft && 'none' || 'fast' }}
     secrets: inherit
 
+  # A main push the suite skips still warms main's native build cache
+  # (ci-suite.yml's warm-native-builds), which merge groups restore.
+  warm:
+    needs: [main-coverage]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-coverage.outputs.covered == 'true'
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+    uses: ./.github/workflows/ci-suite.yml
+    with:
+      trusted-cache: true
+      sccache-write: true
+      scope: warm
+    secrets: inherit
+
   # Preserve the branch-protection check name while the implementation jobs
   # live in the reusable suite. Exactly one invocation must have completed.
   test-rust:
