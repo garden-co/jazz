@@ -6,7 +6,7 @@
     "format:check": "oxfmt --check --ignore-path .oxfmtignore . && cargo fmt --check",
     "lint": "oxlint . --ignore-path .oxlintignore && pnpm lint:rust",
     "lint:rust": "cargo clippy --workspace -- -D warnings",
-    "test:tooling": "node --test dev/gates/test/lint-hook-parity.test.mjs && node --test dev/scripts/check-lockstep-versions.test.mjs",
+    "test:tooling": "node --test dev/gates/test/lint-hook-parity.test.mjs && node --test dev/scripts/check-lockstep-versions.test.mjs && node --test dev/release-publish/release-publish.test.mjs",
     "test:focused-rust": "bash dev/gates/test/dev-t.test.sh",
     "test:stack-preflight": "bash dev/gates/test/require-clean-worktree.test.sh",
     "test:vercel-preview-skip": "node --test dev/scripts/skip-new-core-vercel-preview.test.mjs",
