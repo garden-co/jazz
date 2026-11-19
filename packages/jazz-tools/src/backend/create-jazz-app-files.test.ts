@@ -1,9 +1,9 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { testApp, type TestAppFile } from "../testing/test-app.js";
-import { createJazz, memory } from "./create-jazz.js";
+import { createJazz, memory, remote, sqlite } from "./create-jazz.js";
 
 const notes: TestAppFile = { format: 1, tables: { notes: { columns: { body: "string" } } } };
 const notesWithDone: TestAppFile = {
@@ -103,7 +103,7 @@ describe("createJazz takes jazz.permissions.json in every form a project may hol
   });
 });
 
-describe("createJazz confirms the decrypt conversions its app declares", () => {
+describe("createJazz refuses apps that declare end-to-end encryption", () => {
   // Projects are spaces; a task's title is encrypted in its project's space,
   // and its notes are being decrypted into `notesText`.
   const encrypted: TestAppFile = {
@@ -140,31 +140,38 @@ describe("createJazz confirms the decrypt conversions its app declares", () => {
     },
   } as never;
 
-  async function startConfirming(confirmDecrypt?: string[]) {
-    await inProject();
+  function startEncrypted(store: ReturnType<typeof sqlite> | ReturnType<typeof remote>) {
     const jazz = createJazz({
       app: testApp(encrypted),
       permissions,
-      store: memory(),
-      confirmDecrypt,
+      store,
+      confirmDecrypt: ["tasks.notes"],
     });
     cleanups.push(() => jazz.close());
     return jazz.ready();
   }
 
-  it("publishes when confirmDecrypt names the decrypted column, which no client can open yet", async () => {
-    // The deploy passes its confirmation; the backend's own client has no
-    // encryption hooks yet, so it refuses to open the encrypted app.
-    await expect(startConfirming(["tasks.notes"])).rejects.toThrow(
+  it("leaves the SQLite store untouched even when the decrypt conversion is confirmed", async () => {
+    await inProject();
+    await expect(startEncrypted(sqlite({ path: join(process.cwd(), "store") }))).rejects.toThrow(
       /declares end-to-end encryption/,
     );
+    expect(await readdir(process.cwd())).toEqual([]);
   });
 
-  it("refuses, naming the column, without confirmDecrypt", async () => {
-    await expect(startConfirming()).rejects.toThrow(/decrypting tasks\.notes/);
-  });
-
-  it("refuses when confirmDecrypt names only another column", async () => {
-    await expect(startConfirming(["tasks.title"])).rejects.toThrow(/decrypting tasks\.notes/);
+  it("refuses before sending a deployment request to a remote store", async () => {
+    await inProject();
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected request"));
+    try {
+      const store = remote({
+        url: "http://127.0.0.1:1",
+        appId: "00000000-0000-4000-8000-000000000001",
+        secret: "test-secret",
+      });
+      await expect(startEncrypted(store)).rejects.toThrow(/declares end-to-end encryption/);
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      fetch.mockRestore();
+    }
   });
 });
