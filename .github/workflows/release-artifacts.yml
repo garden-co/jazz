@@ -121,6 +121,9 @@ jobs:
       include_rn: true
       # release-server and release-npm, packed beside the package checks.
       release_bundles: true
+      # Release builds also rebuild the iOS relay without cache and require
+      # it byte-identical to the cached build.
+      reproduce_ios_relay: ${{ needs.resolve.outputs.release == 'true' }}
 
   # The called workflows' publish jobs never run here (dry-run, publish:
   # false), but GitHub checks every called job's permissions against the
