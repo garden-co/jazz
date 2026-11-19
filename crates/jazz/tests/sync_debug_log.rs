@@ -93,7 +93,20 @@ const SEEDED: &str = "seeded-label-7f3a";
 
 /// Subscribe a fresh client to a one-row server under `level`, and return
 /// what was logged.
+/// Held while a capture is installed: this module's tests run their
+/// captures (one at DEBUG, one at INFO) in parallel in one binary, and
+/// tracing rebuilds the global max level whenever a dispatcher is created or
+/// dropped. A rebuild while only the INFO capture is live caps the max level
+/// at INFO, and the DEBUG capture then misses the client's Read. One capture
+/// at a time leaves no such rebuild.
+static CAPTURE: Mutex<()> = Mutex::new(());
+
 fn logged_subscription(level: Level) -> Vec<BTreeMap<String, String>> {
+    // A test that failed while holding it leaves it poisoned; the capture
+    // it guarded has ended either way.
+    let _one_capture = CAPTURE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let events = Arc::new(Mutex::new(Vec::new()));
     let capture = Capture {
         level,
