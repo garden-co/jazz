@@ -16,13 +16,13 @@ use crate::random::RandomSource;
 use crate::registry::{Registry, Suite};
 
 use super::super::derive::{self, RecoveryKeys};
+use super::super::device_account::DeviceAccountIdentity;
 use super::super::domain::{AccountDomain, AppDomain};
 use super::super::error::{
     IntrinsicContradiction, ProtocolError, ProtocolResult, RecoveryFailure, RefusalCode,
 };
 use super::super::ids;
 use super::super::json;
-use super::super::local_first::LocalFirstIdentity;
 use super::super::records::KeyColumns;
 use super::super::records::account::{
     AccountAction, AccountIdentity, AccountKind, AccountRoot, AccountSealingKey, AccountSuccessor,
@@ -324,13 +324,13 @@ pub fn check_bootstrap(
 /// How the account signs in, and whether the application allows resets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResetPolicy {
-    pub local_first: bool,
+    pub device_account: bool,
     pub allow_account_reset: bool,
 }
 
 /// Reset preconditions (§2.11): an app-authenticated session, reset
 /// allowed, a canonical `app` root (`state`; an account whose root is
-/// `local-first` never resets, whoever signs in), this device's request
+/// `device-account` never resets, whoever signs in), this device's request
 /// matching its keys, and this device not active in the current generation.
 pub fn check_reset(
     writer: &AccountWriter<'_>,
@@ -340,7 +340,9 @@ pub fn check_reset(
     public: &PublicAccountLedger,
     private: &PrivateAccountLedger,
 ) -> ProtocolResult<RootPermit> {
-    if policy.local_first || !policy.allow_account_reset || state.root.row.kind != AccountKind::App
+    if policy.device_account
+        || !policy.allow_account_reset
+        || state.root.row.kind != AccountKind::App
     {
         return refuse(RefusalCode::AccountResetNotAllowed);
     }
@@ -364,9 +366,9 @@ pub enum RootAuthority<'a> {
     /// An account of the application's own sign-in: the root is
     /// authenticated only by its author.
     App,
-    /// A local-first account: the root is signed by the identity, whose key
+    /// A device account: the root is signed by the identity, whose key
     /// must derive the account ID.
-    LocalFirst(&'a LocalFirstIdentity),
+    DeviceAccount(&'a DeviceAccountIdentity),
 }
 
 /// The identity, public root and sealing key record `permit` allows for
@@ -383,10 +385,10 @@ pub fn account_root(
     if permit.device_id != device.id {
         return refuse(RefusalCode::NoDeviceRequest);
     }
-    if let RootAuthority::LocalFirst(identity) = authority
+    if let RootAuthority::DeviceAccount(identity) = authority
         && identity.account_id(writer.domain).as_deref() != Some(writer.account_id)
     {
-        return refuse(RefusalCode::LocalFirstIdentityMismatch);
+        return refuse(RefusalCode::DeviceAccountIdentityMismatch);
     }
     let generation = permit.generation;
     let application = writer.application()?;
@@ -429,22 +431,22 @@ pub fn account_root(
         device_id: device.id.clone(),
         epoch_id: epoch_id.clone(),
         kind: AccountKind::App,
-        local_first_public_key: None,
-        local_first_signature: None,
+        device_account_public_key: None,
+        device_account_signature: None,
     };
-    if let RootAuthority::LocalFirst(identity) = authority {
-        root.kind = AccountKind::LocalFirst;
-        root.local_first_public_key = Some(identity.public_key().to_vec());
-        root.local_first_signature = Some(Vec::new());
+    if let RootAuthority::DeviceAccount(identity) = authority {
+        root.kind = AccountKind::DeviceAccount;
+        root.device_account_public_key = Some(identity.public_key().to_vec());
+        root.device_account_signature = Some(Vec::new());
         let bytes = root.signed_bytes(&application, &device.keys())?;
         let signature = identity.sign(&bytes)?;
-        provider_check(read_back(super::super::local_first::verify(
+        provider_check(read_back(super::super::device_account::verify(
             writer.registry,
             identity.public_key(),
             &bytes,
             &signature,
         ))?)?;
-        root.local_first_signature = Some(signature);
+        root.device_account_signature = Some(signature);
     }
     let account_key = sealing_key_record(writer, device, &epoch_id, &key, rng)?;
     Ok(RootRecords {

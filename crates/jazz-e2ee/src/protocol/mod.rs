@@ -14,7 +14,7 @@
 //!   and the exact bytes each record signs or binds.
 //! - [`derive`](mod@derive): recovery roots from a recovery secret, and
 //!   account sealing key pairs from account epoch keys.
-//! - [`local_first`]: the local-first identity that signs a local-first
+//! - [`device_account`]: the device-account identity that signs a device
 //!   account's root, and the account ID its key derives.
 //! - [`signing`]: signing and verification over the [`crate::agility::Signer`]
 //!   role, keeping provider failures distinct from invalid signatures.
@@ -28,11 +28,11 @@
 
 pub mod account;
 pub mod derive;
+pub mod device_account;
 pub mod domain;
 pub mod error;
 pub mod ids;
 pub mod json;
-pub mod local_first;
 pub mod position;
 pub mod records;
 pub mod signing;

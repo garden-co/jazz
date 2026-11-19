@@ -226,7 +226,7 @@ describe("Db auth state", () => {
     const initialToken = makeJwt({ iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice", version: 1 });
     const initialSession = internalSessionFromVerifiedReservedJwtPayload(
       { iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice" },
-      "local-first",
+      "device-account",
     )!;
     const refreshedToken = makeJwt({
       iss: LOCAL_FIRST_JWT_ISSUER,
@@ -268,7 +268,7 @@ describe("Db auth state", () => {
     db.refreshForTest();
 
     expect(db.getAuthState()).toMatchObject({
-      authMode: "local-first",
+      authMode: "device-account",
       session: { ...author(LOCAL_FIRST_JWT_ISSUER, "alice") },
     });
     expect(runtimeClient.updateTrustedAuthToken).toHaveBeenCalledWith(
@@ -281,7 +281,7 @@ describe("Db auth state", () => {
     const initialToken = makeJwt({ iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice", version: 0 });
     const initialSession = internalSessionFromVerifiedReservedJwtPayload(
       { iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice" },
-      "local-first",
+      "device-account",
     )!;
     let version = 0;
     const runtimeClient = {

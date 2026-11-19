@@ -4,6 +4,7 @@ import { SharedBrowserForegroundNodeLease } from "../native-runtime/browser-shar
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import {
   BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN,
+  BROWSER_STORE_HELD_BY_ANOTHER_BUILD,
   BrowserWorkerUnresponsiveError,
 } from "../native-runtime/browser-worker-protocol.js";
 import type { BrowserWorkerConnection, BrowserWorkerConnectionContext } from "../runtime-source.js";
@@ -461,14 +462,18 @@ describe("BrowserConnectionManager acknowledged storage reset", () => {
 
 function admissionManager(
   retryable = true,
-  heldByAnotherSignIn = false,
+  heldByAnotherTab: boolean | "sign-in" | "build" = false,
   config: Record<string, unknown> = {},
 ) {
   let pinned = true;
+  let heldBy: false | "sign-in" | "build" =
+    heldByAnotherTab === true ? "sign-in" : heldByAnotherTab;
   let error = new Error(
-    heldByAnotherSignIn
+    heldBy === "sign-in"
       ? BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN
-      : "incompatible persistent browser configuration",
+      : heldBy === "build"
+        ? BROWSER_STORE_HELD_BY_ANOTHER_BUILD
+        : "incompatible persistent browser configuration",
   );
   const connections: Array<
     BrowserWorkerConnection & {
@@ -484,13 +489,13 @@ function admissionManager(
       createBrowserWorkerConnection: vi.fn(() => {
         const rejected = pinned;
         const refusal = error;
-        const held = heldByAnotherSignIn;
+        const held = heldBy;
         const connection = {
           ready: async () => {
             if (rejected) throw refusal;
           },
           canRetryInitialConfigurationAdmission: () => rejected && retryable,
-          waitsForAnotherSignIn: () => rejected && held,
+          waitsForAnotherTab: () => (rejected && held) || false,
           deleteStorage: vi.fn(async () => {
             if (rejected) throw refusal;
           }),
@@ -522,7 +527,7 @@ function admissionManager(
     /** Later attempts are refused for another reason than a held store. */
     refuseOtherwise: (other: Error) => {
       error = other;
-      heldByAnotherSignIn = false;
+      heldBy = false;
     },
   };
 }
@@ -572,6 +577,41 @@ describe("Browser configuration admission retries", () => {
         expect(connection.shutdown).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(60_000);
       expect(connections).toHaveLength(attempts);
+    } finally {
+      host.phase = "closing";
+      await manager.shutdown().catch(() => undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits quietly while another build's tab holds the store, reports it past its patience, and joins once that tab lets go", async () => {
+    // A deploy changed the schema; a tab of the previous build still has the
+    // store open. This tab once stopped for good, silently: `stopped`, not
+    // retrying, until a later explicit call.
+    vi.useFakeTimers();
+    const { manager, host, connections, unpin } = admissionManager(true, "build");
+    const status = () =>
+      (manager as unknown as { transportLinkStatus(): unknown }).transportLinkStatus();
+    try {
+      let failure: unknown;
+      const waiting = manager.ensureReady("runtime").catch((error: unknown) => {
+        failure = error;
+      });
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(failure).toBeUndefined();
+      expect(status()).toEqual({ state: "connecting" });
+      expect(connections.length).toBeGreaterThan(1);
+      await vi.advanceTimersByTimeAsync(BrowserConnectionManager.HELD_BY_ANOTHER_TAB_PATIENCE_MS);
+      await waiting;
+      expect(isStoreHeldByAnotherTabError(failure)).toBe(true);
+      expect((failure as Error).message).toContain("another build of this app");
+      expect((failure as Error).message).toContain("reload the tab that runs the older build");
+      expect(status()).toEqual({ state: "offline", reason: "held-by-another-tab", retrying: true });
+      // The other tab reloads into this build: the next attempt joins.
+      unpin();
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(status()).not.toMatchObject({ state: "offline" });
+      await expect(manager.ensureReady("runtime")).resolves.toBeUndefined();
     } finally {
       host.phase = "closing";
       await manager.shutdown().catch(() => undefined);

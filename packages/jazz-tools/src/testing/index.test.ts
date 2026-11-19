@@ -506,7 +506,7 @@ describe("createPolicyTestApp", () => {
     const policyTestApp = await createPolicyTestApp(app, permissions, expect);
 
     try {
-      const alice = policyTestApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
+      const alice = policyTestApp.as({ user_id: "alice", claims: {}, authMode: "device-account" });
       await expect(alice.all(app.notes)).resolves.toEqual([]);
       await expect(alice.all(app.tags)).resolves.toEqual([]);
     } finally {
@@ -557,7 +557,7 @@ describe("createPolicyTestApp", () => {
     }
   }, 10_000);
 
-  it("runs policies as a local-first guest session without an explicit issuer", async () => {
+  it("runs policies as a device-account guest session without an explicit issuer", async () => {
     const guestApp = testApp({
       tables: {
         carts: { columns: { item: "string", ownerId: "uuid" } },
@@ -569,10 +569,10 @@ describe("createPolicyTestApp", () => {
       tables: {
         carts: {
           read: "ownerId = session.user",
-          insert: { allOf: ["ownerId = session.user", "session.authMode = 'local-first'"] },
+          insert: { allOf: ["ownerId = session.user", "session.authMode = 'device-account'"] },
         },
         products: {
-          read: "session.authMode in ['local-first', 'external']",
+          read: "session.authMode in ['device-account', 'external']",
           insert: "session.authMode = 'external'",
         },
         staffNotes: { read: "session.authMode = 'external'" },
@@ -591,7 +591,7 @@ describe("createPolicyTestApp", () => {
       const guestSession = {
         user_id: "guest-device",
         claims: {},
-        authMode: "local-first",
+        authMode: "device-account",
       } as const;
       const guest = policyTestApp.as(guestSession);
       const guestAccount = policyTestApp.accountFor(guestSession);
@@ -619,6 +619,32 @@ describe("createPolicyTestApp", () => {
     }
   }, 20_000);
 
+  it("refuses the pre-rename local-first auth mode in permissions and sessions", async () => {
+    const guardedApp = testApp({ tables: { staffNotes: { columns: { body: "string" } } } });
+    // Kept, this guard would admit every device account: no session is
+    // "local-first" any more.
+    await expect(
+      createPolicyTestApp(
+        guardedApp,
+        { tables: { staffNotes: { read: "session.authMode != 'local-first'" } } },
+        expect,
+      ),
+    ).rejects.toThrow(/never "local-first" any more.*compare with "device-account"/s);
+
+    const policyTestApp = await createPolicyTestApp(todosApp, todosPermissions, expect);
+    try {
+      expect(() =>
+        policyTestApp.as({
+          user_id: "guest-device",
+          claims: {},
+          authMode: "local-first" as never,
+        }),
+      ).toThrow(/authMode "local-first" was renamed to "device-account"/);
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 20_000);
+
   it("keeps an explicit external issuer as a trusted forSession actor", async () => {
     const actorApp = testApp({
       tables: { carts: { columns: { item: "string", ownerId: "uuid" } } },
@@ -638,7 +664,7 @@ describe("createPolicyTestApp", () => {
         user_id: "member",
         account_id: account,
         claims: {},
-        authMode: "local-first",
+        authMode: "device-account",
       } as const;
       expect(policyTestApp.accountFor(actorSession)).toBe(account);
 
@@ -663,7 +689,7 @@ describe("createPolicyTestApp", () => {
           user_id: "guest-device",
           account_id: "00000000-0000-4000-8000-000000000002",
           claims: {},
-          authMode: "local-first",
+          authMode: "device-account",
         }),
       ).toThrow(/founding account derived from their key/);
     } finally {
@@ -679,16 +705,16 @@ describe("createPolicyTestApp", () => {
         issuer: LOCAL_FIRST_JWT_ISSUER,
         user_id: "guest-device",
         claims: {},
-        authMode: "local-first",
+        authMode: "device-account",
       });
       const withoutIssuer = policyTestApp.sessionFor({
         user_id: "guest-device",
         claims: {},
-        authMode: "local-first",
+        authMode: "device-account",
       });
       expect(withIssuer).toMatchObject({
         issuer: LOCAL_FIRST_JWT_ISSUER,
-        authMode: "local-first",
+        authMode: "device-account",
         user_id: withoutIssuer.user_id,
         account_id: withoutIssuer.account_id,
       });
@@ -700,7 +726,7 @@ describe("createPolicyTestApp", () => {
           user_id: "guest-device",
           account_id: "00000000-0000-4000-8000-000000000002",
           claims: {},
-          authMode: "local-first",
+          authMode: "device-account",
         }),
       ).toThrow(/founding account derived from their key/);
     } finally {
@@ -716,7 +742,7 @@ describe("createPolicyTestApp", () => {
         policyTestApp.as({
           user_id: "guest-device",
           claims: { join_code: "invite-123" },
-          authMode: "local-first",
+          authMode: "device-account",
         }),
       ).toThrow(/local-first guests cannot carry custom claims/);
     } finally {
