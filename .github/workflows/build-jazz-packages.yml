@@ -403,7 +403,10 @@ jobs:
         with:
           rust-targets: ${{ matrix.target }}
           sccache: ${{ matrix.use_sccache && 'true' || 'false' }}
-          sccache-key: release-napi-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-${{ matrix.platform }}-v1
+          # Off for every platform today; if a matrix entry turns it on, only
+          # main pushes write the cache.
+          sccache-commit: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'true' || 'false' }}
+          sccache-key: release-napi-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-${{ matrix.platform }}-v2
 
       # The second restore key: a Version Packages commit always changes
       # Cargo.lock (the workspace version), so start from this platform's last
