@@ -73,6 +73,10 @@ pub struct Encryption {
     reconnected: Cell<bool>,
     status: Cell<Option<AccountStatus>>,
     last_error: RefCell<Option<String>>,
+    /// What the loop is doing or waiting on, for a call that waits on it.
+    stage: Cell<&'static str>,
+    /// A wake was asked for the batch that waits (see [`Encryption::wake_if_owed`]).
+    woken: Cell<bool>,
     gate: Gate,
     /// The loop, polled by the host.
     main: RefCell<Option<LocalBoxFuture<'static, ()>>>,
@@ -197,12 +201,30 @@ impl Encryption {
             reconnected: Cell::new(false),
             status: Cell::new(None),
             last_error: RefCell::default(),
+            stage: Cell::new("starting"),
+            woken: Cell::new(false),
             gate: Gate::default(),
             main: RefCell::default(),
         });
         let running = Rc::clone(&encryption);
         *encryption.main.borrow_mut() = Some(Box::pin(main_loop(running)));
         encryption
+    }
+
+    /// Asks the host for a tick when a read the runtime just asked is waiting
+    /// to go upstream: its next remote read is asked from a continuation,
+    /// after the last one was answered, and nothing else would send it.
+    ///
+    /// It asks once for each batch that waits: a transport that is attached
+    /// but cannot drain (its queue is full, its link is stuck) would
+    /// otherwise make every drive ask again at once and spin the host. A new
+    /// ask follows only once what waited has gone (a tick sent it).
+    pub fn wake_if_owed(&self) {
+        if !self.db.owes_requests_sent() {
+            self.woken.set(false);
+        } else if !self.woken.replace(true) {
+            self.store.request_wake();
+        }
     }
 
     /// Lets the loop run as far as it can without waiting.
@@ -215,6 +237,8 @@ impl Encryption {
         if future.as_mut().poll(&mut context).is_ready() {
             *main = None;
         }
+        drop(main);
+        self.wake_if_owed();
     }
 
     /// The reports waiting, as JSON texts.
@@ -257,6 +281,7 @@ impl Encryption {
         json!({
             "status": self.status.get().map(status_name),
             "error": self.last_error.borrow().clone(),
+            "stage": self.stage.get(),
         })
     }
 
@@ -438,6 +463,8 @@ impl Encryption {
 async fn main_loop(this: Rc<Encryption>) {
     let (client, db) = (Rc::clone(&this.client), Rc::clone(&this.db));
     // The runtime needs the catalogue identities, known after one sync.
+    this.stage
+        .set("waiting for the app's table identities from the server");
     while !client.prepare(&db).unwrap_or(false) {
         yield_now().await;
     }
@@ -455,7 +482,9 @@ async fn main_loop(this: Rc<Encryption>) {
     let mut noticed = false;
     let mut looked = web_time::Instant::now();
     loop {
+        this.stage.set("waiting for its turn");
         let turn = this.gate.enter().await;
+        this.stage.set("watching the account");
         if account.is_none() {
             match client.watch_account(&db).await {
                 Ok(watch) => account = Some(watch),
@@ -479,6 +508,7 @@ async fn main_loop(this: Rc<Encryption>) {
         }
         if verify {
             verify = false;
+            this.stage.set("verifying the account");
             match client.ensure_account(&db).await {
                 Ok(status) => {
                     backoff = RETRY_FIRST;
@@ -591,6 +621,7 @@ async fn main_loop(this: Rc<Encryption>) {
                 }
             }
         }
+        this.stage.set("idle");
         drop(turn);
         yield_now().await;
     }

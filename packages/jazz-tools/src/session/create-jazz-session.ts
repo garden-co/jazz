@@ -178,6 +178,7 @@ const BROWSER_SESSION_OPTIONS = {
   store: true,
   fetch: true,
   bearer: true,
+  encryption: true,
 } as const satisfies Record<Exclude<keyof JazzClientConfig, "appId" | "backendSecret">, true>;
 
 /** @internal A browser session's core, which follows your auth's signed-in user. */
@@ -190,6 +191,9 @@ export type BrowserJazzSession = UserFollowingSession<JazzClient>;
  */
 function refuseUnkeptOptions(clientConfig: Record<string, unknown>): void {
   for (const [key, value] of Object.entries(clientConfig)) {
+    // The encryption option carries the app's own store: a live handle the
+    // client uses and does not keep as configuration.
+    if (key === "encryption") continue;
     let kept = value;
     if (key === "runtimeSources" && value && typeof value === "object") {
       // Live handles the Db leaves out of its config.

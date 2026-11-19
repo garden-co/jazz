@@ -50,7 +50,7 @@
     "build:fast": "node ../../dev/artifacts/build.mjs wasm fast",
     "build:profiling": "node ../../dev/artifacts/build.mjs wasm profiling",
     "test:durable-objects": "tests/durable-objects/run.sh",
-    "build:durable-object": "wasm-pack build . --target web --release --out-dir durable-object/pkg --out-name jazz_wasm_do --no-pack -- --features durable-object && node durable-object/reinstantiable.mjs && node -e \"require('node:fs').rmSync('durable-object/pkg/.gitignore', { force: true })\"",
+    "build:durable-object": "wasm-pack build . --target web --release --out-dir durable-object/pkg --out-name jazz_wasm_do --no-pack -- --no-default-features --features durable-object,console_error_panic_hook,transport-compression-ruzstd && node durable-object/reinstantiable.mjs && node -e \"require('node:fs').rmSync('durable-object/pkg/.gitignore', { force: true })\"",
     "check:durable-object-pack": "node durable-object/check-pack.mjs",
     "test:durable-object-release": "node --test tests/durable-objects/release.test.mjs"
   },

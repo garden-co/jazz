@@ -1238,17 +1238,35 @@ async function initialize(context: RuntimeContext): Promise<void> {
         "WASM runtime does not support self-signed client opens; rebuild the matching Jazz WASM artifact",
       );
     }
-    unownedDb = proof
-      ? await wasmModule.WasmDb.openBrowserWithSelfSignedProof(
+    const keyless = options.keyless;
+    if (keyless && typeof wasmModule.WasmDb.openBrowserKeyless !== "function") {
+      throw new Error(
+        "WASM runtime does not support encrypted apps; rebuild the matching Jazz WASM artifact",
+      );
+    }
+    unownedDb = keyless
+      ? await wasmModule.WasmDb.openBrowserKeyless(
           context.pageStore,
           schema,
           config,
-          proof.token,
-          proof.appId,
-          proof.claimedAuthor,
           options.dbName,
+          keyless.bindings,
+          options.appId,
+          keyless.environment,
+          proof?.token,
+          proof?.claimedAuthor,
         )
-      : await wasmModule.WasmDb.openBrowser(context.pageStore, schema, config, options.dbName);
+      : proof
+        ? await wasmModule.WasmDb.openBrowserWithSelfSignedProof(
+            context.pageStore,
+            schema,
+            config,
+            proof.token,
+            proof.appId,
+            proof.claimedAuthor,
+            options.dbName,
+          )
+        : await wasmModule.WasmDb.openBrowser(context.pageStore, schema, config, options.dbName);
     const runtime = NativeRuntimeAdapter.fromDb(
       unownedDb as never,
       options.schema,

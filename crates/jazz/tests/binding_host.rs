@@ -1105,6 +1105,50 @@ fn a_tab_read_asks_for_the_tick_that_fetches_its_large_values() {
 }
 
 #[test]
+fn a_tab_asks_for_the_tick_that_sends_the_next_read_of_its_serializable_transaction() {
+    // The first read of a serializable transaction goes out with the tick its
+    // call asks for. The next is asked once the first one's answer is
+    // applied, inside that tick, after the tick's send: nothing else is in
+    // flight to tick the tab, so it must ask for one itself.
+    let server = authority();
+    server.insert("notes", &title("one"), &none()).unwrap();
+    server
+        .insert(
+            "comments",
+            &comment(RowUuid(uuid::Uuid::from_bytes([7; 16])), "two"),
+            &none(),
+        )
+        .unwrap();
+    let worker = open(0xd4);
+    worker.set_remote_link_hint("live").unwrap();
+    let up = worker.connect_upstream();
+    let down = server
+        .accept_subscriber(worker.author(), Default::default())
+        .unwrap();
+    let (tab, tab_up, tab_down) = tab_over(&worker, open(0xd5));
+    let links = [(&up, &down), (&tab_up, &tab_down)];
+    let tx = &OpenTransactionId::new().to_string();
+    tab.begin_transaction(tx, "serializable", None, None)
+        .unwrap();
+    let read = |table: &str| {
+        let query = postcard::to_allocvec(&Query::from(table)).unwrap();
+        tab.all(query, &none(), Some(tx), None, None).unwrap()
+    };
+    // Both asked now; the transaction runs them one after the other.
+    let (notes, comments) = (read("notes"), read("comments"));
+    let (notes, comments) = drive_on_demand(&links, futures::future::join(notes, comments));
+    let count = |bytes: Vec<u8>| {
+        jazz::binding_codec::decode_rows(&bytes)
+            .unwrap()
+            .iter()
+            .map(|batch| batch.rows.len())
+            .sum::<usize>()
+    };
+    assert_eq!(count(notes.unwrap()), 1);
+    assert_eq!(count(comments.unwrap()), 1);
+}
+
+#[test]
 fn a_tab_reads_a_large_value_its_worker_relays_from_the_server() {
     // The worker holds the row once the server answers, and fetches its
     // chunks before it serves the tab's read.

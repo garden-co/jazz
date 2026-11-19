@@ -3,10 +3,12 @@ import { PlatformURL } from "../runtime/platform-url.js";
 import { resolveServerUrl } from "../runtime/url.js";
 import { admitAccountConfig } from "./config-capability.js";
 import type { AccountHandle } from "./state.js";
+import { resolveSchemaSource } from "../schema-source.js";
 import {
   accountRegistry,
   accountToken,
   delegatedAccountClaims,
+  deviceAccountSecretReader,
   AccountAuthError,
   onAccountInvalidated,
 } from "./enrollment.js";
@@ -78,7 +80,18 @@ function accountContextScope(config: AccountDbConfig): string {
 /** @internal Resolve a handle for a host adapter; never accept copied credentials. */
 export async function resolveAccountRuntimeConfig(config: AccountDbConfig): Promise<DbConfig> {
   const registry = accountContextScope(config);
-  const { account, ...runtimeConfig } = config;
+  const { account, ...accountless } = config;
+  // A device account's secret is its encryption recovery secret: the runtime
+  // reads it from the handle when it needs it and keeps no copy.
+  const runtimeConfig: Omit<AccountDbConfig, "account"> = accountless.encryption
+    ? {
+        ...accountless,
+        encryption: {
+          ...accountless.encryption,
+          accountSecret: deviceAccountSecretReader(account),
+        },
+      }
+    : accountless;
   const delegatedClaims = delegatedAccountClaims(account, registry);
   if (delegatedClaims) {
     // Signed in through the app's backend: no credential leaves this client.
@@ -158,6 +171,8 @@ export async function createAccountDbWithRuntimeSource(
     const opening = lease;
     lease = undefined;
     db = await createDbWithRuntimeSource(resolved, runtimeSource, opening);
+    // An encrypted app starts verifying its account at open, not at its first query.
+    if (resolved.encryption) db.openClientFor(resolveSchemaSource(resolved.encryption.app));
     if (invalidated) {
       await db.shutdown();
       throw new AccountAuthError("account_logged_out");
