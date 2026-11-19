@@ -136,11 +136,29 @@ export const TYPESCRIPT_SHARDS = Object.freeze([
   "browser-2",
   "packages",
 ]);
+// tools-other runs jazz-tools' Durable Object suite, whose host build
+// (fat-LTO cargo plus wasm-opt) is minutes; it starts alongside the producer
+// instead of after the suites' preparation. Merge groups build that host at
+// wasm-opt -O1; build-jazz-packages.yml and nightly run the same suite on the
+// -Oz host that ships (dev/gates/ensure-artifacts-and-durable-object-host.mjs).
+const producerAndDurableObjectHost = command(
+  "native correctness-artifact producer and Durable Object host",
+  "node",
+  ["dev/gates/ensure-artifacts-and-durable-object-host.mjs"],
+);
 const typescriptPartitions = Object.freeze({
   ...Object.fromEntries(
     TYPESCRIPT_SHARDS.map((shard) => [
       `typescript-${shard}`,
-      Object.freeze([...typescriptPrelude, typescriptConsumers(shard)]),
+      Object.freeze(
+        shard === "tools-other"
+          ? [
+              producerAndDurableObjectHost,
+              ...typescriptPrelude.slice(1),
+              typescriptConsumers(shard),
+            ]
+          : [...typescriptPrelude, typescriptConsumers(shard)],
+      ),
     ]),
   ),
   // The examples shard runs no suite of its own; it admits the prepared
@@ -516,8 +534,13 @@ export function assertFullWorkspaceCoverage(commands) {
     throw new Error("CI-equivalent workspace check omits the required CI feature selection.");
 }
 
+const producerLabels = new Set([
+  "native correctness-artifact producer",
+  "native correctness-artifact producer and Durable Object host",
+]);
+
 export function assertArtifactBoundary(commands) {
-  const artifacts = commands.find(({ label }) => label === "native correctness-artifact producer");
+  const artifacts = commands.find(({ label }) => producerLabels.has(label));
   const suites = commands.find(({ label }) => label === "TypeScript consumers");
   if (!artifacts || !suites)
     throw new Error("CI-equivalent TypeScript plan omits artifacts or test suites.");
