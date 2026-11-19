@@ -426,7 +426,7 @@ jobs:
       # (dev/artifacts/native-build-cache.mjs): this partition's producer
       # builds the same sealed pair.
       - name: Restore native correctness builds
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: node_modules/.cache/jazz-native-builds
           key: jazz-native-builds-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', 'crates/**/*.rs', 'vendor/**', 'dev/artifacts/*.mjs') }}
@@ -517,7 +517,7 @@ jobs:
       # and then validates, seals and verifies it for this checkout exactly as
       # it would a fresh build. This key only picks which entries to restore.
       - name: Restore native correctness builds
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: node_modules/.cache/jazz-native-builds
           key: jazz-native-builds-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', 'crates/**/*.rs', 'vendor/**', 'dev/artifacts/*.mjs') }}
@@ -599,7 +599,8 @@ jobs:
       # target trees the container creates (it fails the whole step), and
       # pnpm install keeps node_modules/.cache.
       - name: Restore native correctness builds
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        id: native-builds
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: node_modules/.cache/jazz-native-builds
           key: jazz-native-builds-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', 'crates/**/*.rs', 'vendor/**', 'dev/artifacts/*.mjs') }}
@@ -610,6 +611,15 @@ jobs:
           sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
       - name: Build the native correctness builds for main's tree
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition warm-native-builds
+      # Saved with the key the restore step computed before setup: hashFiles
+      # cannot walk the trees the build leaves behind (a post-job save of
+      # actions/cache re-evaluates it and fails).
+      - name: Save native correctness builds
+        if: steps.native-builds.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: node_modules/.cache/jazz-native-builds
+          key: ${{ steps.native-builds.outputs.cache-primary-key }}
       - name: Report sccache statistics
         if: always()
         run: sccache --show-stats

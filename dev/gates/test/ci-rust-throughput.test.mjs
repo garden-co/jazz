@@ -2350,3 +2350,30 @@ test("the native build cache is restored before setup-blacksmith installs depend
     );
   }
 });
+
+test("the native build cache key's hashFiles is evaluated only before setup", () => {
+  // actions/cache re-evaluates its key in a post-job save; by then hashFiles
+  // fails on the trees the build left (dispatch 44468637996). Every job only
+  // restores, and main's warm job saves explicitly with the key its restore
+  // step computed before setup.
+  const suite = parse(workflowSuite);
+  const steps = Object.entries(suite.jobs).flatMap(([name, job]) =>
+    (job.steps ?? [])
+      .filter(({ with: inputs }) => inputs?.path === "node_modules/.cache/jazz-native-builds")
+      .map((step) => ({ job: name, uses: step.uses.split("@")[0], step })),
+  );
+  assert.deepEqual(steps.map(({ job, uses }) => `${job} ${uses}`).sort(), [
+    "test-go-ts-backend actions/cache/restore",
+    "test-ts actions/cache/restore",
+    "warm-native-builds actions/cache/restore",
+    "warm-native-builds actions/cache/save",
+  ]);
+  const save = steps.find(({ uses }) => uses === "actions/cache/save").step;
+  assert.equal(save.with.key, "${{ steps.native-builds.outputs.cache-primary-key }}");
+  assert.equal(save.if, "steps.native-builds.outputs.cache-hit != 'true'");
+  const warmRestore = steps.find(
+    ({ job, uses }) => job === "warm-native-builds" && uses === "actions/cache/restore",
+  ).step;
+  assert.equal(warmRestore.id, "native-builds");
+  assert.doesNotMatch(save.with.key, /hashFiles/);
+});
