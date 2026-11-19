@@ -748,7 +748,10 @@ jobs:
   # for arm64-v8a, armeabi-v7a and x86_64 (no emulator or device tests).
   test-kotlin-android:
     if: inputs.scope == 'full'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Three cargo-ndk builds of jazz-ffi (arm64-v8a, armeabi-v7a, x86_64) and
+    # Gradle: with the S3 tier already hitting ~100 %, the rest is cdylib
+    # links, build scripts and proc macros, which want cores.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 20
     container:
       image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba

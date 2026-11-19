@@ -107,6 +107,7 @@ const assertUsesBlacksmithRunner = (jobName, jobSource) => {
     "test-go-ts-backend",
     "test-crates-package",
     "test-jazz-ffi-bindings",
+    "test-kotlin-android",
   ].includes(jobName)
     ? 16
     : 4;
@@ -196,6 +197,7 @@ const assertSuiteS3ConfigurationBoundary = (source) => {
     "test-go-ts-backend",
     "test-crates-package",
     "test-jazz-ffi-bindings",
+    "test-kotlin-android",
   ]) {
     const parsedJob = document.jobs[name];
     assert.equal(parsedJob.env, undefined, `${name} must not configure S3 at job scope`);
@@ -901,6 +903,7 @@ test("shared Rust cache writes are main and merge-group only while trusted PRs r
     "test-go-ts-backend",
     "test-crates-package",
     "test-jazz-ffi-bindings",
+    "test-kotlin-android",
   ]) {
     const source = job(name);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN \}\}/);
