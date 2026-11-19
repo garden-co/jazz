@@ -56,6 +56,8 @@ describe("jazz-tools/backend under the workerd condition", () => {
     ]) {
       expect([...reached], forbidden).not.toContain(forbidden);
     }
-    expect(reached).toContain("jazz-wasm");
+    // The backend build, never the browser build the backend leaves out.
+    expect(reached).toContain("jazz-wasm/backend");
+    expect([...reached].filter((path) => /^jazz-wasm(\/pkg|$)/.test(path))).toEqual([]);
   });
 });

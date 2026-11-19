@@ -670,6 +670,11 @@ jobs:
           tar -tf "${TARBALL}" | grep -q "package/durable-object/pkg/jazz_wasm_do.js"
           tar -tf "${TARBALL}" | grep -q "package/durable-object/index.js"
           tar -tf "${TARBALL}" | grep -q "package/durable-object/host.js"
+          # `jazz-wasm/backend`: what a backend's `createJazz` runs on in a Worker.
+          echo "backend files: $(tar -tf "${TARBALL}" | grep -c "package/backend/")"
+          tar -tf "${TARBALL}" | grep -q "package/backend/pkg/jazz_wasm_backend_bg.wasm"
+          tar -tf "${TARBALL}" | grep -q "package/backend/pkg/jazz_wasm_backend.js"
+          tar -tf "${TARBALL}" | grep -q "package/backend/index.js"
 
       - name: Verify packed jazz-napi payload
         run: |
