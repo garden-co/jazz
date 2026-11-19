@@ -645,6 +645,13 @@ test("Rust tool installation is pinned, allowlisted, and action-download indepen
     /cargo install "\$\{crate\}" --version "\$\{version\}" --locked --root "\$\{install_root\}"/,
   );
   assert.match(installRustToolScript, /if \[\[ "\$\{JAZZ_RUST_TOOL_CACHE_HIT:-\}" == "true" \]\]/);
+  // sccache on Linux: the pinned upstream musl binary, checksum-verified.
+  for (const sha of [
+    "782d2b5dd7ae0a55ebe368ab258114d0928d019ac2d949ab85d5d02f3926709e",
+    "3a6a3712b49da3d263bf2d30d702de4302793016019e800bfb81c0c69401d8f8",
+  ])
+    assert.match(installRustToolScript, new RegExp(`prebuilt_sha256=${sha}`));
+  assert.match(installRustToolScript, /sha256sum -c -/);
   assert.match(installRustToolScript, /"\$\{install_root\}\/bin\/\$\{binary\}" --version/);
   assert.match(
     installRustToolScript,
