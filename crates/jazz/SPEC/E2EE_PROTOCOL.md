@@ -1843,12 +1843,31 @@ transactions are runtime publications, retried internally after a conflict
 (§7). It needs Jazz update permission on the rows: a row whose repair is
 refused is skipped and stays unreadable to others. It does not run offline.
 
-**When repair runs.** A pass runs once the real key is held, after a
-restart, and when one of the device's own writes under the losing key
-settles. It reads the device's replica, which includes its own committed
-writes not yet accepted, so those are repaired like any other row. Since
+**When repair runs.** A pass runs at the natural moments of the delivery
+pass (§3.4: start, reconnect, the app's call, a watched space's change), once
+the real key is held, and on the app's call for one space or for every space
+with a refused key. It finds the rows in the device's replica, which includes
+its own committed writes not yet accepted, so those are repaired like any
+other row once the authority has accepted them (a read at one cut has no
+position for a row it has not accepted: the pass waits and tries again). Since
 the key is never deleted, nothing has to decide when repair is finished: a
 write still open or of unknown outcome is repaired by a later pass.
+
+The rewrite is an ordinary update of the cell's plaintext, sealed by the write
+path under the newest key of the chain's root (§5.2) with a fresh equality
+token: the cells that open under a refused creation's key are the ones the
+batch's own read reports, so a cell a concurrent writer has replaced is not
+among them. A streamed value under the losing key is rewritten as an ordinary
+cell, in memory: repairing a value of n bytes takes at least n bytes of memory,
+unlike the bounded memory of a streamed write (§5.5).
+
+Since the rewrite is an ordinary update, Jazz permissions decide it like any
+other: a creator that may not update the rows it wrote has the repair refused
+by the authority (`authorization-denied`), and those rows stay unreadable to
+the other members; the application's own rules decide whether that can happen.
+The natural moments then stop repairing that space for the rest of the run,
+like the in-run refusal of a creation (this section), and an explicit call
+attempts again.
 
 Required tests: device A wrote row R under the losing key with value `old`;
 after the space's root is known, another member writes `new` to R under the
@@ -1902,6 +1921,12 @@ it. A root candidate that needs such a capability, positioned before the
 first valid root, leaves the choice of root unresolved too, since the client
 cannot tell whether it is the first valid one.
 
+A root row the client cannot decode (junk, or a newer format's) makes the
+space incomplete for this client: it creates nothing for it, so such a root
+blocks the creation of that space on this client for good, never a competing
+root. Rows of the member accounts' histories that cannot be decoded do not
+make the space incomplete; they only make that account's history invalid.
+
 ### 3.4 Members and deliveries
 
 Keys move by delivery only, and nobody asks for them: every member's
@@ -1924,9 +1949,8 @@ applications and users never handle deliveries.
 - **Delivering.** Every device holding keys of a space watches its member
   rows, and the deliveries of the versions concerned (the current
   version, and skipped versions it holds), not those of earlier versions
-  (§3.8). For each member that lacks a version it holds, after
-  a random delay (so that usually one holder delivers), and only if no
-  delivery has appeared meanwhile, the device checks, from the chain it has
+  (§3.8). For each member that lacks a version it holds, when its **pass**
+  runs (below), the device checks, from the chain it has
   authenticated for that address and its space root (§3.3), that `v` is a
   version of **that** space's chain, and takes the key from that space's
   held-key document (§6.2) only. It then reads the member's public account
@@ -1936,12 +1960,34 @@ applications and users never handle deliveries.
   `{scopeId, identifier, keyEpochId, senderAccountId, recipientAccountId,
 recipientAccountEpochId, envelope}`, with a random ID, sealed to that
   key, in a ledger transaction whose read set includes the member's public
-  account rows and member rows. Read-set validation (§0 item 5) refuses the
-  delivery if the member's account rotated or its member rows changed after
-  that cut, so a delivery is never sealed to an epoch that a since-removed
-  device still holds; the device then re-reads. The authority accepts it
-  only from a member to a member (R17). Two holders may both deliver; the
-  second delivery costs storage only.
+  account rows, the member rows and the space's deliveries. Read-set
+  validation (§0 item 5) refuses the delivery if the member's account
+  rotated or its member rows changed after that cut, so a delivery is never
+  sealed to an epoch that a since-removed device still holds, and, since
+  deliveries are readable to every member (R14), if another holder's
+  delivery landed after the cut (a phantom of the read): the device then
+  reads again. **The first holder to commit wins**, with no delay: the loser
+  re-reads, finds the member holding the version and stops, so two holders
+  racing write one delivery. The authority accepts a delivery only from a
+  member to a member (R17). A server that hides a delivery from a holder
+  costs a duplicate delivery at most.
+- **The pass, and when it runs.** A holder's **pass** over a space finds the
+  members that lack a version it holds and delivers it. It covers the spaces
+  this device holds the current key of, and every pass reads the space and
+  its members' accounts from the authority, so a member the device's store
+  had not seen is seen; it compares the members with the deliveries and the
+  members' account generations (new members, and reset accounts whose
+  delivery is now stale). It runs at natural moments, never on a timer: when
+  the app starts or reconnects, once its subscriptions have caught up; right
+  after this device changes a space's members itself (so whoever adds a
+  member normally delivers at once); when a watched space changes (§3.8),
+  for the spaces in use; and whenever the app calls the public method that
+  runs it, for every space or for one. Applications should call it after
+  adding members. A new member of a space no holder is looking at gets its
+  key at the next natural moment of any holder, or when the app runs the
+  pass. (A pass that skipped a space nothing had changed in, and a catch-up
+  that widened the watch first, were measured at a saving of under half of a
+  pass and are not part of the design.)
 - **Receiving.** A member's devices watch deliveries addressed to their
   account and acquire the key (§3.3). While its account lacks a version
   that it needs, a member's device reports the space `key-pending` (§4.3).
@@ -2015,11 +2061,16 @@ current version, and one delivery of `K'` to each of at most 100 current
 members other than itself that have a valid sealing key (§2.12, §3.4). The
 100 are chosen first among members that held the previous version (they
 are reading the space now), then among the others, each group in random
-order. Right after the rotation is accepted, the rotator's runtime delivers
+order. The successor and the first batch (at least one delivery, unless the
+rotator is the only member) commit in one transaction. Right after the
+rotation is accepted, the rotator's runtime delivers
 `K'` to every remaining member in delivery transactions of up to 100
 deliveries, whether or not a delivery to it already exists (another
 member's delivery may not open); members it does not reach (without a sealing key, or the
-rotator went offline) receive `K'` later from any holder. Read-set
+rotator went offline) receive `K'` later from any holder: an unfinished
+rotation needs no tracking, since any holder of the new version (the
+first-batch recipients, or the rotator on its next start) completes it
+through the pass (§3.4), the first holder to commit winning. Read-set
 validation refuses a second successor of the same predecessor, and a
 rotation whose members changed meanwhile; the loser re-reads.
 
@@ -2175,7 +2226,12 @@ sees more than 1,000 member accounts in a space emits a
 and keeps working; the costs below then grow beyond what the first release
 is designed for.
 
-**What a device watches.** Per space its account is a member of: the
+**What a device watches.** Only spaces in active use are watched: when the
+app has an open subscription on an encrypted table, the spaces of its rows
+join a shared set, counted per subscription, and leave it when the last
+subscription using them closes. The runtime cannot see a subscription open
+or close, so the binding that opens it tells the runtime. Per space in the
+set: the
 space's member rows (at most 1,000), its roots and successors (one per
 version), the deliveries of the versions concerned (the current
 version, and skipped versions it holds, §3.4), and the public account roots
@@ -2187,7 +2243,17 @@ are watched across spaces. A member's `__e2ee_account_keys` rows are watched
 only while a delivery to it waits for a valid sealing key (§3.4), and the
 members' public account successors only by a device that may act on the
 needs-rotation mark (§3.5); the delivery transaction reads the rest of a
-member's account history when it needs it (§3.4). Watches of public account
+member's account history when it needs it (§3.4). The space watches are shared across
+the set too: one subscription per system table (member rows, roots,
+successors, deliveries) filtered to the set (`scopeId IN … AND identifier IN
+…`, and for deliveries `keyEpochId IN` the current versions: the store serves
+that from its `(scopeId, identifier, …)` indexes, and would scan the table for
+`identifier IN …` alone), replaced
+with the new one opened before the old one closes when the set changes; a
+change runs the pass (§3.4) for the spaces of the set. The member accounts of
+the spaces of the set are watched too, one subscription per table (roots,
+public successors, sealing keys) over them: the rows that who lacks a key, the
+needs-rotation mark depend on. Watches of public account
 rows are shared across spaces: one subscription per table over the
 accounts the device needs, replaced (the new one opened before the old one
 closes) when that set changes. The design figure is 10,000 watched accounts
@@ -2208,8 +2274,8 @@ is made or abandoned.
   re-evaluates who lacks a key once per batch, at a cost proportional to
   the members.
 - Adding a member costs one delivery, by one holder; each holder
-  device re-evaluates at a cost proportional to the members. Two holders
-  may deliver at once; the second delivery costs storage only.
+  device re-evaluates at a cost proportional to the members. Holders
+  racing to deliver write one delivery: the first to commit wins (§3.4).
 - Deliveries are never deleted (R1): the server stores one per member per
   version (1,000 rotations of a 1,000-member space leave a million rows),
   but a device syncs only those of the current version and of skipped
@@ -2505,6 +2571,25 @@ The creation's outcome decides the key's fate:
   (obtaining the real key and rewriting the cells it wrote under this one),
   and is never used for a new write. The record is kept (§3.2).
 - **Unknown**: the mark is kept.
+
+The transaction identity the runtime stores is the ID of the root row it
+staged: the row's ID is chosen before the transaction exists, and the key is
+stored before commit, while the transaction's own number is drawn at commit.
+The runtime finds the transaction through that row in its own store: the row
+pending (`Own(tx)`, then `transaction_fate(tx)`), accepted, or absent. A root
+absent from the store is looked up among the commits the store keeps as
+refused (a root refused after the run staged it is found without a
+restart); if it is not there and this run is still staging it, it is
+undecided; otherwise only an online read of the authority decides: the root
+shown there is accepted, its absence is `not accepted`, and offline, or with
+rows of the address this client cannot decode, it stays undecided. The local
+store alone never makes a creation `not accepted`, since a store that lost
+the commit says nothing of the authority's decision. The authority's refusal
+names no row: a refusal (`authorization-denied`) of a transaction that
+carries this device's root is taken as the refusal of the root (§3.2, one
+automatic attempt per space after a restart, then the automatic paths stop
+again), whatever else the transaction held; a transaction that fails for
+another reason stops nothing.
 
 After a restart the runtime reconciles each `unpublished` record by its
 stored transaction identity: accepted clears the mark (or marks it

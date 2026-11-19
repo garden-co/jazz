@@ -120,6 +120,19 @@ impl Hooks {
     }
 }
 
+/// Whether the stored `cell` names an epoch whose key this device holds only
+/// as the key of a refused or lost creation of `address`.
+fn under_refused_key(keys: &KeyState, address: &SpaceAddress, cell: &[u8]) -> bool {
+    let Ok(record) = read_stored_record(cell) else {
+        return false;
+    };
+    keys.held.roots_of(address).into_iter().any(|space| {
+        space
+            .depth_of(record.epoch_id)
+            .is_some_and(|depth| space.mark(depth) == Some(&KeyMark::Refused))
+    })
+}
+
 /// The key a write to `address` seals under, or the reason it cannot yet
 /// (protocol §3.2, §5.1).
 fn write_key<'k>(
@@ -194,6 +207,29 @@ impl E2eeHooks for Hooks {
     }
 
     fn seal_write(&self, write: &mut WriteCells<'_>) -> Result<(), SealError> {
+        // A member row this client adds or changes: the space is served by
+        // the next pass after the write commits (protocol §3.4).
+        if write.table == crate::account::rows::SPACE_MEMBERS
+            && matches!(
+                write.kind,
+                WriteKind::Insert | WriteKind::Update | WriteKind::Upsert
+            )
+            && let (Some(Value::Uuid(scope)), Some(Value::Uuid(id))) =
+                (write.cells.get("scopeId"), write.cells.get("identifier"))
+        {
+            let mut changes = self.shared.member_changes.borrow_mut();
+            if changes.len() == crate::state::MAX_REPORTS {
+                changes.pop_front();
+            }
+            changes.push_back((
+                write.row,
+                jazz::e2ee::SpaceAddress {
+                    scope_id: scope.to_string(),
+                    identifier: id.to_string(),
+                },
+                web_time::Instant::now(),
+            ));
+        }
         let Some(plan) = self.plan(write.table) else {
             return Ok(());
         };
@@ -277,6 +313,16 @@ impl E2eeHooks for Hooks {
         };
         let address = Self::address(&keys, plan, &identifier).map_err(SealError::Refused)?;
         let refused_here = keys.creation_refused.contains(&address);
+        // The space needs rotation: the runtime rotates it, and the write
+        // is tried again (protocol §3.5).
+        if keys.rotation_pending.contains(&address)
+            && !keys.rotation_tried.contains(&address)
+            && keys.online
+        {
+            return Err(SealError::NeedsKey {
+                space: db_address(&address),
+            });
+        }
         let key = write_key(&keys, &address, refused_here)?;
         let catalogue = keys
             .catalogue
@@ -538,6 +584,14 @@ impl E2eeHooks for Hooks {
                     (false, value) => value,
                 };
                 row.set_cell(name, Some(decoded), codec.value_type.clone());
+                // A cell that opened under the key of a refused or lost
+                // creation is for the repair to rewrite (protocol §3.2).
+                if let Some(stored) = stored.as_deref()
+                    && under_refused_key(&keys, &address, stored)
+                {
+                    self.shared
+                        .note_repairable(site.table, row_uuid, &db_address(&address), name);
+                }
                 if let Some(space) = stale {
                     report(&mut outcome, notice(UnreadableCode::StaleSpace, &space));
                 }

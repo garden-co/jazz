@@ -18,6 +18,8 @@ jazz-e2ee = { path = "../jazz-e2ee" }
 serde_json = "1.0.145"
 thiserror = "2"
 uuid = { version = "1.18.1", features = ["v4"] }
+# Elapsed time that works in browsers too, as jazz-core uses.
+web-time = "1.1"
 
 # The browser's random source for the crates Jazz uses, as in jazz-wasm.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
