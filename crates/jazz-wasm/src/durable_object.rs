@@ -2185,7 +2185,7 @@ mod core_host {
         fn encrypts(&self) -> bool {
             self.core
                 .as_ref()
-                .is_some_and(|core| core.encrypts().unwrap_or(true))
+                .is_some_and(|core| accounts::encrypts_or_unknown(core.encrypts()))
         }
 
         fn catalogue_index(&self) -> Result<CatalogueIndex, String> {

@@ -8,12 +8,13 @@ use std::collections::HashMap;
 use http::StatusCode;
 use jazz::catalogue::{CatalogueChange, CatalogueRows};
 use jazz::schema::JazzSchema;
-use jazz::tools::deployment::artifact::{DeclaredEncryption, encryption};
+use jazz::tools::deployment::artifact::{DeclaredEncryption, encryption, system_tables};
 use jazz::tools::deployment::published::{PublishMigrationRequest, lower_migration};
 use jazz::tools::deployment::{self, DeploymentError, PreparedDeployment};
 use jazz::tools::public_schema::{Schema, SchemaHash, TableName, TablePolicies};
 use serde::{Deserialize, Serialize};
 
+use super::accounts::encrypts_or_unknown;
 use super::catalogue::{CatalogueIndex, DeploymentResponse, StagedDeployment};
 use crate::runtime::CatalogueApplyError;
 
@@ -346,12 +347,12 @@ fn staging_error(error: jazz::db::Error) -> String {
 
 impl Deployment {
     /// Whether any version this deployment publishes has Jazz's system
-    /// tables.
+    /// tables or its system table fragment cannot be validated.
     pub fn encrypts(&self) -> bool {
-        self.prepared.schemas().iter().any(|schema| {
-            jazz::tools::deployment::artifact::system_tables::check_e2ee_fragment(schema)
-                .unwrap_or(false)
-        })
+        self.prepared
+            .schemas()
+            .iter()
+            .any(|schema| encrypts_or_unknown(system_tables::check_e2ee_fragment(schema)))
     }
 
     /// The schema a runtime that does not exist yet starts with: the

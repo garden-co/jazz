@@ -109,7 +109,7 @@ async fn refuse_foreign_founding(state: &ServerState, app: uuid::Uuid) -> Result
         false
     } else {
         match state.runtime() {
-            Some(runtime) => runtime.encrypts().await.unwrap_or(true),
+            Some(runtime) => accounts::encrypts_or_unknown(runtime.encrypts().await),
             None => false,
         }
     };

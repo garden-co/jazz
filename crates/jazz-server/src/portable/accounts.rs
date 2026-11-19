@@ -784,6 +784,12 @@ pub fn revoke_sessions_route(
     })
 }
 
+/// Treat an unreadable encryption status as encrypting so account checks
+/// still require a registry and refuse foreign founding where applicable.
+pub fn encrypts_or_unknown<E>(status: Result<bool, E>) -> bool {
+    status.unwrap_or(true)
+}
+
 /// The rule that an encrypting app serves only device accounts founded
 /// in its own namespace (E2EE protocol R5, R6): the registry keeps no record
 /// of which namespace founded an account, so an account founded for another
@@ -1136,6 +1142,20 @@ mod tests {
     //! serves.
 
     use super::*;
+
+    /// A host that cannot read its encryption status refuses Mallory's
+    /// foreign founding. Inject the error here to exercise the shared policy.
+    #[test]
+    fn unreadable_encryption_status_refuses_foreign_founding() {
+        let own = Uuid::from_u128(1);
+        let foreign = Uuid::from_u128(2);
+
+        assert!(refuse_foreign_founding(own, foreign, || encrypts_or_unknown(Err(()))).is_err());
+        assert!(
+            refuse_foreign_founding(own, foreign, || encrypts_or_unknown(Ok::<_, ()>(false)))
+                .is_ok()
+        );
+    }
 
     fn principal(subject: &str) -> Principal {
         Principal {
