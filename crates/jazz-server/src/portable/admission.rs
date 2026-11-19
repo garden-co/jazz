@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use jazz::ids::AuthorSubject;
 use jazz::records::Value as CoreValue;
-use jazz::wire::{WireError, WireErrorCode, WireRetry};
+use jazz::wire::{WireError, WireErrorCode, WireErrorReason, WireRetry};
 
 /// How much the server trusts a link's commits, chosen at admission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -187,6 +187,60 @@ pub struct UpgradeCredential<'a> {
 pub type GuestVerifier<'a> =
     dyn FnMut(&str, AuthorSubject, Option<&str>) -> Result<jazz::tools::Session, String> + 'a;
 
+/// Why [`admit_by_core_secret`] refused a connection: its message, and the
+/// [`WireErrorReason`] a client that reads one is told, when it is known.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoreSecretRefusal {
+    /// The refusal's message, which older clients classify.
+    pub message: String,
+    /// Why, when it is a credential's refusal this function decided.
+    pub reason: Option<WireErrorReason>,
+}
+
+impl CoreSecretRefusal {
+    fn because(message: impl Into<String>, reason: WireErrorReason) -> Self {
+        Self {
+            message: message.into(),
+            reason: Some(reason),
+        }
+    }
+
+    /// The `auth_failed` error the client is told.
+    pub fn into_wire(self) -> WireError {
+        let mut error = WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, self.message);
+        error.reason = self.reason;
+        error
+    }
+}
+
+impl From<String> for CoreSecretRefusal {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            reason: None,
+        }
+    }
+}
+
+impl std::fmt::Display for CoreSecretRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::ops::Deref for CoreSecretRefusal {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.message
+    }
+}
+
+impl PartialEq<&str> for CoreSecretRefusal {
+    fn eq(&self, other: &&str) -> bool {
+        self.message == *other
+    }
+}
+
 /// Admit a socket to a core that admits only its app's backend, by the
 /// core's one `secret` (a Durable Object core): as a native core does with
 /// a backend credential and no trusted workload.
@@ -215,7 +269,7 @@ pub fn admit_by_core_secret(
     secret: &str,
     now_ms: u64,
     guest: &mut GuestVerifier<'_>,
-) -> Result<WebSocketAdmission, String> {
+) -> Result<WebSocketAdmission, CoreSecretRefusal> {
     let peer_identity = crate::portable::session::ws_peer_identity(&prelude.peer_identity)?;
     let bundle = prelude
         .bundle
@@ -232,10 +286,10 @@ pub fn admit_by_core_secret(
             Some("backend") => (false, true),
             None => {
                 let Some(token) = auth.jwt_token.as_deref() else {
-                    return Err(
-                        "Session required. Provide a backend session or a local-first proof."
-                            .to_owned(),
-                    );
+                    return Err(CoreSecretRefusal::because(
+                        "Session required. Provide a backend session or a local-first proof.",
+                        WireErrorReason::Missing,
+                    ));
                 };
                 let session = guest(
                     token,
@@ -252,9 +306,14 @@ pub fn admit_by_core_secret(
                     revocation: None,
                 });
             }
-            Some(other) => return Err(format!("unknown backend access `{other}`")),
+            Some(other) => return Err(format!("unknown backend access `{other}`").into()),
         },
-        Some(_) => return Err("Invalid backend secret".to_owned()),
+        Some(_) => {
+            return Err(CoreSecretRefusal::because(
+                "Invalid backend secret",
+                WireErrorReason::Invalid,
+            ));
+        }
         None => (
             auth.admin_secret
                 .as_deref()
@@ -277,18 +336,26 @@ pub fn admit_by_core_secret(
     }
     if !backend {
         return Err(match (&auth.backend_secret, &auth.admin_secret) {
-            (Some(_), _) | (_, Some(_)) => "Invalid backend secret",
-            _ => {
-                "this core admits only its app's backend: connect through the app's createJazz handler"
+            (Some(_), _) | (_, Some(_)) => {
+                CoreSecretRefusal::because("Invalid backend secret", WireErrorReason::Invalid)
             }
-        }
-        .to_owned());
+            // A credential the client sent that this core does not take is
+            // `invalid`; only a client that sent none is `missing`.
+            _ => CoreSecretRefusal::because(
+                "this core admits only its app's backend: connect through the app's createJazz handler",
+                if auth.jwt_token.is_some() || auth.backend_session.is_some() {
+                    WireErrorReason::Invalid
+                } else {
+                    WireErrorReason::Missing
+                },
+            ),
+        });
     }
     if auth.jwt_token.is_some() {
-        return Err(
-            "a guest's local-first proof is admitted on session access: relay it with the backend credential and no X-Jazz-Backend-Access"
-                .to_owned(),
-        );
+        return Err(CoreSecretRefusal::because(
+            "a guest's local-first proof is admitted on session access: relay it with the backend credential and no X-Jazz-Backend-Access",
+            WireErrorReason::Invalid,
+        ));
     }
     let Some(stated) = &auth.backend_session else {
         return Ok(WebSocketAdmission {
@@ -303,7 +370,8 @@ pub fn admit_by_core_secret(
     };
     let session: jazz::tools::Session = serde_json::from_value(stated.clone())
         .map_err(|error| format!("Invalid session format: {error}"))?;
-    crate::portable::session::ws_validate_session_identity(&session, peer_identity)?;
+    crate::portable::session::ws_validate_session_identity(&session, peer_identity)
+        .map_err(|message| CoreSecretRefusal::because(message, WireErrorReason::Invalid))?;
     let revocation = SessionRevocation {
         principal: jazz::account_registry::Principal {
             issuer: session.issuer.clone(),
@@ -357,7 +425,7 @@ mod core_secret_tests {
     fn admit(
         prelude: &WebSocketPrelude,
         upgrade: Option<UpgradeCredential<'_>>,
-    ) -> Result<WebSocketAdmission, String> {
+    ) -> Result<WebSocketAdmission, CoreSecretRefusal> {
         admit_by_core_secret(prelude, upgrade, SECRET, NOW, &mut |token, _, _| {
             Err(format!("no guest verifier in this test (proof `{token}`)"))
         })
@@ -386,6 +454,48 @@ mod core_secret_tests {
             refused.contains("admits only its app's backend"),
             "{refused}"
         );
+    }
+
+    /// #5927 R3b: a Durable Object core's refusals name their reason as the
+    /// native core's do. A credential the client sent that this core does not
+    /// take is `invalid`; only a client that sent none is `missing`.
+    #[test]
+    fn a_refusal_names_why_the_credential_was_refused() {
+        let reason = |auth: serde_json::Value, upgrade| {
+            admit(&prelude(auth, &alice()), upgrade).unwrap_err().reason
+        };
+        let wrong = SECRET.replace('s', "x");
+        assert_eq!(
+            reason(serde_json::json!({}), upgrade(&wrong, "backend")),
+            Some(WireErrorReason::Invalid)
+        );
+        assert_eq!(
+            reason(serde_json::json!({ "backend_secret": wrong }), None),
+            Some(WireErrorReason::Invalid)
+        );
+        assert_eq!(
+            reason(serde_json::json!({}), None),
+            Some(WireErrorReason::Missing)
+        );
+        assert_eq!(
+            reason(serde_json::json!({ "jwt_token": "a.b.c" }), None),
+            Some(WireErrorReason::Invalid)
+        );
+        // Session access with no proof to admit.
+        let session_access = Some(UpgradeCredential {
+            credential: SECRET,
+            access: None,
+        });
+        assert_eq!(
+            reason(serde_json::json!({}), session_access),
+            Some(WireErrorReason::Missing)
+        );
+        // The refusal reaches the client as an `auth_failed` naming it.
+        let error = admit(&prelude(serde_json::json!({}), &alice()), None)
+            .unwrap_err()
+            .into_wire();
+        assert_eq!(error.code, WireErrorCode::AuthFailed);
+        assert_eq!(error.reason, Some(WireErrorReason::Missing));
     }
 
     /// Without an upgrade credential, the prelude's secrets admit as the
