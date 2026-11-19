@@ -2811,3 +2811,86 @@ fn a_new_version_without_the_system_tables_is_refused_against_the_stored_catalog
         );
     }
 }
+
+/// A lens the deploy brings does not make a new version an earlier one: a
+/// version without the system tables that the deploy leads back to a stored
+/// version that has them is still refused, with or without dropping
+/// history. Only the stored lenses could say it came earlier, and they join
+/// stored versions only.
+///
+/// ```text
+/// stored:  v0 plain ──► v1 fragment
+/// deploy:  v0 plain ──► v2 plain + notes ──► v1 fragment, target v2   ✗
+/// ```
+#[test]
+fn a_lens_the_deploy_brings_does_not_exempt_a_new_version_without_the_system_tables() {
+    use jazz::tools::{Lens, LensOp, LensTransform};
+    let plain = structural_of(app());
+    let fragment = structural_of(with_e2ee_fragment(&app()));
+    let mut sibling = plain.clone();
+    sibling.insert(
+        TableName::from("notes"),
+        TableSchemaBuilder::new("notes")
+            .column("body", ColumnType::Text)
+            .build(),
+    );
+    let notes = sibling[&TableName::from("notes")].clone();
+    let (v0, v1, v2) = (
+        SchemaHash::compute(&plain),
+        SchemaHash::compute(&fragment),
+        SchemaHash::compute(&sibling),
+    );
+    let lens = |from, to, ops| {
+        Lens::new(
+            from,
+            to,
+            LensTransform {
+                ops,
+                draft_ops: Vec::new(),
+            },
+        )
+    };
+    let stored = DeploymentCatalogue {
+        schemas: vec![plain.clone(), fragment.clone()],
+        migrations: vec![lens(v0, v1, fragment_ops(&fragment, true))],
+        admitted_schema_hashes: vec![v0, v1],
+    };
+    let declared = DeclaredEncryption {
+        versions: BTreeMap::from([(v1.to_string(), entries())]),
+        ..Default::default()
+    };
+    let mut back_to_v1 = vec![LensOp::RemoveTable {
+        table: "notes".to_owned(),
+        schema: notes.clone(),
+    }];
+    back_to_v1.extend(fragment_ops(&fragment, true));
+    for allow_dropping_history in [false, true] {
+        let error = prepare_encrypted_deployment(
+            &stored,
+            DeploymentRequest {
+                target_schema_hash: v2,
+                schemas: vec![(v2, sibling.clone())],
+                migrations: vec![
+                    lens(
+                        v0,
+                        v2,
+                        vec![LensOp::AddTable {
+                            table: "notes".to_owned(),
+                            schema: notes.clone(),
+                        }],
+                    ),
+                    lens(v2, v1, back_to_v1.clone()),
+                ],
+                permissions: HashMap::new(),
+                allow_dropping_history,
+            },
+            &declared,
+        )
+        .expect_err("a deploy-supplied lens back to a stored version with the system tables");
+        assert!(
+            matches!(error, DeploymentError::InvalidSchema { schema, .. } if schema == v2)
+                && error.to_string().contains("every later version does"),
+            "{error}"
+        );
+    }
+}
