@@ -1,9 +1,5 @@
 import type { ClientMigrations } from "../client-migrations.js";
-import {
-  Encryption,
-  type EncryptionNative,
-  type EncryptionOptions,
-} from "../../encryption/index.js";
+import type { Encryption, EncryptionNative } from "../../encryption/index.js";
 import { servePrivateStore, type PrivateStore } from "../../encryption/private-store.js";
 import { retryAfterKey } from "../../encryption/key-retry.js";
 import { plainSchema, type PlainEntries } from "../../encryption/plain-schema.js";
@@ -248,9 +244,11 @@ export type NativeEncryptionOptions = {
   /** The native `EncryptionRuntime`, built and ready. */
   runtime: unknown;
   store: PrivateStore;
-  /** The local-first account's secret, when the account is local-first. */
-  accountSecret?: () => string | undefined;
+  /** Builds the device's public handle. The keyless broker has no handle. */
+  createHandle: EncryptionHandleFactory;
 };
+
+type EncryptionHandleFactory = (native: EncryptionNative) => Encryption;
 
 /** What a database that has the runtime installed adds to the native calls. */
 type NativeEncryptionDb = EncryptionNative & {
@@ -1152,7 +1150,7 @@ export class NativeRuntimeAdapter implements Runtime {
   /** The installed encryption runtime's side, on the runtime that owns the database. */
   private encryptionState?: {
     native: NativeEncryptionDb;
-    options: EncryptionOptions;
+    createHandle: EncryptionHandleFactory;
     serving: { stop(): void };
     uses: SpaceUse;
     handle?: Encryption;
@@ -1184,7 +1182,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const native = this.db as unknown as NativeEncryptionDb;
     const serving = servePrivateStore(native, options.store);
     try {
-      this.bindEncryption(native, { accountSecret: options.accountSecret }, serving);
+      this.bindEncryption(native, serving, options.createHandle);
       // Verify the account in the background; the app may await `ready()` too.
       this.encryptionHandle()?.start();
     } catch (error) {
@@ -1197,18 +1195,18 @@ export class NativeRuntimeAdapter implements Runtime {
   attachEncryption(
     native: NativeEncryptionDb,
     serving: { stop(): void },
-    deviceAccount: boolean,
+    createHandle: EncryptionHandleFactory,
   ): void {
-    this.bindEncryption(native, { nativeReadiness: true, deviceAccount }, serving);
+    this.bindEncryption(native, serving, createHandle);
     this.signalEncryptionOnline();
   }
 
   private bindEncryption(
     native: NativeEncryptionDb,
-    options: EncryptionOptions,
     serving: { stop(): void },
+    createHandle: EncryptionHandleFactory,
   ): void {
-    this.encryptionState = { native, options, serving, uses: new SpaceUse(native) };
+    this.encryptionState = { native, createHandle, serving, uses: new SpaceUse(native) };
   }
 
   /** Runs a write, and again once the space's key is ready if it failed `key-pending`. */
@@ -1229,7 +1227,7 @@ export class NativeRuntimeAdapter implements Runtime {
   encryptionHandle(): Encryption | undefined {
     const state = this.ownerRuntime.encryptionState;
     if (!state) return undefined;
-    state.handle ??= new Encryption(state.native, state.options);
+    state.handle ??= state.createHandle(state.native);
     return state.handle;
   }
 

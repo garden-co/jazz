@@ -25,7 +25,7 @@ import { authSecretSeedForMinting } from "../runtime/auth-secret-codec.js";
 import { resolveSchemaSource } from "../schema-source.js";
 import * as jazzNapi from "jazz-napi";
 import { declaredEntries } from "../encryption/plain-schema.js";
-import { type Encryption } from "../encryption/index.js";
+import { Encryption } from "../encryption/index.js";
 import { buildNodeEncryption, type NodeEncryptionConfig } from "../encryption/node-host.js";
 import { deviceAccountSecretOf, deviceAccountSecretReader } from "../accounts/enrollment.js";
 import {
@@ -263,7 +263,10 @@ class NodeUserRuntimeSource extends RuntimeSource {
           ? {
               encryption: {
                 ...this.encryption,
-                accountSecret: deviceAccountSecretReader(this.account),
+                createHandle: (native) =>
+                  new Encryption(native, {
+                    accountSecret: deviceAccountSecretReader(this.account),
+                  }),
               },
             }
           : {}),

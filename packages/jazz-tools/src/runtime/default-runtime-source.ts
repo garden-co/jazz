@@ -49,7 +49,7 @@ import { buildBrowserEncryption } from "../encryption/browser-host.js";
 import { declaresEncryption, compiledBindings } from "../encryption/build.js";
 import { resolveSchemaSource } from "../schema-source.js";
 import { declaredEntries } from "../encryption/plain-schema.js";
-import type { Encryption } from "../encryption/index.js";
+import { Encryption } from "../encryption/index.js";
 import { accountConfigBearer } from "../accounts/config-capability.js";
 import { bearerWebSocket } from "./credentialed-transport.js";
 import type { WebSocketConstructor } from "./native-runtime/websocket.js";
@@ -473,6 +473,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     subscriptionBacklogRows?: number,
   ): NativeRuntimeAdapter {
     if (!this.ownerRuntime || this.ownerRuntime.isClosed()) {
+      const encryption = this.encryption;
       this.ownerRuntime = new NativeRuntimeAdapter(
         this.wasmModule.WasmDb,
         schema,
@@ -488,14 +489,15 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
           subscriptionBacklogRows,
           migrations,
           webSocket,
-          ...(this.encryption
+          ...(encryption
             ? {
                 encryption: {
-                  runtime: this.encryption.runtime,
-                  store: this.encryption.store,
-                  accountSecret: this.encryption.accountSecret,
+                  runtime: encryption.runtime,
+                  store: encryption.store,
+                  createHandle: (native) =>
+                    new Encryption(native, { accountSecret: encryption.accountSecret }),
                 },
-                plainEntries: declaredEntries(resolveSchemaSource(this.encryption.app)),
+                plainEntries: declaredEntries(resolveSchemaSource(encryption.app)),
               }
             : {}),
         },

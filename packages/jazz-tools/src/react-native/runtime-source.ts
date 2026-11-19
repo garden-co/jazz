@@ -44,7 +44,7 @@ import {
 } from "./native-foreground-db.js";
 import { importNativeRelay } from "./native-relay.js";
 import { compiledBindings, declaresEncryption } from "../encryption/build.js";
-import { EncryptionStoreRequiredError, type Encryption } from "../encryption/index.js";
+import { Encryption, EncryptionStoreRequiredError } from "../encryption/index.js";
 import { servePrivateStore } from "../encryption/private-store.js";
 
 /**
@@ -310,10 +310,11 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         );
         if (this.encryptionStore) {
           this.adapter = runtime;
+          const deviceAccount = session.authMode === "device-account";
           runtime.attachEncryption(
             foreground,
             this.encryptionStore,
-            session.authMode === "device-account",
+            (native) => new Encryption(native, { nativeReadiness: true, deviceAccount }),
           );
         }
         const appContext: AppContext = {
