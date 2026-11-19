@@ -653,3 +653,78 @@ test("a guest the backend relays syncs by its own proof, until its identity is r
     await mf.dispose();
   }
 });
+
+test("an encrypted app deploys to a Durable Object core, which keeps its declarations and applies the account rules", async () => {
+  const persist = mkdtempSync(join(tmpdir(), "jazz-do-encrypted-"));
+  const open = () =>
+    new Miniflare({
+      modules: true,
+      scriptPath: join(here, "host-worker.mjs"),
+      modulesRoot: join(here, "../.."),
+      modulesRules: [
+        { type: "ESModule", include: ["**/*.js", "**/*.mjs"] },
+        { type: "CompiledWasm", include: ["**/*.wasm"] },
+      ],
+      compatibilityDate: "2026-04-01",
+      durableObjectsPersist: persist,
+      durableObjects: { JAZZ: { className: "JazzCore", useSQLite: true } },
+      bindings: { JAZZ_CORE_SECRET: SECRET },
+    });
+  const admin = { "X-Jazz-Admin-Secret": SECRET, "content-type": "application/json" };
+  const post = (mf, route, body) =>
+    mf.dispatchFetch(`http://core/apps/${APP}/${route}`, {
+      method: "POST",
+      headers: route.startsWith("admin/accounts/") ? vouch : admin,
+      body,
+    });
+  const identity = (digit) => ({
+    issuer: "urn:jazz:local-first",
+    subject: `${String(digit).repeat(8)}-${String(digit).repeat(4)}-4${String(digit).repeat(3)}-8${String(digit).repeat(3)}-${String(digit).repeat(12)}`,
+  });
+  const vouch = { "X-Jazz-Backend-Secret": SECRET, "content-type": "application/json" };
+  try {
+    let mf = open();
+    const deployed = await post(mf, "admin/bundles", fixture.testEncryptedDeployBody(false));
+    assert.equal(deployed.status, 200, await deployed.clone().text());
+    const published = await deployed.json();
+    assert.equal(published.changed, true);
+
+    // The same deployment again changes nothing; one that retypes an
+    // encrypted column of the deployed version is refused.
+    const again = await post(mf, "admin/bundles", fixture.testEncryptedDeployBody(false));
+    assert.equal((await again.json()).changed, false);
+    const retyped = await post(mf, "admin/bundles", fixture.testEncryptedDeployBody(true));
+    assert.equal(retyped.status, 422);
+    assert.match((await retyped.json()).error, /deployed with other encryption declarations/);
+
+    // A device account founded for another audience is refused by an
+    // encrypting app; one in the app's own namespace is founded.
+    const foreign = await post(
+      mf,
+      "admin/accounts/found-local-first",
+      JSON.stringify({ identity: identity(1), audience: "https://other.example" }),
+    );
+    assert.equal(foreign.status, 400);
+    assert.match(await foreign.text(), /its own app id only/);
+    const own = await post(
+      mf,
+      "admin/accounts/found-local-first",
+      JSON.stringify({ identity: identity(2) }),
+    );
+    assert.equal(own.status, 200, await own.clone().text());
+    await mf.dispose();
+
+    // After a restart the declarations are still kept.
+    mf = open();
+    const restarted = await post(mf, "admin/bundles", fixture.testEncryptedDeployBody(true));
+    assert.equal(restarted.status, 422);
+    assert.equal(
+      (await (await post(mf, "admin/bundles", fixture.testEncryptedDeployBody(false))).json())
+        .changed,
+      false,
+    );
+    await mf.dispose();
+  } finally {
+    rmSync(persist, { recursive: true, force: true });
+  }
+});

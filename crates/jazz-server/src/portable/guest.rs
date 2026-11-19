@@ -219,7 +219,9 @@ pub fn bind_account(
 ///
 /// For a host that admits guests only on the app's backend credential,
 /// verified before (a Durable Object core): the audience is the one the
-/// backend `stated_audience`, or `app_id`.
+/// backend `stated_audience`, or `app_id`. A first admission founds the
+/// guest's account unless that namespace is not the app's and the app
+/// `encrypts` ([`accounts::refuse_foreign_founding`]).
 pub fn admit_guest(
     storage: &Storage,
     token: &str,
@@ -227,6 +229,7 @@ pub fn admit_guest(
     stated_audience: Option<&str>,
     app_id: AppId,
     now_seconds: u64,
+    encrypts: &dyn Fn() -> bool,
 ) -> Result<Session, GuestRefusal> {
     let issuer = self_signed_issuer(token).ok_or_else(external_jwt_refused)?;
     let audience = guest_audience(stated_audience, app_id, || Ok(()))?;
@@ -234,6 +237,11 @@ pub fn admit_guest(
     let account = enrolled_account(peer_identity)?;
     let principal = principal_of(&session);
     if let Some(command) = founding_command(&principal, &audience) {
+        accounts::refuse_foreign_founding(
+            *app_id.uuid(),
+            *accounts::device_account_founding_app(&audience).uuid(),
+            encrypts,
+        )?;
         accounts::execute(storage, &command)?;
     }
     let assignment = accounts::login(storage, &principal)?;
@@ -334,6 +342,7 @@ mod tests {
                     None,
                     app,
                     NOW,
+                    &|| false,
                 )
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
                 assert_eq!(session.account_id, peer.account_id(), "{name}");
@@ -378,6 +387,7 @@ mod tests {
                 None,
                 app,
                 NOW,
+                &|| false,
             )
             .unwrap_or_else(|error| panic!("{name}: {error}"));
             assert_eq!(session.account_id, peer.account_id(), "{name}");
@@ -399,6 +409,7 @@ mod tests {
                 Some(endpoint),
                 app(),
                 NOW,
+                &|| false,
             )
             .unwrap_or_else(|error| panic!("{name}: {error}"));
             assert_eq!(session.account_id, peer.account_id(), "{name}");
@@ -410,6 +421,7 @@ mod tests {
                 Some("  "),
                 app(),
                 NOW,
+                &|| false,
             )
             .unwrap_err();
             assert_eq!(
@@ -437,14 +449,16 @@ mod tests {
                 .to_owned();
             assert_ne!(signature, other_signature);
             let forged = format!("{signed}.{other_signature}");
-            let refused = admit_guest(&storage, &forged, peer, None, app, NOW).unwrap_err();
+            let refused =
+                admit_guest(&storage, &forged, peer, None, app, NOW, &|| false).unwrap_err();
             assert_eq!(
                 unauthenticated(refused).code,
                 UnauthenticatedCode::Invalid,
                 "{name}"
             );
 
-            let refused = admit_guest(&storage, "a.b.c", peer, None, app, NOW).unwrap_err();
+            let refused =
+                admit_guest(&storage, "a.b.c", peer, None, app, NOW, &|| false).unwrap_err();
             assert_eq!(
                 unauthenticated(refused),
                 external_jwt_refused(),
@@ -475,6 +489,7 @@ mod tests {
                 None,
                 app,
                 NOW + TTL + 1,
+                &|| false,
             )
             .unwrap_err();
             let refused = unauthenticated(refused);
@@ -498,6 +513,7 @@ mod tests {
                 None,
                 app,
                 NOW,
+                &|| false,
             )
             .unwrap_err();
             assert_eq!(
@@ -513,6 +529,7 @@ mod tests {
                 Some("https://other.example/jazz"),
                 app,
                 NOW,
+                &|| false,
             )
             .unwrap_err();
             assert_eq!(
@@ -535,7 +552,8 @@ mod tests {
             let token = proof(&guest, &audience);
 
             let elsewhere = peer(&guest, "another-namespace");
-            let refused = admit_guest(&storage, &token, elsewhere, None, app, NOW).unwrap_err();
+            let refused =
+                admit_guest(&storage, &token, elsewhere, None, app, NOW, &|| false).unwrap_err();
             assert_eq!(
                 denied(refused),
                 "account does not match authenticated identity assignment",
@@ -543,7 +561,8 @@ mod tests {
             );
 
             let someone_else = peer(&seed(9), &audience);
-            let refused = admit_guest(&storage, &token, someone_else, None, app, NOW).unwrap_err();
+            let refused =
+                admit_guest(&storage, &token, someone_else, None, app, NOW, &|| false).unwrap_err();
             assert_eq!(
                 denied(refused),
                 "account does not match authenticated identity assignment",
@@ -552,7 +571,8 @@ mod tests {
 
             let unenrolled =
                 AuthorSubject::reserved(identity::DEVICE_ACCOUNT_ISSUER, &subject(&guest)).unwrap();
-            let refused = admit_guest(&storage, &token, unenrolled, None, app, NOW).unwrap_err();
+            let refused =
+                admit_guest(&storage, &token, unenrolled, None, app, NOW, &|| false).unwrap_err();
             assert_eq!(
                 denied(refused),
                 "public sessions require an enrolled account identity",
@@ -569,6 +589,7 @@ mod tests {
                 Some(endpoint),
                 app,
                 NOW,
+                &|| false,
             )
             .unwrap_err();
             assert!(
@@ -601,7 +622,8 @@ mod tests {
             let peer = AuthorSubject::reserved(identity::ANONYMOUS_ISSUER, &subject(&guest))
                 .unwrap()
                 .with_account(jazz::account_registry::AccountId(uuid::Uuid::from_u128(1)));
-            let refused = admit_guest(&storage, &token, peer, None, app, NOW).unwrap_err();
+            let refused =
+                admit_guest(&storage, &token, peer, None, app, NOW, &|| false).unwrap_err();
             assert!(
                 matches!(
                     refused,
@@ -644,5 +666,68 @@ mod tests {
             .message,
             "A device account audience must be vouched for with the backend secret"
         );
+    }
+
+    /// An encrypting app serves only accounts founded for its own app id: a
+    /// guest whose proof names another audience is refused its first
+    /// admission and its account is not founded, while one of the app's own
+    /// namespace, and any guest of an app that does not encrypt, are
+    /// admitted.
+    #[test]
+    fn an_encrypting_app_does_not_found_a_guest_for_another_audience() {
+        for (name, storage) in stores() {
+            let endpoint = "https://other.example/jazz";
+            let guest = seed(9);
+            let peer = peer(&guest, endpoint);
+            let refused = admit_guest(
+                &storage,
+                &proof(&guest, endpoint),
+                peer,
+                Some(endpoint),
+                app(),
+                NOW,
+                &|| true,
+            )
+            .unwrap_err();
+            assert_eq!(
+                denied(refused),
+                "an app that encrypts columns serves device accounts founded for its own app id only",
+                "{name}"
+            );
+            let principal = Principal {
+                issuer: identity::DEVICE_ACCOUNT_ISSUER.into(),
+                subject: subject(&guest),
+            };
+            accounts::login(&storage, &principal).expect_err("nothing was founded");
+
+            let own = peer_own(&guest);
+            admit_guest(
+                &storage,
+                &proof(&guest, &app().to_string()),
+                own,
+                None,
+                app(),
+                NOW,
+                &|| true,
+            )
+            .unwrap_or_else(|error| panic!("{name}: its own namespace: {error}"));
+        }
+        let (_, storage) = stores().into_iter().next().unwrap();
+        let guest = seed(10);
+        let endpoint = "https://other.example/jazz";
+        admit_guest(
+            &storage,
+            &proof(&guest, endpoint),
+            peer(&guest, endpoint),
+            Some(endpoint),
+            app(),
+            NOW,
+            &|| false,
+        )
+        .expect("an app without encryption serves it");
+    }
+
+    fn peer_own(guest: &[u8; 32]) -> AuthorSubject {
+        peer(guest, &app().to_string())
     }
 }

@@ -738,6 +738,42 @@ mod smoke {
         serde_json::to_string(&request).expect("deploy request JSON")
     }
 
+    /// The deploy body an app that encrypts a column publishes, from its
+    /// loaded files (a task's title is encrypted in its project's space);
+    /// with `retyped`, the same schema whose declaration types the title as
+    /// an integer instead of text.
+    #[wasm_bindgen(js_name = testEncryptedDeployBody)]
+    pub fn test_encrypted_deploy_body(retyped: bool) -> String {
+        let app = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": {
+                "projects": { "columns": { "name": "string", "ownerId": "uuid" } },
+                "tasks": {
+                    "columns": { "projectId": "uuid", "title": "bytes", "__e2ee_eq_title": "bytes" },
+                    "relations": { "project": { "rel": "projects", "column": "projectId" } },
+                    "encryption": { "space": "projectId", "scope": "projects",
+                        "columns": { "title": "string" }, "equality": ["title"] }
+                }
+            } }"#
+            .replace(r#""title": "string""#, if retyped { r#""title": "int""# } else { r#""title": "string""# });
+        let members = "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.id, accountId = session.user)";
+        let permissions = serde_json::json!({
+            "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+            "tables": {
+                "projects": {
+                    "read": members,
+                    "insert": "$createdBy.account = session.user",
+                    "update": "ownerId = session.user",
+                },
+                "tasks": { "read": "allowedTo.read(project)", "insert": "allowedTo.update(project)" },
+            },
+        })
+        .to_string();
+        jazz::tools::deployment::artifact::load(app.as_bytes(), permissions.as_bytes())
+            .expect("the app's files load")
+            .deployment_body(false)
+            .to_string()
+    }
+
     /// A local-first guest (keys from `seed`, a byte repeated) proving
     /// itself for `audience` at `now_seconds`: `{ proof, peer, subject }`,
     /// its self-signed proof, the peer identity its client names (with the
@@ -981,7 +1017,7 @@ mod core_host {
         WebSocketCredential, WebSocketPrelude,
     };
     use jazz_server::portable::catalogue::{CatalogueIndex, DeploymentResponse};
-    use jazz_server::portable::deployment::{self, DeployError, DeployRequest};
+    use jazz_server::portable::deployment::{self, DeployBody, DeployError};
     use jazz_server::portable::handshake::{link, negotiate_hello};
     use jazz_server::portable::websocket_codec::{
         decode_ws_encoded_frame_batch, encode_ws_frame_batches, ws_foreign_version_refusal,
@@ -1241,6 +1277,7 @@ mod core_host {
             // account registry, as native admits it.
             let secret = self.secret.clone();
             let app_id = jazz::tools::AppId::from_string(&self.app_id);
+            let encrypts = self.encrypts();
             let mut guest = |token: &str, peer, audience: Option<&str>| {
                 let app_id = app_id.clone().map_err(|error| error.to_string())?;
                 let storage = self.registry()?;
@@ -1251,6 +1288,7 @@ mod core_host {
                     audience,
                     app_id,
                     now / 1000,
+                    &|| encrypts,
                 )
                 .map_err(|refusal| refusal.to_string())
             };
@@ -1637,10 +1675,9 @@ mod core_host {
                 (None, None) => return Ok(()),
             };
             let any_stored = !rows.schemas.is_empty();
-            self.core = Some(
-                ServerCore::open(schema, file, any_stored, Some(self.app_id.clone()))
-                    .map_err(js)?,
-            );
+            let core = ServerCore::open(schema, file, any_stored, Some(self.app_id.clone()))
+                .map_err(js)?;
+            self.install(core).map_err(js)?;
             Ok(())
         }
     }
@@ -1976,7 +2013,7 @@ mod core_host {
                     Err(error) => refusal(500, ErrorResponse::internal(error)),
                 },
                 _ => {
-                    if let Err(error) = serde_json::from_slice::<DeployRequest>(body) {
+                    if let Err(error) = serde_json::from_slice::<DeployBody>(body) {
                         return refusal(400, ErrorResponse::bad_request(error.to_string()));
                     }
                     match self.deploy(body) {
@@ -2102,6 +2139,7 @@ mod core_host {
             let Ok(app_id) = uuid::Uuid::parse_str(&self.app_id) else {
                 return refusal(500, ErrorResponse::internal("the app id is not a UUID"));
             };
+            let encrypts = self.encrypts();
             let (reply, effects) = accounts::serve(
                 &storage,
                 route,
@@ -2110,6 +2148,7 @@ mod core_host {
                     app_id,
                     now_ms: js_sys::Date::now() as u64,
                     fresh_id: &mut uuid::Uuid::new_v4,
+                    encrypts: &|| encrypts,
                 },
             );
             if effects.assignments_changed {
@@ -2140,12 +2179,21 @@ mod core_host {
             }
         }
 
+        /// Whether the app has Jazz's system tables, for the rule on
+        /// foreign founding (`refuse_foreign_founding`): no core is no
+        /// schema, and a schema that cannot be read counts as encrypting.
+        fn encrypts(&self) -> bool {
+            self.core
+                .as_ref()
+                .is_some_and(|core| accounts::encrypts_or_unknown(core.encrypts()))
+        }
+
         fn catalogue_index(&self) -> Result<CatalogueIndex, String> {
             Ok(CatalogueIndex::from_rows(&self.catalogue_rows()?, None))
         }
 
-        /// Publish the deploy request in `body` (valid JSON, checked by the
-        /// caller), as native's `POST admin/bundles`: validate it against
+        /// Publish the deploy body in `body` (valid JSON, checked by the
+        /// caller; a request and its encryption declarations), as native's `POST admin/bundles`: validate it against
         /// the core's catalogue and apply its rows and admissions in one
         /// transaction, refused if the catalogue moved since it was staged
         /// (`apply_catalogue`). Without a core yet, the deployment is
@@ -2155,56 +2203,58 @@ mod core_host {
         /// core's catalogue (which admitted the schema it opened on). A
         /// bundle new to the store ends the sessions pinned to others.
         fn deploy(&mut self, body: &[u8]) -> Result<DeploymentResponse, DeployError> {
-            let request =
-                || serde_json::from_slice::<DeployRequest>(body).map_err(DeployError::invalid);
+            let host = ObjectHost {
+                storage: self.storage.clone(),
+            };
             let now = js_sys::Date::now() as u64;
-            if self.core.is_none() {
-                let index = self.catalogue_index().map_err(DeployError::internal)?;
-                let deployment = deployment::prepare(&index, request()?, now)?;
-                if !deployment.staged.response.changed {
-                    return Ok(deployment.staged.response);
-                }
-                let genesis = deployment.genesis()?;
-                let scratch = jazz::host::StoreFile::memory().map_err(DeployError::internal)?;
-                let mut probe = ServerCore::open(genesis.clone(), scratch, false, None)
-                    .map_err(DeployError::internal)?;
-                let probed = apply(&mut probe, request()?, now, false).map(drop);
-                probe.close();
-                probed?;
-                let file = jazz::host::StoreFile::from_storage(durable_object_storage(
-                    self.storage.clone(),
-                ))
-                .map_err(DeployError::internal)?;
-                self.core = Some(
-                    ServerCore::open(genesis, file, false, Some(self.app_id.clone()))
-                        .map_err(DeployError::internal)?,
-                );
-            }
-            let core = self.core.as_mut().expect("opened above");
-            apply(core, request()?, now, true)
+            let deployed = deployment::deploy(&mut self.core, &host, &self.app_id, body, now);
+            // A core it opened has the registry installed, its tables made.
+            self.accounts_open |= self.core.is_some();
+            deployed
+        }
+
+        /// Keep `core` as the open core, with the account registry its
+        /// checks read installed (see [`ObjectHost`]).
+        fn install(&mut self, mut core: ServerCore) -> Result<(), String> {
+            deployment::install_registry(
+                &ObjectHost {
+                    storage: self.storage.clone(),
+                },
+                &mut core,
+            )?;
+            // Installing it made the registry's tables (`registry`).
+            self.accounts_open = true;
+            self.core = Some(core);
+            Ok(())
         }
     }
 
-    /// Stage `request` on `core`'s catalogue and apply it; with
-    /// `supersede`, a bundle new to the store ends the sessions pinned to
-    /// others. Nothing to commit reloads the core's catalogue, as native.
-    fn apply(
-        core: &mut ServerCore,
-        request: DeployRequest,
-        now: u64,
-        supersede: bool,
-    ) -> Result<DeploymentResponse, DeployError> {
-        let rows = core.db().catalogue().map_err(DeployError::internal)?;
-        let index = CatalogueIndex::from_rows(&rows, None);
-        let deployment = deployment::prepare(&index, request, now)?;
-        if !deployment.staged.response.changed {
-            core.reload_catalogue().map_err(DeployError::internal)?;
-            return Ok(deployment.staged.response);
+    /// The object's SQL as the portable deploy reaches it: store handles,
+    /// and the account registry its checks read, installed over the same
+    /// SQL, as native installs the one beside its store.
+    struct ObjectHost {
+        storage: ObjectStorage,
+    }
+
+    impl deployment::CoreHost for ObjectHost {
+        fn store(&self) -> Result<jazz::host::StoreFile, String> {
+            jazz::host::StoreFile::from_storage(durable_object_storage(self.storage.clone()))
+                .map_err(|error| error.to_string())
         }
-        let change = deployment.catalogue_change(&rows)?;
-        let new_bundle = deployment.staged.new_bundle().filter(|_| supersede);
-        core.apply_catalogue(deployment.staged.expected(), change, new_bundle)?;
-        Ok(deployment.staged.response)
+
+        /// The registry's tables are made first, so a check never meets a
+        /// store without them.
+        fn install_registry(&self, core: &mut ServerCore) -> Result<(), String> {
+            accounts::open(&durable_object_storage(self.storage.clone()))
+                .map_err(|error| error.to_string())?;
+            // The core's checks read the registry on the object's own SQL,
+            // which sees what the registry wrote.
+            if core.install_account_registry(durable_object_storage(self.storage.clone())) {
+                Ok(())
+            } else {
+                Err("the account registry needs the core opened for an app".to_owned())
+            }
+        }
     }
 
     /// What `output` answers.

@@ -338,7 +338,6 @@ struct Owner {
     app: Option<String>,
     /// Whether the account registry the checks beside the account tables
     /// read is installed.
-    #[cfg(feature = "native")]
     registry_installed: bool,
     /// Runs a network chunk store's I/O beside this thread.
     #[cfg(feature = "native")]
@@ -1074,20 +1073,14 @@ impl Owner {
         // The registry names the app's founding namespace, parsed as device
         // accounts' ids derive from it (`device_account_founding_app`).
         let installed = match (registry, owner.app.as_deref()) {
-            (Some(reader), Some(app)) => {
-                let app = crate::portable::accounts::device_account_founding_app(app);
-                owner.db.set_account_registry(Rc::new(
-                    crate::server::account_store::RegistryFounders::new(reader, *app.uuid()),
-                ));
-                true
-            }
+            (Some(reader), Some(_)) => owner.install_registry(reader),
             _ => false,
         };
         // Without a registry an account founded locally that later signs in
         // through an external login would count as founded by the app, so
         // an encrypted app is not served without one.
         owner.registry_installed = installed;
-        if registry_required && !installed && owner.encrypts()? {
+        if registry_required && owner.registry_missing()? {
             return Err(
                 "this app encrypts columns, which needs the account registry \
                  of an app's store: open the store for an app (`set_app`) with its \
@@ -1155,7 +1148,6 @@ impl Owner {
             slice: Rc::default(),
             catalogue,
             app,
-            #[cfg(feature = "native")]
             registry_installed: false,
             #[cfg(feature = "native")]
             chunk_io: None,
@@ -1164,8 +1156,37 @@ impl Owner {
         })
     }
 
+    /// Install the account registry the checks beside the E2EE account
+    /// tables' policies read, over `reader`. The registry names the app's
+    /// founding namespace, parsed as device accounts' ids derive from it
+    /// (`device_account_founding_app`). False, and nothing installed, for a
+    /// core opened for no app.
+    fn install_registry(
+        &mut self,
+        reader: impl crate::portable::accounts::RegistryRead + 'static,
+    ) -> bool {
+        let Some(app) = self.app.as_deref() else {
+            return false;
+        };
+        let app = crate::portable::accounts::device_account_founding_app(app);
+        self.db
+            .set_account_registry(Rc::new(crate::portable::accounts::RegistryFounders::new(
+                reader,
+                *app.uuid(),
+            )));
+        self.registry_installed = true;
+        true
+    }
+
+    /// Whether the app encrypts columns and no account registry is
+    /// installed: such a runtime is not served, since an account founded
+    /// locally that later signs in through an external login would count as
+    /// founded by the app.
+    fn registry_missing(&self) -> Result<bool, String> {
+        Ok(!self.registry_installed && self.encrypts()?)
+    }
+
     /// Whether the app's schema has Jazz's E2EE system tables.
-    #[cfg(feature = "native")]
     fn encrypts(&self) -> Result<bool, String> {
         // The admitted versions, not the owner's schema: a running server
         // keeps its first schema while deployments admit later ones.
@@ -1184,16 +1205,8 @@ impl Owner {
     /// every session pinned to another bundle (see
     /// `ServerRuntimeHandle::apply_catalogue`). How many sessions ended,
     /// which they did even when a later step failed, and the outcome.
-    fn apply_catalogue(
-        &mut self,
-        change: CatalogueChange,
-        supersedes: Option<jazz::catalogue::BundleId>,
-    ) -> (usize, Result<(), CatalogueApplyError>) {
-        self.apply_catalogue_keeping(change, supersedes, &[])
-    }
-
-    /// [`Self::apply_catalogue`], keeping `kept` host-table values in the
-    /// same transaction (see [`Db::apply_catalogue_keeping`]).
+    /// Keeping `kept` host-table values in the same transaction (see
+    /// [`Db::apply_catalogue_keeping`]).
     fn apply_catalogue_keeping(
         &mut self,
         change: CatalogueChange,

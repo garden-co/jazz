@@ -18,14 +18,7 @@ use jazz::tools::public_schema::{SchemaHash, TableName};
 #[cfg(test)]
 use std::collections::HashMap;
 
-/// The host table the server keeps each deployed schema version's
-/// encryption declarations in, keyed by the version's schema hash, in the
-/// form [`jazz::tools::deployment::artifact::encryption::STORED_DECLARATIONS_V1`]:
-/// a later deployment of the version may not change them in a way that
-/// breaks its sealed cells (migrations §3.1), even though the schema is
-/// unchanged.
-pub(crate) const DECLARATIONS: jazz::host::HostTable =
-    jazz::host::HostTable::new("e2ee_declarations");
+pub(crate) use crate::portable::deployment::DECLARATIONS;
 
 /// Validate and apply a deployment, with the app's encryption declarations
 /// when it has them (see [`portable::prepare_encrypted`]). The response
@@ -81,19 +74,13 @@ pub(crate) async fn deploy_body(
     // a runtime opens (`Owner::open`): a deployment that brings one to a
     // runtime without it is refused before anything is applied.
     if let Some(runtime) = state.runtime()
-        && deployment.prepared.schemas().iter().any(|schema| {
-            jazz::tools::deployment::artifact::system_tables::check_e2ee_fragment(schema)
-                .unwrap_or(false)
-        })
+        && deployment.encrypts()
         && !runtime
             .has_account_registry()
             .await
             .map_err(DeployError::internal)?
     {
-        return Err(DeployError::invalid(
-            "this app encrypts columns, which needs the account registry of an app's store; \
-             the server's runtime has none",
-        ));
+        return Err(DeployError::invalid(portable::REGISTRY_REQUIRED));
     }
     if !staged.response.changed {
         // Nothing to commit, but the runtime's view of the catalogue may be
@@ -171,32 +158,19 @@ pub(crate) async fn deploy_body(
 }
 
 /// Keep the declarations of each version deployed with them for the first
-/// time when the deployment changes no catalogue row. A deployment that does
-/// change the catalogue keeps them in the transaction that commits it
-/// (`deploy_body`), so a conflicting kept value refuses it before anything is
-/// live. A version whose declarations are kept already keeps them, and a
-/// deployment that names different ones for it is refused rather than
-/// ignored.
+/// time when the deployment changes no catalogue row
+/// ([`portable::keep_first_declared`]): one that names different ones for a
+/// version that keeps some is refused rather than ignored.
 fn keep_declarations(
     kept: Option<&crate::kv::HostKv>,
     first: &[(jazz::tools::public_schema::SchemaHash, Vec<u8>)],
 ) -> Result<(), DeployError> {
-    let Some(kept) = kept else {
-        return Ok(());
-    };
-    for (version, stored) in first {
-        if let Some(existing) = kept
-            .put_if_absent(&version.0, stored)
-            .map_err(DeployError::internal)?
-            && existing != *stored
-        {
-            return Err(DeployError::invalid(format!(
-                "schema version {version} was deployed with other encryption declarations, \
-                 which its cells are sealed under; the deployment names different ones"
-            )));
+    match kept {
+        Some(kept) => {
+            portable::keep_first_declared(first, |key, value| kept.put_if_absent(key, value))
         }
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Publish `source` (a schema carrying its permissions as table policies)
