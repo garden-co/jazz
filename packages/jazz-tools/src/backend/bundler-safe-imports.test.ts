@@ -75,4 +75,19 @@ describe("backend imports under bundlers", () => {
       expect(text, file).not.toMatch(/new URL\([^)]*import\.meta\.url\)/);
     }
   });
+
+  it("installs Node's engine through a used binding, never a bare side-effect import", () => {
+    // Turbopack resolves a barrel's re-exports itself and never evaluates
+    // the barrel, dropping its side-effect imports: a Next.js standalone
+    // build then had no engine (503 "no backend engine installed").
+    // scripts/next-trace-napi.test.mjs checks the built route end to end.
+    const entry = readFileSync(new URL("index.ts", import.meta.url), "utf8");
+    expect(entry).not.toMatch(/^import\s+["']\.\/node-native\.js["']/m);
+    for (const name of ["createJazz", "createJazzClient"]) {
+      const defined = new RegExp(
+        `export function ${name}\\([^)]*\\)[^{]*\\{\\s*installNodeEngine\\(\\);`,
+      );
+      expect(entry, name).toMatch(defined);
+    }
+  });
 });

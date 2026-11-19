@@ -1,4 +1,4 @@
-import "../backend/node-native.js";
+import { installNodeEngine } from "../backend/node-native.js";
 import { Context, Effect, Layer } from "effect";
 import { HttpServerRequest } from "effect/http";
 import {
@@ -10,6 +10,9 @@ import { isNoJazzAccountError } from "../backend/no-account-error.js";
 import type { Db } from "../runtime/db.js";
 import { JazzError, JazzNoAccount, toJazzError } from "./errors.js";
 import { Jazz, type JazzDb } from "./jazz.js";
+
+// Node's engine, by direct reference (see node-native.ts).
+installNodeEngine();
 
 export interface JazzBackendService {
   /** The app's Jazz (`createJazz`), for what this binding does not wrap: serving `/jazz`, `linkIdentity`. */
