@@ -104,6 +104,7 @@ const assertUsesBlacksmithRunner = (jobName, jobSource) => {
     "test-ts",
     "test-react-native",
     "test-go",
+    "test-go-ts-backend",
     "test-crates-package",
     "test-jazz-ffi-bindings",
   ].includes(jobName)
@@ -192,6 +193,7 @@ const assertSuiteS3ConfigurationBoundary = (source) => {
     "test-durable-object-limits",
     "test-ts",
     "test-go",
+    "test-go-ts-backend",
     "test-crates-package",
     "test-jazz-ffi-bindings",
   ]) {
@@ -896,6 +898,7 @@ test("shared Rust cache writes are main and merge-group only while trusted PRs r
     "test-durable-object-limits",
     "test-ts",
     "test-go",
+    "test-go-ts-backend",
     "test-crates-package",
     "test-jazz-ffi-bindings",
   ]) {
@@ -2122,6 +2125,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     "test-jazz-ffi-bindings",
     "test-crates-package",
     "test-go",
+    "test-go-ts-backend",
     "test-kotlin",
     "test-kotlin-android",
   ])
@@ -2142,6 +2146,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
       "test-crates-package",
       "test-durable-object-limits",
       "test-go",
+      "test-go-ts-backend",
       "test-jazz-ffi-bindings",
       "test-kotlin",
       "test-kotlin-android",

@@ -57,6 +57,7 @@ export const ciPartitionJobs = Object.freeze({
   "jazz-ffi-bindings": "test-jazz-ffi-bindings",
   "crates-package": "test-crates-package",
   go: "test-go",
+  "go-ts-backend": "test-go-ts-backend",
   kotlin: "test-kotlin",
   "kotlin-android": "test-kotlin-android",
 });
@@ -472,9 +473,13 @@ export const ciPartitions = Object.freeze({
     ]),
   ]),
   // The Go bindings and the StagePlan Go example (installs Go when the
-  // image has none). go-cli's suite also runs against StagePlan's main
-  // backend in TypeScript (createJazz), so it needs a jazz-tools build.
-  go: Object.freeze([
+  // image has none), against jazz-tools' Rust server.
+  go: Object.freeze([command("Go bindings", "bash", ["dev/gates/go-bindings.sh"])]),
+  // go-cli's suite again against StagePlan's main backend in TypeScript
+  // (createJazz), which needs the NAPI/WASM pair and a jazz-tools build. Its
+  // own partition and job so that build runs beside the go partition rather
+  // than ahead of it.
+  "go-ts-backend": Object.freeze([
     command("native correctness-artifact producer", "node", [
       "dev/gates/ensure-correctness-artifacts.mjs",
     ]),
@@ -489,9 +494,14 @@ export const ciPartitions = Object.freeze({
       "--filter=jazz-tools",
       "--only",
     ]),
-    command("Go bindings", "bash", ["dev/gates/go-bindings.sh"], {
-      env: { JAZZ_GO_TS_MAIN_BACKEND: "1" },
-    }),
+    command(
+      "Go bindings against the TypeScript main backend",
+      "bash",
+      ["dev/gates/go-bindings.sh"],
+      {
+        env: { JAZZ_GO_TS_MAIN_BACKEND: "only" },
+      },
+    ),
   ]),
   // jazz-kotlin over jazz-ffi, and the StagePlan Kotlin CLI and the docs todo
   // app's Kotlin snippets end to end against `jazz-tools server`, on the JVM.
