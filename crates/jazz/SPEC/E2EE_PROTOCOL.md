@@ -784,7 +784,10 @@ added by an updater.
   refused). The stored catalogue decides what came earlier: a new version
   without the system tables is refused when any stored version has them,
   whatever lens it hangs on and whether or not the deploy allows dropping
-  history. Turning
+  history. Only a stored lens could show it to be earlier than a version
+  that has them, and stored lenses join stored versions only; a lens the
+  deploy brings (say, from the new version back to a stored one with the
+  system tables) does not count. Turning
   encryption off is a schema conversion of the columns (a decrypt,
   [migrations](E2EE_MIGRATIONS.md) §3), never a removal of the system tables.
 - **Encrypted columns are last-writer-wins.** The server cannot merge
