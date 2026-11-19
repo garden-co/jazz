@@ -9,8 +9,11 @@ import { describe, expect, it } from "vitest";
 const pkg = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
 
 describe("jazz-tools/backend under the workerd condition", () => {
-  it("maps to the workerd entry, built from src/backend/workerd.ts", () => {
-    expect(pkg.exports["./backend"].workerd).toBe("./dist/backend/workerd.js");
+  it("maps to the workerd entry and its types, built from src/backend/workerd.ts", () => {
+    expect(pkg.exports["./backend"].workerd).toEqual({
+      types: "./dist/backend/workerd.d.ts",
+      default: "./dist/backend/workerd.js",
+    });
     expect(existsSync(new URL("./workerd.ts", import.meta.url))).toBe(true);
     // Its top-level wasm initialisation and engine install are side effects.
     expect(pkg.sideEffects).toContain("./dist/backend/workerd.js");
