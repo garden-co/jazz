@@ -134,7 +134,7 @@ jobs:
           HEAD_SHA: ${{ needs.resolve.outputs.sha }}
           # What the gates read; the rest (Swift, Maven, languages) is
           # checked by artifacts-complete.
-          REQUIRED_ARTIFACTS: pkg-jazz-tools,pkg-jazz-wasm,pkg-jazz-napi,pkg-jazz-rn,pkg-create-jazz,inspector-prebuilt,release-server
+          REQUIRED_ARTIFACTS: pkg-jazz-tools,pkg-jazz-wasm,pkg-jazz-napi,pkg-jazz-rn,pkg-create-jazz,inspector-prebuilt,jazz-tools-linux-x64,jazz-tools-linux-arm64
         run: node dev/scripts/await-release-artifacts.mjs
 
   # Only when no release-artifacts run of this commit exists (e.g. a branch
@@ -377,13 +377,17 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       VERSION: ${{ needs.resolve.outputs.version }}
     steps:
+      # The build's own server binaries (release-server bundles the same files
+      # with SHA256SUMS, but only once every package check has finished).
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with: { name: release-server, path: server, run-id: "${{ needs.artifacts.outputs.run_id }}", github-token: "${{ github.token }}" }
+        with: { pattern: "jazz-tools-linux-*", merge-multiple: true, path: server, run-id: "${{ needs.artifacts.outputs.run_id }}", github-token: "${{ github.token }}" }
 
       - name: Upload to the draft
         run: |
           set -euo pipefail
-          (cd server && sha256sum -c SHA256SUMS)
+          test -s server/jazz-tools-linux-x64
+          test -s server/jazz-tools-linux-arm64
+          (cd server && sha256sum jazz-tools-linux-x64 jazz-tools-linux-arm64 > SHA256SUMS && cat SHA256SUMS)
           test "$(gh release view "v${VERSION}" --json isDraft --jq .isDraft)" = true
           gh release upload "v${VERSION}" server/jazz-tools-linux-x64 server/jazz-tools-linux-arm64 server/SHA256SUMS
 
