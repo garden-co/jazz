@@ -200,10 +200,12 @@ jobs:
         with:
           name: examples-e2e-build-state
           # Tarballs feed `--tarball-dir`; the NAPI binary is copied into each
-          # installed jazz-napi after its fingerprint is checked.
+          # installed jazz-napi after its fingerprint is checked. Only the
+          # runners' linux-x64 binary: a release's packages carry every
+          # platform's (about 195 MB), which every variant job downloaded.
           path: |
             _e2e-state/tarballs/**
-            crates/jazz-napi/*.node
+            crates/jazz-napi/jazz-napi.linux-x64-gnu.node
           if-no-files-found: error
           retention-days: 1
 
