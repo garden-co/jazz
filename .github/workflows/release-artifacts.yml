@@ -111,6 +111,10 @@ jobs:
   packages:
     name: Packages
     needs: resolve
+    # id-token: the macOS jobs' S3 sccache tier (.github/actions/apple-sccache).
+    permissions:
+      contents: read
+      id-token: write
     uses: ./.github/workflows/build-jazz-packages.yml
     with:
       ref: ${{ needs.resolve.outputs.sha }}
@@ -140,11 +144,15 @@ jobs:
     needs: resolve
     permissions:
       contents: write
+      id-token: write
     uses: ./.github/workflows/swift-mirror.yml
     with:
       ref: ${{ needs.resolve.outputs.sha }}
       version: ${{ needs.resolve.outputs.version }}
       publish: false
+      # What a release can ship is also rebuilt without any cache, and must
+      # give the same checksum.
+      reproduce: ${{ needs.resolve.outputs.release == 'true' }}
 
   # Collects the release-* artifacts, writes manifest.json and, for release
   # runs, attests every file's build provenance.
