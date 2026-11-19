@@ -252,13 +252,10 @@ type NativeRestoreOptions = NativeWriteOptions & {
 
 type NativeDb = {
   captureSnapshot?(): NativeReadResult | Promise<NativeReadResult>;
-  /**
-   * A thin session's transaction request, as its backend's client serves it
-   * (NAPI: a pending read; WASM: a promise).
-   */
-  serveThinTransaction?(request: Uint8Array): NativeReadResult | Promise<NativeReadResult>;
-  /** End the thin session's open transactions (NAPI: a pending read; WASM: a promise). */
-  releaseThinTransactions?(): NativeReadResult | Promise<NativeReadResult | void>;
+  /** A thin session's transaction request, as its backend's client serves it. */
+  serveThinTransaction?(request: Uint8Array): NativeReadResult;
+  /** End the thin session's open transactions. */
+  releaseThinTransactions?(): NativeReadResult;
   /** WASM settles its promise-shaped wait early once `cancelled` settles. */
   waitForPendingWrites?(
     tier: string,
@@ -2509,7 +2506,7 @@ export class NativeRuntimeAdapter implements Runtime {
       return Promise.reject(new Error("this native binding serves no thin transactions"));
     const served = this.db.serveThinTransaction(request);
     this.scheduleCoreTick();
-    return this.awaitNativeRead(this.pumpingWhile(served));
+    return this.awaitNativeRead(served);
   }
 
   /** @internal End the thin session's open transactions: nothing of them reached the core. */
@@ -2518,9 +2515,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.closed || !this.db.releaseThinTransactions) return;
     const released = this.db.releaseThinTransactions();
     this.scheduleCoreTick();
-    // WASM's promise settles with nothing; NAPI's pending read is polled.
-    const settled = await this.pumpingWhile(released);
-    if (settled) await this.awaitNativeRead(settled);
+    await this.awaitNativeRead(released);
   }
 
   captureSnapshot(): Promise<SnapshotRef> {
@@ -3726,27 +3721,6 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!this.db.subscribe) throw new Error("Native runtime does not support subscriptions");
     const author = context.kind === "session-authority" ? context.identity : undefined;
     return this.db.subscribe(query, opts, author, this.nativeReadClaims(context));
-  }
-
-  /**
-   * A thin transaction WASM serves answers with a promise (NAPI with a
-   * pending read it polls): keep the server transport pumping while it
-   * waits, as polling does, so the core's confirmation it waits for is
-   * taken in.
-   */
-  private async pumpingWhile<T>(started: T | Promise<T>): Promise<T> {
-    if (!(started instanceof Promise)) return started;
-    let settled = false;
-    const done = started.finally(() => {
-      settled = true;
-    });
-    void (async () => {
-      while (!settled && !this.closed && !this.ownerRuntime.closed) {
-        this.startServerPump();
-        await sleep(5);
-      }
-    })();
-    return done;
   }
 
   /** Drive the binding-owned coverage and hydration operation while the
