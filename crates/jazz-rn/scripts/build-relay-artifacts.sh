@@ -121,21 +121,32 @@ case "$platform" in
     device_target=aarch64-apple-ios
     stage_header
     simulator_targets=(aarch64-apple-ios-sim x86_64-apple-ios)
-    for target in "$device_target" "${simulator_targets[@]}"; do
-      cargo rustc --manifest-path "$relay_manifest" --target "$target" --crate-type staticlib --profile release-mobile
-    done
+    # JAZZ_NATIVE_RELAY_SLICES: build nothing and assemble prebuilt
+    # staticlibs, $JAZZ_NATIVE_RELAY_SLICES/<target>/libjazz_native_relay.a,
+    # each built by the cargo command below (CI builds one job per target).
+    lib() { echo "$root/target/$1/release-mobile/libjazz_native_relay.a"; }
+    if [[ -n "${JAZZ_NATIVE_RELAY_SLICES:-}" ]]; then
+      lib() { echo "$JAZZ_NATIVE_RELAY_SLICES/$1/libjazz_native_relay.a"; }
+      for target in "$device_target" "${simulator_targets[@]}"; do
+        [[ -f "$(lib "$target")" ]] || { echo "no prebuilt $(lib "$target")" >&2; exit 1; }
+      done
+    else
+      for target in "$device_target" "${simulator_targets[@]}"; do
+        cargo rustc --manifest-path "$relay_manifest" --target "$target" --crate-type staticlib --profile release-mobile
+      done
+    fi
     staging=$(mktemp -d)
     trap 'rm -rf "$staging"' EXIT
     simulator_stage="$staging/simulator"
     mkdir -p "$simulator_stage"
     lipo -create \
-      "$root/target/aarch64-apple-ios-sim/release-mobile/libjazz_native_relay.a" \
-      "$root/target/x86_64-apple-ios/release-mobile/libjazz_native_relay.a" \
+      "$(lib aarch64-apple-ios-sim)" \
+      "$(lib x86_64-apple-ios)" \
       -output "$simulator_stage/libjazz_native_relay.a"
     framework="$package/JazzNativeRelay.xcframework"
     rm -rf "$framework"
     xcodebuild -create-xcframework \
-      -library "$root/target/$device_target/release-mobile/libjazz_native_relay.a" -headers "$root/crates/jazz-native-relay/include" \
+      -library "$(lib "$device_target")" -headers "$root/crates/jazz-native-relay/include" \
       -library "$simulator_stage/libjazz_native_relay.a" -headers "$root/crates/jazz-native-relay/include" \
       -output "$framework"
     write_manifest "$package/ios/jazz-native-relay.manifest.json" "$framework"

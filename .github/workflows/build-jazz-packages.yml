@@ -326,10 +326,22 @@ jobs:
             crates/jazz-rn/native/include
           if-no-files-found: error
 
-  build-jazz-rn-ios:
-    name: Build jazz-rn iOS relay XCFramework
+  # The iOS relay's staticlib for each Rust target in parallel, built as
+  # crates/jazz-rn/scripts/build-relay-artifacts.sh builds it. setup-build's
+  # sccache is Linux-only and Blacksmith's sticky disks don't mount on macOS:
+  # sccache keeps its objects in the Actions cache instead. sccache doesn't
+  # hash IPHONEOS_DEPLOYMENT_TARGET, so the key holds it and "Check the
+  # minimum iOS" fails on any object built for a newer one.
+  build-jazz-rn-ios-slices:
+    name: Build jazz-rn iOS relay (${{ matrix.target }})
     if: inputs.include_rn
     runs-on: blacksmith-6vcpu-macos-15
+    strategy:
+      fail-fast: true
+      matrix:
+        target: [aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios]
+    env:
+      TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -337,16 +349,128 @@ jobs:
 
       - uses: ./.github/actions/setup-build
         with:
-          rust-targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
-          sccache: "true"
-          sccache-key: release-jazz-rn-ios-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+          setup-node: "false"
+          rust-cache: "false"
+          rust-targets: ${{ matrix.target }}
+
+      - uses: ./.github/actions/install-rust-tool
+        with:
+          tool: sccache@0.15.0
+
+      # The build script's pinned deployment target, which the verifier
+      # also reads.
+      - name: Read the iOS deployment target
+        id: ios
+        run: |
+          min=$(sed -nE 's/^[[:space:]]*export IPHONEOS_DEPLOYMENT_TARGET=([0-9]+\.[0-9]+)$/\1/p' crates/jazz-rn/scripts/build-relay-artifacts.sh)
+          [[ -n "$min" ]] || { echo "::error::no IPHONEOS_DEPLOYMENT_TARGET in build-relay-artifacts.sh"; exit 1; }
+          echo "min=$min" >> "$GITHUB_OUTPUT"
+          echo "IPHONEOS_DEPLOYMENT_TARGET=$min" >> "$GITHUB_ENV"
+
+      - name: Restore sccache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ runner.temp }}/sccache
+          key: sccache-jazz-rn-${{ matrix.target }}-ios${{ steps.ios.outputs.min }}-v1-${{ github.sha }}
+          restore-keys: sccache-jazz-rn-${{ matrix.target }}-ios${{ steps.ios.outputs.min }}-v1-
+
+      - name: Start sccache
+        run: |
+          dir="$RUNNER_TEMP/sccache"
+          mkdir -p "$dir"
+          SCCACHE_DIR="$dir" SCCACHE_SERVER_UDS="$dir/server.sock" SCCACHE_CACHE_SIZE=8G sccache --start-server
+          {
+            echo "RUSTC_WRAPPER=sccache"
+            echo "SCCACHE_DIR=$dir"
+            echo "SCCACHE_SERVER_UDS=$dir/server.sock"
+            echo "SCCACHE_CACHE_SIZE=8G"
+          } >> "$GITHUB_ENV"
+
+      - name: Build the relay staticlib
+        run: |
+          cargo rustc --manifest-path crates/jazz-native-relay/Cargo.toml --target "$TARGET" --crate-type staticlib --profile release-mobile
+          mkdir -p "slice/$TARGET"
+          cp "target/$TARGET/release-mobile/libjazz_native_relay.a" "slice/$TARGET/"
+          sccache --show-stats
+
+      # Rust's prebuilt std may need an older iOS; nothing may need a newer one.
+      - name: Check the minimum iOS
+        run: |
+          python3 - "slice/$TARGET/libjazz_native_relay.a" "$IPHONEOS_DEPLOYMENT_TARGET" <<'PY'
+          import collections, struct, sys
+          path, want = sys.argv[1], sys.argv[2]
+          data = open(path, "rb").read()
+          assert data[:8] == b"!<arch>\n", "not an ar archive"
+          off, seen = 8, collections.Counter()
+          while off + 60 <= len(data):
+              header = data[off:off + 60]
+              name, size = header[:16].decode().strip(), int(header[48:58])
+              body = data[off + 60:off + 60 + size]
+              if name.startswith("#1/"):
+                  body = body[int(name[3:]):]
+              if body[:4] == b"\xcf\xfa\xed\xfe":
+                  (ncmds,), p = struct.unpack("<I", body[16:20]), 32
+                  for _ in range(ncmds):
+                      cmd, cmdsize = struct.unpack("<II", body[p:p + 8])
+                      if cmd == 0x32:  # LC_BUILD_VERSION
+                          (minos,) = struct.unpack("<I", body[p + 12:p + 16])
+                          seen[f"{minos >> 16}.{(minos >> 8) & 255}"] += 1
+                      p += cmdsize
+              off += 60 + size + (size & 1)
+          print(dict(seen))
+          v = lambda s: tuple(int(n) for n in s.split("."))
+          newer = {k: n for k, n in seen.items() if v(k) > v(want)}
+          sys.exit(f"objects for {newer}, newer than {want}" if newer else 0)
+          PY
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-rn-relay-ios-slice-${{ matrix.target }}
+          path: slice
+          if-no-files-found: error
+
+      - name: Stop sccache
+        if: always()
+        run: sccache --stop-server || true
+
+      - name: Save sccache
+        if: always()
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ runner.temp }}/sccache
+          key: sccache-jazz-rn-${{ matrix.target }}-ios${{ steps.ios.outputs.min }}-v1-${{ github.sha }}
+
+  # lipo, xcodebuild -create-xcframework and the manifest over the slices:
+  # `build:relay:ios` (crates/jazz-rn/package.json) with
+  # JAZZ_NATIVE_RELAY_SLICES, then the verifier.
+  build-jazz-rn-ios:
+    name: Build jazz-rn iOS relay XCFramework
+    if: inputs.include_rn
+    needs: build-jazz-rn-ios-slices
+    runs-on: blacksmith-6vcpu-macos-15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      # The scripts need only Node: no pnpm install.
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-rn-relay-ios-slice-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/relay-slices
 
       - name: Build and verify iOS relay XCFramework
+        working-directory: crates/jazz-rn
         run: |
-          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
-            pnpm --filter jazz-rn build:relay:ios
-          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
-            node crates/jazz-rn/scripts/verify-relay-artifacts.mjs ios
+          export JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)"
+          JAZZ_NATIVE_RELAY_SLICES="$RUNNER_TEMP/relay-slices" bash scripts/build-relay-artifacts.sh ios
+          node ../../dev/artifacts/rn-packages.mjs stage ios
+          node scripts/verify-relay-artifacts.mjs ios
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-rn-relay-ios
