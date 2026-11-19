@@ -2812,6 +2812,63 @@ fn a_new_version_without_the_system_tables_is_refused_against_the_stored_catalog
     }
 }
 
+/// Once Alice has deployed a version with the system tables, she can
+/// redeploy that stored version, but she cannot target the stored version
+/// from before encryption, even when she allows dropping history.
+#[test]
+fn a_deploy_cannot_target_a_stored_version_from_before_encryption() {
+    use jazz::tools::{Lens, LensTransform};
+    let plain = structural_of(app());
+    let fragment = structural_of(with_e2ee_fragment(&app()));
+    let (v0, v1) = (SchemaHash::compute(&plain), SchemaHash::compute(&fragment));
+    let lens = Lens::new(
+        v0,
+        v1,
+        LensTransform {
+            ops: fragment_ops(&fragment, true),
+            draft_ops: Vec::new(),
+        },
+    );
+    let stored = DeploymentCatalogue {
+        schemas: vec![plain, fragment],
+        migrations: vec![lens],
+        admitted_schema_hashes: vec![v0, v1],
+    };
+    let declared = DeclaredEncryption {
+        versions: BTreeMap::from([(v1.to_string(), entries())]),
+        ..Default::default()
+    };
+    let deploy = |target_schema_hash, allow_dropping_history| {
+        prepare_encrypted_deployment(
+            &stored,
+            DeploymentRequest {
+                target_schema_hash,
+                schemas: Vec::new(),
+                migrations: Vec::new(),
+                permissions: app_permissions(),
+                allow_dropping_history,
+            },
+            &declared,
+        )
+    };
+
+    for allow_dropping_history in [false, true] {
+        let error = deploy(v0, allow_dropping_history)
+            .expect_err("the stored version from before encryption cannot be the target");
+        assert!(
+            matches!(&error, DeploymentError::InvalidSchema { schema, reason }
+                if *schema == v0 && reason.contains("cannot roll back")),
+            "{error}"
+        );
+        let (prepared, _) = deploy(v1, allow_dropping_history)
+            .expect("a stored version with the system tables can be the target");
+        assert_eq!(
+            SchemaHash::compute(prepared.active_schema().public_schema()),
+            v1
+        );
+    }
+}
+
 /// A lens the deploy brings does not make a new version an earlier one: a
 /// version without the system tables that the deploy leads back to a stored
 /// version that has them is still refused, with or without dropping

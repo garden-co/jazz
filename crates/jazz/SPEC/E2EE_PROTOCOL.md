@@ -784,8 +784,11 @@ added by an updater.
   history. Only a stored lens could show it to be earlier than a version
   that has them, and stored lenses join stored versions only; a lens the
   deploy brings (say, from the new version back to a stored one with the
-  system tables) does not count. Turning
-  encryption off is a schema conversion of the columns (a decrypt,
+  system tables) does not count. Once any stored version has the system
+  tables, a deploy also refuses to target an older stored version without
+  them, even when the deploy allows dropping history. Such a rollback would
+  put application code from before encryption in front of encrypted data.
+  Turning encryption off is a schema conversion of the columns (a decrypt,
   [migrations](E2EE_MIGRATIONS.md) §3), never a removal of the system tables.
 - **Encrypted columns are last-writer-wins.** The server cannot merge
   ciphertext, so the deploy and code generation refuse a merge strategy
