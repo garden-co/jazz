@@ -461,14 +461,15 @@ jobs:
     # Public only after every gate that doesn't need a public release passed:
     # a NO-GO candidate is never published. Only the install-by-URL smoke and
     # the Cloud RC probe (which installs the tarball by URL) run after it.
-    needs: [resolve, attach-server, rc-tarballs, examples-e2e, rn-device-acceptance, preview]
+    needs: [resolve, attach-server, rc-tarballs, examples-e2e, rn-device-acceptance, preview, adopter-verdict]
     if: >-
       !cancelled() &&
       needs.attach-server.result == 'success' &&
       needs.rc-tarballs.result == 'success' &&
       needs.examples-e2e.result == 'success' &&
       needs.rn-device-acceptance.result == 'success' &&
-      needs.preview.result == 'success'
+      needs.preview.result == 'success' &&
+      needs.adopter-verdict.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -617,6 +618,11 @@ jobs:
       artifacts_run_id: ${{ needs.artifacts.outputs.run_id }}
       rc_npm_run_id: ${{ github.run_id }}
       jazz_sha: ${{ needs.resolve.outputs.sha }}
+      # Never production from a dry run: a dry run's version (the VP head's
+      # final 2.0.0-alpha.N, or <version>-rc.0) would move the long-lived eval
+      # core. Derived here, with no input to override it.
+      t4_mode: ${{ needs.resolve.outputs.dry_run == 'true' && 'preview' || 'production' }}
+      rc_tag: ${{ needs.resolve.outputs.dry_run != 'true' && format('v{0}', needs.resolve.outputs.version) || '' }}
 
   adopter-verdict:
     name: Adopter gate verdict
