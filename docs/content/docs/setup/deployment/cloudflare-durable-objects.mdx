@@ -27,8 +27,8 @@ browsers and apps, and decides who each user is. Other trusted machines reach Ja
 
 ## Deploy the core's Worker
 
-The Worker holds one SQLite-backed Durable Object for your app. It needs the Workers Paid plan:
-the Jazz core makes the Worker about 4 MB compressed, over the Free plan's 3 MB limit. Its module
+The Worker holds one SQLite-backed Durable Object for your app. It runs on the Workers Free plan:
+the Jazz core makes the Worker about 6 MB, well under Workers' 64 MiB limit. Its module
 exports the object's class and forwards every request to it:
 
 ```ts title="worker/index.ts"
@@ -116,7 +116,8 @@ come from the same Worker: forward only your API and `/jazz` to `routeToJazzBack
 wrangler's `assets` binding. The BandChat example's `react-hono-betterauth` app does this, with Better
 Auth on Jazz (`examples/band-chat/apps/react-hono-betterauth`, "Deploy to Cloudflare").
 
-The core and the backend each bring a WebAssembly module, so the Worker needs the Workers Paid plan.
+The core and the backend each bring a WebAssembly module: the Worker is about 20 MB, under Workers'
+64 MiB limit on every plan, Free included.
 
 The backend is one Durable Object, and every browser's sync socket passes through it, as every
 request does: like the core, it is one object per app. Neither hibernates its sockets yet, so both
