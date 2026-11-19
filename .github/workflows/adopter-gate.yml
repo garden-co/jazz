@@ -74,6 +74,7 @@ env:
   PNPM_VERSION: 11.28.10
 
 jobs:
+  # Resolves refs only (no checkout, no downloads): every job fetches the RC files it needs itself, in parallel.
   inputs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -86,33 +87,18 @@ jobs:
         run: |
           [ -n "${{ inputs.rc_tag }}${{ inputs.artifacts_run_id }}" ] || { echo "::error::give rc_tag or artifacts_run_id"; exit 1; }
           echo "rc_ref=${{ inputs.jazz_sha || inputs.rc_tag || github.sha }}" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with: { ref: "${{ steps.ref.outputs.rc_ref }}", path: rc-src, fetch-depth: 0 }
-      - name: Fetch and verify the RC's gate inputs
-        env: { GH_TOKEN: "${{ github.token }}" }
-        run: |
-          if [ -n "${{ inputs.artifacts_run_id }}" ]; then
-            $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}" --npm-run "${{ inputs.rc_npm_run_id || inputs.artifacts_run_id }}"
-          else $AG/fetch-rc.sh "${{ inputs.rc_tag }}" "${{ inputs.language_run_id }}"; fi
       - id: prev
         run: echo "previous=${{ inputs.previous_version }}" | sed "s/=$/=$(npm view jazz-tools dist-tags.latest)/" >> "$GITHUB_OUTPUT"
       - id: diff
         name: Did the upgrade codemod change since the previous release?
-        working-directory: rc-src
+        env: { GH_TOKEN: "${{ github.token }}" }
         run: |
-          prev="${{ steps.prev.outputs.previous }}"
-          if git rev-parse -q --verify "refs/tags/v$prev" >/dev/null && git diff --quiet "v$prev" HEAD -- packages/jazz-tools/src/upgrade; then
+          # The compare API lists at most 300 files: at the cap, or on any error, assume it changed (run the refusals).
+          files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/compare/v${{ steps.prev.outputs.previous }}...${{ steps.ref.outputs.rc_ref }}?per_page=100" -q '.files[].filename' 2>/dev/null) || files=
+          n=$(printf '%s\n' "$files" | grep -c . || true)
+          if [ -n "$files" ] && [ "$n" -lt 300 ] && ! printf '%s\n' "$files" | grep -q '^packages/jazz-tools/src/upgrade/'; then
             echo "upgrade_changed=false" >> "$GITHUB_OUTPUT"; else echo "upgrade_changed=true" >> "$GITHUB_OUTPUT"; fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          {
-            name: rc-inputs,
-            path: dev/adopter-gate/.rc,
-            retention-days: 7,
-            include-hidden-files: true,
-            if-no-files-found: error,
-          }
+          echo "compared $n files since v${{ steps.prev.outputs.previous }}"
 
   checks:
     needs: inputs
@@ -138,11 +124,20 @@ jobs:
           ]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with: { sparse-checkout: "dev/adopter-gate\n.github/actions" }
       - if: startsWith(matrix.job, 't9-')
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with: { ref: "${{ needs.inputs.outputs.rc_ref }}", path: rc-src }
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with: { name: rc-inputs, path: dev/adopter-gate/.rc }
+      - name: Fetch the RC files this job needs
+        env:
+          {
+            GH_TOKEN: "${{ github.token }}",
+            AG_NEED: "${{ matrix.job == 't10' && 'npm,server' || ((matrix.job == 't9-go' || matrix.job == 't9-kotlin') && 'npm,languages' || 'npm') }}",
+          }
+        run: |
+          if [ -n "${{ inputs.artifacts_run_id }}" ]; then
+            $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}" --npm-run "${{ inputs.rc_npm_run_id || inputs.artifacts_run_id }}"
+          else $AG/fetch-rc.sh "${{ inputs.rc_tag }}" "${{ inputs.language_run_id }}"; fi
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with: { node-version-file: .nvmrc }
       # The gate's apps are their own pnpm projects (pnpm 11), not the repo workspace (packageManager pnpm@10).
@@ -159,7 +154,7 @@ jobs:
       - name: Run ${{ matrix.job }}
         env: { MATRIX_JOB: "${{ matrix.job }}" }
         run: |
-          chmod +x $AG/.rc/jazz-tools-linux-x64
+          [ -f $AG/.rc/jazz-tools-linux-x64 ] && chmod +x $AG/.rc/jazz-tools-linux-x64
           case "$MATRIX_JOB" in
             bed-*) $AG/bed.sh "${MATRIX_JOB#bed-}" ;;
             t9-*) $AG/t9.sh "${MATRIX_JOB#t9-}" ;;
@@ -186,10 +181,15 @@ jobs:
         # Only if the image lacks them: an apt mirror once took 6 min here. The scripts need no ss (bash /dev/tcp, PIDs).
         run: command -v curl >/dev/null && command -v git >/dev/null || { apt-get update -qq && apt-get install -y -qq curl git >/dev/null; }
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with: { sparse-checkout: "dev/adopter-gate\n.github/actions" }
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with: { ref: "${{ needs.inputs.outputs.rc_ref }}", path: rc-src }
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with: { name: rc-inputs, path: dev/adopter-gate/.rc }
+      - name: Fetch the RC files this job needs
+        env: { GH_TOKEN: "${{ github.token }}", AG_NEED: "npm,languages" }
+        run: |
+          if [ -n "${{ inputs.artifacts_run_id }}" ]; then
+            $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}" --npm-run "${{ inputs.rc_npm_run_id || inputs.artifacts_run_id }}"
+          else $AG/fetch-rc.sh "${{ inputs.rc_tag }}" "${{ inputs.language_run_id }}"; fi
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with: { node-version-file: .nvmrc }
       - run: npm install --global "pnpm@$PNPM_VERSION" > /dev/null
@@ -211,8 +211,13 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with: { name: rc-inputs, path: dev/adopter-gate/.rc }
+        with: { sparse-checkout: "dev/adopter-gate\n.github/actions" }
+      - name: Fetch the RC files this job needs
+        env: { GH_TOKEN: "${{ github.token }}", AG_NEED: "npm" }
+        run: |
+          if [ -n "${{ inputs.artifacts_run_id }}" ]; then
+            $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}" --npm-run "${{ inputs.rc_npm_run_id || inputs.artifacts_run_id }}"
+          else $AG/fetch-rc.sh "${{ inputs.rc_tag }}" "${{ inputs.language_run_id }}"; fi
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with: { node-version-file: .nvmrc }
       - run: npm install --global "pnpm@$PNPM_VERSION" > /dev/null
@@ -257,8 +262,13 @@ jobs:
       T4_VERCEL_BYPASS_SECRET: ${{ secrets.T4_VERCEL_BYPASS_SECRET }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with: { name: rc-inputs, path: dev/adopter-gate/.rc }
+        with: { sparse-checkout: "dev/adopter-gate\n.github/actions" }
+      - name: Fetch the RC files this job needs
+        env: { GH_TOKEN: "${{ github.token }}", AG_NEED: "npm" }
+        run: |
+          if [ -n "${{ inputs.artifacts_run_id }}" ]; then
+            $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}" --npm-run "${{ inputs.rc_npm_run_id || inputs.artifacts_run_id }}"
+          else $AG/fetch-rc.sh "${{ inputs.rc_tag }}" "${{ inputs.language_run_id }}"; fi
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with: { node-version-file: .nvmrc }
       - run: npm install --global "pnpm@$PNPM_VERSION" > /dev/null
