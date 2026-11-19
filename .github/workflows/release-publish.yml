@@ -857,7 +857,7 @@ jobs:
           git -c user.name="jazz-release-bot" -c user.email="jazz-release-bot@users.noreply.github.com" \
             commit -qm "Jazz for Swift ${VERSION} (garden-co/jazz@${SHA}, v${VERSION})"
           git tag "${VERSION}"
-          git show --stat --oneline HEAD | head -20
+          git show --stat --oneline HEAD | sed -n 1,20p
           if [ "${MODE}" != publish ]; then
             echo "Dry run: would push main and tag ${VERSION} to garden-co/jazz-swift"
             exit 0
