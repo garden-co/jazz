@@ -1,7 +1,7 @@
 // Contract: release-publish.yml imports artifacts only from a successful
-// release-artifacts.yml run of this repository, on release or
-// changeset-release/*, that built a commit with the published tree, with a
-// manifest naming that commit, the tree and the version.
+// release-artifacts.yml run of this repository, on release, that built a
+// commit with the published tree, with a manifest naming that commit, the
+// tree and the version.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -40,13 +40,9 @@ test("the published commit's own run on release is accepted", () => {
   );
 });
 
-test("a tree-equal run on changeset-release is accepted", () => {
-  const vp = run({
-    event: "workflow_dispatch",
-    head_branch: "changeset-release/release",
-    head_sha: vpHead,
-  });
-  assert.deepEqual(ok(vp), []);
+test("a tree-equal earlier run on release is accepted", () => {
+  const earlier = run({ head_sha: vpHead });
+  assert.deepEqual(ok(earlier), []);
   assert.deepEqual(
     manifestProblems(manifest({ sha: vpHead }), { headSha: vpHead, tree, version }),
     [],
@@ -55,28 +51,33 @@ test("a tree-equal run on changeset-release is accepted", () => {
 
 for (const [name, changes, headTree] of [
   ["a tree-equal run on main", { head_branch: "main", head_sha: vpHead }],
+  // Until its ruleset is live (#supply-chain, 2026-11-19): cache scope seeding.
+  [
+    "a tree-equal run on changeset-release",
+    { event: "workflow_dispatch", head_branch: "changeset-release/release", head_sha: vpHead },
+  ],
+  [
+    "a tree-equal push run on changeset-release",
+    { head_branch: "changeset-release/release", head_sha: vpHead },
+  ],
   [
     "a tree-equal pull_request run",
-    { event: "pull_request", head_branch: "changeset-release/release", head_sha: vpHead },
+    { event: "pull_request", head_branch: "release", head_sha: vpHead },
   ],
   [
     "a tree-equal fork run",
     {
       head_repository: { full_name: "someone/jazz" },
-      head_branch: "changeset-release/release",
+      head_branch: "release",
       head_sha: vpHead,
     },
   ],
   [
     "a run that built a different tree",
-    { head_branch: "changeset-release/release", head_sha: vpHead },
+    { head_branch: "release", head_sha: vpHead },
     "e".repeat(40),
   ],
-  [
-    "a run whose commit can't be read",
-    { head_branch: "changeset-release/release", head_sha: vpHead },
-    null,
-  ],
+  ["a run whose commit can't be read", { head_branch: "release", head_sha: vpHead }, null],
   ["another workflow", { path: ".github/workflows/preview-build.yml" }],
   ["a failed run", { conclusion: "failure" }],
   ["an unfinished run", { status: "in_progress", conclusion: null }],
@@ -118,12 +119,9 @@ test("the CLI resolve-artifacts.sh runs exits 1 with the reason", () => {
     });
   };
   cli(run(), manifest());
-  cli(
-    run({ head_branch: "changeset-release/release", head_sha: vpHead }),
-    manifest({ sha: vpHead }),
-  );
+  cli(run({ head_sha: vpHead }), manifest({ sha: vpHead }));
   assert.throws(
-    () => cli(run({ head_branch: "changeset-release/release", head_sha: vpHead }), manifest()),
+    () => cli(run({ head_sha: vpHead }), manifest()),
     (error) => error.status === 1 && /manifest sha/.test(error.stdout),
   );
   assert.throws(

@@ -4,8 +4,8 @@
 #   SHA=<commit> VERSION=<version> MODE=<publish|dry-run> [ARTIFACTS_RUN_ID=<id>] [LEGACY_RUN_IDS="<id> <id> …"] \
 #     dev/release-publish/resolve-artifacts.sh
 #
-# Takes a successful release-artifacts.yml run on `release` or
-# `changeset-release/*` that built <sha>'s tree (a run of <sha> itself first),
+# Takes a successful release-artifacts.yml run on `release` that built
+# <sha>'s tree (a run of <sha> itself first),
 # whose release-manifest names the commit it built, the tree and the version
 # (dev/release-publish/producer-run.mjs). ARTIFACTS_RUN_ID names one run
 # instead of searching; it is held to the same rule.
@@ -28,10 +28,9 @@ echo "tree=${tree}" >> "${out}"
 echo "release ${VERSION} at ${SHA}, tree ${tree}"
 
 # Supply-chain rule (dev/release-publish/producer-run.mjs): a successful
-# release-artifacts.yml run of this repository, on `release` or
-# `changeset-release/*` (push or dispatch), that built a commit with this
-# tree, and whose release-manifest names that commit, tree and version. A run
-# of ${SHA} itself comes first.
+# release-artifacts.yml run of this repository on `release` (push or
+# dispatch) that built a commit with this tree, and whose release-manifest
+# names that commit, tree and version. A run of ${SHA} itself comes first.
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 producer_ok() { # <run id> -> prints the run's head_sha when it may be imported
   local dir head head_tree
@@ -51,7 +50,7 @@ if [ -n "${ARTIFACTS_RUN_ID:-}" ]; then
   candidates=("${ARTIFACTS_RUN_ID}")
 else
   # Runs of ${SHA} itself, newest first; then the release branches' runs.
-  for query in "head_sha=${SHA}&" "branch=release&" "branch=changeset-release%2Frelease&"; do
+  for query in "head_sha=${SHA}&" "branch=release&"; do
     runs="$(gh api "repos/${GH_REPO}/actions/workflows/release-artifacts.yml/runs?${query}status=success&per_page=50" 2>/dev/null)" || continue
     mapfile -t -O "${#candidates[@]}" candidates < <(jq -r '.workflow_runs | sort_by(.created_at) | reverse | .[] | .id' <<<"${runs}")
   done

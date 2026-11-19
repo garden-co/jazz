@@ -6,8 +6,7 @@
 //      a real commit whose tree the git API reports;
 //   2. tree(head_sha) == tree(<sha>);
 //   3. it ran in this repository (no fork) on `push` or `workflow_dispatch`
-//      (never pull_request), on `release` or `changeset-release/*`: the
-//      branches whose runs are attested;
+//      (never pull_request), on `release` (see isReleaseBranch);
 //   4. its release-manifest names head_sha, the published tree and version;
 //   5. it succeeded.
 // resolve-artifacts.sh prefers a run of <sha> itself when there is one.
@@ -34,9 +33,15 @@ export function expectedProblems({ sha, tree, version, repo }) {
   return problems;
 }
 
-/** Whether `branch` is one whose release-artifacts.yml runs are attested. */
+/**
+ * Whether release-artifacts.yml runs on `branch` may be imported: `release`
+ * only, which changes only through PRs under its ruleset. Not
+ * `changeset-release/*` until a ruleset makes it writable by the
+ * jazz-release-pr App and admins alone: until then any write collaborator can
+ * push there and seed its actions/cache scope (#supply-chain, 2026-11-19).
+ */
 export function isReleaseBranch(branch) {
-  return branch === "release" || /^changeset-release\/.+/.test(branch ?? "");
+  return branch === "release";
 }
 
 /**
@@ -51,7 +56,7 @@ export function producerRunProblems(run, { tree, repo, headTree }) {
     problems.push(`run belongs to ${run?.head_repository?.full_name}, not ${repo}`);
   if (!EVENTS.has(run?.event)) problems.push(`run was triggered by ${run?.event}`);
   if (!isReleaseBranch(run?.head_branch))
-    problems.push(`run is on ${run?.head_branch}, not release or changeset-release/*`);
+    problems.push(`run is on ${run?.head_branch}, not release`);
   if (run?.status !== "completed" || run?.conclusion !== "success")
     problems.push(`run is ${run?.status}/${run?.conclusion}`);
   if (!/^[0-9a-f]{40}$/.test(run?.head_sha ?? "")) problems.push(`run head_sha ${run?.head_sha}?`);
