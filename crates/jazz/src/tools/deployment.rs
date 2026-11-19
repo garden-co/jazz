@@ -296,16 +296,19 @@ fn check_system_tables_carried<'a>(
 }
 
 /// A version new to the catalogue that lacks the system tables is refused
-/// when a stored version has them, unless it is an earlier version of one
-/// that has them (a lens leads from it to one): whatever lens it hangs on,
-/// it comes after the stored one in time, so it would strand the system
-/// rows written under it. The stored catalogue decides, so this holds
-/// whatever the deploy says about dropping history.
-fn check_new_versions_keep_system_tables<'a>(
+/// when a stored version has them, whatever lens it hangs on and whatever
+/// the deploy says about dropping history: it comes after the stored one in
+/// time, so it would strand the system rows written under it.
+///
+/// A version without them may still come before one that has them, but
+/// only the stored catalogue can say so: a lens the deploy brings proves
+/// nothing (it could lead a later version back to a stored one that has
+/// them), and the stored lenses join stored versions only, never one new to
+/// the catalogue. So every new version must have them.
+fn check_new_versions_keep_system_tables(
     stored: &DeploymentCatalogue,
     submitted: &[SchemaHash],
     schemas: &BTreeMap<Hash, Schema>,
-    migrations: impl Iterator<Item = &'a Lens>,
 ) -> Result<(), DeploymentError> {
     let has = |schema: &Schema| {
         schema
@@ -320,35 +323,17 @@ fn check_new_versions_keep_system_tables<'a>(
         .iter()
         .map(|schema| SchemaHash::compute(schema).0)
         .collect();
-    let edges: Vec<&Lens> = migrations.collect();
     for hash in submitted {
         if stored_hashes.contains(&hash.0) || schemas.get(&hash.0).is_none_or(has) {
             continue;
         }
-        // Whether a version that has the tables is reachable from it.
-        let mut seen = BTreeSet::from([hash.0]);
-        let mut queue = vec![hash.0];
-        let mut leads_to_them = false;
-        while let Some(at) = queue.pop() {
-            for lens in edges.iter().filter(|lens| lens.source_hash.0 == at) {
-                if schemas.get(&lens.target_hash.0).is_some_and(has) {
-                    leads_to_them = true;
-                }
-                if seen.insert(lens.target_hash.0) {
-                    queue.push(lens.target_hash.0);
-                }
-            }
-        }
-        if !leads_to_them {
-            return Err(DeploymentError::InvalidSchema {
-                schema: *hash,
-                reason:
-                    "a stored version has Jazz's system tables and this one lacks them: once a \
-                         version carries them, every later version does, so that the system rows \
-                         written under earlier versions stay readable"
-                        .to_owned(),
-            });
-        }
+        return Err(DeploymentError::InvalidSchema {
+            schema: *hash,
+            reason: "a stored version has Jazz's system tables and this one lacks them: once a \
+                     version carries them, every later version does, so that the system rows \
+                     written under earlier versions stay readable"
+                .to_owned(),
+        });
     }
     Ok(())
 }
@@ -438,12 +423,7 @@ fn prepare(
         &schemas,
         stored.migrations.iter().chain(&request.migrations),
     )?;
-    check_new_versions_keep_system_tables(
-        stored,
-        &submitted,
-        &schemas,
-        stored.migrations.iter().chain(&request.migrations),
-    )?;
+    check_new_versions_keep_system_tables(stored, &submitted, &schemas)?;
     let warnings = match encryption {
         Some(encryption) => {
             check_encryption(&schemas, &submitted, &mut request, encryption, &follows)?

@@ -1,10 +1,10 @@
 //! Validate a complete deployment before publishing its artifacts and activating it.
 use super::{ServerRuntimeHandle, ServerState};
 pub(crate) use crate::portable::catalogue::DeploymentResponse;
-#[cfg(any(test, feature = "embedded-server"))]
-pub(crate) use crate::portable::deployment::DeploySchema;
 use crate::portable::deployment::{self as portable, Deployment};
-pub(crate) use crate::portable::deployment::{DeployBody, DeployError, DeployRequest};
+pub(crate) use crate::portable::deployment::{DeployBody, DeployError};
+#[cfg(any(test, feature = "embedded-server"))]
+pub(crate) use crate::portable::deployment::{DeployRequest, DeploySchema};
 #[cfg(any(test, feature = "embedded-server"))]
 use jazz::tools::public_schema::{Schema, TablePolicies};
 use std::sync::Arc;
@@ -20,16 +20,9 @@ use std::collections::HashMap;
 
 pub(crate) use crate::portable::deployment::DECLARATIONS;
 
-pub(crate) async fn deploy(
-    state: Arc<ServerState>,
-    request: DeployRequest,
-) -> Result<DeploymentResponse, DeployError> {
-    deploy_body(state, request.into()).await
-}
-
-/// [`deploy`] with the app's encryption declarations (see
-/// [`portable::prepare_encrypted`]). The response carries the deploy's
-/// warnings.
+/// Validate and apply a deployment, with the app's encryption declarations
+/// when it has them (see [`portable::prepare_encrypted`]). The response
+/// carries the deploy's warnings.
 pub(crate) async fn deploy_body(
     state: Arc<ServerState>,
     body: DeployBody,
@@ -197,7 +190,7 @@ pub(crate) async fn publish_source_bundle(
         .iter()
         .map(|(name, table)| (*name, table.policies.clone()))
         .collect();
-    let response = deploy(
+    let response = deploy_body(
         state,
         DeployRequest {
             target_schema_hash: hash.clone(),
@@ -208,7 +201,8 @@ pub(crate) async fn publish_source_bundle(
             migrations: Vec::new(),
             permissions,
             allow_dropping_history: false,
-        },
+        }
+        .into(),
     )
     .await
     .map_err(|error| error.body.to_string())?;
