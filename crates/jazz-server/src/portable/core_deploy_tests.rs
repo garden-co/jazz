@@ -691,17 +691,19 @@ fn an_unreadable_registry_refuses_the_account_checks() {
     }
 }
 
-/// A deployment that changes no catalogue row still keeps the declarations
-/// of a version it names for the first time (one in the catalogue whose
-/// declarations the store does not keep, as a store from before they were
-/// kept), both on the open core and on a host that opens none for it.
+/// A version in the catalogue whose declarations the store does not keep
+/// counts as one deployed without declarations: a deployment that changes
+/// nothing cannot declare them for it as if for the first time, but must
+/// pass the transition from no declarations (here, the backfill the earlier
+/// rows need), both on the open core and on a host that opens none for it.
+/// Nothing is kept for it.
 #[test]
-fn a_deploy_that_changes_nothing_keeps_first_time_declarations() {
+fn a_deploy_that_changes_nothing_cannot_declare_for_an_undeclared_version() {
     for (name, backing) in hosts() {
         let mut host = Host::new(backing);
         let app = loaded(APP);
         host.deploy(&app.deployment_body(false)).unwrap();
-        let kept = host.kept(&app.current_hash()).expect("kept on deploy");
+        host.kept(&app.current_hash()).expect("kept on deploy");
 
         let forget = |host: &Host| {
             host.host
@@ -711,20 +713,26 @@ fn a_deploy_that_changes_nothing_keeps_first_time_declarations() {
                 .unwrap();
             assert_eq!(host.kept(&app.current_hash()), None);
         };
+        let refused = |host: &mut Host, case: &str| {
+            let (status, body) = host.deploy(&app.deployment_body(false)).unwrap_err();
+            assert_eq!(status, 422, "{name} ({case}): {body:?}");
+            assert_eq!(body["code"], "invalid_schema", "{name} ({case}): {body:?}");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("deployed without encryption declarations"),
+                "{name} ({case}): {body:?}"
+            );
+            assert_eq!(host.kept(&app.current_hash()), None, "{name} ({case})");
+        };
 
-        // The open core.
         forget(&host);
-        let again = host.deploy(&app.deployment_body(false)).unwrap();
-        assert_eq!(again["changed"], false, "{name}");
-        assert_eq!(host.kept(&app.current_hash()), Some(kept.clone()), "{name}");
+        refused(&mut host, "open core");
 
-        // No core open: the store is read and kept on directly.
-        forget(&host);
         host.core.take().unwrap().close();
-        let again = host.deploy(&app.deployment_body(false)).unwrap();
-        assert_eq!(again["changed"], false, "{name}");
+        refused(&mut host, "no core open");
         assert!(host.core.is_none(), "{name}: nothing to open a core for");
-        assert_eq!(host.kept(&app.current_hash()), Some(kept.clone()), "{name}");
     }
 }
 
