@@ -6,6 +6,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { createJazzClient } from "../../src/backend/index.js";
+import { testPermissions } from "../../src/testing/index.js";
+import { app } from "./backend-app.generated.js";
 import { bundleWorker } from "./bundle.js";
 import { hostBuilt } from "./host.js";
 import { startDurableObjectCore, type DurableObjectCore } from "./harness.js";
@@ -42,5 +45,41 @@ describe.skipIf(!hostBuilt && !process.env.CI)("createJazz in a Cloudflare Worke
     await first.dispose();
     const again = await worker(persist);
     expect(await (await fetch(`${again.url}/todos`)).json()).toEqual(["kept"]);
+  });
+
+  /** A client of the app through the Worker's `/jazz`, as a device account. */
+  async function guestOf(url: string, appId?: string) {
+    const session = await createJazzClient({
+      ...(appId ? { appId } : {}),
+      app,
+      permissions: testPermissions(app, {
+        format: 1,
+        tables: { todos: { read: "true", insert: "true" } },
+      } as never),
+      serverUrl: `${url}/jazz`,
+      driver: { type: "memory" },
+      initial: "device",
+    } as never);
+    cleanups.push(() => session.close());
+    return session.getSnapshot().client!;
+  }
+
+  it("syncs a device account scoped by the app's id through the Worker's /jazz", async () => {
+    const { url } = await worker();
+    const guest = await guestOf(url, await (await fetch(`${url}/app-id`)).text());
+    await guest.db
+      .insert(app.todos, { title: "from a guest", done: false })
+      .wait({ tier: "global" });
+    // The backend's own routes see the guest's row.
+    expect(await (await fetch(`${url}/todos`)).json()).toEqual(["from a guest"]);
+  });
+
+  it("syncs a browser-style device account (scoped by the endpoint) through the Worker's /jazz", async () => {
+    const { url } = await worker();
+    const guest = await guestOf(url);
+    await guest.db
+      .insert(app.todos, { title: "from a browser", done: false })
+      .wait({ tier: "global" });
+    expect(await (await fetch(`${url}/todos`)).json()).toEqual(["from a browser"]);
   });
 });

@@ -38,6 +38,7 @@ export const JazzBackend = jazzBackend((env: Env) => {
             .wait({ tier: "global" });
           return new Response("ok");
         }
+        if (url.pathname === "/app-id") return new Response((await jazz.ready()).appId);
         if (url.pathname === "/todos") {
           return Response.json((await jazz.db.all(app.todos)).map((todo) => todo.title).sort());
         }

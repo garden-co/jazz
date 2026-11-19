@@ -108,6 +108,8 @@ function underBasePath(pathname: string, basePath: string): boolean {
   return pathname === basePath || pathname.startsWith(`${basePath}/`);
 }
 
+const textEncoder = new TextEncoder();
+
 /** workerd's server socket in the `ws` package's shape, which `acceptSocket` takes. */
 function wsLike(ws: WorkerdWebSocket): WsLikeSocket {
   const socket = {
@@ -122,7 +124,10 @@ function wsLike(ws: WorkerdWebSocket): WsLikeSocket {
     on(event: "message" | "close" | "error", listener: (...args: never[]) => void) {
       const call = listener as (...args: unknown[]) => void;
       if (event === "message") {
-        ws.addEventListener("message", ({ data }) => call(data, typeof data !== "string"));
+        // As the `ws` package hands them over: bytes, text included.
+        ws.addEventListener("message", ({ data }) =>
+          typeof data === "string" ? call(textEncoder.encode(data), false) : call(data, true),
+        );
       } else if (event === "close") {
         ws.addEventListener("close", () => call());
       } else {
