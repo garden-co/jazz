@@ -56,6 +56,7 @@ jobs:
             name: "registry-${{ matrix.target }}",
             path: dev/adopter-gate/.results,
             retention-days: 14,
+            include-hidden-files: true,
           }
 
   swift:
