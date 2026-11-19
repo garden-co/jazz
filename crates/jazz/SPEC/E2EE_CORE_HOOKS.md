@@ -298,19 +298,24 @@ Multi-column correlation applies to the support of every application's read poli
 
 ### H9. Host-supplied private storage and randomness
 
-- **Traits** (in `jazz-e2ee-client`; futures are `LocalBoxFuture` because they are polled on the Db thread; to be built):
+- **Traits** (in `jazz-e2ee-client`; futures are `LocalBoxFuture` because they are polled on the Db thread; exists: `jazz_e2ee_client::store`):
 
   ```rust
-  pub trait PrivateStore {           // per Dₐ(account) scope: a device document and one held-key document per space root (spec §6.1)
-      fn load(&self, scope: &str, doc: &str) -> LocalBoxFuture<'_, Result<Option<Vec<u8>>, StoreError>>;
-      fn save(&self, scope: &str, doc: &str, bytes: &[u8], expected_revision: u64) -> LocalBoxFuture<'_, Result<(), StoreError>>;
-      fn list(&self, scope: &str) -> LocalBoxFuture<'_, Result<Vec<String>, StoreError>>;
-      fn delete(&self, scope: &str) -> LocalBoxFuture<'_, Result<(), StoreError>>;     // the whole scope
-      fn protect(&self, secret: &[u8]) -> LocalBoxFuture<'_, Result<Vec<u8>, StoreError>>;   // at-rest wrap
-      fn unprotect(&self, blob: &[u8]) -> LocalBoxFuture<'_, Result<Zeroizing<Vec<u8>>, StoreError>>;
+  pub trait PrivateStore {           // per Dₐ(account) scope: a device document, one held-key document per space root, one floor per account (spec §6.1, §6.3a)
+      fn load<'a>(&'a self, scope: &'a str, doc: &'a str) -> LocalBoxFuture<'a, Result<Option<Stored>, StoreError>>; // bytes and revision
+      fn open_scope<'a>(&'a self, scope: &'a str) -> LocalBoxFuture<'a, Result<u64, StoreError>>; // the scope's incarnation, created if absent
+      fn save<'a>(&'a self, scope: &'a str, incarnation: u64, doc: &'a str, bytes: &'a [u8], expected: Option<u64>) -> LocalBoxFuture<'a, Result<u64, StoreError>>; // compare and swap
+      fn list<'a>(&'a self, scope: &'a str) -> LocalBoxFuture<'a, Result<Vec<String>, StoreError>>;
+      fn delete<'a>(&'a self, scope: &'a str) -> LocalBoxFuture<'a, Result<(), StoreError>>;     // the whole scope
+      fn protect<'a>(&'a self, secret: &'a [u8]) -> LocalBoxFuture<'a, Result<Vec<u8>, StoreError>>;   // at-rest wrap
+      fn unprotect<'a>(&'a self, blob: &'a [u8]) -> LocalBoxFuture<'a, Result<Zeroizing<Vec<u8>>, StoreError>>;
   }
   ```
 
+  - A save names the revision it replaces (`None`: the document must not exist) and fails with `StoreError::Conflict` otherwise, so two writers of one store (tabs, runtimes) never silently drop each other's keys: the later one reads again and merges.
+  - A scope has a random incarnation from its creation to its deletion. A save names the incarnation its runtime opened and fails with `StoreError::Wiped` in a deleted or recreated scope, never creating one, so a runtime that opened the scope before another one wiped it closes instead of recreating it.
+  - A delete of a scope removes its incarnation first and its documents after, so a delete that stops half way leaves documents without an incarnation; a store treats such a scope as wiped (opening it removes what is left and makes a new incarnation) and never adopts the leftover documents, so a wiped device's keys do not come back. An app-supplied store keeps this order.
+  - Built: `MemoryStore` (tests and sessions that keep nothing). There is no default store: the application supplies its own, with the platform's protection of secrets; no store ships with an unprotected default.
   - `protect` / `unprotect` back each platform's at-rest protection:
     - browser: non-extractable WebCrypto AES-KW/GCM key in IndexedDB;
     - Apple: Keychain item;
@@ -320,7 +325,7 @@ Multi-column correlation applies to the support of every application's read poli
 
 - **Randomness (exists).** `jazz_e2ee::random::RandomSource` (`crates/jazz-e2ee/src/random.rs:12`), with `OsRandom` (:26) through getrandom. Recommendation: the default everywhere is `OsRandom`; hosts override it only for deterministic tests and simulation. It is not a per-binding obligation.
 - **Per binding (to be built).**
-  - **napi** (`crates/jazz-napi`): a JS object with promise-returning methods, called through a thread-safe function. A default Node file store is provided.
+  - **napi** (`crates/jazz-napi`): a JS object with promise-returning methods, called through a thread-safe function. The application supplies the store; no default file store is provided.
   - **wasm** (`crates/jazz-wasm`): no awaited JS→Rust callback exists yet. Add one using `js_sys::Function` → `Promise` → `wasm_bindgen_futures::JsFuture`. The store and keys live in the worker that owns the durable store; see Risks.
   - **jazz-native-relay** (C ABI): function-pointer callbacks with completion handles. jazz-rn's C++ implements them over Keychain/Keystore.
   - **jazz-ffi** (Swift/Kotlin/Go): a foreign trait `PrivateKeyStore`, blocking on its own thread and adapted into the async trait.

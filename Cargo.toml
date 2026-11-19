@@ -9,6 +9,7 @@ members = [
   "crates/jazz/layers/types",
   "crates/jazz-compression",
   "crates/jazz-e2ee",
+  "crates/jazz-e2ee-client",
   "crates/jazz-text",
   "crates/wasm-tracing",
   "crates/jazz-wasm",

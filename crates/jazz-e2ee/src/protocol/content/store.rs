@@ -126,7 +126,7 @@ pub struct StoreOwner<'a> {
 }
 
 /// A check's outcome that is not a provider failure.
-type Checked<T> = Result<T, Rejection>;
+pub(super) type Checked<T> = Result<T, Rejection>;
 
 impl StoreOwner<'_> {
     fn scope(&self) -> ProtocolResult<AccountDomain> {
@@ -145,7 +145,7 @@ impl StoreOwner<'_> {
 
     /// Signs with the device's signing key and verifies the signature
     /// again; a failure to read it back is a provider failure.
-    fn sign(&self, bytes: &[u8]) -> ProtocolResult<Vec<u8>> {
+    pub(super) fn sign(&self, bytes: &[u8]) -> ProtocolResult<Vec<u8>> {
         let signer = self
             .registry
             .signer(self.device.signing.public.mechanism.as_mechanism())?;
@@ -163,7 +163,7 @@ impl StoreOwner<'_> {
         Ok(signature)
     }
 
-    fn verify(&self, bytes: &[u8], signature: &[u8]) -> ProtocolResult<Checked<()>> {
+    pub(super) fn verify(&self, bytes: &[u8], signature: &[u8]) -> ProtocolResult<Checked<()>> {
         match signing::verify(self.registry, &self.device.signing.public, bytes, signature) {
             Ok(true) => Ok(Ok(())),
             Ok(false) => Ok(Err(Rejection::Signature)),
@@ -289,7 +289,7 @@ impl StoreOwner<'_> {
         })
     }
 
-    fn check_binding(&self, binding: &Binding) -> ProtocolResult<Checked<()>> {
+    pub(super) fn check_binding(&self, binding: &Binding) -> ProtocolResult<Checked<()>> {
         Ok(if *binding == self.binding()? {
             Ok(())
         } else {

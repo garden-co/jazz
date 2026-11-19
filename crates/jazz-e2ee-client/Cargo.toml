@@ -1,0 +1,26 @@
+[package]
+name = "jazz-e2ee-client"
+version.workspace = true
+edition = "2024"
+# Not published yet: nothing in the published crates depends on it.
+publish = false
+description = "Jazz's end-to-end encryption client runtime: private storage for device state."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+include = ["src/**"]
+
+[dependencies]
+futures = "0.3"
+jazz-e2ee = { path = "../jazz-e2ee" }
+thiserror = "2"
+uuid = { version = "1.18.1", features = ["v4"] }
+
+# The browser's random source for the crates Jazz uses, as in jazz-wasm.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+uuid = { version = "1.18.1", features = ["v4", "js"] }
+
+[dev-dependencies]
+jazz.workspace = true
