@@ -42,7 +42,7 @@ export const ciPartitionJobs = Object.freeze({
   "rust-workspace": "test-rust-workspace",
   "rust-differential": "test-storage-compat",
   "storage-compat": "test-storage-compat",
-  "durable-object-limits": "test-storage-compat",
+  "durable-object-limits": "test-durable-object-limits",
   // One test-ts matrix job per TypeScript shard (see typescriptPartitions).
   "typescript-tools-node-1": "test-ts",
   "typescript-tools-node-2": "test-ts",
@@ -57,6 +57,7 @@ export const ciPartitionJobs = Object.freeze({
   "jazz-ffi-bindings": "test-jazz-ffi-bindings",
   "crates-package": "test-crates-package",
   go: "test-go",
+  "go-ts-backend": "test-go-ts-backend",
   kotlin: "test-kotlin",
   "kotlin-android": "test-kotlin-android",
 });
@@ -136,11 +137,29 @@ export const TYPESCRIPT_SHARDS = Object.freeze([
   "browser-2",
   "packages",
 ]);
+// tools-other runs jazz-tools' Durable Object suite, whose host build
+// (fat-LTO cargo plus wasm-opt) is minutes; it starts alongside the producer
+// instead of after the suites' preparation. Merge groups build that host at
+// wasm-opt -O1; build-jazz-packages.yml and nightly run the same suite on the
+// -Oz host that ships (dev/gates/ensure-artifacts-and-durable-object-host.mjs).
+const producerAndDurableObjectHost = command(
+  "native correctness-artifact producer and Durable Object host",
+  "node",
+  ["dev/gates/ensure-artifacts-and-durable-object-host.mjs"],
+);
 const typescriptPartitions = Object.freeze({
   ...Object.fromEntries(
     TYPESCRIPT_SHARDS.map((shard) => [
       `typescript-${shard}`,
-      Object.freeze([...typescriptPrelude, typescriptConsumers(shard)]),
+      Object.freeze(
+        shard === "tools-other"
+          ? [
+              producerAndDurableObjectHost,
+              ...typescriptPrelude.slice(1),
+              typescriptConsumers(shard),
+            ]
+          : [...typescriptPrelude, typescriptConsumers(shard)],
+      ),
     ]),
   ),
   // The examples shard runs no suite of its own; it admits the prepared
@@ -414,9 +433,38 @@ export const ciPartitions = Object.freeze({
   // limits (100 bound parameters, 100 KB statements, expression depth 100,
   // ...), so SQL that would fail there fails here. See
   // dev/durable-objects/README.md.
+  // This is `cargo test --workspace` in three commands. Nextest builds the
+  // same targets and runs the unit, integration, bin and example tests, but
+  // runs test binaries in parallel where cargo test ran them one after
+  // another (~200s of a 260s step). The docs todo server's snippet tests
+  // keep cargo test's harness (one process, tests on threads): one of them
+  // depends on that timing under these limits and fails in a process of its
+  // own. Nextest skips doc tests, so the last command runs exactly those.
+  // All three use the same --workspace feature selection, so they share one
+  // build.
   "durable-object-limits": Object.freeze([
     command("Durable Object SQLite limits", "cargo", [
+      "nextest",
+      "run",
+      "--profile",
+      "jazz-ci",
+      "--workspace",
+      "--features",
+      "jazz-core/durable-object-limits",
+      "-E",
+      "not (package(todo-server-docs) and binary(snippets))",
+    ]),
+    command("Durable Object SQLite limits, docs todo server snippets", "cargo", [
       "test",
+      "--workspace",
+      "--features",
+      "jazz-core/durable-object-limits",
+      "--test",
+      "snippets",
+    ]),
+    command("Durable Object SQLite limits doc tests", "cargo", [
+      "test",
+      "--doc",
       "--workspace",
       "--features",
       "jazz-core/durable-object-limits",
@@ -443,9 +491,13 @@ export const ciPartitions = Object.freeze({
     ]),
   ]),
   // The Go bindings and the StagePlan Go example (installs Go when the
-  // image has none). go-cli's suite also runs against StagePlan's main
-  // backend in TypeScript (createJazz), so it needs a jazz-tools build.
-  go: Object.freeze([
+  // image has none), against jazz-tools' Rust server.
+  go: Object.freeze([command("Go bindings", "bash", ["dev/gates/go-bindings.sh"])]),
+  // go-cli's suite again against StagePlan's main backend in TypeScript
+  // (createJazz), which needs the NAPI/WASM pair and a jazz-tools build. Its
+  // own partition and job so that build runs beside the go partition rather
+  // than ahead of it.
+  "go-ts-backend": Object.freeze([
     command("native correctness-artifact producer", "node", [
       "dev/gates/ensure-correctness-artifacts.mjs",
     ]),
@@ -460,9 +512,14 @@ export const ciPartitions = Object.freeze({
       "--filter=jazz-tools",
       "--only",
     ]),
-    command("Go bindings", "bash", ["dev/gates/go-bindings.sh"], {
-      env: { JAZZ_GO_TS_MAIN_BACKEND: "1" },
-    }),
+    command(
+      "Go bindings against the TypeScript main backend",
+      "bash",
+      ["dev/gates/go-bindings.sh"],
+      {
+        env: { JAZZ_GO_TS_MAIN_BACKEND: "only" },
+      },
+    ),
   ]),
   // jazz-kotlin over jazz-ffi, and the StagePlan Kotlin CLI and the docs todo
   // app's Kotlin snippets end to end against `jazz-tools server`, on the JVM.
@@ -516,8 +573,13 @@ export function assertFullWorkspaceCoverage(commands) {
     throw new Error("CI-equivalent workspace check omits the required CI feature selection.");
 }
 
+const producerLabels = new Set([
+  "native correctness-artifact producer",
+  "native correctness-artifact producer and Durable Object host",
+]);
+
 export function assertArtifactBoundary(commands) {
-  const artifacts = commands.find(({ label }) => label === "native correctness-artifact producer");
+  const artifacts = commands.find(({ label }) => producerLabels.has(label));
   const suites = commands.find(({ label }) => label === "TypeScript consumers");
   if (!artifacts || !suites)
     throw new Error("CI-equivalent TypeScript plan omits artifacts or test suites.");

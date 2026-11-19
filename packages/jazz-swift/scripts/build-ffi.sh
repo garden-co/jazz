@@ -33,7 +33,9 @@ header_out="$here/Sources/jazz_ffiFFI/jazz_ffiFFI.h"
 
 cd "$repo"
 # The static library, and the native libraries it needs on this platform.
-native=$(cargo rustc -q -p jazz-ffi $flag --lib --crate-type staticlib -- --print native-static-libs 2>&1 \
+# Uncolored: with CARGO_TERM_COLOR=always (dtolnay/rust-toolchain sets it) the
+# note ends in an escape code, which turns the last flag into "-lc<ESC>[0m".
+native=$(cargo rustc -q --color never -p jazz-ffi $flag --lib --crate-type staticlib -- --print native-static-libs 2>&1 \
   | sed -n 's/.*native-static-libs: //p' | tail -1)
 
 if [[ "$mode" != lib ]]; then

@@ -100,10 +100,13 @@ const assertUsesBlacksmithRunner = (jobName, jobSource) => {
     "lint",
     "test-rust-workspace",
     "test-storage-compat",
+    "test-durable-object-limits",
     "test-ts",
     "test-react-native",
     "test-go",
+    "test-go-ts-backend",
     "test-crates-package",
+    "test-jazz-ffi-bindings",
   ].includes(jobName)
     ? 16
     : 4;
@@ -187,17 +190,22 @@ const assertSuiteS3ConfigurationBoundary = (source) => {
     "lint",
     "test-rust-workspace",
     "test-storage-compat",
+    "test-durable-object-limits",
     "test-ts",
     "test-go",
+    "test-go-ts-backend",
     "test-crates-package",
+    "test-jazz-ffi-bindings",
   ]) {
     const parsedJob = document.jobs[name];
     assert.equal(parsedJob.env, undefined, `${name} must not configure S3 at job scope`);
     const exportIndex = parsedJob.steps.findIndex(
       (step) => step.name === "Export trusted sccache configuration",
     );
-    const setupIndex = parsedJob.steps.findIndex(
-      (step) => step.uses === "./.github/actions/setup-blacksmith",
+    // test-jazz-ffi-bindings runs on the runner image (swiftc, JDK), where
+    // setup-build starts its job-local sccache instead.
+    const setupIndex = parsedJob.steps.findIndex((step) =>
+      ["./.github/actions/setup-blacksmith", "./.github/actions/setup-build"].includes(step.uses),
     );
     assert.notEqual(exportIndex, -1, `${name} is missing trusted S3 configuration export`);
     assert.ok(exportIndex < setupIndex, `${name} must export S3 configuration before setup`);
@@ -645,13 +653,12 @@ test("Rust tool installation is pinned, allowlisted, and action-download indepen
     /cargo install "\$\{crate\}" --version "\$\{version\}" --locked --root "\$\{install_root\}"/,
   );
   assert.match(installRustToolScript, /if \[\[ "\$\{JAZZ_RUST_TOOL_CACHE_HIT:-\}" == "true" \]\]/);
-  // sccache on Linux: the pinned upstream musl binary, checksum-verified.
+  // sccache on Linux x86_64 and aarch64: the pinned upstream musl binaries.
   for (const sha of [
     "782d2b5dd7ae0a55ebe368ab258114d0928d019ac2d949ab85d5d02f3926709e",
     "3a6a3712b49da3d263bf2d30d702de4302793016019e800bfb81c0c69401d8f8",
   ])
-    assert.match(installRustToolScript, new RegExp(`prebuilt_sha256=${sha}`));
-  assert.match(installRustToolScript, /sha256sum -c -/);
+    assert.match(installRustToolScript, new RegExp(`release_sha256=${sha}`));
   assert.match(installRustToolScript, /"\$\{install_root\}\/bin\/\$\{binary\}" --version/);
   assert.match(
     installRustToolScript,
@@ -791,10 +798,11 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
   assert.match(aggregate, /if: always\(\)/);
   assert.match(
     aggregate,
-    /needs:\s*\[\s*test-rust-workspace,\s*test-storage-compat,\s*test-jazz-ffi-bindings,\s*test-crates-package,\s*test-kotlin,\s*test-kotlin-android,?\s*\]/,
+    /needs:\s*\[\s*test-rust-workspace,\s*test-storage-compat,\s*test-durable-object-limits,\s*test-jazz-ffi-bindings,\s*test-crates-package,\s*test-kotlin,\s*test-kotlin-android,?\s*\]/,
   );
   assert.match(aggregate, /test "\$\{WORKSPACE_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{STORAGE_COMPAT_RESULT\}" = success/);
+  assert.match(aggregate, /test "\$\{DURABLE_OBJECT_LIMITS_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{JAZZ_FFI_BINDINGS_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{CRATES_PACKAGE_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{KOTLIN_RESULT\}" = success/);
@@ -893,9 +901,12 @@ test("shared Rust cache writes are main and merge-group only while trusted PRs r
     "lint",
     "test-rust-workspace",
     "test-storage-compat",
+    "test-durable-object-limits",
     "test-ts",
     "test-go",
+    "test-go-ts-backend",
     "test-crates-package",
+    "test-jazz-ffi-bindings",
   ]) {
     const source = job(name);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN \}\}/);
@@ -910,6 +921,13 @@ test("shared Rust cache writes are main and merge-group only while trusted PRs r
   );
   assert.match(setupBlacksmithAction, /SCCACHE_MULTILEVEL_CHAIN=disk,s3/);
   assert.match(setupBlacksmithAction, /SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0/);
+  // setup-build chains S3 only when its caller passes the trusted condition.
+  assert.match(setupBuildAction, /sccache-s3:[\s\S]*default: "false"/);
+  assert.match(setupBuildAction, /ENABLE_S3: \$\{\{ inputs\.sccache-s3 \}\}/);
+  assert.match(
+    setupBuildAction,
+    /if \[\[ "\$\{ENABLE_S3\}" == "true" \]\]; then[\s\S]*SCCACHE_MULTILEVEL_CHAIN=disk,s3[\s\S]*SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0/,
+  );
 });
 
 test("entry workflow grants credentialed cross-ref caches only to main, merge groups and trusted stacked PRs", () => {
@@ -2107,11 +2125,13 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
   for (const name of [
     "test-rust-workspace",
     "test-storage-compat",
+    "test-durable-object-limits",
     "test-ts",
     "test-react-native",
     "test-jazz-ffi-bindings",
     "test-crates-package",
     "test-go",
+    "test-go-ts-backend",
     "test-kotlin",
     "test-kotlin-android",
   ])
@@ -2130,7 +2150,9 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     [
       "lint",
       "test-crates-package",
+      "test-durable-object-limits",
       "test-go",
+      "test-go-ts-backend",
       "test-jazz-ffi-bindings",
       "test-kotlin",
       "test-kotlin-android",
