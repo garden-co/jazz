@@ -7,9 +7,9 @@ const shaPattern = /^[a-f0-9]{40}$/;
 const previewPath = ".github/workflows/preview-build.yml";
 const releasePreviewPath = ".github/workflows/preview-jazz-tools-alpha-release.yml";
 const publishPath = ".github/workflows/publish-jazz-tools-alpha.yml";
-// release-artifacts.yml dispatched on the Version Packages branch builds that
-// head itself (its pushes to `release` build a predicted tree instead, which
-// is no commit, so they are not accepted here).
+// release-artifacts.yml builds its run's head_sha: on a push to `release`
+// (the release commit release-publish.yml publishes), or dispatched on the
+// Version Packages branch.
 const releaseArtifactsPath = ".github/workflows/release-artifacts.yml";
 
 export function inspectorRunSource(run, repository) {
@@ -32,8 +32,9 @@ export function inspectorRunSource(run, repository) {
       /^changeset-release\/.+/.test(run.head_branch ?? "")) ||
     (run.path === publishPath && releaseEvent && run.head_branch === "release") ||
     (run.path === releaseArtifactsPath &&
-      run.event === "workflow_dispatch" &&
-      /^changeset-release\/.+/.test(run.head_branch ?? ""));
+      ((run.event === "push" && run.head_branch === "release") ||
+        (run.event === "workflow_dispatch" &&
+          /^changeset-release\/.+/.test(run.head_branch ?? ""))));
   if (!approved)
     throw new Error(
       "Inspector artifact run has an unapproved producer workflow, event or source branch",

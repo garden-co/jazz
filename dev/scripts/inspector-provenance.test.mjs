@@ -46,6 +46,7 @@ for (const [path, event, head_branch] of [
   ["publish-jazz-tools-alpha.yml", "push", "release"],
   ["publish-jazz-tools-alpha.yml", "workflow_dispatch", "release"],
   ["release-artifacts.yml", "workflow_dispatch", "changeset-release/release"],
+  ["release-artifacts.yml", "push", "release"],
 ]) {
   test(`accepts approved caller ${path} on ${event}`, () => {
     assert.equal(
@@ -78,8 +79,8 @@ for (const [name, changes] of [
     },
   ],
   [
-    "release artifacts built on a release push (a predicted tree)",
-    { path: ".github/workflows/release-artifacts.yml", event: "push", head_branch: "release" },
+    "release artifacts pushed on another branch",
+    { path: ".github/workflows/release-artifacts.yml", event: "push", head_branch: "main" },
   ],
   [
     "release artifacts dispatched on main",
