@@ -34,7 +34,7 @@ export default defineConfig({
     testTimeout: 30_000,
     // Backend modules imported on their own (not through jazz-tools/backend)
     // need Node's engine, as each Node entry installs it.
-    setupFiles: ["src/backend/node-native.ts"],
+    setupFiles: ["tests/setup/lazy-node-engine.ts"],
     include: ["src/**/*.test.ts", "tests/typed-app/**/*.test.ts", "tests/topology/**/*.test.ts"],
     exclude: ["tests/browser/**", "node_modules/**", "src/**/*.svelte.test.ts", "src/solid/**"],
   },

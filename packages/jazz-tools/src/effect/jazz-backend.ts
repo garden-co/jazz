@@ -11,9 +11,6 @@ import type { Db } from "../runtime/db.js";
 import { JazzError, JazzNoAccount, toJazzError } from "./errors.js";
 import { Jazz, type JazzDb } from "./jazz.js";
 
-// Node's engine, by direct reference (see node-native.ts).
-installNodeEngine();
-
 export interface JazzBackendService {
   /** The app's Jazz (`createJazz`), for what this binding does not wrap: serving `/jazz`, `linkIdentity`. */
   readonly jazz: AppJazz;
@@ -77,6 +74,8 @@ export class JazzBackend extends Context.Service<JazzBackend, JazzBackendService
             // createJazz opens on first use; the layer opens it up front so
             // a store that cannot open fails the layer, not a later request.
             try: async () => {
+              // Node's engine, by direct reference (see node-native.ts).
+              installNodeEngine();
               const jazz = createJazz(options);
               try {
                 await jazz.ready();
