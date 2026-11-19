@@ -103,6 +103,9 @@ const assertUsesBlacksmithRunner = (jobName, jobSource) => {
     "test-durable-object-limits",
     "test-ts",
     "test-react-native",
+    "test-go",
+    "test-crates-package",
+    "test-jazz-ffi-bindings",
   ].includes(jobName)
     ? 16
     : 4;
@@ -188,14 +191,19 @@ const assertSuiteS3ConfigurationBoundary = (source) => {
     "test-storage-compat",
     "test-durable-object-limits",
     "test-ts",
+    "test-go",
+    "test-crates-package",
+    "test-jazz-ffi-bindings",
   ]) {
     const parsedJob = document.jobs[name];
     assert.equal(parsedJob.env, undefined, `${name} must not configure S3 at job scope`);
     const exportIndex = parsedJob.steps.findIndex(
       (step) => step.name === "Export trusted sccache configuration",
     );
-    const setupIndex = parsedJob.steps.findIndex(
-      (step) => step.uses === "./.github/actions/setup-blacksmith",
+    // test-jazz-ffi-bindings runs on the runner image (swiftc, JDK), where
+    // setup-build starts its job-local sccache instead.
+    const setupIndex = parsedJob.steps.findIndex((step) =>
+      ["./.github/actions/setup-blacksmith", "./.github/actions/setup-build"].includes(step.uses),
     );
     assert.notEqual(exportIndex, -1, `${name} is missing trusted S3 configuration export`);
     assert.ok(exportIndex < setupIndex, `${name} must export S3 configuration before setup`);
@@ -250,6 +258,7 @@ const assertEntryCacheTrustBoundary = (source) => {
   assert.deepEqual(
     Object.keys(entryJobs).sort(),
     [
+      "land-group",
       "main-coverage",
       "report-dispatched-test-rust",
       "report-full-suite",
@@ -266,7 +275,27 @@ const assertEntryCacheTrustBoundary = (source) => {
     "report-dispatched-test-rust": dispatchedStatus,
     "report-full-suite": fullSuiteStatus,
     "main-coverage": mainCoverage,
+    "land-group": landGroup,
   } = entryJobs;
+  // Landing a green merge group is the only job holding a merge-capable
+  // credential: the Review Loop's App key, minted only for merge-group pushes
+  // after full-suite was posted, behind an explicit opt-in variable.
+  assert.equal(
+    landGroup.if,
+    "always() && vars.LAND_MERGE_GROUPS == 'true' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/merge-group/') && needs.report-full-suite.result == 'success'",
+  );
+  assert.deepEqual(landGroup.needs, ["report-full-suite"]);
+  assert.deepEqual(landGroup.permissions, { contents: "read" });
+  assert.deepEqual(landGroup.concurrency, {
+    group: "land-${{ github.ref }}",
+    "cancel-in-progress": false,
+  });
+  assert.equal(landGroup.steps[0].with["persist-credentials"], false);
+  assert.deepEqual(
+    [...JSON.stringify(landGroup).matchAll(/secrets\.([A-Z_]+)/g)].map((m) => m[1]),
+    ["LAND_MERGE_GROUPS_APP_PRIVATE_KEY"],
+  );
+  assert.match(landGroup.steps.at(-1).run, /^dev\/ci\/land-group\.sh /);
   assert.deepEqual(
     Object.keys(untrusted).sort(),
     ["if", "permissions", "uses", "with"],
@@ -823,7 +852,7 @@ test("the lint job checks the integration workspace and TypeScript runs its own 
   assert.doesNotMatch(workflowSuite, /^  build-integration:/m);
   assert.match(
     typescript,
-    /name: Run CI-equivalent TypeScript partition\s+run: node dev\/gates\/local-ci-equivalent\.mjs --ci-partition typescript/,
+    /name: Run CI-equivalent TypeScript partition\s+run: node dev\/gates\/local-ci-equivalent\.mjs --ci-partition \$\{\{ matrix\.partition \}\}/,
   );
   assert.match(
     lint,
@@ -866,6 +895,9 @@ test("shared Rust cache writes are main and merge-group only while trusted PRs r
     "test-storage-compat",
     "test-durable-object-limits",
     "test-ts",
+    "test-go",
+    "test-crates-package",
+    "test-jazz-ffi-bindings",
   ]) {
     const source = job(name);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN \}\}/);
@@ -880,6 +912,13 @@ test("shared Rust cache writes are main and merge-group only while trusted PRs r
   );
   assert.match(setupBlacksmithAction, /SCCACHE_MULTILEVEL_CHAIN=disk,s3/);
   assert.match(setupBlacksmithAction, /SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0/);
+  // setup-build chains S3 only when its caller passes the trusted condition.
+  assert.match(setupBuildAction, /sccache-s3:[\s\S]*default: "false"/);
+  assert.match(setupBuildAction, /ENABLE_S3: \$\{\{ inputs\.sccache-s3 \}\}/);
+  assert.match(
+    setupBuildAction,
+    /if \[\[ "\$\{ENABLE_S3\}" == "true" \]\]; then[\s\S]*SCCACHE_MULTILEVEL_CHAIN=disk,s3[\s\S]*SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0/,
+  );
 });
 
 test("entry workflow grants credentialed cross-ref caches only to main, merge groups and trusted stacked PRs", () => {
@@ -1544,7 +1583,7 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   const typescript = job("test-ts");
   const runner = fs.readFileSync(path.join(root, "dev/gates/run-ts-tests.sh"), "utf8");
   const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
-  assert.match(typescript, /local-ci-equivalent\.mjs --ci-partition typescript/);
+  assert.match(typescript, /local-ci-equivalent\.mjs --ci-partition \$\{\{ matrix\.partition \}\}/);
   assert.match(
     localCi,
     /native correctness-artifact producer[\s\S]*ensure-correctness-artifacts\.mjs/,

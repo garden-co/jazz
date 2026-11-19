@@ -139,8 +139,15 @@ const mocks = vi.hoisted(() => {
   };
 });
 
-vi.mock("jazz-napi", () => ({
-  NapiDb: mocks.MockNapiDb,
+vi.mock("./backend-native.js", () => ({
+  backendNative: () => ({
+    host: "node",
+    Db: mocks.MockNapiDb,
+    captureTextAnchor: () => undefined,
+    captureTextRange: () => undefined,
+    resolveTextAnchor: () => undefined,
+    resolveTextRange: () => undefined,
+  }),
 }));
 
 vi.mock("../runtime/native-runtime/native-runtime-adapter.js", () => ({

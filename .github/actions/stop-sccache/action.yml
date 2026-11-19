@@ -1,0 +1,14 @@
+name: Stop job-local sccache at job end
+description: |
+  Internal to setup-build. A JavaScript action only for its post step: it
+  stops the job-local sccache daemon before the Blacksmith sticky disk's own
+  post step unmounts and commits the cache. A running daemon keeps files open
+  on the mount, so the unmount fails ("Failed to cleanup and commit sticky
+  disk") and the next job starts from the previous committed cache, or none.
+  Post steps run in reverse order, so setup-build must use this after the
+  sticky disk mount.
+
+runs:
+  using: node24
+  main: main.mjs
+  post: post.mjs

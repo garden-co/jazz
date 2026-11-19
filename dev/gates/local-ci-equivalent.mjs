@@ -43,7 +43,14 @@ export const ciPartitionJobs = Object.freeze({
   "rust-differential": "test-storage-compat",
   "storage-compat": "test-storage-compat",
   "durable-object-limits": "test-durable-object-limits",
-  typescript: "test-ts",
+  // One test-ts matrix job per TypeScript shard (see typescriptPartitions).
+  "typescript-tools-node-1": "test-ts",
+  "typescript-tools-node-2": "test-ts",
+  "typescript-tools-other": "test-ts",
+  "typescript-browser-1": "test-ts",
+  "typescript-browser-2": "test-ts",
+  "typescript-packages": "test-ts",
+  "typescript-examples": "test-ts",
   "next-trace-decide": "test-next-trace",
   "next-trace": "test-next-trace",
   "react-native": "test-react-native",
@@ -97,6 +104,101 @@ timeout 60s env \
   JAZZ_DIFFERENTIAL_STEP_COUNT=60 \
   "$test_binary" maintained_one_shot_differential_oracle --exact --ignored`,
 ]);
+
+// The TypeScript suites run as shards of run-ts-tests.sh, one CI job each, so
+// the longest one (not their sum) sets test-ts's wall time. Every shard
+// produces (or reuses) the sealed native pair and admits it the same way; the
+// shards' suites together are exactly run-ts-tests.sh's `all`
+// (dev/gates/test/ts-shards.test.mjs).
+const typescriptConsumers = (shard) =>
+  command("TypeScript consumers", "pnpm", ["test:typescript-consumers", "--shard", shard], {
+    // The consumer runner intentionally supports command overrides for its
+    // own harness tests. A CI-equivalent invocation must not inherit one.
+    env: { JAZZ_REQUIRE_CI_TEST_COMMANDS: "1" },
+  });
+const typescriptPrelude = Object.freeze([
+  command("native correctness-artifact producer", "node", [
+    "dev/gates/ensure-correctness-artifacts.mjs",
+  ]),
+  command("preinstalled Chromium", "pnpm", [
+    "exec",
+    "playwright",
+    "install",
+    "--dry-run",
+    "chromium",
+  ]),
+]);
+export const TYPESCRIPT_SHARDS = Object.freeze([
+  "tools-node-1",
+  "tools-node-2",
+  "tools-other",
+  "browser-1",
+  "browser-2",
+  "packages",
+]);
+const typescriptPartitions = Object.freeze({
+  ...Object.fromEntries(
+    TYPESCRIPT_SHARDS.map((shard) => [
+      `typescript-${shard}`,
+      Object.freeze([...typescriptPrelude, typescriptConsumers(shard)]),
+    ]),
+  ),
+  // The examples shard runs no suite of its own; it admits the prepared
+  // surface, then runs these against it.
+  "typescript-examples": Object.freeze([
+    ...typescriptPrelude,
+    typescriptConsumers("examples"),
+    // An exact, named historical-storage receipt rather than an incidental
+    // member of the broad browser suite: a green TypeScript partition must mean
+    // current code handled the pinned real-browser corpora as designed (opens
+    // and appends to the current linear-history corpus, refuses pre-linear
+    // roots with a typed error).
+    command("browser storage compatibility corpus", "pnpm", [
+      "--dir",
+      "packages/jazz-tools",
+      "test:browser:focused",
+      "--",
+      "tests/browser/indexeddb-jazz-compat.test.ts",
+    ]),
+    // Vitest strips types without checking them, so without this step an
+    // example can break against a jazz-tools API change while its tests pass.
+    // It runs last, against the jazz-tools build the consumers produced.
+    command("example typecheck", "pnpm", [
+      "--recursive",
+      "--no-bail",
+      "--workspace-concurrency=4",
+      "--filter",
+      "./examples/**",
+      "run",
+      "typecheck",
+    ]),
+    // A stale or missing jazz.generated.ts otherwise shows only when a backend
+    // starts: `jazz-tools generate --check` in every example app, with the
+    // CLI and the sealed jazz-napi this partition built.
+    command("example bindings", "node", [
+      "dev/gates/run-correctness-consumer.mjs",
+      "--",
+      "node",
+      "dev/gates/example-bindings.mjs",
+    ]),
+    // A Durable Object host runs jazz-server's engine on wasm32, without
+    // its native host; this partition's toolchain builds wasm32.
+    command("jazz-server's engine for wasm32", "cargo", [
+      "check",
+      "-p",
+      "jazz-server",
+      "--no-default-features",
+      "--lib",
+      "--target",
+      "wasm32-unknown-unknown",
+    ]),
+  ]),
+});
+
+/** Local names for several partitions run in order (not used by CI). */
+export const ciPartitionGroups = Object.freeze({
+  typescript: Object.freeze(Object.keys(typescriptPartitions)),
+});
 
 /**
  * CI partitions are the source of truth for both CI and `--ci-equivalent`.
@@ -246,67 +348,7 @@ export const ciPartitions = Object.freeze({
     ]),
   ]),
   "rust-differential": Object.freeze([differentialCommand]),
-  typescript: Object.freeze([
-    command("native correctness-artifact producer", "node", [
-      "dev/gates/ensure-correctness-artifacts.mjs",
-    ]),
-    command("preinstalled Chromium", "pnpm", [
-      "exec",
-      "playwright",
-      "install",
-      "--dry-run",
-      "chromium",
-    ]),
-    command("TypeScript consumers", "pnpm", ["test:typescript-consumers"], {
-      // The consumer runner intentionally supports command overrides for its
-      // own harness tests. A CI-equivalent invocation must not inherit one.
-      env: { JAZZ_REQUIRE_CI_TEST_COMMANDS: "1" },
-    }),
-    // An exact, named historical-storage receipt rather than an incidental
-    // member of the broad browser suite: a green TypeScript partition must mean
-    // current code handled the pinned real-browser corpora as designed (opens
-    // and appends to the current linear-history corpus, refuses pre-linear
-    // roots with a typed error).
-    command("browser storage compatibility corpus", "pnpm", [
-      "--dir",
-      "packages/jazz-tools",
-      "test:browser:focused",
-      "--",
-      "tests/browser/indexeddb-jazz-compat.test.ts",
-    ]),
-    // Vitest strips types without checking them, so without this step an
-    // example can break against a jazz-tools API change while its tests pass.
-    // It runs last, against the jazz-tools build the consumers produced.
-    command("example typecheck", "pnpm", [
-      "--recursive",
-      "--no-bail",
-      "--workspace-concurrency=4",
-      "--filter",
-      "./examples/**",
-      "run",
-      "typecheck",
-    ]),
-    // A stale or missing jazz.generated.ts otherwise shows only when a backend
-    // starts: `jazz-tools generate --check` in every example app, with the
-    // CLI and the sealed jazz-napi this partition built.
-    command("example bindings", "node", [
-      "dev/gates/run-correctness-consumer.mjs",
-      "--",
-      "node",
-      "dev/gates/example-bindings.mjs",
-    ]),
-    // A Durable Object host runs jazz-server's engine on wasm32, without
-    // its native host; this partition's toolchain builds wasm32.
-    command("jazz-server's engine for wasm32", "cargo", [
-      "check",
-      "-p",
-      "jazz-server",
-      "--no-default-features",
-      "--lib",
-      "--target",
-      "wasm32-unknown-unknown",
-    ]),
-  ]),
+  ...typescriptPartitions,
   // Whether a ready PR runs the Next.js trace test (B65-1): it touches how a
   // backend reaches jazz-napi. Writes `run=true|false` to $GITHUB_OUTPUT for
   // the test-next-trace job's later steps; outside a PR it always says run.
@@ -477,6 +519,8 @@ export const focusedCommands = Object.freeze([
 
 export function planFor({ mode, partition } = {}) {
   if (partition !== undefined) {
+    if (Object.hasOwn(ciPartitionGroups, partition))
+      return Object.freeze(ciPartitionGroups[partition].flatMap((name) => ciPartitions[name]));
     const commands = ciPartitions[partition];
     if (!commands) throw new Error(`unknown CI partition: ${partition}`);
     return commands;
@@ -606,7 +650,8 @@ function usage() {
 
 Default: --focused (NOT CI-equivalent; targeted iteration only).
 --ci-equivalent: all exact command partitions invoked by CI, serialized locally.
---ci-partition: one named CI partition for .github/workflows/ci-suite.yml.`);
+--ci-partition: one named CI partition for .github/workflows/ci-suite.yml,
+  or "typescript" for every typescript-* partition in order.`);
 }
 
 async function main(argv) {
@@ -630,6 +675,8 @@ async function main(argv) {
     if (mode === "ci-equivalent") {
       assertFullWorkspaceCoverage(commands);
       assertArtifactBoundary(commands);
+      for (const name of ciPartitionGroups.typescript)
+        assertArtifactBoundary(planFor({ partition: name }));
       assertReactNativeBridgeBoundary(commands);
       console.log("local-ci: CI-equivalent mode; running every CI command partition serially.");
     }
