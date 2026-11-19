@@ -8,9 +8,12 @@ import { manifestMismatch, runCommitMismatch } from "./require-run-commit.mjs";
 
 const root = path.resolve(import.meta.dirname, "../..");
 const sha = "a".repeat(40);
+const repo = "garden-co/jazz";
 const run = (extra = {}) => ({
   id: 7,
   head_sha: sha,
+  event: "push",
+  head_repository: { full_name: repo },
   path: ".github/workflows/release-artifacts.yml",
   ...extra,
 });
@@ -37,6 +40,26 @@ test("another commit's run, or another workflow's, is refused", () => {
     /is a ci\.yml run/,
   );
   assert.match(runCommitMismatch(undefined, { expectedSha: sha, workflows }), /no such run/);
+});
+
+test("a pull_request run, or another repository's, never stands for a commit", () => {
+  for (const event of ["pull_request", "pull_request_target"])
+    assert.match(
+      runCommitMismatch(run({ event }), { expectedSha: sha, workflows, repo }),
+      new RegExp(`is a ${event} run`),
+    );
+  assert.match(
+    runCommitMismatch(run({ head_repository: { full_name: "someone/fork" } }), {
+      expectedSha: sha,
+      workflows,
+      repo,
+    }),
+    /built someone\/fork, not garden-co\/jazz/,
+  );
+  assert.equal(
+    runCommitMismatch(run({ event: "workflow_dispatch" }), { expectedSha: sha, workflows, repo }),
+    undefined,
+  );
 });
 
 test("a release manifest must name the same commit and run", () => {
@@ -74,4 +97,6 @@ test("a called publish dry run checks the artifacts run it was given", () => {
   ).with.script;
   assert.match(script, /getWorkflowRun/);
   assert.match(script, /head_sha !== sha/);
+  assert.match(script, /startsWith\("pull_request"\)/);
+  assert.match(script, /head_repository/);
 });
