@@ -100,6 +100,8 @@ runs:
       with:
         node-version-file: .nvmrc
         cache: ${{ inputs.restore-caches == 'true' && 'pnpm' || '' }}
+        # setup-node v5+ caches the packageManager's store without `cache:`.
+        package-manager-cache: ${{ inputs.restore-caches == 'true' }}
         cache-dependency-path: |
           pnpm-lock.yaml
           .github-cache-scope

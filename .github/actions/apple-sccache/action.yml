@@ -103,9 +103,12 @@ runs:
         case "${EVENT}:${REF}" in
           push:refs/heads/main|workflow_dispatch:refs/heads/main)
             role="${WRITER}" ;;
-          # The release refs write if the writer role trusts them, else read
-          # main's entries (enough for a warm Version Packages build).
-          push:refs/heads/release|workflow_dispatch:refs/heads/release|push:refs/heads/changeset-release/*|workflow_dispatch:refs/heads/changeset-release/*)
+          # release writes if the writer role trusts it, else reads main's
+          # entries. Not changeset-release/*: neither role trusts that ref
+          # (#supply-chain: don't widen the reader to an unprotected branch
+          # name), so a Version Packages build gets no S3 tier and, with the
+          # Actions-cache fallback closed to untrusted refs, builds cold.
+          push:refs/heads/release|workflow_dispatch:refs/heads/release)
             role="${WRITER}" then_role="${READER}" ;;
           pull_request:*)
             [[ "${TRUSTED_PR}" != true ]] || role="${READER}" ;;
