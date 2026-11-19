@@ -2377,6 +2377,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-e2ee-client"
+version = "2.0.0-alpha.67"
+dependencies = [
+ "futures",
+ "getrandom 0.2.17",
+ "jazz-core",
+ "jazz-e2ee",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "jazz-example-band-book-benchmark"
 version = "0.1.0"
 dependencies = [
