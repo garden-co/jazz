@@ -69,28 +69,26 @@ impl ForegroundEncryption {
         })
     }
 
-    pub fn build(
+    pub async fn build(
         self,
         account: String,
         device_account_secret: Option<String>,
         store: Rc<JsStore>,
-    ) -> impl std::future::Future<Output = Result<Built, String>> + 'static {
-        async move {
-            let built = host::build_native(
-                host::Options {
-                    app_file: self.bindings.to_vec(),
-                    from_bindings: true,
-                    device_account_secret,
-                    app_id: self.declarations.app_id.uuid().to_string(),
-                    environment: self.declarations.environment.clone(),
-                },
-                account,
-                Rc::clone(&store),
-                Some(&self.declarations),
-            )
-            .await?;
-            Ok(Built { built, store })
-        }
+    ) -> Result<Built, String> {
+        let built = host::build_native(
+            host::Options {
+                app_file: self.bindings.to_vec(),
+                from_bindings: true,
+                device_account_secret,
+                app_id: self.declarations.app_id.uuid().to_string(),
+                environment: self.declarations.environment.clone(),
+            },
+            account,
+            Rc::clone(&store),
+            Some(&self.declarations),
+        )
+        .await?;
+        Ok(Built { built, store })
     }
 }
 
