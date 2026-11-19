@@ -295,13 +295,13 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.sha || inputs.ref || format('v{0}', inputs.version) }}
           persist-credentials: false
 
-      # No sccache: it never hits a fat-LTO build. rust-cache restores the
-      # dependencies.
+      # No build cache: release builds must not read one pull_request runs
+      # could write (and sccache never hits a fat-LTO build anyway).
       - uses: ./.github/actions/setup-build
         with:
           setup-node: "false"
+          rust-cache: "false"
           rust-targets: ${{ matrix.target }}
-          rust-cache-key: kotlin-android-jni-${{ matrix.abi }}
 
       - name: Build
         env:
