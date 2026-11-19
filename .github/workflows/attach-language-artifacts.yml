@@ -48,6 +48,11 @@ on:
         required: false
         type: boolean
         default: true
+      maven:
+        description: "Also build the Maven Central bundle (jazz-kotlin-maven), signed with a throwaway key."
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       version:
@@ -311,6 +316,55 @@ jobs:
           path: kotlin-dist/*
           # `error` once dev/scripts/build-kotlin-dist.sh is on main.
           if-no-files-found: warn
+
+  # The Maven Central bundle: the tools/jazz tree of a local Maven repository,
+  # from the same natives as the jar above, signed with a throwaway key
+  # (publish re-signs it). Beside the kotlin job, not after it.
+  maven:
+    name: Build the Maven repository
+    needs: build
+    if: inputs.maven
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.sha || inputs.ref || format('v{0}', inputs.version) }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-build
+        with:
+          setup-node: "false"
+          rust-cache: "false"
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: natives-*
+          merge-multiple: true
+          path: natives
+
+      - name: Throwaway signing key
+        run: |
+          set -euo pipefail
+          GNUPGHOME="$(mktemp -d)"
+          export GNUPGHOME
+          gpg --batch --pinentry-mode loopback --passphrase dry-run \
+            --quick-gen-key "Jazz dry run <dry-run@example.invalid>" rsa4096 sign 1d
+          {
+            echo "ORG_GRADLE_PROJECT_signingInMemoryKey<<EOF_KEY"
+            gpg --batch --pinentry-mode loopback --passphrase dry-run --armor --export-secret-keys
+            echo "EOF_KEY"
+            echo "ORG_GRADLE_PROJECT_signingInMemoryKeyPassword=dry-run"
+          } >> "${GITHUB_ENV}"
+
+      - name: Build, sign, check
+        run: bash dev/scripts/publish-kotlin.sh natives local
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-kotlin-maven
+          path: ~/.m2/repository/tools/jazz
+          if-no-files-found: error
 
   # Read-only: packs the assets reproducibly and checksums them, for the
   # attach job (a real run) or as the dry run's result.

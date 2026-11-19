@@ -124,6 +124,7 @@ jobs:
       version: ${{ needs.resolve.outputs.version }}
       ref: ${{ needs.resolve.outputs.sha }}
       dry-run: true
+      maven: true
 
   swift:
     name: Swift
@@ -305,58 +306,11 @@ jobs:
           path: ${{ runner.temp }}/npm/*
           if-no-files-found: error
 
-  # The Maven Central bundle, built and signed locally with a throwaway key,
-  # from the natives the Kotlin jar in release-languages bundles.
-  maven:
-    name: Maven repository
-    needs: [resolve, languages]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ needs.resolve.outputs.sha }}
-          persist-credentials: false
-
-      - uses: ./.github/actions/setup-build
-        with:
-          setup-node: "false"
-          rust-cache: "false"
-
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          pattern: natives-*
-          merge-multiple: true
-          path: natives
-
-      - name: Throwaway signing key
-        run: |
-          set -euo pipefail
-          GNUPGHOME="$(mktemp -d)"
-          export GNUPGHOME
-          gpg --batch --pinentry-mode loopback --passphrase dry-run \
-            --quick-gen-key "Jazz dry run <dry-run@example.invalid>" rsa4096 sign 1d
-          {
-            echo "ORG_GRADLE_PROJECT_signingInMemoryKey<<EOF_KEY"
-            gpg --batch --pinentry-mode loopback --passphrase dry-run --armor --export-secret-keys
-            echo "EOF_KEY"
-            echo "ORG_GRADLE_PROJECT_signingInMemoryKeyPassword=dry-run"
-          } >> "${GITHUB_ENV}"
-
-      - name: Build, sign, check
-        run: bash dev/scripts/publish-kotlin.sh natives local
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: release-maven
-          path: ~/.m2/repository/tools/jazz
-          if-no-files-found: error
-
   # Collects the release-* artifacts, writes manifest.json and, for release
   # runs, attests every file's build provenance.
   manifest:
     name: Manifest
-    needs: [resolve, packages, languages, swift, server, npm, maven]
+    needs: [resolve, packages, languages, swift, server, npm]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -393,7 +347,7 @@ jobs:
           path: out/release-npm
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          name: release-maven
+          name: jazz-kotlin-maven
           path: out/release-maven
 
       - name: Check and write manifest.json
@@ -451,6 +405,12 @@ jobs:
         with:
           name: release-languages
           path: out/release-languages/*
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-maven
+          path: out/release-maven
           if-no-files-found: error
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
