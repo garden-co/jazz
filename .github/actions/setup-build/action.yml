@@ -187,3 +187,10 @@ runs:
           echo "SCCACHE_SERVER_UDS=${sccache_socket}" >> "${GITHUB_ENV}"
           echo "SCCACHE_CACHE_SIZE=${SCCACHE_CACHE_SIZE:-8G}" >> "${GITHUB_ENV}"
         fi
+
+    # After the sticky disk mount, so its post step (which stops the daemon)
+    # runs before the sticky disk's post step unmounts and commits the cache.
+    # Provisioned runners share a host-owned daemon: never stop it.
+    - name: Stop sccache at job end
+      if: inputs.sccache == 'true' && inputs.sccache-sticky-disk == 'true' && runner.os == 'Linux' && steps.provisioned-tools.outputs.active != 'true'
+      uses: ./.github/actions/stop-sccache

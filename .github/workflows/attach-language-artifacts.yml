@@ -104,7 +104,8 @@ jobs:
             static: libjazz_ffi.a
             shared: libjazz_ffi.dylib
             jna: darwin-x86-64
-          - os: blacksmith-2vcpu-windows-2025
+          # 8 vCPUs: 8 min on 2 vCPUs, about 1.5 min warm here.
+          - os: blacksmith-8vcpu-windows-2025
             platform: windows-x86_64
             target: x86_64-pc-windows-msvc
             static: jazz_ffi.lib
