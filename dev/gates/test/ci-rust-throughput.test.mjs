@@ -815,7 +815,7 @@ test("the lint job checks the integration workspace and TypeScript runs its own 
   assert.doesNotMatch(workflowSuite, /^  build-integration:/m);
   assert.match(
     typescript,
-    /name: Run CI-equivalent TypeScript partition\s+run: node dev\/gates\/local-ci-equivalent\.mjs --ci-partition typescript/,
+    /name: Run CI-equivalent TypeScript partition\s+run: node dev\/gates\/local-ci-equivalent\.mjs --ci-partition \$\{\{ matrix\.partition \}\}/,
   );
   assert.match(
     lint,
@@ -1530,7 +1530,7 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   const typescript = job("test-ts");
   const runner = fs.readFileSync(path.join(root, "dev/gates/run-ts-tests.sh"), "utf8");
   const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
-  assert.match(typescript, /local-ci-equivalent\.mjs --ci-partition typescript/);
+  assert.match(typescript, /local-ci-equivalent\.mjs --ci-partition \$\{\{ matrix\.partition \}\}/);
   assert.match(
     localCi,
     /native correctness-artifact producer[\s\S]*ensure-correctness-artifacts\.mjs/,
