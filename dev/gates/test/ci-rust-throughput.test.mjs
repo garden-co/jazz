@@ -2323,3 +2323,30 @@ test("main pushes skip the full suite only for trees a green merge group tested"
     fs.rmSync(bin, { recursive: true, force: true });
   }
 });
+
+test("the native build cache is restored before setup-blacksmith installs dependencies", () => {
+  // Its key hashes Rust sources with recursive globs. After pnpm install (and
+  // rust-cache's target restore) the container-created trees make the
+  // runner's hashFiles fail, which fails the step and the job.
+  const suite = parse(workflowSuite);
+  const jobs = Object.entries(suite.jobs).filter(([, job]) =>
+    (job.steps ?? []).some(
+      ({ with: inputs }) => inputs?.path === "node_modules/.cache/jazz-native-builds",
+    ),
+  );
+  assert.deepEqual(jobs.map(([name]) => name).sort(), [
+    "test-go-ts-backend",
+    "test-ts",
+    "warm-native-builds",
+  ]);
+  for (const [name, job] of jobs) {
+    const cache = job.steps.findIndex(
+      ({ with: inputs }) => inputs?.path === "node_modules/.cache/jazz-native-builds",
+    );
+    const setup = job.steps.findIndex(({ uses }) => uses === "./.github/actions/setup-blacksmith");
+    assert.ok(
+      cache !== -1 && setup !== -1 && cache < setup,
+      `${name} restores the cache after setup`,
+    );
+  }
+});
