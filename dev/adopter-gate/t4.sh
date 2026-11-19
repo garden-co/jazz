@@ -9,4 +9,7 @@ body() {
     | grep -E "^(PASS|FAIL|FINDING|SEEDED|smoke run 1 failed)" \
     | sed 's/^FINDING/REVIEW t4 finding:/; s/^SEEDED/REVIEW t4 first run: seeded/; s/^smoke run 1 failed; retrying once/REVIEW t4 smoke run 1 failed, retried once (known flake jazz#5553; remove the retry once it is fixed)/'
 }
-ag_job t4 body
+ag_job t4 body; rc=$?
+# On failure, show the step logs run-t4.sh keeps in $T4_WORK (they're also uploaded as the t4-logs artifact).
+if [ $rc -ne 0 ]; then for f in "${T4_WORK:-${RUNNER_TEMP:-/tmp}/t4-work}"/*.log; do [ -f "$f" ] && { echo "--- tail $f"; tail -25 "$f"; }; done; fi
+exit $rc
