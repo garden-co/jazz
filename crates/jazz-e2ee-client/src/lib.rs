@@ -17,7 +17,15 @@
 //!   held key permits the write; nothing else is checked on the content
 //!   path.
 //!
-//! Key acquisition, space creation, deliveries and rotation build on this.
+//! - Spaces: [`E2eeClient::acquire`] reads a space's rows at one cut and
+//!   keeps the keys they give; [`E2eeClient::write`] and
+//!   [`E2eeClient::read`] wrap a call so that a key the hooks lack is
+//!   acquired, or a space's root prepared and staged with the write, and
+//!   reports settle to `key-pending`, `key-unavailable` or `space-pending`
+//!   ([`E2eeClient::on_report`]); [`E2eeClient::create_space`] and
+//!   [`E2eeClient::reconcile`] create a space and settle creations by their
+//!   root's fate; [`E2eeClient::watch_spaces`] and
+//!   [`E2eeClient::sync_spaces`] acquire when watched rows change.
 //!
 //! The application's mechanism selection and allow-list come from its
 //! `encryption.mechanisms` settings (see [`ClientConfig`]): readers route
@@ -28,6 +36,7 @@ mod client;
 mod error;
 mod hooks;
 mod mechanisms;
+mod spaces;
 mod state;
 pub mod store;
 mod values;
@@ -35,6 +44,7 @@ mod values;
 pub use account::{AccountStatus, AccountWatch, OwnAccount};
 pub use client::{ClientConfig, E2eeClient};
 pub use error::ClientError;
+pub use spaces::{SpaceCreation, SpaceKeyState, SpaceWatch};
 pub use state::{MAX_REPORTS, Report};
 pub use store::{MemoryStore, PrivateStore, StoreError, Stored};
 pub use values::CELL_TYPE_ENCODING;
