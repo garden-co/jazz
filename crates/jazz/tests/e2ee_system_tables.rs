@@ -2661,6 +2661,54 @@ fn a_later_version_carries_the_system_tables_its_predecessor_has() {
     );
 }
 
+/// An app deployer must supply ancestor declarations so the server can
+/// derive policies for the system tables retained by the target.
+#[test]
+fn inherited_system_tables_need_ancestor_declarations() {
+    let ancestor = structural_of(with_e2ee_fragment(&app()));
+    let mut target = ancestor.clone();
+    let notes = TableSchemaBuilder::new("notes")
+        .column("body", ColumnType::Text)
+        .build();
+    target.insert(TableName::from("notes"), notes.clone());
+    let ancestor_hash = SchemaHash::compute(&ancestor);
+    let target_hash = SchemaHash::compute(&target);
+    let Err(error) = prepare_encrypted_deployment(
+        &DeploymentCatalogue {
+            schemas: vec![ancestor, target],
+            migrations: vec![jazz::tools::Lens::new(
+                ancestor_hash,
+                target_hash,
+                jazz::tools::LensTransform {
+                    ops: vec![jazz::tools::LensOp::AddTable {
+                        table: "notes".to_owned(),
+                        schema: notes,
+                    }],
+                    draft_ops: Vec::new(),
+                },
+            )],
+            ..Default::default()
+        },
+        DeploymentRequest {
+            target_schema_hash: target_hash,
+            schemas: Vec::new(),
+            migrations: Vec::new(),
+            permissions: app_permissions(),
+            allow_dropping_history: false,
+        },
+        &DeclaredEncryption::default(),
+    ) else {
+        panic!("the deploy supplied no declarations for the inherited system tables");
+    };
+    assert!(
+        matches!(error, DeploymentError::InvalidSchema { .. })
+            && error
+                .to_string()
+                .contains("send the ancestor's encryption declarations"),
+        "{error}"
+    );
+}
+
 /// An app whose later version declares no encryption keeps the system tables
 /// under their own stored names, so the system rows written under the first
 /// version stay readable.
@@ -2829,6 +2877,63 @@ fn a_new_version_without_the_system_tables_is_refused_against_the_stored_catalog
         assert!(
             error.to_string().contains("every later version does"),
             "{error}"
+        );
+    }
+}
+
+/// Once Alice has deployed a version with the system tables, she can
+/// redeploy that stored version, but she cannot target the stored version
+/// from before encryption, even when she allows dropping history.
+#[test]
+fn a_deploy_cannot_target_a_stored_version_from_before_encryption() {
+    use jazz::tools::{Lens, LensTransform};
+    let plain = structural_of(app());
+    let fragment = structural_of(with_e2ee_fragment(&app()));
+    let (v0, v1) = (SchemaHash::compute(&plain), SchemaHash::compute(&fragment));
+    let lens = Lens::new(
+        v0,
+        v1,
+        LensTransform {
+            ops: fragment_ops(&fragment, true),
+            draft_ops: Vec::new(),
+        },
+    );
+    let stored = DeploymentCatalogue {
+        schemas: vec![plain, fragment],
+        migrations: vec![lens],
+        admitted_schema_hashes: vec![v0, v1],
+    };
+    let declared = DeclaredEncryption {
+        versions: BTreeMap::from([(v1.to_string(), entries())]),
+        ..Default::default()
+    };
+    let deploy = |target_schema_hash, allow_dropping_history| {
+        prepare_encrypted_deployment(
+            &stored,
+            DeploymentRequest {
+                target_schema_hash,
+                schemas: Vec::new(),
+                migrations: Vec::new(),
+                permissions: app_permissions(),
+                allow_dropping_history,
+            },
+            &declared,
+        )
+    };
+
+    for allow_dropping_history in [false, true] {
+        let error = deploy(v0, allow_dropping_history)
+            .expect_err("the stored version from before encryption cannot be the target");
+        assert!(
+            matches!(&error, DeploymentError::InvalidSchema { schema, reason }
+                if *schema == v0 && reason.contains("cannot roll back")),
+            "{error}"
+        );
+        let (prepared, _) = deploy(v1, allow_dropping_history)
+            .expect("a stored version with the system tables can be the target");
+        assert_eq!(
+            SchemaHash::compute(prepared.active_schema().public_schema()),
+            v1
         );
     }
 }

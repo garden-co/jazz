@@ -1192,7 +1192,12 @@ pub fn reaches_system_table(expr: &PolicyExpr) -> Option<String> {
 
 /// The name and version of the stored form of one schema version's
 /// declarations: this line, a newline, then the entries as canonical JSON
-/// (keys sorted at every level, no whitespace).
+/// (keys sorted at every level, no whitespace). The empty object records
+/// a deployment without declarations. Nonempty v1 records read as before,
+/// and a version deployed before empty records were written can still be
+/// identified in the catalogue. Older hosts decode the empty record and
+/// require declarations on redeploy because they treat every record as
+/// nonempty.
 pub const STORED_DECLARATIONS_V1: &str = "jazz-e2ee-declarations-v1";
 
 /// One schema version's entries in their stored form
@@ -1237,10 +1242,16 @@ pub fn check_redeclaration(
     };
     check_transition((schema, Some(stored)), (schema, Some(given)), &same_version).map_err(
         |reason| {
-            format!(
-                "this schema version was deployed with other encryption declarations, and \
-                 its cells are sealed under them: {reason}"
-            )
+            if stored.is_empty() {
+                format!(
+                    "this schema version was deployed without encryption declarations: {reason}"
+                )
+            } else {
+                format!(
+                    "this schema version was deployed with other encryption declarations, and \
+                     its cells are sealed under them: {reason}"
+                )
+            }
         },
     )
 }
