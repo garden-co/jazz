@@ -36,6 +36,7 @@ use super::super::signing;
 use super::key::AccountKey;
 use super::ledger::{PrivateAccountLedger, PublicAccountLedger};
 use super::replay::AccountState;
+use super::sealing::SealingKeys;
 
 const Z32: [u8; 32] = [0; 32];
 
@@ -489,14 +490,11 @@ fn sealing_key_record(
     Ok(record)
 }
 
-/// A later publication of the current epoch's sealing key record for the
-/// selected mechanism (§2.12, stage `account-key`), by an active device
-/// holding the current account key: the case of a mechanism migration,
-/// since the epoch's creation wrote the record of the mechanism selected
-/// then. It is for a selected mechanism the current epoch has no valid
-/// record of; the caller decides that, as replay does not yet judge
-/// sealing key records.
-pub fn account_sealing_key(
+/// A sealing key record of the current epoch for the selected mechanism,
+/// signed by an active device holding the current account key. It does
+/// not look at the records already published; only
+/// [`later_account_sealing_key`] calls it, after checking them.
+fn account_sealing_key(
     writer: &AccountWriter<'_>,
     state: &AccountState,
     signer: &LocalDevice,
@@ -508,6 +506,38 @@ pub fn account_sealing_key(
     }
     let key = current_key(state, account_key)?;
     sealing_key_record(writer, signer, state.epoch_id(), key, rng)
+}
+
+/// A later publication of the current epoch's sealing key record for the
+/// selected mechanism (§2.12, stage `account-key`), by an active device
+/// holding the current account key: the case of a mechanism migration,
+/// since the epoch's creation wrote the record of the mechanism selected
+/// then. `sealing` are the valid records of the same read as `state`
+/// ([`super::AccountReplay::sealing_keys`]). When the current epoch
+/// already has a valid record of the selected mechanism, nothing is
+/// written: `Ok(None)`.
+pub fn later_account_sealing_key(
+    writer: &AccountWriter<'_>,
+    sealing: &SealingKeys,
+    state: &AccountState,
+    signer: &LocalDevice,
+    account_key: &AccountKey,
+    rng: &mut dyn RandomSource,
+) -> ProtocolResult<Option<AccountSealingKey>> {
+    if sealing.account_id() != writer.account_id
+        || state.account_id != writer.account_id
+        || sealing.generation() != state.generation
+        || sealing.current_epoch_id() != state.epoch_id()
+    {
+        return Err(ProtocolError::InconsistentEvidence);
+    }
+    if !state.is_active(&signer.id) {
+        return refuse(RefusalCode::DeviceNotActive);
+    }
+    if sealing.current(writer.suite.key_seal.mechanism()).is_some() {
+        return Ok(None);
+    }
+    account_sealing_key(writer, state, signer, account_key, rng).map(Some)
 }
 
 /// A challenge and the secret it seals, kept only in memory and never

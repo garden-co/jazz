@@ -1,7 +1,7 @@
 //! The E2EE protocol's pure foundations (`crates/jazz/SPEC/E2EE_PROTOCOL.md`):
 //! typed rows of the internal tables, their canonical encodings, signed
 //! bytes and contexts, recovery and account sealing key derivations, and
-//! account replay. Nothing here does I/O: callers pass the rows of one
+//! account and space replay. Nothing here does I/O: callers pass the rows of one
 //! ledger read, with their positions.
 //!
 //! - [`domain`]: application domains.
@@ -19,8 +19,10 @@
 //! - [`signing`]: signing and verification over the [`crate::agility::Signer`]
 //!   role, keeping provider failures distinct from invalid signatures.
 //! - [`account`]: account and device lifecycle (§2): record builders, public
-//!   replay, state as of a position, private verification and account key
-//!   authentication.
+//!   replay, state as of a position, private verification, account key
+//!   authentication and account sealing key validity.
+//! - [`space`]: spaces (§3): the space's root, its chain, key acquisition,
+//!   who lacks a version, the needs-rotation mark and record builders.
 //! - [`position`]: accepted positions and the checks of one ledger read.
 //! - [`error`]: the protocol's failures and their codes (§7).
 
@@ -34,6 +36,7 @@ pub mod json;
 pub mod position;
 pub mod records;
 pub mod signing;
+pub mod space;
 
 pub use error::{ProtocolError, ProtocolResult};
 pub use position::{Accepted, Position};

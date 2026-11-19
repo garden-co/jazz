@@ -13,8 +13,8 @@ use super::super::records::account::{
 /// The public rows of one account at cut `through` (R10). Device keys are
 /// the account's `__e2ee_device_keys` rows; the other tables may hold rows
 /// naming other accounts, which replay ignores or, for roots, rejects.
-/// Account replay does not read `account_keys`: whether a sealing key
-/// record is valid (§2.12) is not decided here.
+/// `account_keys` are the account's sealing key records; which are valid
+/// (§2.12) is decided by [`super::AccountReplay::sealing_keys`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicAccountLedger {
     pub account_id: String,

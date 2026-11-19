@@ -1050,7 +1050,7 @@ fn device_keys(view: &PublicAccountLedger) -> ProtocolResult<BTreeMap<String, Ke
     collect_keys(view.keys.iter())
 }
 
-fn collect_keys<'a>(
+pub(super) fn collect_keys<'a>(
     rows: impl Iterator<Item = &'a Accepted<DeviceKeysRow>>,
 ) -> ProtocolResult<BTreeMap<String, KeyColumns>> {
     let mut keys: BTreeMap<String, KeyColumns> = BTreeMap::new();

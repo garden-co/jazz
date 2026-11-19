@@ -36,10 +36,6 @@ pub enum IntrinsicContradiction {
     ConflictingDeviceKeys,
     MissingRootKey,
     MissingSignerKey,
-    /// A valid sealing key record of the account's own current epoch that
-    /// does not derive from the epoch key (§2.12): only the account's own
-    /// devices can write one.
-    ConflictingAccountKey,
 }
 
 impl IntrinsicContradiction {
@@ -49,7 +45,6 @@ impl IntrinsicContradiction {
             Self::ConflictingDeviceKeys => "conflicting-device-keys",
             Self::MissingRootKey => "missing-root-key",
             Self::MissingSignerKey => "missing-signer-key",
-            Self::ConflictingAccountKey => "conflicting-account-key",
         }
     }
 }

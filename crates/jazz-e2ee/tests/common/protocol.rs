@@ -109,6 +109,18 @@ impl Ledger {
         }
     }
 
+    /// The position the next transaction will take.
+    pub fn next_position(&self) -> u64 {
+        self.next
+    }
+
+    /// Moves the next transaction's position forward to `next`, so that
+    /// several accounts' ledgers share one sequence of positions.
+    pub fn advance_to(&mut self, next: u64) {
+        assert!(next >= self.next, "positions only move forward");
+        self.next = next;
+    }
+
     /// A new transaction's position; the cut moves to it.
     pub fn next(&mut self) -> Position {
         let position = Position(self.next);
