@@ -179,7 +179,12 @@ jobs:
     steps:
       - name: Tools the gate scripts use
         # Only if the image lacks them: an apt mirror once took 6 min here. The scripts need no ss (bash /dev/tcp, PIDs).
-        run: command -v curl >/dev/null && command -v git >/dev/null || { apt-get update -qq && apt-get install -y -qq curl git >/dev/null; }
+        run: |
+          command -v curl >/dev/null && command -v git >/dev/null || { apt-get update -qq && apt-get install -y -qq curl git >/dev/null; }
+          # gh (fetch-rc.sh) isn't in the swift image: a pinned release binary, checked against its published sum.
+          curl -sSfL -o /tmp/gh.tgz https://github.com/cli/cli/releases/download/v2.103.3/gh_2.103.3_linux_amd64.tar.gz
+          echo "4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d  /tmp/gh.tgz" | sha256sum -c
+          tar xzf /tmp/gh.tgz -C /tmp && install /tmp/gh_2.103.3_linux_amd64/bin/gh /usr/local/bin/gh
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with: { sparse-checkout: "dev/adopter-gate\n.github/actions" }
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6

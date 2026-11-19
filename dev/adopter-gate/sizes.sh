@@ -10,12 +10,18 @@ body() {
 const fs = require("fs"), path = require("path"), zlib = require("zlib"), [W, prev, v, pct] = process.argv.slice(2);
 const files = (d) => fs.readdirSync(d, { recursive: true }).map((f) => path.join(d, f)).filter((f) => fs.statSync(f).isFile());
 const measure = (dir, pick) => files(dir).filter(pick).reduce((a, f) => { const b = fs.readFileSync(f); return { raw: a.raw + b.length, gz: a.gz + zlib.gzipSync(b, { level: 9 }).length }; }, { raw: 0, gz: 0 });
-const rows = [["jazz-wasm .wasm", "jazz-wasm", (f) => f.endsWith(".wasm")], ["jazz-tools dist JS", "jazz-tools", (f) => /\/dist\/.*\.js$/.test(f)]];
+// What a browser downloads is pkg/jazz_wasm_bg.wasm; the package also carries server-only wasm (e.g. the Durable
+// Object build), reported with no threshold so it can't masquerade as browser growth.
+const rows = [
+  ["jazz-wasm browser wasm (pkg/jazz_wasm_bg.wasm)", "jazz-wasm", (f) => /(^|\/)pkg\/jazz_wasm_bg\.wasm$/.test(f) && !f.includes("durable-object"), true],
+  ["jazz-wasm other wasm (server-only, e.g. durable-object/)", "jazz-wasm", (f) => f.endsWith(".wasm") && !(/(^|\/)pkg\/jazz_wasm_bg\.wasm$/.test(f) && !f.includes("durable-object")), false],
+  ["jazz-tools dist JS", "jazz-tools", (f) => /\/dist\/.*\.js$/.test(f), true],
+];
 const out = [];
-for (const [label, pkg, pick] of rows) {
+for (const [label, pkg, pick, gated] of rows) {
   const a = measure(path.join(W, "prev", pkg), pick), b = measure(path.join(W, "rc", pkg), pick);
-  const d = a.gz ? ((b.gz - a.gz) / a.gz) * 100 : 0, verdict = d > Number(pct) ? "REVIEW" : "PASS";
-  console.log(`${verdict} size ${label}: ${prev} → ${v}: raw ${a.raw} → ${b.raw} B, gzip ${a.gz} → ${b.gz} B (${d >= 0 ? "+" : ""}${d.toFixed(1)}%, review above +${pct}%)`);
+  const d = a.gz ? ((b.gz - a.gz) / a.gz) * 100 : 0, verdict = gated && d > Number(pct) ? "REVIEW" : "PASS";
+  console.log(`${verdict} size ${label}: ${prev} → ${v}: raw ${a.raw} → ${b.raw} B, gzip ${a.gz} → ${b.gz} B (${a.raw === 0 ? "new" : `${d >= 0 ? "+" : ""}${d.toFixed(1)}%`}${gated ? `, review above +${pct}%` : ", not gated"})`);
   out.push({ label, prev, v, raw: [a.raw, b.raw], gzip: [a.gz, b.gz], pct: Number(d.toFixed(2)) });
 }
 fs.writeFileSync(path.join(W, "sizes.json"), JSON.stringify(out, null, 2));
