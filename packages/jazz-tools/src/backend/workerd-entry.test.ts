@@ -10,10 +10,13 @@ const pkg = JSON.parse(readFileSync(new URL("../../package.json", import.meta.ur
 
 describe("jazz-tools/backend under the workerd condition", () => {
   it("maps to the workerd entry and its types, built from src/backend/workerd.ts", () => {
-    expect(pkg.exports["./backend"].workerd).toEqual({
-      types: "./dist/backend/workerd.d.ts",
-      default: "./dist/backend/workerd.js",
+    // `workerd` must come before Node's types: TypeScript and bundlers take
+    // the first condition that matches (a top-level `types` would win).
+    expect(pkg.exports["./backend"]).toEqual({
+      workerd: { types: "./dist/backend/workerd.d.ts", default: "./dist/backend/workerd.js" },
+      default: { types: "./dist/backend/index.d.ts", default: "./dist/backend/index.js" },
     });
+    expect(Object.keys(pkg.exports["./backend"])[0]).toBe("workerd");
     expect(existsSync(new URL("./workerd.ts", import.meta.url))).toBe(true);
     // Its top-level wasm initialisation and engine install are side effects.
     expect(pkg.sideEffects).toContain("./dist/backend/workerd.js");
