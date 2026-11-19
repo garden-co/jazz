@@ -237,7 +237,10 @@ test("the -Oz host that ships runs the full Durable Object suite before every re
   const release = releaseJobs["test-wasm-durable-object"];
   assert.equal(release.needs, "build-wasm-durable-object");
   const releaseRuns = runs(release);
-  assert.ok(!releaseRuns.includes("pnpm --filter jazz-wasm build:durable-object"), "it tests, never rebuilds, the host");
+  assert.ok(
+    !releaseRuns.includes("pnpm --filter jazz-wasm build:durable-object"),
+    "it tests, never rebuilds, the host",
+  );
   assert.deepEqual(releaseRuns.slice(-2), suite);
   const download = release.steps.findIndex(
     ({ uses, with: w }) =>
@@ -246,7 +249,10 @@ test("the -Oz host that ships runs the full Durable Object suite before every re
       w.path === "crates/jazz-wasm/durable-object/pkg",
   );
   const firstSuite = release.steps.findIndex(({ run }) => run?.trim() === suite[0]);
-  assert.ok(download !== -1 && download < firstSuite, "the suite runs on the downloaded release host");
+  assert.ok(
+    download !== -1 && download < firstSuite,
+    "the suite runs on the downloaded release host",
+  );
   assert.ok(
     releaseRuns.some((run) => run.includes("release.test.mjs") && run.includes("-Oz build")),
     "the downloaded host is checked to be the -Oz build",
