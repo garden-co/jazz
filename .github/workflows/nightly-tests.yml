@@ -135,6 +135,8 @@ jobs:
         run: node dev/gates/ensure-correctness-artifacts.mjs
       - name: Build the release (-Oz) Durable Object host
         run: pnpm --filter jazz-wasm build:durable-object
+      - name: Build the release (-Oz) backend build
+        run: pnpm --filter jazz-wasm build:backend
       - name: Run jazz-tools' Durable Object suite on it
         run: node dev/gates/run-ts-consumers.mjs --shard durable-objects
 

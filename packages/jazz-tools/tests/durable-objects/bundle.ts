@@ -28,5 +28,5 @@ export async function bundleWorker(entry: string): Promise<string> {
     },
     logLevel: "warning",
   });
-  return join(outdir, basename(entry).replace(/\.ts$/, ".js"));
+  return join(outdir, basename(entry).replace(/\.(?:ts|mjs)$/, ".js"));
 }

@@ -140,7 +140,8 @@ fn seed(db: &Db, room_messages: usize) {
     for (room_index, room) in [ANNOUNCEMENTS_ROOM, GENERAL_ROOM].into_iter().enumerate() {
         for start in (0..room_messages).step_by(SEED_BATCH) {
             let end = (start + SEED_BATCH).min(room_messages);
-            block_on(db.transaction(async |tx| {
+            block_on(async {
+                let tx = db.mergeable_tx().await?;
                 for message in start..end {
                     tx.insert(
                         "messages",
@@ -152,8 +153,8 @@ fn seed(db: &Db, room_messages: usize) {
                     )
                     .await?;
                 }
-                Ok(())
-            }))
+                tx.commit().await
+            })
             .unwrap_or_else(|error| panic!("seed {room} messages {start}..{end}: {error}"));
         }
     }

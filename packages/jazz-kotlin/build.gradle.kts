@@ -3,6 +3,9 @@
 // `gradle build` (Gradle 8.14; no wrapper is committed) first builds crates/jazz-ffi with
 // cargo and generates its Kotlin bindings with uniffi-bindgen; pass
 // -PjazzFfi=skip to build without them (tests then use a fake native).
+// -PuniffiBindings=<dir> (with -PnativeLibs) takes bindings already generated
+// by this same uniffi-bindgen command (attach-language-artifacts.yml's
+// linux-x86_64 job) instead: no cargo at all.
 
 plugins {
     kotlin("jvm") version "2.2.21"
@@ -49,9 +52,15 @@ val ffiLib = repo.resolve(
     },
 )
 val uniffiOut = layout.buildDirectory.dir("generated/uniffi")
+val uniffiBindings = (findProperty("uniffiBindings") as String?)?.let { file(it) }
+if (uniffiBindings != null) {
+    check(findProperty("nativeLibs") != null) { "-PuniffiBindings needs -PnativeLibs" }
+    check(uniffiBindings.resolve("uniffi/jazz_ffi/jazz_ffi.kt").isFile) { "-PuniffiBindings=$uniffiBindings lacks uniffi/jazz_ffi/jazz_ffi.kt" }
+}
 
 val cargoBuildFfi by tasks.registering(Exec::class) {
     description = "Builds crates/jazz-ffi."
+    enabled = uniffiBindings == null
     workingDir = repo
     commandLine(listOf("cargo", "build", "-p", "jazz-ffi") + if (cargoProfile == "release") listOf("--release") else emptyList())
 }
@@ -60,6 +69,7 @@ val generateUniffi by tasks.registering(Exec::class) {
     description = "Generates jazz-ffi's Kotlin bindings with uniffi-bindgen."
     dependsOn(cargoBuildFfi)
     workingDir = repo
+    enabled = uniffiBindings == null
     inputs.file(ffiLib)
     outputs.dir(uniffiOut)
     commandLine(
@@ -72,7 +82,7 @@ val generateUniffi by tasks.registering(Exec::class) {
 if (withFfi) {
     sourceSets.main {
         kotlin.srcDir("src/ffi/kotlin")
-        kotlin.srcDir(uniffiOut)
+        kotlin.srcDir(uniffiBindings ?: uniffiOut)
     }
     tasks.named("compileKotlin") { dependsOn(generateUniffi) }
     // The sources jar (Maven Central) packs the generated bindings too.

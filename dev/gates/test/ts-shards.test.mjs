@@ -201,10 +201,7 @@ test("tools-other starts the producer and an -O1 Durable Object host together", 
     "the host builds in its own target directory, so the two do not share Cargo's lock",
   );
   // The default (what ships, and what local `pnpm test` builds) stays -Oz.
-  const build = fs.readFileSync(
-    path.join(root, "crates/jazz-wasm/durable-object/build.mjs"),
-    "utf8",
-  );
+  const build = fs.readFileSync(path.join(root, "crates/jazz-wasm/size-build.mjs"), "utf8");
   assert.match(build, /const wasmOptLevel = levelFlag === -1 \? "Oz" :/);
 });
 
@@ -226,33 +223,43 @@ test("the -Oz host that ships runs the full Durable Object suite before every re
   const releaseJobs = parse(
     fs.readFileSync(path.join(root, ".github/workflows/build-jazz-packages.yml"), "utf8"),
   ).jobs;
-  const builder = releaseJobs["build-wasm-durable-object"];
-  assert.ok(runs(builder).includes("pnpm --filter jazz-wasm build:durable-object"));
-  assert.ok(
-    builder.steps.some(
-      ({ uses, with: w }) =>
-        uses?.startsWith("actions/upload-artifact") && w.name === "jazz-wasm-durable-object-pkg",
-    ),
-  );
+  // The Durable Object core and the backend build `createJazz` runs on.
+  const hosts = [
+    ["build-wasm-durable-object", "build:durable-object", "durable-object"],
+    ["build-wasm-backend", "build:backend", "backend"],
+  ];
   const release = releaseJobs["test-wasm-durable-object"];
-  assert.equal(release.needs, "build-wasm-durable-object");
+  assert.deepEqual(
+    release.needs,
+    hosts.map(([job]) => job),
+  );
   const releaseRuns = runs(release);
-  assert.ok(
-    !releaseRuns.includes("pnpm --filter jazz-wasm build:durable-object"),
-    "it tests, never rebuilds, the host",
-  );
   assert.deepEqual(releaseRuns.slice(-2), suite);
-  const download = release.steps.findIndex(
-    ({ uses, with: w }) =>
-      uses?.startsWith("actions/download-artifact") &&
-      w.name === "jazz-wasm-durable-object-pkg" &&
-      w.path === "crates/jazz-wasm/durable-object/pkg",
-  );
   const firstSuite = release.steps.findIndex(({ run }) => run?.trim() === suite[0]);
-  assert.ok(
-    download !== -1 && download < firstSuite,
-    "the suite runs on the downloaded release host",
-  );
+  for (const [job, script, dir] of hosts) {
+    const builder = releaseJobs[job];
+    assert.ok(runs(builder).includes(`pnpm --filter jazz-wasm ${script}`));
+    assert.ok(
+      builder.steps.some(
+        ({ uses, with: w }) =>
+          uses?.startsWith("actions/upload-artifact") && w.name === `jazz-wasm-${dir}-pkg`,
+      ),
+    );
+    assert.ok(
+      !releaseRuns.includes(`pnpm --filter jazz-wasm ${script}`),
+      "it tests, never rebuilds, the host",
+    );
+    const download = release.steps.findIndex(
+      ({ uses, with: w }) =>
+        uses?.startsWith("actions/download-artifact") &&
+        w.name === `jazz-wasm-${dir}-pkg` &&
+        w.path === `crates/jazz-wasm/${dir}/pkg`,
+    );
+    assert.ok(
+      download !== -1 && download < firstSuite,
+      "the suite runs on the downloaded release host",
+    );
+  }
   assert.ok(
     releaseRuns.some((run) => run.includes("release.test.mjs") && run.includes("-Oz build")),
     "the downloaded host is checked to be the -Oz build",
@@ -267,6 +274,7 @@ test("the -Oz host that ships runs the full Durable Object suite before every re
   assert.deepEqual(runs(job), [
     "node dev/gates/ensure-correctness-artifacts.mjs",
     "pnpm --filter jazz-wasm build:durable-object",
+    "pnpm --filter jazz-wasm build:backend",
     "node dev/gates/run-ts-consumers.mjs --shard durable-objects",
   ]);
 });

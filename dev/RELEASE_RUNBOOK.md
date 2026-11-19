@@ -170,6 +170,10 @@ gh workflow run release-publish.yml --ref main \
   reports PUBLISHED); `USER_MANAGED` leaves it validated for Publish in the
   Portal, as before. `maven-portal-dry-run` (dry run
   only) uploads `USER_MANAGED`, waits for VALIDATED and drops it.
+- The run summary opens with the RC gate's verdict (`rc-verdict` of the
+  newest release-candidate.yml run on the Version Packages head): every HOLD
+  with its owner, to decide before approving. A NO-GO refuses the publish; a
+  gate run from before `rc-verdict` is reported as having no verdict.
 - The run summary has a timing table for every job.
 
 ## 5. Publish the GitHub Release and announcement

@@ -21,7 +21,7 @@ const APP = "my-app";
 const SECRET = "s".repeat(40);
 const SCHEMA = fixture.testNotesSchema();
 
-function start(persist) {
+function start(persist, durableObjects = { JAZZ: { className: "JazzCore", useSQLite: true } }) {
   return new Miniflare({
     modules: true,
     scriptPath: join(here, "host-worker.mjs"),
@@ -31,11 +31,22 @@ function start(persist) {
       { type: "CompiledWasm", include: ["**/*.wasm"] },
     ],
     compatibilityDate: "2026-04-01",
-    durableObjects: { JAZZ: { className: "JazzCore", useSQLite: true } },
+    durableObjects,
     durableObjectsPersist: persist,
     bindings: { JAZZ_CORE_SECRET: SECRET, JAZZ_SCHEMA: SCHEMA },
   });
 }
+
+test("the Worker answers /health without a Durable Object binding", async () => {
+  const mf = start(undefined, {});
+  try {
+    const response = await mf.dispatchFetch("http://core/health");
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), "ok");
+  } finally {
+    await mf.dispose();
+  }
+});
 
 /** A socket to the core, its answers queued as they arrive. */
 async function connect(mf, headers = {}) {
@@ -92,6 +103,7 @@ test("a Durable Object core without a published schema answers health and admits
   });
   try {
     assert.equal(await (await mf.dispatchFetch("http://core/health")).text(), "ok");
+    assert.equal((await mf.dispatchFetch("http://core/ready")).status, 200);
     const admit = (headers) =>
       mf.dispatchFetch(`http://core/apps/${APP}/backend/admit`, { method: "POST", headers });
     assert.equal((await admit({ "X-Jazz-Backend-Secret": SECRET })).status, 204);
@@ -157,7 +169,7 @@ test("a Durable Object core serves its app's backend and refuses anyone else", a
     const ours = await connect(mf, backend);
     ours.send(prelude);
     ours.send(fixture.testThinHello());
-    assert.deepEqual(await ours.next(), { hello: true });
+    assert.deepEqual(await ours.next(), { hello: true, heartbeat: false });
     ours.send(fixture.testThinSchema(1n, SCHEMA));
     assert.deepEqual(await ours.next(), { id: 1, ok: true });
     ours.send(fixture.testThinInsertNote(2n, "first"));
@@ -172,7 +184,7 @@ test("a Durable Object core serves its app's backend and refuses anyone else", a
     const again = await connect(mf, backend);
     again.send(prelude);
     again.send(fixture.testThinHello());
-    assert.deepEqual(await again.next(), { hello: true });
+    assert.deepEqual(await again.next(), { hello: true, heartbeat: false });
     again.send(fixture.testThinSchema(1n, SCHEMA));
     assert.deepEqual(await again.next(), { id: 1, ok: true });
     again.send(fixture.testThinQueryNotes(2n));
@@ -247,7 +259,7 @@ test("a backend publishes its schema to a Durable Object core, which then serves
     const ours = await connect(mf, backend);
     ours.send(prelude);
     ours.send(fixture.testThinHello());
-    assert.deepEqual(await ours.next(), { hello: true });
+    assert.deepEqual(await ours.next(), { hello: true, heartbeat: false });
     ours.send(fixture.testThinSchema(1n, SCHEMA));
     assert.deepEqual(await ours.next(), { id: 1, ok: true });
     ours.send(fixture.testThinInsertNote(2n, "published"));
@@ -262,7 +274,7 @@ test("a backend publishes its schema to a Durable Object core, which then serves
     const later = await connect(mf, backend);
     later.send(prelude);
     later.send(fixture.testThinHello());
-    assert.deepEqual(await later.next(), { hello: true });
+    assert.deepEqual(await later.next(), { hello: true, heartbeat: false });
     later.send(fixture.testThinSchema(1n, SCHEMA));
     assert.deepEqual(await later.next(), { id: 1, ok: true });
     later.send(fixture.testThinQueryNotes(2n));
@@ -296,7 +308,7 @@ async function ready(mf) {
   const socket = await connect(mf, backend);
   socket.send(prelude);
   socket.send(fixture.testThinHello());
-  assert.deepEqual(await socket.next(), { hello: true });
+  assert.deepEqual(await socket.next(), { hello: true, heartbeat: false });
   socket.send(fixture.testThinSchema(1n, SCHEMA));
   assert.deepEqual(await socket.next(), { id: 1, ok: true });
   return socket;
@@ -563,7 +575,7 @@ test("revoking a user's sessions ends their stated sessions and refuses older on
     });
     bundle = (await published.json()).bundle;
     const [alice, hello] = await as(1000);
-    assert.deepEqual(hello, { hello: true });
+    assert.deepEqual(hello, { hello: true, heartbeat: false });
 
     const revoked = await mf.dispatchFetch(
       `http://core/apps/${APP}/admin/accounts/revoke-sessions`,
@@ -580,7 +592,11 @@ test("revoking a user's sessions ends their stated sessions and refuses older on
     const [, older] = await as(1500);
     assert.match(older.error ?? "", /session revoked/);
     const [later, fresh] = await as(3000);
-    assert.deepEqual(fresh, { hello: true }, "a session authenticated after the mark is admitted");
+    assert.deepEqual(
+      fresh,
+      { hello: true, heartbeat: false },
+      "a session authenticated after the mark is admitted",
+    );
     later.close();
   } finally {
     await mf.dispose();
@@ -619,7 +635,7 @@ test("a guest the backend relays syncs by its own proof, until its identity is r
     assert.ok(forged.error, JSON.stringify(forged));
 
     const [socket, hello] = await relay(guest.proof);
-    assert.deepEqual(hello, { hello: true });
+    assert.deepEqual(hello, { hello: true, heartbeat: false });
     socket.send(fixture.testThinSchema(1n, SCHEMA));
     assert.deepEqual(await socket.next(), { id: 1, ok: true });
     socket.send(fixture.testThinInsertNote(2n, "by a guest"));

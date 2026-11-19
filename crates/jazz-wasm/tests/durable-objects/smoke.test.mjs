@@ -4,7 +4,7 @@
 //
 //   object #1: write (short + 300 KiB note) ── read
 //   restart (a new workerd over the same persisted storage)
-//   object #2: read ── callback transaction (refused) ── read
+//   object #2: read ── mergeable transaction (refused) ── read
 //   scopes: outer(1, inner(2, fails), 3) keeps [1, 3]; whole(4, fails) undone
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
