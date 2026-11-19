@@ -544,6 +544,7 @@ jobs:
       SHA: ${{ needs.resolve.outputs.sha }}
       PROBE_TAG: ${{ inputs.probe-tag }}
       ARTIFACTS_RUN_ID: ${{ needs.artifacts.outputs.run_id }}
+      DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
     steps:
       - id: probe
         run: |
@@ -573,8 +574,10 @@ jobs:
           else
             # This candidate: the release-artifacts run (server binaries) and
             # this run (rc-npm, the rc-stamped tarballs).
-            payload=$(jq -n --arg ref "${branch}" --arg sha "${SHA}" --arg runs "${ARTIFACTS_RUN_ID},${GITHUB_RUN_ID}" \
-              '{ref: $ref, inputs: {jazz_sha: $sha, jazz_artifacts_run_ids: $runs}}')
+            # rc_tag is only a label here: the real tag, or dryrun-<sha8>.
+            if [ "${DRY_RUN}" = true ]; then label="dryrun-${SHA:0:8}"; else label="v${VERSION}"; fi
+            payload=$(jq -n --arg ref "${branch}" --arg sha "${SHA}" --arg runs "${ARTIFACTS_RUN_ID},${GITHUB_RUN_ID}" --arg tag "${label}" \
+              '{ref: $ref, inputs: {rc_tag: $tag, jazz_sha: $sha, jazz_artifacts_run_ids: $runs}}')
           fi
           gh api -X POST "${base}/dispatches" --input - <<<"${payload}"
           run_id=""
