@@ -29,7 +29,7 @@ const partitionCommand = (partition) =>
   `node dev/gates/local-ci-equivalent.mjs --ci-partition ${partition}`;
 const trustedSccacheCondition =
   "inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '')";
-const trustedTurboCondition = "inputs.trusted-cache";
+const trustedTurboCondition = "inputs.trusted-cache && inputs.sccache-write";
 const sccacheExportStep = Object.freeze({
   name: "Export trusted sccache configuration",
   if: trustedSccacheCondition,
