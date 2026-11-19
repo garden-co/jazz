@@ -651,6 +651,7 @@ impl ParameterDomain {
                 Some(ty) => self.known(ty),
                 None => ParameterTerm::Dynamic,
             },
+            Operand::TableIdentity(_) => self.known(ColumnType::Uuid),
         })
     }
 
@@ -1834,13 +1835,22 @@ fn validate_join(
     {
         let source_type = planner_column_type(root, source_column)?;
         let target_type = planner_column_type(join_table, &join.on_column)?;
-        if !matches!(
-            non_null_column_type(source_type),
-            ColumnType::Uuid | ColumnType::Array(_)
-        ) && !matches!(
-            non_null_column_type(target_type),
-            ColumnType::Uuid | ColumnType::Array(_)
-        ) {
+        // A system table's address columns name rows of several tables, so
+        // they cannot be declared references: an undeclared `uuid`
+        // correlation with one side on a system table is an ordinary
+        // existence join too.
+        let system_address = (undeclared_system_uuid(root, source_column)
+            || undeclared_system_uuid(join_table, &join.on_column))
+            && column_types_comparable(source_type, target_type);
+        if system_address
+            || !matches!(
+                non_null_column_type(source_type),
+                ColumnType::Uuid | ColumnType::Array(_)
+            ) && !matches!(
+                non_null_column_type(target_type),
+                ColumnType::Uuid | ColumnType::Array(_)
+            )
+        {
             if !column_types_comparable(source_type, target_type) {
                 return Err(QueryError::OperandTypeMismatch);
             }
@@ -1860,6 +1870,9 @@ fn validate_join(
         let lookup_table = schema_table(schema, &lookup.table)?;
         match root.references.get(&lookup.row_id_source_column) {
             Some(target) if target == &lookup.table => {}
+            // A system table's undeclared `uuid` address names a row of the
+            // looked-up table.
+            None if undeclared_system_uuid(root, &lookup.row_id_source_column) => {}
             _ => {
                 return Err(not_ref_compatible(
                     &root_table,
@@ -1892,14 +1905,26 @@ fn validate_join(
             root_table.to_owned()
         } else {
             planner_column_type(root, source_column)?;
-            root.references.get(source_column).cloned().ok_or_else(|| {
-                // A row-id join names the table the column must reference.
-                if join.target == JoinTarget::RowId {
-                    not_ref_compatible(&root_table, source_column, &join.table, None)
-                } else {
-                    not_a_reference(&root_table, source_column)
+            match root.references.get(source_column) {
+                Some(target) => target.clone(),
+                // A system table's undeclared `uuid` address joined to a
+                // table's row ids names a row of that table.
+                None if join.target == JoinTarget::RowId
+                    && undeclared_system_uuid(root, source_column) =>
+                {
+                    join.table.clone()
                 }
-            })?
+                // A row-id join names the table the column must reference.
+                None if join.target == JoinTarget::RowId => {
+                    return Err(not_ref_compatible(
+                        &root_table,
+                        source_column,
+                        &join.table,
+                        None,
+                    ));
+                }
+                None => return Err(not_a_reference(&root_table, source_column)),
+            }
         }
     } else {
         root_table.to_owned()
@@ -1918,6 +1943,9 @@ fn validate_join(
         JoinTarget::Column => match join_table.references.get(&join.on_column) {
             Some(target) if target == &target_table => {}
             None if join.on_column == "id" && join.table == target_table => {}
+            // A system table's undeclared `uuid` address matched against the
+            // ids of the table it names.
+            None if undeclared_system_uuid(join_table, &join.on_column) => {}
             _ => {
                 return Err(not_ref_compatible(
                     &join.table,
@@ -1937,6 +1965,17 @@ fn validate_join(
         }
     }
     validate_join_conditions(schema, join_table, join, params)
+}
+
+/// Whether `column` of `table` is an undeclared `uuid` column of a system
+/// table ([`crate::schema::is_system_table`]): an address column, which a
+/// join may correlate without a declared reference. Every other table keeps
+/// the declared-reference rule.
+fn undeclared_system_uuid(table: &TableSchema, column: &str) -> bool {
+    crate::schema::is_system_table(&table.name)
+        && !table.references.contains_key(column)
+        && planner_column_type(table, column)
+            .is_ok_and(|ty| matches!(non_null_column_type(ty), ColumnType::Uuid))
 }
 
 fn validate_aggregate(table: &TableSchema, aggregate: &AggregateQuery) -> Result<(), QueryError> {
@@ -2772,6 +2811,9 @@ fn operand_type(
         Operand::Literal(value) => value_type(value).map(Some),
         Operand::Param(name) => Ok(params.get(name).cloned()),
         Operand::Claim(name) => claim_type(name),
+        // A table's catalogue identity is a `uuid`: it compares with `uuid`
+        // columns only.
+        Operand::TableIdentity(_) => Ok(Some(ColumnType::Uuid)),
     }
 }
 

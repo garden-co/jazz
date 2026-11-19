@@ -28,7 +28,7 @@ pub use crate::options::{
     UpdateOptions, UpsertOptions, WriteIdentity, WriteTarget, block_on,
 };
 
-use crate::compile::{Compiled, Ctx, Cut, Overlay as CutOverlay, Session, View};
+use crate::compile::{Compiled, Ctx, Cut, InsertedRows, Overlay as CutOverlay, Session, View};
 use crate::tools::{CmpOp, PolicyExpr};
 
 #[path = "fanout.rs"]
@@ -248,6 +248,9 @@ fn row_local_policy(policy: &PolicyExpr) -> bool {
         | PolicyExpr::SessionInList { .. }
         | PolicyExpr::True
         | PolicyExpr::False => true,
+        // False outside a write check, so it reads nothing here.
+        PolicyExpr::InsertedByThisTransaction => true,
+        PolicyExpr::InheritsFrom { .. } => false,
         _ => false,
     }
 }
@@ -867,6 +870,11 @@ struct Inner {
     /// base row (SPEC 7). Cleared at every unit and overlay boundary
     /// ([`Inner::start_unit_heads`]), never left to another unit.
     inherited_heads: RefCell<InheritedHeads>,
+    /// Rows the unit being applied inserted fresh (no version before the
+    /// unit), by stored table: what `InsertedByThisTransaction` holds for
+    /// in its write checks. Kept after the unit's checks end, so a staged
+    /// write's batch can note them, until the next unit starts.
+    unit_inserts: RefCell<InsertedRows>,
     /// The open transaction's seq and the tables it wrote.
     tx: Option<(u64, BTreeSet<String>)>,
     /// The identity the open callback transaction writes as. A write as
@@ -2329,6 +2337,7 @@ impl Db {
                 deferred: RefCell::new(None),
                 trusted_rows: RefCell::new(BTreeMap::new()),
                 inherited_heads: RefCell::new(HashMap::new()),
+                unit_inserts: RefCell::new(BTreeMap::new()),
                 tx: None,
                 tx_identity: None,
                 client: None,
@@ -3325,7 +3334,7 @@ impl Db {
         let session = Session::for_author(author, claims);
         let binding = BTreeMap::new();
         let none = Session::default();
-        let mut ctx = Ctx::new(&inner.schema, None, &none, &binding);
+        let mut ctx = Ctx::new(&inner.schema, None, &none, &binding).with_catalogue(&*inner);
         let mut columns = Vec::with_capacity(clauses.len());
         for clause in &clauses {
             let condition = ctx.policy_clause(Some(clause), table, "a", &session)?;
@@ -4843,9 +4852,12 @@ fn policy_reads_other_rows(policy: &PolicyExpr) -> bool {
         PolicyExpr::Exists { .. }
         | PolicyExpr::ExistsRel { .. }
         | PolicyExpr::Inherits { .. }
-        | PolicyExpr::InheritsReferencing { .. } => true,
+        | PolicyExpr::InheritsReferencing { .. }
+        | PolicyExpr::InheritsFrom { .. } => true,
         PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts.iter().any(policy_reads_other_rows),
         PolicyExpr::Not(inner) => policy_reads_other_rows(inner),
+        // Its value depends on the unit's inserts, not on rows read.
+        PolicyExpr::InsertedByThisTransaction => false,
         _ => false,
     }
 }
@@ -5436,6 +5448,7 @@ impl Inner {
     ) -> Ctx<'s> {
         let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
         Ctx::new(schema, policy, claims, &prepared.binding)
+            .with_catalogue(self)
             .with_view(read.view.clone())
             .with_withheld(self.withheld.get())
             .with_cut(read.cut.clone(), read.settled_only)
@@ -6797,7 +6810,9 @@ impl Inner {
     ) -> Result<(String, Vec<Sql>, OverlayRead), Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
-        let mut ctx = Ctx::new(schema, None, &claims, &binding).with_cut(cut, false);
+        let mut ctx = Ctx::new(schema, None, &claims, &binding)
+            .with_cut(cut, false)
+            .with_catalogue(self);
         let condition = policy(&mut ctx)?;
         let read = OverlayRead {
             rows: ctx.overlaid_rows,
@@ -6824,6 +6839,7 @@ impl Inner {
             own,
             extra: Vec::new(),
             overlay: Some(overlay),
+            inserted: Arc::default(),
         };
         let session = self.session(author);
         let (sql, params, _) = self.policy_check(table, row, &[], Some(cut), |ctx| {
@@ -6856,7 +6872,9 @@ impl Inner {
     ) -> Result<bool, Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
-        let mut ctx = Ctx::new(schema, None, &claims, &binding).with_cut(Some(cut), false);
+        let mut ctx = Ctx::new(schema, None, &claims, &binding)
+            .with_cut(Some(cut), false)
+            .with_catalogue(self);
         let condition = policy(&mut ctx)?;
         let source = ctx.source(table)?;
         let mut params = ctx.params;
@@ -7092,6 +7110,20 @@ impl Inner {
     pub(crate) fn defer_checks(&self) {
         *self.deferred.borrow_mut() = Some(Vec::new());
         self.trusted_rows.borrow_mut().clear();
+        self.unit_inserts.borrow_mut().clear();
+    }
+
+    /// Note a unit's fresh insert of `row` on branch `key` (see
+    /// [`Inner::unit_inserts`]). A write outside a unit is a single write:
+    /// it has none.
+    fn note_unit_insert(&self, table: &Table, row: RowUuid, key: &[u8]) {
+        if self.deferred.borrow().is_some() {
+            self.unit_inserts
+                .borrow_mut()
+                .entry(table.stored.clone())
+                .or_default()
+                .insert((*row.0.as_bytes(), key.to_vec()));
+        }
     }
 
     /// Note a unit's write that no policy checks, so its row grounds the
@@ -7116,6 +7148,7 @@ impl Inner {
     pub(crate) fn abandon_checks(&self) {
         *self.deferred.borrow_mut() = None;
         self.trusted_rows.borrow_mut().clear();
+        self.unit_inserts.borrow_mut().clear();
     }
 
     /// End a unit written at `seq`: ground its writes (SPEC 7). The first
@@ -7127,19 +7160,28 @@ impl Inner {
     /// unit could have taken away is checked again against the unit's
     /// whole post-state (see [`Inner::post_state_pass`]).
     pub(crate) fn finish_checks(&self, seq: u64) -> Result<(), Error> {
-        self.finish_checks_after(seq, Arc::default())
+        self.finish_checks_after(seq, Arc::default(), Arc::default())
     }
 
     /// [`Inner::finish_checks`] for a unit that continues writes already
     /// grounded: `grounded` (stored table to rows) shows its end state to
-    /// the unit's checks from the first round on.
+    /// the unit's checks from the first round on, and `inserted` are those
+    /// writes' fresh inserts.
     pub(crate) fn finish_checks_after(
         &self,
         seq: u64,
         grounded: Arc<GroundedRows>,
+        inserted: Arc<InsertedRows>,
     ) -> Result<(), Error> {
         let pending = self.deferred.borrow_mut().take().unwrap_or_default();
         let trusted = std::mem::take(&mut *self.trusted_rows.borrow_mut());
+        let mut inserted = inserted;
+        for (table, rows) in self.unit_inserts.borrow().iter() {
+            Arc::make_mut(&mut inserted)
+                .entry(table.clone())
+                .or_default()
+                .extend(rows.iter().cloned());
+        }
         // Nothing to ground: writes no policy checks (a backend's own, a
         // replica's) leave only trusted rows, and merging those into the
         // set a staged write shares with its batch would copy that set on
@@ -7158,11 +7200,11 @@ impl Inner {
                 .or_default()
                 .extend(rows);
         }
-        self.ground_after(pending, seq, grounded)
+        self.ground_after(pending, seq, grounded, inserted)
     }
 
     fn ground(&self, pending: Vec<DeferredCheck>, seq: u64) -> Result<(), Error> {
-        self.ground_after(pending, seq, Arc::default())
+        self.ground_after(pending, seq, Arc::default(), Arc::default())
     }
 
     fn ground_after(
@@ -7170,6 +7212,7 @@ impl Inner {
         mut pending: Vec<DeferredCheck>,
         seq: u64,
         mut grounded: Arc<GroundedRows>,
+        inserted: Arc<InsertedRows>,
     ) -> Result<(), Error> {
         // Each check runs under the schema its write was staged with.
         let mut live = Vec::with_capacity(pending.len());
@@ -7198,6 +7241,7 @@ impl Inner {
                 own: self.own_rank(seq),
                 extra: Vec::new(),
                 overlay: Some(CutOverlay::Grounded(grounded.clone())),
+                inserted: inserted.clone(),
             };
             let mut passed = Vec::new();
             let mut failed = Vec::new();
@@ -7235,7 +7279,7 @@ impl Inner {
             pending = failed;
             round += 1;
         }
-        self.post_state_pass(rounds, seq, &mut evidence)
+        self.post_state_pass(rounds, seq, &inserted, &mut evidence)
     }
 
     /// Check `check`'s policy on the rows `cut` shows. Also returns the
@@ -7289,6 +7333,7 @@ impl Inner {
         &self,
         rounds: Vec<(DeferredCheck, usize, BTreeSet<String>)>,
         seq: u64,
+        inserted: &Arc<InsertedRows>,
         evidence: &mut EvidenceBudget,
     ) -> Result<(), Error> {
         // Per stored table and round: how many writes passed in it, and
@@ -7357,6 +7402,7 @@ impl Inner {
                     row: *check.row.0.as_bytes(),
                     key: check.key.clone(),
                 }),
+                inserted: inserted.clone(),
             };
             if !self
                 .write_check_holds(&check.schema, check, cut, evidence)?
@@ -7410,6 +7456,7 @@ impl Inner {
             own: self.own_rank(seq.saturating_sub(1)),
             extra: Vec::new(),
             overlay: None,
+            inserted: Arc::default(),
         };
         Ok(matches!(
             self.existing_at(&table.stored, row, key, Some(&cut))?,
@@ -7462,9 +7509,32 @@ impl Inner {
             own: self.own_rank(seq),
             extra: Vec::new(),
             overlay: Some(CutOverlay::Grounded(Arc::default())),
+            inserted: Arc::default(),
         };
         self.holds_as_of(&self.schema, table, row, key, cut, policy)
             .map(Some)
+    }
+
+    /// Whether the row had any version, live or deleted, in the state a
+    /// unit written at `seq` was made over.
+    fn existed_before(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        seq: u64,
+    ) -> Result<bool, Error> {
+        let cut = Cut {
+            unsettled: false,
+            seq: self.own_pos(seq.saturating_sub(1)),
+            own: self.own_rank(seq.saturating_sub(1)),
+            extra: Vec::new(),
+            overlay: None,
+            inserted: Arc::default(),
+        };
+        Ok(self
+            .existing_at(&table.stored, row, key, Some(&cut))?
+            .is_some())
     }
 
     /// Whether `row`'s current version on branch `key` is a tombstone.
@@ -8867,6 +8937,9 @@ impl Inner {
         self.changed
             .borrow_mut()
             .push((table.stored.clone(), row, key.clone()));
+        // The row had no version, the unit's own writes included: a fresh
+        // insert.
+        self.note_unit_insert(table, row, &key);
         if let Some(author) = self.checked(who) {
             self.write_check(table, row, &key, author, WriteCheck::Insert, seq)?;
         } else {
@@ -9122,6 +9195,15 @@ impl Inner {
             }
             Located::Absent { .. } => unreachable!("absent upserts insert"),
         };
+        // An upsert over a tombstone inserts afresh only a row that had no
+        // version before the unit (one the unit inserted and deleted): over
+        // an earlier row it brings that row back, as a restore does.
+        if reinserted
+            && self.deferred.borrow().is_some()
+            && !self.existed_before(table, row, &key, seq)?
+        {
+            self.note_unit_insert(table, row, &key);
+        }
         // The new row is checked on the evidence SPEC 7 gives a WITH CHECK
         // ([`Inner::write_check`]): a same-table EXISTS compares the new row
         // with the old one, not with itself.
@@ -9481,6 +9563,12 @@ fn policy_is_monotone(
             source_table,
             ..
         } => inherited(schema, schema.tables.get(source_table), *operation, seen),
+        // The candidate row's policies can take a pass away as rows change
+        // (a member row removed, the row itself updated): keep the full
+        // post-state pass.
+        PolicyExpr::InheritsFrom { .. } => false,
+        // Holds for the unit's fresh inserts, a set no added row shrinks.
+        PolicyExpr::InsertedByThisTransaction => true,
         _ => true,
     }
 }
@@ -10194,6 +10282,10 @@ struct Batch {
     /// rather than copied, so a stage costs the same however many writes
     /// came before it.
     rows: Arc<GroundedRows>,
+    /// The rows `ops` inserted fresh, by stored table: what a later staged
+    /// write's `InsertedByThisTransaction` holds for (see
+    /// [`Db::in_overlay`]).
+    inserted: Arc<InsertedRows>,
     /// What the batch's partial large-value updates built: descriptors
     /// derived from stored trees and the nodes consolidations prepared,
     /// trusted and stored whenever the staged writes apply.
@@ -10805,6 +10897,7 @@ impl Db {
                 reads_state: Rc::default(),
                 ops: Vec::new(),
                 rows: Arc::default(),
+                inserted: Arc::default(),
                 edits: LargeEdits::default(),
                 uploads: Vec::new(),
                 claims: None,
@@ -11183,6 +11276,10 @@ impl Db {
             }
             None => Arc::default(),
         };
+        let staged_inserts = match extra.as_deref() {
+            Some(_) => batch.inserted.clone(),
+            None => Arc::default(),
+        };
         let live = inner
             .overlay
             .as_ref()
@@ -11241,7 +11338,7 @@ impl Db {
                 inner.defer_checks();
                 let applied = inner
                     .apply_all_checking(&[(schema, op.clone())], 0, own)
-                    .and_then(|()| inner.finish_checks_after(own, staged_rows));
+                    .and_then(|()| inner.finish_checks_after(own, staged_rows, staged_inserts));
                 if applied.is_err() {
                     inner.abandon_checks();
                 }
@@ -11352,7 +11449,11 @@ impl Db {
     fn stage_op(&self, id: OpenTransactionId, mut op: StagedOp) -> Result<(), Error> {
         // Validate against the overlay now, so errors surface at the call;
         // a counter write's change is from what the transaction sees.
-        self.in_overlay(id, Some(&mut op), |_, _| Ok(()))
+        // The write's fresh inserts, for the batch's later writes' checks.
+        let inserted = self
+            .in_overlay(id, Some(&mut op), |inner, _| {
+                Ok(std::mem::take(&mut *inner.unit_inserts.borrow_mut()))
+            })
             .map_err(|error| self.serializable_write_conflict(id, &op, error))?;
         let mut inner = self.inner.staging();
         let schema = self.execution_schema(&inner);
@@ -11375,6 +11476,12 @@ impl Db {
                 .entry(table)
                 .or_default()
                 .insert(*row.0.as_bytes());
+        }
+        for (table, rows) in inserted {
+            Arc::make_mut(&mut batch.inserted)
+                .entry(table)
+                .or_default()
+                .extend(rows);
         }
         batch.ops.push((schema, op));
         Ok(())

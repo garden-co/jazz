@@ -63,6 +63,29 @@ pub struct SchemaConversionError {
     /// `policies.select.using`): the table whose policy it is, whichever
     /// tables its conditions read. Boxed to keep the error small.
     rule: Option<Box<(String, String)>>,
+    /// The unsupported policy shape a deployment refused, if that is why.
+    unsupported: Option<UnsupportedPolicy>,
+}
+
+/// A policy shape [`check_deployable_policies`] refuses, so a caller can
+/// tell which without reading the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnsupportedPolicy {
+    /// An `InheritsFrom` whose candidate's policy reaches another
+    /// `InheritsFrom` (itself included): the SQL compiler follows one
+    /// level only, so every check of it would fail.
+    NestedInheritsFrom,
+    /// An `InheritsFrom` in a read (`select`) policy, or in a policy one
+    /// inherits: no read rule needs it and no sync support ships for it.
+    InheritsFromInReadPolicy,
+    /// An `InsertedByThisTransaction` outside an `Exists` of an insert or
+    /// update `WITH CHECK`, or under a `NOT` outside its `Exists`:
+    /// everywhere else it is false, so a `NOT` of it holds for every row.
+    MisplacedInsertedByThisTransaction,
+    /// An `InheritsFrom` whose `table_column` or `id_column` is not a
+    /// scalar column (an array, say): a row naming several rows would
+    /// inherit from any one of them.
+    NonScalarAddressColumn,
 }
 
 impl SchemaConversionError {
@@ -72,6 +95,7 @@ impl SchemaConversionError {
             message: message.into(),
             unknown_column: None,
             rule: None,
+            unsupported: None,
         }
     }
 
@@ -86,6 +110,23 @@ impl SchemaConversionError {
         self.rule
             .as_deref()
             .map(|(table, slot)| (table.as_str(), slot.as_str()))
+    }
+
+    fn unsupported(
+        path: impl Into<String>,
+        message: impl Into<String>,
+        shape: UnsupportedPolicy,
+    ) -> Self {
+        Self {
+            unsupported: Some(shape),
+            ..Self::new(path, message)
+        }
+    }
+
+    /// The unsupported policy shape a deployment refused, when that is why
+    /// the schema was refused.
+    pub fn unsupported_policy(&self) -> Option<UnsupportedPolicy> {
+        self.unsupported
     }
 
     /// The `(table, column)` of a policy that names a column its table
@@ -160,6 +201,28 @@ pub fn check_deployable_json_schemas(schema: &Schema) -> Result<(), SchemaConver
 /// and sync the row under check), so the form is not supported until that
 /// is settled.
 ///
+/// An `InheritsFrom` whose candidate's policy for its operation reaches
+/// another `InheritsFrom` (directly, through an inherited policy, or the
+/// same node naming its own table) is refused
+/// ([`UnsupportedPolicy::NestedInheritsFrom`]): the SQL compiler follows one
+/// level only, so every check of it would fail. An `InheritsFrom` a read
+/// (`select`) policy reaches is refused too
+/// ([`UnsupportedPolicy::InheritsFromInReadPolicy`]): Jazz derives the node
+/// for write policies only, and no sync support ships for it.
+///
+/// An `InsertedByThisTransaction` is refused
+/// ([`UnsupportedPolicy::MisplacedInsertedByThisTransaction`]) unless it is
+/// inside an `Exists` of an insert or update `WITH CHECK`, with no `NOT`
+/// above it outside an `Exists`: everywhere else it is false, so under a
+/// `NOT` it would hold for every row. A policy that inherits one (through
+/// `Inherits`, `InheritsReferencing` or `InheritsFrom`) is held to the same
+/// placement.
+///
+/// An `InheritsFrom` whose `table_column` or `id_column` is an array or
+/// row column is refused ([`UnsupportedPolicy::NonScalarAddressColumn`]):
+/// an address names one row, and a row listing several would inherit from
+/// any one of them.
+///
 /// A policy comparing `session.authMode` with `"local-first"` is refused:
 /// device accounts are `"device-account"` since the rename, and such a
 /// policy would quietly never match. One already published fails closed when
@@ -170,6 +233,10 @@ pub fn check_deployable_json_schemas(schema: &Schema) -> Result<(), SchemaConver
 /// `jazz-tools validate`, the dev server and a deployment all run.
 pub fn check_deployable_policies(schema: &Schema) -> Result<(), SchemaConversionError> {
     for (name, table) in schema {
+        if let Some(read) = table.policies.select.using.as_ref() {
+            let path = format!("$.{}.policies.select.using", name.as_str());
+            refuse_inherits_from_in_read(schema, table, read, &path)?;
+        }
         let slots = [
             ("select.using", table.policies.select.using.as_ref()),
             (
@@ -185,19 +252,426 @@ pub fn check_deployable_policies(schema: &Schema) -> Result<(), SchemaConversion
         ];
         for (slot, expr) in slots {
             if let Some(expr) = expr {
-                let at = format!("$.{}.policies.{slot}", name.as_str());
+                let path = format!("$.{}.policies.{slot}", name.as_str());
                 if let Some(message) = expr.removed_auth_mode_error() {
-                    return Err(err(at, message));
+                    return Err(err(path, message));
                 }
-                refuse_nested_outer_rows(
-                    expr,
-                    &format!("$.{}.policies.{slot}", name.as_str()),
-                    false,
-                )?;
+                refuse_nested_outer_rows(expr, &path, false)?;
+                refuse_nested_inherits_from(schema, expr, &path)?;
+                let placement = Placement {
+                    with_check: matches!(slot, "insert.with_check" | "update.with_check"),
+                    in_exists: false,
+                    negated: false,
+                };
+                refuse_misplaced_inserted(schema, table, expr, &path, placement)?;
+                refuse_non_scalar_addresses(schema, table, expr, &path)?;
             }
         }
     }
     Ok(())
+}
+
+/// Refuse an `InheritsFrom` in `expr` whose candidate's policy reaches
+/// another one (see [`check_deployable_policies`]).
+fn refuse_nested_inherits_from(
+    schema: &Schema,
+    expr: &PolicyExpr,
+    path: &str,
+) -> Result<(), SchemaConversionError> {
+    match expr {
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => {
+            let kind = if matches!(expr, PolicyExpr::And(_)) {
+                "And"
+            } else {
+                "Or"
+            };
+            for (index, part) in parts.iter().enumerate() {
+                refuse_nested_inherits_from(schema, part, &format!("{path}.{kind}[{index}]"))?;
+            }
+            Ok(())
+        }
+        PolicyExpr::Not(inner) => {
+            refuse_nested_inherits_from(schema, inner, &format!("{path}.Not"))
+        }
+        PolicyExpr::Exists { condition, .. } => {
+            refuse_nested_inherits_from(schema, condition, &format!("{path}.Exists.condition"))
+        }
+        PolicyExpr::InheritsFrom {
+            operation, tables, ..
+        } => {
+            for candidate in tables {
+                // An unknown candidate is the schema compile's to refuse.
+                let Some(target) = schema.get(&TableName::new(candidate.clone())) else {
+                    continue;
+                };
+                // The clauses the SQL compiler reads: both update clauses
+                // for `Update`.
+                let clauses = match operation {
+                    Operation::Update => vec![
+                        target.policies.update.using.as_ref(),
+                        target.policies.update.with_check.as_ref(),
+                    ],
+                    operation => vec![source_operation_policy(target, *operation)],
+                };
+                let mut seen = Vec::new();
+                if clauses
+                    .into_iter()
+                    .flatten()
+                    .any(|clause| reaches_inherits_from(schema, target, clause, &mut seen))
+                {
+                    return Err(SchemaConversionError::unsupported(
+                        format!("{path}.InheritsFrom"),
+                        format!(
+                            "an `InheritsFrom` whose candidate `{candidate}`'s {operation:?} \
+                             policy has an `InheritsFrom` of its own is not supported: an \
+                             `InheritsFrom` reaches one level of rows"
+                        ),
+                        UnsupportedPolicy::NestedInheritsFrom,
+                    ));
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Refuse the first part of read policy `expr` (of `table`) that reaches
+/// an `InheritsFrom` (see [`check_deployable_policies`]).
+fn refuse_inherits_from_in_read(
+    schema: &Schema,
+    table: &TableSchema,
+    expr: &PolicyExpr,
+    path: &str,
+) -> Result<(), SchemaConversionError> {
+    match expr {
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => {
+            let kind = if matches!(expr, PolicyExpr::And(_)) {
+                "And"
+            } else {
+                "Or"
+            };
+            for (index, part) in parts.iter().enumerate() {
+                refuse_inherits_from_in_read(
+                    schema,
+                    table,
+                    part,
+                    &format!("{path}.{kind}[{index}]"),
+                )?;
+            }
+            Ok(())
+        }
+        PolicyExpr::Not(inner) => {
+            refuse_inherits_from_in_read(schema, table, inner, &format!("{path}.Not"))
+        }
+        expr if reaches_inherits_from(schema, table, expr, &mut Vec::new()) => {
+            Err(SchemaConversionError::unsupported(
+                path,
+                "`InheritsFrom` is not supported in a read policy: Jazz derives it for write \
+                 policies only, and no sync support ships for it",
+                UnsupportedPolicy::InheritsFromInReadPolicy,
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Whether evaluating `expr`, a policy of `table`, reaches an
+/// `InheritsFrom`: in it, in an `Exists` condition, or in a policy it
+/// inherits (`seen` holds the inherited policies already walked).
+fn reaches_inherits_from(
+    schema: &Schema,
+    table: &TableSchema,
+    expr: &PolicyExpr,
+    seen: &mut Vec<(TableName, Operation)>,
+) -> bool {
+    let inherited = |name: &TableName, operation: Operation, seen: &mut Vec<_>| {
+        if seen.contains(&(*name, operation)) {
+            return false;
+        }
+        seen.push((*name, operation));
+        schema.get(name).is_some_and(|parent| {
+            source_operation_policy(parent, operation)
+                .is_some_and(|policy| reaches_inherits_from(schema, parent, policy, seen))
+        })
+    };
+    match expr {
+        PolicyExpr::InheritsFrom { .. } => true,
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts
+            .iter()
+            .any(|part| reaches_inherits_from(schema, table, part, seen)),
+        PolicyExpr::Not(inner) => reaches_inherits_from(schema, table, inner, seen),
+        PolicyExpr::Exists {
+            table: exists,
+            condition,
+        } => schema
+            .get(&TableName::new(exists.clone()))
+            .is_some_and(|exists| reaches_inherits_from(schema, exists, condition, seen)),
+        PolicyExpr::Inherits {
+            operation,
+            via_column,
+            ..
+        } => table
+            .columns
+            .columns
+            .iter()
+            .find(|column| column.name.as_str() == via_column)
+            .and_then(|column| column.references.as_ref())
+            .is_some_and(|parent| inherited(parent, *operation, seen)),
+        PolicyExpr::InheritsReferencing {
+            operation,
+            source_table,
+            ..
+        } => inherited(&TableName::new(source_table.clone()), *operation, seen),
+        _ => false,
+    }
+}
+
+/// Refuse an `InheritsFrom` in `expr` (a policy of `table`) whose address
+/// columns are not scalar (see [`check_deployable_policies`]).
+fn refuse_non_scalar_addresses(
+    schema: &Schema,
+    table: &TableSchema,
+    expr: &PolicyExpr,
+    path: &str,
+) -> Result<(), SchemaConversionError> {
+    match expr {
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => {
+            let kind = if matches!(expr, PolicyExpr::And(_)) {
+                "And"
+            } else {
+                "Or"
+            };
+            for (index, part) in parts.iter().enumerate() {
+                refuse_non_scalar_addresses(
+                    schema,
+                    table,
+                    part,
+                    &format!("{path}.{kind}[{index}]"),
+                )?;
+            }
+            Ok(())
+        }
+        PolicyExpr::Not(inner) => {
+            refuse_non_scalar_addresses(schema, table, inner, &format!("{path}.Not"))
+        }
+        PolicyExpr::Exists {
+            table: exists,
+            condition,
+        } => match schema.get(&TableName::new(exists.clone())) {
+            Some(exists) => refuse_non_scalar_addresses(
+                schema,
+                exists,
+                condition,
+                &format!("{path}.Exists.condition"),
+            ),
+            // An unknown table is the schema compile's to refuse.
+            None => Ok(()),
+        },
+        PolicyExpr::InheritsFrom {
+            table_column,
+            id_column,
+            ..
+        } => {
+            for (field, column) in [("table_column", table_column), ("id_column", id_column)] {
+                // An unknown column is the schema compile's to refuse.
+                let Some(descriptor) = table
+                    .columns
+                    .columns
+                    .iter()
+                    .find(|descriptor| descriptor.name.as_str() == column)
+                else {
+                    continue;
+                };
+                if matches!(
+                    descriptor.column_type,
+                    ColumnType::Array { .. } | ColumnType::Row { .. }
+                ) {
+                    return Err(SchemaConversionError::unsupported(
+                        format!("{path}.InheritsFrom.{field}"),
+                        format!(
+                            "an `InheritsFrom` {field} must be a scalar column, but `{column}` \
+                             is not: an address names one row, and a column listing several \
+                             would inherit from any one of them"
+                        ),
+                        UnsupportedPolicy::NonScalarAddressColumn,
+                    ));
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Where a policy part sits, for [`refuse_misplaced_inserted`].
+#[derive(Clone, Copy)]
+struct Placement {
+    /// In an insert or update `WITH CHECK`.
+    with_check: bool,
+    /// Inside an `Exists` condition.
+    in_exists: bool,
+    /// Under a `NOT` that is outside every `Exists`.
+    negated: bool,
+}
+
+impl Placement {
+    /// Whether an `InsertedByThisTransaction` here means what it says.
+    fn admits_inserted(self) -> bool {
+        self.with_check && self.in_exists && !self.negated
+    }
+
+    /// Whether a policy inherited here may hold an
+    /// `InsertedByThisTransaction`: its own `Exists` puts it inside one.
+    fn admits_inherited_inserted(self) -> bool {
+        self.with_check && !self.negated
+    }
+}
+
+const MISPLACED_INSERTED: &str = "`InsertedByThisTransaction` is supported only inside an \
+     `exists` of an insert or update WITH CHECK, and not under a `NOT` outside that `exists`: \
+     anywhere else it is always false, so under a `NOT` it would hold for every row";
+
+/// Refuse an `InsertedByThisTransaction` in `expr` (a policy of `table`)
+/// that `placement` does not admit (see [`check_deployable_policies`]).
+fn refuse_misplaced_inserted(
+    schema: &Schema,
+    table: &TableSchema,
+    expr: &PolicyExpr,
+    path: &str,
+    placement: Placement,
+) -> Result<(), SchemaConversionError> {
+    let refused = |path: String| {
+        Err(SchemaConversionError::unsupported(
+            path,
+            MISPLACED_INSERTED,
+            UnsupportedPolicy::MisplacedInsertedByThisTransaction,
+        ))
+    };
+    match expr {
+        PolicyExpr::InsertedByThisTransaction if !placement.admits_inserted() => {
+            refused(format!("{path}.InsertedByThisTransaction"))
+        }
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => {
+            let kind = if matches!(expr, PolicyExpr::And(_)) {
+                "And"
+            } else {
+                "Or"
+            };
+            for (index, part) in parts.iter().enumerate() {
+                refuse_misplaced_inserted(
+                    schema,
+                    table,
+                    part,
+                    &format!("{path}.{kind}[{index}]"),
+                    placement,
+                )?;
+            }
+            Ok(())
+        }
+        PolicyExpr::Not(inner) => refuse_misplaced_inserted(
+            schema,
+            table,
+            inner,
+            &format!("{path}.Not"),
+            Placement {
+                negated: placement.negated || !placement.in_exists,
+                ..placement
+            },
+        ),
+        PolicyExpr::Exists {
+            table: exists,
+            condition,
+        } => match schema.get(&TableName::new(exists.clone())) {
+            Some(exists) => refuse_misplaced_inserted(
+                schema,
+                exists,
+                condition,
+                &format!("{path}.Exists.condition"),
+                Placement {
+                    in_exists: true,
+                    ..placement
+                },
+            ),
+            // An unknown table is the schema compile's to refuse.
+            None => Ok(()),
+        },
+        PolicyExpr::Inherits { .. }
+        | PolicyExpr::InheritsReferencing { .. }
+        | PolicyExpr::InheritsFrom { .. }
+            if !placement.admits_inherited_inserted()
+                && reaches_inserted(schema, table, expr, &mut Vec::new()) =>
+        {
+            refused(path.to_owned())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Whether evaluating `expr`, a policy of `table`, reaches an
+/// `InsertedByThisTransaction`: in it, in an `Exists` condition, or in a
+/// policy it inherits (`seen` holds the inherited policies already walked).
+fn reaches_inserted(
+    schema: &Schema,
+    table: &TableSchema,
+    expr: &PolicyExpr,
+    seen: &mut Vec<(TableName, Operation)>,
+) -> bool {
+    let inherited = |name: &TableName, operation: Operation, seen: &mut Vec<_>| {
+        if seen.contains(&(*name, operation)) {
+            return false;
+        }
+        seen.push((*name, operation));
+        schema.get(name).is_some_and(|parent| {
+            // Both update clauses, as `InheritsFrom` reads them.
+            let clauses = match operation {
+                Operation::Update => vec![
+                    parent.policies.update.using.as_ref(),
+                    parent.policies.update.with_check.as_ref(),
+                ],
+                operation => vec![source_operation_policy(parent, operation)],
+            };
+            clauses
+                .into_iter()
+                .flatten()
+                .any(|policy| reaches_inserted(schema, parent, policy, seen))
+        })
+    };
+    match expr {
+        PolicyExpr::InsertedByThisTransaction => true,
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts
+            .iter()
+            .any(|part| reaches_inserted(schema, table, part, seen)),
+        PolicyExpr::Not(inner) => reaches_inserted(schema, table, inner, seen),
+        PolicyExpr::Exists {
+            table: exists,
+            condition,
+        } => schema
+            .get(&TableName::new(exists.clone()))
+            .is_some_and(|exists| reaches_inserted(schema, exists, condition, seen)),
+        PolicyExpr::Inherits {
+            operation,
+            via_column,
+            ..
+        } => table
+            .columns
+            .columns
+            .iter()
+            .find(|column| column.name.as_str() == via_column)
+            .and_then(|column| column.references.as_ref())
+            .is_some_and(|parent| inherited(parent, *operation, seen)),
+        PolicyExpr::InheritsReferencing {
+            operation,
+            source_table,
+            ..
+        } => inherited(&TableName::new(source_table.clone()), *operation, seen),
+        PolicyExpr::InheritsFrom {
+            operation, tables, ..
+        } => tables
+            .iter()
+            .any(|candidate| inherited(&TableName::new(candidate.clone()), *operation, seen)),
+        _ => false,
+    }
 }
 
 /// The outer-row column `expr` refers to, if any (inside nested `Exists`
@@ -209,7 +683,7 @@ fn outer_row_reference(expr: &PolicyExpr) -> Option<String> {
     };
     let value = |value: &PolicyValue| match value {
         PolicyValue::SessionRef(path) => outer(path),
-        PolicyValue::Literal(_) => None,
+        PolicyValue::Literal(_) | PolicyValue::TableIdentity { .. } => None,
     };
     match expr {
         PolicyExpr::Cmp { value: v, .. } | PolicyExpr::Contains { value: v, .. } => value(v),
@@ -225,6 +699,8 @@ fn outer_row_reference(expr: &PolicyExpr) -> Option<String> {
         }
         PolicyExpr::Not(inner) => outer_row_reference(inner),
         PolicyExpr::Exists { condition, .. } => outer_row_reference(condition),
+        // Its columns are the checked row's own, never an outer row's.
+        PolicyExpr::InheritsFrom { .. } | PolicyExpr::InsertedByThisTransaction => None,
         _ => None,
     }
 }
@@ -272,6 +748,8 @@ fn refuse_nested_outer_rows(
             }
             refuse_nested_outer_rows(condition, &format!("{path}.condition"), true)
         }
+        // Neither has an `Exists` condition of its own to nest one in.
+        PolicyExpr::InheritsFrom { .. } | PolicyExpr::InsertedByThisTransaction => Ok(()),
         _ => Ok(()),
     }
 }
@@ -1238,10 +1716,12 @@ fn policy_requires_branch(expr: &PolicyExpr) -> bool {
     match expr {
         PolicyExpr::Inherits { max_depth: _, .. }
         | PolicyExpr::InheritsReferencing { .. }
+        | PolicyExpr::InheritsFrom { .. }
         | PolicyExpr::Exists { .. }
         | PolicyExpr::ExistsRel { .. } => true,
         PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => exprs.iter().any(policy_requires_branch),
         PolicyExpr::Not(expr) => policy_requires_branch(expr),
+        PolicyExpr::InsertedByThisTransaction => false,
         _ => false,
     }
 }
@@ -1339,6 +1819,22 @@ fn append_policy_clause(
         PolicyExpr::ExistsRel { rel } => {
             append_exists_rel_policy_clause(schema, table, path, query, rel)
         }
+        PolicyExpr::InheritsFrom {
+            operation,
+            table_column,
+            id_column,
+            tables,
+        } => append_inherits_from_clause(
+            schema,
+            table,
+            path,
+            query,
+            *operation,
+            table_column,
+            id_column,
+            tables,
+            expansion_path,
+        ),
         PolicyExpr::Or(exprs) if exprs.iter().any(policy_requires_branch) => {
             let existing_branches = PolicyBranch::alternatives_from_query(query);
             let mut query = Query::from(table.as_str()).filter(Predicate::Any(Vec::new()));
@@ -1822,6 +2318,8 @@ fn validate_exists_rel_policy_join_conditions(
         PolicyExpr::Exists { condition, .. } => {
             validate_exists_rel_policy_join_conditions(table, &format!("{path}.Exists"), condition)
         }
+        // A candidate table's own policies are validated as that table's.
+        PolicyExpr::InheritsFrom { .. } | PolicyExpr::InsertedByThisTransaction => Ok(()),
         _ => Ok(()),
     }
 }
@@ -2902,6 +3400,99 @@ fn rel_value_to_policy_operand(
     }
 }
 
+/// [`PolicyExpr::InheritsFrom`], expanded: one policy alternative per
+/// candidate `T`, each `table_column = table_id(T)` and an existence join
+/// on `T` by `T.id = this.<id_column>` whose condition is `T`'s own policy
+/// for `operation` (both update clauses for `Update`), lowered as a direct
+/// policy of `T`. A candidate without that policy grants nothing. Each
+/// alternative is conjoined with every alternative `query` already holds.
+#[allow(clippy::too_many_arguments)]
+fn append_inherits_from_clause(
+    schema: &Schema,
+    table: &TableName,
+    path: &str,
+    query: Query,
+    operation: Operation,
+    table_column: &str,
+    id_column: &str,
+    tables: &[String],
+    expansion_path: &mut Vec<(String, Operation)>,
+) -> Result<Query, SchemaConversionError> {
+    let existing = PolicyBranch::alternatives_from_query(query);
+    let mut combined = Query::from(table.as_str()).filter(Predicate::Any(Vec::new()));
+    for candidate in tables {
+        let path = format!("{path}.InheritsFrom[{candidate}]");
+        let candidate_name = TableName::new(candidate.clone());
+        let candidate_schema = schema.get(&candidate_name).ok_or_else(|| {
+            err(
+                policy_path(table, &path),
+                format!("InheritsFrom names unknown table '{candidate}'"),
+            )
+        })?;
+        let policies = &candidate_schema.policies;
+        let clause = match operation {
+            Operation::Update => policies.update.using.as_ref().map(|using| {
+                PolicyExpr::And(vec![
+                    using.clone(),
+                    policies.update.with_check.as_ref().unwrap_or(using).clone(),
+                ])
+            }),
+            operation => source_operation_policy(candidate_schema, operation).cloned(),
+        };
+        let Some(clause) = clause else {
+            continue;
+        };
+        let lowered = append_inherited_policy_expanded_fallback(
+            schema,
+            candidate_schema,
+            table,
+            &path,
+            Query::from(table.as_str()),
+            &candidate_name,
+            id_column,
+            &clause,
+            operation,
+            expansion_path,
+        )?;
+        let named = Predicate::Eq(
+            Operand::Column(table_column.to_owned()),
+            Operand::TableIdentity(candidate.clone()),
+        );
+        for alternative in PolicyBranch::alternatives_from_query(lowered) {
+            for before in &existing {
+                combined = combined.policy_branch(PolicyBranch {
+                    filters: before
+                        .filters
+                        .iter()
+                        .cloned()
+                        .chain(std::iter::once(named.clone()))
+                        .chain(alternative.filters.iter().cloned())
+                        .collect(),
+                    joins: before
+                        .joins
+                        .iter()
+                        .chain(alternative.joins.iter())
+                        .cloned()
+                        .collect(),
+                    reachable: before
+                        .reachable
+                        .iter()
+                        .chain(alternative.reachable.iter())
+                        .cloned()
+                        .collect(),
+                    inherits: before
+                        .inherits
+                        .iter()
+                        .chain(alternative.inherits.iter())
+                        .cloned()
+                        .collect(),
+                });
+            }
+        }
+    }
+    Ok(combined)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn append_inherited_policy(
     schema: &Schema,
@@ -3296,6 +3887,14 @@ fn convert_policy_predicate(
                 convert_session_path_operand(table, path, path_segments)
                     .map(|operand| Predicate::In(operand, values))
             }),
+        // The lowered form is the query form, read outside any write check,
+        // where the node is false (only a unit's write checks evaluate it).
+        PolicyExpr::InsertedByThisTransaction => Ok(Predicate::Any(Vec::new())),
+        PolicyExpr::InheritsFrom { .. } => Err(err(
+            policy_path(table, path),
+            "core schema policies support `InheritsFrom` only as a conjunct or disjunct, \
+             not as a plain predicate (under `Not`)",
+        )),
         other => Err(err(
             policy_path(table, path),
             format!("core schema policies do not support {other:?} yet"),
@@ -3315,6 +3914,9 @@ fn convert_policy_operand(
         PolicyValue::Literal(value) => Ok(Operand::Literal(convert_policy_literal(
             table, path, value,
         )?)),
+        // The name, not the identity: the lowering stays a pure function of
+        // the schema, and the SQL compiler binds the identity.
+        PolicyValue::TableIdentity { table } => Ok(Operand::TableIdentity(table.clone())),
     }
 }
 

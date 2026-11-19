@@ -27,6 +27,14 @@ pub enum PolicyValue {
     Literal(#[serde(with = "value_payload")] Value),
     /// Reference to a session variable, e.g., ["user_id"] or ["claims", "teams"].
     SessionRef(#[serde(with = "path_payload")] Vec<String>),
+    /// The catalogue identity of table `table` (its stored name within the
+    /// policy's schema): the `uuid` the authority mints for it, the same on
+    /// every store and for the table's whole life. Written `table_id('T')`
+    /// in `jazz.permissions.json`. Resolved when the policy is compiled for
+    /// evaluation; while a store does not know it (a replica whose
+    /// catalogue mirror has not confirmed the names), it is no value, so a
+    /// comparison with it holds for no row.
+    TableIdentity { table: String },
 }
 
 /// Database operation type for policy evaluation.
@@ -153,6 +161,32 @@ pub enum PolicyExpr {
         /// Zero performs no inheritance hop and therefore cannot grant access.
         max_depth: Option<usize>,
     },
+
+    /// Inherit `operation` from the row named by a (table identity, row id)
+    /// pair: `table_column` holds a catalogue table identity
+    /// ([`PolicyValue::TableIdentity`]), `id_column` a row id of that
+    /// table. Only the tables in `tables` are candidates.
+    ///
+    /// It holds iff, for some `T` in `tables`, `table_column` is `T`'s
+    /// identity and the non-deleted row of `T` whose `id` is `id_column`
+    /// passes `T`'s policy for `operation`, compiled at the full depth a
+    /// direct check of that row uses (this is not a hop of an inheritance
+    /// chain). For `Update` it is both clauses of `T`'s update policy on
+    /// the same row image, `USING` and (`WITH CHECK`, or `USING` when there
+    /// is none): a save of the row that changes nothing. A row naming any
+    /// other table, or a missing or deleted row, passes nothing.
+    InheritsFrom {
+        operation: Operation,
+        table_column: String,
+        id_column: String,
+        tables: Vec<String>,
+    },
+
+    /// Inside an `Exists`, true iff the unit being checked inserts that
+    /// `Exists`'s row: a fresh insert of a row that had no version before
+    /// the unit, not a restore or an update. Everywhere else (a read
+    /// policy, a single write, outside an `Exists`) it is false.
+    InsertedByThisTransaction,
 
     /// Logical AND of multiple expressions.
     And(#[serde(with = "exprs_payload")] Vec<PolicyExpr>),
@@ -368,6 +402,8 @@ impl PolicyExpr {
             | PolicyExpr::InList { .. }
             | PolicyExpr::Inherits { .. }
             | PolicyExpr::InheritsReferencing { .. }
+            | PolicyExpr::InheritsFrom { .. }
+            | PolicyExpr::InsertedByThisTransaction
             | PolicyExpr::True
             | PolicyExpr::False => None,
         }
@@ -595,6 +631,66 @@ mod tests {
         ])
     }
 
+    /// The address-policy variants' serde JSON, as stored in a permissions
+    /// bundle (`jazz-bundle-v1`, additive): named, with their fields, and
+    /// read back exactly. The bundle's canonical form and digest are pinned
+    /// with `canonical_json` (`crates/jazz/tests/address_policy_encoding.rs`).
+    #[test]
+    fn address_policy_json_is_pinned() {
+        for (expr, json) in [
+            (
+                PolicyExpr::InheritsFrom {
+                    operation: Operation::Select,
+                    table_column: "scopeId".into(),
+                    id_column: "identifier".into(),
+                    tables: vec!["projects".into()],
+                },
+                r#"{"type":"InheritsFrom","operation":"Select","table_column":"scopeId","id_column":"identifier","tables":["projects"]}"#,
+            ),
+            (
+                PolicyExpr::InheritsFrom {
+                    operation: Operation::Update,
+                    table_column: "scopeId".into(),
+                    id_column: "identifier".into(),
+                    tables: vec!["boards".into(), "projects".into()],
+                },
+                r#"{"type":"InheritsFrom","operation":"Update","table_column":"scopeId","id_column":"identifier","tables":["boards","projects"]}"#,
+            ),
+            (
+                PolicyExpr::InsertedByThisTransaction,
+                r#"{"type":"InsertedByThisTransaction"}"#,
+            ),
+            (
+                PolicyExpr::Cmp {
+                    column: "scopeId".into(),
+                    op: CmpOp::Eq,
+                    value: PolicyValue::TableIdentity {
+                        table: "projects".into(),
+                    },
+                },
+                r#"{"type":"Cmp","column":"scopeId","op":"Eq","value":{"type":"TableIdentity","table":"projects"}}"#,
+            ),
+        ] {
+            assert_eq!(serde_json::to_string(&expr).unwrap(), json);
+            assert_eq!(serde_json::from_str::<PolicyExpr>(json).unwrap(), expr);
+        }
+        for (input, error) in [
+            (
+                r#"{"type":"InheritsFrom","operation":"Select","table_column":"scopeId","id_column":"identifier"}"#,
+                "missing field `tables`",
+            ),
+            (
+                r#"{"type":"Cmp","column":"a","op":"Eq","value":{"type":"TableIdentity"}}"#,
+                "missing field `table`",
+            ),
+        ] {
+            let actual = serde_json::from_str::<PolicyExpr>(input)
+                .unwrap_err()
+                .to_string();
+            assert!(actual.starts_with(error), "{input}: {actual}");
+        }
+    }
+
     #[test]
     fn policy_expr_json_is_pinned() {
         let expr = every_policy_variant();
@@ -650,8 +746,8 @@ mod tests {
                 "unknown variant `Nope`, expected one of `Cmp`, `SessionCmp`, `IsNull`, \
                  `SessionIsNull`, `IsNotNull`, `SessionIsNotNull`, `Contains`, \
                  `SessionContains`, `In`, `InList`, `SessionInList`, `Exists`, `ExistsRel`, \
-                 `Inherits`, `InheritsReferencing`, `And`, `Or`, `Not`, `True`, `False` at line \
-                 1 column 14",
+                 `Inherits`, `InheritsReferencing`, `InheritsFrom`, `InsertedByThisTransaction`, \
+                 `And`, `Or`, `Not`, `True`, `False` at line 1 column 14",
             ),
         ] {
             let actual = serde_json::from_str::<PolicyExpr>(input)

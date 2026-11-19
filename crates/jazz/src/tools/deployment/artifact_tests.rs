@@ -723,6 +723,54 @@ fn unknown_keys_are_refused_at_every_level_with_the_nearest() {
     .unwrap();
 }
 
+/// `__e2ee_` names Jazz's own end-to-end encryption tables, which schema
+/// validation treats differently: an application may not define one in its
+/// current schema, nor set policies on one, even when the schema it reads
+/// the permissions against holds one (as Jazz's own will).
+#[test]
+fn the_system_table_prefix_is_reserved_for_jazz() {
+    // The writer reads what it writes back, so it refuses the table too.
+    let mut input = todo_server();
+    input.schemas[0].insert(
+        TableName::from("__e2ee_spaces"),
+        table(vec![
+            ColumnDescriptor::new("scopeId", ColumnType::Uuid),
+            ColumnDescriptor::new("identifier", ColumnType::Uuid),
+        ]),
+    );
+    input.current = SchemaHash::compute(&input.schemas[0]).to_string();
+    let error = write(input)
+        .expect_err("the table must be refused")
+        .to_string();
+    assert!(
+        error.contains(
+            "tables.__e2ee_spaces: `__e2ee_spaces`: table names starting with `__e2ee_` are \
+             reserved for Jazz's own"
+        ),
+        "{error}"
+    );
+
+    let mut current = loaded(shared_todos()).current_schema().clone();
+    current.insert(
+        TableName::from("__e2ee_spaces"),
+        table(vec![
+            ColumnDescriptor::new("scopeId", ColumnType::Uuid),
+            ColumnDescriptor::new("identifier", ColumnType::Uuid),
+        ]),
+    );
+    let relations = shared_todos().codegen.relations();
+    let file = json::parse(br#"{"tables": {"__e2ee_spaces": {"insert": "true"}}}"#).unwrap();
+    let (path, message) =
+        permissions_file::read(&file, &current, &relations, &Default::default()).unwrap_err();
+    assert_eq!(path, "tables.__e2ee_spaces");
+    assert!(message.contains("are reserved for Jazz's own"), "{message}");
+    // A table that only resembles the prefix is the application's.
+    let file = json::parse(br#"{"tables": {"_e2ee_spaces": {"insert": "true"}}}"#).unwrap();
+    let (_, message) =
+        permissions_file::read(&file, &current, &relations, &Default::default()).unwrap_err();
+    assert!(message.contains("has no table"), "{message}");
+}
+
 #[test]
 fn an_unknown_version_is_refused_before_anything_else() {
     // `$schema` carries the version.
@@ -1355,6 +1403,10 @@ fn policy_variants(expr: &PolicyExpr, seen: &mut BTreeSet<&'static str>) {
         }
         PolicyExpr::Inherits { .. } => "Inherits",
         PolicyExpr::InheritsReferencing { .. } => "InheritsReferencing",
+        // Jazz derives these for its system tables; the file has no
+        // spelling for them, so they are not among the variants above.
+        PolicyExpr::InheritsFrom { .. } => "InheritsFrom",
+        PolicyExpr::InsertedByThisTransaction => "InsertedByThisTransaction",
         PolicyExpr::And(all) => {
             all.iter().for_each(|e| policy_variants(e, seen));
             "And"
@@ -1438,6 +1490,70 @@ fn only_strings(file: &json::Json, text: &str) {
             };
             ops.iter().for_each(|(_, p)| policy(p, text));
         }
+    }
+}
+
+/// `table_id('T')` reads as table `T`'s catalogue identity, compared with
+/// a `uuid` column, and the file writes it back so; a table the schema lacks,
+/// or a column that is no `uuid`, is refused where it is written.
+#[test]
+fn a_table_identity_reads_and_writes_as_table_id() {
+    let expr = read_policy("todos", "owner = table_id('shares')").unwrap();
+    assert_eq!(
+        expr,
+        PolicyExpr::Cmp {
+            column: "owner".into(),
+            op: CmpOp::Eq,
+            value: PolicyValue::TableIdentity {
+                table: "shares".into(),
+            },
+        }
+    );
+    assert_eq!(printed("todos", &expr), "owner = table_id('shares')");
+    through_the_permissions_file(&expr);
+
+    let error = read_policy("todos", "owner = table_id('notes')").unwrap_err();
+    assert!(
+        error.contains("`table_id('notes')` names no table"),
+        "{error}"
+    );
+    let error = read_policy("todos", "name = table_id('shares')").unwrap_err();
+    assert!(error.contains("a table identity is a uuid"), "{error}");
+}
+
+/// The nodes Jazz derives for its system tables have no spelling in the
+/// file: writing one is refused, naming it, rather than written as text that
+/// would read back as something else.
+#[test]
+fn derived_policy_nodes_are_not_written_to_the_file() {
+    let codegen = shared_todos().codegen;
+    let relations = codegen.relations();
+    let loaded = loaded(shared_todos());
+    let context = expr::Context {
+        schema: loaded.current_schema(),
+        relations: &relations,
+        computed: &expr::ComputedNames::new(),
+    };
+    for (expr, name) in [
+        (
+            PolicyExpr::InheritsFrom {
+                operation: Operation::Select,
+                table_column: "owner".into(),
+                id_column: "owner".into(),
+                tables: vec!["shares".into()],
+            },
+            "InheritsFrom",
+        ),
+        (
+            PolicyExpr::Exists {
+                table: "shares".into(),
+                condition: Box::new(PolicyExpr::InsertedByThisTransaction),
+            },
+            "InsertedByThisTransaction",
+        ),
+    ] {
+        let error = expr::print(&expr, &context, "todos").unwrap_err();
+        assert!(error.contains(&format!("`{name}`")), "{error}");
     }
 }
 

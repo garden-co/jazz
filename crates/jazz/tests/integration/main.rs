@@ -7,6 +7,8 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+#[path = "../address_policy_encoding.rs"]
+mod address_policy_encoding;
 #[path = "../aggregate_nullable_keys.rs"]
 mod aggregate_nullable_keys;
 #[path = "../aggregate_ordering.rs"]
@@ -79,6 +81,10 @@ mod history_reads;
 mod host_tables;
 #[path = "../include_live.rs"]
 mod include_live;
+#[path = "../inherits_from_policies.rs"]
+mod inherits_from_policies;
+#[path = "../inherits_from_refusals.rs"]
+mod inherits_from_refusals;
 #[path = "../kept_plans.rs"]
 mod kept_plans;
 #[path = "../large_value_append.rs"]
@@ -257,6 +263,8 @@ mod sync_untrusted_clients;
 mod sync_wire_corpus;
 #[path = "../sync_write_only.rs"]
 mod sync_write_only;
+#[path = "../system_table_joins.rs"]
+mod system_table_joins;
 #[path = "../text_affix_predicates.rs"]
 mod text_affix_predicates;
 #[path = "../text_merge.rs"]

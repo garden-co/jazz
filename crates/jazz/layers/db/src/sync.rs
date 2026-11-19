@@ -3799,11 +3799,20 @@ pub(crate) enum Support {
 }
 
 /// One equality of a composite [`Support::Array`]: the child's `inner`
-/// column holds the parent's `outer` cell.
+/// column holds `value`.
 #[derive(Debug)]
 pub(crate) struct Also {
     inner: String,
-    outer: String,
+    value: AlsoValue,
+}
+
+/// What an [`Also`] child's column equals.
+#[derive(Debug)]
+enum AlsoValue {
+    /// The parent's cell in this stored column.
+    Outer(String),
+    /// A fixed value: a table identity a policy compares the column with.
+    Fixed(Sql),
 }
 
 /// Whether support can follow `consulted.inner = table.outer` by value:
@@ -4613,6 +4622,19 @@ impl Inner {
                 _ => {}
             }
         }
+        /// The columns an `EXISTS` condition's conjuncts compare with a
+        /// table identity (`column = table_id('T')`), each with `T`.
+        fn identities<'p>(condition: &'p PolicyExpr, out: &mut Vec<(&'p str, &'p str)>) {
+            match condition {
+                PolicyExpr::Cmp {
+                    column,
+                    op: CmpOp::Eq,
+                    value: PolicyValue::TableIdentity { table },
+                } => out.push((column, table)),
+                PolicyExpr::And(parts) => parts.iter().for_each(|part| identities(part, out)),
+                _ => {}
+            }
+        }
         fn clauses<'p>(policy: &'p PolicyExpr, out: &mut Vec<(&'p str, &'p PolicyExpr)>) {
             match policy {
                 PolicyExpr::Exists { table, condition } => out.push((table, condition)),
@@ -4620,6 +4642,11 @@ impl Inner {
                     parts.iter().for_each(|part| clauses(part, out))
                 }
                 PolicyExpr::Not(part) => clauses(part, out),
+                // No support ships for an `InheritsFrom`: a deployment
+                // refuses one in a read policy, directly or inherited (Jazz
+                // derives it for write policies only), so no read policy
+                // reaches one.
+                PolicyExpr::InheritsFrom { .. } | PolicyExpr::InsertedByThisTransaction => {}
                 _ => {}
             }
         }
@@ -4648,7 +4675,7 @@ impl Inner {
             let part = |inner: &str, outer: &str| {
                 followable_by_value(table, outer, consulted, inner).then(|| Also {
                     inner: consulted.stored_name(inner).to_owned(),
-                    outer: table.stored_name(outer).to_owned(),
+                    value: AlsoValue::Outer(table.stored_name(outer).to_owned()),
                 })
             };
             let mut composite = Vec::new();
@@ -4658,6 +4685,20 @@ impl Inner {
                         .iter()
                         .filter_map(|&(inner, outer)| part(inner, outer)),
                 );
+                // A comparison with a table identity narrows the children
+                // to that table's, by the identity's value. One this store
+                // does not know yet is left out: the support is kept for
+                // the subscription's life, wider but complete.
+                let mut named = Vec::new();
+                identities(condition, &mut named);
+                for (inner, name) in named {
+                    if let Some(value) = self.identity_cell(consulted, inner, name)? {
+                        composite.push(Also {
+                            inner: consulted.stored_name(inner).to_owned(),
+                            value: AlsoValue::Fixed(value),
+                        });
+                    }
+                }
                 if !composite.is_empty() {
                     composite.insert(0, lead);
                 }
@@ -4696,6 +4737,8 @@ impl Inner {
                 PolicyExpr::And(parts) | PolicyExpr::Or(parts) => {
                     parts.iter().for_each(|part| hops(part, out))
                 }
+                // Not a hop through a reference column (see `clauses`).
+                PolicyExpr::InheritsFrom { .. } => {}
                 _ => {}
             }
         }
@@ -4971,11 +5014,26 @@ impl Inner {
                     // NULL, as no written row's does ([`composite_keys`]).
                     let parts: Vec<(String, Sql)> = composite
                         .iter()
-                        .filter_map(|also| match image_cell(image, &also.outer) {
-                            Some(Sql::Null) | None => None,
-                            Some(value) => Some((also.inner.clone(), value)),
+                        .filter_map(|also| {
+                            let value = match &also.value {
+                                AlsoValue::Outer(outer) => image_cell(image, outer),
+                                AlsoValue::Fixed(value) => Some(value.clone()),
+                            };
+                            match value {
+                                Some(Sql::Null) | None => None,
+                                Some(value) => Some((also.inner.clone(), value)),
+                            }
                         })
                         .collect();
+                    // A key needs a part from the row: fixed parts alone
+                    // would follow every space of a table.
+                    let from_row = composite.iter().any(|also| {
+                        matches!(&also.value, AlsoValue::Outer(outer)
+                            if !matches!(image_cell(image, outer), Some(Sql::Null) | None))
+                    });
+                    if !from_row {
+                        continue;
+                    }
                     // One part left is the single key of its column, as a
                     // correlation on that column alone follows it; none
                     // left, nothing, as a NULL leading equality alone.
@@ -7411,6 +7469,17 @@ impl Inner {
     /// that has received none yet. Stored identities are derived from it
     /// (see [`crate::names::identity`]), so two apps' tables never share one.
     pub(super) fn namespace(&self) -> Result<Option<[u8; 16]>, Error> {
+        let stored = self.stored_namespace()?;
+        if stored.is_some() || !self.publishes_catalogue() {
+            return Ok(stored);
+        }
+        let minted = *uuid::Uuid::new_v4().as_bytes();
+        self.persist_namespace(minted)?;
+        Ok(Some(minted))
+    }
+
+    /// The namespace this store holds, if any; it mints none.
+    fn stored_namespace(&self) -> Result<Option<[u8; 16]>, Error> {
         let stored = match self.conn.cached_row(
             "SELECT v FROM _jazz_meta WHERE k = ?1",
             [NAMESPACE_META],
@@ -7424,12 +7493,7 @@ impl Inner {
             Err(rusqlite::Error::QueryReturnedNoRows) => None,
             Err(error) => return Err(storage(error)),
         };
-        if stored.is_some() || !self.publishes_catalogue() {
-            return Ok(stored);
-        }
-        let minted = *uuid::Uuid::new_v4().as_bytes();
-        self.persist_namespace(minted)?;
-        Ok(Some(minted))
+        Ok(stored)
     }
 
     pub(super) fn persist_namespace(&self, namespace: [u8; 16]) -> Result<(), Error> {
@@ -16753,6 +16817,67 @@ fn pruned_txs_created(conn: &Storage, known: &std::cell::Cell<Option<Known>>) {
         holds: true,
         rollbacks: crate::values::rollbacks(conn),
     }));
+}
+
+impl Inner {
+    /// Table `name`'s catalogue identity as `consulted.inner` stores it,
+    /// for a composite support key: `None` while this store does not know
+    /// it, or when `inner` is not a scalar `uuid` column, whose cells could
+    /// not equal it.
+    fn identity_cell(
+        &self,
+        consulted: &crate::values::Table,
+        inner: &str,
+        name: &str,
+    ) -> Result<Option<Sql>, Error> {
+        use crate::compile::IdentitySource;
+        use crate::records::ValueType;
+        let uuid = inner == "id"
+            || (!crate::compile::is_array(consulted, inner)
+                && consulted.columns.iter().any(|column| {
+                    let mut ty = &column.ty;
+                    while let ValueType::Nullable(inner) = ty {
+                        ty = inner;
+                    }
+                    column.name == inner && column.tags.is_none() && matches!(ty, ValueType::Uuid)
+                }));
+        let Ok(target) = self.schema.table(name) else {
+            return Ok(None);
+        };
+        if !uuid {
+            return Ok(None);
+        }
+        Ok(self.identity_namespace()?.map(|namespace| {
+            Sql::Blob(
+                crate::names::identity(namespace, &target.stored, None)
+                    .as_bytes()
+                    .to_vec(),
+            )
+        }))
+    }
+}
+
+/// A policy's catalogue identities on this store: as [`Db::table_identity`]
+/// has them, the authority's namespace once this store holds it and its
+/// schema's names are confirmed (on the authority, always once a version is
+/// admitted). Before that, none: such a policy grants nothing through an
+/// identity (a comparison with it holds for no row, and a `NOT` over one is
+/// false) until the names are confirmed, when it is compiled again. Only a
+/// store that is not the authority lacks them, and in the shipped topology
+/// only Core, the authority, evaluates policies.
+impl crate::compile::IdentitySource for Inner {
+    fn identity_namespace(&self) -> Result<Option<[u8; 16]>, Error> {
+        let Some(namespace) = self.stored_namespace()? else {
+            return Ok(None);
+        };
+        // The owner's version id is kept; hashing a schema per check is not.
+        let version = if Rc::ptr_eq(&self.schema, &self.owner) {
+            self.owner_version
+        } else {
+            self.schema.jazz.version_id()
+        };
+        Ok(self.names_confirmed(&version).then_some(namespace))
+    }
 }
 
 #[cfg(test)]

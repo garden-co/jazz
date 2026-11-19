@@ -145,6 +145,17 @@ fn names(value: &Json, path: &str) -> Result<Vec<String>, Refusal> {
     }
 }
 
+/// Why an application table may not be named `name`, which starts with
+/// [`crate::schema::SYSTEM_TABLE_PREFIX`]: Jazz defines its own system
+/// tables with that prefix, and schema validation treats them differently.
+pub(super) fn reserved_table_name(name: &str) -> String {
+    format!(
+        "`{name}`: table names starting with `{}` are reserved for Jazz's own end-to-end \
+         encryption tables; give the table another name",
+        crate::schema::SYSTEM_TABLE_PREFIX
+    )
+}
+
 fn identifier(name: &str, path: &str) -> Result<(), Refusal> {
     let mut chars = name.chars();
     let valid = chars
@@ -304,9 +315,13 @@ fn read_tables(
     for (name, table) in object(value, path)? {
         let path = format!("{path}.{name}");
         identifier(name, &path)?;
+        let current = codegen.is_some();
+        // Earlier versions keep whatever names they deployed with.
+        if current && crate::schema::is_system_table(name) {
+            return Err(refuse(&path, reserved_table_name(name)));
+        }
         let fields = object(table, &path)?;
         only_keys(fields, TABLE_KEYS, &path)?;
-        let current = codegen.is_some();
         for key in ["computed", "tsOnly"] {
             if !current && table.get(key).is_some() {
                 return Err(refuse(
