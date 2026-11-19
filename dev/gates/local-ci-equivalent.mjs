@@ -372,11 +372,15 @@ export const ciPartitions = Object.freeze({
   // limits (100 bound parameters, 100 KB statements, expression depth 100,
   // ...), so SQL that would fail there fails here. See
   // dev/durable-objects/README.md.
-  // This is `cargo test --workspace` in two commands. Nextest builds the same
-  // targets and runs the same unit, integration, bin and example tests, but
+  // This is `cargo test --workspace` in three commands. Nextest builds the
+  // same targets and runs the unit, integration, bin and example tests, but
   // runs test binaries in parallel where cargo test ran them one after
-  // another (~200s of a 260s step). Nextest skips doc tests, so the second
-  // command runs exactly those, with the same feature selection.
+  // another (~200s of a 260s step). The docs todo server's snippet tests
+  // keep cargo test's harness (one process, tests on threads): one of them
+  // depends on that timing under these limits and fails in a process of its
+  // own. Nextest skips doc tests, so the last command runs exactly those.
+  // All three use the same --workspace feature selection, so they share one
+  // build.
   "durable-object-limits": Object.freeze([
     command("Durable Object SQLite limits", "cargo", [
       "nextest",
@@ -386,6 +390,16 @@ export const ciPartitions = Object.freeze({
       "--workspace",
       "--features",
       "jazz-core/durable-object-limits",
+      "-E",
+      "not (package(todo-server-docs) and binary(snippets))",
+    ]),
+    command("Durable Object SQLite limits, docs todo server snippets", "cargo", [
+      "test",
+      "--workspace",
+      "--features",
+      "jazz-core/durable-object-limits",
+      "--test",
+      "snippets",
     ]),
     command("Durable Object SQLite limits doc tests", "cargo", [
       "test",
