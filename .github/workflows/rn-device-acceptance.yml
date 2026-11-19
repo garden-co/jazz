@@ -143,7 +143,14 @@ jobs:
         if: inputs.artifacts_run_id == ''
         run: |
           set -euo pipefail
-          brew list llvm >/dev/null 2>&1 || brew install llvm
+          if ! brew list llvm >/dev/null 2>&1; then
+            for attempt in 1 2 3; do
+              brew install llvm && break
+              [[ "${attempt}" == 3 ]] && exit 1
+              echo "::warning::brew install llvm attempt ${attempt} failed"
+              sleep $((attempt * 10))
+            done
+          fi
           echo "CC_wasm32_unknown_unknown=$(brew --prefix llvm)/bin/clang" >> "${GITHUB_ENV}"
       - name: Download the prebuilt artifacts
         if: inputs.artifacts_run_id != ''

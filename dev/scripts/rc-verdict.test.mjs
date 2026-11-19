@@ -53,3 +53,18 @@ test("a probe-only run counts only the probe", () => {
   const needs = { ...ok("resolve", "cloud-rc-probe"), "examples-e2e": { result: "skipped" } };
   assert.equal(rcVerdict({ needs, probeOnly: true, probe: "green" }).verdict, "GO");
 });
+
+test("of alternative jobs exactly one must run and pass", () => {
+  const alternatives = [["rn-device-acceptance", "rn-device-acceptance-built"]];
+  const with_ = (fast, built) => ({
+    ...ok("resolve"),
+    "rn-device-acceptance": { result: fast },
+    "rn-device-acceptance-built": { result: built },
+  });
+  assert.equal(rcVerdict({ needs: with_("success", "skipped"), alternatives }).verdict, "GO");
+  assert.equal(rcVerdict({ needs: with_("skipped", "success"), alternatives }).verdict, "GO");
+  assert.equal(rcVerdict({ needs: with_("skipped", "skipped"), alternatives }).verdict, "NO-GO");
+  assert.equal(rcVerdict({ needs: with_("failure", "skipped"), alternatives }).verdict, "NO-GO");
+  assert.equal(rcVerdict({ needs: with_("skipped", "failure"), alternatives }).verdict, "NO-GO");
+  assert.equal(rcVerdict({ needs: with_("success", "skipped") }).verdict, "NO-GO");
+});
