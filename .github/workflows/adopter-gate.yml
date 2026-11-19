@@ -84,6 +84,10 @@ jobs:
       upgrade_changed: ${{ steps.diff.outputs.upgrade_changed }}
       previous: ${{ steps.prev.outputs.previous }}
     steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with: { sparse-checkout: dev/adopter-gate }
+      - name: Test the producer-run check (stubbed gh, no network)
+        run: dev/adopter-gate/provenance.test.sh
       # The commit being gated, as a full sha: every job's fetch-rc.sh requires each producer run (artifacts_run_id,
       # rc_npm_run_id, language_run_id) to have built exactly it (#supply-chain's rule), and fails closed otherwise.
       - id: ref

@@ -44,7 +44,7 @@ Needs Node, pnpm 11, sqlite3 and `ss`, plus cargo, Go, JDK 17 with Gradle, or Sw
 
 ## Harness rules
 
-- Provenance (#supply-chain's rule): files from another run (`artifacts_run_id`, `rc_npm_run_id`, `language_run_id`) are used only if that run's `head_sha` is the commit being gated: `jazz_sha`, or the RC tag's commit. `fetch-rc.sh` fails closed without it (`AG_EXPECT_SHA`) or on a mismatch, and the verdict job requires the artifacts run's `release-manifest` to name the same commit (the `provenance` row).
+- Provenance (#supply-chain's rule): files from another run (`artifacts_run_id`, `rc_npm_run_id`, `language_run_id`) are used only if that run built the commit being gated (`jazz_sha`, or the RC tag's commit) on a `push` or `workflow_dispatch` (never `pull_request*`) in this repository (not a fork), from a producer workflow: `release-artifacts.yml` or `release-candidate.yml` for `artifacts_run_id`, `release-candidate.yml` for `rc_npm_run_id`, and those or `attach-language-artifacts.yml` for `language_run_id`. `provenance.test.sh` tests it against a stubbed `gh` (CI runs it in the `inputs` job). `fetch-rc.sh` fails closed without it (`AG_EXPECT_SHA`) or on a mismatch, and the verdict job requires the artifacts run's `release-manifest` to name the same commit (the `provenance` row).
 - No pass-on-retry: a check that fails once is FAIL (flakes are fixed, not retried). Only network fetches (downloads, installs) retry, and only fetches.
 
 - Kill processes by port or PID, never with `pkill -f`. A pattern can match the shell running it.

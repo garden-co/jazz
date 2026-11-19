@@ -10,15 +10,23 @@
 AG_NEED=${AG_NEED:-npm,server,languages}; need() { case ",$AG_NEED," in *",$1,"*) return 0;; esac; return 1; }
 R=${GITHUB_REPOSITORY:-garden-co/jazz}
 # Supply chain (#supply-chain's rule, rn-device-acceptance.yml's pattern): files imported from another run are only
-# used if that run built the commit being gated, AG_EXPECT_SHA (the workflow's jazz_sha, or the RC tag's commit).
-# Fail closed: no expected sha, an API error, or a different head_sha stops the fetch.
-producer() { local sha; [[ "${AG_EXPECT_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || { echo "FAIL provenance: AG_EXPECT_SHA must be the full commit sha being gated (got '${AG_EXPECT_SHA:-}')"; exit 1; }
-  sha=$(ag_retry 3 gh api "repos/$R/actions/runs/$1" --jq .head_sha) || { echo "FAIL provenance: can't read run $1"; exit 1; }
-  [ "$sha" = "$AG_EXPECT_SHA" ] || { echo "FAIL provenance: run $1 built $sha, not $AG_EXPECT_SHA"; exit 1; }
-  echo "provenance: run $1 built $AG_EXPECT_SHA"; }
+# used if that run built the commit being gated, AG_EXPECT_SHA (the workflow's jazz_sha, or the RC tag's commit), on a
+# push or dispatch (a pull_request run builds a merge with some base) in this repository (not a fork), from one of the
+# producer workflows given. Fail closed: no expected sha, an API error, or any mismatch stops the fetch.
+# usage: producer <run id> <workflow file>...   (one API read covers all four)
+producer() { local run=$1 got sha ev repo path ok=; shift
+  [[ "${AG_EXPECT_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || { echo "FAIL provenance: AG_EXPECT_SHA must be the full commit sha being gated (got '${AG_EXPECT_SHA:-}')"; exit 1; }
+  got=$(ag_retry 3 gh api "repos/$R/actions/runs/$run" --jq '[.head_sha,.event,.head_repository.full_name,.path]|join(" ")') || { echo "FAIL provenance: can't read run $run"; exit 1; }
+  read -r sha ev repo path <<< "$got"
+  [ "$sha" = "$AG_EXPECT_SHA" ] || { echo "FAIL provenance: run $run built $sha, not $AG_EXPECT_SHA"; exit 1; }
+  case "$ev" in push|workflow_dispatch) ;; *) echo "FAIL provenance: run $run is a '$ev' run, not push or workflow_dispatch"; exit 1;; esac
+  [ "$repo" = "$R" ] || { echo "FAIL provenance: run $run built from '$repo', not $R"; exit 1; }
+  for w in "$@"; do [ "$path" = ".github/workflows/$w" ] && ok=1; done
+  [ -n "$ok" ] || { echo "FAIL provenance: run $run is from '$path', not one of: $*"; exit 1; }
+  echo "provenance: run $run built $AG_EXPECT_SHA ($ev, $path)"; }
 if [ "$1" = --run ]; then   # no release: workflow artifacts of a release-artifacts run (server, languages) and an RC run (rc-npm)
   RUNID=$2; NPMRUN=$RUNID; [ "${3:-}" = --npm-run ] && [ -n "${4:-}" ] && NPMRUN=$4
-  producer "$RUNID"; [ "$NPMRUN" = "$RUNID" ] || producer "$NPMRUN"
+  producer "$RUNID" release-artifacts.yml release-candidate.yml; producer "$NPMRUN" release-candidate.yml
   mkdir -p "$AG_TGZ"; cd "$AG_TGZ"
   # An artifact that doesn't exist yet fails at once (gh says "no artifact matches"); other failures are retried.
   get() { local i; for i in 1 2 3; do rm -rf "_$2"; if gh run download "$1" -R "$R" -n "$2" -D "_$2" > "_$2.err" 2>&1; then cp -r "_$2"/. . && rm -rf "_$2" "_$2.err"; return 0; fi
@@ -55,7 +63,7 @@ fi
 TAG=$1; RUN=${2:-}; V=${TAG#v}
 if [ -n "$RUN" ]; then   # a language run for a tag: it must have built the tag's commit
   AG_EXPECT_SHA=${AG_EXPECT_SHA:-$(ag_retry 3 gh api "repos/$R/commits/$TAG" --jq .sha)} || { echo "FAIL provenance: can't resolve $TAG"; exit 1; }
-  producer "$RUN"
+  producer "$RUN" attach-language-artifacts.yml release-artifacts.yml release-candidate.yml
 fi
 FETCH=$(cd "$AG/../.." && pwd)/.github/actions/fetch-release-artifacts/fetch.sh
 mkdir -p "$AG_TGZ"
