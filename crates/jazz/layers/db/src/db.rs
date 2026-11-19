@@ -56,6 +56,18 @@ pub use sync::{
 };
 pub use sync::{ORIGIN_ENTRY_RETENTION_MS, origin_node};
 
+#[cfg(feature = "e2ee-client")]
+#[path = "e2ee_ledger.rs"]
+pub(crate) mod e2ee_ledger;
+#[cfg(feature = "e2ee-client")]
+#[path = "e2ee_query.rs"]
+mod e2ee_query;
+#[cfg(feature = "e2ee-client")]
+#[path = "e2ee_read.rs"]
+mod e2ee_read;
+#[cfg(feature = "e2ee-client")]
+#[path = "e2ee_write.rs"]
+mod e2ee_write;
 #[path = "shard.rs"]
 pub mod shard;
 pub use crate::names::LensEffects;
@@ -110,6 +122,9 @@ pub struct PreparedQuery {
     request_claims: Option<(AuthorSubject, BTreeMap<String, Value>)>,
     /// The schema view that prepared it; `None` follows the owner schema.
     schema: Option<Rc<Schema>>,
+    /// What the encryption hooks keep of a query they rewrote.
+    #[cfg(feature = "e2ee-client")]
+    planned: Option<Rc<e2ee_query::Planned>>,
 }
 
 impl PreparedQuery {
@@ -969,6 +984,13 @@ struct Inner {
     /// Whether `_jazz_pruned_txs` exists, as last read (see
     /// `sync::has_pruned_txs`).
     pruned_txs: std::cell::Cell<Option<sync::Known>>,
+    /// The client's encryption hooks ([`crate::e2ee`]).
+    #[cfg(feature = "e2ee-client")]
+    e2ee: Option<Rc<dyn crate::e2ee::E2eeHooks>>,
+    /// Keys this database's digests of plaintext search values, chosen at
+    /// random when it opens: a digest confirms no guessed value elsewhere.
+    #[cfg(feature = "e2ee-client")]
+    e2ee_salt: [u8; 32],
 }
 
 /// Whether a read decodes its rows' projected cells.
@@ -2086,6 +2108,10 @@ impl Db {
         conn: crate::storage::Storage,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
+        #[cfg(feature = "e2ee-client")]
+        if let Some(hooks) = &config.e2ee {
+            crate::e2ee::refuse_stored_defaults(&config.schema, hooks.declarations())?;
+        }
         // Before the first statement is prepared: the flag is read at
         // prepare time.
         crate::host::stable_plans(&conn)?;
@@ -2437,6 +2463,15 @@ impl Db {
                 #[cfg(any(test, feature = "testing"))]
                 composite_scans: std::cell::Cell::new(0),
                 pruned_txs: std::cell::Cell::new(None),
+                #[cfg(feature = "e2ee-client")]
+                e2ee: config.e2ee,
+                #[cfg(feature = "e2ee-client")]
+                e2ee_salt: {
+                    let mut salt = [0; 32];
+                    salt[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+                    salt[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+                    salt
+                },
             })),
         };
         {
@@ -2476,7 +2511,7 @@ impl Db {
     /// global authority (see [`Db::set_authority`]).
     pub async fn open_history_complete(config: DbConfig) -> Result<Self, Error> {
         let db = Self::open(config).await?;
-        db.set_authority();
+        db.set_authority()?;
         Ok(db)
     }
 
@@ -2574,14 +2609,28 @@ impl Db {
     /// before any client connected (a backup) carries it: its replicas
     /// still follow it once it is restored. A store that cannot write it
     /// now mints it when it first serves its catalogue, as before.
-    pub fn set_authority(&self) {
+    ///
+    /// # Errors
+    ///
+    /// Returns a protocol error if the database was opened with encryption
+    /// hooks (`DbConfig::with_e2ee`). Only clients seal and open encrypted
+    /// cells, and an authority must store and serve them as they are.
+    pub fn set_authority(&self) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
+        #[cfg(feature = "e2ee-client")]
+        if inner.e2ee.is_some() {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "a database with encryption hooks cannot serve as the authority",
+            ));
+        }
         inner.authority = true;
         if inner.publishes_catalogue() {
             // A storage failure here surfaces again, with its error, from
             // the first catalogue it serves, which mints it then.
             let _ = inner.namespace();
         }
+        Ok(())
     }
 
     /// Read account founders from `registry` in the checks beside the
@@ -3581,9 +3630,22 @@ impl Db {
         let mut inner = self.inner();
         let normalized = normalize_relation(query, &inner.schema)?;
         let query = normalized.as_ref().unwrap_or(query);
-        let shape = jazz_types::sha256::hash(
-            format!("{query:?}{:?}", inner.schema.jazz.version_id()).as_bytes(),
-        );
+        // Encrypted equality filters become token filters before anything
+        // validates, stores or uploads the query.
+        #[cfg(feature = "e2ee-client")]
+        let (physical, planned) = inner.plan_query(query)?;
+        #[cfg(feature = "e2ee-client")]
+        let query = &physical;
+        #[cfg_attr(not(feature = "e2ee-client"), allow(unused_mut))]
+        let mut shape = format!("{query:?}{:?}", inner.schema.jazz.version_id());
+        // The held epochs a rewritten query's tokens were computed for: a
+        // new one is a new query, even offline, where its text is the same.
+        // So is a new residual: its filter and window are not in the text.
+        #[cfg(feature = "e2ee-client")]
+        if let Some(planned) = &planned {
+            shape.push_str(&format!("{:?}{:?}", planned.epochs, planned.residual_key));
+        }
+        let shape = jazz_types::sha256::hash(shape.as_bytes());
         let bound = jazz_types::sha256::hash(format!("{binding:?}").as_bytes());
         let key = (short(shape), short(bound));
         if !inner.validated_shapes.contains(&key) {
@@ -3607,6 +3669,8 @@ impl Db {
             binding_id: Binding(short(bound)),
             request_claims: None,
             schema: self.view.clone(),
+            #[cfg(feature = "e2ee-client")]
+            planned,
         })
     }
 
@@ -3619,7 +3683,22 @@ impl Db {
     ) -> Result<Vec<CurrentRow>, Error> {
         self.fetching(|| {
             let inner = self.inner();
-            inner.run(prepared, None, &ReadSpec::of(&opts, &inner)?)
+            inner.run_for_reader(prepared, None, &ReadSpec::of(&opts, &inner)?, false)
+        })
+        .await
+    }
+
+    /// [`Db::all`] as a strict read: one a write is built on, which fails
+    /// rather than leave out a row the encryption hooks cannot open
+    /// (protocol §4.4).
+    pub async fn all_strict(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.fetching(|| {
+            let inner = self.inner();
+            inner.run_for_reader(prepared, None, &ReadSpec::of(&opts, &inner)?, true)
         })
         .await
     }
@@ -3643,7 +3722,7 @@ impl Db {
             };
             let inner = self.inner();
             let read = ReadSpec::of(&opts, &inner)?;
-            let roots = inner.run(&prepared, identity, &read)?;
+            let roots = inner.run_for_reader(&prepared, identity, &read, false)?;
             inner.nest_relations(&prepared, identity, &read, roots)
         })
         .await
@@ -3662,8 +3741,12 @@ impl Db {
             .nest_relations(prepared, None, &ReadSpec::default(), roots)
     }
 
+    /// A read of the store as it is; inside a callback transaction, a
+    /// strict one (protocol §4.4).
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
-        self.inner().run(prepared, None, &ReadSpec::default())
+        let inner = self.inner();
+        let strict = inner.tx.is_some();
+        inner.run_for_reader(prepared, None, &ReadSpec::default(), strict)
     }
 
     pub async fn all_for_identity(
@@ -3674,7 +3757,12 @@ impl Db {
     ) -> Result<Vec<CurrentRow>, Error> {
         let prepared = self.execution_query(prepared);
         let inner = self.inner();
-        inner.run(&prepared, Some(identity), &ReadSpec::of(&opts, &inner)?)
+        inner.run_for_reader(
+            &prepared,
+            Some(identity),
+            &ReadSpec::of(&opts, &inner)?,
+            false,
+        )
     }
 
     pub async fn all_result_tree(
@@ -3684,7 +3772,7 @@ impl Db {
     ) -> Result<ResultTree, Error> {
         let inner = self.inner();
         let read = ReadSpec::of(&opts, &inner)?;
-        let roots = inner.run(prepared, None, &read)?;
+        let roots = inner.run_for_reader(prepared, None, &read, false)?;
         let mut run = RelationRun::new(&inner, prepared, None, &read);
         let tree = inner.nest(
             &mut run,
@@ -3891,7 +3979,7 @@ impl Db {
     ) -> Result<Vec<CurrentRow>, Error> {
         let inner = self.inner();
         let read = ReadSpec::of(&opts, &inner)?;
-        let rows = inner.run(prepared, identity, &read)?;
+        let rows = inner.run_for_reader(prepared, identity, &read, false)?;
         inner.nest_relations(prepared, identity, &read, rows)
     }
 
@@ -3971,7 +4059,21 @@ impl Db {
 
     /// One write. On a client, a local (unauthenticated) write is also an
     /// upload: it is recorded for the authority, which decides its fate.
-    fn write_op(&self, mut op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
+    fn write_op(&self, op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
+        self.write_op_streamed(op, who, None)
+    }
+
+    /// [`Db::write_op`] of a write whose `streamed` column holds a value the
+    /// encryption hooks sealed as it streamed: they seal the write's other
+    /// cells and leave that one as it is.
+    pub(crate) fn write_op_streamed(
+        &self,
+        mut op: StagedOp,
+        who: Who,
+        streamed: Option<large_ops::StreamedSeal<'_>>,
+    ) -> Result<WriteHandle, Error> {
+        #[cfg(not(feature = "e2ee-client"))]
+        let _ = streamed;
         self.inner().require_mutation_admission()?;
         // A write while a callback transaction is open joins its commit:
         // only one made as that transaction's identity may (its own).
@@ -3989,15 +4091,21 @@ impl Db {
                 let mark = inner.changed.borrow().len();
                 (inner.seq, mark)
             };
+            // Internal rows the encryption hooks stage with the write: they
+            // commit, and upload, before it.
+            #[cfg_attr(not(feature = "e2ee-client"), allow(unused_mut))]
+            let mut ops = Vec::new();
             let (notify, handle) = self.write_unnotified(&table, |inner, seq| {
-                let edits = inner.chunk_large_cells(&mut op)?;
-                inner.counter_deltas(&mut op)?;
-                inner.derived.extend(edits.derived);
-                inner.pending_nodes.extend(edits.pending_nodes);
-                let applied = inner.apply_as(&op, who, seq);
-                inner.clear_derived();
-                applied
+                #[cfg(feature = "e2ee-client")]
+                {
+                    ops = inner.seal_op(&mut op, None, streamed)?;
+                    for companion in &mut ops {
+                        inner.apply_authored(companion, who, seq)?;
+                    }
+                }
+                inner.apply_authored(&mut op, who, seq)
             })?;
+            ops.push(op);
             // A standalone write that changed nothing made no commit: its
             // handle names the row's current version, which may be the
             // newest commit's own seq, so recording it would upload a
@@ -4006,7 +4114,7 @@ impl Db {
             // The upload record joins the write's SQLite transaction: if it
             // fails, `with_upload` rolls both back, and nobody has been told.
             if let Err(error) = committed
-                .then(|| self.record_upload(vec![op], handle.tx, sync::Kind::Mergeable, None))
+                .then(|| self.record_upload(ops, handle.tx, sync::Kind::Mergeable, None))
                 .transpose()
             {
                 let mut inner = self.inner();
@@ -5590,6 +5698,25 @@ impl Inner {
         read: &ReadSpec,
     ) -> Result<Vec<CurrentRow>, Error> {
         Ok(self.run_with_deps(prepared, identity, read)?.0)
+    }
+
+    /// [`Inner::run`] for a reader: the rows leave the store, so the
+    /// encryption hooks open them first. A `strict` read fails rather than
+    /// leave out a row it cannot open (protocol §4.4).
+    pub(crate) fn run_for_reader(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+        strict: bool,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        #[cfg_attr(not(feature = "e2ee-client"), allow(unused_mut))]
+        let mut rows = self.run(prepared, identity, read)?;
+        #[cfg(feature = "e2ee-client")]
+        self.open_read(prepared, read, strict, &mut rows)?;
+        #[cfg(not(feature = "e2ee-client"))]
+        let _ = strict;
+        Ok(rows)
     }
 
     /// [`Inner::run`] for a caller that uses only each row's identity,
@@ -10956,6 +11083,23 @@ impl Inner {
     }
 
     /// Apply one write as `who`: policies apply for a session identity.
+    /// Apply `op`, a write this store authors as `who`, at `seq`: its
+    /// large values chunked and its counter changes resolved first.
+    fn apply_authored(
+        &mut self,
+        op: &mut StagedOp,
+        who: Who,
+        seq: u64,
+    ) -> Result<WriteHandle, Error> {
+        let edits = self.chunk_large_cells(op)?;
+        self.counter_deltas(op)?;
+        self.derived.extend(edits.derived);
+        self.pending_nodes.extend(edits.pending_nodes);
+        let applied = self.apply_as(op, who, seq);
+        self.clear_derived();
+        applied
+    }
+
     fn apply_as(&mut self, op: &StagedOp, who: Who, seq: u64) -> Result<WriteHandle, Error> {
         let author = match who {
             Who::Session(author) | Who::Attributed(author) => author,
@@ -11802,8 +11946,38 @@ impl Db {
     }
 
     /// [`Self::stage`] a write whose large values a partial update built:
-    /// the batch keeps what it built for every later apply.
+    /// the batch keeps what it built for every later apply. The encryption
+    /// hooks seal it first, so a refusal surfaces here, not at commit.
     pub(crate) fn stage_with_edits(
+        &self,
+        id: OpenTransactionId,
+        op: StagedOp,
+        edits: LargeEdits,
+    ) -> Result<(), Error> {
+        self.stage_streamed(id, op, edits, None)
+    }
+
+    /// [`Self::stage_with_edits`] of a write whose `streamed` column holds a
+    /// value the encryption hooks sealed as it streamed (see
+    /// [`Db::write_op_streamed`]).
+    pub(crate) fn stage_streamed(
+        &self,
+        id: OpenTransactionId,
+        op: StagedOp,
+        edits: LargeEdits,
+        streamed: Option<large_ops::StreamedSeal<'_>>,
+    ) -> Result<(), Error> {
+        #[cfg(feature = "e2ee-client")]
+        return self.stage_sealed(id, op, edits, None, streamed);
+        #[cfg(not(feature = "e2ee-client"))]
+        {
+            let _ = streamed;
+            self.stage_chunked(id, op, edits)
+        }
+    }
+
+    /// [`Self::stage_with_edits`] of a write already sealed.
+    pub(crate) fn stage_chunked(
         &self,
         id: OpenTransactionId,
         mut op: StagedOp,
@@ -12401,7 +12575,7 @@ impl TxRef<'_> {
                         view: through.view.clone(),
                         ..ReadSpec::default()
                     };
-                    let roots = inner.run(&prepared, identity, &read)?;
+                    let roots = inner.run_for_reader(&prepared, identity, &read, true)?;
                     inner.nest_relations(&prepared, identity, &read, roots)
                 })?;
                 Ok((rows, prepared))

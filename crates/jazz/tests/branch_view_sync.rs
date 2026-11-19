@@ -172,7 +172,7 @@ fn connect_negotiating(
 /// A server and a durable client connected to it.
 fn connected() -> (Db, Db, Rc<RefCell<usize>>) {
     let server = open(0x01, AuthorSubject::SYSTEM);
-    server.set_authority();
+    server.set_authority().unwrap();
     let client = open(0x02, alice());
     let (upstream, shipped) = connect(&server, &client);
     std::mem::forget(upstream);
@@ -337,7 +337,7 @@ fn a_write_to_an_unrelated_branch_wakes_no_branch_view_subscription() {
 #[test]
 fn a_branch_view_subscription_resumes_in_its_view() {
     let server = open(0x01, AuthorSubject::SYSTEM);
-    server.set_authority();
+    server.set_authority().unwrap();
     let client = open(0x02, alice());
     let (main, draft, other) = (branch(0xd1), branch(0xd2), branch(0xd3));
     put(&server, &main, 0x60, "main", 1);
@@ -422,7 +422,7 @@ fn a_head_tombstone_masks_a_base_row_another_read_holds() {
 #[test]
 fn a_windowed_view_reopening_drops_a_base_row_deleted_while_away() {
     let server = open(0x01, AuthorSubject::SYSTEM);
-    server.set_authority();
+    server.set_authority().unwrap();
     let client = open(0x02, alice());
     let (main, draft) = (branch(0xf1), branch(0xf2));
     for (row, rank) in [(0x80, 1), (0x81, 2), (0x82, 3), (0x83, 4)] {
@@ -483,7 +483,7 @@ fn a_frozen_base_view_follows_a_head_tombstone_from_another_writer() {
 #[test]
 fn a_tab_keeps_a_windowed_view_over_a_frozen_base() {
     let server = open(0x01, AuthorSubject::SYSTEM);
-    server.set_authority();
+    server.set_authority().unwrap();
     let worker = open(0x02, alice());
     std::mem::forget(connect(&server, &worker).0);
     let tab = open(0x03, alice());
@@ -756,7 +756,7 @@ fn reconnect_then_view(
     bytes: (u8, u8),
 ) -> Vec<String> {
     let server = open(0x01, AuthorSubject::SYSTEM);
-    server.set_authority();
+    server.set_authority().unwrap();
     let client = open(0x02, alice());
     let (up, _) = connect(&server, &client);
     let (main, draft) = (branch(bytes.0), branch(bytes.1));
@@ -926,7 +926,7 @@ fn hidden_before_the_view(
     bytes: (u8, u8),
 ) -> Vec<String> {
     let server = open(0x01, AuthorSubject::SYSTEM);
-    server.set_authority();
+    server.set_authority().unwrap();
     let client = open(0x02, alice());
     let (up, _) = connect(&server, &client);
     let (main, draft) = (branch(bytes.0), branch(bytes.1));
@@ -987,7 +987,7 @@ fn a_view_opened_after_the_head_hid_a_row_hides_it() {
 #[test]
 fn a_tab_hides_a_row_its_worker_may_not_read_on_the_head() {
     let server = open(0x01, AuthorSubject::SYSTEM);
-    server.set_authority();
+    server.set_authority().unwrap();
     let worker = open(0x02, alice());
     std::mem::forget(connect(&server, &worker).0);
     let tab = open(0x03, alice());
@@ -1042,7 +1042,7 @@ fn a_tab_hides_a_row_its_worker_may_not_read_on_the_head() {
 fn a_resumed_view_follows_access_to_a_head_row_changed_while_away() {
     for granted_while_away in [true, false] {
         let server = open(0x01, AuthorSubject::SYSTEM);
-        server.set_authority();
+        server.set_authority().unwrap();
         let client = open(0x02, alice());
         let (up, _) = connect(&server, &client);
         let (main, draft) = (branch(0x71), branch(0x72));
@@ -1126,7 +1126,7 @@ fn a_reopened_store_keeps_hiding_a_row_offline() {
         ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
     {
         let server = open(0x01, AuthorSubject::SYSTEM);
-        server.set_authority();
+        server.set_authority().unwrap();
         let client = open_file();
         std::mem::forget(connect(&server, &client).0);
         put(&server, &main, 0x45, "x", 1);
@@ -1248,7 +1248,7 @@ fn set_rank_on(db: &Db, row: u8, on: &BranchSelector, rank: i32) {
 /// ships only head rows written after `since`.
 fn resume_base_enters_filter(tombstone: bool, bytes: (u8, u8)) -> Vec<String> {
     let server = open(0x01, AuthorSubject::SYSTEM);
-    server.set_authority();
+    server.set_authority().unwrap();
     let client = open(0x02, alice());
     let (up, _) = connect(&server, &client);
     let (main, draft) = (branch(bytes.0), branch(bytes.1));
@@ -1309,7 +1309,7 @@ fn inc_schema() -> JazzSchema {
 /// main's list through a main lists read or not.
 fn relation_names(tombstone: bool, bytes: (u8, u8), main_sub: bool) -> (String, String) {
     let server = open_with(inc_schema(), 0x01, AuthorSubject::SYSTEM);
-    server.set_authority();
+    server.set_authority().unwrap();
     let client = open_with(inc_schema(), 0x02, alice());
     std::mem::forget(connect(&server, &client).0);
     let (main, draft) = (branch(bytes.0), branch(bytes.1));
@@ -1513,7 +1513,7 @@ fn edits_to_a_hidden_head_row_send_nothing_more() {
 fn a_revoke_without_a_view_keeps_no_marker() {
     let (client, path) = file_client("plain");
     let server = open(0x01, AuthorSubject::SYSTEM);
-    server.set_authority();
+    server.set_authority().unwrap();
     std::mem::forget(connect(&server, &client).0);
     let main = branch(0xa3);
     put(&server, &main, 0x45, "x", 1);
@@ -1656,7 +1656,7 @@ fn a_dropped_view_stops_following_its_masking_rows() {
 fn a_readers_own_write_she_may_not_read_hides_the_row() {
     let (client, path) = file_client("own");
     let server = open(0x01, AuthorSubject::SYSTEM);
-    server.set_authority();
+    server.set_authority().unwrap();
     std::mem::forget(connect(&server, &client).0);
     let (main, draft) = (branch(0xa9), branch(0xaa));
     put(&server, &main, 0x45, "x", 1);
@@ -1928,7 +1928,7 @@ fn a_regained_row_goes_cold_after_unsubscribe_and_is_evicted_on_read() {
 fn a_tabs_settled_row_needs_a_live_read_to_stay_current_through_its_worker() {
     for open_view in [false, true] {
         let server = open(0x01, AuthorSubject::SYSTEM);
-        server.set_authority();
+        server.set_authority().unwrap();
         let worker = open(0x02, alice());
         std::mem::forget(connect(&server, &worker).0);
         let tab = open(0x03, alice());
@@ -2164,7 +2164,7 @@ fn the_server_accepts_a_serializable_branch_read_when_only_another_branch_change
 #[test]
 fn a_serializable_branch_read_needs_a_server_that_negotiated_it() {
     let server = open(0x01, AuthorSubject::SYSTEM);
-    server.set_authority();
+    server.set_authority().unwrap();
     let client = open(0x02, alice());
     let (upstream, _) = connect_negotiating(&server, &client, jazz::wire::FEATURE_NONE);
     std::mem::forget(upstream);
@@ -2186,7 +2186,7 @@ fn a_serializable_branch_read_needs_a_server_that_negotiated_it() {
 #[test]
 fn an_offline_serializable_branch_read_commits_when_the_link_returns() {
     let server = open(0x01, AuthorSubject::SYSTEM);
-    server.set_authority();
+    server.set_authority().unwrap();
     let client = open(0x02, alice());
     let (upstream, _) = connect(&server, &client);
     // The app keeps its draft live, so the replica holds its rows offline.
@@ -2222,7 +2222,7 @@ fn cold_tab_over_an_offline_worker(
     bytes: (u8, u8),
 ) -> (Db, Db, [ReadViewSourceSpec; 3], OpenTransactionId) {
     let server = open(0x01, AuthorSubject::SYSTEM);
-    server.set_authority();
+    server.set_authority().unwrap();
     let worker = open(0x02, alice());
     std::mem::forget(connect(&server, &worker).0);
     let (main, draft) = (branch(bytes.0), branch(bytes.1));

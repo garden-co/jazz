@@ -322,7 +322,7 @@ fn open_authority(schema: &Schema) -> Db {
         },
     )))
     .unwrap();
-    authority.set_authority();
+    authority.set_authority().unwrap();
     authority
 }
 

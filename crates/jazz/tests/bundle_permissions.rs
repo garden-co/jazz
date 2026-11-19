@@ -43,7 +43,7 @@ fn config(node: u8, author: AuthorSubject, read: PolicyExpr) -> DbConfig {
 
 /// An authority whose own schema reads everything, with one seeded row.
 fn server_with_row(db: Db) -> (Db, RowUuid) {
-    db.set_authority();
+    db.set_authority().unwrap();
     let row = RowUuid::from_bytes([7; 16]);
     db.seed_settled_mergeable_for_bootstrap(
         "users",
@@ -146,7 +146,7 @@ fn rolling_back_publishes_the_same_bundle_again() {
 #[test]
 fn a_bundle_this_store_never_published_is_refused() {
     let server = block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap();
-    server.set_authority();
+    server.set_authority().unwrap();
     let (_client_side, server_side) = duplex();
     let error = server
         .accept_pinned_subscriber(
@@ -162,7 +162,7 @@ fn a_bundle_this_store_never_published_is_refused() {
 #[test]
 fn a_bundle_whose_write_schema_was_never_admitted_is_refused() {
     let server = block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap();
-    server.set_authority();
+    server.set_authority().unwrap();
     // Its schema has a column the store never admitted.
     let unadmitted = SchemaBuilder::new()
         .table(
@@ -239,7 +239,7 @@ fn bundles_govern_sessions_after_a_restart() {
     // Reopened with a schema that reads everything: the pinned session
     // still reads by its bundle.
     let server = open(PolicyExpr::True);
-    server.set_authority();
+    server.set_authority().unwrap();
     let alice = AuthorSubject::for_test_bytes([0x55; 16]);
     let (db, _keep) = pinned(&server, 1, alice, closed);
     pump(&server, &[&db]);
@@ -249,7 +249,7 @@ fn bundles_govern_sessions_after_a_restart() {
 #[test]
 fn a_pinned_session_writes_by_its_bundle() {
     let server = block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap();
-    server.set_authority();
+    server.set_authority().unwrap();
     let mut no_inserts = users(PolicyExpr::True);
     for table in no_inserts.values_mut() {
         table.policies.insert.with_check = Some(PolicyExpr::False);
@@ -380,7 +380,7 @@ fn counting_pipe() -> (
 /// reads every user and one that reads none.
 fn server_with_users(rows: u8) -> (Db, BundleId, BundleId) {
     let server = block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap();
-    server.set_authority();
+    server.set_authority().unwrap();
     for n in 0..rows {
         server
             .seed_settled_mergeable_for_bootstrap(
@@ -491,7 +491,7 @@ fn a_pinned_session_under_another_bundle_opens_fresh() {
 #[test]
 fn a_session_with_claims_resumes_only_with_the_same_claims() {
     let server = block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap();
-    server.set_authority();
+    server.set_authority().unwrap();
     let teams = ["red", "red", "red", "blue", "blue"];
     for (n, team) in teams.iter().enumerate() {
         server

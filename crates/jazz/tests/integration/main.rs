@@ -57,6 +57,9 @@ mod deployment_preparation;
 mod dynamic_schema_views;
 #[path = "../e2ee_author_columns.rs"]
 mod e2ee_author_columns;
+#[cfg(feature = "e2ee-client")]
+#[path = "../e2ee_client_hooks.rs"]
+mod e2ee_client_hooks;
 #[path = "../e2ee_declarations.rs"]
 mod e2ee_declarations;
 #[path = "../e2ee_system_tables.rs"]

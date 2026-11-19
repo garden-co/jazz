@@ -76,7 +76,7 @@ fn exchange(alice: &Db, bob: &Db) {
 fn fixture() -> (Db, Db) {
     let alice = open(1);
     let bob = open(2);
-    bob.set_authority();
+    bob.set_authority().unwrap();
     connect(&alice, &bob);
     alice.set_remote_link_hint(RemoteLinkHint::Live);
     exchange(&alice, &bob);

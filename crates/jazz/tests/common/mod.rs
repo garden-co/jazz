@@ -164,7 +164,7 @@ pub fn reinstall(
     ))
     .unwrap();
     if authority {
-        db.set_authority();
+        db.set_authority().unwrap();
     }
     db
 }

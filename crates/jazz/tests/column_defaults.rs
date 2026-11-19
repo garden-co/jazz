@@ -74,6 +74,8 @@ fn open_db() -> Db {
         clock: None,
         migrations: Default::default(),
         system_node: None,
+        #[cfg(feature = "e2ee-client")]
+        e2ee: None,
     }))
     .expect("open db")
 }

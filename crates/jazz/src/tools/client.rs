@@ -926,10 +926,12 @@ impl JazzClient {
         let default_session = default_session_from_context(&context);
         let core_schema = crate::schema::JazzSchema::new(&context.schema)
             .map_err(|error| JazzError::Schema(error.to_string()))?;
-        crate::binding_host::refuse_encrypted_app(&core_schema)
-            .map_err(|error| JazzError::Schema(error.to_string()))?;
         let identity = core_identity(&context, client_id(&context)?, default_session.as_ref())?;
         let mut config = DbConfig::new(core_schema, identity);
+        // This client installs no encryption hooks, so it refuses an
+        // encrypted app.
+        crate::binding_host::refuse_encrypted_app(&config)
+            .map_err(|error| JazzError::Schema(error.to_string()))?;
         config.migrations = context.migrations.clone();
         let db = match context.storage {
             ClientStorage::Memory => Db::open(config).await,

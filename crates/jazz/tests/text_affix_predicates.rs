@@ -256,7 +256,7 @@ impl Transport for Pipe {
 /// Alice's replica sent.
 fn connected(features: jazz::wire::WireFeatures) -> (Db, Db, Rc<RefCell<usize>>) {
     let server = open(0x01, AuthorSubject::SYSTEM);
-    server.set_authority();
+    server.set_authority().unwrap();
     seed(&server);
     let client = open(0x02, alice());
     let (upstream, affix_reads) = link(&server, &client, features);
@@ -400,7 +400,7 @@ fn an_affix_read_needs_a_server_that_negotiated_it() {
 #[test]
 fn a_serializable_commit_reading_by_prefix_needs_a_server_that_negotiated_it() {
     let server = open(0x01, AuthorSubject::SYSTEM);
-    server.set_authority();
+    server.set_authority().unwrap();
     seed(&server);
     let client = open(0x02, alice());
     let (upstream, _) = link(&server, &client, jazz::wire::current_wire_features());

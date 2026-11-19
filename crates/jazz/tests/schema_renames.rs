@@ -136,7 +136,7 @@ fn reopen(db: Db, path: &Path, config: DbConfig) -> Db {
     drop(db);
     let db = block_on(Db::open_at(config, path, FileOptions::default())).unwrap();
     if authority {
-        db.set_authority();
+        db.set_authority().unwrap();
     }
     db
 }
@@ -448,7 +448,7 @@ fn a_table_rename_holds_across_reopen_and_for_a_fresh_receiver() {
     }
 
     let server = open_at(after.clone(), &path);
-    server.set_authority();
+    server.set_authority().unwrap();
     let fresh = block_on(Db::open(
         bare_config(after, 2, user(2)).with_migrations(vec![before], vec![rename]),
     ))

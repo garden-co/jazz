@@ -38,7 +38,7 @@ fn open() -> Db {
         },
     )))
     .unwrap();
-    db.set_authority();
+    db.set_authority().unwrap();
     db.seed_settled_mergeable_for_bootstrap(
         "notes",
         RowUuid::from_bytes([4; 16]),
@@ -174,7 +174,7 @@ fn claim_scopes_in_one_store_follow_their_own_source() {
             },
         )))
         .unwrap();
-        db.set_authority();
+        db.set_authority().unwrap();
         db.seed_settled_mergeable_for_bootstrap(
             "notes",
             RowUuid::from_bytes([4; 16]),

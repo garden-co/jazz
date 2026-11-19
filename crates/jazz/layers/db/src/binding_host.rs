@@ -675,32 +675,47 @@ pub fn db_config(schema: JazzSchema, config: &OpenConfig, identity: DbIdentity) 
 }
 
 /// Why a client may not open an app whose schema holds Jazz's system tables
-/// (it declares end-to-end encryption): it has no encryption hooks yet, so
-/// it would write plaintext into the ciphertext columns, and the types
-/// generated code gives those columns would hide that.
+/// (it declares end-to-end encryption) without encryption hooks: it would
+/// write plaintext into the ciphertext columns, and the types generated
+/// code gives those columns would hide that.
 pub const ENCRYPTED_APP_REFUSAL: &str = "this client can't open an app that declares end-to-end \
     encryption yet: it has no encryption hooks, so it would store plaintext in the encrypted \
     columns. Deploy the app with `deploy` or the HTTP deploy route, and open it with a client \
     that has encryption";
 
-/// Refuse `schema` if it holds Jazz's system tables, which only an
-/// encrypted app's schema does.
-pub fn refuse_encrypted_app(schema: &JazzSchema) -> Result<(), Error> {
-    if schema
+/// Refuse to open `config`'s schema if it holds Jazz's system tables, which
+/// only an encrypted app's schema does (a version that declares no
+/// encryption keeps the tables once an earlier one added them), unless the
+/// configuration installs encryption hooks built from an encrypted app's
+/// declarations ([`DbConfig::with_e2ee`], [`crate::e2ee::E2eeHooks::built_from_encrypted_app`]). A
+/// build without the `e2ee-client` feature has no hooks to install and
+/// always refuses.
+pub fn refuse_encrypted_app(config: &DbConfig) -> Result<(), Error> {
+    if !config
+        .schema
         .tables()
         .iter()
         .any(|table| jazz_model::schema::is_system_table(&table.name))
     {
-        return Err(Error::new(ErrorCode::Schema, ENCRYPTED_APP_REFUSAL));
+        return Ok(());
     }
-    Ok(())
+    #[cfg(feature = "e2ee-client")]
+    if config
+        .e2ee
+        .as_ref()
+        .is_some_and(|hooks| hooks.built_from_encrypted_app())
+    {
+        return Ok(());
+    }
+    Err(Error::new(ErrorCode::Schema, ENCRYPTED_APP_REFUSAL))
 }
 
 /// Open an in-memory database. `history_complete` needs nothing: every
 /// SQLite store keeps full history. A schema with Jazz's system tables is
-/// refused ([`refuse_encrypted_app`]).
+/// refused unless the configuration has encryption hooks
+/// ([`refuse_encrypted_app`]).
 pub async fn open_memory(db_config: DbConfig) -> Result<Db, Error> {
-    refuse_encrypted_app(&db_config.schema)?;
+    refuse_encrypted_app(&db_config)?;
     Db::open(db_config).await
 }
 
@@ -710,7 +725,7 @@ pub async fn open_file(
     path: &std::path::Path,
     options: crate::db::FileOptions,
 ) -> Result<Db, Error> {
-    refuse_encrypted_app(&db_config.schema)?;
+    refuse_encrypted_app(&db_config)?;
     Db::open_at(db_config, path, options).await
 }
 
@@ -1532,7 +1547,8 @@ impl Binding {
         let prepared = self.db.prepare_query(&query)?;
         let mut opts = ReadOpts::for_read_tier(ReadTier::LocalOnly);
         opts.read_view.include_deleted = true;
-        let rows = block_on(self.db.all(&prepared, opts))?;
+        // The row a mutation is built on: strict (protocol §4.4).
+        let rows = block_on(self.db.all_strict(&prepared, opts))?;
         Ok(crate::binding_codec::encode_rows(&rows)?)
     }
 
@@ -1983,9 +1999,23 @@ impl Binding {
             Some(id) => self.staged_identity(id, identity)?,
             None => identity,
         };
-        let upload = self
-            .db
-            .begin_streaming_value_upload(&table, &cells, &column)?;
+        let target = match &head {
+            Some(head) => crate::options::WriteTarget::BranchView {
+                head: head.clone(),
+                base: base.clone(),
+            },
+            None => crate::options::WriteTarget::Root,
+        };
+        // In a transaction, the row's space is the one the transaction sees.
+        let upload = match transaction {
+            Some(id) => self
+                .db
+                .tx_ref(id)
+                .begin_streaming_value_upload_for(&table, row, &cells, &column, &target)?,
+            None => self
+                .db
+                .begin_streaming_value_upload_for(&table, row, &cells, &column, &target)?,
+        };
         Ok(StreamingMutation {
             state: Some(Box::new(StreamingState {
                 binding: self.clone(),

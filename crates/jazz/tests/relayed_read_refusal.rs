@@ -451,7 +451,7 @@ fn a_relay_that_cannot_mirror_its_servers_catalogue_refuses_the_tabs_remote_read
         config(head.clone(), 0x51).with_migrations(schemas, lenses),
     ))
     .unwrap();
-    server.set_authority();
+    server.set_authority().unwrap();
     let device = Device::new(head, "todos");
     let upstream = connect(&device.relay, &server);
     let refusal = tab_reads_through_a_refused_relay(&device, &server, &upstream, Some(0));

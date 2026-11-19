@@ -39,6 +39,8 @@ pub mod compile;
 pub mod db;
 #[cfg(feature = "durable-object-limits")]
 mod durable_object_limits;
+#[cfg(feature = "e2ee-client")]
+pub mod e2ee;
 pub mod format;
 pub mod host;
 pub(crate) mod large;

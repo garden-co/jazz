@@ -150,7 +150,7 @@ fn same(db: &Db, row: RowUuid, author: AuthorSubject, what: &str) -> Vec<bool> {
 fn a_variant_tagged_after_a_check_was_kept_is_matched_by_its_tag() {
     let schema = || docs_schema(&["todo", "done"], session_eq("status", &["claims", "role"]));
     let db = open(schema(), 1);
-    db.set_authority();
+    db.set_authority().unwrap();
     db.set_identity_claims(user(0), claims("n0", "ghost"));
     insert(&db, "teams", id(TEAM, 0), &[("name", text("t0"))]);
     doc(&db, 0, "n0", 0, "todo").unwrap();
@@ -359,7 +359,7 @@ fn differential(seed_of: u64) {
     let v1 = docs_schema(&["todo", "doing", "done"], first);
     let v2 = docs_schema(&["todo", "doing", "done", "later"], second);
     let db = open(v1.clone(), 1);
-    db.set_authority();
+    db.set_authority().unwrap();
     db.keep_variants_for_import(
         [(
             ("docs".into(), "status".into()),

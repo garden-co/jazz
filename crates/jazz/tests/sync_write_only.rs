@@ -96,7 +96,7 @@ fn ordinary_write_only_case(serializable: bool) {
         },
     )))
     .unwrap();
-    bob.set_authority();
+    bob.set_authority().unwrap();
     let first = if serializable {
         let id = OpenTransactionId::new();
         block_on(alice.begin_serializable(id)).unwrap();
@@ -180,7 +180,7 @@ fn policy_pair(policies: jazz::tools::TablePolicies) -> (Db, Db) {
         },
     )))
     .unwrap();
-    bob.set_authority();
+    bob.set_authority().unwrap();
     (alice, bob)
 }
 fn pump(alice: &Db, bob: &Db) {
@@ -513,7 +513,7 @@ fn a_write_only_insert_superseded_by_another_writer_is_evicted() {
     let carol = open_as(write_only(), 32, AuthorSubject::SYSTEM);
     carol.become_replica();
     let bob = open_as(write_only(), 33, AuthorSubject::SYSTEM);
-    bob.set_authority();
+    bob.set_authority().unwrap();
     connect(&alice, &bob, "alice");
     let (up, down) = duplex();
     block_on(carol.connect_upstream(up));
@@ -554,7 +554,7 @@ fn a_write_only_insert_superseded_by_another_writer_is_evicted() {
 
 fn relayed(identity: AuthorSubject, server_link: bool) -> (Db, Db, Db) {
     let server = open_as(write_only(), 41, AuthorSubject::SYSTEM);
-    server.set_authority();
+    server.set_authority().unwrap();
     let relay = open_as(write_only(), 42, identity);
     if server_link {
         let (up, down) = duplex();

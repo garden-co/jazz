@@ -138,6 +138,12 @@ export const ciPartitions = Object.freeze({
     command("changesets release plan", "node", ["dev/gates/changesets.mjs"]),
     command("jazz module layers", "node", ["dev/gates/jazz-module-layers.mjs"]),
     command("actions pinned to commit SHAs", "node", ["dev/gates/actions-pinned.mjs"]),
+    // Only clients seal and open encrypted cells: the server never builds
+    // with the client's encryption hooks.
+    command("server excludes e2ee-client", "node", [
+      "dev/gates/server-excludes-e2ee-client.mjs",
+      "--self-test",
+    ]),
     // The exhaustive target-class compile lives here rather than in front of
     // the TypeScript artifact build: it gates the same push, but no longer
     // delays the longest job's native artifacts by a serial workspace check.
@@ -233,6 +239,25 @@ export const ciPartitions = Object.freeze({
       "--tests",
       "--features",
       RUST_CI_FEATURES,
+    ]),
+    // jazz-core's integration tests again with the client's encryption hooks
+    // compiled in: the hook tests exist only then, and every other test must
+    // pass with the call sites built. A run of its own, so the workspace run
+    // above keeps the server's feature set.
+    command("jazz-core integration tests with e2ee-client", "node", [
+      "dev/gates/run-rust-tests.mjs",
+      "--require-nextest",
+      "--timeout-seconds",
+      "600",
+      "--nextest-profile",
+      "jazz-ci",
+      "--",
+      "-p",
+      "jazz-core",
+      "--test",
+      "integration",
+      "--features",
+      "jazz-core/testing,jazz-core/e2ee-client",
     ]),
     // jazz-ffi's C ABI from a C program linking its staticlib, and the Swift
     // and Kotlin sources uniffi-bindgen generates (target/jazz-ffi-bindings).

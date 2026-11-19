@@ -2345,7 +2345,7 @@ reported against the space column as `invalid-ciphertext`. Any other error fails
 deduplicated per account by `(table, id, column, code)` in a bounded
 least-recently-used set of 10,000 entries; a listener registered later first
 receives the reports still in that set. A console warning names table, row and
-column, never content.
+column, never content. The reports belong to the client runtime and its listeners: a read's result, one-shot or a subscription's, carries none, and the database core does not pass them on.
 
 Unreadable rows are dropped after `limit` and `offset` have been applied, so a
 page may contain fewer rows than its limit. This is accepted behaviour: the

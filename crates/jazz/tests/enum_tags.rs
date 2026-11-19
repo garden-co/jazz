@@ -98,7 +98,7 @@ fn open_at(schema: JazzSchema, node: u8, path: &Path) -> Db {
 
 fn authority_at(schema: JazzSchema, path: &Path) -> Db {
     let db = open_at(schema, 0, path);
-    db.set_authority();
+    db.set_authority().unwrap();
     db
 }
 
