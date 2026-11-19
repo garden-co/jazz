@@ -29,6 +29,13 @@ export type WireError = {
   code: string;
   retry: string;
   message: string;
+  /**
+   * Why, when the server named it (`WireErrorReason` in
+   * `crates/jazz/layers/protocol/src/wire.rs`): `expired`, `missing`,
+   * `invalid`, `disabled`, `revoked` or `reauthenticate`. Absent from an
+   * older server, whose message is read instead.
+   */
+  reason?: string;
 };
 
 /** A valid structured server error received before wire negotiation completed. */
@@ -67,10 +74,13 @@ export const REAUTHENTICATE_WIRE_MESSAGE_PREFIX = "reauthenticate:";
  * credential and asks its backend again.
  */
 export function isReauthenticateWireError(error: WireError): boolean {
+  if (error.code !== "auth_failed") return false;
+  // A reason this client knows decides; one from a newer server does not.
+  if (error.reason !== undefined && !error.reason.startsWith("unknown:")) {
+    return error.reason === "reauthenticate";
+  }
   return (
-    error.code === "auth_failed" &&
-    error.retry === "after_resume" &&
-    error.message.startsWith(REAUTHENTICATE_WIRE_MESSAGE_PREFIX)
+    error.retry === "after_resume" && error.message.startsWith(REAUTHENTICATE_WIRE_MESSAGE_PREFIX)
   );
 }
 
@@ -222,6 +232,13 @@ export const FEATURE_HEARTBEAT = 1 << 11;
  */
 export const HEARTBEAT_SILENCE_MS = 120_000;
 /**
+ * `FEATURE_TYPED_ERROR_REASON` in `crates/jazz/layers/protocol/src/wire.rs`:
+ * a client that offers it is told why a server refused its credential at the
+ * end of the `Error` frame's body, instead of only in the message. Every carrier
+ * offers it; the server never does, so it never reaches the runtime above.
+ */
+export const FEATURE_TYPED_ERROR_REASON = 1 << 14;
+/**
  * How long a connection may take from opening the socket to the server's
  * hello. An attempt nobody answers (a proxy holding the upgrade for a
  * backend that is down, packets dropped on the way) otherwise never ends,
@@ -362,32 +379,39 @@ export function isWireHello(frame: Uint8Array): boolean {
 
 export function isWireError(frame: Uint8Array): boolean {
   if (frame[0] !== WIRE_ERROR_TAG) return false;
-  const reader = new PostcardReader(frame);
-  reader.u64();
-  readWireErrorBodyExact(reader);
+  decodeWireError(frame);
   return true;
 }
 
+/**
+ * Decode an `Error` frame. To a client that offered
+ * `FEATURE_TYPED_ERROR_REASON`, a server may end its body with the refusal's
+ * reason (`wire-error-reason-v1`); the message is length-prefixed, so it is
+ * read when bytes remain.
+ */
 export function decodeWireError(frame: Uint8Array): WireError {
   const reader = new PostcardReader(frame);
   const tag = reader.u64();
-  if (tag !== 1) throw new Error(`expected WireFrame::Error, got tag ${tag}`);
-  return readWireErrorBodyExact(reader);
-}
-
-function readWireErrorBodyExact(reader: PostcardReader): WireError {
-  const error = {
+  if (tag !== WIRE_ERROR_TAG) throw new Error(`expected WireFrame::Error, got tag ${tag}`);
+  const error: WireError = {
     code: wireErrorCodeName(reader.u64()),
     retry: wireRetryName(reader.u64()),
     message: reader.string(),
   };
+  if (!reader.done()) error.reason = wireErrorReasonName(reader.u64());
   assertReaderDone(reader, "WireFrame::Error");
   return error;
 }
 
+/**
+ * Why the server refused this client's credential. A server that named its
+ * reason is taken at its word; an older one's message is read, as before.
+ */
 export function wireAuthFailureReason(error: WireError): AuthFailureReason | null {
   if (error.code !== "auth_failed") return null;
-  return mapAuthReason(error.message);
+  if (error.reason === "reauthenticate") return "invalid";
+  const named = error.reason !== undefined && !error.reason.startsWith("unknown:");
+  return mapAuthReason(named ? error.reason! : error.message);
 }
 
 export class WebSocketCarrier {
@@ -432,7 +456,8 @@ export class WebSocketCarrier {
     this.onFrame = options.onFrame;
     this.onError = options.onError;
     this.onTerminal = options.onTerminal;
-    this.localFeatures = (options.features ?? CLIENT_WIRE_FEATURES) | FEATURE_HEARTBEAT;
+    this.localFeatures =
+      (options.features ?? CLIENT_WIRE_FEATURES) | FEATURE_HEARTBEAT | FEATURE_TYPED_ERROR_REASON;
     this.renewalUrl = isCookieSessionAuth(options.authJson) ? renewalUrlFor(this.url) : null;
     assertWireFeatures(this.localFeatures, "client wire features");
     this.socket = new WebSocketCtor(this.url);
@@ -695,7 +720,7 @@ export class WebSocketCarrier {
         if ((negotiation.features & FEATURE_HEARTBEAT) !== 0) this.watchSilence();
         this.resolveNegotiation({
           ...negotiation,
-          features: negotiation.features & ~FEATURE_HEARTBEAT,
+          features: negotiation.features & ~FEATURE_HEARTBEAT & ~FEATURE_TYPED_ERROR_REASON,
         });
         continue;
       }
@@ -1130,6 +1155,82 @@ function wireErrorCodeName(tag: number): string {
     default:
       // A code from a newer server: still the server's refusal, which the
       // link retries rather than a frame it failed to read.
+      return `unknown:${tag}`;
+  }
+}
+
+/** `WireErrorReason` tags (encoding `wire-error-reason-v1`). Append-only. */
+const WIRE_ERROR_REASON_TAGS = {
+  expired: 0,
+  missing: 1,
+  invalid: 2,
+  disabled: 3,
+  revoked: 4,
+  reauthenticate: 5,
+} as const;
+export type WireErrorReasonName = keyof typeof WIRE_ERROR_REASON_TAGS;
+
+/**
+ * The features a client's `Hello` offered, from the websocket message that
+ * carries it; null when the message is not a lone `Hello`. A backend that
+ * relays a client (`createJazz`) reads this to answer the client in the
+ * encoding it reads.
+ */
+export function clientHelloFeatures(message: Uint8Array): number | null {
+  try {
+    const frames = decodeWebSocketFrameBatch(message);
+    if (frames.length !== 1 || frames[0]![0] !== WIRE_HELLO_TAG) return null;
+    const reader = new PostcardReader(frames[0]!);
+    reader.u64(); // WireFrame::Hello
+    reader.u64(); // min_protocol_version
+    reader.u64(); // max_protocol_version
+    return reader.u64();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A websocket message refusing a client's credential (`auth_failed`), naming
+ * `reason` when the client's `Hello` offered `FEATURE_TYPED_ERROR_REASON`
+ * (`wire-error-reason-v1`) and as the plain `Error` every client reads
+ * otherwise. `clientFeatures` undefined: the client's `Hello` has not been
+ * seen, so the plain one.
+ */
+export function encodeAuthFailedBatch(
+  retry: "never" | "after_resume",
+  message: string,
+  reason: WireErrorReasonName,
+  clientFeatures: number | undefined,
+): Uint8Array {
+  const frame = new PostcardWriter();
+  frame.u64(WIRE_ERROR_TAG);
+  frame.u64(3); // WireErrorCode::AuthFailed
+  frame.u64(retry === "never" ? 0 : 2);
+  frame.string(message);
+  if (clientFeatures !== undefined && (clientFeatures & FEATURE_TYPED_ERROR_REASON) !== 0) {
+    frame.u64(WIRE_ERROR_REASON_TAGS[reason]);
+  }
+  return encodeWebSocketFrameBatch([frame.finish()]);
+}
+
+/** `WireErrorReason` (encoding `wire-error-reason-v1`). */
+function wireErrorReasonName(tag: number): string {
+  switch (tag) {
+    case 0:
+      return "expired";
+    case 1:
+      return "missing";
+    case 2:
+      return "invalid";
+    case 3:
+      return "disabled";
+    case 4:
+      return "revoked";
+    case 5:
+      return "reauthenticate";
+    default:
+      // A reason from a newer server: still a refusal, read from its message.
       return `unknown:${tag}`;
   }
 }
