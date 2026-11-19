@@ -80,13 +80,28 @@ jobs:
     timeout-minutes: 5
     outputs:
       rc_ref: ${{ steps.ref.outputs.rc_ref }}
+      expect_sha: ${{ steps.ref.outputs.expect_sha }}
       upgrade_changed: ${{ steps.diff.outputs.upgrade_changed }}
       previous: ${{ steps.prev.outputs.previous }}
     steps:
+      # The commit being gated, as a full sha: every job's fetch-rc.sh requires each producer run (artifacts_run_id,
+      # rc_npm_run_id, language_run_id) to have built exactly it (#supply-chain's rule), and fails closed otherwise.
       - id: ref
+        env: { GH_TOKEN: "${{ github.token }}", RC_TAG: "${{ inputs.rc_tag }}", JAZZ_SHA: "${{ inputs.jazz_sha }}", RUN: "${{ inputs.artifacts_run_id }}" }
         run: |
-          [ -n "${{ inputs.rc_tag }}${{ inputs.artifacts_run_id }}" ] || { echo "::error::give rc_tag or artifacts_run_id"; exit 1; }
-          echo "rc_ref=${{ inputs.jazz_sha || inputs.rc_tag || github.sha }}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          [ -n "$RC_TAG$RUN" ] || { echo "::error::give rc_tag or artifacts_run_id"; exit 1; }
+          if [ -n "$JAZZ_SHA" ]; then [[ "$JAZZ_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::jazz_sha must be a full 40-character commit sha"; exit 1; }; fi
+          if [ -n "$RUN" ] && [ -z "$JAZZ_SHA" ]; then echo "::error::artifacts_run_id needs jazz_sha: the commit those runs must have built"; exit 1; fi
+          expect=$JAZZ_SHA
+          if [ -n "$RC_TAG" ] && [ -z "$RUN" ]; then
+            tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$RC_TAG" --jq .sha)
+            [ -z "$expect" ] || [ "$expect" = "$tag_sha" ] || { echo "::error::$RC_TAG is $tag_sha, not jazz_sha $expect"; exit 1; }
+            expect=$tag_sha
+          fi
+          echo "gating $expect"
+          echo "expect_sha=$expect" >> "$GITHUB_OUTPUT"
+          echo "rc_ref=$expect" >> "$GITHUB_OUTPUT"
       - id: prev
         run: echo "previous=${{ inputs.previous_version }}" | sed "s/=$/=$(npm view jazz-tools dist-tags.latest)/" >> "$GITHUB_OUTPUT"
       - id: diff
@@ -132,6 +147,7 @@ jobs:
         env:
           {
             GH_TOKEN: "${{ github.token }}",
+            AG_EXPECT_SHA: "${{ needs.inputs.outputs.expect_sha }}",
             AG_NEED: "${{ matrix.job == 't10' && 'npm,server' || ((matrix.job == 't9-go' || matrix.job == 't9-kotlin') && 'npm,languages' || 'npm') }}",
           }
         run: |
@@ -214,7 +230,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with: { ref: "${{ needs.inputs.outputs.rc_ref }}", path: rc-src }
       - name: Fetch the RC files this job needs
-        env: { GH_TOKEN: "${{ github.token }}", AG_NEED: "npm,languages" }
+        env: { GH_TOKEN: "${{ github.token }}", AG_EXPECT_SHA: "${{ needs.inputs.outputs.expect_sha }}", AG_NEED: "npm,languages" }
         run: |
           if [ -n "${{ inputs.artifacts_run_id }}" ]; then
             $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}" --npm-run "${{ inputs.rc_npm_run_id || inputs.artifacts_run_id }}"
@@ -243,7 +259,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with: { sparse-checkout: "dev/adopter-gate\n.github/actions" }
       - name: Fetch the RC files this job needs
-        env: { GH_TOKEN: "${{ github.token }}", AG_NEED: "npm" }
+        env: { GH_TOKEN: "${{ github.token }}", AG_EXPECT_SHA: "${{ needs.inputs.outputs.expect_sha }}", AG_NEED: "npm" }
         run: |
           if [ -n "${{ inputs.artifacts_run_id }}" ]; then
             $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}" --npm-run "${{ inputs.rc_npm_run_id || inputs.artifacts_run_id }}"
@@ -295,7 +311,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with: { sparse-checkout: "dev/adopter-gate\n.github/actions" }
       - name: Fetch the RC files this job needs
-        env: { GH_TOKEN: "${{ github.token }}", AG_NEED: "npm" }
+        env: { GH_TOKEN: "${{ github.token }}", AG_EXPECT_SHA: "${{ needs.inputs.outputs.expect_sha }}", AG_NEED: "npm" }
         run: |
           if [ -n "${{ inputs.artifacts_run_id }}" ]; then
             $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}" --npm-run "${{ inputs.rc_npm_run_id || inputs.artifacts_run_id }}"
@@ -348,9 +364,29 @@ jobs:
             timeout 90 gh run download "${{ github.run_id }}" -R "$GITHUB_REPOSITORY" -p 'results-*' -D results && exit 0
             echo "results download attempt $i failed"; sleep $((i * 10))
           done; exit 1
+      # release-artifacts uploads its manifest last, so it's checked here, at the end (rn-device-acceptance.yml's
+      # pattern): it must name the commit being gated. Fail closed: no manifest by the time the run finished, or
+      # within 4 min, is FAIL.
+      - name: Require the artifacts run's release manifest to name the gated commit
+        if: inputs.artifacts_run_id != ''
+        env: { GH_TOKEN: "${{ github.token }}", RUN: "${{ inputs.artifacts_run_id }}", EXPECT: "${{ needs.inputs.outputs.expect_sha }}" }
+        run: |
+          mkdir -p results/provenance; out=results/provenance/provenance.txt; m="$RUNNER_TEMP/release-manifest"; end=$(( $(date +%s) + 240 ))
+          until timeout 60 gh run download "$RUN" -R "$GITHUB_REPOSITORY" -n release-manifest -D "$m" 2>/dev/null; do
+            if [ "$(gh run view "$RUN" -R "$GITHUB_REPOSITORY" --json status --jq .status)" = completed ] || [ "$(date +%s)" -ge $end ]; then
+              timeout 60 gh run download "$RUN" -R "$GITHUB_REPOSITORY" -n release-manifest -D "$m" 2>/dev/null && break
+              echo "FAIL provenance: run $RUN has no release-manifest (finished without one, or not within 4 min)" > "$out"; exit 0
+            fi
+            sleep 15
+          done
+          sha=$(node -p 'require(process.argv[1]).sha' "$m/manifest.json")
+          if [ -n "$EXPECT" ] && [ "$sha" = "$EXPECT" ]; then echo "PASS provenance: run $RUN's release manifest names $EXPECT" > "$out"
+          else echo "FAIL provenance: run $RUN's release manifest is for $sha, not '${EXPECT}'" > "$out"; fi
+          cat "$out"
       - name: Verdict
         run: |
           expected=bed-t1,bed-t3,bed-t5,bed-t6,fixtures,t10,sizes,t4-noregion,t9-ts,t9-rust,t9-go,t9-kotlin,t9-swift,t4
+          [ -n "${{ inputs.artifacts_run_id }}" ] && expected=$expected,provenance
           [ "${{ needs.inputs.outputs.upgrade_changed }}" = true ] && expected=$expected,refusals
           node $AG/verdict.mjs results "$expected"
       - if: always()

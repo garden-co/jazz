@@ -9,8 +9,16 @@
 # (libjazz_ffi + Kotlin jar). Default all. Each CI job fetches only its own, so no job waits on a shared download.
 AG_NEED=${AG_NEED:-npm,server,languages}; need() { case ",$AG_NEED," in *",$1,"*) return 0;; esac; return 1; }
 R=${GITHUB_REPOSITORY:-garden-co/jazz}
+# Supply chain (#supply-chain's rule, rn-device-acceptance.yml's pattern): files imported from another run are only
+# used if that run built the commit being gated, AG_EXPECT_SHA (the workflow's jazz_sha, or the RC tag's commit).
+# Fail closed: no expected sha, an API error, or a different head_sha stops the fetch.
+producer() { local sha; [[ "${AG_EXPECT_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || { echo "FAIL provenance: AG_EXPECT_SHA must be the full commit sha being gated (got '${AG_EXPECT_SHA:-}')"; exit 1; }
+  sha=$(ag_retry 3 gh api "repos/$R/actions/runs/$1" --jq .head_sha) || { echo "FAIL provenance: can't read run $1"; exit 1; }
+  [ "$sha" = "$AG_EXPECT_SHA" ] || { echo "FAIL provenance: run $1 built $sha, not $AG_EXPECT_SHA"; exit 1; }
+  echo "provenance: run $1 built $AG_EXPECT_SHA"; }
 if [ "$1" = --run ]; then   # no release: workflow artifacts of a release-artifacts run (server, languages) and an RC run (rc-npm)
   RUNID=$2; NPMRUN=$RUNID; [ "${3:-}" = --npm-run ] && [ -n "${4:-}" ] && NPMRUN=$4
+  producer "$RUNID"; [ "$NPMRUN" = "$RUNID" ] || producer "$NPMRUN"
   mkdir -p "$AG_TGZ"; cd "$AG_TGZ"
   # An artifact that doesn't exist yet fails at once (gh says "no artifact matches"); other failures are retried.
   get() { local i; for i in 1 2 3; do rm -rf "_$2"; if gh run download "$1" -R "$R" -n "$2" -D "_$2" > "_$2.err" 2>&1; then cp -r "_$2"/. . && rm -rf "_$2" "_$2.err"; return 0; fi
@@ -45,6 +53,10 @@ if [ "$1" = --run ]; then   # no release: workflow artifacts of a release-artifa
   ls -la; exit 0
 fi
 TAG=$1; RUN=${2:-}; V=${TAG#v}
+if [ -n "$RUN" ]; then   # a language run for a tag: it must have built the tag's commit
+  AG_EXPECT_SHA=${AG_EXPECT_SHA:-$(ag_retry 3 gh api "repos/$R/commits/$TAG" --jq .sha)} || { echo "FAIL provenance: can't resolve $TAG"; exit 1; }
+  producer "$RUN"
+fi
 FETCH=$(cd "$AG/../.." && pwd)/.github/actions/fetch-release-artifacts/fetch.sh
 mkdir -p "$AG_TGZ"
 names=; need npm && names="jazz-tools-$V.tgz

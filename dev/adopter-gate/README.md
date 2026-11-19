@@ -28,7 +28,8 @@ Post-publish: `registry-smoke.sh <version> npm|create-jazz|crates|go|swift|kotli
 ## Running locally
 
 ```sh
-dev/adopter-gate/fetch-rc.sh v2.0.0-alpha.68-rc.1 [attach-language-artifacts run id]   # or: --run <RC dry-run id>
+dev/adopter-gate/fetch-rc.sh v2.0.0-alpha.68-rc.1 [attach-language-artifacts run id]
+# or: AG_EXPECT_SHA=<full commit sha> dev/adopter-gate/fetch-rc.sh --run <release-artifacts run> --npm-run <RC run>
 dev/adopter-gate/bed.sh t1 && dev/adopter-gate/fixtures.sh && dev/adopter-gate/t9.sh go   # etc.
 node dev/adopter-gate/verdict.mjs dev/adopter-gate/.results
 ```
@@ -43,6 +44,7 @@ Needs Node, pnpm 11, sqlite3 and `ss`, plus cargo, Go, JDK 17 with Gradle, or Sw
 
 ## Harness rules
 
+- Provenance (#supply-chain's rule): files from another run (`artifacts_run_id`, `rc_npm_run_id`, `language_run_id`) are used only if that run's `head_sha` is the commit being gated: `jazz_sha`, or the RC tag's commit. `fetch-rc.sh` fails closed without it (`AG_EXPECT_SHA`) or on a mismatch, and the verdict job requires the artifacts run's `release-manifest` to name the same commit (the `provenance` row).
 - No pass-on-retry: a check that fails once is FAIL (flakes are fixed, not retried). Only network fetches (downloads, installs) retry, and only fetches.
 
 - Kill processes by port or PID, never with `pkill -f`. A pattern can match the shell running it.
