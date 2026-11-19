@@ -26,6 +26,23 @@ inputs:
   min-os:
     description: "Minimum OS the objects are built for, e.g. ios15.1."
     required: true
+  # Composite actions can't read `vars`: the caller passes them.
+  writer-role:
+    description: "vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN"
+    required: false
+    default: ""
+  reader-role:
+    description: "vars.SCCACHE_PR_READER_AWS_ROLE_ARN"
+    required: false
+    default: ""
+  bucket:
+    description: "vars.SCCACHE_BUCKET"
+    required: false
+    default: ""
+  region:
+    description: "vars.SCCACHE_REGION"
+    required: false
+    default: ""
 
 outputs:
   s3:
@@ -56,8 +73,8 @@ runs:
         REF: ${{ github.ref }}
         # ci.yml's trusted pull requests: same repository, trusted author.
         TRUSTED_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}
-        WRITER: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
-        READER: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
+        WRITER: ${{ inputs.writer-role }}
+        READER: ${{ inputs.reader-role }}
       run: |
         role=""
         case "${EVENT}:${REF}" in
@@ -78,15 +95,15 @@ runs:
       uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
       with:
         role-to-assume: ${{ steps.tier.outputs.role }}
-        aws-region: ${{ vars.SCCACHE_REGION }}
+        aws-region: ${{ inputs.region }}
 
     - name: Export the S3 tier
       id: s3
       shell: bash
       env:
         AUTHENTICATED: ${{ steps.aws.outcome == 'success' }}
-        CACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
-        CACHE_REGION: ${{ vars.SCCACHE_REGION }}
+        CACHE_BUCKET: ${{ inputs.bucket }}
+        CACHE_REGION: ${{ inputs.region }}
         MIN_OS: ${{ inputs.min-os }}
       run: |
         if [[ "${AUTHENTICATED}" == true && -n "${CACHE_BUCKET}" ]]; then
