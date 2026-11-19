@@ -417,11 +417,11 @@ impl EqualityColumn {
     }
 
     /// `V` for `value`, which must be null or of the column's type (an
-    /// integer column's values fit 32 bits); anything else is
-    /// [`Error::InvalidInput`].
+    /// integer column's values fit 32 bits) and fit the encoding's bounds.
+    /// Other values return [`Error::InvalidInput`].
     pub fn encode(&self, value: &EqualityValue<'_>) -> Result<Vec<u8>> {
         if self.fits(self.depth, value) {
-            Ok(equality_value(value))
+            equality_value(value)
         } else {
             Err(Error::InvalidInput)
         }
@@ -505,28 +505,28 @@ impl EqualityItems<'_> {
 
     /// Whether `test` holds for every element, in order.
     pub fn all(&self, mut test: impl FnMut(&EqualityValue<'_>) -> bool) -> bool {
-        match self {
-            Self::Values(items) => items.iter().all(&mut test),
-            Self::Bufs(items) => items.iter().all(|item| test(&item.as_value())),
-        }
+        self.iter().all(|item| test(&item))
+    }
+
+    fn iter(&self) -> impl Iterator<Item = EqualityValue<'_>> {
+        (0..self.len()).map(move |index| match self {
+            Self::Values(items) => items[index],
+            Self::Bufs(items) => items[index].as_value(),
+        })
     }
 }
 
 impl PartialEq for EqualityItems<'_> {
     fn eq(&self, other: &Self) -> bool {
-        self.len() == other.len() && {
-            let mut mine = Vec::new();
-            self.all(|item| {
-                mine.push(equality_value(item));
-                true
-            });
-            let mut theirs = Vec::new();
-            other.all(|item| {
-                theirs.push(equality_value(item));
-                true
-            });
-            mine == theirs
-        }
+        self.len() == other.len()
+            && self
+                .iter()
+                .zip(other.iter())
+                .all(|(left, right)| match (&left, &right) {
+                    (EqualityValue::Array(left), EqualityValue::Array(right)) => left == right,
+                    _ => equality_value(&left)
+                        .is_ok_and(|left| equality_value(&right).is_ok_and(|right| left == right)),
+                })
     }
 }
 
@@ -561,11 +561,12 @@ const CANONICAL_NAN: u64 = 0x7ff8_0000_0000_0000;
 /// bytes of an enum value's variant name, the exact UTF-8 bytes of a JSON
 /// text as stored, and for an array the element count (four bytes,
 /// big-endian) followed by each element as its own `V` framed by its length
-/// (four bytes, big-endian), in order.
-pub fn equality_value(value: &EqualityValue<'_>) -> Vec<u8> {
+/// (four bytes, big-endian), in order. An array count or element length
+/// outside the corresponding 32-bit bound returns [`Error::InvalidInput`].
+pub fn equality_value(value: &EqualityValue<'_>) -> Result<Vec<u8>> {
     let mut out = vec![1u8];
     match *value {
-        EqualityValue::Null => return vec![0],
+        EqualityValue::Null => return Ok(vec![0]),
         EqualityValue::Bool(value) => out.push(u8::from(value)),
         EqualityValue::Int(value) => out.extend_from_slice(&value.to_be_bytes()),
         EqualityValue::Timestamp(value) => out.extend_from_slice(&value.to_be_bytes()),
@@ -585,16 +586,17 @@ pub fn equality_value(value: &EqualityValue<'_>) -> Vec<u8> {
         EqualityValue::Enum(variant) => out.extend_from_slice(variant.as_bytes()),
         EqualityValue::Json(text) => out.extend_from_slice(text.as_bytes()),
         EqualityValue::Array(items) => {
-            out.extend_from_slice(&(items.len() as u32).to_be_bytes());
-            items.all(|item| {
-                let element = equality_value(item);
-                out.extend_from_slice(&(element.len() as u32).to_be_bytes());
+            let count = u32::try_from(items.len()).map_err(|_| Error::InvalidInput)?;
+            out.extend_from_slice(&count.to_be_bytes());
+            for item in items.iter() {
+                let element = equality_value(&item)?;
+                let len = u32::try_from(element.len()).map_err(|_| Error::InvalidInput)?;
+                out.extend_from_slice(&len.to_be_bytes());
                 out.extend_from_slice(&element);
-                true
-            });
+            }
         }
     }
-    out
+    Ok(out)
 }
 
 /// The equality token of a logical value of a declared column: the
