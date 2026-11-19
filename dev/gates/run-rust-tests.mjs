@@ -12,6 +12,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { checkedOutCommit, sourceIdentity } from "./source-identity.mjs";
+import { reportFlakyPasses } from "./nextest-flaky.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const now = () => new Date().toISOString();
@@ -185,6 +186,13 @@ const receipt =
   path.join(root, "target", "test-receipts", `rust-${startedAt.replace(/[:.]/g, "-")}.json`);
 fs.mkdirSync(path.dirname(receipt), { recursive: true });
 
+// The profile's JUnit report (.config/nextest.toml) names tests that passed
+// only on a retry. Nextest keeps it under the workspace's target/nextest
+// (its default store dir, whatever CARGO_TARGET_DIR says). Remove an earlier
+// run's, so only this run's is read.
+const junitPath = path.join(root, "target", "nextest", nextestProfile, "junit.xml");
+if (useNextest) fs.rmSync(junitPath, { force: true });
+
 let timedOut = false;
 const child = spawn(command, commandArgs, {
   cwd: root,
@@ -211,6 +219,8 @@ const result = await new Promise((resolve) => {
 });
 clearTimeout(timer);
 const finishedAt = now();
+// Tests that passed only on a retry, listed in the job summary.
+const flakyPasses = useNextest ? reportFlakyPasses(junitPath) : [];
 const source = sourceIdentity(root);
 const data = {
   schemaVersion: 1,
@@ -223,6 +233,7 @@ const data = {
   signal: result.signal,
   spawnError: result.error ?? null,
   timedOut,
+  flakyPasses,
   runner: useNextest ? "cargo-nextest" : "cargo-fallback",
   nextestProfile: useNextest ? nextestProfile : null,
   perTestTimeout: useNextest ? "configured Nextest slow-timeout + one termination interval" : null,
