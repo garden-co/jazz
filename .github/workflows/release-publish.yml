@@ -210,8 +210,10 @@ jobs:
       - name: Download the legacy artifacts
         run: |
           set -euo pipefail
-          get() { # <name> <dest>
-            gh run download "$(jq -r --arg k "$1" '.[$k]' <<<"${LEGACY}")" -n "$1" -D "$2"
+          get() { # <name> <dest>: extracted over <dest> (gh refuses to overwrite)
+            local tmp="${RUNNER_TEMP}/dl/$1"
+            gh run download "$(jq -r --arg k "$1" '.[$k]' <<<"${LEGACY}")" -n "$1" -D "${tmp}"
+            mkdir -p "$2" && cp -a "${tmp}/." "$2/"
           }
           get pkg-jazz-tools packages/jazz-tools
           get pkg-jazz-wasm crates/jazz-wasm
