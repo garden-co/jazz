@@ -45,6 +45,11 @@ on:
         required: false
         type: boolean
         default: false
+      probe-tag:
+        description: "Only run the Cloud RC probe against this existing release (e.g. v2.0.0-alpha.68-rc.1) and report its verdict. No other gate runs; nothing is published."
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -67,6 +72,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       INPUT_VERSION: ${{ inputs.version }}
       DRY_RUN: ${{ inputs.dry-run || inputs.version == '' }}
+      PROBE_TAG: ${{ inputs.probe-tag }}
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       version: ${{ steps.resolve.outputs.version }}
@@ -88,7 +94,7 @@ jobs:
             echo "::error::version must look like 2.0.0-alpha.N-rc.M or 2.0.0-alpha.N.K-rc.M, got '${version}'"
             exit 1
           fi
-          if [ "${DRY_RUN}" != true ]; then
+          if [ "${DRY_RUN}" != true ] && [ -z "${PROBE_TAG}" ]; then
             if git ls-remote --exit-code --tags origin "refs/tags/v${version}" >/dev/null; then
               echo "::error::tag v${version} already exists; pick the next rc number."
               exit 1
@@ -108,6 +114,7 @@ jobs:
   find-artifacts:
     name: Find the release artifacts
     needs: resolve
+    if: inputs.probe-tag == ''
     runs-on: ubuntu-latest
     timeout-minutes: 65
     permissions:
@@ -337,7 +344,7 @@ jobs:
   draft:
     name: Draft v${{ needs.resolve.outputs.version }}
     needs: resolve
-    if: needs.resolve.outputs.dry_run != 'true'
+    if: needs.resolve.outputs.dry_run != 'true' && inputs.probe-tag == ''
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -439,7 +446,7 @@ jobs:
   cloud-rc-probe:
     name: Cloud RC probe
     needs: [resolve, attach-server]
-    if: "!cancelled() && needs.attach-server.result == 'success'"
+    if: "!cancelled() && (needs.attach-server.result == 'success' || inputs.probe-tag != '')"
     runs-on: ubuntu-latest
     timeout-minutes: 25
     outputs:
@@ -448,6 +455,7 @@ jobs:
       TOKEN: ${{ secrets.INFRA_RC_PROBE_TOKEN }}
       VERSION: ${{ needs.resolve.outputs.version }}
       SHA: ${{ needs.resolve.outputs.sha }}
+      PROBE_TAG: ${{ inputs.probe-tag }}
     steps:
       - id: probe
         run: |
@@ -456,6 +464,12 @@ jobs:
             echo "verdict=skipped: token pending" >> "$GITHUB_OUTPUT"
             echo "::notice::Cloud RC probe skipped: token pending (INFRA_RC_PROBE_TOKEN is not set)"
             exit 0
+          fi
+          if [ -n "${PROBE_TAG}" ]; then
+            # Probe-only: an existing release, at the commit its tag names.
+            VERSION="${PROBE_TAG#v}"
+            SHA=$(GH_TOKEN="${{ github.token }}" gh api "repos/${GH_REPO}/commits/${PROBE_TAG}" --jq .sha)
+            echo "Probing the existing release ${PROBE_TAG} (${SHA})"
           fi
           export GH_TOKEN="${TOKEN}"
           repo=garden-co/infra
@@ -537,12 +551,18 @@ jobs:
           RESULTS: ${{ toJSON(needs) }}
           DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
           PROBE: ${{ needs.cloud-rc-probe.outputs.verdict }}
+          PROBE_ONLY: ${{ inputs.probe-tag != '' }}
         run: |
           node -e '
             const needs = JSON.parse(process.env.RESULTS);
             const dryRun = process.env.DRY_RUN === "true";
             // A dry run publishes nothing, so it has no draft to probe either.
-            const skippable = dryRun ? new Set(["attach-server", "publish", "cloud-rc-probe"]) : new Set();
+            const probeOnly = process.env.PROBE_ONLY === "true";
+            const skippable = probeOnly
+              ? new Set(Object.keys(needs).filter((job) => !["resolve", "cloud-rc-probe"].includes(job)))
+              : dryRun
+                ? new Set(["attach-server", "publish", "cloud-rc-probe"])
+                : new Set();
             let go = true, hold = false;
             for (const [job, { result }] of Object.entries(needs)) {
               const ok = result === "success" || (skippable.has(job) && result === "skipped");
