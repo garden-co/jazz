@@ -1,0 +1,10 @@
+import { app } from "../jazz/jazz.generated.js";
+import { account, clientAs, check, done } from "./client.js";
+const aId = await account("alice"); await account("bob");
+const alice = await clientAs("alice"), bob = await clientAs("bob");
+const photo = new Uint8Array(200_000).map((_, i) => i % 251);
+await alice.db.insert(app.notes, { text: "field note", owner_id: aId, photo }).wait({ tier: "global" });
+const rows: any[] = await alice.db.all(app.notes, { tier: "remote" });
+check("alice reads note + 200 KB photo", rows.length === 1 && rows[0].photo?.length === 200_000);
+check("bob sees nothing", (await bob.db.all(app.notes, { tier: "remote" })).length === 0);
+done();
