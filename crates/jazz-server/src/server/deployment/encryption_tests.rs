@@ -27,6 +27,10 @@ fn app_id() -> AppId {
 }
 
 async fn router() -> Router {
+    router_and_state().await.0
+}
+
+async fn router_and_state() -> (Router, std::sync::Arc<super::super::ServerState>) {
     let server = ServerBuilder::new(app_id())
         .with_auth_config(AuthConfig {
             admin_secret: Some("test-admin".into()),
@@ -36,7 +40,7 @@ async fn router() -> Router {
         .build()
         .await
         .unwrap();
-    create_router(server.state.clone())
+    (create_router(server.state.clone()), server.state)
 }
 
 async fn publish(router: &Router, body: Value) -> (StatusCode, Value) {
@@ -361,11 +365,19 @@ async fn a_racing_deploy_with_conflicting_declarations_is_refused_without_its_ca
     let body: crate::portable::deployment::DeployBody =
         serde_json::from_value(v2.deployment_body(false)).unwrap();
 
-    // B prepares against a catalogue where nothing of v2 is kept yet.
+    // B prepares while the store holds v1's declarations but nothing for v2.
+    let kept = state
+        .store
+        .as_ref()
+        .unwrap()
+        .kv(super::DECLARATIONS)
+        .unwrap();
     let index = state.catalogue_store.index().unwrap();
     let deployment =
-        crate::portable::deployment::prepare_encrypted(&index, body, 1_000, |_| Ok(None))
-            .unwrap_or_else(|_| panic!("prepared"));
+        crate::portable::deployment::prepare_encrypted(&index, body, 1_000, |version| {
+            kept.get(&version.0)
+        })
+        .unwrap_or_else(|error| panic!("{}", error.body));
     let v2_hash = v2.current_hash();
     assert!(
         deployment
@@ -374,12 +386,6 @@ async fn a_racing_deploy_with_conflicting_declarations_is_refused_without_its_ca
             .any(|(version, _)| *version == v2_hash)
     );
     // A keeps different declarations for v2 meanwhile.
-    let kept = state
-        .store
-        .as_ref()
-        .unwrap()
-        .kv(super::DECLARATIONS)
-        .unwrap();
     kept.put_if_absent(&v2_hash.0, b"declarations another instance kept")
         .unwrap();
 
@@ -584,6 +590,101 @@ async fn a_later_version_without_declarations_deploys_with_the_system_tables() {
             .iter()
             .any(|hash| *hash == json!(app.current_hash().to_string()))
     );
+}
+
+/// Alice can declare encryption on the first deployment of a schema that
+/// the host already knows as its unpublished genesis.
+#[test]
+fn the_first_deployment_of_an_unpublished_genesis_can_declare_encryption() {
+    use crate::portable::catalogue::CatalogueIndex;
+    use crate::portable::deployment::prepare_encrypted;
+
+    let app = loaded("ownerId = session.user");
+    let index = CatalogueIndex::from_rows(&Default::default(), Some(app.current_schema()));
+    let body = serde_json::from_value(app.deployment_body(false)).unwrap();
+    let deployment = prepare_encrypted(&index, body, 1_000, |_| Ok(None))
+        .unwrap_or_else(|error| panic!("{}", error.body));
+    assert_eq!(deployment.first_declared.len(), 1);
+    assert_eq!(deployment.first_declared[0].0, app.current_hash());
+}
+
+/// When Alice redeploys a schema that previously declared no encryption,
+/// its existing plaintext columns still require an encryption conversion.
+///
+/// ```text
+/// Alice deploys v1 (encrypted title) and v2 (plaintext body)
+///   └─► redeploy v2 declaring body encrypted in place ──✗ refused
+/// ```
+#[tokio::test]
+async fn a_version_deployed_without_declarations_cannot_encrypt_in_place() {
+    let (router, state) = router_and_state().await;
+    let file = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": { "notes": { "columns": { "body": "bytes" } } },
+        "history": { "v1": { "tables": { "notes": {
+            "columns": { "title": "bytes", "body": "bytes" },
+            "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } } } } },
+        "migrations": [{ "from": "v1", "migrate": { "notes": {
+            "title": { "drop": "bytes", "backwardsDefault": "" } } } }] }"#;
+    let permissions = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
+    let app =
+        artifact::load(file.as_bytes(), permissions.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    let mut deployment = app.deployment_body(false);
+    let (status, body) = publish(&router, deployment.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = publish(&router, deployment.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // The migration is already stored. Redeploy the same schema hash
+    // without submitting a new migration that would independently refuse it.
+    deployment["migrations"] = json!([]);
+    let versions = deployment["encryption"]["versions"]
+        .as_object_mut()
+        .unwrap();
+    let mut entry = versions.values().next().unwrap()["notes"].clone();
+    entry["columns"] = json!({ "body": entry["columns"]["title"] });
+    versions.insert(app.current_hash().to_string(), json!({ "notes": entry }));
+    let (status, refusal) = publish(&router, deployment.clone()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("held plaintext"),
+        "{refusal}"
+    );
+
+    // Inspect storage directly to pin the durable record for an empty set.
+    let kept = state
+        .store
+        .as_ref()
+        .unwrap()
+        .kv(super::DECLARATIONS)
+        .unwrap();
+    let target = app.current_hash();
+    assert_eq!(
+        kept.get(&target.0).unwrap().as_deref(),
+        Some(b"jazz-e2ee-declarations-v1\n{}".as_slice())
+    );
+
+    // A catalogue created before empty records were written must also
+    // reject the request, even though its store has no record for v2.
+    let index = state.catalogue_store.index().unwrap();
+    let Err(legacy_refusal) = crate::portable::deployment::prepare_encrypted(
+        &index,
+        serde_json::from_value(deployment).unwrap(),
+        1_000,
+        |version| {
+            if *version == target {
+                Ok(None)
+            } else {
+                kept.get(&version.0)
+            }
+        },
+    ) else {
+        panic!("the legacy deployment must require a conversion");
+    };
+    assert_eq!(legacy_refusal.body, refusal);
 }
 
 /// A policy of a later version that declares nothing may read a column that

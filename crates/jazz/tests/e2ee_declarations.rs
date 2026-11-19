@@ -382,6 +382,12 @@ fn stored_declarations_are_pinned() {
          \"tasks\":{\"columns\":{\"notes\":{\"type\":{\"columnType\":{\"type\":\"Text\"},\"nullable\":true}},\"title\":{\"type\":{\"columnType\":{\"type\":\"Text\"},\"nullable\":false}}},\"equality\":[\"title\"],\"scope\":\"projects\",\"space\":\"projectId\"}}"
     );
     assert_eq!(decode_stored(&stored).unwrap(), entries);
+    let empty = Default::default();
+    let stored_empty = b"jazz-e2ee-declarations-v1\n{}";
+    assert_eq!(encode_stored(&empty).unwrap(), stored_empty);
+    assert_eq!(decode_stored(stored_empty).unwrap(), empty);
+    assert!(decode_stored(b"jazz-e2ee-declarations-v1\n{").is_err());
+    assert!(decode_stored(b"\xff").is_err());
     assert!(decode_stored(b"jazz-e2ee-declarations-v2\n{}").is_err());
 }
 
