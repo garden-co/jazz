@@ -181,7 +181,11 @@ jobs:
         with:
           rust-targets: wasm32-unknown-unknown
           sccache: "true"
-          sccache-key: release-wasm-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+          # Only main pushes write the cache: they are what warms it, and a
+          # release build's fresh-version objects are rarely reused. Elsewhere
+          # the post-step commit (up to 2 min) would hold up every consumer.
+          sccache-commit: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'true' || 'false' }}
+          sccache-key: release-wasm-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v2
 
       - uses: ./.github/actions/install-rust-tool
         with:
@@ -233,7 +237,11 @@ jobs:
         with:
           rust-targets: wasm32-unknown-unknown
           sccache: "true"
-          sccache-key: release-wasm-do-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+          # Only main pushes write the cache: they are what warms it, and a
+          # release build's fresh-version objects are rarely reused. Elsewhere
+          # the post-step commit (up to 2 min) would hold up every consumer.
+          sccache-commit: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'true' || 'false' }}
+          sccache-key: release-wasm-do-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v2
 
       - uses: ./.github/actions/install-rust-tool
         with:
@@ -287,7 +295,11 @@ jobs:
         with:
           rust-targets: wasm32-unknown-unknown
           sccache: "true"
-          sccache-key: release-wasm-backend-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+          # Only main pushes write the cache: they are what warms it, and a
+          # release build's fresh-version objects are rarely reused. Elsewhere
+          # the post-step commit (up to 2 min) would hold up every consumer.
+          sccache-commit: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'true' || 'false' }}
+          sccache-key: release-wasm-backend-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v2
 
       - uses: ./.github/actions/install-rust-tool
         with:
@@ -336,7 +348,11 @@ jobs:
         with:
           rust-targets: wasm32-unknown-unknown
           sccache: "true"
-          sccache-key: release-wasm-do-suite-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+          # Only main pushes write the cache: they are what warms it, and a
+          # release build's fresh-version objects are rarely reused. Elsewhere
+          # the post-step commit (up to 2 min) would hold up every consumer.
+          sccache-commit: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'true' || 'false' }}
+          sccache-key: release-wasm-do-suite-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v2
 
       - uses: ./.github/actions/install-rust-tool
         with:
@@ -387,7 +403,10 @@ jobs:
         with:
           rust-targets: ${{ matrix.target }}
           sccache: ${{ matrix.use_sccache && 'true' || 'false' }}
-          sccache-key: release-napi-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-${{ matrix.platform }}-v1
+          # Off for every platform today; if a matrix entry turns it on, only
+          # main pushes write the cache.
+          sccache-commit: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'true' || 'false' }}
+          sccache-key: release-napi-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-${{ matrix.platform }}-v2
 
       # The second restore key: a Version Packages commit always changes
       # Cargo.lock (the workspace version), so start from this platform's last
