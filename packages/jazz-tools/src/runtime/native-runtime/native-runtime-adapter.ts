@@ -271,6 +271,8 @@ type NativeDb = {
   waitForSync?(
     tier: string,
     writer?: Uint8Array | null,
+    /** WASM: settling it stops the wait (napi ignores it). */
+    cancelled?: Promise<void>,
   ): NativeReadResult | Promise<NativeReadResult | void>;
   // Native runtime adapters may close synchronously or asynchronously and may
   // report whether they transitioned state. The adapter awaits either form and
@@ -3515,6 +3517,7 @@ export class NativeRuntimeAdapter implements Runtime {
           ? this.db.waitForSync(
               tier,
               this.trustedWriteIdentity(sessionFromWriteContext(sync.writeContext)) ?? null,
+              cancelled,
             )
           : this.db.waitForPendingWrites(tier, cancelled, true);
       const wait = this.awaitNativeRead(
