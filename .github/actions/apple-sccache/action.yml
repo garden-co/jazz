@@ -1,0 +1,181 @@
+name: Apple sccache
+description: |
+  sccache for macOS jobs, which setup-build's sccache doesn't cover (it is
+  Linux-only, and Blacksmith's sticky disks don't mount on macOS).
+
+  The shared trusted S3 tier when this run may use it: the writer role for
+  pushes and dispatches on main; on release and changeset-release/* the
+  writer role if its OIDC trust covers them, else the reader role (once its
+  trust does); the reader role for trusted pull requests (same repository,
+  trusted author, as ci.yml grants). Otherwise, or if
+  the role can't be assumed, a job-local disk cache restored from and saved to
+  the Actions cache, which Blacksmith evicts under load.
+
+  sccache doesn't hash MACOSX_/IPHONEOS_DEPLOYMENT_TARGET, so `min-os` (e.g.
+  macos13.0, ios15.1) is part of the S3 prefix and the Actions-cache key: an
+  object built for one minimum OS is never served to another. Callers should
+  still check the built objects' minimum OS.
+
+  Expects the deployment targets to be set and Rust installed. Jobs save the
+  disk cache themselves (actions/cache/save with `fallback-key`) when `s3` is
+  not 'true'.
+
+inputs:
+  key:
+    description: "Cache name: the job and target, e.g. jazz-rn-aarch64-apple-ios."
+    required: true
+  min-os:
+    description: "Minimum OS the objects are built for, e.g. ios15.1."
+    required: true
+  # Composite actions can't read `vars`: the caller passes them.
+  writer-role:
+    description: "vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN"
+    required: false
+    default: ""
+  reader-role:
+    description: "vars.SCCACHE_PR_READER_AWS_ROLE_ARN"
+    required: false
+    default: ""
+  bucket:
+    description: "vars.SCCACHE_BUCKET"
+    required: false
+    default: ""
+  region:
+    description: "vars.SCCACHE_REGION"
+    required: false
+    default: ""
+
+outputs:
+  s3:
+    description: "'true' when the S3 tier is in use."
+    value: ${{ steps.s3.outputs.enabled }}
+  fallback-key:
+    description: "Actions-cache key for the disk cache when the S3 tier isn't in use."
+    value: sccache-${{ inputs.key }}-${{ inputs.min-os }}-v1-${{ github.sha }}
+  fallback-hit:
+    description: "'true' when the fallback restored this exact key."
+    value: ${{ steps.restore.outputs.cache-hit }}
+  fallback-matched:
+    description: "The fallback key restored, if any."
+    value: ${{ steps.restore.outputs.cache-matched-key }}
+
+runs:
+  using: composite
+  steps:
+    # The pinned release binary, checked against its published SHA-256:
+    # seconds, where building it (install-rust-tool) takes 2.5 min whenever
+    # Blacksmith has evicted that cache.
+    - name: Install sccache 0.15.0
+      if: runner.arch == 'ARM64'
+      shell: bash
+      run: |
+        set -euo pipefail
+        name=sccache-v0.15.0-aarch64-apple-darwin
+        dir="$RUNNER_TEMP/sccache-bin"
+        mkdir -p "$dir"
+        curl -sSfL --retry 3 -o "$dir/$name.tar.gz" "https://github.com/mozilla/sccache/releases/download/v0.15.0/$name.tar.gz"
+        echo "430ef7b5f54256d3ed5bfe77e8b0afc51aa209aeebe4f95b69c3a52ce3acc6e9  $dir/$name.tar.gz" | shasum -a 256 -c -
+        tar -xzf "$dir/$name.tar.gz" -C "$dir" --strip-components 1 "$name/sccache"
+        "$dir/sccache" --version | grep -Fx "sccache 0.15.0"
+        echo "$dir" >> "$GITHUB_PATH"
+    - if: runner.arch != 'ARM64'
+      uses: ./.github/actions/install-rust-tool
+      with:
+        tool: sccache@0.15.0
+
+    - name: Choose the sccache tier
+      id: tier
+      shell: bash
+      env:
+        EVENT: ${{ github.event_name }}
+        REF: ${{ github.ref }}
+        # ci.yml's trusted pull requests: same repository, trusted author.
+        TRUSTED_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}
+        WRITER: ${{ inputs.writer-role }}
+        READER: ${{ inputs.reader-role }}
+      run: |
+        role="" then_role=""
+        case "${EVENT}:${REF}" in
+          push:refs/heads/main|workflow_dispatch:refs/heads/main)
+            role="${WRITER}" ;;
+          # The release refs write if the writer role trusts them, else read
+          # main's entries (enough for a warm Version Packages build).
+          push:refs/heads/release|workflow_dispatch:refs/heads/release|push:refs/heads/changeset-release/*|workflow_dispatch:refs/heads/changeset-release/*)
+            role="${WRITER}" then_role="${READER}" ;;
+          pull_request:*)
+            [[ "${TRUSTED_PR}" != true ]] || role="${READER}" ;;
+        esac
+        echo "role=${role}" >> "$GITHUB_OUTPUT"
+        echo "then-role=${then_role}" >> "$GITHUB_OUTPUT"
+        if [[ -n "${role}" ]]; then
+          echo "sccache tier for ${EVENT} on ${REF}: S3 via ${role##*/}"
+        else
+          echo "sccache tier for ${EVENT} on ${REF}: Actions cache only"
+        fi
+
+    # Fails (and falls back) where the role's trust doesn't cover this run:
+    # fork pull requests, which get no OIDC token, and refs not yet trusted.
+    - name: Authenticate the trusted sccache tier
+      id: aws
+      if: steps.tier.outputs.role != ''
+      continue-on-error: true
+      uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+      with:
+        role-to-assume: ${{ steps.tier.outputs.role }}
+        aws-region: ${{ inputs.region }}
+
+    - name: Authenticate the trusted sccache tier (read only)
+      id: aws-reader
+      if: steps.tier.outputs.then-role != '' && steps.aws.outcome != 'success'
+      continue-on-error: true
+      uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+      with:
+        role-to-assume: ${{ steps.tier.outputs.then-role }}
+        aws-region: ${{ inputs.region }}
+
+    - name: Export the S3 tier
+      id: s3
+      shell: bash
+      env:
+        AUTHENTICATED: ${{ steps.aws.outcome == 'success' || steps.aws-reader.outcome == 'success' }}
+        CACHE_BUCKET: ${{ inputs.bucket }}
+        CACHE_REGION: ${{ inputs.region }}
+        MIN_OS: ${{ inputs.min-os }}
+      run: |
+        if [[ "${AUTHENTICATED}" == true && -n "${CACHE_BUCKET}" ]]; then
+          {
+            echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
+            echo "SCCACHE_REGION=${CACHE_REGION}"
+            echo "SCCACHE_S3_USE_SSL=true"
+            echo "SCCACHE_S3_KEY_PREFIX=jazz-ci/v1/production/blacksmith-v1/apple-${MIN_OS}"
+            echo "SCCACHE_MULTILEVEL_CHAIN=disk,s3"
+            echo "SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0"
+          } >> "$GITHUB_ENV"
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Restore the disk cache (no S3 tier)
+      id: restore
+      if: steps.s3.outputs.enabled != 'true'
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+      with:
+        path: ${{ runner.temp }}/sccache
+        key: sccache-${{ inputs.key }}-${{ inputs.min-os }}-v1-${{ github.sha }}
+        restore-keys: sccache-${{ inputs.key }}-${{ inputs.min-os }}-v1-
+
+    - name: Start sccache
+      shell: bash
+      run: |
+        dir="$RUNNER_TEMP/sccache"
+        mkdir -p "$dir"
+        {
+          echo "RUSTC_WRAPPER=sccache"
+          echo "SCCACHE_DIR=$dir"
+          echo "SCCACHE_SERVER_UDS=$dir/server.sock"
+          echo "SCCACHE_CACHE_SIZE=8G"
+        } >> "$GITHUB_ENV"
+        # No stats here: the jobs print them after building. (Piping them into
+        # head under pipefail made sccache panic on the closed pipe.)
+        SCCACHE_DIR="$dir" SCCACHE_SERVER_UDS="$dir/server.sock" SCCACHE_CACHE_SIZE=8G sccache --start-server
