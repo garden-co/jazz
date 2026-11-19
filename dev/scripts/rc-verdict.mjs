@@ -11,7 +11,9 @@
  *   GO     every leg passed, nothing held.
  *
  * Env: RESULTS (toJSON(needs)), DRY_RUN, DRY_RUN_SKIPPABLE (comma-separated
- * jobs a dry run skips), PROBE_ONLY, PROBE (the probe's
+ * jobs a dry run skips), ALTERNATIVES (comma-separated groups of jobs joined
+ * by `|`, of which exactly one runs: one success and the rest skipped pass as
+ * one leg), PROBE_ONLY, PROBE (the probe's
  * verdict), ADOPTER (the adopter gate's status), ADOPTER_ATTENTION (its
  * attention lines, JSON array, optional).
  */
@@ -22,6 +24,7 @@ export function rcVerdict({
   dryRun,
   probeOnly,
   dryRunSkippable = ["attach-server", "publish"],
+  alternatives = [],
   probe = "",
   adopter = "",
   adopterAttention = [],
@@ -32,6 +35,14 @@ export function rcVerdict({
     : dryRun
       ? new Set(dryRunSkippable)
       : new Set();
+  for (const group of alternatives) {
+    const results = group.map((job) => needs[job]?.result);
+    if (
+      results.filter((result) => result === "success").length === 1 &&
+      results.every((result) => result === "success" || result === "skipped")
+    )
+      for (const job of group) skippable.add(job);
+  }
   const jobs = Object.entries(needs).map(([job, { result }]) => {
     const ok = result === "success" || (skippable.has(job) && result === "skipped");
     let note = result;
@@ -78,6 +89,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     ...(process.env.DRY_RUN_SKIPPABLE
       ? { dryRunSkippable: process.env.DRY_RUN_SKIPPABLE.split(",") }
       : {}),
+    alternatives: (process.env.ALTERNATIVES ?? "")
+      .split(",")
+      .filter(Boolean)
+      .map((group) => group.split("|")),
     probe: process.env.PROBE ?? "",
     adopter: process.env.ADOPTER ?? "",
     adopterAttention: JSON.parse(process.env.ADOPTER_ATTENTION || "[]"),
