@@ -329,9 +329,12 @@ jobs:
               }
 
               if (treeReuseSafe) {
-                // Built once per commit by release-artifacts.yml, dispatched
-                // on the Version Packages head; the standalone preview run is
-                // the fallback for heads from before it.
+                // Not release-artifacts.yml's Version Packages head run: a run
+                // on changeset-release/* restores an actions/cache scope that
+                // any write collaborator can seed (#supply-chain, 2026-11-19),
+                // and inspector-provenance.mjs refuses it. Until that workflow
+                // restores no cache on untrusted refs, only a preview run from
+                // before #6129 is reused; otherwise this run builds.
                 const requiredArtifacts = [
                   "pkg-jazz-tools",
                   "pkg-jazz-wasm",
@@ -343,10 +346,7 @@ jobs:
                   "jazz-tools-linux-arm64",
                 ];
                 const misses = [];
-                for (const workflowId of [
-                  "release-artifacts.yml",
-                  "preview-jazz-tools-alpha-release.yml",
-                ]) {
+                for (const workflowId of ["preview-jazz-tools-alpha-release.yml"]) {
                   let runs = [];
                   try {
                     const runsResponse = await github.rest.actions.listWorkflowRuns({
