@@ -288,6 +288,18 @@ impl WasmThinRouter {
         })
     }
 
+    /// The public schema JSON the client bound the connection to, once it
+    /// did.
+    pub fn schema(&self) -> Option<js_sys::Uint8Array> {
+        self.router.borrow().schema().map(js_sys::Uint8Array::from)
+    }
+
+    /// Whether something routed waits on an answer that has not come.
+    #[wasm_bindgen(js_name = isWaiting)]
+    pub fn is_waiting(&self) -> bool {
+        self.router.borrow().is_waiting()
+    }
+
     /// What may go now, in order.
     pub fn ready(&self) -> Result<Vec<WasmThinStep>, JsValue> {
         let mut steps = Vec::new();
