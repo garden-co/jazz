@@ -35,6 +35,13 @@ impl Db {
         if companions.is_empty() {
             return self.stage_chunked(id, op, edits);
         }
+        let names: Vec<(String, RowUuid)> = companions
+            .iter()
+            .filter_map(|companion| match companion {
+                StagedOp::Insert(table, _, opts) => opts.row_id.map(|row| (table.clone(), row)),
+                _ => None,
+            })
+            .collect();
         let mark = {
             let inner = self.inner.staging();
             let batch = inner
@@ -52,20 +59,70 @@ impl Db {
             .into_iter()
             .try_for_each(|companion| self.stage_chunked(id, companion, LargeEdits::default()))
             .and_then(|()| self.stage_chunked(id, op, edits));
-        if staged.is_err() {
+        let hooks = {
             let mut inner = self.inner.staging();
-            // The overlay may hold the companions: the next stage replays
-            // what stays staged.
-            inner.settle_overlay();
-            if let Some(batch) = inner.batches.get_mut(&id) {
-                let (ops, rows, inserted, claims) = mark;
-                batch.ops.truncate(ops);
-                batch.rows = rows;
-                batch.inserted = inserted;
-                batch.claims = claims;
+            if staged.is_err() {
+                // The overlay may hold the companions: the next stage replays
+                // what stays staged.
+                inner.settle_overlay();
+                if let Some(batch) = inner.batches.get_mut(&id) {
+                    let (ops, rows, inserted, claims) = mark;
+                    batch.ops.truncate(ops);
+                    batch.rows = rows;
+                    batch.inserted = inserted;
+                    batch.claims = claims;
+                }
+                inner.e2ee.clone()
+            } else {
+                let hooks = inner.e2ee.clone();
+                if let Some(batch) = inner.batches.get_mut(&id) {
+                    batch.companions.stage(hooks, names.iter().cloned());
+                }
+                None
             }
+        };
+        // Told once nothing borrows the store: the hooks never call it.
+        if let Some(hooks) = hooks {
+            hooks.companions_dropped(&names);
         }
         staged
+    }
+}
+
+/// The companion rows the sealed writes of one open transaction staged:
+/// unless the transaction commits them, the hooks are told they were
+/// dropped ([`E2eeHooks::companions_dropped`]) when it goes.
+#[derive(Default)]
+pub(crate) struct StagedCompanions {
+    hooks: Option<std::rc::Rc<dyn E2eeHooks>>,
+    rows: Vec<(String, RowUuid)>,
+    committed: std::cell::Cell<bool>,
+}
+
+impl StagedCompanions {
+    fn stage(
+        &mut self,
+        hooks: Option<std::rc::Rc<dyn E2eeHooks>>,
+        rows: impl IntoIterator<Item = (String, RowUuid)>,
+    ) {
+        self.hooks = self.hooks.take().or(hooks);
+        self.rows.extend(rows);
+    }
+
+    /// The transaction committed its rows: nothing was dropped.
+    pub(crate) fn committed(&self) {
+        self.committed.set(true);
+    }
+}
+
+impl Drop for StagedCompanions {
+    fn drop(&mut self) {
+        if self.committed.get() || self.rows.is_empty() {
+            return;
+        }
+        if let Some(hooks) = &self.hooks {
+            hooks.companions_dropped(&self.rows);
+        }
     }
 }
 

@@ -538,6 +538,8 @@ pub struct FaultyStore {
     pub contended: Rc<std::cell::Cell<bool>>,
     /// The next save first deletes its scope, as another tab's wipe would.
     pub wiped_first: Rc<std::cell::Cell<bool>>,
+    /// How many saves were attempted, failed or not.
+    pub saves: Rc<std::cell::Cell<usize>>,
 }
 
 /// Returns pending once, waking itself, so that other futures run.
@@ -582,6 +584,7 @@ impl PrivateStore for FaultyStore {
         expected: Option<u64>,
     ) -> LocalBoxFuture<'a, Result<u64, StoreError>> {
         Box::pin(async move {
+            self.saves.set(self.saves.get() + 1);
             if self.failing.get() {
                 return Err(StoreError::Failed("the disk is full".to_owned()));
             }

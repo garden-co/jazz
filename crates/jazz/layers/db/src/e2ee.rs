@@ -74,6 +74,15 @@ pub trait E2eeHooks {
     /// column returns `Ok` untouched.
     fn seal_write(&self, write: &mut WriteCells<'_>) -> Result<(), SealError>;
 
+    /// The companion rows `seal_write` staged, as (table, row ID), that
+    /// will not be stored: the write failed to stage after sealing, or the
+    /// transaction that held them was abandoned or failed to commit. A
+    /// row staged again later (a retried write) is a new staging. The
+    /// default does nothing.
+    fn companions_dropped(&self, rows: &[(String, RowUuid)]) {
+        let _ = rows;
+    }
+
     /// Open the rows of one read in place: decrypt each encrypted cell,
     /// remove the equality token cells, and, outside strict reads, remove
     /// the rows it cannot open and report them. In a strict read the first
