@@ -1,5 +1,9 @@
 import type { ClientMigrations } from "../client-migrations.js";
+import { Encryption, type EncryptionNative } from "../../encryption/index.js";
+import { servePrivateStore, type PrivateStore } from "../../encryption/private-store.js";
+import { retryAfterKey } from "../../encryption/key-retry.js";
 import { plainSchema, type PlainEntries } from "../../encryption/plain-schema.js";
+import { SpaceUse, type SubscriptionSpaceUse } from "../../encryption/space-use.js";
 import { streamingChunks } from "../streaming-source.js";
 import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
@@ -225,6 +229,40 @@ type NativeDbConstructor = {
     appId: string,
     environment: string,
   ): NativeDb;
+  openMemoryEncrypted?(
+    schema: Uint8Array,
+    config: Uint8Array,
+    runtime: unknown,
+    proof?: { token: string; claimedAuthor: string } | null,
+  ): NativeDb;
+  openPersistentEncrypted?(
+    dataPath: string,
+    schema: Uint8Array,
+    config: Uint8Array,
+    runtime: unknown,
+    proof?: { token: string; claimedAuthor: string } | null,
+  ): NativeDb;
+};
+
+/**
+ * The end-to-end encryption runtime a Node host built for the app (over the
+ * private store the app supplied) and the app's side of it.
+ */
+export type NativeEncryptionOptions = {
+  /** The native `EncryptionRuntime`, built and ready. */
+  runtime: unknown;
+  store: PrivateStore;
+  /** The local-first account's secret, when the account is local-first. */
+  accountSecret?: () => string | undefined;
+};
+
+/** What a database that has the runtime installed adds to the native calls. */
+type NativeEncryptionDb = EncryptionNative & {
+  takeStoreRequests(): string[];
+  replyStore(id: string, ok: boolean, payload: string): boolean;
+  encryptionUseSpace(table: string, id: string, open: boolean): void;
+  encryptionSpaces(): string;
+  encryptionSetOnline(online: boolean): void;
 };
 
 type NativeWriteOptions = {
@@ -770,6 +808,8 @@ type SubscriptionState = {
   tier: string;
   callback?: (result: RuntimeSubscriptionDelta | Error) => void;
   cancelled: boolean;
+  /** The spaces this subscription uses (an app on encrypted tables). */
+  spaces?: SubscriptionSpaceUse;
 };
 
 export type SubscriptionOutputColumns = {
@@ -1113,6 +1153,15 @@ export class NativeRuntimeAdapter implements Runtime {
   // must continue, or the HLC readout waits behind them forever.
   private foregroundLeaseDraining = false;
   private nextSubscriptionId = 1;
+  /** The installed encryption runtime's side, on the runtime that owns the database. */
+  private encryptionState?: {
+    native: NativeEncryptionDb;
+    options: NativeEncryptionOptions;
+    serving: { stop(): void };
+    uses: SpaceUse;
+    handle?: Encryption;
+    online?: boolean;
+  };
 
   static fromDb(
     db: NativeDb,
@@ -1133,6 +1182,42 @@ export class NativeRuntimeAdapter implements Runtime {
       slowQueryLog: opts?.slowQueryLog,
       subscriptionBacklogRows: opts?.subscriptionBacklogRows,
     });
+  }
+
+  private serveEncryption(options: NativeEncryptionOptions): void {
+    const native = this.db as unknown as NativeEncryptionDb;
+    this.encryptionState = {
+      native,
+      options,
+      serving: servePrivateStore(native, options.store),
+      uses: new SpaceUse(native),
+    };
+    // Verify the account in the background; the app may await `ready()` too.
+    this.encryptionHandle()?.start();
+  }
+
+  /** Runs a write, and again once the space's key is ready if it failed `key-pending`. */
+  retryAfterKey<T>(operation: () => T): T | Promise<T> {
+    const state = this.ownerRuntime.encryptionState;
+    if (!state) return operation();
+    return retryAfterKey(
+      operation,
+      async (space) =>
+        JSON.parse(await state.native.encryptionCall("prepareSpace", space)) as boolean,
+    );
+  }
+
+  /**
+   * The encryption handle of this database, when the app declares encryption
+   * and opened with its runtime (`undefined` otherwise).
+   */
+  encryptionHandle(): Encryption | undefined {
+    const state = this.ownerRuntime.encryptionState;
+    if (!state) return undefined;
+    state.handle ??= new Encryption(state.native, {
+      accountSecret: state.options.accountSecret,
+    });
+    return state.handle;
   }
 
   /** The migrations this runtime's app ships (see {@link ClientMigrations}). */
@@ -1180,6 +1265,8 @@ export class NativeRuntimeAdapter implements Runtime {
       webSocket?: WebSocketConstructor;
       /** The app's versions and migrations: see {@link ClientMigrations}. */
       migrations?: ClientMigrations;
+      /** An app that declares encryption opens with its runtime installed. */
+      encryption?: NativeEncryptionOptions;
       /**
        * A backend of an app that declares encryption holds no keys: it opens
        * with hooks that relay ciphertext and refuse encrypted columns.
@@ -1276,6 +1363,46 @@ export class NativeRuntimeAdapter implements Runtime {
           environment,
         );
       }
+    } else if (opts?.encryption) {
+      if (!Runtime) throw new Error("Native runtime constructor required for an encrypted app");
+      if (opts.backendMode) {
+        throw new Error(
+          "End-to-end encryption is not supported on a backend client yet: a backend cannot hold a device's keys",
+        );
+      }
+      const proof = opts.selfSignedClientProof
+        ? {
+            token: opts.selfSignedClientProof.token,
+            claimedAuthor: opts.selfSignedClientProof.claimedAuthor,
+          }
+        : null;
+      if (opts.persistentPath) {
+        if (!Runtime.openPersistentEncrypted) {
+          throw new Error(
+            "Native runtime does not support encrypted apps; rebuild the Jazz native artifact",
+          );
+        }
+        this.db = Runtime.openPersistentEncrypted(
+          opts.persistentPath,
+          this.schemaBytes,
+          this.configBytes,
+          opts.encryption.runtime,
+          proof,
+        );
+      } else {
+        if (!Runtime.openMemoryEncrypted) {
+          throw new Error(
+            "Native runtime does not support encrypted apps; rebuild the Jazz native artifact",
+          );
+        }
+        this.db = Runtime.openMemoryEncrypted(
+          this.schemaBytes,
+          this.configBytes,
+          opts.encryption.runtime,
+          proof,
+        );
+      }
+      this.serveEncryption(opts.encryption);
     } else if (opts?.persistentPath) {
       if (!Runtime) {
         throw new Error("Native runtime constructor required for persistent storage");
@@ -1706,9 +1833,24 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private linkChanged(): void {
     if (this === this.ownerRuntime) this.noteLinkFailure();
+    this.signalEncryptionOnline();
     this.remoteLink.changed();
     this.linkStatusPublisher.changed();
     this.syncStatusPublisher.changed();
+  }
+
+  /** Tells the encryption runtime when the connection to the server goes away or comes back. */
+  private signalEncryptionOnline(): void {
+    const state = this.ownerRuntime.encryptionState;
+    if (!state || this !== this.ownerRuntime || this.closed) return;
+    const online = this.upstreamLinkStatus().state === "connected";
+    if (state.online === online) return;
+    state.online = online;
+    try {
+      state.native.encryptionSetOnline(online);
+    } catch {
+      // The database is closing.
+    }
   }
 
   /** The upstream link as the app sees it; see {@link LinkStatus}. */
@@ -1959,6 +2101,8 @@ export class NativeRuntimeAdapter implements Runtime {
     for (const write of this.writes.values()) {
       write.close?.();
     }
+    this.encryptionState?.handle?.stop();
+    this.encryptionState?.serving.stop();
     this.subscriptions.clear();
     this.pendingTxs.clear();
     this.completedTxs.clear();
@@ -2864,6 +3008,14 @@ export class NativeRuntimeAdapter implements Runtime {
       cancelled: false,
     });
     const subscription = this.subscriptions.get(handle)!;
+    const columns = subscription.outputColumns;
+    subscription.spaces =
+      (columns &&
+        this.ownerRuntime.encryptionState?.uses.forSubscription(
+          columns.rootTable,
+          columns.rootColumns,
+        )) ||
+      undefined;
     const query = nativeQueryInput(queryJson, this.schema);
     const install = (native: ReadableStream<unknown> | Subscription) => {
       const source = subscriptionSource(native);
@@ -2909,7 +3061,14 @@ export class NativeRuntimeAdapter implements Runtime {
     const subscription = this.subscriptions.get(handle);
     if (!subscription) return;
     if (subscription.callback) throw new Error("Subscription has already been activated");
-    subscription.callback = onUpdate as (result: RuntimeSubscriptionDelta | Error) => void;
+    const deliver = onUpdate as (result: RuntimeSubscriptionDelta | Error) => void;
+    const spaces = subscription.spaces;
+    subscription.callback = spaces
+      ? (result) => {
+          if (!(result instanceof Error)) spaces.observe(result);
+          deliver(result);
+        }
+      : deliver;
     if (subscription.terminalError) {
       this.deliverSubscriptionFailure(subscription);
       return;
@@ -4982,6 +5141,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private retireSubscriptionResources(subscription: SubscriptionState): void {
     if (subscription.cancelled) return;
     subscription.cancelled = true;
+    subscription.spaces?.release();
+    subscription.spaces = undefined;
     if (subscription.poolId !== undefined) this.pooledSubscriptions.delete(subscription.poolId);
     subscription.openingAbort?.abort();
     const source = subscription.source;
@@ -6082,6 +6243,10 @@ const REJECTION_CODES_BY_REASON: Readonly<Record<NativeCoreErrorReason, string>>
   identity_mismatch: "write_rejected",
   // A skipped catalogue version, never a write's fate.
   schema_version_unsupported: "write_rejected",
+  // Refused when the call is made (the key or the space's root is missing),
+  // never a write's fate once it is accepted.
+  "key-pending": "write_rejected",
+  "space-pending": "write_rejected",
 };
 
 /** A rejected wait's code, from the core reason every binding carries on it. */
