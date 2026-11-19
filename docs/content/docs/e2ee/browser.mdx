@@ -4,7 +4,8 @@ description: "Encrypted columns in a web app: nothing to configure for the keys,
 languageTabs: backend
 ---
 
-In a browser the client keeps the device's keys for you. You pass your app and encryption works (for now with in-page storage, `driver: { type: "memory" }`; see [limits](/docs/e2ee/limits)):
+In a browser the client keeps the device's keys for you. Pass your generated app to enable
+encryption. Older Jazz versions may need [in-page storage](/docs/e2ee/limits).
 
 ```ts
 import { createJazzClient } from "jazz-tools/client";
@@ -12,7 +13,6 @@ import { app } from "./jazz.generated";
 
 const session = await createJazzClient({
   serverUrl: "/jazz",
-  driver: { type: "memory" },
   encryption: { app },
   client: () => import("jazz-tools/local-first"),
 });

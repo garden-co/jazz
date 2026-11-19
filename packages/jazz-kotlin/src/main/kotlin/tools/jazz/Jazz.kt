@@ -34,10 +34,18 @@ import kotlinx.serialization.json.jsonPrimitive
  * the rest of the library builds without them. What `open` throws is
  * rethrown as it is, not wrapped.
  */
-internal fun openReflectively(className: String, config: String, tokens: ((String) -> String?)? = null): Native {
+internal fun openReflectively(
+    className: String,
+    config: String,
+    tokens: ((String) -> String?)? = null,
+    store: ((String) -> StoreReply)? = null,
+): Native {
     val native = Class.forName(className)
     return try {
-        if (tokens == null) {
+        if (store != null) {
+            native.getMethod("openWithStore", String::class.java, Function1::class.java, Function1::class.java)
+                .invoke(null, config, store, tokens) as Native
+        } else if (tokens == null) {
             native.getMethod("open", String::class.java).invoke(null, config) as Native
         } else {
             native.getMethod("openWithTokens", String::class.java, Function1::class.java).invoke(null, config, tokens) as Native
@@ -82,6 +90,9 @@ public class Jazz internal constructor(
 
             override fun openWithTokens(configJson: String, tokens: (String) -> String?): Native =
                 openReflectively("tools.jazz.UniffiNative", configJson, tokens)
+
+            override fun openWithStore(configJson: String, store: (String) -> StoreReply, tokens: ((String) -> String?)?): Native =
+                openReflectively("tools.jazz.UniffiNative", configJson, tokens, store)
         }
 
         /** Opens the app [app] (the text of its `jazz.app.json`), as generated bindings' `open` does. */
@@ -94,7 +105,14 @@ public class Jazz internal constructor(
                     )
                 }
                 val json = config.toJson(app)
-                val native = when (val auth = config.auth) {
+                val encryption = config.encryption
+                val bearer = (config.auth as? JazzAuth.Bearer)?.let { auth ->
+                    { reason: String -> runBlocking { auth.token(TokenReason.of(reason)) } }
+                }
+                val native = if (encryption != null) {
+                    val bridge = PrivateStoreBridge(encryption.store)
+                    opener.openWithStore(json, bridge::call, bearer)
+                } else when (val auth = config.auth) {
                     // The native core asks on a thread of its own: blocking there is fine.
                     is JazzAuth.Bearer -> opener.openWithTokens(json) { reason ->
                         runBlocking { auth.token(TokenReason.of(reason)) }
@@ -104,6 +122,9 @@ public class Jazz internal constructor(
                 Jazz(native, implementations, config.dispatcher)
             }
     }
+
+    /** The app's end-to-end encryption: its account, devices, recovery and keys (see [Encryption]). */
+    public val encryption: Encryption get() = Encryption(native) { call -> io(call) }
 
     /**
      * The end user's session: [SessionState.SignedIn] with who, `Expired`

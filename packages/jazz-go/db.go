@@ -39,6 +39,10 @@ type Config struct {
 	// Auth signs an end user in (Token, DeviceAccount, DeviceKey): with
 	// ServerURL set to the app's Jazz endpoint (its backend's /jazz).
 	Auth Auth `json:"-"`
+	// Encryption is where this device keeps its encryption keys, for an app
+	// that declares end-to-end encryption (an app that does is refused
+	// without it). Not for a backend: it holds no keys.
+	Encryption *EncryptionConfig `json:"-"`
 	// AllowPlaintext lets ServerURL be http:// or ws:// to a host other than
 	// this machine (passed to the core as allowInsecureHttp). Credentials
 	// then cross the network unencrypted: only for a private network you
@@ -101,6 +105,7 @@ type DB struct {
 	handle   uintptr
 	app      any
 	provider uint64 // the TokenProvider's id, if any
+	store    uint64 // the private store's id, if any
 
 	// streams are the DB's open subscriptions and watches, by id: each
 	// stops its jazz-ffi side at once; its channel closes once what was
@@ -173,6 +178,11 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 	if err := loadFFI(); err != nil {
 		return nil, err
 	}
+	return open(ctx, cfg)
+}
+
+// open opens the app once the FFI is loaded and transport is checked.
+func open(ctx context.Context, cfg Config) (*DB, error) {
 	var auth map[string]any
 	if cfg.Auth != nil {
 		var err error
@@ -180,11 +190,19 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 			return nil, err
 		}
 	}
+	var environment string
+	if cfg.Encryption != nil {
+		if cfg.Encryption.Store == nil {
+			return nil, &Error{Kind: KindRefused, Message: "Config.Encryption needs a Store"}
+		}
+		environment = cfg.Encryption.Environment
+	}
 	config, err := json.Marshal(struct {
 		Config
-		Contract int            `json:"contract"`
-		AuthJSON map[string]any `json:"auth,omitempty"`
-	}{cfg, 2, auth})
+		Contract    int            `json:"contract"`
+		AuthJSON    map[string]any `json:"auth,omitempty"`
+		Environment string         `json:"environment,omitempty"`
+	}{cfg, 2, auth, environment})
 	if err != nil {
 		return nil, err
 	}
@@ -192,12 +210,22 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		h        uintptr
 		err      error
 		provider uint64
+		store    uint64
 	}
 	done := make(chan opened, 1)
 	go func() {
+		if cfg.Encryption != nil {
+			var tokens TokenProvider
+			if t, ok := cfg.Auth.(tokenAuth); ok {
+				tokens = t.provider
+			}
+			h, provider, store, err := openEncrypted(string(config), tokens, cfg.Encryption.Store)
+			done <- opened{h, err, provider, store}
+			return
+		}
 		if t, ok := cfg.Auth.(tokenAuth); ok {
 			h, provider, err := openUser(string(config), t.provider)
-			done <- opened{h, err, provider}
+			done <- opened{h: h, err: err, provider: provider}
 			return
 		}
 		var cerr uintptr
@@ -209,11 +237,12 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		if o.err != nil {
 			return nil, o.err
 		}
-		return &DB{handle: o.h, app: cfg.Computed, provider: o.provider}, nil
+		return &DB{handle: o.h, app: cfg.Computed, provider: o.provider, store: o.store}, nil
 	case <-ctx.Done():
 		go func() {
 			if o := <-done; o.h != 0 {
 				ffi.close(o.h)
+				releaseCallbacks(o.provider, o.store)
 			}
 		}()
 		return nil, ctx.Err()
@@ -228,10 +257,15 @@ func (db *DB) Close() error {
 	if db.handle != 0 {
 		ffi.close(db.handle)
 		db.handle = 0
-		// The token callback is valid until jazz_close returns.
-		providers.Delete(db.provider)
+		releaseCallbacks(db.provider, db.store)
 	}
 	return nil
+}
+
+// releaseCallbacks runs after native close so both callbacks remain valid until it returns.
+func releaseCallbacks(provider, store uint64) {
+	providers.Delete(provider)
+	stores.Delete(store)
 }
 
 // call runs jazz_call(method, args) and decodes its result into out.

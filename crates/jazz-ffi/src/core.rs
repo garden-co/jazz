@@ -221,9 +221,13 @@ impl Delivery {
     }
 }
 
+/// A host's private store for an encrypted app: each request as JSON text,
+/// answered with `ok` and a payload (see `jazz_app_support::EncryptionConfig`).
+pub(crate) type StoreCalls = Arc<dyn Fn(String) -> (bool, String) + Send + Sync>;
+
 impl Core {
     pub fn open(config_json: &str) -> Result<Self> {
-        Self::open_with_tokens(config_json, None)
+        Self::open_with(config_json, None, None)
     }
 
     /// [`Self::open`] for an end user signing in with the app's bearer
@@ -232,7 +236,18 @@ impl Core {
         config_json: &str,
         tokens: Option<Arc<dyn jazz_app_support::TokenProvider>>,
     ) -> Result<Self> {
-        let (files, config, app_text) = config(config_json, tokens)?;
+        Self::open_with(config_json, tokens, None)
+    }
+
+    /// [`Self::open_with_tokens`] for an app that declares end-to-end
+    /// encryption: `store` is the device's private store (`"environment"` in
+    /// the config names the deployment's environment, default `dev`).
+    pub fn open_with(
+        config_json: &str,
+        tokens: Option<Arc<dyn jazz_app_support::TokenProvider>>,
+        store: Option<StoreCalls>,
+    ) -> Result<Self> {
+        let (files, config, app_text) = config(config_json, tokens, store)?;
         let contract = convert::parse(config_json, "the config")?
             .get("contract")
             .and_then(Json::as_u64)
@@ -243,6 +258,9 @@ impl Core {
         let relations = convert::Relations::read(&app_text)?;
         let jazz = block_on(Jazz::open(files, config))?;
         let schema = block_on(jazz.with_client(|client| async move { Ok(client.schema()?) }))?;
+        // A device's schema as the app sees it: encrypted columns have their
+        // plaintext types.
+        let schema = jazz.plain_schema(schema);
         Ok(Self::with(
             jazz,
             Arc::new(schema),
@@ -542,13 +560,21 @@ impl Core {
         let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
         let row = block_on(jazz.with_client(move |client| async move {
             let client = client_for(client, tx)?;
-            let (id, values, committed) =
-                client.insert_with_id(&name, id.map(|id| *id.uuid()), cells)?;
+            let (id, values, committed) = jazz_app_support::with_key_wait(|| {
+                client.insert_with_id(&name, id.map(|id| *id.uuid()), cells.clone())
+            })
+            .await?;
             mark_wrote(tx);
             settle(&client, committed, tier).await?;
-            let fields = table
-                .columns
-                .columns
+            // The values come in the stored schema's column order, which has
+            // an encrypted column's token columns that `table` (the app's
+            // plain view) does not.
+            let stored = client.schema()?;
+            let columns = stored
+                .get(&jazz_app_support::jazz::tools::TableName::new(&name))
+                .map(|stored| stored.columns.columns.clone())
+                .unwrap_or_default();
+            let fields = columns
                 .iter()
                 .zip(values)
                 .map(
@@ -584,7 +610,10 @@ impl Core {
         let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
         let row = block_on(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
-            let committed = client.upsert(&name, *id.uuid(), cells.into_iter().collect())?;
+            let cells: std::collections::HashMap<_, _> = cells.into_iter().collect();
+            let committed =
+                jazz_app_support::with_key_wait(|| client.upsert(&name, *id.uuid(), cells.clone()))
+                    .await?;
             mark_wrote(tx);
             settle(&client, committed, tier).await?;
             read_back(&client, &table, &name, id).await
@@ -619,7 +648,9 @@ impl Core {
         let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
         let row = block_on(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
-            let committed = client.restore(&name, id, cells)?;
+            let committed =
+                jazz_app_support::with_key_wait(|| client.restore(&name, id, cells.clone()))
+                    .await?;
             mark_wrote(tx);
             settle(&client, committed, tier).await?;
             read_back(&client, &table, &name, id).await
@@ -642,7 +673,8 @@ impl Core {
         let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
         block_on(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
-            let committed = client.update(&name, id, cells)?;
+            let committed =
+                jazz_app_support::with_key_wait(|| client.update(&name, id, cells.clone())).await?;
             mark_wrote(tx);
             settle(&client, committed, tier).await
         }))?;
@@ -705,7 +737,7 @@ impl Core {
         let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
         block_on(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
-            let committed = client.delete(&name, id)?;
+            let committed = jazz_app_support::with_key_wait(|| client.delete(&name, id)).await?;
             mark_wrote(tx);
             settle(&client, committed, tier).await
         }))?;
@@ -1128,6 +1160,35 @@ impl Core {
             .open_jazz()?
             .session()
             .map(|session| serde_json::to_string(&session.state()).unwrap_or_default()))
+    }
+
+    /// One end-to-end encryption operation by name (`ready`, `devices`,
+    /// `challenge`, `answer`, ...), its arguments and result as JSON.
+    pub fn encryption_call(&self, op: &str, args: &str) -> Result<String> {
+        let args = if args.trim().is_empty() {
+            Json::Object(Default::default())
+        } else {
+            convert::parse(args, "the arguments")?
+        };
+        let result = block_on(self.open_jazz()?.encryption().call(op, args))?;
+        Ok(result.to_string())
+    }
+
+    /// Verifies the account and enrols or recovers this device, waiting up
+    /// to `timeout_ms`: `active`, `awaiting-approval` or `reenrolled`.
+    pub fn encryption_ready(&self, timeout_ms: u64) -> Result<String> {
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+        Ok(block_on(self.open_jazz()?.encryption().ready(timeout))?)
+    }
+
+    /// What the encryption runtime's loop is doing, as JSON.
+    pub fn encryption_state(&self) -> Result<String> {
+        Ok(block_on(self.open_jazz()?.encryption().state())?.to_string())
+    }
+
+    /// The encryption reports waiting, each as a JSON text.
+    pub fn encryption_reports(&self) -> Result<Vec<String>> {
+        Ok(block_on(self.open_jazz()?.encryption().take_reports())?)
     }
 
     /// The connection's status as JSON (`{ "link": … }`).
@@ -1727,6 +1788,7 @@ pub(crate) fn generate_device_key() -> Result<String> {
 fn config(
     config_json: &str,
     tokens: Option<Arc<dyn jazz_app_support::TokenProvider>>,
+    store: Option<StoreCalls>,
 ) -> Result<(AppFiles, Config, String)> {
     let Json::Object(config) = convert::parse(config_json, "the config")? else {
         return Err(refused("the config must be a JSON object"));
@@ -1742,6 +1804,7 @@ fn config(
     let mut session = None;
     let mut auth = None;
     let mut insecure = false;
+    let mut environment = None;
     for (key, value) in &config {
         if value.is_null() {
             continue;
@@ -1761,6 +1824,7 @@ fn config(
             "storage" => storage = Some(text()?),
             "backendSecret" => backend_secret = Some(text()?),
             "adminSecret" => admin_secret = Some(text()?),
+            "environment" => environment = Some(text()?),
             "session" => session = Some(value.clone()),
             "auth" => auth = Some(value.clone()),
             // An end user over plain http:// to a host other than
@@ -1925,6 +1989,14 @@ fn config(
         return Err(refused(
             "backendSecret, adminSecret and session are for a backend, which needs \"permissions\"",
         ));
+    }
+    if let Some(store) = store {
+        let mut encryption =
+            jazz_app_support::EncryptionConfig::store_calls(move |request| store(request));
+        if let Some(environment) = environment {
+            encryption = encryption.environment(environment);
+        }
+        result = result.encryption(encryption);
     }
     let files = AppFiles::new(
         app.clone().into_bytes(),

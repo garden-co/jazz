@@ -50,6 +50,11 @@ public data class JazzConfig(
     val auth: JazzAuth? = null,
     /** Where the blocking native calls run; every call is main-safe either way. */
     val dispatcher: kotlinx.coroutines.CoroutineDispatcher = kotlinx.coroutines.Dispatchers.IO,
+    /**
+     * Where this device keeps its encryption keys, for an app that declares end-to-end
+     * encryption (an app that does is refused without it).
+     */
+    val encryption: JazzEncryption? = null,
 ) {
     internal fun toJson(app: String): String {
         val json: JsonObject = buildJsonObject {
@@ -66,6 +71,7 @@ public data class JazzConfig(
                     Storage.Persistent -> "persistent"
                 },
             )
+            encryption?.let { put("environment", it.environment) }
             when (auth) {
                 is JazzAuth.DeviceAccount -> put("auth", buildJsonObject { put("deviceKey", auth.key) })
                 is JazzAuth.Bearer -> put("auth", buildJsonObject { put("bearer", true) })

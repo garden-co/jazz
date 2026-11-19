@@ -1,0 +1,125 @@
+---
+title: Encryption in Rust, Swift, Kotlin and Go
+description: "The private store each native platform supplies, a suggested place for it, and how a Rust backend takes part."
+---
+
+In a native app, the device's keys live in a **private store that your app supplies**. Jazz ships no
+default one: where keys are kept, and what protects them, is your platform's call. The store is the
+same seven small operations on every platform (see [Private store](/docs/e2ee/private-store)); each
+language gives you its own interface to implement, and Jazz asks it for what it needs.
+
+What a store holds is small and rarely written: the device's own keys, the key for each space it
+belongs to, and one floor for each other account it has seen (the mark that lets it notice a rolled-back history; see [limits](/docs/e2ee/limits)). Jazz calls the store one request at a time on the client's thread, so keep it quick: a
+store that waits on the network holds up the client while it waits. A synchronous store callback (Go,
+Kotlin, Swift, C) that never returns blocks the client, including closing it, so a store must return or
+fail promptly.
+
+## What to put in the store
+
+Keep the saved documents in files in your app's private directory, and keep **one 32-byte key** in the
+operating system's key store. `protect` encrypts a secret with that key and `unprotect` reverses it.
+Because the key stays in the key store, a copy of the files on its own cannot answer a
+device-approval challenge as your device would.
+
+| Platform       | The key lives in                                           | The files live in                   |
+| -------------- | ---------------------------------------------------------- | ----------------------------------- |
+| Swift (Apple)  | the Keychain (this device only, not synced)                | Application Support                 |
+| Kotlin/Android | the Android Keystore (a key that cannot be exported)       | the app's `filesDir`                |
+| Go             | the OS key store (Keychain, Credential Manager, libsecret) | the user's config or data directory |
+| Rust           | the OS key store, through a crate such as `keyring`        | the app's data directory            |
+
+## Opening an encrypted app
+
+An app that declares encrypted columns opens only with a store. Without one the open fails and names
+the option, so plain text never reaches an encrypted column by accident. Everything else works as in
+[Getting started](/docs/e2ee/getting-started): you read and write encrypted columns as ordinary values.
+
+**Rust**
+
+```rust
+use std::rc::Rc;
+use jazz_app_support::{Auth, Config, EncryptionConfig, Jazz};
+
+let config = Config::new(app_id)
+    .server("https://app.example/jazz")
+    .user(Auth::Device(device_key))
+    .encryption(EncryptionConfig::store(|| Rc::new(MyStore::open())).environment("production"));
+let jazz = Jazz::open(files, config).await?;
+let status = jazz.encryption().ready(std::time::Duration::from_secs(30)).await?;
+```
+
+`MyStore` implements `jazz_e2ee_client::PrivateStore`. The closure runs once, on the client's thread.
+Turn on the `e2ee-client` feature of `jazz-app-support`.
+
+**Swift**
+
+```swift
+let config = Config.client(
+    appId: appId, serverUrl: "https://app.example/jazz", auth: .deviceKey(key))
+var withKeys = config
+withKeys.encryption = EncryptionConfig(store: KeychainBackedStore(), environment: "production")
+let client = try await Client.open(app: appJSON, config: withKeys)
+let status = try await client.encryption.ready()
+```
+
+**Kotlin**
+
+```kotlin
+val jazz = Jazz.open(
+    appJson,
+    JazzConfig(
+        appId = appId, serverUrl = "https://app.example/jazz", auth = JazzAuth.DeviceAccount(key),
+        encryption = JazzEncryption(KeystoreBackedStore(context), environment = "production"),
+    ),
+)
+val status = jazz.encryption.ready()
+```
+
+**Go**
+
+```go
+db, err := jazz.Open(ctx, jazz.Config{
+	App: app, AppID: appID, ServerURL: "https://app.example/jazz", Auth: jazz.DeviceKey(key),
+	Encryption: &jazz.EncryptionConfig{Store: keyringStore{}, Environment: "production"},
+})
+status, err := db.Encryption().Ready(ctx, 30*time.Second)
+```
+
+`ready` verifies the account and enrols this device (or founds the account's first device). It returns
+`active`, `awaiting-approval` (another device must approve it, or its recovery phrase does) or
+`reenrolled`.
+
+If readiness fails on one unexpected store or database error, the failure is final for that client:
+close the client and open it again. Your store should throw such an error, not report the device as
+wiped or absent (see [Private store](/docs/e2ee/private-store)).
+
+The same handle gives you the other calls the [web client](/docs/e2ee/devices-and-recovery) has:
+`devices`, `challenge`, `answer`, `approvalCode`, `approve`, `removeDevice`, `keysDeliver`, `keysRotate`
+and the recovery calls. A failure carries a code such as `approval-code-mismatch` or `no-challenge`.
+
+## Recovery
+
+- **A device account** (the app opens with `Auth::Device`, or `DeviceKey` in Go, Swift and Kotlin)
+  recovers from its own account key: restore the key on a new device and encryption comes with it.
+  There is no separate recovery material to keep.
+- **An account your app signs in itself** (a bearer) needs a recovery phrase. `recoveryCreate` makes
+  24 words to show the user once; `recoveryRegister(phrase)` registers them from a device that is
+  active; on a new device, `recoveryRestore(phrase)` approves it. It is the same kind of phrase as
+  the web client's, and a different phrase from a local-first account's own. A wrong phrase fails with
+  `invalid-length`, `invalid-word` or `invalid-checksum` and approves nothing. A phrase whose root was
+  retired stays retired: registering it again fails with `recovery-root-mismatch`, as restoring with
+  it does.
+
+## A backend takes no part
+
+A Rust backend, and anything else that runs on a server, is never an encryption participant: it has no
+account, no keys and no store. Open it as you open any backend, with no `encryption` setting. It relays
+what your clients write and works on the plain columns; a write that names an encrypted column fails with
+"the backend holds no encryption keys", and a read of an encrypted column is refused. Its encryption
+handle refuses every call.
+
+## React Native
+
+The native relay behind React Native opens an encrypted app too: its own store holds no keys, and a
+device's screens attach with the runtime over a store your app supplies. The JavaScript side of that,
+the calls and the store, are not wired yet; see [limits](/docs/e2ee/limits).

@@ -298,6 +298,17 @@ impl NativeRelayWire {
 
 // ---- the relay handle ---------------------------------------------------------------
 
+#[cfg(feature = "e2ee-client")]
+use crate::encryption::Declarations;
+/// With the `e2ee-client` feature off there are no declarations to open a
+/// relay with.
+#[cfg(not(feature = "e2ee-client"))]
+type Declarations = std::convert::Infallible;
+#[cfg(not(feature = "e2ee-client"))]
+type EncryptedDevice = std::convert::Infallible;
+#[cfg(feature = "e2ee-client")]
+use crate::encryption::EncryptedDevice;
+
 type RelayJob = Box<dyn FnOnce(&mut RelayWorker) + Send + 'static>;
 
 enum RelayCommand {
@@ -364,6 +375,42 @@ impl Drop for OwnerAlive {
 impl NativeRelay {
     /// Open the scope's SQLite store on a new owner thread.
     pub fn spawn(config: RelayOpenConfig) -> Result<Self, RelayError> {
+        Self::spawn_with(config, None)
+    }
+
+    /// [`Self::spawn`] for an app that declares end-to-end encryption: the
+    /// relay's store holds no keys and opens with keyless hooks built from
+    /// `declarations`, loaded from the same app and environment as
+    /// `config.schema`; device UI peers attach with
+    /// [`Self::attach_client_encrypted`].
+    #[cfg(feature = "e2ee-client")]
+    pub fn spawn_encrypted(
+        config: RelayOpenConfig,
+        declarations: crate::encryption::Declarations,
+    ) -> Result<Self, RelayError> {
+        // The same per-table check deploy and the loaders make; before the
+        // owner thread exists.
+        for (table, entry) in &declarations.tables {
+            jazz::tools::deployment::artifact::encryption::check_entry(
+                table,
+                entry,
+                config.schema.public_schema(),
+            )
+            .map_err(|(at, message)| {
+                RelayError::DeclarationsMismatch(format!(
+                    "tables.{table}.encryption{at}: {message}"
+                ))
+            })?;
+        }
+        Self::spawn_with(config, Some(declarations))
+    }
+
+    fn spawn_with(
+        config: RelayOpenConfig,
+        #[cfg_attr(not(feature = "e2ee-client"), allow(unused_variables))] declarations: Option<
+            Declarations,
+        >,
+    ) -> Result<Self, RelayError> {
         // Before the thread exists and before SQLite is touched.
         config.validate()?;
         let sqlite_path = config.sqlite_path.clone();
@@ -379,7 +426,7 @@ impl NativeRelay {
             .name("jazz-native-relay".to_owned())
             .spawn(move || {
                 let _alive = OwnerAlive(owner_alive);
-                let mut worker = match RelayWorker::open(config) {
+                let mut worker = match RelayWorker::open(config, declarations) {
                     Ok(worker) => {
                         let _ = started_tx.send(Ok(()));
                         worker
@@ -428,7 +475,24 @@ impl NativeRelay {
         identity: DbIdentity,
         claims: BTreeMap<String, Value>,
     ) -> Result<NativeRelayClient, RelayError> {
-        let id = self.run(move |worker| worker.attach(identity, claims, 0))?;
+        let id = self.run(move |worker| worker.attach(identity, claims, 0, None))?;
+        Ok(NativeRelayClient {
+            relay: self.clone(),
+            id,
+        })
+    }
+
+    /// Attach a device UI peer of an encrypted relay: its database opens
+    /// with the runtime's hooks over the device's private store. The
+    /// device must supply the relay's app file, app ID and environment.
+    #[cfg(feature = "e2ee-client")]
+    pub fn attach_client_encrypted(
+        &self,
+        identity: DbIdentity,
+        claims: BTreeMap<String, Value>,
+        device: crate::encryption::EncryptedDevice,
+    ) -> Result<NativeRelayClient, RelayError> {
+        let id = self.run(move |worker| worker.attach(identity, claims, 0, Some(device)))?;
         Ok(NativeRelayClient {
             relay: self.clone(),
             id,
@@ -446,7 +510,7 @@ impl NativeRelay {
         if identity.author != self.inner.identity.author {
             return Err(RelayError::ScopeConfigurationMismatch);
         }
-        let id = self.run(move |worker| worker.attach(identity, claims, lease.high_water))?;
+        let id = self.run(move |worker| worker.attach(identity, claims, lease.high_water, None))?;
         Ok(NativeRelayClient {
             relay: self.clone(),
             id,
@@ -541,6 +605,15 @@ impl NativeRelay {
         &self,
         operation: impl FnOnce(&mut RelayWorker) -> Result<T, RelayError> + Send + 'static,
     ) -> Result<T, RelayError> {
+        self.enqueue(operation)?
+            .recv()
+            .map_err(|_| self.owner_closed())?
+    }
+
+    fn enqueue<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut RelayWorker) -> Result<T, RelayError> + Send + 'static,
+    ) -> Result<mpsc::Receiver<Result<T, RelayError>>, RelayError> {
         if !self.is_alive() {
             return Err(RelayError::Closed);
         }
@@ -563,11 +636,18 @@ impl NativeRelay {
                     mpsc::TrySendError::Disconnected(_) => RelayError::Closed,
                 })?;
         }
-        response_rx.recv().map_err(|_| {
-            self.inner.alive.store(false, Ordering::Release);
-            RelayError::Closed
-        })?
+        Ok(response_rx)
     }
+
+    fn owner_closed(&self) -> RelayError {
+        self.inner.alive.store(false, Ordering::Release);
+        RelayError::Closed
+    }
+}
+
+#[cfg(feature = "e2ee-client")]
+fn readiness_timeout() -> RelayError {
+    RelayError::Drive("timeout: the account was not verified in time".to_owned())
 }
 
 /// Stable handle for one process-local UI peer.
@@ -580,6 +660,109 @@ pub struct NativeRelayClient {
 impl NativeRelayClient {
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// One end-to-end encryption operation of this device's runtime by name
+    /// (`ready`, `devices`, `keysDeliver`, ...; see `host::runtime`), its
+    /// arguments and result as JSON. The relay is driven while it waits.
+    /// The `ready` deadline includes time waiting for the relay owner.
+    #[cfg(feature = "e2ee-client")]
+    pub fn encryption_call(
+        &self,
+        op: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, RelayError> {
+        self.encryption_call_with_timeout(op, args, Duration::from_secs(60))
+    }
+
+    #[cfg(feature = "e2ee-client")]
+    pub(crate) fn encryption_call_with_timeout(
+        &self,
+        op: &str,
+        args: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, RelayError> {
+        let started = Instant::now();
+        let (id, op) = (self.id, op.to_owned());
+        let ready = op == "ready";
+        let progress = ready.then(|| Arc::new(Mutex::new(None)));
+        let owner_progress = progress.clone();
+        let operation = move |worker: &mut RelayWorker| {
+            let timeout = if ready {
+                let remaining = timeout.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    // The caller's deadline passed while this job waited
+                    // in the queue. The loop already owns any recovery.
+                    return Err(readiness_timeout());
+                }
+                remaining
+            } else {
+                timeout
+            };
+            let encryption =
+                worker.client(id)?.encryption.clone().ok_or_else(|| {
+                    RelayError::Drive("this peer holds no encryption keys".into())
+                })?;
+            let end = Instant::now() + timeout;
+            let mut call = if ready {
+                let encryption = encryption.clone();
+                Box::pin(async move {
+                    encryption
+                        .ready_native(timeout)
+                        .await
+                        .map(serde_json::Value::from)
+                })
+            } else {
+                encryption.call(op, args)
+            };
+            // Keep the last host-confirmed outcome available while the
+            // owner is asleep or occupied driving the relay.
+            let observe = || -> Result<(), RelayError> {
+                if let Some(progress) = &owner_progress {
+                    let observed = encryption.native_ready_at_deadline();
+                    *progress
+                        .lock()
+                        .map_err(|_| RelayError::Poisoned("encryption readiness"))? =
+                        Some(observed);
+                }
+                Ok(())
+            };
+            observe()?;
+            loop {
+                if let Poll::Ready(done) =
+                    call.as_mut().poll(&mut Context::from_waker(Waker::noop()))
+                {
+                    return done.map_err(RelayError::Drive);
+                }
+                if !ready && Instant::now() >= end {
+                    return Err(RelayError::Drive("the encryption call timed out".into()));
+                }
+                worker.drive();
+                observe()?;
+                thread::sleep(Duration::from_millis(2));
+            }
+        };
+        if let Some(progress) = progress {
+            let response = self.relay.enqueue(operation)?;
+            match response.recv_timeout(timeout.saturating_sub(started.elapsed())) {
+                Ok(result) => result,
+                Err(mpsc::RecvTimeoutError::Timeout) => progress
+                    .lock()
+                    .map_err(|_| RelayError::Poisoned("encryption readiness"))?
+                    .take()
+                    .map_or_else(
+                        || Err(readiness_timeout()),
+                        |result| {
+                            result
+                                .map(serde_json::Value::from)
+                                .map_err(RelayError::Drive)
+                        },
+                    ),
+                Err(mpsc::RecvTimeoutError::Disconnected) => Err(self.relay.owner_closed()),
+            }
+        } else {
+            self.relay.run(operation)
+        }
     }
 
     /// Run one ordinary core turn for this foreground and its relay. A
@@ -726,6 +909,9 @@ struct Foreground {
     /// Something changed for this foreground since the drive began.
     notify: bool,
     next_handle: u64,
+    /// A device's encryption runtime, driven with each drive of the relay.
+    #[cfg(feature = "e2ee-client")]
+    encryption: Option<Rc<jazz_e2ee_client::host::runtime::Encryption>>,
 }
 
 impl Foreground {
@@ -883,6 +1069,10 @@ impl Foreground {
             let _ = upload.abort();
         }
         self.subscriptions.clear();
+        #[cfg(feature = "e2ee-client")]
+        if let Some(encryption) = &self.encryption {
+            encryption.stop();
+        }
         self.link.close();
         self.served.close();
         let _ = block_on(self.binding.close());
@@ -925,6 +1115,10 @@ pub(crate) struct RelayWorker {
     redrive: bool,
     /// When time-bound waits were last evaluated.
     timed: Instant,
+    /// The keyless hooks an encrypted relay's databases open with unless a
+    /// device UI peer brings the runtime's.
+    #[cfg(feature = "e2ee-client")]
+    keyless: Option<Rc<dyn jazz::e2ee::E2eeHooks>>,
 }
 
 /// A binding's tick requests set `dirty`; the owner's drive ticks it.
@@ -999,14 +1193,39 @@ fn relay_db_config(schema: JazzSchema, identity: DbIdentity, migrations: &Migrat
 }
 
 impl RelayWorker {
-    fn open(config: RelayOpenConfig) -> Result<Self, RelayError> {
+    /// The config of one of this relay's databases, with the keyless hooks
+    /// of an encrypted relay.
+    fn db_config(&self, schema: JazzSchema, identity: DbIdentity) -> DbConfig {
+        let config = relay_db_config(schema, identity, &self.migrations);
+        #[cfg(feature = "e2ee-client")]
+        if let Some(hooks) = &self.keyless {
+            return config.with_e2ee(Rc::clone(hooks));
+        }
+        config
+    }
+
+    fn open(
+        config: RelayOpenConfig,
+        #[cfg_attr(not(feature = "e2ee-client"), allow(unused_variables))] declarations: Option<
+            Declarations,
+        >,
+    ) -> Result<Self, RelayError> {
+        #[cfg(feature = "e2ee-client")]
+        let keyless = declarations.map(crate::encryption::keyless);
         ensure_sqlite_store(&config.sqlite_path)?;
         if let Some(parent) = config.sqlite_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| RelayError::Storage(error.to_string()))?;
         }
+        #[allow(unused_mut)]
+        let mut db_config =
+            relay_db_config(config.schema.clone(), config.identity, &config.migrations);
+        #[cfg(feature = "e2ee-client")]
+        if let Some(hooks) = &keyless {
+            db_config = db_config.with_e2ee(Rc::clone(hooks));
+        }
         let db = block_on(binding_host::open_file(
-            relay_db_config(config.schema.clone(), config.identity, &config.migrations),
+            db_config,
             &config.sqlite_path,
             FileOptions::default(),
         ))
@@ -1031,6 +1250,8 @@ impl RelayWorker {
             rebuilt: false,
             redrive: false,
             timed: Instant::now(),
+            #[cfg(feature = "e2ee-client")]
+            keyless,
         })
     }
 
@@ -1110,6 +1331,9 @@ impl RelayWorker {
         identity: DbIdentity,
         claims: BTreeMap<String, Value>,
         high_water: u64,
+        #[cfg_attr(not(feature = "e2ee-client"), allow(unused_variables))] device: Option<
+            EncryptedDevice,
+        >,
     ) -> Result<u64, RelayError> {
         // A relay serves its own identity's sessions only: it uploads what
         // they write as itself.
@@ -1117,12 +1341,29 @@ impl RelayWorker {
             .db
             .check_serves(identity.author)
             .map_err(|error| RelayError::Host(error.into()))?;
-        let db = block_on(binding_host::open_memory(relay_db_config(
-            self.schema.clone(),
-            identity,
-            &self.migrations,
-        )))
-        .map_err(|error| RelayError::Host(error.into()))?;
+        // A device brings the runtime's hooks; any other peer of an
+        // encrypted relay is keyless like the relay.
+        #[allow(unused_mut)]
+        let mut db_config = self.db_config(self.schema.clone(), identity);
+        #[cfg(feature = "e2ee-client")]
+        let mut runtime = None;
+        #[cfg(feature = "e2ee-client")]
+        if let Some(device) = device {
+            let account = identity
+                .author
+                .account_id()
+                .map(|account| account.0.to_string())
+                .ok_or_else(|| RelayError::Drive("a device needs an account".to_owned()))?;
+            let keyless = self.keyless.as_ref().ok_or_else(|| {
+                RelayError::Drive("the relay does not declare encryption".to_owned())
+            })?;
+            let built = crate::encryption::build(device, account, keyless.declarations())
+                .map_err(RelayError::Drive)?;
+            db_config = db_config.with_e2ee(built.built.client().hooks());
+            runtime = Some(built);
+        }
+        let db = block_on(binding_host::open_memory(db_config))
+            .map_err(|error| RelayError::Host(error.into()))?;
         // Continue after the node's previous holder: its transaction ids
         // were (seq, node), and the relay deduplicates by them.
         if high_water > 0 {
@@ -1132,6 +1373,16 @@ impl RelayWorker {
         let binding = Binding::new(db, identity, false);
         binding.set_non_durable_client();
         let dirty = hook(&binding);
+        #[cfg(feature = "e2ee-client")]
+        let encryption = runtime.map(|built| {
+            let flag = Rc::clone(&dirty);
+            built.store.set_wake(Box::new(move || flag.set(true)));
+            jazz_e2ee_client::host::runtime::Encryption::new_native(
+                built.built,
+                built.store,
+                Rc::clone(&binding.db),
+            )
+        });
         let mutation_errors = Rc::new(RefCell::new(Vec::new()));
         let reports = Rc::clone(&mutation_errors);
         *binding.hooks.rejected.borrow_mut() =
@@ -1174,6 +1425,8 @@ impl RelayWorker {
                 wake: None,
                 notify: false,
                 next_handle: 0,
+                #[cfg(feature = "e2ee-client")]
+                encryption,
             },
         );
         self.drive();
@@ -1366,7 +1619,7 @@ impl RelayWorker {
         block_on(self.persistent.close()).map_err(|error| error.to_string())?;
         delete_store_files(&self.sqlite_path).map_err(|error| error.to_string())?;
         let db = block_on(binding_host::open_file(
-            relay_db_config(self.schema.clone(), self.identity, &self.migrations),
+            self.db_config(self.schema.clone(), self.identity),
             &self.sqlite_path,
             FileOptions::default(),
         ))
@@ -1443,6 +1696,14 @@ impl RelayWorker {
             }
             if !progressed {
                 break;
+            }
+        }
+        // A device's encryption runtime goes on as far as it can without
+        // waiting.
+        #[cfg(feature = "e2ee-client")]
+        for client in self.clients.values() {
+            if let Some(encryption) = &client.encryption {
+                encryption.drive();
             }
         }
         // A refused upstream syncs nothing: stop its connection and say why,
@@ -2948,6 +3209,8 @@ pub enum RelayError {
     Host(HostError),
     #[error("native relay drive failed: {0}")]
     Drive(String),
+    #[error("the encryption declarations do not match the relay's schema: {0}")]
+    DeclarationsMismatch(String),
     #[error("native relay socket: {0}")]
     Socket(String),
 }

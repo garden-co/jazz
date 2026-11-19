@@ -17,6 +17,8 @@ pub use account_session::{
     jazz_native_relay_host_lease_refresh_account_session,
     jazz_native_relay_host_lease_release_account_session,
 };
+#[cfg(feature = "e2ee-client")]
+pub mod encryption;
 mod node_lease;
 mod relay;
 mod text_anchors;
@@ -3224,6 +3226,8 @@ mod tests {
     use super::*;
 
     mod encrypted_app;
+    #[cfg(feature = "e2ee-client")]
+    mod encrypted_device;
     mod host;
     mod snapshot_capture_codec;
     mod socket_worker;

@@ -212,6 +212,13 @@ impl From<jazz_app_support::Error> for JazzErrorKind {
                 _ => Self::Refused(message),
             },
             E::Unsupported(what) => unsupported(what),
+            // An encryption call's failure keeps its code in the message
+            // (`encryption (approval-code-mismatch): ...`) for the host's
+            // wrapper to name; a store or database failure may pass.
+            E::Encryption { code, .. } if code == "store" || code == "database" => {
+                Self::Io(message)
+            }
+            E::Encryption { .. } => Self::Refused(message),
             // E::Refused: the backend refused who the client is (a credential
             // trusted neither way, a refused link); `for_user` reports its
             // 403 as `Permission` itself.
