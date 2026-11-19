@@ -75,6 +75,9 @@ pub const FEATURE_TEXT_AFFIX_PREDICATES: WireFeatures = 1 << 13;
 /// server never advertises it (SPEC 8, "Typed error reasons").
 pub const FEATURE_TYPED_ERROR_REASON: WireFeatures = 1 << 14;
 
+/// The replica accepts the ReplaceHolds sync message (v1, tag 21) on an existing link.
+pub const FEATURE_REPLACE_HOLDS: WireFeatures = 1 << 15;
+
 /// Bitset of optional protocol features advertised by one peer.
 pub type WireFeatures = u64;
 
@@ -970,6 +973,7 @@ pub fn current_wire_features() -> WireFeatures {
         | FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
         | FEATURE_SERIALIZABLE_BRANCH_READS
         | FEATURE_TEXT_AFFIX_PREDICATES
+        | FEATURE_REPLACE_HOLDS
         | runtime_transport_compression_features()
 }
 

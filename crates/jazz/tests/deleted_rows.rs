@@ -805,12 +805,15 @@ fn an_offline_edit_of_a_row_deleted_meanwhile_applies_and_leaves_it_deleted() {
 
     synced.disconnect();
     delete(&synced.server, row(1));
-    block_on(synced.alice.transaction(async |tx| {
+    block_on(async {
+        let tx = synced.alice.mergeable_tx().await?;
+
         tx.update("notes", row(1), title("edited"), Default::default())
             .await?;
         tx.update("notes", row(2), title("also"), Default::default())
-            .await
-    }))
+            .await?;
+        tx.commit().await
+    })
     .expect("alice commits offline");
     delete(&synced.alice, row(1));
     synced.connect();

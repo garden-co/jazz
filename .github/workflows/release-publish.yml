@@ -115,6 +115,10 @@ jobs:
             dev/release-publish
             dev/scripts
 
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+
       - name: Validate the inputs
         env:
           GH_TOKEN: ${{ github.token }}
@@ -135,6 +139,7 @@ jobs:
       # release commit publishes, and only once the release tests passed on
       # the PR head.
       - name: Require a tested release commit
+        id: gate
         if: inputs.mode == 'publish'
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
@@ -154,7 +159,16 @@ jobs:
             const { evaluateReleaseTestGate } = await import(`${process.env.GITHUB_WORKSPACE}/dev/scripts/release-test-gate.mjs`);
             const { ok, lines } = await evaluateReleaseTestGate({ github, owner, repo, sha, headSha: pr.head.sha, headRef: pr.head.ref });
             for (const line of lines) core.info(line);
+            core.setOutput("head_sha", pr.head.sha);
             if (!ok) core.setFailed(`Release tests have not passed on PR #${pr.number}'s head ${pr.head.sha}`);
+
+      # First in the run's summary, for whoever approves `publish`: the RC
+      # gate's holds (each with its owner). A NO-GO verdict refuses.
+      - name: RC gate verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.gate.outputs.head_sha || inputs.sha }}
+        run: node dev/release-publish/rc-verdict.mjs
 
       - name: Find the artifacts
         id: artifacts
@@ -843,7 +857,7 @@ jobs:
           git -c user.name="jazz-release-bot" -c user.email="jazz-release-bot@users.noreply.github.com" \
             commit -qm "Jazz for Swift ${VERSION} (garden-co/jazz@${SHA}, v${VERSION})"
           git tag "${VERSION}"
-          git show --stat --oneline HEAD | head -20
+          git show --stat --oneline HEAD | sed -n 1,20p
           if [ "${MODE}" != publish ]; then
             echo "Dry run: would push main and tag ${VERSION} to garden-co/jazz-swift"
             exit 0
