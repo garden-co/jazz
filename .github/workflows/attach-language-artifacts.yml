@@ -278,9 +278,7 @@ jobs:
   kotlin:
     name: Build the Kotlin jar and aar
     needs: build
-    # 16 vCPUs and sccache: Gradle compiles Rust (the bindings' crate) for
-    # the jar and again for the aar; uncached on 4 vCPUs that took 9 min.
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -291,8 +289,6 @@ jobs:
         with:
           setup-node: "false"
           rust-cache: "false"
-          sccache: "true"
-          sccache-key: release-kotlin-sccache-${{ github.repository_id }}-v1
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
@@ -328,9 +324,7 @@ jobs:
     name: Build the Maven repository
     needs: build
     if: inputs.maven
-    # 16 vCPUs and sccache: Gradle compiles Rust (the bindings' crate) for
-    # the jar and again for the aar; uncached on 4 vCPUs that took 9 min.
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -342,8 +336,6 @@ jobs:
         with:
           setup-node: "false"
           rust-cache: "false"
-          sccache: "true"
-          sccache-key: release-maven-sccache-${{ github.repository_id }}-v1
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
