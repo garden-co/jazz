@@ -37,7 +37,6 @@
 //! If a future zero-copy shim is added, hand the host a Rust-defined finalizer
 //! callback that frees through mimalloc instead.
 
-mod e2ee_crypto;
 mod serve_core;
 mod text;
 

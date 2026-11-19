@@ -1,0 +1,59 @@
+[package]
+name = "jazz-e2ee"
+version.workspace = true
+edition = "2024"
+# Not published yet: nothing in the published crates depends on it.
+publish = false
+description = "Jazz end-to-end encryption formats and pure-Rust primitives, compatible with the libsodium-based wire formats."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+# Only what builds the library: tests and their fixtures stay in the repo.
+include = ["src/**"]
+
+[features]
+default = ["os-random"]
+# `OsRandom`, the operating system's (or browser's) secure random source.
+os-random = ["dep:getrandom"]
+# `jazz_e2ee::conformance`, the test kit every mechanism implementation runs.
+conformance = []
+
+[dependencies]
+aead-stream = { version = "0.6.0", default-features = false, features = ["alloc"] }
+blake2 = { version = "0.11.0", default-features = false, features = ["zeroize"] }
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc", "zeroize"] }
+curve25519-dalek = { version = "5.0.0", default-features = false, features = ["zeroize"] }
+ed25519-dalek = { version = "3.0.0", default-features = false, features = ["zeroize"] }
+getrandom = { version = "0.3", optional = true }
+# HPKE (RFC 9180) base mode: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20Poly1305.
+hpke = { version = "0.15.1", default-features = false, features = ["alloc", "x25519", "chacha"] }
+rand_core = { version = "0.10.1", default-features = false }
+# SHA-1 only for the device-account subject and account ID (UUIDv5, §2.3).
+sha1 = { version = "0.10.6", default-features = false }
+# SHA-256, one of the protocol's primitives; SHA-512 for the device-account
+# signing key.
+sha2 = { version = "0.11.1", default-features = false, features = ["zeroize"] }
+thiserror = "2"
+zeroize = { version = "1.8.2", default-features = false, features = ["alloc"] }
+
+# The browser build's random source, as in jazz-wasm.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.3", optional = true, features = ["wasm_js"] }
+
+[dev-dependencies]
+# Builds this crate's own tests and examples with the conformance kit.
+jazz-e2ee = { path = ".", features = ["conformance"] }
+# Cross-checks only: the library itself never links libsodium. This version
+# bundles libsodium 1.0.22, the one `crates/jazz/SPEC/fixtures/e2ee-vectors.c`
+# is built against and checks for.
+libsodium-sys-stable = "=1.24.0"
+# Build records outside the writer's rules, to test the reader.
+aead-stream = { version = "0.6.0", default-features = false, features = ["alloc"] }
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
+
+[[example]]
+name = "custom_mechanism"
+required-features = ["conformance"]
+# Its test runs with the crate's tests.
+test = true

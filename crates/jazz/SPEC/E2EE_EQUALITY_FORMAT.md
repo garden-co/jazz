@@ -1,8 +1,12 @@
 # E2EE equality-token format
 
-This companion specifies the standalone built-in equality adapter. Table
-contexts, logical-value encoding and encrypted query integration are separate
-contracts and are not supplied by this layer. The common envelope and context encodings are defined in
+> **Status.** The normative reference implementation of this format is the
+> pure-Rust crate `crates/jazz-e2ee`, with the independent generator
+> `fixtures/e2ee-vectors.c`.
+
+This companion specifies the built-in equality mechanism, the equality
+context `C` and the value encoding `V`. Encrypted query integration is a
+separate contract. The common envelope and context encodings are defined in
 [E2EE cryptographic formats](E2EE_CRYPTO_FORMAT.md).
 
 ## Built-in token mechanism, version 1
@@ -17,40 +21,116 @@ the encoded logical value. `len(X)` is the byte length of `X`, encoded as an
 unsigned four-byte big-endian integer. There is no padding or field count.
 
 ```text
-D = BLAKE2b-256(key=K, input=len(H) || H || len(C) || C)
+D = BLAKE2b-256(key=K, input=UTF8("jazz.e2ee.equality-key.v1") || 00 || len(H) || H || len(C) || C)
 T = BLAKE2b-256(key=D, input=V)
 stored token = H || T
 ```
 
-The header binds the adapter ID and version into the derived key. The common
-layer supplies a separate equality purpose and the applicable identities;
-adapters do not choose those identities or decide whether a candidate matches.
-Temporary derived-key buffers are cleared after use. This reduces their
-lifetime but does not guarantee erasure in JavaScript runtimes.
+The header binds the mechanism ID and version into the derived key. The common
+layer supplies the context and the value; mechanisms do not choose the
+identities or decide whether a candidate matches. Temporary derived-key
+buffers are cleared after use.
+
+## Context
+
+`C = frame[ctx, T]` (`records::equality_context`): `ctx` is the canonical
+context (`JE2C 01`) with application `Dₛ`, policy `jazz.e2ee.equality.v1`,
+scope the space table's catalogue identity, identifier the space identifier,
+table and column the column's catalogue identities, epoch the space epoch,
+and empty row and recipient: a token does not bind its row, so equal values
+of one column and epoch match across rows. `T` is the column's logical type
+bytes, as for a cell record. The epoch must be a lowercase hyphenated UUID
+of version 4 or 7 with the RFC variant (`[89ab]`), and the table and column
+non-empty, as for cell contexts; anything else is `InvalidInput`.
+
+## Value encoding
+
+`V` (`records::equality_value`) is `00` for null, and otherwise `01`
+followed by:
+
+| Type                  | Bytes after `01`                                      |
+| --------------------- | ----------------------------------------------------- |
+| Boolean               | `00` or `01`                                          |
+| 32- or 64-bit integer | eight bytes, big-endian two's complement              |
+| Timestamp             | eight bytes, big-endian unsigned                      |
+| Float (double)        | eight bytes, big-endian, of the canonical bit pattern |
+| Text                  | the exact UTF-8 bytes                                 |
+| Bytes                 | the bytes                                             |
+| UUID                  | the 16 bytes                                          |
+| Enum                  | the exact UTF-8 bytes of the value's variant name     |
+
+The canonical bit pattern of a float is a design choice of the token
+encoding: every NaN is encoded as `7ff8000000000000` and `-0.0` as `0.0`, so
+all NaNs share one token and `0.0` and `-0.0` share another. This is not
+exactly Jazz's plaintext equality, which is not one rule either: stored
+values compare by bits (so `0.0` and `-0.0` differ, and two NaNs with the
+same bits are equal), while SQL comparisons use IEEE comparison (`0.0 =
+-0.0`, and a NaN equals nothing), and the record reader refuses NaN values.
+Since a token match only selects candidates, which the client decrypts and
+compares with the query's own plaintext rule (see "Security and
+compatibility"), the encoding errs towards matching: it never leaves out a
+row that a plaintext rule would accept for `0.0`/`-0.0`, and NaN, which
+plaintext rows cannot hold, needs no exact rule.
+Text is compared by exact bytes: there is no Unicode, case or whitespace
+normalisation, so `é` (`c3a9`) and `e` followed by U+0301 (`65cc81`) have
+different tokens, as they are different Jazz text values. The column type is
+bound by `T`, so values of different types are never compared. Fixtures
+(asserted by the crate's `equality_values` test): `0.0` and `-0.0` both
+encode as `010000000000000000`, every NaN as `017ff8000000000000`, `-2` as
+`01fffffffffffffffe`, null as `00` and the empty text as `01`.
+An enum value is encoded by its variant name, exactly as a text value (no
+length framing, since `V` is the whole hash input, and no normalisation):
+the variant `open` encodes as `016f70656e` and `done` as `01646f6e65`. The
+column's type bytes `T`, which list the variants, keep an enum column's
+tokens apart from a text column's.
+
+## Column types
+
+An equality index is declared per column, and its type decides the
+encoding: boolean, integer (32-bit, values must fit), bigint, timestamp,
+double, text, bytes, UUID and enum columns, as in the table above. Array,
+row, JSON and transaction-ID columns have no value encoding and cannot be
+equality-indexed: a declaration naming one is refused when it is declared,
+with a typed error that names the type (`records::EqualityColumn::declare`,
+`UnsupportedEqualityColumn`: "Equality indexes are not supported for json
+columns"), never at write time. Tokens are computed only through a declared
+column (`records::equality_token_of`), which refuses a value of another
+type with `InvalidInput`; there is no public entry point that hashes
+caller-supplied bytes, so every token hashes the canonical encoding.
 
 ## Independent fixture
 
-`fixtures/e2ee-vectors.c` constructs the envelope and derivation input without
-Jazz TypeScript helpers and links against the pinned libsodium 1.0.22 archive.
+`fixtures/e2ee-vectors.c` constructs the envelope and derivation input
+without any Jazz code and links against libsodium 1.0.22 as
+`libsodium-sys-stable` =1.24.0 bundles it.
 Assertions must remain enabled. It emits `equalityContext`, `equalityDerived`
-and `equality`; the stored literals are in the TypeScript crypto fixture.
+and `equality`; the `jazz-e2ee` vector tests assert them.
 Its public test inputs are a key containing bytes `00` through `1f`, the
 existing context fixture, and UTF-8 `hello` as `V`.
 
-Browser and native adapter tests compare the token against the same literal.
 This is an independent framing check, not an independent cryptographic
 implementation or security audit. The generic fixture context tests the
 adapter boundary; it is not a real application's table context.
 
 ## Security and compatibility
 
-Tokens disclose equality/frequency and query patterns, so applications must
-opt in before persisting searchable indexes. A token match identifies a candidate, not trusted plaintext: clients
+Tokens disclose equality and frequency within one column and epoch: the
+server sees how many rows share each token, and which tokens queries ask
+for. Applications must opt in before persisting searchable indexes. A token match identifies a candidate, not trusted plaintext: clients
 must decrypt and compare candidates before applying logical limits or counts.
 Jazz permissions remain authoritative for reads and writes.
 
-BYOC adapters retain their own explicit mechanism ID and version. They receive
-the common layer's context and value bytes; they cannot change logical
-comparison semantics. Changes to the derivation, framing or value encoding
+Custom equality mechanisms (registered as in the crypto format's mechanism
+agility rules) carry their own mechanism ID and version. They receive the
+common layer's context and value bytes; they cannot change logical
+comparison semantics. A provider failure is `CryptoFailure`, never a
+non-matching token. Changes to the derivation, framing or value encoding
 require an explicit compatibility decision before persisted indexes can use
 them. There is no implicit reindexing or migration in this version.
+
+A token is a one-way function of one value under one context and type. A
+token of one value under a column's new context or type cannot be computed
+from a token of the old one, and the source values that a schema conversion
+maps to a searched value cannot in general be enumerated from it; equality
+on a converting column is therefore limited as [E2EE migrations](E2EE_MIGRATIONS.md)
+§3.3 states.
