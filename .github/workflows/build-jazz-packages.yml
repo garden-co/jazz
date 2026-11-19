@@ -168,6 +168,10 @@ jobs:
         with:
           rust-targets: wasm32-unknown-unknown
           sccache: "true"
+          # Only main pushes write the cache: they are what warms it, and a
+          # release build's fresh-version objects are rarely reused. Elsewhere
+          # the post-step commit (up to 2 min) would hold up every consumer.
+          sccache-commit: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'true' || 'false' }}
           sccache-key: release-wasm-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
 
       - uses: ./.github/actions/install-rust-tool
@@ -208,6 +212,10 @@ jobs:
         with:
           rust-targets: wasm32-unknown-unknown
           sccache: "true"
+          # Only main pushes write the cache: they are what warms it, and a
+          # release build's fresh-version objects are rarely reused. Elsewhere
+          # the post-step commit (up to 2 min) would hold up every consumer.
+          sccache-commit: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'true' || 'false' }}
           sccache-key: release-wasm-do-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
 
       - uses: ./.github/actions/install-rust-tool
@@ -254,6 +262,10 @@ jobs:
         with:
           rust-targets: wasm32-unknown-unknown
           sccache: "true"
+          # Only main pushes write the cache: they are what warms it, and a
+          # release build's fresh-version objects are rarely reused. Elsewhere
+          # the post-step commit (up to 2 min) would hold up every consumer.
+          sccache-commit: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'true' || 'false' }}
           sccache-key: release-wasm-do-suite-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
 
       - uses: ./.github/actions/install-rust-tool
@@ -346,6 +358,10 @@ jobs:
         with:
           rust-targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
           sccache: "true"
+          # Only main pushes write the cache: they are what warms it, and a
+          # release build's fresh-version objects are rarely reused. Elsewhere
+          # the post-step commit (up to 2 min) would hold up every consumer.
+          sccache-commit: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'true' || 'false' }}
           sccache-key: release-jazz-rn-android-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
 
       - name: Install cargo-ndk
@@ -388,6 +404,10 @@ jobs:
         with:
           rust-targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
           sccache: "true"
+          # Only main pushes write the cache: they are what warms it, and a
+          # release build's fresh-version objects are rarely reused. Elsewhere
+          # the post-step commit (up to 2 min) would hold up every consumer.
+          sccache-commit: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'true' || 'false' }}
           sccache-key: release-jazz-rn-ios-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
 
       - name: Build and verify iOS relay XCFramework
