@@ -300,7 +300,7 @@ fn the_portable_deploy_refuses_system_tables_without_declarations() {
     );
 }
 
-/// An encrypting app serves local-first accounts founded for its own app id
+/// An encrypting app serves device accounts founded for its own app id
 /// only: the registry keeps no record of the founding namespace, so an
 /// account founded for another audience could not be told from the app's
 /// own. Before the app encrypts, any audience founds.
@@ -312,7 +312,7 @@ fn the_portable_deploy_refuses_system_tables_without_declarations() {
 /// found-local-first {}                ──► ✓   found-local-first {audience: app id} ──► ✓
 /// ```
 #[tokio::test]
-async fn an_encrypting_app_founds_local_first_accounts_for_its_own_audience_only() {
+async fn an_encrypting_app_founds_device_accounts_for_its_own_audience_only() {
     let router = router().await;
     let found = |audience: Option<String>, subject: &str| {
         let router = router.clone();
@@ -367,7 +367,7 @@ async fn an_encrypting_app_founds_local_first_accounts_for_its_own_audience_only
 /// of the audience its proof names, and an encrypting app refuses a guest
 /// whose audience is not its own.
 #[tokio::test]
-async fn an_encrypting_app_admits_a_local_first_founder_of_its_own_audience_only() {
+async fn an_encrypting_app_admits_a_device_account_founder_of_its_own_audience_only() {
     use crate::server::routes::accounts::admit_local_founder;
     use axum::http::HeaderMap;
     let server = ServerBuilder::new(app_id())

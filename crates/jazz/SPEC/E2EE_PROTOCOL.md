@@ -520,26 +520,26 @@ Account and device tables (fixed policies):
   is `device-account` exactly when the account was founded by a device-account
   identity (Jazz's account registry); an account founded otherwise writes
   `app` roots.
-  An encrypting app serves local-first accounts founded for its own app id
-  only. A local-first identity's account ID derives from the audience its
+  An encrypting app serves device accounts founded for its own app id
+  only. A device-account identity's account ID derives from the audience its
   proof names (§2.3), which may be another than the app's, and the registry
   keeps no record of which one founded an account, so such an account could
   not be told from the app's own. The server therefore refuses to found one
   for an app that encrypts (`found-local-first`, and a guest's first
   admission), and accepts no identity or root (R5, R6) for an account whose
-  identities are all local-first and none of which derives its ID in the
-  app's namespace: neither a `local-first` nor an `app` root, so neither a
+  identities are all device-account identities and none of which derives its ID in the
+  app's namespace: neither a `device-account` nor an `app` root, so neither a
   bootstrap nor a reset. An account with an external identity is not told
-  apart from one the app founded: a local-first account of another audience
+  apart from one the app founded: a device account of another audience
   that was linked to an external login before the app encrypted counts as
   the app's, so that login can reset it (§2.11), like any account's own
   login.
   The rule also covers accounts founded before the app turned encryption
-  on: a local-first account founded for another audience by then is locked
+  on: a device account founded for another audience by then is locked
   out of encryption for good, and can neither bootstrap nor reset. There is
   no migration, and the registry records no namespace to move it by. This
   is intended. The deploy that first turns encryption on does not list
-  such accounts: finding them reads every local-first identity in the
+  such accounts: finding them reads every device-account identity in the
   registry, work that grows with the app's accounts, not with the deploy.
 - R7. Challenges, proofs, approvals, device deliveries: insert by `$createdBy`
   only, referencing a request or challenge of the same account; read by

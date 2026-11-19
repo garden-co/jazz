@@ -1638,14 +1638,14 @@ fn rejected_for(reason: Reason, message: impl Into<String>) -> Error {
 /// account tables' policies need its founder (E2EE protocol R5, R6), which
 /// no policy can read.
 pub trait AccountRegistryView {
-    /// Whether `account` was founded by a local-first identity; `None`
+    /// Whether `account` was founded by a device-account identity; `None`
     /// when the registry holds no identity of it.
-    fn founded_local_first(
+    fn founded_by_device_account(
         &self,
         account: jazz_types::account_registry::AccountId,
     ) -> Result<Option<bool>, String>;
 
-    /// Whether `account` was founded by a local-first identity for another
+    /// Whether `account` was founded by a device-account identity for another
     /// audience than the app's own, whose accounts an encrypting app does
     /// not serve: with no record of which namespace founded it, such an
     /// account's kind (E2EE protocol R6) and reset rights (R5) cannot be
@@ -1657,22 +1657,22 @@ pub trait AccountRegistryView {
         Ok(false)
     }
 
-    /// [`Self::founded_local_first`], read on the store's own connection
+    /// [`Self::founded_by_device_account`], read on the store's own connection
     /// `store`, which the check runs on inside the write's transaction. A
     /// registry kept in the store's file reads its tables here: a second
     /// connection to a shared in-memory database (no write-ahead log) is
     /// locked out while the store's connection holds a write. By default,
     /// the registry's own way of reading.
-    fn founded_local_first_on(
+    fn founded_by_device_account_on(
         &self,
         _store: &crate::storage::Storage,
         account: jazz_types::account_registry::AccountId,
     ) -> Result<Option<bool>, String> {
-        self.founded_local_first(account)
+        self.founded_by_device_account(account)
     }
 
     /// [`Self::founded_for_another_audience`], read on the store's own
-    /// connection (see [`Self::founded_local_first_on`]).
+    /// connection (see [`Self::founded_by_device_account_on`]).
     fn founded_for_another_audience_on(
         &self,
         _store: &crate::storage::Storage,
@@ -7410,8 +7410,9 @@ impl Inner {
     /// The checks beside the account tables' insert policies that read
     /// Jazz's account registry and an identity's generation (E2EE protocol
     /// R5, R6): a reset identity (generation above 0) only for an account
-    /// not founded by a local-first identity, by a session that isn't
-    /// local-first, with the account's identity of the generation before;
+    /// not founded by a device-account identity, by a session that isn't a
+    /// device-account session, with the account's identity of the
+    /// generation before;
     /// a root whose `kind` names how its account was founded. The policies
     /// check the rest, `allowAccountReset` included. True for any other
     /// table.
@@ -7437,26 +7438,26 @@ impl Inner {
         {
             return Ok(false);
         }
-        let local_first_session =
+        let device_account_session =
             check.author.principal_parts().0 == jazz_types::identity::DEVICE_ACCOUNT_ISSUER;
         // A store without the account, or without a registry, has no
         // links: the session's own login founded its account.
-        let founded_local_first = || -> Result<bool, Error> {
+        let founded_by_device_account = || -> Result<bool, Error> {
             let known = match &self.account_registry {
                 Some(registry) => registry
-                    .founded_local_first_on(&self.conn, account)
+                    .founded_by_device_account_on(&self.conn, account)
                     .map_err(|error| Error::new(ErrorCode::Storage, error))?,
                 None => None,
             };
-            Ok(known.unwrap_or(local_first_session))
+            Ok(known.unwrap_or(device_account_session))
         };
         if !identities {
             let kind = match self.account_cell(table, check, "kind")? {
                 Some(Value::String(kind)) => kind,
                 _ => return Ok(false),
             };
-            let founded = if founded_local_first()? {
-                "local-first"
+            let founded = if founded_by_device_account()? {
+                "device-account"
             } else {
                 "app"
             };
@@ -7469,7 +7470,7 @@ impl Inner {
         if generation == 0 {
             return Ok(true);
         }
-        if generation < 0 || local_first_session || founded_local_first()? {
+        if generation < 0 || device_account_session || founded_by_device_account()? {
             return Ok(false);
         }
         // The account's own identity of the generation before.

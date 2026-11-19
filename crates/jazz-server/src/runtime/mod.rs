@@ -3298,14 +3298,14 @@ mod tests {
     /// An opened server checks an account root's `kind` against how the
     /// account was founded, as the account registry in its own store says,
     /// not against the session's issuer alone. The registry holds alice's
-    /// account as founded by an external login; a session of a local-first
+    /// account as founded by an external login; a session of a device-account
     /// identity writes as that account.
     ///
     /// ```text
     /// registry: alice's account founded by an external login (app)
-    /// alice's account, from a local-first session:
+    /// alice's account, from a device-account session:
     ///   device request ──► ✓
-    ///   identity + root "local-first" ──► ✗ (founded by the app)
+    ///   identity + root "device-account" ──► ✗ (founded by the app)
     ///   identity + root "app"         ──► ✓
     /// ```
     #[test]
@@ -3481,7 +3481,7 @@ mod tests {
             if !registry {
                 // Not "no registry, so the session's issuer decides": the
                 // unreadable registry refuses either root.
-                for kind in ["local-first", "app"] {
+                for kind in ["device-account", "app"] {
                     let error = commit(db, identity_and_root(kind))
                         .expect_err("a store without the registry tables");
                     assert!(error.contains("account registry"), "{kind}: {error}");
@@ -3489,9 +3489,10 @@ mod tests {
                 return Ok(());
             }
             // Without the registry the session's issuer would decide, and
-            // a local-first session's root would have to say "local-first".
+            // a device-account session's root would have to say
+            // "device-account".
             // The refusal is the policy check's, not some other error.
-            let error = commit(db, identity_and_root("local-first"))
+            let error = commit(db, identity_and_root("device-account"))
                 .expect_err("the registry says the app founded the account");
             assert!(
                 error.contains("INSERT policy denied") && error.contains("account_roots"),

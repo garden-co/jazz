@@ -136,7 +136,7 @@ fn identities_of(
         .map_err(registry::storage_error)
 }
 
-/// How many identities of `account` are not local-first.
+/// How many identities of `account` are not device-account identities.
 fn external_identities_of(
     conn: &jazz::storage::Storage,
     account: AccountId,
@@ -160,8 +160,8 @@ impl RegistryFounders {
         Self { reader, app }
     }
 
-    /// An account was founded by a local-first identity when one of its
-    /// local-first identities derives its id: linking a local-first
+    /// An account was founded by a device-account identity when one of its
+    /// device-account identities derives its id: linking a device-account
     /// identity into another account keeps that account's id.
     fn founded(
         &self,
@@ -184,14 +184,14 @@ impl RegistryFounders {
 }
 
 impl jazz::db::AccountRegistryView for RegistryFounders {
-    fn founded_local_first(&self, account: AccountId) -> Result<Option<bool>, String> {
+    fn founded_by_device_account(&self, account: AccountId) -> Result<Option<bool>, String> {
         self.founded(
             account,
             self.reader.sql(|conn| identities_of(conn, account)),
         )
     }
 
-    fn founded_local_first_on(
+    fn founded_by_device_account_on(
         &self,
         store: &jazz::storage::Storage,
         account: AccountId,
@@ -199,15 +199,15 @@ impl jazz::db::AccountRegistryView for RegistryFounders {
         self.founded(account, identities_of(store, account))
     }
 
-    /// An account whose identities are all local-first and none of which
-    /// derives its id in this app's namespace was founded for another
-    /// audience (`found-local-first` and a guest's first admission may name
-    /// one). An encrypting app does not serve such accounts: this rule is
+    /// An account whose identities are all device-account identities and
+    /// none of which derives its id in this app's namespace was founded for
+    /// another audience (`found-local-first` and a guest's first admission
+    /// may name one). An encrypting app does not serve such accounts: this rule is
     /// the documented one (E2EE protocol R5, R6), and the founding routes
     /// refuse to create them. An account with an external identity is not
     /// told apart from one the app founded, so it reads as the app's.
     fn founded_for_another_audience(&self, account: AccountId) -> Result<bool, String> {
-        let Some(founded) = self.founded_local_first(account)? else {
+        let Some(founded) = self.founded_by_device_account(account)? else {
             return Ok(false);
         };
         if founded {
@@ -224,7 +224,7 @@ impl jazz::db::AccountRegistryView for RegistryFounders {
         store: &jazz::storage::Storage,
         account: AccountId,
     ) -> Result<bool, String> {
-        let Some(founded) = self.founded_local_first_on(store, account)? else {
+        let Some(founded) = self.founded_by_device_account_on(store, account)? else {
             return Ok(false);
         };
         if founded {
@@ -305,7 +305,7 @@ mod tests {
     // the registry's own read connection (E2EE protocol R5, R6). Internal:
     // the view has no public reader of its own to observe it through.
     #[test]
-    fn the_founders_view_tells_local_first_founded_accounts() {
+    fn the_founders_view_tells_device_account_founded_accounts() {
         use jazz::db::AccountRegistryView;
         let dir = tempfile::tempdir().unwrap();
         let storage = crate::runtime::StorageConfig::data_dir(dir.path());
@@ -338,17 +338,20 @@ mod tests {
             .unwrap(),
             app,
         );
-        assert_eq!(view.founded_local_first(founded.account), Ok(Some(true)));
-        assert_eq!(view.founded_local_first(external), Ok(Some(false)));
         assert_eq!(
-            view.founded_local_first(AccountId(Uuid::from_bytes([3; 16]))),
+            view.founded_by_device_account(founded.account),
+            Ok(Some(true))
+        );
+        assert_eq!(view.founded_by_device_account(external), Ok(Some(false)));
+        assert_eq!(
+            view.founded_by_device_account(AccountId(Uuid::from_bytes([3; 16]))),
             Ok(None)
         );
     }
 
-    /// An account whose identities are all local-first and none of which
-    /// derives its id in the app's namespace was founded for another
-    /// audience; the app's own founders, external accounts and unknown
+    /// An account whose identities are all device-account identities and
+    /// none of which derives its id in the app's namespace was founded for
+    /// another audience; the app's own founders, external accounts and unknown
     /// accounts are not.
     #[test]
     fn an_account_founded_for_another_audience_is_told_apart() {

@@ -102,7 +102,7 @@ pub(super) async fn login_or_register_for_admin(
     Ok(response(request.identity, assignment))
 }
 
-/// The rule that an encrypting app serves only local-first accounts founded
+/// The rule that an encrypting app serves only device accounts founded
 /// in its own namespace (E2EE protocol R5, R6): the registry keeps no record
 /// of which namespace founded an account, so an account founded for another
 /// audience could not be told from the app's own, and no account record is
@@ -118,9 +118,7 @@ async fn refuse_foreign_founding(state: &ServerState, app: uuid::Uuid) -> Result
         None => false,
     };
     if encrypts {
-        Err(
-            "an app that encrypts columns serves local-first accounts founded for its own app id only",
-        )
+        Err("an app that encrypts columns serves device accounts founded for its own app id only")
     } else {
         Ok(())
     }
