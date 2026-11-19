@@ -9,13 +9,7 @@ import {
   type BackendClientCredential,
 } from "../runtime/credentialed-transport.js";
 import type { WebSocketConstructor } from "../runtime/native-runtime/websocket.js";
-import {
-  NapiDb,
-  captureTextAnchor,
-  captureTextRange,
-  resolveTextAnchor,
-  resolveTextRange,
-} from "jazz-napi";
+import { backendNative } from "./backend-native.js";
 import { mintLocalFirstTokenFromSeed } from "../runtime/local-first-token.js";
 import { accountRegistryUrl, createAccountDbWithRuntimeSource } from "../accounts/context.js";
 import { accountRegistry, getBackendAuth, type BackendAuth } from "../accounts/enrollment.js";
@@ -23,7 +17,6 @@ import { prepareAccountManager, type AccountStore } from "../accounts/persistenc
 import type { AccountHandle } from "../accounts/state.js";
 import { authSecretSeedForMinting } from "../runtime/auth-secret-codec.js";
 import { resolveSchemaSource } from "../schema-source.js";
-import * as jazzNapi from "jazz-napi";
 import {
   enginePermissions,
   isPermissionsFile,
@@ -172,10 +165,10 @@ function backendNodeId(config: OpenJazzSessionConfig): string {
 class NodeUserRuntimeSource extends RuntimeSource {
   override textAnchors(): TextAnchors {
     return textAnchorsFrom({
-      captureTextAnchor,
-      captureTextRange,
-      resolveTextAnchor,
-      resolveTextRange,
+      captureTextAnchor: backendNative().captureTextAnchor,
+      captureTextRange: backendNative().captureTextRange,
+      resolveTextAnchor: backendNative().resolveTextAnchor,
+      resolveTextRange: backendNative().resolveTextRange,
     });
   }
 
@@ -218,7 +211,7 @@ class NodeUserRuntimeSource extends RuntimeSource {
       )
       .digest("hex");
     const runtime = new NativeRuntimeAdapter(
-      NapiDb,
+      backendNative().Db,
       runtimeSchema,
       this.host.driver.type === "persistent"
         ? deterministicBytes(
@@ -325,7 +318,7 @@ export async function createJazzClient(input: JazzClientConfig): Promise<Backend
   let core!: SessionCore<JazzClient>;
   // A jazz.permissions.json is checked against the app's bindings by the Rust loader.
   // Through a static jazz-napi import, so bundlers and file tracers ship it.
-  provideCodegenNapi(jazzNapi);
+  provideCodegenNapi(backendNative().codegen);
   // From a jazz.permissions.json, also the bundle id it makes with the app,
   // which `forUser` checks against the bundle the main backend publishes.
   const loaded = isPermissionsFile(input.permissions)
