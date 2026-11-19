@@ -176,5 +176,6 @@ runs:
           echo "SCCACHE_SERVER_UDS=$dir/server.sock"
           echo "SCCACHE_CACHE_SIZE=8G"
         } >> "$GITHUB_ENV"
+        # No stats here: the jobs print them after building. (Piping them into
+        # head under pipefail made sccache panic on the closed pipe.)
         SCCACHE_DIR="$dir" SCCACHE_SERVER_UDS="$dir/server.sock" SCCACHE_CACHE_SIZE=8G sccache --start-server
-        sccache --show-stats | head -12
