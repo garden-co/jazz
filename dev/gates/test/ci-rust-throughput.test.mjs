@@ -100,6 +100,7 @@ const assertUsesBlacksmithRunner = (jobName, jobSource) => {
     "lint",
     "test-rust-workspace",
     "test-storage-compat",
+    "test-durable-object-limits",
     "test-ts",
     "test-react-native",
   ].includes(jobName)
@@ -181,7 +182,13 @@ const assertSuiteS3ConfigurationBoundary = (source) => {
       `untrusted suite callers must not inherit ${name}`,
     );
 
-  for (const name of ["lint", "test-rust-workspace", "test-storage-compat", "test-ts"]) {
+  for (const name of [
+    "lint",
+    "test-rust-workspace",
+    "test-storage-compat",
+    "test-durable-object-limits",
+    "test-ts",
+  ]) {
     const parsedJob = document.jobs[name];
     assert.equal(parsedJob.env, undefined, `${name} must not configure S3 at job scope`);
     const exportIndex = parsedJob.steps.findIndex(
@@ -754,10 +761,11 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
   assert.match(aggregate, /if: always\(\)/);
   assert.match(
     aggregate,
-    /needs:\s*\[\s*test-rust-workspace,\s*test-storage-compat,\s*test-jazz-ffi-bindings,\s*test-crates-package,\s*test-kotlin,\s*test-kotlin-android,?\s*\]/,
+    /needs:\s*\[\s*test-rust-workspace,\s*test-storage-compat,\s*test-durable-object-limits,\s*test-jazz-ffi-bindings,\s*test-crates-package,\s*test-kotlin,\s*test-kotlin-android,?\s*\]/,
   );
   assert.match(aggregate, /test "\$\{WORKSPACE_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{STORAGE_COMPAT_RESULT\}" = success/);
+  assert.match(aggregate, /test "\$\{DURABLE_OBJECT_LIMITS_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{JAZZ_FFI_BINDINGS_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{CRATES_PACKAGE_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{KOTLIN_RESULT\}" = success/);
@@ -852,7 +860,13 @@ test("Turbo cache uses its pinned OIDC policy only inside the trusted suite invo
 });
 
 test("shared Rust cache writes are main and merge-group only while trusted PRs receive read access", () => {
-  for (const name of ["lint", "test-rust-workspace", "test-storage-compat", "test-ts"]) {
+  for (const name of [
+    "lint",
+    "test-rust-workspace",
+    "test-storage-compat",
+    "test-durable-object-limits",
+    "test-ts",
+  ]) {
     const source = job(name);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN \}\}/);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_PR_READER_AWS_ROLE_ARN \}\}/);
@@ -2063,6 +2077,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
   for (const name of [
     "test-rust-workspace",
     "test-storage-compat",
+    "test-durable-object-limits",
     "test-ts",
     "test-react-native",
     "test-jazz-ffi-bindings",
@@ -2086,6 +2101,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     [
       "lint",
       "test-crates-package",
+      "test-durable-object-limits",
       "test-go",
       "test-jazz-ffi-bindings",
       "test-kotlin",

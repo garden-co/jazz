@@ -42,7 +42,7 @@ export const ciPartitionJobs = Object.freeze({
   "rust-workspace": "test-rust-workspace",
   "rust-differential": "test-storage-compat",
   "storage-compat": "test-storage-compat",
-  "durable-object-limits": "test-storage-compat",
+  "durable-object-limits": "test-durable-object-limits",
   typescript: "test-ts",
   "next-trace-decide": "test-next-trace",
   "next-trace": "test-next-trace",
@@ -372,9 +372,24 @@ export const ciPartitions = Object.freeze({
   // limits (100 bound parameters, 100 KB statements, expression depth 100,
   // ...), so SQL that would fail there fails here. See
   // dev/durable-objects/README.md.
+  // This is `cargo test --workspace` in two commands. Nextest builds the same
+  // targets and runs the same unit, integration, bin and example tests, but
+  // runs test binaries in parallel where cargo test ran them one after
+  // another (~200s of a 260s step). Nextest skips doc tests, so the second
+  // command runs exactly those, with the same feature selection.
   "durable-object-limits": Object.freeze([
     command("Durable Object SQLite limits", "cargo", [
+      "nextest",
+      "run",
+      "--profile",
+      "jazz-ci",
+      "--workspace",
+      "--features",
+      "jazz-core/durable-object-limits",
+    ]),
+    command("Durable Object SQLite limits doc tests", "cargo", [
       "test",
+      "--doc",
       "--workspace",
       "--features",
       "jazz-core/durable-object-limits",

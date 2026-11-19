@@ -138,5 +138,6 @@ Risks to keep an eye on:
   crossing, against ~1 us natively. Savepoints are 39% of statements today;
   as `transactionSync` scopes they cost a JS call each, not an `exec`.
 
-A CI job running `cargo test --workspace --features jazz/durable-object-limits`
-keeps all of this from regressing.
+CI's `durable-object-limits` partition (the `test-durable-object-limits` job)
+runs the whole workspace suite with `jazz-core/durable-object-limits`, doc
+tests included, and keeps all of this from regressing.
