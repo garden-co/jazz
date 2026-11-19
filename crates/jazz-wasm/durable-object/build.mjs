@@ -16,7 +16,6 @@ import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const out = join(root, "durable-object/pkg");
-const features = process.argv.includes("--tests") ? "durable-object-tests" : "durable-object";
 const env = {
   ...process.env,
   CARGO_PROFILE_RELEASE_OPT_LEVEL: "z",
@@ -40,21 +39,42 @@ run("wasm-pack", [
   "--no-pack",
   "--",
   "--features",
-  features,
+  "durable-object",
 ]);
 
-/** wasm-opt on PATH, else the one wasm-pack downloaded for the browser build. */
+/**
+ * The binaryen the size numbers were measured with, and the one wasm-pack
+ * 0.13.1 downloads for the browser build: another version optimises
+ * differently, so it is refused rather than used.
+ */
+const WASM_OPT_VERSION = "version 117";
+
+/** A pinned wasm-opt: on PATH, or the copy wasm-pack downloaded. */
 function wasmOpt() {
-  try {
-    execFileSync("wasm-opt", ["--version"], { stdio: "ignore" });
-    return "wasm-opt";
-  } catch {}
   const cache = join(homedir(), ".cache/.wasm-pack");
-  for (const dir of existsSync(cache) ? readdirSync(cache) : []) {
-    const bin = join(cache, dir, "bin/wasm-opt");
-    if (dir.startsWith("wasm-opt") && existsSync(bin)) return bin;
+  const candidates = [
+    "wasm-opt",
+    ...(existsSync(cache) ? readdirSync(cache) : [])
+      .filter((dir) => dir.startsWith("wasm-opt"))
+      .map((dir) => join(cache, dir, "bin/wasm-opt")),
+  ];
+  const seen = [];
+  for (const bin of candidates) {
+    let version;
+    try {
+      version = execFileSync(bin, ["--version"], { encoding: "utf8" }).trim();
+    } catch {
+      continue;
+    }
+    seen.push(`${bin}: ${version}`);
+    if (version.includes(WASM_OPT_VERSION)) {
+      console.log(`build:durable-object: ${bin} (${version})`);
+      return bin;
+    }
   }
-  throw new Error("build:durable-object needs wasm-opt (binaryen) on PATH, or wasm-pack's copy");
+  throw new Error(
+    `build:durable-object needs wasm-opt ${WASM_OPT_VERSION} (binaryen), on PATH or as wasm-pack's copy; found ${seen.join("; ") || "none"}`,
+  );
 }
 
 const wasm = join(out, "jazz_wasm_do_bg.wasm");
