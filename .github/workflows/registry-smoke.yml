@@ -75,7 +75,13 @@ jobs:
         env: { AG_WAIT_MIN: "${{ inputs.wait_minutes }}", GH_TOKEN: "${{ github.token }}" }
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with: { name: registry-swift, path: dev/adopter-gate/.results, retention-days: 14, include-hidden-files: true }
+        with:
+          {
+            name: registry-swift,
+            path: dev/adopter-gate/.results,
+            retention-days: 14,
+            include-hidden-files: true,
+          }
 
   verdict:
     needs: [smoke, swift]
