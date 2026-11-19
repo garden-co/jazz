@@ -8,9 +8,11 @@ export const STORE_HELD_BY_ANOTHER_TAB_ERROR_CODE = "store_held_by_another_tab";
  * - A guest signs up (or in) in one tab while another tab is still the
  *   guest. The other tab normally follows the sign-up within moments, or
  *   closes.
- * - A deploy changed the app's schema, and another tab still runs the
- *   previous build (or this tab runs the previous one, and a newer tab
- *   opened the store first). That tab reloads, or closes.
+ * - A deploy changed the app's schema, and another tab runs a build Jazz
+ *   can't order against this one (neither's schema history contains the
+ *   other's, or one ships none). That tab reloads, or closes. (Builds it can
+ *   order don't wait: the newer one takes the store and the older tabs
+ *   reload, see `createJazzClient`'s `onNewerBuild`.)
  *
  * Either way this tab joins on its own once the other tab lets go. Until
  * then its sync status is `connecting`.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compareRuntimeAdmission } from "./runtime-admission.js";
+import { compareBuildLineage, compareRuntimeAdmission } from "./runtime-admission.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 const tasks = {
@@ -78,5 +78,26 @@ describe("compareRuntimeAdmission", () => {
         {},
       ),
     ).toBe("incompatible");
+  });
+});
+
+describe("compareBuildLineage", () => {
+  const lineage = (...hashes: string[]) => ({
+    schemas: hashes.map((hash) => ({ hash, schema: {} })),
+    migrations: [],
+  });
+
+  it("orders a build whose schema history extends the other's after it", () => {
+    expect(compareBuildLineage(lineage("v1"), lineage("v1", "v2"))).toBe("newer");
+    expect(compareBuildLineage(lineage("v1", "v2"), lineage("v1"))).toBe("older");
+    expect(compareBuildLineage(lineage("v1"), lineage("v1", "v2", "v3"))).toBe("newer");
+  });
+
+  it("can't order builds of the same history, unrelated histories, or a build that ships none", () => {
+    expect(compareBuildLineage(lineage("v1", "v2"), lineage("v1", "v2"))).toBe("unknown");
+    // A rollback, or a preview build of another branch.
+    expect(compareBuildLineage(lineage("v1", "v2"), lineage("v1", "v3"))).toBe("unknown");
+    expect(compareBuildLineage(undefined, lineage("v1", "v2"))).toBe("unknown");
+    expect(compareBuildLineage(lineage("v1"), undefined)).toBe("unknown");
   });
 });
