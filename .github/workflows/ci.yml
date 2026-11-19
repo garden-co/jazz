@@ -187,6 +187,13 @@ jobs:
           if [ "${IS_GROUP}" = true ]; then
             description="Full suite passed in ${REF_NAME}"
             covered="$(dev/ci/full-suite-coverage.sh origin/main "${HEAD_SHA}")"
+            # Also every PR this group's own commits carry, read the way
+            # land-group reads them, so a PR the group tested always gets
+            # full-suite even when an older commit below the group's base
+            # stops the walk above (e.g. a docs PR that never ran the suite).
+            if members="$(dev/ci/group-members.sh "${HEAD_SHA}" "g${REF_NAME#merge-group/}")"; then
+              covered="$(printf '%s\n' "${covered}" $(awk '$1 == "pr" { print $3 }' <<<"${members}") | sort -u)"
+            fi
           else
             description="Full suite passed on this commit"
             covered="${HEAD_SHA}"
@@ -205,8 +212,13 @@ jobs:
   # only after full-suite is posted on every PR head the group covers, merges
   # each PR at the exact sha the group tested and stops at the first PR whose
   # head moved, lacks its approval comment or would leave main on another tree.
-  # Inert until the repository variable LAND_MERGE_GROUPS is "true": the merges
-  # use the Review Loop's GitHub App, whose key is a secret only Anselm adds.
+  # Groups are stacked (each cut on the previous one's FINAL) and may go green
+  # out of order, so each job first waits until main reaches its own base: the
+  # jobs serialise through main's tree, never through a shared concurrency
+  # group (which would cancel a pending middle group or let a later group hold
+  # the slot while an earlier one waits). Inert until the repository variable
+  # LAND_MERGE_GROUPS is "true": the merges use the Review Loop's GitHub App,
+  # whose key is a secret only Anselm adds.
   land-group:
     if: >-
       always() && vars.LAND_MERGE_GROUPS == 'true' &&
@@ -214,9 +226,9 @@ jobs:
       needs.report-full-suite.result == 'success'
     needs: [report-full-suite]
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 30
+    timeout-minutes: 50
     concurrency:
-      group: land-merge-groups
+      group: land-${{ github.ref }}
       cancel-in-progress: false
     permissions:
       contents: read

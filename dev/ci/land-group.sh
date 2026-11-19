@@ -10,7 +10,10 @@
 #     previous PR's): if main moved any other way, stop and merge nothing more;
 #   - the PR's head must still be the sha the group merged;
 #   - it must carry the Review Loop's approval comment at that exact sha and a
-#     github-actions full-suite success status (the ruleset requires it);
+#     github-actions full-suite success status (the ruleset requires it). The
+#     approval is any OWNER/MEMBER/COLLABORATOR comment whose first line is
+#     "Approved by <who> ... at <full head sha>": the same trust the Review
+#     Loop's own landing applies today;
 #   - merge it with a merge commit pinned to that sha (merge-async with
 #     direct_merge for stacked-base PRs), then require main's tree to equal the
 #     group's tree after that PR.
@@ -21,7 +24,7 @@ set -euo pipefail
 final="$1"
 label="$2"
 : "${REPO:?}" "${GH_TOKEN:?}"
-wait_seconds="${LAND_WAIT_SECONDS:-900}"
+wait_seconds="${LAND_WAIT_SECONDS:-2700}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 members="$("${here}/group-members.sh" "${final}" "${label}")"
@@ -32,7 +35,9 @@ main_tree() { gh api "repos/${REPO}/branches/main" --jq .commit.commit.tree.sha;
 
 # Groups are cut on the previous group's FINAL, so this one can go green before
 # the previous one has landed: wait until main reaches this group's base, or a
-# point inside it when a previous attempt landed some of its PRs.
+# point inside it when a previous attempt landed some of its PRs. This wait is
+# what serialises stacked groups: a later group's base only appears on main
+# once every PR before it has landed, so two jobs never merge interleaved.
 start=-1
 deadline=$((SECONDS + wait_seconds))
 while :; do

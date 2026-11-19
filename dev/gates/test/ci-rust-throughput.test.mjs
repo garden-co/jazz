@@ -272,7 +272,7 @@ const assertEntryCacheTrustBoundary = (source) => {
   assert.deepEqual(landGroup.needs, ["report-full-suite"]);
   assert.deepEqual(landGroup.permissions, { contents: "read" });
   assert.deepEqual(landGroup.concurrency, {
-    group: "land-merge-groups",
+    group: "land-${{ github.ref }}",
     "cancel-in-progress": false,
   });
   assert.equal(landGroup.steps[0].with["persist-credentials"], false);
